@@ -183,7 +183,7 @@ def test_initialize_grouped_weights(share_weight_quantizer):
     pairs = list(module.iter_weights_for_calibration())
     expected = [q(weight).detach().clone() for weight, q in pairs]
     parameters = dict(model.named_parameters())
-    mtq.initialize_quantized_weights(model)
+    mtq.initialize_qdq_weights(model)
     for (weight, q), target in zip(pairs, expected):
         torch.testing.assert_close(weight, target, rtol=0, atol=0)
         assert q.is_enabled
@@ -199,7 +199,7 @@ def test_initialize_preserves_unquantized_output_rows():
     original = layer.weight.detach().clone()
     expected = layer.weight_quantizer(layer.weight).detach().clone()
     expected[rows] = original[rows]
-    mtq.initialize_quantized_weights(model)
+    mtq.initialize_qdq_weights(model)
     torch.testing.assert_close(layer.weight, expected, rtol=0, atol=0)
 
 

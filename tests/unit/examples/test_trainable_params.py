@@ -33,7 +33,7 @@ configure_trainable_parameters = trainable_params.configure_trainable_parameters
 initialize_student_weights = trainable_params.initialize_student_weights
 
 
-@pytest.mark.parametrize("weight_init", ["original", "quantized"])
+@pytest.mark.parametrize("weight_init", ["checkpoint", "qdq"])
 @pytest.mark.parametrize("recompute", [False, True])
 @pytest.mark.parametrize("restore_kind", ["state", "file"])
 def test_full_rank_training_and_restore(recompute, restore_kind, weight_init, tmp_path):
@@ -86,7 +86,7 @@ def test_full_rank_training_and_restore(recompute, restore_kind, weight_init, tm
     resume_dir.mkdir()
     (resume_dir / "latest_checkpointed_iteration.txt").write_text("1")
     before_resume = restored[1].weight.detach().clone()
-    initialize_student_weights(restored, "quantized", resume_dir)
+    initialize_student_weights(restored, "qdq", resume_dir)
     torch.testing.assert_close(restored[1].weight, before_resume, rtol=0, atol=0)
     restored_optimizer = torch.optim.Adam([restored[1].weight], lr=0.1)
     restored_optimizer.load_state_dict(copy.deepcopy(optimizer.state_dict()))

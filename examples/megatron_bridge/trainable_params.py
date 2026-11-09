@@ -24,7 +24,7 @@ from modelopt.torch.opt import ModeloptStateManager
 from modelopt.torch.quantization import (
     enable_quant_input_gradients,
     has_quant_lora,
-    initialize_quantized_weights,
+    initialize_qdq_weights,
 )
 from modelopt.torch.quantization.qtensor import QTensorWrapper
 
@@ -35,14 +35,14 @@ def initialize_student_weights(
     model: nn.Module, weight_init: str, checkpoint_dir: str | Path
 ) -> nn.Module:
     """Initialize selected student weights on a fresh run, preserving native resumes."""
-    if weight_init not in ("original", "quantized"):
-        raise ValueError("weight_init must be 'original' or 'quantized'.")
+    if weight_init not in ("checkpoint", "qdq"):
+        raise ValueError("weight_init must be 'checkpoint' or 'qdq'.")
     if (
-        weight_init == "original"
+        weight_init == "checkpoint"
         or (Path(checkpoint_dir) / "latest_checkpointed_iteration.txt").is_file()
     ):
         return model
-    return initialize_quantized_weights(model, trainable_only=True)
+    return initialize_qdq_weights(model, trainable_only=True)
 
 
 def configure_trainable_parameters(model: nn.Module, target_parameters: list[str]) -> nn.Module:

@@ -47,7 +47,7 @@ SEQUENTIAL_CFG = {
     "config",
     [mtq.INT8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.FP8_DEFAULT_CFG, SEQUENTIAL_CFG],
 )
-def test_initialize_quantized_weights_preserves_state_and_frozen_weights(config, dtype):
+def test_initialize_qdq_weights_preserves_state_and_frozen_weights(config, dtype):
     torch.manual_seed(42)
     model = nn.Sequential(nn.Linear(256, 16), nn.Linear(16, 8)).to(dtype=dtype)
     inputs = torch.randn(2, 256, dtype=dtype)
@@ -59,7 +59,7 @@ def test_initialize_quantized_weights_preserves_state_and_frozen_weights(config,
     buffers = {name: b.clone() for name, b in model.named_buffers()}
     state = copy.deepcopy(mto.modelopt_state(model))
 
-    assert mtq.initialize_quantized_weights(model, trainable_only=True) is model
+    assert mtq.initialize_qdq_weights(model, trainable_only=True) is model
 
     torch.testing.assert_close(model[0].weight, expected, rtol=0, atol=0)
     assert model[0].weight.dtype == dtype
@@ -72,21 +72,21 @@ def test_initialize_quantized_weights_preserves_state_and_frozen_weights(config,
     assert model[0].weight_quantizer.is_enabled
 
 
-def test_initialize_quantized_weights_undoes_pre_scale():
+def test_initialize_qdq_weights_undoes_pre_scale():
     model = nn.Linear(16, 8, bias=False)
     mtq.quantize(model, mtq.INT8_WEIGHT_ONLY_CFG, lambda m: m(torch.randn(2, 16)))
     quantizer = model.weight_quantizer
     quantizer.pre_quant_scale = torch.linspace(0.5, 2.0, 16)
     expected = quantizer(model.weight).detach() / quantizer.pre_quant_scale
     scale = quantizer.pre_quant_scale.clone()
-    mtq.initialize_quantized_weights(model)
+    mtq.initialize_qdq_weights(model)
     torch.testing.assert_close(model.weight, expected)
     torch.testing.assert_close(quantizer.pre_quant_scale, scale, rtol=0, atol=0)
     assert quantizer.is_enabled
 
 
 @pytest.mark.parametrize("transpose", [False, True])
-def test_initialize_quantized_weights_refuses_ambiguous_alias_before_changes(transpose):
+def test_initialize_qdq_weights_refuses_ambiguous_alias_before_changes(transpose):
     model = nn.ModuleList([nn.Linear(16, 16), nn.Linear(16, 16)])
     model[1].weight = nn.Parameter(model[0].weight.T) if transpose else model[0].weight
     mtq.quantize(
@@ -94,23 +94,23 @@ def test_initialize_quantized_weights_refuses_ambiguous_alias_before_changes(tra
     )
     before = {name: p.detach().clone() for name, p in model.named_parameters()}
     with pytest.raises(ValueError):
-        mtq.initialize_quantized_weights(model)
+        mtq.initialize_qdq_weights(model)
     for name, p in model.named_parameters():
         torch.testing.assert_close(p, before[name], rtol=0, atol=0)
 
 
-def test_initialize_quantized_weights_validates_all_scales_before_changes():
+def test_initialize_qdq_weights_validates_all_scales_before_changes():
     model = nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16))
     mtq.quantize(model, mtq.INT8_WEIGHT_ONLY_CFG, lambda m: m(torch.randn(2, 16)))
     model[1].weight_quantizer.pre_quant_scale = torch.zeros(16)
     before = model[0].weight.detach().clone()
     with pytest.raises(ValueError):
-        mtq.initialize_quantized_weights(model)
+        mtq.initialize_qdq_weights(model)
     torch.testing.assert_close(model[0].weight, before, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("rotate_back", [False, True])
-def test_initialize_quantized_weights_returns_to_latent_domain(monkeypatch, rotate_back):
+def test_initialize_qdq_weights_returns_to_latent_domain(monkeypatch, rotate_back):
     # CPU reference for the CUDA-only normalized Hadamard implementation.
     def hadamard(inputs, rotate_fp32=False, block_size=None):
         pairs = inputs.reshape(*inputs.shape[:-1], -1, 2)
@@ -129,19 +129,19 @@ def test_initialize_quantized_weights_returns_to_latent_domain(monkeypatch, rota
     transformed = q(model.weight).detach()
     expected = (transformed if rotate_back else hadamard(transformed)) / q.pre_quant_scale
     output_before = model(inputs).detach()
-    mtq.initialize_quantized_weights(model)
+    mtq.initialize_qdq_weights(model)
     torch.testing.assert_close(model.weight, expected)
     torch.testing.assert_close(model(inputs), output_before)
     assert q.rotate_is_enabled and q.rotate_back_is_enabled == rotate_back
 
 
-def test_initialize_quantized_weights_refuses_adapters_before_changes():
+def test_initialize_qdq_weights_refuses_adapters_before_changes():
     model = nn.Linear(16, 8)
     mtq.quantize(model, mtq.INT8_WEIGHT_ONLY_CFG, lambda m: m(torch.randn(2, 16)))
     mtq.enable_quant_lora(model)
     before = {name: p.detach().clone() for name, p in model.named_parameters()}
     with pytest.raises(ValueError, match="adapter-free"):
-        mtq.initialize_quantized_weights(model)
+        mtq.initialize_qdq_weights(model)
     for name, parameter in model.named_parameters():
         torch.testing.assert_close(parameter, before[name], rtol=0, atol=0)
 
@@ -170,7 +170,7 @@ def test_initialize_mixed_weights_with_cache():
     enable_weight_cache(model)
     with weight_cache_scope(model):
         baseline = model(inputs).detach()
-        mtq.initialize_quantized_weights(model)
+        mtq.initialize_qdq_weights(model)
         torch.testing.assert_close(model(inputs), baseline, rtol=0, atol=0)
     for layer, weight in zip(model, expected):
         torch.testing.assert_close(layer.weight, weight, rtol=0, atol=0)

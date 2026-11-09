@@ -77,7 +77,7 @@ __all__ = [
     "enable_quantizer",
     "fold_weight",
     "get_auto_quantize_config",
-    "initialize_quantized_weights",
+    "initialize_qdq_weights",
     "postprocess_amax",
     "print_quant_summary",
     "quantize",
@@ -1368,14 +1368,15 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
 
 
 @torch.no_grad()
-def initialize_quantized_weights(model: nn.Module, *, trainable_only: bool = False) -> nn.Module:
+def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) -> nn.Module:
     """Initialize floating latent weights from their configured fake-quantized values.
 
     Call once after calibration/restoration, before distributed wrapping and optimizer
     construction. Quantizers, calibration buffers, parameter objects and dtypes are retained.
     Pre-scales and rotations are inverted before storing values, so subsequent forwards
     continue to apply those transforms exactly once. This is initialization, not folding:
-    quantizers remain enabled. Never call on a resumed training checkpoint.
+    quantizers remain enabled. Uses already-restored calibration state without rerunning
+    calibration or GPTQ. Never call on a resumed training checkpoint.
 
     Args:
         model: Calibrated fake-quantized model with uncompressed floating weights.
@@ -1437,7 +1438,7 @@ def initialize_quantized_weights(model: nn.Module, *, trainable_only: bool = Fal
             initialized = set()
             for module in model.modules():
                 if isinstance(module, QuantModule):
-                    module._initialize_quantized_weights(trainable_only, initialized)
+                    module._initialize_qdq_weights(trainable_only, initialized)
     finally:
         invalidate_weight_cache(model)
     return model

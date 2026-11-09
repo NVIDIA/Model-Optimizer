@@ -183,11 +183,12 @@ def get_args():
     )
     parser.add_argument(
         "--student_weight_init",
-        choices=["original", "quantized"],
-        default="original",
+        choices=["checkpoint", "qdq"],
+        default="checkpoint",
         help="Keep the checkpoint's floating latent weights (default), or initialize trainable "
         "weights from their configured quantize/dequantize values on a fresh QAD run. "
-        "Quantizers stay enabled. Native checkpoint resumes are never reinitialized.",
+        "Uses restored quantizers without rerunning calibration or GPTQ. "
+        "Native checkpoint resumes are never reinitialized.",
     )
     parser.add_argument(
         "--trainable_params",
@@ -662,10 +663,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     )
     if args.fake_quant_weight_cache and not student_has_modelopt_state:
         raise ValueError("--fake_quant_weight_cache needs a quantized --student_megatron_path.")
-    if args.student_weight_init == "quantized" and not student_has_modelopt_state:
-        raise ValueError(
-            "--student_weight_init quantized needs a quantized --student_megatron_path."
-        )
+    if args.student_weight_init == "qdq" and not student_has_modelopt_state:
+        raise ValueError("--student_weight_init qdq needs a quantized --student_megatron_path.")
     if args.fake_quant_weight_cache and "callbacks" not in inspect.signature(distill).parameters:
         raise ValueError("--fake_quant_weight_cache needs a newer Megatron-Bridge; see the README.")
     # A quantized student pins the layout: it must match what quantize.py wrote, so reuse the same
@@ -777,7 +776,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         distill_submodule="language_model" if is_vlm else None,
     )
 
-    if args.trainable_params or args.student_weight_init == "quantized":
+    if args.trainable_params or args.student_weight_init == "qdq":
         # Run after initial student restoration; native training resume happens later.
         def _select_trainable_student_hook(model_chunks):
             """Select parameters in the distilled student before the teacher is attached."""

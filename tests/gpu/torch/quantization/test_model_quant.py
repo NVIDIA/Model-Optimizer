@@ -44,7 +44,7 @@ def test_initialize_cuda_weight_formats(config):
     weight = model.weight
     expected = model.weight_quantizer(weight).detach().clone()
     buffers = {name: value.clone() for name, value in model.named_buffers()}
-    mtq.initialize_quantized_weights(model)
+    mtq.initialize_qdq_weights(model)
     torch.testing.assert_close(model.weight, expected, rtol=0, atol=0)
     assert model.weight is weight and model.weight_quantizer.is_enabled
     for name, value in model.named_buffers():
@@ -63,7 +63,7 @@ def test_initialize_weight_memory_and_time(record_property):
     torch.cuda.reset_peak_memory_stats()
     start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     start.record()
-    mtq.initialize_quantized_weights(model)
+    mtq.initialize_qdq_weights(model)
     end.record()
     torch.cuda.synchronize()
     record_property("initialization_ms", start.elapsed_time(end))

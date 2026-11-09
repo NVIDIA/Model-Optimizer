@@ -82,7 +82,7 @@ def test_ggml_backend_via_quantize(num_bits):
     parameter = model.weight
     expected_weight = model.weight_quantizer(parameter).detach().clone()
     buffers = {name: value.clone() for name, value in model.weight_quantizer.named_buffers()}
-    mtq.initialize_quantized_weights(model)
+    mtq.initialize_qdq_weights(model)
     assert model.weight is parameter and model.weight_quantizer.is_enabled
     torch.testing.assert_close(model.weight, expected_weight, rtol=0, atol=0)
     for name, value in model.weight_quantizer.named_buffers():

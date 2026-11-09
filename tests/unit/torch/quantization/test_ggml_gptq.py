@@ -444,18 +444,26 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
     ],
     ids=["q8_0-gptq", "iq2_xs-gptq", "iq2_xs-local_hessian"],
 )
-def test_pin_survives_save_and_restore(num_bits, algorithm):
-    model, inputs = _gptq_model(num_bits=num_bits, algorithm=algorithm)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_pin_survives_save_and_restore(num_bits, algorithm, dtype):
+    model, inputs = _gptq_model(num_bits=num_bits, algorithm=algorithm, dtype=dtype)
     buffer = io.BytesIO()
     mto.save(model, buffer)
     buffer.seek(0)
 
-    restored = mto.restore(torch.nn.Linear(512, 8, bias=False), buffer)
+    restored = mto.restore(torch.nn.Linear(512, 8, bias=False, dtype=dtype), buffer)
 
     ggml_format = GGML_FORMAT_REGISTRY[num_bits]
     pinned = pinned_packed_weight(model.weight_quantizer, num_bits)
     assert torch.equal(ggml_format.pack(restored.weight, restored.weight_quantizer), pinned)
     torch.testing.assert_close(restored(inputs), model(inputs))
+
+    # Initialization uses the loaded PTQ result; no calibration data is supplied.
+    expected = ggml_format.dequantize(pinned, torch.tensor(restored.weight.shape), dtype=dtype)
+    mtq.initialize_qdq_weights(restored)
+    torch.testing.assert_close(restored.weight, expected, rtol=0, atol=0)
+    assert restored.weight.dtype == dtype and restored.weight_quantizer.is_enabled
+    assert torch.equal(pinned_packed_weight(restored.weight_quantizer, num_bits), pinned)
 
 
 def test_pin_is_dropped_once_the_weight_changes():

@@ -160,7 +160,7 @@ class QuantModule(DynamicModule):
         )
 
     @torch.no_grad()
-    def _initialize_quantized_weights(self, trainable_only, initialized):
+    def _initialize_qdq_weights(self, trainable_only, initialized):
         for weight, quantizer in self._iter_weights_for_initialization(trainable_only):
             if not weight.numel():
                 continue

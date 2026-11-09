@@ -650,7 +650,7 @@ class TestQuantFusedExperts:
                 for weight, q in converted.iter_weights_for_calibration()
                 if weight.requires_grad
             ]
-            mtq.initialize_quantized_weights(converted, trainable_only=True)
+            mtq.initialize_qdq_weights(converted, trainable_only=True)
             for (weight, _), value in zip(
                 [(w, q) for w, q in converted.iter_weights_for_calibration() if w.requires_grad],
                 expected,
