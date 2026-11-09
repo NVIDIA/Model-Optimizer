@@ -16,6 +16,7 @@
 import copy
 import inspect
 import json
+from fnmatch import fnmatch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -474,6 +475,92 @@ def test_export_diffusion_component_kv_metadata(
     assert {key for key in exported if "quantizer" in key} == set(expected_kv)
     for key, value in expected_kv.items():
         torch.testing.assert_close(exported[key], value)
+
+
+_WAN_VAE_DECODER_RESNET_CONVS = "*decoder.*resnets.*.conv[12]*"
+
+
+def _quantize_tiny_wan_vae(quant_cfg, keep):
+    """Quantize a tiny Wan VAE as the diffusers example does for text-to-video.
+
+    Calibration runs only ``decode``, as a text-to-video pipeline does, and then every quantizer
+    outside ``keep`` is disabled. Channel counts are multiples of 16, as in the released Wan VAEs.
+    """
+    torch.manual_seed(0)
+    vae = get_tiny_wan22_vae(base_dim=32).eval()
+    latents = torch.randn(1, 16, 2, 2, 2)
+    mtq.quantize(vae, copy.deepcopy(quant_cfg), lambda m: m.decode(latents))
+    mtq.disable_quantizer(vae, lambda name: not fnmatch(name, keep))
+    return vae
+
+
+@torch.no_grad()
+def test_export_wan_vae_nvfp4_conv3d(tmp_path):
+    """Every Wan VAE conv the config declares as NVFP4 is exported packed with its scales."""
+    vae = _quantize_tiny_wan_vae(mtq.NVFP4_DEFAULT_CFG, _WAN_VAE_DECODER_RESNET_CONVS)
+    convs = {name: m for name, m in vae.named_modules() if isinstance(m, nn.Conv3d)}
+    expected = {
+        name: (
+            m.weight.shape[0],
+            m.weight[0].numel(),
+            m.weight_quantizer.amax.float().squeeze() / (6 * 448),
+            m.input_quantizer.amax.float().squeeze() / (6 * 448),
+        )
+        for name, m in convs.items()
+        if m.weight_quantizer.is_enabled
+    }
+    assert 0 < len(expected) < len(convs)
+
+    export_hf_checkpoint(vae, export_dir=tmp_path)
+
+    exported = {}
+    for shard in tmp_path.glob("*.safetensors"):
+        exported.update(load_file(str(shard)))
+    config = _load_config(tmp_path / "config.json")["quantization_config"]
+    assert config["quant_algo"] == "NVFP4"
+    assert config["config_groups"]["group_0"]["targets"] == ["Conv3d"]
+    for name in convs:
+        # The config declares every conv outside ``ignore`` as NVFP4, so exactly those are packed.
+        assert any(fnmatch(name, pattern) for pattern in config["ignore"]) == (name not in expected)
+        weight = exported[f"{name}.weight"]
+        if name not in expected:
+            assert weight.is_floating_point()
+            assert f"{name}.weight_scale" not in exported
+            continue
+        out_channels, k, weight_scale_2, input_scale = expected[name]
+        assert weight.dtype == torch.uint8
+        assert weight.shape == (out_channels, k // 2)
+        assert exported[f"{name}.weight_scale"].dtype == torch.float8_e4m3fn
+        assert exported[f"{name}.weight_scale"].shape == (out_channels, k // 16)
+        torch.testing.assert_close(exported[f"{name}.weight_scale_2"], weight_scale_2)
+        torch.testing.assert_close(exported[f"{name}.input_scale"], input_scale)
+
+
+@pytest.mark.parametrize(
+    ("quant_cfg", "keep", "export_kwargs", "error", "match"),
+    [
+        (mtq.FP8_DEFAULT_CFG, _WAN_VAE_DECODER_RESNET_CONVS, {}, NotImplementedError, "NVFP4"),
+        (mtq.W4A16_NVFP4_CFG, _WAN_VAE_DECODER_RESNET_CONVS, {}, NotImplementedError, "input"),
+        # Text-to-video calibration never runs the encoder, so its convs have no input amax.
+        (mtq.NVFP4_DEFAULT_CFG, "*resnets.*.conv[12]*", {}, ValueError, "calibrated"),
+        (
+            mtq.NVFP4_DEFAULT_CFG,
+            _WAN_VAE_DECODER_RESNET_CONVS,
+            {"padding_strategy": "row"},
+            NotImplementedError,
+            "padding",
+        ),
+    ],
+    ids=["fp8", "weight_only_nvfp4", "uncalibrated_encoder", "gemm_padding"],
+)
+@torch.no_grad()
+def test_export_wan_vae_conv3d_fails_closed(tmp_path, quant_cfg, keep, export_kwargs, error, match):
+    """Unsupported Wan VAE conv exports raise instead of writing a mislabeled checkpoint."""
+    vae = _quantize_tiny_wan_vae(quant_cfg, keep)
+
+    with pytest.raises(error, match=match):
+        export_hf_checkpoint(vae, export_dir=tmp_path, **export_kwargs)
+    assert not (tmp_path / "config.json").exists()
 
 
 def test_svdquant_diffusers_export_promotes_clean_keys():

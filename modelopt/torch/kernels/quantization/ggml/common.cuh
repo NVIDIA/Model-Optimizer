@@ -122,7 +122,10 @@ inline void check_importance(const char *format, const at::Tensor &input,
 // Fixed per-group choices, [blocks, groups] of any integer dtype. Returns them as contiguous
 // uint8 rows, or an undefined tensor when there are none.
 inline at::Tensor checked_choices(const char *format, const at::Tensor &input,
-                                  const std::optional<at::Tensor> &choices, int groups) {
+                                  const std::optional<at::Tensor> &choices, int groups,
+                                  bool every_choice) {
+  TORCH_CHECK(!(every_choice && choices.has_value()), format,
+              " takes choices or every_choice, not both");
   if (!choices.has_value())
     return at::Tensor();
   TORCH_CHECK(choices->is_cuda() && choices->get_device() == input.get_device(), format,
@@ -233,6 +236,38 @@ __device__ __forceinline__ void block_min_accumulate(const float (&local)[kSlots
     for (int w = 1; w < kWarps; ++w)
       value = fminf(value, scratch[w * kSlots + tid]);
     accum[tid] += value;
+  }
+  __syncthreads();
+}
+
+// Block-wide minimum of every slot's key into best[slot], as block_min_accumulate does for errors.
+// scratch must hold kWarps * kSlots keys. Barriers are internal, so every thread of the block must
+// call this; best is valid on every thread after it returns.
+template <int kSlots>
+__device__ __forceinline__ void block_min_keys(const unsigned long long (&local)[kSlots],
+                                               unsigned long long *scratch,
+                                               unsigned long long *best) {
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const int warp = tid >> 5;
+#pragma unroll
+  for (int slot = 0; slot < kSlots; ++slot) {
+    unsigned long long key = local[slot];
+#pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) {
+      const unsigned long long other = __shfl_down_sync(0xffffffff, key, delta);
+      key = other < key ? other : key;
+    }
+    if (lane == 0)
+      scratch[warp * kSlots + slot] = key;
+  }
+  __syncthreads();
+  if (tid < kSlots) {
+    unsigned long long key = scratch[tid];
+#pragma unroll
+    for (int w = 1; w < kWarps; ++w)
+      key = scratch[w * kSlots + tid] < key ? scratch[w * kSlots + tid] : key;
+    best[tid] = key;
   }
   __syncthreads();
 }

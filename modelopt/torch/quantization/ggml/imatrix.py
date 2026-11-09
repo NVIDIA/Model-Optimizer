@@ -32,6 +32,7 @@ class GGMLImatrixEncoder(ImatrixEncoder):
     heavy-tailed and, for an MoE expert that sees few calibration tokens, noisy; its root did better
     on both dense and MoE models. The pinned payload is what later forwards and export use, and it
     marks the weight as final: a quantizer that already holds one, such as GPTQ's, is left alone.
+    A format that keeps its pinned scales leaves the weight unrounded, as GPTQ does.
     """
 
     def accepts(self, quantizer) -> bool:
@@ -56,13 +57,15 @@ class GGMLImatrixEncoder(ImatrixEncoder):
         ggml_format = GGML_FORMAT_REGISTRY[quantizer.num_bits]
         extra_args = quantizer.backend_extra_args or {}
         floored = floored_second_moments(second_moments)
-        kwargs = {} if floored is None else {"importance": floored.sqrt()}
+        importance = None if floored is None else floored.sqrt()
         packed, shape = ggml_format.quantize(
             weight.contiguous(),
             block_chunk_size=extra_args.get("block_chunk_size", ggml_format.block_chunk_size),
-            **kwargs,
+            importance=importance,
         )
-        pin_packed_weight(quantizer, quantizer.num_bits, packed)
+        pin_packed_weight(quantizer, quantizer.num_bits, packed, importance)
+        if ggml_format.payload_scales is not None:
+            return weight
         decoded = ggml_format.dequantize(
             packed,
             shape,

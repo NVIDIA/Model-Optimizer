@@ -29,6 +29,8 @@ GGML_BLOCK_SIZE = 256
 _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
 # Columns hashed at a time, bounding _row_keys' int64 temporaries to this slice of the weight.
 _ROW_KEY_CHUNK = 256
+# Blocks hashed at once by _block_keys, which bounds its float32 and int64 temporaries.
+_KEY_BLOCKS_PER_CHUNK = 4096
 
 
 class _CacheKey(NamedTuple):
@@ -165,16 +167,39 @@ def _matching_cache(
     return None
 
 
-def pin_packed_weight(quantizer, format_name: str, packed_weights: torch.Tensor) -> None:
-    """Make ``packed_weights`` the ``format_name`` payload of ``quantizer``'s weight while it fits.
+def pin_packed_weight(
+    quantizer,
+    format_name: str,
+    packed_weights: torch.Tensor,
+    importance: torch.Tensor | None = None,
+    source: torch.Tensor | None = None,
+) -> None:
+    """Make ``packed_weights`` the ``format_name`` payload of ``quantizer``'s weight.
 
-    For payloads an algorithm chose itself, such as GPTQ, which leaves the weight equal to their
-    decoding: encoding that decoding again does not return the same codes. The pin is a buffer, so
-    it moves with offloading and is kept by ``mto.save``/``restore`` and layerwise checkpoints. Fake
-    quant and export use it while the weight, or the rows an export takes from it, is exactly its
-    decoding, and encode afresh otherwise -- including once the quantizer is given another format.
+    For payloads an algorithm chose itself, such as GPTQ. The pin is a buffer, so it moves with
+    offloading and is kept by ``mto.save``/``restore`` and layerwise checkpoints. A format with
+    :attr:`GGMLFormat.payload_scales` then encodes every weight under the pinned scales and the
+    ``importance`` its search was weighted with: the weight the payload was encoded from and its
+    decoding both encode to the payload, and a weight QAD updated to the codes nearest it under
+    those scales. Other formats use the pin while the weight, or the rows an export takes from it,
+    is exactly its decoding, and encode afresh otherwise.
+
+    ``source`` is the weight the payload's per-group choices were picked for, when a search other
+    than the encoder's own picked them, such as a local-Hessian one. Encoding again would re-pick
+    them, so each block still equal to that block of ``source`` keeps its pinned codes; a block QAD
+    changed is encoded as above, its local scales searched again under the pinned scale.
     """
     quantizer._set_buffer(_pin_name(format_name), packed_weights)
+    importance_name = PINNED_IMPORTANCE_PREFIX + format_name
+    if importance is not None:
+        quantizer._set_buffer(importance_name, importance.float())
+    elif hasattr(quantizer, importance_name):
+        delattr(quantizer, importance_name)
+    source_name = _source_name(format_name)
+    if source is not None:
+        quantizer._set_buffer(source_name, _block_keys(source, packed_weights.shape[:-1]))
+    elif hasattr(quantizer, source_name):
+        delattr(quantizer, source_name)
     quantizer._quantizer_cache = None
 
 
@@ -183,12 +208,48 @@ def pinned_packed_weight(quantizer, format_name: str) -> torch.Tensor | None:
     return getattr(quantizer, _pin_name(format_name), None)
 
 
+def pinned_importance(quantizer, format_name: str) -> torch.Tensor | None:
+    """The per-input-column importance the ``format_name`` payload pinned to ``quantizer`` used."""
+    return getattr(quantizer, PINNED_IMPORTANCE_PREFIX + format_name, None)
+
+
+# Quantizer attribute that makes its pinned payload stand in for whatever weight it is handed.
+# AutoQuantize sets it while it keeps the source weight for other candidates, so a candidate whose
+# calibration rewrote the weight (GPTQ) still replays its own codes.
+PIN_OVERRIDES_WEIGHT = "_ggml_pin_overrides_weight"
+
+
 # Prefix of the buffer holding a pinned payload; checkpoint code keeps buffers with it.
 PINNED_PAYLOAD_PREFIX = "_ggml_pinned_"
+# Prefix of the buffer holding the importance a pinned payload was searched with, a vector over
+# the weight's input columns.
+PINNED_IMPORTANCE_PREFIX = "_ggml_importance_"
 
 
 def _pin_name(format_name: str) -> str:
     return f"{PINNED_PAYLOAD_PREFIX}{format_name}"
+
+
+def _source_name(format_name: str) -> str:
+    """The buffer holding a pin's source fingerprint, ``[*rows, blocks]``.
+
+    It shares the payload's prefix, so checkpointing and sharding treat it as part of the pin, and
+    shards like the payload's leading dimensions.
+    """
+    return f"{_pin_name(format_name)}_source"
+
+
+def _block_keys(weight: torch.Tensor, blocks_shape: tuple[int, ...]) -> torch.Tensor:
+    """A :func:`_row_keys` hash of each 256-value block of ``weight`` as float32, ``blocks_shape``.
+
+    Hashing float32 values lets a lossless upcast of the weight, as folding hands over, match.
+    """
+    blocks = weight.reshape(-1, GGML_BLOCK_SIZE)
+    keys = torch.empty(blocks.shape[0], dtype=torch.int64, device=weight.device)
+    for start in range(0, blocks.shape[0], _KEY_BLOCKS_PER_CHUNK):
+        chunk = blocks[start : start + _KEY_BLOCKS_PER_CHUNK]
+        keys[start : start + _KEY_BLOCKS_PER_CHUNK] = _row_keys(chunk.float())
+    return keys.reshape(blocks_shape)
 
 
 def _matching_rows(table: torch.Tensor, rows: torch.Tensor) -> torch.Tensor | None:
@@ -258,7 +319,10 @@ def fake_quantize_with_cache(
         dtype=inputs.dtype,
         block_chunk_size=decode_chunk_size,
     )
-    return inputs + (reconstructed - inputs).detach()
+    # Exactly the reconstruction export decodes, with a straight-through gradient. The usual
+    # ``inputs + (reconstructed - inputs).detach()`` rounds twice in a narrow dtype, so it can
+    # differ wherever the two are far apart, as when a pinned payload replays over a source weight.
+    return reconstructed + (inputs - inputs.detach())
 
 
 @dataclass(frozen=True)
@@ -292,6 +356,9 @@ class GGMLFormat:
     # formats without one.
     choice_groups: int = 0
     num_choices: int = 0
+    # Reads the FP16 super-block scale of each ``[blocks, block_bytes]`` payload row, for formats
+    # whose ``quantize`` takes them as ``scales``; see :func:`pin_packed_weight`.
+    payload_scales: Callable[[torch.Tensor], torch.Tensor] | None = None
 
     @property
     def effective_bits(self) -> float:
@@ -377,13 +444,78 @@ class GGMLFormat:
     def _pinned_or_quantize(
         self, quantizer, weight: torch.Tensor, *, block_chunk_size: int | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """``quantize(weight)``, or the pinned payload's rows if ``weight`` decodes them."""
+        """``quantize(weight)``, under the pinned scales or as the pinned rows ``weight`` decodes."""
+        shape = torch.tensor(weight.shape, dtype=torch.int64)
+        kwargs = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
+        pinned = pinned_packed_weight(quantizer, self.name)
+        keeps_scales = pinned is not None and self.payload_scales is not None
+        # Unless the pin stands in for the weight (PIN_OVERRIDES_WEIGHT): AutoQuantize then keeps
+        # the source weight, which these scales would encode to other codes than the pinned ones.
+        if (
+            pinned is not None
+            and self.payload_scales is not None
+            and not getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
+        ):
+            # Encode in the pinned weight's shape, whose last dimension the importance spans; fake
+            # quant hands the weight over in 256-value rows.
+            pinned_shape = (*pinned.shape[:-2], pinned.shape[-2] * self.block_size)
+            if math.prod(pinned_shape) == weight.numel():
+                source = getattr(quantizer, _source_name(self.name), None)
+                unchanged = None
+                if source is not None:
+                    unchanged = _block_keys(weight, pinned.shape[:-1]) == source.to(weight.device)
+                    if bool(unchanged.all()):
+                        packed = pinned.to(weight.device)
+                        return packed.reshape(*weight.shape[:-1], -1, self.block_bytes), shape
+                importance = pinned_importance(quantizer, self.name)
+                packed, _ = self.quantize(
+                    weight.reshape(pinned_shape),
+                    scales=self.payload_scales(pinned.reshape(-1, self.block_bytes)).to(
+                        weight.device
+                    ),
+                    importance=None if importance is None else importance.to(weight.device),
+                    **kwargs,
+                )
+                if unchanged is not None:
+                    packed = torch.where(unchanged[..., None], pinned.to(packed.device), packed)
+                return packed.reshape(*weight.shape[:-1], -1, self.block_bytes), shape
+        # Rows of a decoding, as an export splitting a fused weight hands over.
         packed = self._pinned_rows(quantizer, weight)
         if packed is not None:
-            return packed, torch.tensor(weight.shape, dtype=torch.int64)
-        if block_chunk_size is None:
-            return self.quantize(weight)
-        return self.quantize(weight, block_chunk_size=block_chunk_size)
+            return packed, shape
+        if keeps_scales:
+            raise ValueError(
+                f"{self.name.upper()} keeps the scales pinned to its quantizer, but was handed "
+                f"{tuple(weight.shape)} rows that are neither the pinned weight nor rows of its "
+                "decoding; see pin_current_codes."
+            )
+        return self.quantize(weight, **kwargs)
+
+    def pin_current_codes(
+        self, weight: torch.Tensor, quantizer, dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
+        """Pin the codes ``weight`` encodes to under its pinned scales; return their decoding.
+
+        An export that splits a fused weight into row slices hands :meth:`pack` slices of this
+        decoding in its ``dtype``, which it finds among the pinned rows. Unless ``quantizer``
+        keeps pinned scales, ``weight`` is returned in ``dtype`` as it is.
+        """
+        dtype = weight.dtype if dtype is None else dtype
+        pinned = None if quantizer is None else pinned_packed_weight(quantizer, self.name)
+        if pinned is None or self.payload_scales is None:
+            return weight.to(dtype)
+        packed, shape = self._pinned_or_quantize(quantizer, weight)
+        # The source's keys stay valid: its unchanged blocks are the ones the new pin kept.
+        source = getattr(quantizer, _source_name(self.name), None)
+        pin_packed_weight(
+            quantizer,
+            self.name,
+            packed.reshape(pinned.shape).to(pinned.device),
+            pinned_importance(quantizer, self.name),
+        )
+        if source is not None:
+            quantizer._set_buffer(_source_name(self.name), source)
+        return self.dequantize(packed, shape, dtype=dtype)
 
     def _pinned_rows(self, quantizer, weight: torch.Tensor) -> torch.Tensor | None:
         """The pinned payload of ``weight``, a view of the pinned weight or rows taken from it.
@@ -403,6 +535,11 @@ class GGMLFormat:
         ):
             return None
         pinned = pinned.to(weight.device).reshape(-1, width, self.block_bytes)
+        if (
+            getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
+            and self.full_pin(quantizer, weight) is not None
+        ):
+            return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
         shape = torch.tensor((pinned.shape[0], weight.shape[-1]))
         rows = weight.reshape(-1, weight.shape[-1])
         storage_dtypes = [weight.dtype]
@@ -425,6 +562,55 @@ class GGMLFormat:
             if index is not None:
                 return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
         return None
+
+    def full_pin(self, quantizer, weight: torch.Tensor) -> torch.Tensor | None:
+        """The payload ``quantizer`` pins for all of ``weight``; None if it pins none or some rows."""
+        pinned = pinned_packed_weight(quantizer, self.name)
+        if pinned is None or (
+            pinned.numel() != weight.numel() // self.block_size * self.block_bytes
+        ):
+            return None
+        return pinned
+
+    def decode_pinned(self, quantizer, weight: torch.Tensor) -> torch.Tensor:
+        """``weight`` as its pinned payload decodes, rounded once to its dtype as GPTQ wrote it."""
+        pinned = self.full_pin(quantizer, weight)
+        if pinned is None:
+            raise ValueError(
+                f"No {self.name.upper()} payload pinned for a {tuple(weight.shape)} weight"
+            )
+        return self.dequantize(
+            pinned.to(weight.device).reshape(-1, self.block_bytes),
+            torch.tensor(weight.shape),
+            dtype=weight.dtype,
+        )
+
+
+def leading_fp16_scales(blocks: torch.Tensor) -> torch.Tensor:
+    """The FP16 super-block scale in the first two bytes of each ``[blocks, block_bytes]`` row."""
+    return blocks[:, :2].contiguous().view(torch.float16).reshape(-1)
+
+
+def super_block_scales(
+    blocks: torch.Tensor,
+    predict: Callable[[torch.Tensor], torch.Tensor],
+    scales: torch.Tensor | None,
+    chunk_size: int,
+) -> torch.Tensor:
+    """Each block's FP16 super-block scale: ``scales`` if given, else predicted a chunk at a time."""
+    if scales is None:
+        return torch.cat(
+            [
+                predict(blocks[start : start + chunk_size])
+                for start in range(0, len(blocks), chunk_size)
+            ]
+        )
+    if scales.dtype != torch.float16 or scales.numel() != len(blocks):
+        raise ValueError(
+            f"scales must hold one float16 value per block ({len(blocks)}), got "
+            f"{scales.dtype} {tuple(scales.shape)}"
+        )
+    return scales.reshape(-1).to(blocks.device)
 
 
 def dequantize_blocks(
@@ -527,13 +713,16 @@ def choice_blocks(
     groups: int,
     num_choices: int,
     format_name: str,
+    every_choice: bool = False,
 ) -> torch.Tensor | None:
     """Per-group ``choices`` as validated ``[weight.numel() // 256, groups]`` int64 rows.
 
     ``choices`` is shaped ``[*weight.shape[:-1], weight.shape[-1] // 256, groups]``. A given choice
     replaces the encoder's own pick for that group; the codebook entries and signs are still
-    searched under it.
+    searched under it. ``every_choice`` requests every choice's payload instead, so excludes it.
     """
+    if every_choice and choices is not None:
+        raise ValueError(f"{format_name} takes choices or every_choice, not both")
     if choices is None:
         return None
     expected = (*weight.shape[:-1], weight.shape[-1] // GGML_BLOCK_SIZE, groups)
@@ -546,6 +735,27 @@ def choice_blocks(
     if not ((choices >= 0) & (choices < num_choices)).all():
         raise ValueError(f"{format_name} choices must lie in [0, {num_choices})")
     return choices
+
+
+def encode_every_choice(
+    quantize: Callable[..., tuple[torch.Tensor, torch.Tensor]],
+    weight: torch.Tensor,
+    groups: int,
+    num_choices: int,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``quantize``'s payload with each choice taken by every group, ``[num_choices, *packed]``.
+
+    The torch encoders' path to ``every_choice``, one encode per choice; the CUDA encoders produce
+    the same payloads in one pass over the codebook.
+    """
+    fixed = torch.empty(
+        (*weight.shape[:-1], weight.shape[-1] // GGML_BLOCK_SIZE, groups),
+        dtype=torch.int64,
+        device=weight.device,
+    )
+    payloads = [quantize(weight, choices=fixed.fill_(c), **kwargs)[0] for c in range(num_choices)]
+    return torch.stack(payloads), torch.tensor(weight.shape, dtype=torch.int64)
 
 
 def chunk_importance(
