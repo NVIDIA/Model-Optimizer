@@ -1317,10 +1317,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--deterministic",
         help=(
-            "Best-effort reproducible PTQ: seed every random number generator and use "
-            "deterministic torch kernels (an op without one only warns). Needs an explicit "
-            "--batch_size, since the default probes it from free GPU memory and so differs "
-            "between GPUs and runs."
+            "Reproducible PTQ: calibrate with eager attention, whose result for a sample does "
+            "not depend on the other samples in its batch (that of the SDPA kernels does), feed "
+            "the samples in an order fixed by their content, seed every random number "
+            "generator and use deterministic torch kernels (an op without one only warns). The "
+            "scales then depend on which samples are used, not on their order in the dataset or "
+            "on the batch size. Eager attention takes more memory than SDPA."
         ),
         default=False,
         action="store_true",
@@ -1566,11 +1568,13 @@ def parse_args() -> argparse.Namespace:
     if args.calib_seq <= 0:
         parser.error("--calib_seq must be positive.")
 
-    if args.deterministic and args.batch_size == 0:
-        parser.error(
-            "--deterministic needs an explicit --batch_size: the default probes it from free GPU "
-            "memory, so it differs between GPUs and runs."
-        )
+    if args.deterministic:
+        if args.attn_implementation not in (None, "eager"):
+            parser.error(
+                "--deterministic needs --attn_implementation eager, the one whose result for a "
+                "sample does not depend on which samples share its batch."
+            )
+        args.attn_implementation = "eager"
 
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")
@@ -1672,6 +1676,10 @@ def _main_inner(args: argparse.Namespace):
             tokenizer,
             device,
         ) = load_model(args)
+
+        if args.deterministic:
+            attn = getattr(getattr(full_model, "config", None), "_attn_implementation", None)
+            print_rank_0(f"Deterministic mode: the model loaded with {attn} attention.")
 
         if args.sparsity_fmt != "dense":
             # Sparse

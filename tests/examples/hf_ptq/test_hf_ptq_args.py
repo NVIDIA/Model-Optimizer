@@ -1119,20 +1119,26 @@ def test_one_rank_per_node_runs_the_gpu_memory_monitor(
     assert len(launched) == launches
 
 
-def test_deterministic_needs_an_explicit_batch_size(monkeypatch):
+def test_deterministic_calibrates_with_eager_attention(monkeypatch):
     flags = ["--pyt_ckpt_path", "/models/Qwen3-0.6B", "--deterministic"]
-    with pytest.raises(SystemExit):
-        _parse_hf_ptq_args(monkeypatch, *flags)
-
-    _, args = _parse_hf_ptq_args(monkeypatch, *flags, "--batch_size", "8")
-
+    _, args = _parse_hf_ptq_args(monkeypatch, *flags)
     assert args.deterministic
+    assert args.attn_implementation == "eager"
+
+    _, args = _parse_hf_ptq_args(monkeypatch, *flags, "--attn_implementation", "eager")
+    assert args.attn_implementation == "eager"
+
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(monkeypatch, *flags, "--attn_implementation", "sdpa")
+
+    _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
+    assert args.attn_implementation is None
 
 
 @pytest.mark.usefixtures("clean_env")
 def test_main_enables_determinism_before_loading(monkeypatch, tmp_path):
     hf_ptq, args = _parse_hf_ptq_args(
-        monkeypatch, "--pyt_ckpt_path", "org/model", "--deterministic", "--batch_size", "8"
+        monkeypatch, "--pyt_ckpt_path", "org/model", "--deterministic"
     )
     seeds = []
 
