@@ -120,6 +120,23 @@ def _nvfp4_awq_clip_on_every_rank_job(rank, size):
     assert torch.equal(amax[1], alone[0].weight_quantizer.amax.float().reshape(())), amax
 
 
+def test_nvfp4_awq_clip_loss_does_not_depend_on_the_batching():
+    """Every token counts the same however the batches split the tokens: a candidate clip's loss is
+    the sum of its squared errors, in float64, not a mean per batch, which would weigh a short
+    batch's tokens more."""
+    torch.manual_seed(0)
+    x = torch.randn(8, 64, device="cuda")
+    config = {**mtq.NVFP4_AWQ_CLIP_CFG, "algorithm": {"method": "awq_clip", "debug": True}}
+    losses = []
+    for batches in ([x], [x[:3], x[3:]]):
+        model = _nvfp4_linears("cuda", 1)
+        mtq.quantize(model, config, lambda m, batches=batches: [m(batch) for batch in batches])
+        losses.append(model[0].awq_clip.loss_buffer)
+    assert losses[0].dtype == torch.float64
+    # Not bit for bit: a GEMM may round rows differently in another batch size.
+    torch.testing.assert_close(losses[0], losses[1], rtol=1e-3, atol=0)
+
+
 def test_nvfp4_awq_clip_picks_the_same_clip_on_every_rank(need_2_gpus, dist_workers):
     """NVFP4's awq_clip clips the per-tensor amax. Each rank of a model distributed over several
     ranks calibrates on its own data, and averaging each candidate clip's loss over the ranks gives
