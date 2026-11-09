@@ -34,10 +34,10 @@ def resolve_local(request):
     """Resolve revisions before downloading, and return only exact cache snapshots."""
     if request.get("schema_version") != 2 or not isinstance(request.get("inputs"), dict):
         raise ValueError("Expected a schema_version 2 input request")
-    root = Path(request["hf_local"])
-    if not root.is_absolute():
+    cache_root = Path(request["hf_local"])
+    if not cache_root.is_absolute():
         raise ValueError("Input cache must be an absolute path")
-    root = root.resolve()
+    root = cache_root.resolve()
     plans = []
     model_plans = []
     resolved = {}
@@ -101,6 +101,9 @@ def resolve_local(request):
             "backend": "huggingface",
             "uri": f"https://huggingface.co/{'datasets/' if kind == 'dataset' else ''}{name}/tree/{sha}",
         }
+    # Login and compute hosts may resolve the profile's cache mount differently.
+    for item in resolved.values():
+        item["path"] = str(cache_root / Path(item["path"]).relative_to(root))
     return {
         "schema_version": 2,
         "status": "ready",

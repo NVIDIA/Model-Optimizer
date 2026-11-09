@@ -32,10 +32,11 @@ _PROFILE = _LAUNCHER / "examples/smoke/local_profile.yaml"
 
 
 @pytest.mark.parametrize(
-    ("missing_dataset", "linked"), [(False, False), (True, False), (False, True)]
+    ("missing_dataset", "linked", "aliased_root"),
+    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
 )
 def test_hf_inputs_pin_every_revision_before_downloading(
-    tmp_path, monkeypatch, missing_dataset, linked
+    tmp_path, monkeypatch, missing_dataset, linked, aliased_root
 ):
     """Model and dataset snapshots use exact commits; an unresolved input copies no bytes."""
     hub = pytest.importorskip("huggingface_hub")
@@ -60,9 +61,14 @@ def test_hf_inputs_pin_every_revision_before_downloading(
 
     monkeypatch.setattr(hub, "HfApi", lambda **_: SimpleNamespace(repo_info=info))
     monkeypatch.setattr(hub, "snapshot_download", download)
+    cache = tmp_path / "cache"
+    if aliased_root:
+        physical_cache = tmp_path / "physical-cache"
+        physical_cache.mkdir()
+        cache.symlink_to(physical_cache, target_is_directory=True)
     request = {
         "schema_version": 2,
-        "hf_local": str(tmp_path / "cache"),
+        "hf_local": str(cache),
         "inputs": {
             "/inputs/model": {"ref": "Org/Model@branch"},
             "/inputs/data": {"ref": "Org/Data", "kind": "dataset"},
@@ -80,6 +86,7 @@ def test_hf_inputs_pin_every_revision_before_downloading(
         assert result["status"] == "ready"
         for item, kind, sha in zip(result["inputs"], ("model", "dataset"), ("a", "b")):
             assert item["version"] == sha * 40
+            assert Path(item["path"]).is_relative_to(cache)
             assert json.loads((Path(item["path"]) / "data.json").read_text()) == {
                 "kind": kind,
                 "commit": sha * 40,
