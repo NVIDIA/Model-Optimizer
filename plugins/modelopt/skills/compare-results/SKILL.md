@@ -10,6 +10,8 @@ Use this to plan and complete a baseline-vs-candidate comparison. The baseline
 is the reference checkpoint, and the candidate is the checkpoint whose accuracy
 change is being measured, typically a further quantized version of the baseline.
 
+For guidance on evaluation design, metrics, data budgets, and interpreting model comparisons, see [Evaluation guidelines](../../../../examples/llm_eval/evaluation_guidelines.md).
+
 ## Workflow
 
 1. Establish the candidate checkpoint/run and the matching baseline. Infer the

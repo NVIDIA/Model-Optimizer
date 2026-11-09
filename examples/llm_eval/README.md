@@ -4,6 +4,8 @@ This folder includes popular 3rd-party LLM benchmarks for LLM accuracy evaluatio
 
 The following instructions show how to evaluate the Model Optimizer quantized LLM with the benchmarks, including the TensorRT-LLM deployment.
 
+For guidance on evaluation design, metrics, data budgets, and interpreting model comparisons, see [Evaluation guidelines](evaluation_guidelines.md). For AI-assisted workflows, see the skills for [running evaluations](../../plugins/modelopt/skills/evaluation/SKILL.md) and [comparing results](../../plugins/modelopt/skills/compare-results/SKILL.md).
+
 ## NeMo Evaluator
 
 [NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/get-started/quickstart/index.html#self-hosted-options) is the recommended way to evaluate a large choice of benchmarks on quantized checkpoints generated from [hf_ptq](../hf_ptq). Quantized checkpoints can be served with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang) and then evaluated using NeMo Evaluator.
