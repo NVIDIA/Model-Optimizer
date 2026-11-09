@@ -79,6 +79,15 @@ def test_ggml_backend_via_quantize(num_bits):
     assert torch.isfinite(output).all()
     assert not torch.equal(output, unquantized_output)
 
+    parameter = model.weight
+    expected_weight = model.weight_quantizer(parameter).detach().clone()
+    buffers = {name: value.clone() for name, value in model.weight_quantizer.named_buffers()}
+    mtq.initialize_quantized_weights(model)
+    assert model.weight is parameter and model.weight_quantizer.is_enabled
+    torch.testing.assert_close(model.weight, expected_weight, rtol=0, atol=0)
+    for name, value in model.weight_quantizer.named_buffers():
+        torch.testing.assert_close(value, buffers[name], rtol=0, atol=0)
+
 
 def test_ggml_backend_rejects_unknown_format():
     # Match the dispatcher's own wording: a bare "requires num_bits" would also accept the

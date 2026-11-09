@@ -549,6 +549,14 @@ class _QuantHFParallelLinear(_ParallelLinear):
         with self.enable_weight_access_and_writeback():
             super().fold_weight(keep_attrs)
 
+    def _initialize_quantized_weights(self, trainable_only, initialized):
+        requires_grad = self.weight.requires_grad
+        if trainable_only and not requires_grad:
+            return
+        with self.enable_weight_access_and_writeback():
+            self.weight.requires_grad_(requires_grad)
+            super()._initialize_quantized_weights(trainable_only, initialized)
+
     @contextmanager
     def enable_weight_access_and_writeback(self):
         if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers>=5.16

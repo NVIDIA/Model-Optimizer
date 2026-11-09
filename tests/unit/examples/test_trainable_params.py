@@ -28,14 +28,15 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
 
-configure_trainable_parameters = _load_example_module(
-    "trainable_params.py", "megatron_bridge"
-).configure_trainable_parameters
+trainable_params = _load_example_module("trainable_params.py", "megatron_bridge")
+configure_trainable_parameters = trainable_params.configure_trainable_parameters
+initialize_student_weights = trainable_params.initialize_student_weights
 
 
+@pytest.mark.parametrize("weight_init", ["original", "quantized"])
 @pytest.mark.parametrize("recompute", [False, True])
 @pytest.mark.parametrize("restore_kind", ["state", "file"])
-def test_full_rank_training_and_restore(recompute, restore_kind):
+def test_full_rank_training_and_restore(recompute, restore_kind, weight_init, tmp_path):
     """Preserve selective updates and Adam restoration with frozen embeddings."""
     torch.manual_seed(42)
     model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16), nn.Linear(16, 16))
@@ -46,6 +47,7 @@ def test_full_rank_training_and_restore(recompute, restore_kind):
     configure_trainable_parameters(model, ["1.weight"])
     # Reapplying setup must not nest wrappers or alter quantizer state.
     configure_trainable_parameters(model, ["1.weight"])
+    initialize_student_weights(model, weight_init, tmp_path / "fresh")
     torch.testing.assert_close(model(inputs), baseline, rtol=0, atol=0)
     initial_weight = model[1].weight.detach().clone()
     optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=0.1)
@@ -80,6 +82,12 @@ def test_full_rank_training_and_restore(recompute, restore_kind):
     assert restored[1].weight.grad.count_nonzero() > 0
     restored.zero_grad(set_to_none=True)
     configure_trainable_parameters(restored, ["1.weight"])
+    resume_dir = tmp_path / "resume"
+    resume_dir.mkdir()
+    (resume_dir / "latest_checkpointed_iteration.txt").write_text("1")
+    before_resume = restored[1].weight.detach().clone()
+    initialize_student_weights(restored, "quantized", resume_dir)
+    torch.testing.assert_close(restored[1].weight, before_resume, rtol=0, atol=0)
     restored_optimizer = torch.optim.Adam([restored[1].weight], lr=0.1)
     restored_optimizer.load_state_dict(copy.deepcopy(optimizer.state_dict()))
     for candidate, opt in [(model, optimizer), (restored, restored_optimizer)]:

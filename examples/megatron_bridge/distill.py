@@ -50,7 +50,7 @@ from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
-from trainable_params import configure_trainable_parameters
+from trainable_params import configure_trainable_parameters, initialize_student_weights
 
 try:
     from megatron.bridge.data.builders import DirectHFSFTDatasetConfig
@@ -180,6 +180,14 @@ def get_args():
             "If the checkpoint carries ModelOpt state (i.e. it is quantized), the quantizers are "
             "restored automatically, turning distillation into Quantization Aware Distillation (QAD)."
         ),
+    )
+    parser.add_argument(
+        "--student_weight_init",
+        choices=["original", "quantized"],
+        default="original",
+        help="Keep the checkpoint's floating latent weights (default), or initialize trainable "
+        "weights from their configured quantize/dequantize values on a fresh QAD run. "
+        "Quantizers stay enabled. Native checkpoint resumes are never reinitialized.",
     )
     parser.add_argument(
         "--trainable_params",
@@ -654,6 +662,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     )
     if args.fake_quant_weight_cache and not student_has_modelopt_state:
         raise ValueError("--fake_quant_weight_cache needs a quantized --student_megatron_path.")
+    if args.student_weight_init == "quantized" and not student_has_modelopt_state:
+        raise ValueError(
+            "--student_weight_init quantized needs a quantized --student_megatron_path."
+        )
     if args.fake_quant_weight_cache and "callbacks" not in inspect.signature(distill).parameters:
         raise ValueError("--fake_quant_weight_cache needs a newer Megatron-Bridge; see the README.")
     # A quantized student pins the layout: it must match what quantize.py wrote, so reuse the same
@@ -765,7 +777,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         distill_submodule="language_model" if is_vlm else None,
     )
 
-    if args.trainable_params:
+    if args.trainable_params or args.student_weight_init == "quantized":
         # Run after initial student restoration; native training resume happens later.
         def _select_trainable_student_hook(model_chunks):
             """Select parameters in the distilled student before the teacher is attached."""
@@ -773,7 +785,9 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                 student = unwrap_model(chunk)
                 if is_vlm:
                     student = student.language_model
-                configure_trainable_parameters(student, args.trainable_params)
+                if args.trainable_params:
+                    configure_trainable_parameters(student, args.trainable_params)
+                initialize_student_weights(student, args.student_weight_init, checkpoint_dir)
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_select_trainable_student_hook, prepend=True)

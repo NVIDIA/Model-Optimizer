@@ -62,9 +62,11 @@ from .kv_cache_auto_quant import (
     get_kv_cache_auto_quantize_config,
 )
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
+from .lora import has_quant_lora
 from .mode import QuantizeModeRegistry, _rank_local_calibrations, get_modelike_from_algo_cfg
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
-from .utils import is_quantized
+from .qtensor import QTensorWrapper
+from .utils import invalidate_weight_cache, is_quantized
 from .utils.core_utils import _get_fsdp2_mesh
 
 __all__ = [
@@ -75,6 +77,7 @@ __all__ = [
     "enable_quantizer",
     "fold_weight",
     "get_auto_quantize_config",
+    "initialize_quantized_weights",
     "postprocess_amax",
     "print_quant_summary",
     "quantize",
@@ -1362,6 +1365,82 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             module.fold_weight(keep_attrs)
+
+
+@torch.no_grad()
+def initialize_quantized_weights(model: nn.Module, *, trainable_only: bool = False) -> nn.Module:
+    """Initialize floating latent weights from their configured fake-quantized values.
+
+    Call once after calibration/restoration, before distributed wrapping and optimizer
+    construction. Quantizers, calibration buffers, parameter objects and dtypes are retained.
+    Pre-scales and rotations are inverted before storing values, so subsequent forwards
+    continue to apply those transforms exactly once. This is initialization, not folding:
+    quantizers remain enabled. Never call on a resumed training checkpoint.
+
+    Args:
+        model: Calibrated fake-quantized model with uncompressed floating weights.
+        trainable_only: Initialize only weights whose ``requires_grad`` is true.
+    """
+    if not is_quantized(model):
+        raise ValueError("Weight initialization requires a calibrated fake-quantized model.")
+    if has_quant_lora(model):
+        raise ValueError("Weight initialization requires an adapter-free student.")
+    if any(isinstance(module, FSDPModule) for module in model.modules()):
+        raise ValueError("Initialize quantized weights before FSDP wrapping.")
+    seen = {}
+    storage_ranges = {}
+    for module in model.modules():
+        if not isinstance(module, QuantModule):
+            continue
+        validated = False
+        for weight, quantizer in module._iter_weights_for_initialization(trainable_only):
+            if not validated:
+                module._validate_fold_weight()
+                validated = True
+            if (
+                isinstance(weight, QTensorWrapper)
+                or not weight.is_floating_point()
+                or weight.is_meta
+            ):
+                raise ValueError("Weight initialization requires materialized floating weights.")
+            members = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+            for member in members:
+                if not member.fake_quant or member._if_calib:
+                    raise ValueError(
+                        "Restore calibrated fake quantizers before weight initialization."
+                    )
+                scale = member.pre_quant_scale
+                if scale is not None and (
+                    scale.is_meta or not bool((torch.isfinite(scale) & (scale != 0)).all())
+                ):
+                    raise ValueError("Weight pre-quantization scales must be finite and nonzero.")
+            if weight.numel():
+                key = module._weight_initialization_key(weight)
+                if key in seen and seen[key] is not quantizer:
+                    raise ValueError("A shared weight has different weight quantizers.")
+                if key not in seen:
+                    device, pointer, offset, shape, stride, _ = key
+                    start = offset * weight.element_size()
+                    end = (
+                        offset + sum((size - 1) * step for size, step in zip(shape, stride)) + 1
+                    ) * weight.element_size()
+                    spans = storage_ranges.setdefault((device, pointer), [])
+                    if any(start < high and low < end for low, high in spans):
+                        raise ValueError(
+                            "Overlapping weight views cannot be initialized separately."
+                        )
+                    spans.append((start, end))
+                seen[key] = quantizer
+    invalidate_weight_cache(model)
+    try:
+        with preserve_quantizer_attributes_context(model):
+            initialized = set()
+            for module in model.modules():
+                if isinstance(module, QuantModule):
+                    module._initialize_quantized_weights(trainable_only, initialized)
+    finally:
+        invalidate_weight_cache(model)
+    return model
 
 
 @contextmanager
