@@ -1693,8 +1693,10 @@ def awq_lite(
             self.weight_scale = (
                 get_weight_scale(module.weight, self.block_size) if use_weight_scale else None
             )
+            # float64 here and in the sums below: the order the batches are summed in moves an fp32 sum by
+            # ~1e-7, enough to flip the alpha of a module whose loss curve is flat
             self.loss = {
-                k.item(): torch.zeros((), device=module.weight.device, dtype=torch.float32)
+                k.item(): torch.zeros((), device=module.weight.device, dtype=torch.float64)
                 for k in torch.arange(0, 1.0 + alpha_step, alpha_step)
             }
             self.best_scale = None
@@ -1739,7 +1741,7 @@ def awq_lite(
         return scale
 
     def get_act_scale_sum(x):
-        return x.abs().reshape(-1, x.shape[-1]).sum(0, dtype=torch.float32)
+        return x.abs().reshape(-1, x.shape[-1]).sum(0, dtype=torch.float64)
 
     def get_scale(x_max, w_max, alpha, tensor_parallel_group=None):
         scales = x_max.pow(alpha)
@@ -1752,14 +1754,14 @@ def awq_lite(
         if tensor_parallel_group and tensor_parallel_group.is_initialized():
             dist.all_reduce(scales, op=dist.ReduceOp.SUM, group=tensor_parallel_group.group)
             scales /= tensor_parallel_group.world_size()
-        return scales
+        return scales.to(torch.float32)
 
     def update_loss(self, out, out_actual, alpha):
         out_actual = out_actual[0] if isinstance(out_actual, tuple) else out_actual
         out = out[0] if isinstance(out, tuple) else out
         out = out.to_local() if hasattr(out, "to_local") else out
         out_actual = out_actual.to_local() if hasattr(out_actual, "to_local") else out_actual
-        loss = (out - out_actual).float().pow(2).sum()
+        loss = (out - out_actual).double().pow(2).sum()
         self.awq_lite.loss[alpha] += loss.to(self.awq_lite.loss[alpha].device)
 
     def update_best_params(self):
