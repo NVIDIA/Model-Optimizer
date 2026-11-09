@@ -30,7 +30,21 @@ to the evaluation skill root, and step numbers match `SKILL.md`.
 
 Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 
-**Set up `.env` now (not Step 8).** The working `.env` lives at the **workspace root** — the directory you run `nel` from — matching `modelopttools:eval-config`'s convention; do **not** create it under the skill dir. (NEL does not discover `.env` by path: it reads secrets from the shell env via the `host:` prefix after you `source`, so the location is purely *which file you source* before `nel run`. Keeping the single `.env` at the workspace root avoids a stale duplicate under the symlinked, shared `.agents/` skill tree.) For judge-scored / user-sim tasks (HLE, AA-LCR, Tau2), seed it from the template if absent — the template ships under the skill dir, the working `.env` does not: `[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env`. Then try `modelopttools:eval-config` (if available) to fill the judge `model_id`/`url` rows (user adds the secret key). Needed before Step 5, which substitutes those values into task `<VAR>` placeholders.
+**Set up `.env` now (not Step 8).** Keep it at the workspace root, where `nel`
+runs, and preserve an existing file:
+`[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env`.
+The optional `modelopttools:eval-config` integration can fill endpoint settings.
+Without it, have the user supply the judge/user-simulator model IDs, URLs, and
+required credentials from the selected task's recipe. Do not guess private hosts.
+Set non-secret model IDs and URLs in the config before Step 5; the user enters
+secret values in `.env` and exports them for NEL's `host:` references.
+
+**Public setup without MLflow.** If no tracking server is configured, remove
+`execution.auto_export` and the `export.mlflow` block from the copied template;
+also remove `execution.cpu_partition` if it was only needed by auto-export.
+Keep local run configs, logs, per-sample outputs, and score artifacts for validation
+and comparison. If the user enables MLflow, use their explicit tracking URI and
+credentials; a ModelOpt tools plugin or MLflow MCP server is not required.
 
 **Secret safety — never open `.env` with Read/Write/Edit.** The harness mirrors later edits of any agent-opened file into the transcript, so touching `.env` leaks the keys the user adds afterward. Use shell only (`cp` to create, `source` to load — neither echoes); edit `env.example`, never `.env`; leave value entry to the user / `modelopttools:eval-config`.
 
@@ -54,7 +68,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 1. Read the task reference file(s).
 2. Use `recipes/examples/example_eval.yaml` as the base.
 3. Copy the YAML fragment(s) into `evaluation.tasks`, applying any per-task notes.
-4. **MLflow auto-export is on by default** — it needs **two** pieces, both in `example_eval.yaml`: (a) the **trigger** `execution.auto_export.destinations: [mlflow]` (without it the run is *not* uploaded), and (b) the `export.mlflow` block that configures it. In the `export.mlflow` block use **literal** values for `experiment_name` / `description` / `tags` — substitute the actual `served_model_name` and sampling params. Do **not** use `${deployment.*}` / `${evaluation.*}` cross-references: with auto-export on, NEL resolves the export block at submit time in a scope without those nodes and fails with `Interpolation key '...' not found` (`${oc.env:USER}` and `${oc.env:MLFLOW_TRACKING_URI}` are fine — they're env vars). Because these literals can't interpolate, keep the `temperature` / `top_p` / `max_new_tokens` tags **equal to** the top-level `params` and update both in the same edit — they're the only queryable record of sampling in MLflow (NEL doesn't log them as run params), so a stale tag silently misreports the run. `tracking_uri` = `${oc.env:MLFLOW_TRACKING_URI}` from `modelopttools:eval-config` (not hand-filled), and auto-export needs `execution.cpu_partition` (e.g. gcp-nrt `cpu`) — it's a separate CPU-only sbatch that GPU-only partitions reject (`Cannot find GPU specification`), silently dropping the link. Before filling `experiment_name`/`tags`, read the checkpoint's `.experiment.json` (Step 3) and carry the PTQ run's experiment name plus its `modelopt_*` tags across (Step 4).
+4. **When MLflow is configured, auto-export is on in the template** — it needs **two** pieces, both in `example_eval.yaml`: (a) the **trigger** `execution.auto_export.destinations: [mlflow]` (without it the run is *not* uploaded), and (b) the `export.mlflow` block that configures it. In the `export.mlflow` block use **literal** values for `experiment_name` / `description` / `tags` — substitute the actual `served_model_name` and sampling params. Do **not** use `${deployment.*}` / `${evaluation.*}` cross-references: with auto-export on, NEL resolves the export block at submit time in a scope without those nodes and fails with `Interpolation key '...' not found` (`${oc.env:USER}` and `${oc.env:MLFLOW_TRACKING_URI}` are fine — they're env vars). Because these literals can't interpolate, keep the `temperature` / `top_p` / `max_new_tokens` tags **equal to** the top-level `params` and update both in the same edit — they're the only queryable record of sampling in MLflow (NEL doesn't log them as run params), so a stale tag silently misreports the run. `tracking_uri` = `${oc.env:MLFLOW_TRACKING_URI}` from the user's settings or the optional `modelopttools:eval-config` integration, and auto-export needs `execution.cpu_partition` (e.g. gcp-nrt `cpu`) — it's a separate CPU-only sbatch that GPU-only partitions reject (`Cannot find GPU specification`), silently dropping the link. Before filling `experiment_name`/`tags`, read the checkpoint's `.experiment.json` (Step 3) and carry the PTQ run's experiment name plus its `modelopt_*` tags across (Step 4).
 5. Proceed to Step 3, then Step 4, then Step 7.5/8. Skip Step 2's 5-question flow.
 
 ---
@@ -282,7 +296,7 @@ Hostname match → set `defaults: - execution: internal/slurm/<cluster>`, drop t
 
 On SLURM, several deploy/eval failures are invisible to `--dry-run` and only surface at canary (`mount_home`, HF cache, `cpu_partition`, top-level vs per-stage `env_vars`) — read `references/slurm.md`.
 
-- Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, the `cpu_partition` for auto-export, etc.). Don't propose defaults; let them give plain text. (`tracking_uri` is **not** one of these — it's `${oc.env:MLFLOW_TRACKING_URI}` from `modelopttools:eval-config`.)
+- Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, the `cpu_partition` for auto-export, etc.). Don't propose defaults; let them give plain text. (When MLflow is enabled, `tracking_uri` reads the user's `MLFLOW_TRACKING_URI`.)
 - **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).
 - **ModelOpt provenance.** When Step 3 found a `.experiment.json`, carry it into

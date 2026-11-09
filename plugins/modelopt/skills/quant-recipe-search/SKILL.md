@@ -10,9 +10,17 @@ description: >-
   (use deployment), creating/running evals (use evaluation or launching-evals),
   monitoring jobs (use monitor), MLflow browsing (use accessing-mlflow), or
   comparing completed baseline-vs-candidate scores only (use compare-results).
+license: Apache-2.0
+metadata:
+  author: Zhiyu Cheng <zhiyuc@nvidia.com>
 ---
 
 # Quant Recipe Search
+
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/plugins/modelopt/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
 
 Use this skill when quantization is an iterative recipe search, not a one-off
 PTQ run. The skill owns strategy: define success, choose the search space,

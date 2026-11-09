@@ -4,9 +4,16 @@ description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Eval
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073).
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
+metadata:
+  author: Zhiyu Cheng <zhiyuc@nvidia.com>
 ---
 
 # NeMo Evaluator Launcher Assistant
+
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/plugins/modelopt/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
 
 Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints.
 
@@ -49,8 +56,8 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
 1. Read **`references/nel-next.md`** (shared: venv, schema, AWS creds, architecture, timeout strategy, MLflow, run flow) + the per-benchmark recipe `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md`; start from `recipes/examples/example_eval_next.yaml`.
    Read [model-card research](references/model-card-research.md) for generation settings; consult task-specific policy before selecting published budgets or fallbacks.
 2. Isolated nel-next venv: `"$SKILL_DIR/scripts/nel-next.sh" --setup-only` (keeps 0.2.6 `nel` untouched).
-3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`, `${HARBOR_ECS_REGION}`) into `.env`; always include the `output.export_config.mlflow` block.
-4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
+3. Configure credentials and harbor infrastructure using the public setup path in `references/nel-next.md`; `modelopttools:eval-config` is optional. Include `output.export_config.mlflow` only when an accessible MLflow server is configured.
+4. Dry-run → canary → full (`nel-next.sh eval run`), then preserve the merged artifacts. If MLflow export is configured, run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` afterward; SLURM does not auto-export.
 5. Before reporting a full-run score, apply `references/run-validation.md`, including its benchmark-specific checks.
 
 Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
