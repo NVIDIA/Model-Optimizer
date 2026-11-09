@@ -200,11 +200,12 @@ def test_linear_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
     ],
 )
 @pytest.mark.parametrize("log_mse", [False, True])
+@pytest.mark.parametrize("local_hessian_scales", [False, True])
 def test_an_update_that_may_move_fits_its_room(
-    need_2_gpus, monkeypatch, num_bits, shape, dtype, cuda_extension, log_mse
+    need_2_gpus, monkeypatch, num_bits, shape, dtype, cuda_extension, log_mse, local_hessian_scales
 ):
-    """An update that may run on another GPU, logging its error or not, peaks there within the
-    room it is admitted with."""
+    """An update that may run on another GPU, logging its error or not and searching the local
+    scales or not, peaks there within the room it is admitted with."""
     if cuda_extension:
         get_cuda_ext_ggml(raise_if_failed=True)  # without it, no update may move to check
     else:
@@ -224,7 +225,9 @@ def test_an_update_that_may_move_fits_its_room(
         "algorithm": "max",
     }
     mtq.quantize(linear, config, forward_loop=lambda m: m(inputs))
-    helper = GGMLGPTQHelper(linear, "linear", log_mse=log_mse)
+    helper = GGMLGPTQHelper(
+        linear, "linear", log_mse=log_mse, local_hessian_scales=local_hessian_scales
+    )
     helper.accumulate(inputs)
     block_size = 256
     worker = torch.device("cuda", 1)

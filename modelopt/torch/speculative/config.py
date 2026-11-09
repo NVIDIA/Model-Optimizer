@@ -615,6 +615,14 @@ class EagleConfig(ModeloptBaseConfig):
         ),
     )
 
+    eagle_mix_hidden_states_mode: Literal["sparse_replace", "uniform_layer_sample"] = ModeloptField(
+        default="sparse_replace",
+        description=(
+            "Hidden state mixing variant used when eagle_mix_hidden_states=True. "
+            "Available options: sparse_replace, uniform_layer_sample."
+        ),
+    )
+
     eagle_use_torch_compile: bool = ModeloptField(
         default=True,
         description="Whether to use torch.compile on eagle forward/loss methods for faster training.",

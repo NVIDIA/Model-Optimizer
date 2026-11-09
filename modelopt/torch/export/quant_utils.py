@@ -77,6 +77,7 @@ from .quant_format import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_MXFP4,
     QUANTIZATION_W4A16_NVFP4,
+    STATIC_INPUT_SCALE_FORMATS,
 )
 
 logger = logging.getLogger(__name__)
@@ -1798,6 +1799,34 @@ def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
                 continue
             router_names.append(f"{name + '.' if name else ''}{attr}")
     return router_names
+
+
+def _get_uncalibrated_static_input_module_names(model: nn.Module) -> list[str]:
+    """Return the names of modules whose static input quantizer has no calibrated amax.
+
+    Their format declares an ``input_scale`` in the checkpoint, which export can only take from
+    calibration, so a module the calibration forward never ran would be exported without it.
+    """
+    module_names = []
+    for name, module in model.named_modules():
+        for weight_name in weight_attr_names(module):
+            input_quantizer = getattr(
+                module, quantizer_attr_names(weight_name).input_quantizer, None
+            )
+            if (
+                isinstance(input_quantizer, TensorQuantizer)
+                and input_quantizer.is_enabled
+                and not (input_quantizer._dynamic or input_quantizer.is_mx_format)
+                and not input_quantizer._use_constant_amax
+                and input_quantizer.amax is None
+                and _get_quantization_from_quantizers(
+                    module, representative_weight_quantizer(module, weight_name), input_quantizer
+                )
+                in STATIC_INPUT_SCALE_FORMATS
+            ):
+                module_names.append(name)
+                break
+    return module_names
 
 
 def _has_pre_quant_scale(module: nn.Module, weight_names: list[str]) -> bool:

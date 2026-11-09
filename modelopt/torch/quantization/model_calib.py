@@ -2343,8 +2343,10 @@ def _get_awq_quantizer_block_size(tensor: torch.Tensor, quantizer: TensorQuantiz
 def svd(weight, rank):
     original_device = weight.device
     original_dtype = weight.dtype
-    weight_f64 = weight.to(dtype=torch.float64, device=original_device)
-    u, s, vt = torch.linalg.svd(weight_f64, full_matrices=False)
+    # float32 is enough because the factors are cast back to the weight dtype, while float64 is
+    # over 20x slower on GPUs with low float64 throughput, such as GB300.
+    compute_dtype = torch.float64 if original_dtype == torch.float64 else torch.float32
+    u, s, vt = torch.linalg.svd(weight.to(compute_dtype), full_matrices=False)
     us = u[:, :rank] * s[:rank]
     vt = vt[:rank]
     us = us.to(device=original_device, dtype=original_dtype)
@@ -2641,6 +2643,7 @@ def gptq(
     fused: bool = False,
     importance_weighted: bool = False,
     hessian_input_dtype: str = "float32",
+    local_hessian_scales: bool = False,
 ):
     """GPTQ quantization.
 
@@ -2681,6 +2684,8 @@ def gptq(
             importance weight it by the square root of the Hessian diagonal.
         hessian_input_dtype: ``"float32"`` or ``"bfloat16"``, the dtype the Hessian GEMM reads
             the activations in; see :class:`GPTQCalibConfig <modelopt.torch.quantization.config.GPTQCalibConfig>`.
+        local_hessian_scales: If True, formats with per-group choices pick them by the
+            GPTQ-compensated block Hessian; see ``GPTQCalibConfig``.
     """
     total_start = time.time()
 
@@ -2731,6 +2736,7 @@ def gptq(
             offload_to_cpu=True,
             fused=fused,
             importance_weighted=importance_weighted,
+            local_hessian_scales=local_hessian_scales,
             hessian_input_dtype=hessian_input_dtype,
             weight_quantizer=weight_quantizer,
             weight=weight,

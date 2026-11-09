@@ -46,6 +46,7 @@ from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
+from modelopt.torch.export.trtllm.enc_dec import is_trtllm_enc_dec_export
 from modelopt.torch.models import hf_model_type
 from modelopt.torch.models.hf import (
     checkpoint_has_mtp,
@@ -53,6 +54,7 @@ from modelopt.torch.models.hf import (
     prepare_model_for_loading,
 )
 from modelopt.torch.quantization.mode import get_modelike_from_algo_cfg
+from modelopt.torch.speculative.utils import is_speculative_config
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
@@ -65,8 +67,6 @@ from modelopt.torch.utils.plugins.model_load_utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
 def _calibration_methods(args) -> set[str]:
@@ -512,13 +512,6 @@ def build_quant_cfg(
     return quant_cfg
 
 
-def is_speculative(hf_config):
-    """Check if the model architecture is a speculative model."""
-    return hf_config.architectures and any(
-        name in hf_config.architectures[0] for name in SPECULATIVE_MODEL_LIST
-    )
-
-
 def is_diffusion_gemma(hf_config) -> bool:
     """Check if the model architecture is DiffusionGemma.
 
@@ -893,7 +886,7 @@ def get_model(
     # Only the general load path below threads max_memory/offload_folder into
     # from_pretrained; the specialized loaders build their own calls.
     if _disk_offload and (
-        is_speculative(hf_config)
+        is_speculative_config(hf_config)
         or has_pack_quantized_config(hf_config)
         or get_original_hf_quant_method(hf_config) == "mxfp4"
     ):
@@ -904,7 +897,7 @@ def get_model(
             UserWarning,
         )
 
-    if is_speculative(hf_config):
+    if is_speculative_config(hf_config):
         model = load_pretrained(
             ckpt_path,
             AutoModelForCausalLM,
@@ -1082,15 +1075,6 @@ def get_model(
 def is_model_on_gpu(model) -> bool:
     """Returns if the model is fully loaded on GPUs."""
     return all("cuda" in str(param.device) for param in model.parameters())
-
-
-def is_trtllm_enc_dec_export(model_type: str | None) -> bool:
-    """Return whether the root Hugging Face model_type still exports a TensorRT-LLM checkpoint.
-
-    These are the encoder-decoder families the deprecated TensorRT-LLM exporter supports. Other
-    encoder-decoder models (e.g. LongT5, PLBart, T5Gemma) use the unified HF export.
-    """
-    return model_type in ["t5", "mt5", "umt5", "bart", "mbart", "whisper"]
 
 
 def generate_excludes_prompt(model) -> bool:
