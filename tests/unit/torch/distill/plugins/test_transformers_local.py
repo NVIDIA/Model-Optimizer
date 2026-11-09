@@ -48,6 +48,7 @@ from modelopt.torch.distill.plugins.transformers import (
     TransformersLocalDistillationAdapter,
     transformers_family,
 )
+from modelopt.torch.distill.plugins.transformers.adapter import _TransformersRuntime
 from modelopt.torch.distill.plugins.transformers.parallel import native_mesh_context
 from modelopt.torch.quantization import repair_partition
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -301,6 +302,46 @@ def _realized_contexts_preserve_unique_data_repair_job(rank, size):
         torch.testing.assert_close(
             row["gradient_norm"], expected_row["gradient_norm"], rtol=1e-6, atol=1e-8
         )
+
+    # Conditional experts must match serial optimization even when previously
+    # active fields become absent or participate only on another replica.
+    runtime = _TransformersRuntime(
+        TransformersLocalDistillationAdapter(raw).context, mtd.LocalDistillationConfig()
+    )
+    for optimizer_type in (torch.optim.Adagrad, torch.optim.AdamW):
+        fields = [torch.nn.Parameter(torch.tensor([1.0])) for _ in range(3)]
+        reference_fields = [torch.nn.Parameter(field.detach().clone()) for field in fields]
+        runtime.parameter_meshes = {id(field): [runtime.dp_cp] for field in fields}
+        actual_optimizer = optimizer_type(fields, lr=0.01, weight_decay=0)
+        reference_optimizer = optimizer_type(reference_fields, lr=0.01, weight_decay=0)
+        for step in range(2):
+            actual_optimizer.zero_grad(set_to_none=True)
+            reference_optimizer.zero_grad(set_to_none=True)
+            local = fields[0] if rank == 0 else fields[2] if step == 0 else None
+            if local is not None:
+                local.square().sum().backward()
+            objective = reference_fields[0].square().sum()
+            if step == 0:
+                objective = objective + reference_fields[2].square().sum()
+            objective.backward()
+            runtime.reduce_gradients(fields)
+            for field, expected_field in zip(fields, reference_fields):
+                assert (field.grad is None) == (expected_field.grad is None)
+                if field.grad is not None:
+                    torch.testing.assert_close(field.grad, expected_field.grad)
+            runtime.clip_gradients(fields, 1.0)
+            torch.nn.utils.clip_grad_norm_(reference_fields, 1.0)
+            actual_optimizer.step()
+            reference_optimizer.step()
+            for field, expected_field in zip(fields, reference_fields):
+                torch.testing.assert_close(field, expected_field, rtol=0, atol=0)
+                actual_state = actual_optimizer.state[field]
+                expected_state = reference_optimizer.state[expected_field]
+                assert actual_state.keys() == expected_state.keys()
+                for key in actual_state:
+                    torch.testing.assert_close(
+                        actual_state[key], expected_state[key], rtol=0, atol=0
+                    )
 
 
 def test_realized_contexts_preserve_unique_data_repair(cpu_dist_workers):

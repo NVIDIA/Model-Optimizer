@@ -628,11 +628,11 @@ def prepare_packed_weights_for_tp(model):
     except BaseException:
         for module, weight, quantizer, buffers, attributes, real_gemm in reversed(journal):
             quantizer._buffers = buffers
-            for key in names:
-                if key in attributes:
-                    setattr(quantizer, key, attributes[key])
+            for attribute in names:
+                if attribute in attributes:
+                    setattr(quantizer, attribute, attributes[attribute])
                 else:
-                    quantizer.__dict__.pop(key, None)
+                    quantizer.__dict__.pop(attribute, None)
             module._parameters["weight"] = weight
             if real_gemm is not None:
                 module._use_real_quant_gemm = real_gemm

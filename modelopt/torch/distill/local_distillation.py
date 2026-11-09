@@ -191,6 +191,15 @@ class _LocalRunner:
             raise error
         return value
 
+    def _validate_gradient_norms(self, row):
+        invalid = [
+            name
+            for name, values in row["units"].items()
+            if not math.isfinite(values["gradient_norm"])
+        ]
+        if invalid:
+            raise FloatingPointError(f"Nonfinite local-repair gradient norm: {invalid}")
+
     def _validate_output(self):
         if self.config.output_dir:
             output = Path(self.config.output_dir)
@@ -575,15 +584,14 @@ class _LocalRunner:
                             if parameter.grad is not None:
                                 parameter.grad.div_(denominator)
                         norm = (
-                            self.runtime.clip_gradients(parameters, self.config.gradient_clip_norm)
+                            self.runtime.clip_gradients(
+                                parameters, self.config.gradient_clip_norm, error_if_nonfinite=False
+                            )
                             if self.runtime
                             else nn.utils.clip_grad_norm_(
-                                parameters, self.config.gradient_clip_norm, error_if_nonfinite=True
+                                parameters, self.config.gradient_clip_norm, error_if_nonfinite=False
                             )
                         )
-                    with self._phase("optimizer_step"):
-                        optimizer.step()
-                        self.policies[unit.name].project_()
                     row["units"][unit.name] = {
                         "mse": error / count,
                         "elements": count,
@@ -593,6 +601,13 @@ class _LocalRunner:
                             dict.fromkeys(group["lr"] for group in optimizer.param_groups)
                         ),
                     }
+                # PP stages can own different numbers of units. Complete their
+                # gradient collectives before one model-wide validation boundary.
+                self._guard(lambda: self._validate_gradient_norms(row))
+                with self._phase("optimizer_step"):
+                    for unit in self.units:
+                        self.optimizers[unit.name].step()
+                        self.policies[unit.name].project_()
                 self.metrics["history"].append(row)
                 self.metrics["updates"] = step
                 if step == start + 1 or step % self.config.report_interval == 0:

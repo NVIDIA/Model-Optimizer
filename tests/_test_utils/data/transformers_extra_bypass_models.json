@@ -231,47 +231,6 @@
         "q_lora_rank": 1536,
         "qk_nope_head_dim": 128,
         "qk_rope_head_dim": 64,
-        "quantization_config": {
-          "config_groups": {
-            "group_0": {
-              "format": "mxfp4-pack-quantized",
-              "input_activations": null,
-              "output_activations": null,
-              "targets": [
-                "Linear"
-              ],
-              "weights": {
-                "actorder": null,
-                "block_structure": null,
-                "dynamic": false,
-                "group_size": 32,
-                "num_bits": 4,
-                "observer": "minmax",
-                "observer_kwargs": {},
-                "scale_dtype": "torch.uint8",
-                "strategy": "group",
-                "symmetric": true,
-                "type": "float",
-                "zp_dtype": null
-              }
-            }
-          },
-          "format": "mxfp4-pack-quantized",
-          "global_compression_ratio": null,
-          "ignore": [
-            "re:.*self_attn.*",
-            "re:.*shared_experts.*",
-            "re:.*mlp\\.(gate|up|gate_up|down)_proj.*",
-            "re:.*block_sparse_moe\\.gate$",
-            "re:.*block_sparse_moe\\.routed_expert_(up|down)_proj.*",
-            "re:.*lm_head.*",
-            "re:.*vision_tower.*",
-            "re:.*mm_projector.*"
-          ],
-          "kv_cache_scheme": null,
-          "quant_method": "compressed-tensors",
-          "quantization_status": "compressed"
-        },
         "remove_invalid_values": false,
         "repetition_penalty": 1.0,
         "return_dict": true,

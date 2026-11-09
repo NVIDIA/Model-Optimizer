@@ -425,6 +425,38 @@ def test_local_quantization_preflight_is_transactional(invalid_selection, monkey
     ]
 
 
+def test_local_repair_rejects_late_nonfinite_gradient_before_any_update(monkeypatch):
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.quantization.repair import QuantizationRepairPolicy
+
+    torch.manual_seed(12)
+    teacher = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8)).eval()
+    student = mtq.quantize(copy.deepcopy(teacher), mtq.INT8_WEIGHT_ONLY_CFG)
+    prepared = []
+    original = QuantizationRepairPolicy._prepare
+
+    def prepare(policy, *args, **kwargs):
+        groups = original(policy, *args, **kwargs)
+        fields = [parameter for group in groups for parameter in group.params]
+        prepared.append([(parameter, parameter.detach().clone()) for parameter in fields])
+        if len(prepared) == 2:
+            fields[0].register_hook(lambda gradient: torch.full_like(gradient, float("nan")))
+        return groups
+
+    monkeypatch.setattr(QuantizationRepairPolicy, "_prepare", prepare)
+    with pytest.raises((RuntimeError, FloatingPointError), match=r"[Nn]onfinite|non-finite"):
+        mtd.local_distill(
+            student,
+            teacher,
+            [torch.randn(8, 3, 8)],
+            {"units": ["0", "1"], "updates": 1, "warmup_fraction": 0, "scheduler": "constant"},
+        )
+    assert len(prepared) == 2
+    for unit in prepared:
+        for parameter, initial in unit:
+            torch.testing.assert_close(parameter, initial, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("batch_kind", ["dict", "tensor"])
 @pytest.mark.parametrize("optimizer_name", ["adagrad", "adamw"])
 def test_local_streaming_update_matches_independent_reference(batch_kind, optimizer_name):

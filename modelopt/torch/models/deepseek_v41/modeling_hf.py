@@ -1,6 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Architecture reference: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/model.py
 # Copyright (c) 2023 DeepSeek. MIT License.
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 
 """Native, differentiable HF text port of the published DeepSeek V4.1 backbone.
@@ -300,6 +314,7 @@ class DeepseekV41Model(DeepseekV41PreTrainedModel):
         elif position_ids.ndim == 1:
             position_ids = position_ids.unsqueeze(0).expand(batch, -1)
         if prefix_length:
+            assert cache is not None
             if (input_ids is None) != (cache.input_ids is None):
                 raise ValueError("Cached input_ids and inputs_embeds modes cannot be mixed.")
             if input_ids is not None:
@@ -314,6 +329,7 @@ class DeepseekV41Model(DeepseekV41PreTrainedModel):
         elif attention_mask.ndim != 2:
             raise ValueError("V4.1 text attention_mask must be a two-dimensional token mask.")
         elif prefix_length and attention_mask.shape[1] == new_length:
+            assert cache is not None
             attention_mask = torch.cat((cache.attention_mask, attention_mask), 1)
         if attention_mask.shape != (batch, prefix_length + new_length):
             raise ValueError("V4.1 attention mask must cover the complete input prefix.")

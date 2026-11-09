@@ -1,6 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Architecture reference: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/model.py
 # Copyright (c) 2023 DeepSeek. MIT License.
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 
 """CSA2 sliding windows, compressed latents, and shared sparse index ownership."""
@@ -38,6 +52,7 @@ class V41Compressor(nn.Module):
         cutoff = hidden_states.shape[1] // self.ratio * self.ratio
         value = hidden_states[:, :cutoff].float()
         latent = self.wkv(value).float().unflatten(1, (-1, self.ratio))
+        assert self.wgate is not None
         gates = self.wgate(value).float().unflatten(1, (-1, self.ratio))
         pooled = (latent * gates.softmax(2)).sum(2)
         return self.norm(pooled.to(hidden_states.dtype))
@@ -151,8 +166,12 @@ class V41Attention(nn.Module):
             valid = token_mask.gather(1, indices.clamp_min(0).flatten(1)).reshape_as(indices)
             indices = indices.masked_fill(~valid, -1)
         if self.compress_ratio:
-            latent = self.compressor(hidden_states) if self.is_kv_source else None
+            latent = None
+            if self.is_kv_source:
+                assert self.compressor is not None
+                latent = self.compressor(hidden_states)
             if self.is_index_source:
+                assert self.indexer is not None
                 state["topk"] = self.indexer(
                     hidden_states,
                     qr,
@@ -164,6 +183,7 @@ class V41Attention(nn.Module):
                     token_mask,
                 )
             if self.is_kv_source:
+                assert latent is not None
                 count = latent.shape[1]
                 compressed = rotary(
                     latent,

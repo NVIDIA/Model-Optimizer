@@ -56,6 +56,11 @@ and code establish these layouts, not pretrained tensor values or quality.
 Prepare V4.1 through `adapter.parallelize`; its model-owned EP dispatcher keeps
 routing weights before the down projection and preserves the FP32 routed sum.
 The generic dispatcher has different rounding semantics and is rejected.
+V4.1 uses the faithful `full_context_teacher_local_unit_replay` CP fallback:
+context ranks retain full model inputs and reduce disjoint-token objectives.
+It does not shard sparse/recurrent attention or save its activation memory.
+V4.1 has no validated native PP plan; shared compressed/index/candidate state
+requires explicit stage transport before that combination can be supported.
 
 The standalone `DeepseekV41MoE` accepts captured `[batch, sequence, hidden]`
 inputs and explicit component checkpoint extraction. It is useful for local MSE

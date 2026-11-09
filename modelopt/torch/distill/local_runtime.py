@@ -288,11 +288,31 @@ class DistributedLocalRuntime:
         """Optionally reduce feature-sharded objectives after participation validation."""
 
     def reduce_gradients(self, parameters):
+        groups = {}
         for parameter in parameters:
-            if parameter.grad is None:
-                parameter.grad = torch.zeros_like(parameter)
-            for mesh in self.parameter_meshes[id(parameter)]:
-                _sum(parameter.grad, mesh)
+            meshes = self.parameter_meshes[id(parameter)]
+            key = tuple(id(mesh) for mesh in meshes)
+            groups.setdefault(key, (meshes, []))[1].append(parameter)
+        for meshes, fields in groups.values():
+            if not any(_size(mesh) > 1 for mesh in meshes):
+                continue
+            presence = torch.tensor(
+                [parameter.grad is not None for parameter in fields],
+                device=fields[0].device,
+                dtype=torch.int32,
+            )
+            for mesh in meshes:
+                if _size(mesh) > 1:
+                    dist.all_reduce(presence, op=dist.ReduceOp.MAX, group=mesh.get_group())
+            # Preserve optimizer semantics for fields unused by every replica;
+            # a remotely active field must still join every gradient sum.
+            for parameter, present in zip(fields, presence.tolist(), strict=True):
+                if not present:
+                    continue
+                if parameter.grad is None:
+                    parameter.grad = torch.zeros_like(parameter)
+                for mesh in meshes:
+                    _sum(parameter.grad, mesh)
 
     def optimizer_group_key(self, parameter):
         """Keep expert, TP-sharded and replicated fields in their native ownership groups."""
@@ -302,16 +322,19 @@ class DistributedLocalRuntime:
             id(parameter) in self.tp_parameters,
         )
 
-    def clip_gradients(self, parameters, max_norm):
+    def clip_gradients(self, parameters, max_norm, *, error_if_nonfinite=True):
         device = parameters[0].device
         expert = torch.zeros((), device=device)
         replicated = torch.zeros_like(expert)
         tp_sharded = torch.zeros_like(expert)
         has_experts = False
         for parameter in parameters:
-            if id(parameter) in self.expert_parameters:
+            is_expert = id(parameter) in self.expert_parameters
+            has_experts |= is_expert
+            if parameter.grad is None:
+                continue
+            if is_expert:
                 expert += parameter.grad.float().square().sum()
-                has_experts = True
             elif id(parameter) in self.tp_parameters:
                 tp_sharded += parameter.grad.float().square().sum()
             else:
@@ -321,9 +344,10 @@ class DistributedLocalRuntime:
         if self.tp_parameters:
             _sum(tp_sharded, self.tp)
         norm = (expert + tp_sharded + replicated).sqrt()
-        if not torch.isfinite(norm):
+        if error_if_nonfinite and not torch.isfinite(norm):
             raise FloatingPointError("Nonfinite local-repair gradient norm.")
         multiplier = (max_norm / (norm + 1e-6)).clamp_max(1)
         for parameter in parameters:
-            parameter.grad.mul_(multiplier)
+            if parameter.grad is not None:
+                parameter.grad.mul_(multiplier)
         return norm

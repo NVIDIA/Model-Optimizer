@@ -381,6 +381,7 @@ def parallelize_native_transformers(model, context, *, initialize=None):
             else:
                 model.__dict__.pop(name, None)
         raise
+    assert plans is not None and partitions is not None
     tp_plan, ep_plan, fsdp_plan = plans
     route = (
         "dispatch" if "ep_dispatch_experts" in ep_plan.values() else "masked" if ep_plan else None

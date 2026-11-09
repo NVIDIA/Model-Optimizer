@@ -219,12 +219,94 @@ __global__ void iq1_encode(const scalar_t *input, int64_t num_blocks, const floa
   Format::store(payload, picks, choices, d_bits);
 }
 
+// Every choice's encoding of each block, in one pass over the codebook: for each choice, each
+// vector's best pick under it (with its own best shift when the shift is per vector), written as
+// that choice's payload -- the bytes iq1_encode writes when given that choice for every group.
+// output holds kChoices x num_blocks payloads.
+template <typename Format, bool kWeighted, typename scalar_t>
+__global__ void iq1_encode_every_choice(const scalar_t *input, int64_t num_blocks,
+                                        const float *grid, const __half *scales,
+                                        const float *importance, int64_t blocks_per_row,
+                                        uint8_t *output) {
+  constexpr int kGroups = Format::kGroups;
+  constexpr int kChoices = Format::kChoices;
+  constexpr bool kSharedShift = Format::kSharedShift;
+
+  __shared__ unsigned long long warp_keys[kWarps * kChoices];
+  __shared__ unsigned long long best[kChoices];
+  __shared__ uint8_t choices[kChoices][kGroups];
+  __shared__ uint16_t picks[kChoices][kVectorsPerBlock];
+
+  const int tid = threadIdx.x;
+  const int64_t block = blockIdx.x;
+  if (block >= num_blocks)
+    return;
+  for (int i = tid; i < kChoices * kGroups; i += blockDim.x)
+    choices[i / kGroups][i % kGroups] = static_cast<uint8_t>(i / kGroups);
+  __syncthreads();
+
+  const scalar_t *source = input + block * kBlockSize;
+  const __half d_half = scales[block];
+  const uint16_t d_bits = __half_as_ushort(d_half);
+  const float d = __half2float(d_half);
+  bool nonzero = true;
+  for (int choice = 0; choice < kChoices; ++choice)
+    nonzero = Format::begin(output + (choice * num_blocks + block) * Format::kPayloadBytes, d_bits);
+  if (!nonzero)
+    return;
+  const float *weights = kWeighted ? importance + (block % blocks_per_row) * kBlockSize : nullptr;
+
+  // The scoring pass of iq1_encode, keeping each choice's best pick rather than only its error.
+#pragma unroll 1
+  for (int slot = 0; slot < kVectorsPerBlock; ++slot) {
+    float x[kVectorSize], w[kVectorSize];
+    float xnorm, xsum, weight_sum = kVectorSize;
+    load_vector(source + slot * kVectorSize, x, xnorm, xsum);
+    load_iq1_importance<kWeighted>(weights, slot, x, w, xnorm, xsum, weight_sum);
+    unsigned long long keys[kChoices];
+#pragma unroll
+    for (int choice = 0; choice < kChoices; ++choice)
+      keys[choice] = ~0ULL;
+    for (int entry = tid; entry < kIq1sEntries; entry += blockDim.x) {
+      float dot, qnorm, qsum;
+      iq1_grid_terms<kWeighted>(x, w, grid + entry * kVectorSize, dot, qnorm, qsum);
+#pragma unroll
+      for (int choice = 0; choice < kChoices; ++choice) {
+        const float scale = d * (2 * (choice & 7) + 1);
+        if constexpr (kSharedShift) {
+          const unsigned long long key =
+              error_key(shifted_error(xnorm, xsum, dot, qnorm, qsum, scale, iq1_delta(choice >> 3),
+                                      weight_sum),
+                        entry);
+          keys[choice] = key < keys[choice] ? key : keys[choice];
+        } else {
+#pragma unroll
+          for (int shift = 0; shift < 2; ++shift) {
+            const unsigned long long key = error_key(
+                shifted_error(xnorm, xsum, dot, qnorm, qsum, scale, iq1_delta(shift), weight_sum),
+                (shift << kIq1EntryBits) | entry);
+            keys[choice] = key < keys[choice] ? key : keys[choice];
+          }
+        }
+      }
+    }
+    block_min_keys<kChoices>(keys, warp_keys, best);
+    if (tid < kChoices)
+      picks[tid][slot] = static_cast<uint16_t>(best[tid] & ((1u << (kIq1EntryBits + 1)) - 1));
+  }
+  __syncthreads();
+  for (int choice = 0; choice < kChoices; ++choice)
+    Format::store(output + (choice * num_blocks + block) * Format::kPayloadBytes, picks[choice],
+                  choices[choice], d_bits);
+}
+
 // Packs one IQ1 format from per-block FP16 scales, once its inputs (and check_importance, if
-// given) have been validated.
+// given) have been validated. With every_choice, returns every choice's payload,
+// [kChoices, blocks, payload bytes].
 template <typename Format>
 at::Tensor iq1_encode_blocks(const at::Tensor &input, const at::Tensor &grid,
                              const at::Tensor &scales, const std::optional<at::Tensor> &importance,
-                             const at::Tensor &choices) {
+                             const at::Tensor &choices, bool every_choice = false) {
   const auto values = input.contiguous();
   const auto table = grid.contiguous();
   const auto block_scales = scales.contiguous();
@@ -232,14 +314,29 @@ at::Tensor iq1_encode_blocks(const at::Tensor &input, const at::Tensor &grid,
   c10::cuda::CUDAGuard guard(values.device());
   const int64_t num_blocks = values.numel() / kBlockSize;
   at::Tensor output =
-      at::empty({num_blocks, Format::kPayloadBytes}, values.options().dtype(at::kByte));
+      every_choice
+          ? at::empty({Format::kChoices, num_blocks, Format::kPayloadBytes},
+                      values.options().dtype(at::kByte))
+          : at::empty({num_blocks, Format::kPayloadBytes}, values.options().dtype(at::kByte));
   const auto stream = c10::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, values.scalar_type(), "iq1_pack", [&] {
         const auto *half_scales =
             reinterpret_cast<const __half *>(block_scales.data_ptr<at::Half>());
         const uint8_t *fixed = choices.defined() ? choices.data_ptr<uint8_t>() : nullptr;
-        if (weights.defined()) {
+        const float *imp = weights.defined() ? weights.data_ptr<float>() : nullptr;
+        const int64_t rows = weights.defined() ? weights.size(0) : 1;
+        if (every_choice && weights.defined()) {
+          iq1_encode_every_choice<Format, true, scalar_t>
+              <<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
+                  values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
+                  imp, rows, output.data_ptr<uint8_t>());
+        } else if (every_choice) {
+          iq1_encode_every_choice<Format, false, scalar_t>
+              <<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
+                  values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
+                  imp, rows, output.data_ptr<uint8_t>());
+        } else if (weights.defined()) {
           iq1_encode<Format, true, scalar_t><<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
               values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
               weights.data_ptr<float>(), weights.size(0), fixed, output.data_ptr<uint8_t>());

@@ -82,7 +82,7 @@ class TransformersFamilyAdapter(ModuleLocalDistillationAdapter):
     def transform_logits(self, model, logits):
         """Apply task-owned post-projection math; custom heads override this contract."""
         config = getattr(self.teacher_forward_target(model), "config", None)
-        if callable(getattr(config, "get_text_config", None)):
+        if config is not None and callable(getattr(config, "get_text_config", None)):
             config = config.get_text_config()
         if (
             getattr(config, "final_logit_softcapping", None) not in (None, 0)
@@ -261,7 +261,7 @@ class TransformersFamilyAdapter(ModuleLocalDistillationAdapter):
         if not self.batch_packed_documents or requires_full_context_activations(model):
             return False
         config = getattr(model, "config", None)
-        if callable(getattr(config, "get_text_config", None)):
+        if config is not None and callable(getattr(config, "get_text_config", None)):
             config = config.get_text_config()
         pending = [getattr(config, name, None) for name in ("rope_scaling", "rope_parameters")]
         while pending:

@@ -189,25 +189,6 @@ class TensorQuantizer(nn.Module):
             )
         return super().__setattr__(name, value)
 
-    def _apply(self, fn, recurse=True):
-        # Packed formats prescribe scale dtypes independently of compute dtype.
-        fields = {}
-        if not self.fake_quant or getattr(self, "_native_weight_meta", None):
-            for name in ("_scale", "_double_scale", "_scale_zeros"):
-                if self._buffers.get(name) is not None:
-                    fields[name] = self._buffers.pop(name)
-        try:
-            result = super()._apply(fn, recurse=recurse)
-        finally:
-            for name, value in fields.items():
-                if value.is_meta:
-                    transformed = fn(value).to(value.dtype)
-                else:
-                    device = fn(torch.empty(0, dtype=torch.uint8, device=value.device)).device
-                    transformed = value.to(device=device)
-                self._buffers[name] = transformed
-        return result
-
     def __init__(
         self,
         quant_attribute_cfg=None,
@@ -1567,6 +1548,29 @@ class TensorQuantizer(nn.Module):
             setattr(self, key, value)
         else:
             self.register_buffer(key, value)
+
+    def _apply(self, fn, recurse=True):
+        """Move native scales and pinned importance without rounding their prescribed dtypes."""
+        # ggml imports its backend, which imports this module.
+        from ...ggml.common import PINNED_IMPORTANCE_PREFIX
+
+        names = {name for name in self._buffers if name.startswith(PINNED_IMPORTANCE_PREFIX)}
+        if not self.fake_quant or getattr(self, "_native_weight_meta", None):
+            names.update(("_scale", "_double_scale", "_scale_zeros"))
+        fields = {
+            name: self._buffers.pop(name) for name in names if self._buffers.get(name) is not None
+        }
+        try:
+            module = super()._apply(fn, recurse=recurse)
+        finally:
+            for name, value in fields.items():
+                if value.is_meta:
+                    transformed = fn(value).to(value.dtype)
+                else:
+                    device = fn(torch.empty(0, dtype=torch.uint8, device=value.device)).device
+                    transformed = value.to(device=device)
+                self._buffers[name] = transformed
+        return module
 
 
 class HardDisabledTensorQuantizer(TensorQuantizer):

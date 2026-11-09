@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 """Differentiable Step-5 text implementation with bounded CSA attention tiles.
 
@@ -28,7 +41,7 @@ from .configuration_step5 import Step5Config
 __all__ = ["Step5ForCausalLM", "Step5Model", "Step5PreTrainedModel"]
 
 
-class _FP32Parameters:
+class _FP32Parameters(nn.Module):
     def _apply(self, fn, recurse=True):
         result = super()._apply(fn, recurse=recurse)
         for parameter in self.parameters(recurse=False):
@@ -468,6 +481,7 @@ class Step5Attention(nn.Module):
             stop = min(start + 16, sequence)
             count = stop - start
             if state is not None:
+                assert self.indexer is not None
                 indices = self.indexer.select(state, start, stop)
             elif self.window is not None:
                 width = min(self.window, total)
@@ -543,7 +557,9 @@ class Step5DecoderLayer(GradientCheckpointingLayer):
         )
         normed = self.post_attention_layernorm(hidden_states, output_dtype=compute_dtype)
         if self.moe is None:
+            assert self.mlp is not None
             return hidden_states + self.mlp(normed).float()
+        assert self.share_expert is not None
         return hidden_states + (self.moe(normed).float() + self.share_expert(normed).float())
 
 

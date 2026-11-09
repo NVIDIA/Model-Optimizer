@@ -38,6 +38,7 @@ from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.registry import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor import FP8QTensor, QTensorWrapper
+from modelopt.torch.quantization.repair import QuantizationRepairPolicy
 from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
 
 
@@ -247,6 +248,7 @@ def test_transformers_moe_ptq_repair_packing_and_reload(bits, implementation, tm
     [
         "cp",
         "pp",
+        pytest.param("pp_nonfinite", marks=pytest.mark.timeout(40)),
         "cp_pp",
         "tp",
         "tp_iq2_xxs",
@@ -266,7 +268,7 @@ def test_transformers_moe_ptq_repair_packing_and_reload(bits, implementation, tm
     ],
 )
 @pytest.mark.timeout(180)
-def test_transformers_parallel_repair_matches_reference(mode):
+def test_transformers_parallel_repair_matches_reference(mode, monkeypatch):
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     if world_size != 4:
         pytest.skip("Launch on four ranks")
@@ -400,6 +402,35 @@ def test_transformers_parallel_repair_matches_reference(mode):
                     param_dtype=torch.bfloat16, reduce_dtype=torch.float32
                 ),
             )
+    if mode == "pp_nonfinite":
+        fields = []
+        prepare = QuantizationRepairPolicy._prepare
+
+        def prepare_with_fault(policy, *args, **kwargs):
+            groups = prepare(policy, *args, **kwargs)
+            for group in groups:
+                for parameter in group.params:
+                    fields.append((parameter, parameter.detach().clone()))
+            if mesh["pp"].get_local_rank() == 1:
+                groups[0].params[0].register_hook(
+                    lambda gradient: torch.full_like(gradient, float("nan"))
+                )
+            return groups
+
+        monkeypatch.setattr(QuantizationRepairPolicy, "_prepare", prepare_with_fault)
+        with pytest.raises((ValueError, RuntimeError), match=r"[Nn]onfinite|non-finite"):
+            mtd.local_distill(
+                student,
+                teacher,
+                [batch, batch],
+                {**config, "global_batch_size": dp},
+                adapter=adapter,
+            )
+        assert fields
+        for parameter, initial in fields:
+            torch.testing.assert_close(parameter, initial, rtol=0, atol=0)
+        dist.barrier()
+        return
     result = mtd.local_distill(
         student, teacher, [batch, batch], {**config, "global_batch_size": dp}, adapter=adapter
     )

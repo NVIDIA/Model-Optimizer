@@ -25,7 +25,7 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from .ggml.common import pin_packed_weight
+from .ggml.common import pin_packed_weight, pinned_importance
 from .ggml.registry import GGML_FORMAT_REGISTRY
 from .ggml.scale_fields import decode_scale_fields, replace_scale_fields
 from .utils.native_weight import pin_native_weight
@@ -394,7 +394,13 @@ class GGMLScale(_GroupedScale):
         shape = torch.tensor(tuple(weight.shape), device=native.device)
         values = self.format.dequantize(native, shape, dtype=weight.dtype)
         _write_prepared_weight(quantizer, weight, values)
-        pin_packed_weight(quantizer, quantizer.num_bits, native)
+        pin_packed_weight(
+            quantizer,
+            quantizer.num_bits,
+            native,
+            pinned_importance(quantizer, quantizer.num_bits),
+            source=weight if self.format.payload_scales is not None else None,
+        )
 
 
 def grouped_native_repair(quantizers, dtype):

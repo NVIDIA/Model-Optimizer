@@ -20,7 +20,17 @@ Relevant tests are under
 [`tests/gpu/torch/distill/plugins`](../../tests/gpu/torch/distill/plugins) and
 [`test_repair_formats.py`](../../tests/gpu/torch/quantization/test_repair_formats.py).
 
-Latest focused hardening validation passed **222 distinct CPU cases** and
+The November 9 cleanup against main `64cb6ed7` reran the CPU core/adapter,
+GPTQ and native-format/export regressions (236 cases in the final format/export
+group; these suites overlap). GPU checks passed 10 native distributed, 3 DCP,
+3 PP/CP+PP and failure-propagation, 9 codec and 29 family cases. The pinned
+HF 5.23 environment also passed 40 text-extension checks; the older CPU HF
+release cannot import every extension. All feature pre-commit hooks pass.
+The PP failure case injects a nonfinite gradient on one stage and verifies
+model-wide refusal before any repair field changes. Distributed optimizer
+checks compare absent-field behavior and Adagrad/AdamW state to a serial oracle.
+
+Earlier focused hardening validation passed **222 distinct CPU cases** and
 **40 GPU cases**: 10 native distributed, 2 PP/CP+PP repair, 3 DCP, 9 codec and 16 selected family
 cases. The final core/adapter rerun passed 55 cases; the two native NVFP4 routes
 were also rerun against the finalized output-head path. The expanded tests cover

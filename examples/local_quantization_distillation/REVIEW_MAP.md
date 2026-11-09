@@ -1,13 +1,13 @@
 # Source and review map
 
 [Return to the API guide](README.md). The review base is `origin/main` at
-`8c614286acd653670fb7ee6e9b4fac4da62a1626`; historical measurements retain their
+`64cb6ed78e518439bd2d4c1bd7b4da99e361534a`; historical measurements retain their
 own runtime/source revisions.
 
 | Owner | Entry points | Review focus |
 |---|---|---|
 | Repair API | `modelopt/torch/distill/config.py`, `local_distillation.py`, `local_units.py` | Once-resolved unit/quantizer preflight plan, valid-token objectives and independent unit optimizers |
-| Shared runtime | `modelopt/torch/distill/local_parallel.py`, `local_runtime.py`, `local_checkpoint.py` | Typed RealizedMeshContext, physical gradient/statistic ownership, PP scheduling and exact resume |
+| Shared runtime | `modelopt/torch/distill/local_parallel.py`, `local_runtime.py`, `local_checkpoint.py` | Typed RealizedMeshContext, physical gradient/statistic ownership, unused-field optimizer semantics, PP scheduling and exact resume |
 | Native fields | `modelopt/torch/quantization/repair.py`, `repair_formats.py`, `repair_partition.py` | Legal native scale projection, bounded immutable constants, partition geometry and final writeback |
 | Native kernels | `modelopt/torch/kernels/quantization/repair.py` | IQ decoding, grouped scale application, gradients and large-index addressing |
 | HF adapter | `modelopt/torch/distill/plugins/transformers/adapter.py`, `families/`, `packing.py`, `output_head.py` | Semantic units, conservative document coalescing, output-head contracts and per-forward side state |

@@ -29,7 +29,7 @@ class _NemotronFamily(TransformersFamilyAdapter):
             "full_attention": "attention",
             "linear_attention": "mamba",
         }
-        operation = operations.get(getattr(block, "block_type", None))
+        operation = operations.get(getattr(block, "block_type", ""))
         if operation in unit_types:
             return ["mixer"]
         return super().unit_attributes(block, unit_types)

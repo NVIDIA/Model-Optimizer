@@ -40,9 +40,12 @@ from .common import (
     choice_blocks,
     chunk_importance,
     dequantize_blocks,
+    encode_every_choice,
     importance_blocks,
     iq2_tile_terms,
+    leading_fp16_scales,
     narrow_to_float32,
+    super_block_scales,
     validate_block_chunk_size,
     validate_packed_weights,
     validate_weight,
@@ -182,6 +185,8 @@ def quantize_iq2_xs(
     block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
     importance: torch.Tensor | None = None,
     choices: torch.Tensor | None = None,
+    scales: torch.Tensor | None = None,
+    every_choice: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ2_XS blocks.
 
@@ -191,41 +196,53 @@ def quantize_iq2_xs(
     treated as zero during packing. ``importance``, a non-negative per-input-column vector,
     weights each value's squared error in the search, as llama.cpp's imatrix does. ``choices``,
     ``[*weight.shape[:-1], weight.shape[-1] // 256, 16]``, fixes each 16-value group's 4-bit local scale.
+    ``scales``, one FP16 super-block scale per block, replaces the predicted ones.
+    ``every_choice`` returns every choice's payload instead, each with that choice in every
+    group, ``[num_choices, *packed shape]``.
     """
     validate_weight(weight, "IQ2_XS")
     validate_block_chunk_size(block_chunk_size)
     block_importance = importance_blocks(importance, weight, "IQ2_XS")
-    block_choices = choice_blocks(choices, weight, 16, 16, "IQ2_XS")
+    block_choices = choice_blocks(choices, weight, 16, 16, "IQ2_XS", every_choice)
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ2_XS_BLOCK_SIZE)
+    block_scales = super_block_scales(
+        blocks, _predict_iq2_xs_scales, scales, _SCALE_BLOCK_CHUNK_SIZE
+    )
     grid = iq2_xs_grid(weight.device)
     if weight.is_cuda:
         extension = get_cuda_ext_ggml()
         if extension is not None:
-            scale_chunks = [
-                _predict_iq2_xs_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
-                for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
-            ]
             packed = extension.iq2_xs_pack(
-                blocks, grid, torch.cat(scale_chunks), block_importance, block_choices
+                blocks, grid, block_scales, block_importance, block_choices, every_choice
             )
             packed_shape = (
                 *weight.shape[:-1],
                 weight.shape[-1] // IQ2_XS_BLOCK_SIZE,
                 IQ2_XS_BLOCK_BYTES,
             )
-            return packed.reshape(packed_shape), logical_shape
+            return packed.reshape(*packed.shape[:-2], *packed_shape), logical_shape
 
+    if every_choice:
+        return encode_every_choice(
+            quantize_iq2_xs,
+            weight,
+            16,
+            16,
+            block_chunk_size=block_chunk_size,
+            importance=importance,
+            scales=scales,
+        )
     chunks = []
     for start in range(0, blocks.shape[0], block_chunk_size):
         block_chunk = blocks[start : start + block_chunk_size]
-        scales = _predict_iq2_xs_scales(block_chunk)
+        chunk_scales = block_scales[start : start + block_chunk.shape[0]]
         weights = chunk_importance(block_importance, start, start + block_chunk.shape[0])
         group_choices = (
             None if block_choices is None else block_choices[start : start + block_chunk.shape[0]]
         )
-        chunks.append(_encode_blocks(block_chunk, grid, scales, weights, group_choices))
+        chunks.append(_encode_blocks(block_chunk, grid, chunk_scales, weights, group_choices))
     packed_shape = (
         *weight.shape[:-1],
         weight.shape[-1] // IQ2_XS_BLOCK_SIZE,
@@ -303,6 +320,7 @@ IQ2_XS_FORMAT = GGMLFormat(
     weighted=True,
     choice_groups=16,
     num_choices=16,
+    payload_scales=leading_fp16_scales,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq2_xs and

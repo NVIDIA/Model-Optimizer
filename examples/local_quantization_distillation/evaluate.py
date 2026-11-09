@@ -19,6 +19,7 @@ import inspect
 import json
 import math
 import time
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -246,6 +247,7 @@ def evaluate_pair(
         error = f"{type(exc).__name__}: {exc}"
     if adapter is not None:
         adapter.synchronize_error(error)
+    assert heads is not None
     use_head = all(head.head is not None for head in heads)
     if adapter is not None:
         adapter.synchronize_error(
@@ -267,6 +269,7 @@ def evaluate_pair(
         teacher.eval()
         candidate.eval()
         iterator, exhausted, index = iter(dataloader), object(), 0
+        batch: Any
         while True:
             batch, error = exhausted, None
             try:

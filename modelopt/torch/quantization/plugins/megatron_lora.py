@@ -35,6 +35,12 @@ from .megatron import _QuantMegatronMLP
 __all__ = []
 
 
+try:
+    from megatron.core.models.hybrid.hybrid_block import HybridStack
+except ImportError:
+    HybridStack = None
+
+
 @QuantLoRAInputRegistry.register({TransformerBlock: "TransformerBlock"})
 class _MegatronQuantLoRATransformerBlock(_QuantLoRAInput):
     def forward(self, hidden_states, *args, **kwargs):
@@ -132,3 +138,9 @@ QuantLoRARegistry.register(
         QuantModuleRegistry[TERowParallelLinear]: "TERowParallelLinear",
     }
 )(_MegatronQuantLoRALinear)
+
+
+if HybridStack is not None:
+    QuantLoRAInputRegistry.register({HybridStack: "HybridStack"})(
+        _MegatronQuantLoRATransformerBlock
+    )

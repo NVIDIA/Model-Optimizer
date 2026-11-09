@@ -220,6 +220,7 @@ class TransformersLocalDistillationAdapter(ModuleLocalDistillationAdapter):
         """
         if self.mesh is None:
             raise ValueError("parallelize requires an explicit device mesh.")
+        assert self.context is not None
         if self.context.mesh_manager is not None:
             from .parallel import parallelize_native_transformers
 
@@ -291,6 +292,7 @@ class TransformersLocalDistillationAdapter(ModuleLocalDistillationAdapter):
         """Let the family describe structured outputs and modality-specific validity."""
         record = self._family(self.student).capture(unit, args, kwargs, output, batch)
         if self._runtime is not None:
+            assert self.student is not None
             module = self.student.get_submodule(unit.student_path)
             mesh = self._family(self.student).objective_tp_mesh(module, record.target)
             if mesh is not None:
@@ -354,6 +356,7 @@ class TransformersLocalDistillationAdapter(ModuleLocalDistillationAdapter):
             if dispatched:
                 from torch.distributed.tensor import Shard
 
+                assert self._runtime is not None
                 tp = self._runtime.tp
                 # Match native dispatch's token selection exactly, including
                 # uneven/empty chunks. Each TP-replicated token is counted once.
@@ -379,7 +382,12 @@ class TransformersLocalDistillationAdapter(ModuleLocalDistillationAdapter):
                     if isinstance(child, _QuantFusedExperts):
                         weight = getattr(child, child._first_proj_attr)
                         counts[name] = torch.zeros(
-                            child.num_experts * (_size(self._runtime.ep) if dispatched else 1),
+                            child.num_experts
+                            * (
+                                _size(self._runtime.ep)
+                                if dispatched and self._runtime is not None
+                                else 1
+                            ),
                             device=weight.device,
                             dtype=torch.int64,
                         )
@@ -428,7 +436,7 @@ class TransformersLocalDistillationAdapter(ModuleLocalDistillationAdapter):
         ):
             raise ValueError("A 4D attention mask must be Boolean or floating additive bias.")
         config = getattr(model, "config", None)
-        if callable(getattr(config, "get_text_config", None)):
+        if config is not None and callable(getattr(config, "get_text_config", None)):
             config = config.get_text_config()
         if (
             isinstance(attention, torch.Tensor)
@@ -552,6 +560,7 @@ class TransformersLocalDistillationAdapter(ModuleLocalDistillationAdapter):
         except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
             error = f"{type(exc).__name__}: {exc}"
         self.synchronize_error(error)
+        assert prepared is not None
         cp = _submesh(self.mesh, "cp")
         native_cp = _size(cp) > 1
         inputs = None

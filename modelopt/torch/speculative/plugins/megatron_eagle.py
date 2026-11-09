@@ -37,6 +37,7 @@ from megatron.core.parallel_state import (
     get_data_parallel_rank,
     get_expert_tensor_parallel_world_size,
     get_pipeline_model_parallel_world_size,
+    get_tensor_model_parallel_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -1124,6 +1125,13 @@ class _DynamicEagleGPTModel(EagleModel):
             if self.eagle_freeze_base_model:
                 loss = 0.0 * loss
 
+        aligned_hidden_states_history = None
+        if (
+            self.eagle_mix_hidden_states
+            and self.eagle_mix_hidden_states_mode == "uniform_layer_sample"
+        ):
+            aligned_hidden_states_history = [eagle_module_input_hidden_states]
+
         acc = []
         for ttt_step in range(self.eagle_ttt_steps):
             eagle_inputs = self._get_eagle_module_inputs(
@@ -1154,7 +1162,7 @@ class _DynamicEagleGPTModel(EagleModel):
 
             if self.config.sequence_parallel:
                 eagle_module_output_hidden_states = gather_from_sequence_parallel_region(
-                    eagle_module_output_hidden_states
+                    eagle_module_output_hidden_states, tensor_parallel_output_grad=False
                 )
             eagle_module_output_hidden_states = torch.cat(
                 (
@@ -1170,35 +1178,68 @@ class _DynamicEagleGPTModel(EagleModel):
                     eagle_module_output_hidden_states[:-1, :, :],
                 )
             )
+            if self.config.sequence_parallel:
+                eagle_module_output_hidden_states = scatter_to_sequence_parallel_region(
+                    eagle_module_output_hidden_states
+                )
+                if aligned_hidden_states_history is not None:
+                    # Scatter can return a view; history must not retain the full sequence storage.
+                    eagle_module_output_hidden_states = eagle_module_output_hidden_states.clone()
 
             if self.eagle_mix_hidden_states:
-                seq_len_s, batch_size, _ = eagle_module_output_hidden_states.shape
-                num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
+                if self.eagle_mix_hidden_states_mode == "uniform_layer_sample":
+                    assert aligned_hidden_states_history is not None
+                    aligned_hidden_states_history.append(eagle_module_output_hidden_states)
+                    eagle_module_input_hidden_states = self._sample_uniform_hidden_state_history(
+                        aligned_hidden_states_history,
+                        process_group=get_tensor_model_parallel_group(),
+                        sequence_parallel=self.config.sequence_parallel,
+                    )
+                elif self.eagle_mix_hidden_states_mode == "sparse_replace":
+                    seq_len_s, batch_size, _ = eagle_module_output_hidden_states.shape
+                    if self.config.sequence_parallel:
+                        seq_len_s *= get_tensor_model_parallel_world_size()
+                    num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
 
-                # Randomly select positions for each batch to replace
-                rand_indices = torch.stack(
-                    [
-                        torch.randperm(seq_len_s, device=eagle_module_output_hidden_states.device)[
-                            :num_to_replace
+                    # Randomly select positions for each batch to replace
+                    rand_indices = torch.stack(
+                        [
+                            torch.randperm(
+                                seq_len_s, device=eagle_module_output_hidden_states.device
+                            )[:num_to_replace]
+                            for _ in range(batch_size)
+                        ],
+                        dim=0,
+                    )
+
+                    # Preserve global replacement counts and choices when mixing local SP shards.
+                    replace_mask = torch.zeros(
+                        (seq_len_s, batch_size),
+                        dtype=torch.bool,
+                        device=eagle_module_output_hidden_states.device,
+                    )
+                    replace_mask.scatter_(0, rand_indices.T, True)
+                    if self.config.sequence_parallel:
+                        tp_group = get_tensor_model_parallel_group()
+                        torch.distributed.broadcast(
+                            replace_mask,
+                            src=torch.distributed.get_global_rank(tp_group, 0),
+                            group=tp_group,
+                        )
+                        replace_mask = replace_mask.chunk(get_tensor_model_parallel_world_size())[
+                            get_tensor_model_parallel_rank()
                         ]
-                        for _ in range(batch_size)
-                    ],
-                    dim=0,
-                )
-
-                # Clone to avoid inplace modification of view created in no_grad mode
-                eagle_module_input_hidden_states = eagle_module_input_hidden_states.clone()
-                for batch_idx in range(batch_size):
-                    eagle_module_input_hidden_states[rand_indices[batch_idx], batch_idx, :] = (
-                        eagle_module_output_hidden_states[rand_indices[batch_idx], batch_idx, :]
+                    eagle_module_input_hidden_states = torch.where(
+                        replace_mask.unsqueeze(-1),
+                        eagle_module_output_hidden_states,
+                        eagle_module_input_hidden_states,
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported eagle_mix_hidden_states_mode: {self.eagle_mix_hidden_states_mode}"
                     )
             else:
                 eagle_module_input_hidden_states = eagle_module_output_hidden_states
-
-            if self.config.sequence_parallel:
-                eagle_module_input_hidden_states = scatter_to_sequence_parallel_region(
-                    eagle_module_input_hidden_states
-                )
 
             # If labels are not provided, return the original logits. We only return after
             # all eagle weights have been exercised for quantization calibration purpose.

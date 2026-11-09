@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 """Scoped output-head capture and bounded native projection for HF tasks."""
 
@@ -38,6 +51,7 @@ def capture_head_inputs(head):
 
     def identity(*args, **kwargs):
         hidden_states = args[0] if args else kwargs.get("hidden_states", kwargs.get("input"))
+        assert isinstance(hidden_states, torch.Tensor)  # Validated by the capture pre-hook.
         # Task-owned in-place softcapping must not modify the captured hidden states.
         return hidden_states.new_zeros((*hidden_states.shape[:-1], 1))
 
@@ -129,12 +143,12 @@ class OutputHeadProjection:
         owner = self.owner
         group = fully_shard.state(owner)._fsdp_param_group if owner is not None else None
         sharded = group is not None and group.is_sharded
-        if sharded:
+        if sharded and owner is not None:
             owner.unshard()
         try:
             yield
         finally:
-            if sharded:
+            if sharded and owner is not None:
                 owner.reshard()
 
     @property

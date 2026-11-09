@@ -42,7 +42,8 @@ FORMAT_MODULES = [
 
 
 @pytest.mark.parametrize(
-    ("num_bits", "transform"), [(name, None) for name in FORMAT_NAMES] + [("iq2_s", "awq")]
+    ("num_bits", "transform"),
+    [(name, None) for name in FORMAT_NAMES] + [("iq2_s", "awq"), ("iq2_s", "gptq")],
 )
 def test_native_ggml_scale_repair_keeps_codes_and_reload(
     num_bits, transform, tmp_path, monkeypatch
@@ -52,7 +53,7 @@ def test_native_ggml_scale_repair_keeps_codes_and_reload(
 
     import modelopt.torch.opt as mto
     from modelopt.torch.distill import LocalDistillationConfig
-    from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+    from modelopt.torch.quantization.ggml.common import pinned_importance, pinned_packed_weight
     from modelopt.torch.quantization.repair import QuantizationRepairPolicy
 
     torch.manual_seed(12)
@@ -67,7 +68,9 @@ def test_native_ggml_scale_repair_keeps_codes_and_reload(
         ],
         "algorithm": "max",
     }
-    mtq.quantize(layer, cfg)
+    if transform == "gptq":
+        cfg["algorithm"] = {"method": "gptq", "block_size": 256, "importance_weighted": True}
+    mtq.quantize(layer, cfg, lambda module: module(torch.randn(4, 256)))
     if transform == "awq":
         layer.weight_quantizer.pre_quant_scale = torch.linspace(0.5, 1.5, 256)
     inputs = torch.randn(3, 256)
@@ -75,6 +78,8 @@ def test_native_ggml_scale_repair_keeps_codes_and_reload(
     fmt = GGML_FORMAT_REGISTRY[num_bits]
     packed = layer.weight_quantizer._quantizer_cache.packed_weights.clone()
     original_levels, _ = fmt.unpack_int8(packed.reshape(-1, fmt.block_bytes))
+    importance = pinned_importance(layer.weight_quantizer, num_bits)
+
     decoded = []
     if num_bits == "iq2_s" and transform is None:
         original_decode = type(fmt).decode_int8
@@ -109,10 +114,13 @@ def test_native_ggml_scale_repair_keeps_codes_and_reload(
         policy.close()
     else:
         policy.finalize_()
-    if transform:
+    if transform == "awq":
         assert layer.weight_quantizer.pre_quant_scale is None
     native = pinned_packed_weight(layer.weight_quantizer, num_bits)
     assert native is not None
+    if importance is not None:
+        torch.testing.assert_close(pinned_importance(layer.weight_quantizer, num_bits), importance)
+    assert torch.equal(fmt.pack(layer.weight.detach(), layer.weight_quantizer), native)
     levels, _ = fmt.unpack_int8(native.reshape(-1, fmt.block_bytes))
     assert torch.equal(levels, original_levels)
     torch.testing.assert_close(layer(inputs), changed, rtol=0, atol=0)
