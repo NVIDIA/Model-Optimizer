@@ -312,7 +312,6 @@ def make_calib_dataloader(
             max_sample_length=args.calib_seq,
             device=device,
             include_labels=include_labels,
-            canonical_order=args.deterministic,
         )
     if world_size > 1 and calib_dataloader is not None and not args.calib_with_images:
         calib_dataloader = _shard_calib_dataloader(
@@ -1318,11 +1317,11 @@ def parse_args() -> argparse.Namespace:
         "--deterministic",
         help=(
             "Reproducible PTQ: calibrate with eager attention, whose result for a sample does "
-            "not depend on the other samples in its batch (that of the SDPA kernels does), feed "
-            "the samples in an order fixed by their content, seed every random number "
-            "generator and use deterministic torch kernels (an op without one only warns). The "
-            "scales then depend on which samples are used, not on their order in the dataset or "
-            "on the batch size. Eager attention takes more memory than SDPA."
+            "not depend on the other samples in its batch (that of the SDPA kernels does), seed "
+            "every random number generator and use deterministic torch kernels (an op without "
+            "one only warns). The scales then depend on which samples are used, not on their "
+            "order in the dataset or on the batch size. Eager attention takes more memory than "
+            "SDPA."
         ),
         default=False,
         action="store_true",

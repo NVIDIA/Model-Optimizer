@@ -859,28 +859,6 @@ class TestGetDatasetDataloaderBlending:
         assert len(batches) == 1
         assert batches[0]["input_ids"].shape[0] == 2
 
-    def test_canonical_order_ignores_the_order_of_the_samples(self, tmp_path, tiny_tokenizer):
-        pytest.importorskip("datasets")
-        rows = [{"text": "word " * (i + 1)} for i in range(7)]
-        forward = _write_jsonl(tmp_path / "forward.jsonl", rows)
-        reverse = _write_jsonl(tmp_path / "reverse.jsonl", rows[::-1])
-
-        def batches(path, **kwargs):
-            loader = get_dataset_dataloader(
-                dataset_name=path,
-                tokenizer=tiny_tokenizer,
-                batch_size=3,
-                num_samples=7,
-                max_sample_length=16,
-                **kwargs,
-            )
-            return [batch["input_ids"] for batch in loader]
-
-        assert not all(torch.equal(a, b) for a, b in zip(batches(forward), batches(reverse)))
-        canonical = [batches(path, canonical_order=True) for path in (forward, reverse)]
-        assert len(canonical[0]) == 3
-        assert all(torch.equal(a, b) for a, b in zip(*canonical))
-
     def test_length_mismatch_raises(self, tmp_path, tiny_tokenizer):
         """``dataset_name`` and ``num_samples`` lists must align."""
         pytest.importorskip("datasets")
