@@ -111,9 +111,16 @@ class GGMLGPTQHelper(GPTQHelper):
     def update_scratch(self, weight):
         """The local-Hessian search's scratch, when ``local_hessian_scales`` picks the local scales."""
         ggml_format = GGML_FORMAT_REGISTRY[self.weight_quantizer.num_bits]
-        if not (self.local_hessian_scales and ggml_format.num_choices > 0):
+        if not self._searches(ggml_format):
             return 0
         return search_scratch(ggml_format, weight.numel() // weight.shape[-1])
+
+    def _searches(self, ggml_format):
+        """Whether ``local_hessian_scales`` picks this weight's local scales.
+
+        A Hessian no calibration input reached leaves the identity inverse: the plain search.
+        """
+        return self.local_hessian_scales and ggml_format.num_choices > 0 and self.n_samples > 0
 
     def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
@@ -155,9 +162,7 @@ class GGMLGPTQHelper(GPTQHelper):
             else None
         )
 
-        # A Hessian no calibration input reached leaves the identity inverse: the plain search.
-        search = self.local_hessian_scales and ggml_format.num_choices > 0 and self.n_samples > 0
-        self._searched = search
+        search = self._searched = self._searches(ggml_format)
 
         def quantize_group(group, columns):
             kwargs = {} if importance is None else {"importance": importance[columns]}
