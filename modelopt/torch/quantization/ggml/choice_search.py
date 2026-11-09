@@ -43,8 +43,8 @@ def search_choices(
     for every group, its codebook entries searched as the encoder does (weighted by ``importance``).
     In each block, each group first takes the choice with the least error under its own diagonal
     block of the Hessian; groups are then revisited in turn, each taking the choice that most lowers
-    the block's error with the others held. On CUDA the search after the encode runs as one kernel
-    per block; each block's Hessian must be symmetric.
+    the block's error with the others held, an update that needs each block's Hessian symmetric.
+    With the CUDA extension, the search after the encode runs as one kernel per block.
     """
     rows = weight.reshape(-1, weight.shape[-1])
     blocks, groups = weight.shape[-1] // GGML_BLOCK_SIZE, ggml_format.choice_groups
@@ -76,12 +76,12 @@ def _rows_per_chunk(ggml_format: GGMLFormat) -> int:
 def search_scratch(ggml_format: GGMLFormat, rows: int) -> int:
     """Bytes :func:`search_choices` holds at once on ``rows`` rows, as measured with the CUDA codecs.
 
-    For each chunk of rows, every choice's payload and float32 errors; the fused search kernel
-    needs nothing as large besides.
+    For each chunk of rows, every choice's payload and float32 errors, and the block's float32
+    reference and contiguous copy; the fused search kernel needs nothing as large besides.
     """
     chunk = min(rows, _rows_per_chunk(ggml_format))
-    candidates = ggml_format.num_choices * chunk
-    return candidates * (4 * GGML_BLOCK_SIZE + ggml_format.block_bytes)
+    candidates = ggml_format.num_choices * chunk * (4 * GGML_BLOCK_SIZE + ggml_format.block_bytes)
+    return candidates + chunk * 8 * GGML_BLOCK_SIZE
 
 
 def _search_block(ggml_format, block, hessian, importance, chunk_args, decode_args):

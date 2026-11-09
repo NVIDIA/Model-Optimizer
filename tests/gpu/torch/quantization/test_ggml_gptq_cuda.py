@@ -21,8 +21,11 @@ import torch
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, choice_search
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.ggml.gptq import compensated_block_hessian
+from modelopt.torch.quantization.utils.calib_utils import compute_hessian_inverse
 
 
 def _iq1_s_config(algorithm):
@@ -136,10 +139,7 @@ def test_auto_quantize_refuses_gptq_on_native_fp8_weights_and_hands_back_the_mod
 
 @pytest.mark.parametrize("num_bits", ["iq2_xxs", "iq2_xs", "iq2_s", "iq1_s", "iq1_m"])
 def test_fused_choice_search_matches_the_pytorch_search(monkeypatch, num_bits):
-    from modelopt.torch.quantization.ggml import choice_search
-    from modelopt.torch.quantization.ggml.gptq import compensated_block_hessian
-    from modelopt.torch.quantization.utils.calib_utils import compute_hessian_inverse
-
+    get_cuda_ext_ggml(raise_if_failed=True)  # without it, both searches would be the PyTorch one
     ggml_format = GGML_FORMAT_REGISTRY[num_bits]
     inputs = _correlated_inputs()
     weight = torch.randn(64, 512, generator=torch.Generator().manual_seed(1)).cuda()

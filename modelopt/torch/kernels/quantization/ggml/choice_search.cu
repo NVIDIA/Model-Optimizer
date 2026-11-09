@@ -15,12 +15,8 @@
  * limitations under the License.
  */
 
-// The Hessian-weighted choice search of modelopt.torch.quantization.ggml.gptq.search_choices, one
-// CUDA block per row of a 256-column GGML block: given every choice's decoding error of the row,
-// each group first takes the choice with the least error under its diagonal block of H, then the
-// groups are revisited in turn, each taking the choice that most lowers e H e^T with the others
-// held. The PyTorch reference issues a few small kernels per group and sweep; this runs it all in
-// one launch. H must be symmetric: it is read by column so the threads of a warp read it coalesced.
+// modelopt.torch.quantization.ggml.choice_search's Hessian-weighted choice search, one CUDA block
+// per row of a 256-column GGML block. H is read by column, so a warp's reads are coalesced.
 
 #include "common.cuh"
 
@@ -30,6 +26,7 @@ using namespace modelopt::ggml;
 
 constexpr int kMaxChoices = 16;
 constexpr int kMaxGroups = 16;
+static_assert(kThreads == kBlockSize, "each thread owns one column of the block");
 
 // Sum of value over each aligned run of width lanes (a power of two up to 32), on every lane.
 __device__ __forceinline__ float segment_sum(float value, int width) {
@@ -84,9 +81,8 @@ __global__ void search(const float *errors, const float *hessian, int64_t rows, 
   gradient[tid] = grad;
   __syncthreads();
 
-  // Switching group g from its current errors to choice c's, delta, changes e H e^T by
-  // delta . (2 gradient_g + H_gg delta). Work items are (choice, column of g) pairs, group_size
-  // consecutive threads per choice, so the same segment sums apply.
+  // Switching group g by delta changes e H e^T by delta . (2 gradient_g + H_gg delta). Items are
+  // (choice, column of g) pairs, group_size threads per choice, so the segment sums apply.
   const int pairs = choices * group_size;
   for (int sweep = 0; sweep < sweeps; ++sweep) {
     for (int g = 0; g < groups; ++g) {
@@ -148,6 +144,7 @@ at::Tensor search_choices_cuda(at::Tensor errors, at::Tensor hessian, int64_t gr
                   ((kBlockSize / groups) & (kBlockSize / groups - 1)) == 0,
               "groups must split 256 columns into power-of-two runs of at most 32");
   TORCH_CHECK(sweeps >= 0, "sweeps must be non-negative");
+  TORCH_CHECK(errors.size(1) <= std::numeric_limits<int>::max(), "CUDA grid is too large");
   const auto error_values = errors.contiguous();
   const auto hessian_values = hessian.contiguous();
   c10::cuda::CUDAGuard guard(error_values.device());
