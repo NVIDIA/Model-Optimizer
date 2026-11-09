@@ -312,6 +312,7 @@ def make_calib_dataloader(
             max_sample_length=args.calib_seq,
             device=device,
             include_labels=include_labels,
+            canonical_order=args.deterministic,
         )
     if world_size > 1 and calib_dataloader is not None and not args.calib_with_images:
         calib_dataloader = _shard_calib_dataloader(

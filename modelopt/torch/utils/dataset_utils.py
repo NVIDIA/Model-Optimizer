@@ -16,6 +16,7 @@
 """Utility functions for getting samples and forward loop function for different datasets."""
 
 import copy
+import hashlib
 import json
 import os
 import random
@@ -754,6 +755,7 @@ def get_dataset_dataloader(
     pack: bool = False,
     distributed: bool = False,
     sampler_kwargs: dict | None = None,
+    canonical_order: bool = False,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
@@ -787,6 +789,10 @@ def get_dataset_dataloader(
             (e.g. for data-parallel calibration). ``sampler_kwargs`` supplies ``num_replicas``
             and ``rank``.
         sampler_kwargs: Keyword args for the ``DistributedSampler`` when ``distributed=True``.
+        canonical_order: If True, sort the samples by the SHA-256 of their text before tokenizing and
+            batching, so the batches depend on which samples are used and not on the order they are listed
+            in (a file, a source order). What a sample shares a batch with changes the numerics of the
+            forward pass, and with it the calibrated scales.
 
     Returns:
         An instance of dataloader.
@@ -852,6 +858,9 @@ def get_dataset_dataloader(
             tokenizer=tokenizer,
         )
         all_samples.extend(samples)
+
+    if canonical_order:
+        all_samples.sort(key=lambda sample: hashlib.sha256(sample.encode()).digest())
 
     # Multi-source pack=True without shuffling would consume all of oversampled source 1's docs
     # before any of oversampled source 2 are reached

@@ -591,6 +591,7 @@ def test_distributed_calibration_gives_each_rank_its_own_shard(hf_ptq, monkeypat
         batch_size=1,
         calib_size=[8],
         calib_seq=16,
+        deterministic=False,
     )
     tokenizer = get_tiny_tokenizer()
 
