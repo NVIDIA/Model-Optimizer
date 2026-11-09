@@ -247,7 +247,7 @@ def collect_metrics(output, role, concurrencies):
 
 
 def evaluate(args, client_python, workspace):
-    """Run both arms sequentially in one single-GPU allocation."""
+    """Run both arms sequentially on one GPU within the requested allocation."""
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     models = {"baseline": args.baseline.resolve(), "candidate": args.candidate.resolve()}
@@ -276,15 +276,28 @@ def evaluate(args, client_python, workspace):
             sys.executable,
             "-c",
             (
-                "import torch,json,socket,vllm; assert torch.cuda.device_count()==1; "
-                "print(json.dumps({'name':torch.cuda.get_device_name(0), 'count':1, "
+                "import torch,json,socket,vllm; "
+                "print(json.dumps({'name':torch.cuda.get_device_name(0), "
+                "'count':torch.cuda.device_count(), "
+                "'uuid':str(torch.cuda.get_device_properties(0).uuid), "
                 "'node':socket.gethostname(),'engine_version':vllm.__version__,"
                 "'capability':torch.cuda.get_device_capability(0)}))"
             ),
         ],
         text=True,
     )
-    save(output / "gpu.json", json.loads(gpu))
+    gpu = json.loads(gpu)
+    if gpu["count"] != args.allocated_gpus:
+        raise ValueError("Visible GPU count does not match the requested allocation")
+    # Select by UUID so existing Slurm ordinal remapping cannot select another GPU.
+    if gpu["count"] > 1:
+        selected = gpu["uuid"]
+        if not selected.startswith(("GPU-", "MIG-")):
+            selected = "GPU-" + selected
+        os.environ["CUDA_VISIBLE_DEVICES"] = selected
+        client_env["CUDA_VISIBLE_DEVICES"] = selected
+    gpu["active_gpu_count"] = 1
+    save(output / "gpu.json", gpu)
     dataset = args.dataset.resolve() / "main"
     files = {split: str(dataset / f"{split}-00000-of-00001.parquet") for split in ("train", "test")}
     for path in files.values():
@@ -397,11 +410,14 @@ def main():
     parser.add_argument("--candidate-linear-backend", choices=("auto", "marlin"), default="auto")
     parser.add_argument("--compilation-mode", choices=("default", "none"), default="default")
     parser.add_argument("--samples", type=int, default=64)
+    parser.add_argument("--allocated-gpus", type=int, default=1)
     parser.add_argument("--concurrency", type=int, nargs="+", default=[1, 4, 8])
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
     if args.samples < 1 or not args.concurrency or any(c < 1 or c > 8 for c in args.concurrency):
         parser.error("Use positive samples and concurrency values in 1..8")
+    if args.allocated_gpus < 1:
+        parser.error("Use a positive allocated GPU count")
     if len(set(args.concurrency)) != len(args.concurrency):
         parser.error("Concurrency values must be unique")
     if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):

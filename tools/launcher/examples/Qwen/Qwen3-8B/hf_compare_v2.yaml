@@ -7,6 +7,7 @@ parameters:
   samples: 64
   candidate_linear_backend: auto
   compilation_mode: default
+  allocated_gpus: 1
 inputs:
   /inputs/baseline:
     ref: ${parameters.baseline}
@@ -29,16 +30,18 @@ tasks:
       --baseline-ref "$BASELINE_REF" --candidate-ref "$CANDIDATE_REF"
       --samples "$ACCURACY_SAMPLES" --candidate-linear-backend "$CANDIDATE_LINEAR_BACKEND"
       --compilation-mode "$COMPILATION_MODE"
+      --allocated-gpus "$ALLOCATED_GPUS"
     environment:
       BASELINE_REF: ${parameters.baseline}
       CANDIDATE_REF: ${parameters.candidate}
       ACCURACY_SAMPLES: ${parameters.samples}
       CANDIDATE_LINEAR_BACKEND: ${parameters.candidate_linear_backend}
       COMPILATION_MODE: ${parameters.compilation_mode}
+      ALLOCATED_GPUS: ${parameters.allocated_gpus}
     resources:
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: 1
+      gpus_per_node: ${parameters.allocated_gpus}
     container: vllm/vllm-openai:v0.25.0@sha256:fc56161ee42a011aeee78b65d0a81b6683c7d04402fd40503d14d4d6c98f07cb
     outputs:
       results:

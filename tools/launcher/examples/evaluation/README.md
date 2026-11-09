@@ -10,6 +10,9 @@ at a time, runs lm-evaluation-harness's canonical eight-shot GSM8K CoT task on
 cell uses one shared 32768-token prefix, 2048 new input tokens, 1024 output
 tokens, three warmup requests, and 8/16/32 measured requests. Both arms use
 temperature zero, prefix caching, BF16 KV cache, and one GPU with TP=PP=1.
+If the cluster requires a larger allocation, set `allocated_gpus` accordingly;
+the comparison selects the first assigned GPU by UUID and records the allocated
+and active counts in `gpu.json`. All allocated GPUs count toward resource usage.
 These small samples demonstrate checkpoint compatibility and the workflow;
 they do not establish a full accuracy or performance acceptance gate.
 
