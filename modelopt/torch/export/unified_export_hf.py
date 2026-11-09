@@ -141,6 +141,7 @@ from .quant_format import (
 )
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
+    _get_uncalibrated_static_input_module_names,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -1389,6 +1390,24 @@ def _export_diffusers_checkpoint(
     module_components = {
         name: comp for name, comp in all_components.items() if isinstance(comp, nn.Module)
     }
+
+    # Refuse before any component is fused, packed or written.
+    uncalibrated = {
+        name: module_names
+        for name, comp in module_components.items()
+        if (module_names := _get_uncalibrated_static_input_module_names(comp))
+    }
+    if uncalibrated:
+        details = "; ".join(
+            f"{name}: {len(module_names)} layer(s), e.g. {module_names[0]}"
+            for name, module_names in uncalibrated.items()
+        )
+        raise ValueError(
+            f"Static input quantizers were never calibrated ({details}): the checkpoint would "
+            "declare their input scales without containing them. Calibrate with data that runs "
+            "these layers, or leave the layers unquantized by disabling both their weight and "
+            "input quantizers."
+        )
 
     # Best-effort diffusers pipeline check (kept for folder layout + model_index.json behavior)
     is_diffusers_pipe = False

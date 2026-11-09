@@ -51,6 +51,7 @@ from .quant_format import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_MXFP4,
     QUANTIZATION_W4A16_NVFP4,
+    STATIC_INPUT_SCALE_FORMATS,
 )
 from .quant_utils import (
     _get_quantization_from_quantizers,
@@ -91,12 +92,6 @@ _FUNCTIONAL_WEIGHT_EXPORT_FORMATS = (
     }
 )
 _KV_CACHE_EXPORT_FORMATS = {KV_CACHE_FP8, KV_CACHE_FP8_K_NVFP4_V, KV_CACHE_NVFP4}
-_STATIC_INPUT_SCALE_FORMATS = {
-    QUANTIZATION_FP8,
-    QUANTIZATION_NVFP4,
-    QUANTIZATION_W4A8_NVFP4_FP8,
-    QUANTIZATION_W4A8_MXFP4_FP8,
-}
 
 
 class _UnsupportedQuantizedWeightExportFormatError(NotImplementedError):
@@ -396,7 +391,7 @@ def _resolve_quantized_weight_export_inputs(
         )
     # NVFP4 dynamic block scales still require a fixed global input scale.
     if (
-        quantization_format in _STATIC_INPUT_SCALE_FORMATS
+        quantization_format in STATIC_INPUT_SCALE_FORMATS
         and input_quantizer is not None
         and input_quantizer.is_enabled
         and (input_quantizer._dynamic or input_quantizer.is_mx_format)
@@ -492,7 +487,7 @@ def capture_quantized_weight_export_state(
 
     if input_quantizer is not None and input_quantizer.is_enabled:
         input_amax = input_quantizer.export_amax()
-        if input_amax is None and quantization_format in _STATIC_INPUT_SCALE_FORMATS:
+        if input_amax is None and quantization_format in STATIC_INPUT_SCALE_FORMATS:
             raise RuntimeError(f"Missing calibrated static input scale for {weight_name!r}")
         if input_amax is not None:
             input_scale = (

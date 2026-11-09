@@ -215,6 +215,47 @@ def test_export_diffusers_pipeline_config(tmp_path, tiny_pipeline, selection):
         assert reloaded.config[setting] == pipe.config[setting]
 
 
+@pytest.mark.parametrize("tiny_pipeline", ["wan22"], indirect=True)
+@pytest.mark.parametrize("num_inference_steps", [1, 2], ids=["starved", "covered"])
+@torch.no_grad()
+def test_export_diffusers_refuses_uncalibrated_static_inputs(
+    tmp_path, tiny_pipeline, num_inference_steps
+):
+    """A one-step calibration never runs Wan 2.2's transformer_2, so export refuses it."""
+    pipe, _ = tiny_pipeline
+
+    def calibrate(_):
+        # As in the diffusers example, each backbone is calibrated through the whole pipeline.
+        pipe(
+            prompt="a cat",
+            num_inference_steps=num_inference_steps,
+            height=16,
+            width=16,
+            num_frames=5,
+            output_type="latent",
+        )
+
+    for backbone in (pipe.transformer, pipe.transformer_2):
+        mtq.quantize(backbone, copy.deepcopy(mtq.FP8_DEFAULT_CFG), calibrate)
+    export_dir = tmp_path / "export_pipeline"
+
+    if num_inference_steps == 1:
+        with pytest.raises(ValueError, match="transformer_2"):
+            export_hf_checkpoint(pipe, export_dir=export_dir)
+        assert not any(export_dir.glob("*"))
+    else:
+        export_hf_checkpoint(pipe, export_dir=export_dir)
+        for component in ("transformer", "transformer_2"):
+            exported = {}
+            for shard in (export_dir / component).glob("*.safetensors"):
+                exported.update(load_file(str(shard)))
+            fp8_weights = [key for key, t in exported.items() if t.dtype == torch.float8_e4m3fn]
+            assert fp8_weights
+            assert all(
+                key.removesuffix("weight") + "input_scale" in exported for key in fp8_weights
+            )
+
+
 @pytest.mark.parametrize(
     ("setting", "expected"),
     [
