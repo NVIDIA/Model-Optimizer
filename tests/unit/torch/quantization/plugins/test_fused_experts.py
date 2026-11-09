@@ -59,6 +59,7 @@ from modelopt.torch.opt.conversion import ApplyModeError
 from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.model_calib import (
     _expert_slices,
@@ -2741,6 +2742,51 @@ def test_native_fp8_experts_reject_packed_weight_updates(cfg, algorithm):
         return
     for name, weight in unpacked.items():
         assert not torch.equal(getattr(experts, name), weight)
+
+
+@pytest.mark.parametrize("algorithm", ["imatrix", {"method": "gptq", "block_size": 256}])
+def test_native_fp8_experts_calibrate_in_the_dtype_their_forward_runs_in(algorithm):
+    # A BF16 forward encodes each expert cast to BF16; calibration must see those same weights, or
+    # the ranges max records and the codes GPTQ or imatrix pin are not the ones the forward uses.
+    torch.manual_seed(42)
+    config = PretrainedConfig(
+        hidden_size=256,
+        intermediate_size=256,
+        num_experts=2,
+        hidden_act="silu",
+        dtype=torch.bfloat16,
+    )
+    experts = FP8Experts(config, block_size=None, has_gate=True)
+    for name in ("gate_up_proj", "down_proj"):
+        weight = getattr(experts, name)
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape).to(weight.dtype))
+            getattr(experts, f"{name}_scale_inv").fill_(0.02)
+    cfg = {"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"}
+    quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*weight_quantizer", "cfg": cfg},
+    ]
+    mtq.quantize(experts, {"quant_cfg": quant_cfg, "algorithm": "max"}, forward_loop=None)
+    for name in ("gate_up_proj", "down_proj"):
+        for idx, quantizer in enumerate(getattr(experts, f"{name}_weight_quantizers")):
+            blocks = experts.get_expert_weight(name, idx, torch.bfloat16).float().reshape(-1, 256)
+            torch.testing.assert_close(
+                quantizer.amax.flatten().float(), blocks.abs().amax(dim=1), rtol=0, atol=0
+            )
+    experts.unpack_weight()
+    inputs = torch.randn(64, 256, dtype=torch.bfloat16)
+    indices = (torch.arange(64) % 2).unsqueeze(1)
+    routing = torch.ones(64, 1, dtype=torch.bfloat16)
+    mtq.calibrate(experts, algorithm, forward_loop=lambda m: m(inputs, indices, routing))
+
+    iq2_xxs = GGML_FORMAT_REGISTRY["iq2_xxs"]
+    for name in ("gate_up_proj", "down_proj"):
+        for idx, quantizer in enumerate(getattr(experts, f"{name}_weight_quantizers")):
+            forward_weight = experts.get_expert_weight(name, idx, inputs.dtype)
+            assert torch.equal(
+                iq2_xxs.pack(forward_weight, quantizer), pinned_packed_weight(quantizer, "iq2_xxs")
+            )
 
 
 # ---------------------------------------------------------------------------

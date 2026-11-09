@@ -135,7 +135,7 @@ def _local_expert_weight(module: nn.Module, proj: str, local: torch.Tensor, idx:
     """``module.get_expert_weight(proj, idx, dtype)``, read from ``local`` rather than the module.
 
     The per-expert export packs each expert as that accessor returns it, which casts unpacked native
-    FP8 experts, held at the default dtype, to the export dtype. The accessor indexes the fused
+    FP8 experts, held in their checkpoint's dtype, to the export dtype. The accessor indexes the fused
     parameter itself, a sharded DTensor here, so it is handed this rank's rows instead. Whatever
     else it reads, such as how it picks this rank's experts out of a weight, is the module's own.
     The rows stand in for ``self.<proj>`` only where the accessor reads it itself: a method it calls

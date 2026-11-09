@@ -456,7 +456,6 @@ def test_get_model_uses_expected_dtype_kwarg(
         monkeypatch.delattr(example_utils.transformers, architecture, raising=False)
     else:
         monkeypatch.setattr(example_utils.transformers, model_class_name, FakeLlamaForCausalLM)
-    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
@@ -533,7 +532,6 @@ def test_get_model_device_map(
     # (e.g. Gemma3ForCausalLM) reappears on the next ``hasattr`` and the real one loads.
     # raising=False: DiffusionGemma may not exist in the installed transformers.
     monkeypatch.setattr(example_utils.transformers, architecture, FakeArchitecture, raising=False)
-    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
@@ -629,7 +627,6 @@ def test_get_model_selects_bundled_or_builtin_class(
     monkeypatch.setattr(example_utils, "AutoModelForCausalLM", _record("bundled"))
     monkeypatch.setattr(example_utils.transformers, architecture, _record("builtin"), raising=False)
     monkeypatch.setattr(example_utils, "prepare_model_for_loading", lambda *a, **k: nullcontext())
-    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
