@@ -338,11 +338,11 @@ class PTQSpec(SpecSection):
     default, previews through the wrapper's own chat path rather than ``generate`` on token ids,
     and puts the quantized language model back into the wrapper."""
 
-    preview_unsupported: str | None = None
-    """Why the flow skips the generation preview, the sample before and after quantization.
+    generation_unsupported: str | None = None
+    """Why the flow generates no sample, neither before nor after quantization (the preview).
 
-    The preview is a sanity check on top of calibration, so a model that cannot run it still
-    quantizes and exports."""
+    The samples are a sanity check on top of calibration, so a model that cannot generate them
+    still quantizes and exports. ``post_ptq_generation_unsupported`` skips only the second one."""
 
     post_ptq_generation_unsupported: str | None = None
     """Why the quantized model cannot generate the after-quantization sample though the original

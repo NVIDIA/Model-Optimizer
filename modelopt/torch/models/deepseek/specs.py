@@ -23,9 +23,9 @@ from ..specs import ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
 
-# Shared by the six types that skip the preview for it: ``deepseek``, ``deepseek_v3``,
+# Shared by the six types that skip sample generation for it: ``deepseek``, ``deepseek_v3``,
 # ``deepseek_v32``, ``deepseek_v4``, ``kimi_k2`` and ``kimi_k25``.
-PREVIEW_UNSUPPORTED = "DeepSeek generation may go OOM"
+GENERATION_UNSUPPORTED = "DeepSeek generation may go OOM"
 
 # No ExportSpec.grouped_expert_export here: the grouped export path is not validated on
 # this model.
@@ -33,7 +33,7 @@ register(
     ModelSpec(
         model_type="deepseek",
         modeling_source="remote_code",
-        ptq_spec=PTQSpec(preview_unsupported=PREVIEW_UNSUPPORTED),
+        ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),
         moe_spec=MoESpec(
             block_names=("DeepseekMoE",),
             expert_linear_names=("gate_proj", "down_proj", "up_proj"),

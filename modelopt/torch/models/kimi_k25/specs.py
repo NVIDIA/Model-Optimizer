@@ -25,7 +25,7 @@ structure fallbacks recognize the native ``DeepseekV3MoE`` blocks ``prepare`` in
 export's MoE-block handling skips them. Sharing the sections is left to a follow-up.
 """
 
-from ..deepseek.specs import PREVIEW_UNSUPPORTED
+from ..deepseek.specs import GENERATION_UNSUPPORTED
 from ..deepseek_v3.specs import BASE_MODEL_EP_PLAN
 from ..specs import EPSpec, ModelSpec, PTQSpec, register
 from .ep import DECOMPRESSED_FORMATS, make_buildable, prepare, prepare_refusal
@@ -54,7 +54,7 @@ register(
             decompressed_formats=DECOMPRESSED_FORMATS,
             requires_transformers="5.8",
         ),
-        # The language model is a kimi_k2, a DeepSeek-V3 architecture: the same preview limit.
-        ptq_spec=PTQSpec(preview_unsupported=PREVIEW_UNSUPPORTED),
+        # The language model is a kimi_k2, a DeepSeek-V3 architecture: the same generation limit.
+        ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),
     )
 )

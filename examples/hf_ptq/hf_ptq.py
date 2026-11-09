@@ -860,7 +860,7 @@ def pre_quantize(
     # Generate preview before quantization
     if args.skip_generate:
         generated_ids_before_ptq = None
-    elif (reason := get_ptq_spec(model_type).preview_unsupported) is not None:
+    elif (reason := get_ptq_spec(model_type).generation_unsupported) is not None:
         print(f"Skipping the generation preview: {reason}")
         generated_ids_before_ptq = None
     elif vlm_wrapper and tokenizer is not None:

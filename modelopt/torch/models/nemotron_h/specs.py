@@ -31,7 +31,7 @@ BASE_MODEL_EP_PLAN = {
 
 # The hybrid SSM/Mamba modeling code does not work with accelerate's big model inference when several
 # GPUs are used, in the checkpoint's own code and in transformers' port from v5.3.
-PREVIEW_UNSUPPORTED = (
+GENERATION_UNSUPPORTED = (
     "its hybrid SSM modeling code does not work with accelerate's big model inference "
     "on several GPUs"
 )
@@ -40,7 +40,7 @@ register(
     ModelSpec(
         model_type="nemotron_h",
         min_transformers_version="5.5",
-        ptq_spec=PTQSpec(preview_unsupported=PREVIEW_UNSUPPORTED),
+        ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),
         export_spec=ExportSpec(grouped_expert_export=True),
         ep_spec=EPSpec(base_model_ep_plan=BASE_MODEL_EP_PLAN),
         moe_spec=MoESpec(

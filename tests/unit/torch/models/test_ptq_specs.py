@@ -36,13 +36,13 @@ EXPECTED_PTQ_FIELDS = {
     "t5": {"no_device_map"},
     "deci": {"dtype_kwarg"},
     "nemotron-nas": {"dtype_kwarg"},  # the DeciLM architecture under another model type
-    "deepseek": {"preview_unsupported"},
-    "deepseek_v3": {"preview_unsupported"},
-    "deepseek_v32": {"preview_unsupported"},
-    "deepseek_v4": {"preview_unsupported"},
-    "kimi_k2": {"preview_unsupported"},  # a DeepSeek-V3 architecture under its own model type
-    "kimi_k25": {"preview_unsupported"},  # a VLM wrapping a kimi_k2 language model
-    "nemotron_h": {"preview_unsupported"},
+    "deepseek": {"generation_unsupported"},
+    "deepseek_v3": {"generation_unsupported"},
+    "deepseek_v32": {"generation_unsupported"},
+    "deepseek_v4": {"generation_unsupported"},
+    "kimi_k2": {"generation_unsupported"},  # a DeepSeek-V3 architecture under its own model type
+    "kimi_k25": {"generation_unsupported"},  # a VLM wrapping a kimi_k2 language model
+    "nemotron_h": {"generation_unsupported"},
     "llama4": {"post_ptq_generation_unsupported"},
     "llama4_text": {"post_ptq_generation_unsupported"},
 }

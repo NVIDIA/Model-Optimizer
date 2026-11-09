@@ -15,7 +15,7 @@
 
 """DeepSeek-V4 specs (HF model type ``deepseek_v4``)."""
 
-from ..deepseek.specs import PREVIEW_UNSUPPORTED
+from ..deepseek.specs import GENERATION_UNSUPPORTED
 from ..specs import ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
@@ -28,7 +28,7 @@ register(
     ModelSpec(
         model_type="deepseek_v4",
         min_transformers_version="5.8",
-        ptq_spec=PTQSpec(preview_unsupported=PREVIEW_UNSUPPORTED),
+        ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),
         moe_spec=MoESpec(
             block_names=("DeepseekV4SparseMoeBlock",),
             expert_linear_names=("gate_up_proj", "down_proj"),

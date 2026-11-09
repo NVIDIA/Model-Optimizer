@@ -20,7 +20,7 @@ checkpoint. Only what the PTQ flow needs is recorded: no MoE or export section, 
 find none, as they did before this type had a spec.
 """
 
-from ..deepseek.specs import PREVIEW_UNSUPPORTED
+from ..deepseek.specs import GENERATION_UNSUPPORTED
 from ..specs import ModelSpec, PTQSpec, register
 
 __all__: list[str] = []
@@ -29,6 +29,6 @@ register(
     ModelSpec(
         model_type="kimi_k2",
         modeling_source="remote_code",
-        ptq_spec=PTQSpec(preview_unsupported=PREVIEW_UNSUPPORTED),
+        ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),
     )
 )

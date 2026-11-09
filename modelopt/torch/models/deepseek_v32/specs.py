@@ -15,7 +15,7 @@
 
 """DeepSeek-V3.2 specs (HF model type ``deepseek_v32``)."""
 
-from ..deepseek.specs import PREVIEW_UNSUPPORTED
+from ..deepseek.specs import GENERATION_UNSUPPORTED
 from ..specs import ModelSpec, PTQSpec, register
 
 __all__: list[str] = []
@@ -26,6 +26,6 @@ register(
     ModelSpec(
         model_type="deepseek_v32",
         min_transformers_version="5.11",
-        ptq_spec=PTQSpec(preview_unsupported=PREVIEW_UNSUPPORTED),
+        ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),
     )
 )
