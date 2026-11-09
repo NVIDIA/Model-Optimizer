@@ -7,9 +7,17 @@ description: >-
   or needs to produce a quantized HuggingFace checkpoint from a pretrained
   model using ModelOpt. Do NOT use for multi-candidate recipe
   exploration or optimization (use quant-recipe-search).
+license: Apache-2.0
+metadata:
+  author: Zhiyu Cheng <zhiyuc@nvidia.com>
 ---
 
 # ModelOpt Post-Training Quantization
+
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/plugins/modelopt/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
 
 Produce a quantized checkpoint from a pretrained model. **Read `examples/hf_ptq/README.md` first** — it has the support matrix, CLI flags, and accuracy guidance.
 

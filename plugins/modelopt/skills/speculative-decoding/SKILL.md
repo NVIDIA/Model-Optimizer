@@ -8,10 +8,17 @@ description: >-
   meets threshold. Triggers on "EAGLE3", "DFlash", "DSpark", "Domino", "draft model",
   "acceptance rate", "speculative decoding pipeline". Do NOT use for quantizing a
   model (use ptq) or serving a checkpoint (use deployment).
-user_invocable: true
+license: Apache-2.0
+metadata:
+  author: Zhiyu Cheng <zhiyuc@nvidia.com>
 ---
 
 # Speculative Decoding Draft-Model Training
+
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/plugins/modelopt/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
 
 Everything needed to take a target model from "no draft head" to "validated
 acceptance rate" lives in this directory. Work through the stages below in order

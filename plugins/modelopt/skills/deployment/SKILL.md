@@ -2,9 +2,16 @@
 name: deployment
 description: Serve a quantized or unquantized LLM checkpoint as an OpenAI-compatible API endpoint using vLLM, SGLang, or TRT-LLM. Use when user says "deploy model", "serve model", "start vLLM server", "launch SGLang", "TRT-LLM deploy", "AutoDeploy", "benchmark throughput", "serve checkpoint", or needs an inference endpoint from a HuggingFace or ModelOpt-quantized checkpoint. Do NOT use for quantizing models (use ptq) or evaluating accuracy (use evaluation).
 license: Apache-2.0
+metadata:
+  author: Zhiyu Cheng <zhiyuc@nvidia.com>
 ---
 
 # Deployment Skill
+
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/plugins/modelopt/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
 
 Serve a model checkpoint as an OpenAI-compatible inference endpoint. Supports vLLM, SGLang, and TRT-LLM (including AutoDeploy).
 

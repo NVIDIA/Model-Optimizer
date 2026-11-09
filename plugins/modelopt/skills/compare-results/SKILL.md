@@ -2,9 +2,16 @@
 name: compare-results
 description: Establish baseline-vs-candidate evaluation plans, delegate missing evaluations, compare validated results, and decide quantization feasibility. Use when the user asks to compare baseline vs quantized runs, explain an accuracy drop/regression, verify whether a quantized checkpoint is acceptable, or compare NEL/MLflow evaluation outputs. Do NOT use for generic single-model evaluation without comparison intent (use evaluation), live NEL status/debugging (use launching-evals), or generic MLflow browsing without a comparison goal (use accessing-mlflow).
 license: Apache-2.0
+metadata:
+  author: Zhiyu Cheng <zhiyuc@nvidia.com>
 ---
 
 # Compare Results
+
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/plugins/modelopt/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
 
 Use this to plan and complete a baseline-vs-candidate comparison. The baseline
 is the reference checkpoint, and the candidate is the checkpoint whose accuracy
@@ -24,7 +31,9 @@ change is being measured, typically a further quantized version of the baseline.
    quantization flags.
 3. Fetch the baseline and candidate task list, configs, score artifacts, and
    logs. If the user provides MLflow runs or invocation IDs, use the
-   accessing-mlflow skill to fetch configs and artifacts.
+   accessing-mlflow skill to fetch configs and artifacts. If its MCP server is
+   unavailable, use user-supplied exports or local run artifacts; ask for missing
+   files rather than requiring MCP setup for an artifact-based comparison.
 4. Confirm each run passed evaluation Step 9, "Verify completed evaluation run",
    before comparing scores. If not, validate logs, server health,
    judge/code-execution status, sample accounting, and reasoning parsing before

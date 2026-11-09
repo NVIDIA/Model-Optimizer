@@ -4,19 +4,10 @@ Common detection for all ModelOpt skills. After this, you know what's available.
 
 ## Env-1. Get ModelOpt source
 
-```bash
-ls examples/hf_ptq/hf_ptq.py 2>/dev/null && echo "Source found"
-```
-
-If not found: `git clone https://github.com/NVIDIA/Model-Optimizer.git && cd Model-Optimizer`
-
-If found, ensure the source is up to date:
-
-```bash
-git pull origin main
-```
-
-If previous runs left patches in `modelopt/` (from 4C unlisted model work), check whether they should be kept. Reset only if starting a completely new task: `git checkout main`.
+Follow [skill-loading.md](skill-loading.md) to locate source and shared files,
+set `MODELOPT_ROOT` and `MODELOPT_SKILLS`, and record the source revision. Run
+repository-relative commands from `MODELOPT_ROOT`; keep the task's output
+workspace separate when required. Preserve existing branches and local patches.
 
 ## Env-2. Local or remote?
 
@@ -34,7 +25,7 @@ If the cluster config contains multiple clusters and the user did not name the t
 For remote, connect:
 
 ```bash
-source "$SKILL_DIR/remote_exec.sh"
+source "$MODELOPT_SKILLS/common/remote_exec.sh"
 remote_load_cluster <cluster_name>
 remote_check_ssh
 remote_detect_env    # sets REMOTE_ENV_TYPE = slurm / docker / bare

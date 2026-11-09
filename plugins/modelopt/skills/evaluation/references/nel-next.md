@@ -42,16 +42,24 @@ you silently get a 0.3.x PyPI install — which cannot reach 0.4.x and lacks the
 registry override. Unset it unless you deliberately want the older toolchain; `--version`
 prints the resolved spec, so check there if a run behaves unexpectedly.
 
-## Credentials + internal infra (`.env`)
+## Credentials and infrastructure (`.env`)
 
-- **AWS creds** (sandboxes run in AWS ECS Fargate, shared NVIDIA acct `463701203462`)
+- **AWS creds** (sandboxes run in the user's configured AWS ECS Fargate account)
   and `HF_TOKEN` are secrets you add yourself: `HF_TOKEN`, `AWS_ACCESS_KEY_ID`,
   `AWS_SECRET_ACCESS_KEY`. Never open `.env` with file tools — shell only.
-- **Internal harbor infra is NOT hardcoded** — configs read `${NEL_NEXT_EVAL_IMAGE}`,
+- **Harbor infrastructure** — configs read `${NEL_NEXT_EVAL_IMAGE}`,
   `${HARBOR_ECR_REPOSITORY}` (Terminal-Bench), `${HARBOR_SWEBENCH_ECR_REPOSITORY}`
-  (SWE-bench), and `${MLFLOW_TRACKING_URI}` from `.env`. Run **`modelopttools:eval-config`**
-  (Step 3b) to write them — it holds the canonical values, arch/region rules, and
-  points to the per-benchmark `bench.yaml` source of truth.
+  (SWE-bench) from `.env`. `modelopttools:eval-config` can supply these values
+  when available. Otherwise the user or their infrastructure administrator must
+  provide an architecture-compatible evaluator image, accessible ECR sandbox
+  images, AWS region, and credentials for the selected benchmark's playbook.
+  Follow the pinned evaluator's deployment documentation to provision that
+  infrastructure; do not substitute guessed registry paths or submit with
+  unresolved values. Ask for the missing settings if it is not provisioned.
+- **MLflow is optional.** If no tracking server is configured, remove
+  `output.export` and `output.export_config` from the copied template and retain
+  local merged results. Otherwise set `MLFLOW_TRACKING_URI` to the user's
+  explicit server URL, keep the export block, and export only after validation.
 - **`HARBOR_ECS_REGION`** sets `sandbox.region` + `AWS_DEFAULT_REGION` (upstream default
   `us-east-1` TB2.1, `us-east-2` SWE-bench). TB2.1's ECR repo name tracks it
   (`…ecr.<region>…/harbor-<region>`); SWE-bench's stays `us-west-2/harbor-swebench`.
@@ -63,7 +71,7 @@ prints the resolved spec, so check there if a run behaves unexpectedly.
 |---|---|
 | submit the sbatch | cluster **login** node (submission only) |
 | vLLM server **+** harbor `eval_image` (agent orchestrator) | the **same GPU compute node**, co-located via `srun --overlap` (shared netns → agent reaches vLLM at `localhost:5000`) |
-| task sandboxes + grading | **remote AWS ECS Fargate** (acct `463701203462`), reached over SSH tunnels |
+| task sandboxes + grading | **remote AWS ECS Fargate** in the configured account, reached over SSH tunnels |
 
 `shards: N` → N compute nodes, each running its own vLLM + eval_image pair on 1/N
 of the trials; the sbatch auto-merges when all shards finish.
@@ -116,7 +124,7 @@ cluster:
   node_pools: {gpu: {partition: <part>, nodes: 1, ntasks_per_node: 1, gpus_per_node: 8}}   # match TP*DP
 output:
   dir: <lustre>/eval-output/<model>-<benchmark>
-  export: [mlflow]              # ALWAYS — see below
+  export: [mlflow]              # only when a tracking server is configured
   export_config: {mlflow: {...}}
 ```
 
@@ -207,22 +215,21 @@ with its own `run_id`, copying the shared `services:` block.
 - **`timeout_strategy`**: `task` = each task's own timeout (leaderboard-comparable);
   `max` = `max(task, playbook)`; `override` = always playbook. Match the benchmark's
   canonical `bench.yaml`.
-- **MLflow export — config + a post-run push.** Add `output.export: [mlflow]` +
+- **Optional MLflow export — config + a post-run push.** Add `output.export: [mlflow]` +
   `export_config.mlflow` (hardcode `experiment_name: <user>/<model>` — `${USER}=root`
   in-container; tags `framework`/`model`/`temperature`/`top_p` + `checkpoint_path`/`benchmark`
   for dashboard attribution, + canonical `task_name`/`nemo-evaluator-next-version`).
-  `tracking_uri: ${MLFLOW_TRACKING_URI}` (from `eval-config`
-  Step 3b — canonical `mlflow.frontier-evals.nvidia.com`; **not** the `mlflow-nemo-evaluator`
-  alias, whose 308 strips `/api/...` → 405). **SLURM does NOT auto-export** — push after
-  the run with `nel-next.sh mlflow-push` (Run flow), which resolves the var and falls back
-  to the canonical host.
+  `tracking_uri: ${MLFLOW_TRACKING_URI}` must resolve to the user's configured
+  server before calling the exporter; do not rely on its internal-host fallback.
+  **SLURM does NOT auto-export** — push after the run with
+  `nel-next.sh mlflow-push` (Run flow) when export is configured.
 - **ModelOpt provenance.** Same rule as SKILL.md Step 4: if the served checkpoint holds a
   `.experiment.json`, use its `experiment_name` verbatim and add its quoted
   `run_name`/`run_id`/`run_url` as `modelopt_run_*` tags, skipping any imported value
   containing `${` — `experiment_name` included, since the same pass resolves the block. Keep `tracking_uri` as `${MLFLOW_TRACKING_URI}` — cross-server, the inherited name
   makes a same-named experiment here and `modelopt_run_url` is the only route back.
 
-## Run (dry-run → canary → full) → push to MLflow
+## Run (dry-run → canary → full), then export if configured
 
 ```bash
 set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"
@@ -230,13 +237,13 @@ set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"
 "$NEL" eval run <cfg>.yaml --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2   # canary
 "$NEL" eval run <cfg>.yaml --submit                                 # full
 "$NEL" eval {status|logs -f|report -f markdown|merge} -r <run_id>     # lifecycle
-"$NEL" mlflow-push -r <run_id> -c <cfg>.yaml                          # post-run: push merged bundle(s) to MLflow
+"$NEL" mlflow-push -r <run_id> -c <cfg>.yaml                          # optional: only with an explicit tracking URI
 ```
 
 `eval run` on a slurm cluster scp's the sbatch + redacted `.secrets.env` and
 submits via SSH; a built-in afternotok chain auto-resumes across walltime windows;
-sharded runs auto-merge. **SLURM does not auto-export** — `mlflow-push` is the final
-step: it reads the config's `export_config.mlflow`, stages each merged bundle's
+sharded runs auto-merge. **SLURM does not auto-export** — when configured,
+`mlflow-push` reads the config's `export_config.mlflow`, stages each merged bundle's
 `eval-*.json` off the cluster (the dev box doesn't mount the run dir), and exports with
 `emit_traces=false` (the default emits one trace per sample → minutes-long hang).
 Idempotent (re-push updates the same run, deduped by `job_id`); forward extra exporter
