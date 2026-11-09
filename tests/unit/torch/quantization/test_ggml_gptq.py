@@ -418,6 +418,21 @@ def test_casting_the_model_keeps_the_importance_its_weight_encodes_to_the_pin_wi
     )
 
 
+@pytest.mark.parametrize("cast", ["bfloat16", "half"])
+def test_casting_the_model_keeps_the_local_scales_gptq_searched(cast):
+    # GPTQ ran on a float32 weight; a cast after it rounds nearly every block of that weight, and
+    # encoding the rounded weight afresh would re-pick the searched local scales.
+    algorithm = {**GPTQ, "importance_weighted": True, "local_hessian_scales": True}
+    model, _ = _gptq_model(rows=16, num_bits="iq2_xxs", algorithm=algorithm)
+    pinned = pinned_packed_weight(model.weight_quantizer, "iq2_xxs")
+
+    getattr(model, cast)()
+
+    assert torch.equal(
+        GGML_FORMAT_REGISTRY["iq2_xxs"].pack(model.weight, model.weight_quantizer), pinned
+    )
+
+
 @pytest.mark.parametrize("num_bits", ["iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s"])
 def test_a_checkpoint_from_before_kept_scales_still_encodes_to_its_pin(num_bits):
     # Earlier GPTQ left the weight as its decoding, rounded to the model's dtype, and no importance.
