@@ -16,6 +16,7 @@
 """Offline coverage for the Hugging Face AutoQuantize example helpers."""
 
 import importlib
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +30,7 @@ from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils.dataset_utils import get_max_batch_size
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
 @pytest.fixture
@@ -328,9 +330,15 @@ def test_kl_padding_exclusion_is_scoped_to_kv_autoquant(
     assert observed["shape"] == expected_shape
 
 
+@pytest.mark.parametrize("use_fsdp2", [True, False], ids=["use_fsdp2", "replicated"])
 @pytest.mark.parametrize("domain", ["weight", "kv_cache"])
-def test_autoquant_retains_fsdp2_warning(autoquant_utils, monkeypatch, domain):
+def test_autoquant_scores_a_batch_per_rank_and_retains_fsdp2_warning(
+    autoquant_utils, monkeypatch, domain, use_fsdp2
+):
+    """Every rank of a distributed plan scores a batch of its own shard per step, so the score
+    steps cover the recipe's score size together; --use_fsdp2 keeps its warning."""
     model = torch.nn.Module()
+    set_distribution_plan(model, DistributionPlan(2, dense="fsdp" if use_fsdp2 else "replicate"))
     inputs = {
         "search_domain": domain,
         "constraints": {"effective_bits": 8.0},
@@ -352,17 +360,18 @@ def test_autoquant_retains_fsdp2_warning(autoquant_utils, monkeypatch, domain):
         return search_model, {}
 
     monkeypatch.setattr(autoquant_utils.mtq, "auto_quantize", search)
-    monkeypatch.setattr(autoquant_utils, "world_size", lambda: 2)
     args = SimpleNamespace(
         calib_with_images=False,
         inference_pipeline_parallel=1,
-        use_fsdp2=True,
+        use_fsdp2=use_fsdp2,
         batch_size=1,
         auto_quantize_checkpoint=None,
     )
 
-    with pytest.warns(UserWarning, match="experimental"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         assert autoquant_utils.auto_quantize(args, model, [None] * 8, SimpleNamespace()) is model
+    assert any("experimental" in str(warning.message) for warning in caught) is use_fsdp2
     assert observed["num_calib_steps"] == 8
     assert observed["num_score_steps"] == 4
 
