@@ -81,6 +81,7 @@ from .utils.calib_utils import (
     _LOCAL_HESSIAN_ENCODER_REGISTRY,
     GPTQHelper,
     bfloat16_hessian_gemm,
+    hessian_dtype,
     run_on_each_gpu,
     track_calib_forward_memory,
     update_expert_weights,
@@ -1043,7 +1044,7 @@ class _LocalHessianAccumulator:
         # (cin, tokens) -> (n_blocks, bs, tokens). A float32 GEMM avoids bf16/fp16 precision loss;
         # a bfloat16 one, accumulating in float32, is faster and needs no float32 copy.
         bf16 = bfloat16_hessian_gemm(self.input_dtype, input_tensor)
-        x = input_tensor.reshape(-1, self.cin).to(torch.bfloat16 if bf16 else torch.float32).T
+        x = input_tensor.reshape(-1, self.cin).to(torch.bfloat16 if bf16 else hessian_dtype()).T
         x = x.reshape(self.num_blocks_per_cin, self.block_size, -1)
         if bf16:
             hessian_batch = torch.bmm(x, x.transpose(-1, -2), out_dtype=torch.float32)
@@ -1066,7 +1067,7 @@ class _LocalHessianAccumulator:
             and self.hessian_per_block is not None
             and self.num_samples
         ):
-            self._normalized_hessian = self.hessian_per_block / self.num_samples
+            self._normalized_hessian = (self.hessian_per_block / self.num_samples).float()
         return self._normalized_hessian
 
     def build_error_func(
@@ -2712,7 +2713,9 @@ def gptq(
     for _, module in fused_experts:
         for _, weight, quantizers, _ in _fused_expert_projections(module):
             expert_hessian_bytes += (
-                4 * weight.shape[-1] ** 2 * sum(q.is_enabled for q in quantizers)
+                hessian_dtype().itemsize
+                * weight.shape[-1] ** 2
+                * sum(q.is_enabled for q in quantizers)
             )
             expert_devices.add(weight.device)
     gpus = [d for d in expert_devices if d.type == "cuda"]

@@ -1005,7 +1005,10 @@ class _HessianInputDtypeConfig(ModeloptBaseConfig):
     hessian_input_dtype: Literal["float32", "bfloat16"] = ModeloptField(
         default="float32",
         title="Dtype the Hessian GEMM reads the activations in.",
-        description="""The Hessian is accumulated and stored in float32 either way. ``float32``
+        description="""The Hessian is accumulated and stored in float32 either way, except under
+        deterministic algorithms (``torch.use_deterministic_algorithms``, as ``hf_ptq
+        --deterministic`` sets them): float32 sums depend on the order of the calibration batches,
+        so it is accumulated in float64 then and this knob is ignored. ``float32``
         copies each batch of activations to float32 for the GEMM. ``bfloat16`` feeds them to a
         tensor-core GEMM in bfloat16 that accumulates in float32: for bfloat16 activations it
         forms the same products and only rounds the sums differently. At 32K tokens per batch
