@@ -154,8 +154,9 @@ def tiny_pipeline(request, tmp_path, tiny_tokenizer):
             scheduler=diffusers.UniPCMultistepScheduler(
                 prediction_type="flow_prediction", use_flow_sigmas=True, flow_shift=3.0
             ),
-            transformer=get_tiny_wan22_transformer(),
-            transformer_2=get_tiny_wan22_transformer(),
+            # A head dim of 16 makes every Linear input a multiple of the NVFP4 block size.
+            transformer=get_tiny_wan22_transformer(attention_head_dim=16),
+            transformer_2=get_tiny_wan22_transformer(attention_head_dim=16),
             boundary_ratio=0.875,
         )
         settings = ("boundary_ratio", "expand_timesteps")
@@ -216,16 +217,19 @@ def test_export_diffusers_pipeline_config(tmp_path, tiny_pipeline, selection):
 
 
 @pytest.mark.parametrize("tiny_pipeline", ["wan22"], indirect=True)
+@pytest.mark.parametrize(
+    "quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG], ids=["fp8", "nvfp4"]
+)
 @pytest.mark.parametrize("num_inference_steps", [1, 2], ids=["starved", "covered"])
 @torch.no_grad()
 def test_export_diffusers_refuses_uncalibrated_static_inputs(
-    tmp_path, tiny_pipeline, num_inference_steps
+    tmp_path, tiny_pipeline, quant_cfg, num_inference_steps
 ):
     """A one-step calibration never runs Wan 2.2's transformer_2, so export refuses it."""
     pipe, _ = tiny_pipeline
 
     def calibrate(_):
-        # As in the diffusers example, each backbone is calibrated through the whole pipeline.
+        # As in the diffusers example, calibration runs the whole pipeline.
         pipe(
             prompt="a cat",
             num_inference_steps=num_inference_steps,
@@ -235,8 +239,9 @@ def test_export_diffusers_refuses_uncalibrated_static_inputs(
             output_type="latent",
         )
 
-    for backbone in (pipe.transformer, pipe.transformer_2):
-        mtq.quantize(backbone, copy.deepcopy(mtq.FP8_DEFAULT_CFG), calibrate)
+    # One pass calibrates both backbones, so no quantized forward runs: NVFP4 fake quant needs CUDA.
+    backbones = nn.ModuleList([pipe.transformer, pipe.transformer_2])
+    mtq.quantize(backbones, copy.deepcopy(quant_cfg), calibrate)
     export_dir = tmp_path / "export_pipeline"
 
     if num_inference_steps == 1:
@@ -249,10 +254,10 @@ def test_export_diffusers_refuses_uncalibrated_static_inputs(
             exported = {}
             for shard in (export_dir / component).glob("*.safetensors"):
                 exported.update(load_file(str(shard)))
-            fp8_weights = [key for key, t in exported.items() if t.dtype == torch.float8_e4m3fn]
-            assert fp8_weights
+            scaled = [key for key in exported if key.endswith(".weight_scale")]
+            assert scaled
             assert all(
-                key.removesuffix("weight") + "input_scale" in exported for key in fp8_weights
+                key.removesuffix("weight_scale") + "input_scale" in exported for key in scaled
             )
 
 
