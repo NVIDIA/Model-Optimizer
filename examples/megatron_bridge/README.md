@@ -436,32 +436,13 @@ Use Bridge/Core versions with HybridModel support.
 
 ### Student latent-weight initialization
 
-`--student_weight_init original` (the default) preserves the checkpoint's floating
-latent weights. `--student_weight_init quantized` instead initializes trainable
-weights from their configured quantize/dequantize values before optimizer creation:
+`--student_weight_init original` (default) keeps the checkpoint's stored floating weights.
+Use `--student_weight_init quantized` to initialize trainable weights from their configured
+quantize/dequantize values. The option is format-independent, supports mixed quantization,
+and preserves quantizers and calibration state.
 
-```bash
---student_weight_init quantized
-```
-
-This works with calibrated fake-quant configurations, including INT8/INT4, FP8,
-NVFP4/MX formats, GGML formats, mixed configurations and sequential quantizers.
-It uses the restored weight quantizers rather than a format-specific decoder.
-Quantizers and calibration state stay enabled and unchanged; pre-scales and rotations
-are inverted to store the result in the latent weight's original coordinate system.
-Frozen weights, biases, parameter objects and floating dtypes are preserved.
-The original option preserves the stored floating weights, including any PTQ updates;
-it cannot recover pre-PTQ weights discarded by calibration.
-
-Use an adapter-free, uncompressed fake-quantized student. Initialize before FSDP
-wrapping; offloaded weights must be materialized first. Ambiguous shared weights
-with different quantizers are rejected. Native resumes detected in
-`<output_dir>/checkpoints` skip initialization and restore model/optimizer state as usual.
-Use a fresh output directory to compare initialization strategies, and continue to
-pass the native checkpoint carrying ModelOpt state as `--student_megatron_path` on resume.
-
-The library equivalent is `mtq.initialize_quantized_weights(student, trainable_only=True)`;
-call it once after calibration/restoration and parameter selection, before creating an optimizer.
+Use an uncompressed, adapter-free fake-quantized student. Initialization applies only to
+fresh runs; native resumes preserve trained weights and optimizer state.
 
 ### LoRA QAD
 
