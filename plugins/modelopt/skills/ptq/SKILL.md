@@ -191,6 +191,7 @@ Report the gate result before moving on. Follow the canonical report format and 
 ## Common Pitfalls
 
 - **Model-specific dependencies**: Models with `trust_remote_code` may import packages not in the container (e.g., `mamba-ssm` for hybrid Mamba models). See Step 2.5. Use `EXTRA_PIP_DEPS` env var with the launcher, or install manually before running `hf_ptq.py`
+- **Linear-attention models** (Qwen3-Next/3.5/3.8, GLM-5.x Flash, Kimi Linear, OLMo Hybrid) fall back to slow, memory-hungry PyTorch kernels without `pip install "fla-core>=0.5.2"`; install it before calibrating on GPU (it breaks CPU runs of these models)
 - **Transformers version**: New models may need a newer version of transformers than what's installed. Check `config.json` for `transformers_version`. In containers, beware of `PIP_CONSTRAINT` blocking upgrades — see `references/slurm-setup-ptq.md` for workarounds
 - **Gated datasets**: Some calibration datasets require HF authentication. Set `HF_TOKEN` in the job environment. Use `--dataset cnn_dailymail` only as the constrained-environment fallback described in Step 4, not as the preferred calibration set
 - **NFS root_squash + Docker**: See the common skill's `slurm-setup.md` section 5

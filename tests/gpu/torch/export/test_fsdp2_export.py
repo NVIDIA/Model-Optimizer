@@ -28,7 +28,7 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file
-from torch.distributed._composable.fsdp import fully_shard
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -177,13 +177,16 @@ def _fuse_layers(rank, size, quant_config, bias):
         def calib_fn(x):
             return x(calib_data)
 
-        # Shard model
-        fully_shard(model)
-        torch.distributed.barrier()
+        # AWQ calibration of a model sharded over several ranks is refused: there, shard after it.
+        awq_on_ranks = size > 1 and "awq" in str(quant_config.get("algorithm"))
+        if not awq_on_ranks:
+            fully_shard(model)
+            torch.distributed.barrier()
 
-        # Quantize model
         mtq.quantize(model, quant_config, calib_fn)
         mtq.quantize(non_fsdp_model, quant_config, calib_fn)
+        if awq_on_ranks:
+            fully_shard(model)
 
         torch.distributed.barrier()
 
@@ -217,13 +220,16 @@ def _export_quantized_weight_test(rank, size, quant_config, bias):
         def calib_fn(x):
             return x(calib_data)
 
-        # Shard model
-        fully_shard(model)
-        torch.distributed.barrier()
+        # AWQ calibration of a model sharded over several ranks is refused: there, shard after it.
+        awq_on_ranks = size > 1 and "awq" in str(quant_config.get("algorithm"))
+        if not awq_on_ranks:
+            fully_shard(model)
+            torch.distributed.barrier()
 
-        # Quantize model
         mtq.quantize(model, quant_config, calib_fn)
         mtq.quantize(non_fsdp_model, quant_config, calib_fn)
+        if awq_on_ranks:
+            fully_shard(model)
 
         torch.distributed.barrier()
 
@@ -305,7 +311,7 @@ def test_fsdp2_weight_update_context_error_propagates(dist_workers):
         mtq.FP8_DEFAULT_CFG,
         mtq.NVFP4_DEFAULT_CFG,
         mtq.NVFP4_AWQ_LITE_CFG,
-        # mtq.W4A8_AWQ_BETA_CFG, #TODO: Fix unit test for this case
+        mtq.W4A8_AWQ_BETA_CFG,
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         # NVFP4_MLP_ONLY_CFG is omitted: SmallQKVModel has no MLP, so that config matched
@@ -327,7 +333,7 @@ def test_fsdp2_weight_update_context_for_fuse_layers(dist_workers, quant_config,
         mtq.FP8_DEFAULT_CFG,
         mtq.NVFP4_DEFAULT_CFG,
         mtq.NVFP4_AWQ_LITE_CFG,
-        # mtq.W4A8_AWQ_BETA_CFG, #TODO: Fix unit test for this case
+        mtq.W4A8_AWQ_BETA_CFG,
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         # NVFP4_MLP_ONLY_CFG is omitted: SmallQKVModel has no MLP, so that config matched

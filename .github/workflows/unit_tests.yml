@@ -96,7 +96,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Record which CPU this runner got
@@ -137,8 +137,6 @@ jobs:
           - {nox_session: "unit-3.13(torch_214, tf_latest)", python_version: "3.13"}
           - {nox_session: "unit-3.14(torch_214, tf_latest)", python_version: "3.14"}
           # Older torch versions on the default Python (3.12) for back-compat.
-          - {nox_session: "unit-3.12(torch_28, tf_latest)", python_version: "3.12"}
-          - {nox_session: "unit-3.12(torch_29, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_210, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_211, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_212, tf_latest)", python_version: "3.12"}
@@ -215,7 +213,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Run skill gate tests

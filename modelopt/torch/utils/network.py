@@ -58,6 +58,7 @@ __all__ = [
     "model_to",
     "param_num_from_forward",
     "remove_bn",
+    "restore_training_modes",
     "run_forward_loop",
     "set_submodule",
     "standardize_constructor_args",
@@ -472,6 +473,22 @@ def unwrap_model(
             warnings.warn(msg or f"Model {model} is wrapped by {type(model)}; unwrapping...")
         return getattr(model, wrappers[type(model)])
     return model
+
+
+def restore_training_modes(model: nn.Module, training_modes: dict[nn.Module, bool]) -> None:
+    """Give each module back its mode from ``training_modes``; one not in it takes its parent's mode.
+
+    ``model.train()`` runs first, so every module's ``train()`` is called; then the modules whose own
+    mode differs get it back, parents first, because ``train()`` also sets every module below.
+    """
+    model.train(training_modes[model])
+    stack = [(child, model.training) for child in model.children()]
+    while stack:
+        module, parent_mode = stack.pop()
+        mode = training_modes.get(module, parent_mode)
+        if module.training != mode:
+            module.train(mode)
+        stack.extend((child, mode) for child in module.children())
 
 
 def zero_grad(model: nn.Module) -> None:

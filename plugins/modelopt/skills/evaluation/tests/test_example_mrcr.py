@@ -13,8 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import re
 import shlex
+import shutil
+import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -25,10 +29,10 @@ GATE = re.compile(
 )
 
 
-def _block(key):
-    """Return the lines nested under the first ``key:`` in the template (stdlib-only)."""
+def _block(key, nth=0):
+    """Return the lines nested under the ``nth`` ``key:`` in the template (stdlib-only)."""
     lines = TEMPLATE.read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line.strip().startswith(f"{key}:"))
+    start = [i for i, line in enumerate(lines) if line.strip().startswith(f"{key}:")][nth]
     indent = len(lines[start]) - len(lines[start].lstrip())
     block = []
     for line in lines[start + 1 :]:
@@ -99,3 +103,55 @@ def test_deployment_command_keeps_all_flags_under_shell_parsing():
         "--max-num-batched-tokens",
     ):
         assert flag in tokens
+
+
+def _folded(key):
+    _, block = _block(key)
+    return " ".join(line.strip() for line in block.splitlines() if line.strip())
+
+
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs util-linux setsid")
+def test_gym_rollout_keeps_token_off_argv_and_scratch_private(tmp_path):
+    header, block = _block("command", nth=1)
+    assert header.strip() == "command: |"  # the gym bootstrap, not the deployment command
+    script = textwrap.dedent(block)
+    for key in ("data_prep_params", "collect_rollout_params", "common_params"):
+        script = script.replace(f"{{{{config.params.extra.nemo_gym.{key}}}}}", _folded(key))
+    lines = re.sub(r"\{\{[^}]*\}\}", "x", _render_gate(script, None)).splitlines()
+    # Keep `set -ex`, then run from data prep on; the bootstrap above it needs a real /opt/Gym.
+    prep = next(i for i, line in enumerate(lines) if line.startswith("ng_prepare_benchmark"))
+    script = "\n".join([lines[0], *lines[prep:]])
+
+    bin_dir, out, scratch = tmp_path / "bin", tmp_path / "out", tmp_path / "scratch"
+    for d in (bin_dir, out, scratch):
+        d.mkdir()
+    stubs = {
+        "ng_prepare_benchmark": 'printf "%s\\n" "$@" > "$OUT/prepare"',
+        "ng_e2e_collect_rollouts": (
+            'printf "%s\\n" "$@" > "$OUT/rollouts"; stat -c %a "$TMPDIR"/* > "$OUT/scratch"; exit 3'
+        ),
+        "ray": "",  # never stop or kill real Ray daemons on the host
+        "pkill": "",
+    }
+    for name, body in stubs.items():
+        (bin_dir / name).write_text(f"#!/usr/bin/env bash\n{body}\n")
+        (bin_dir / name).chmod(0o755)
+    secret = "hf_test_secret_token"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "TMPDIR": str(scratch),
+        "OUT": str(out),
+        "HF_TOKEN": secret,
+        "DUMMY_API_KEY": "dummy",
+        "UV_CACHE_DIR": "/uv",
+    }
+    result = subprocess.run(
+        ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60
+    )
+
+    assert result.returncode == 3  # the rollout's failure propagates
+    assert secret not in (out / "prepare").read_text() + (out / "rollouts").read_text()  # argv
+    assert secret not in result.stdout + result.stderr  # `set -x` trace
+    assert (out / "scratch").read_text().split() == ["700"]  # one private mktemp dir
+    assert not any(scratch.iterdir())  # removed even though the rollout failed
