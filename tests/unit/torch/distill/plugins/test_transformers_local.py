@@ -49,7 +49,6 @@ from modelopt.torch.distill.plugins.transformers import (
     transformers_family,
 )
 from modelopt.torch.distill.plugins.transformers.adapter import _TransformersRuntime
-from modelopt.torch.distill.plugins.transformers.parallel import native_mesh_context
 from modelopt.torch.quantization import repair_partition
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -245,6 +244,7 @@ def test_transformers_standalone_moe_repair():
     )
     inputs = torch.randn(1, 8, 32)
     expected_teacher = teacher(inputs).detach().clone()
+    starting_point = student(inputs).detach().clone()
     result = mtd.local_distill(
         student,
         teacher,
@@ -254,6 +254,7 @@ def test_transformers_standalone_moe_repair():
     )
     assert result.metrics["history"][0]["units"][""]["valid_tokens"] == 8
     assert result.metrics["history"][0]["units"][""]["gradient_norm"] > 0
+    assert not torch.equal(student(inputs), starting_point)
     torch.testing.assert_close(teacher(inputs), expected_teacher, rtol=0, atol=0)
 
 
@@ -510,47 +511,6 @@ def test_colwise_tp_output_quantization_requires_local_fields_and_statistics(cas
         repair_partition.validate_tp_output_quantizer(
             quantizer, NativeWeightPartition((96, 32), 0, 0, 2)
         )
-
-
-def test_native_context_rejects_partial_cp_owner_permutation_before_collectives():
-    class MetadataMesh:
-        def __init__(self, tensor, names, rank):
-            self.mesh, self.mesh_dim_names, self.rank = tensor, names, rank
-
-        def __getitem__(self, names):
-            names = (names,) if isinstance(names, str) else names
-            coordinate = (self.mesh == self.rank).nonzero()[0].tolist()
-            selection = tuple(
-                slice(None) if name in names else index
-                for name, index in zip(self.mesh_dim_names, coordinate, strict=True)
-            )
-            return MetadataMesh(self.mesh[selection], names, self.rank)
-
-        def size(self):
-            return self.mesh.numel()
-
-        def _flatten(self, name):
-            pytest.fail("Invalid CP ownership entered collective mesh construction")
-
-    class MetadataManager:
-        def __init__(self, dense, expert):
-            self.dense, self.expert = dense, expert
-
-        def get_mesh(self, names):
-            names = (names,) if isinstance(names, str) else names
-            root = self.expert if "ep" in names or "efsdp" in names else self.dense
-            return root[names]
-
-    dense = torch.arange(8).reshape(1, 2, 4, 1)
-    expert = torch.arange(8).reshape(1, 2, 1, 4)
-    expert[0, 1, 0, :2] = expert[0, 1, 0, :2].flip(0)
-    for rank in range(8):
-        manager = MetadataManager(
-            MetadataMesh(dense, ("pp", "cp", "fsdp", "tp"), rank),
-            MetadataMesh(expert, ("pp", "cp", "efsdp", "ep"), rank),
-        )
-        with pytest.raises(ValueError, match="context parallel rank groups"):
-            native_mesh_context(manager)
 
 
 def test_native_partition_distinguishes_fake_compression_recipe_from_native_scale_groups():

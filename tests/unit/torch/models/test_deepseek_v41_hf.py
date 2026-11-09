@@ -100,9 +100,6 @@ def test_v41_moe_matches_reference_outputs_and_gradients(scoring_func):
         vision_routing_bias=True,
     )
     module = DeepseekV41MoE(config)
-    ownership = module.parallel_spec()
-    assert ownership["global_expert_ids"] == (0, 1, 2, 3)
-    assert ownership["replicated_paths"] == ("gate", "shared_experts")
     with torch.no_grad():
         module.gate.bias.copy_(torch.tensor([0.1, -0.3, 0.2, 0.4]))
         module.gate.bias_vl.copy_(module.gate.bias.flip(0))

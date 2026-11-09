@@ -219,20 +219,6 @@ class DeepseekV41MoE(nn.Module):
             expert = self.get_submodule(owner)
             expert.checkpoint_quantized_projections |= {projection}
 
-    def parallel_spec(self):
-        """Describe physical ownership for caller-managed TP/EP without creating groups."""
-        return {
-            "sequence_dim": 1,
-            "global_expert_ids": tuple(range(self.num_experts)),
-            "expert_paths": tuple(f"experts.{index}" for index in range(self.num_experts)),
-            "replicated_paths": ("gate", "shared_experts"),
-            "tp_plan": {
-                "experts.*.w1": "colwise",
-                "experts.*.w3": "colwise",
-                "experts.*.w2": "rowwise",
-            },
-        }
-
     def forward(self, hidden_states, image_mask=None):
         """Return routed plus shared outputs with the original input shape and dtype."""
         if hidden_states.shape[-1] != self.config.hidden_size:

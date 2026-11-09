@@ -24,10 +24,8 @@ from contextlib import contextmanager
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.nn.functional import all_gather
 from torch.distributed.tensor import DTensor
 from torch.overrides import TorchFunctionMode
-from torch.utils._pytree import tree_flatten_with_path, tree_unflatten
 
 __all__ = ["CPSequenceLayout"]
 
@@ -35,7 +33,6 @@ _DISPATCH_LOCK = threading.RLock()
 _ACTIVE_LAYOUT: contextvars.ContextVar["CPSequenceLayout | None"] = contextvars.ContextVar(
     "modelopt_cp_layout", default=None
 )
-_SUSPEND_ATTENTION = contextvars.ContextVar("modelopt_cp_full_context", default=False)
 
 
 class _SDPA(nn.Module):
@@ -51,7 +48,7 @@ class _AttentionMode(TorchFunctionMode):
 
     def __torch_function__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
-        if func is not F.scaled_dot_product_attention or _SUSPEND_ATTENTION.get():
+        if func is not F.scaled_dot_product_attention:
             return func(*args, **kwargs)
         mask = args[3] if len(args) > 3 else kwargs.get("attn_mask")
         dropout = args[4] if len(args) > 4 else kwargs.get("dropout_p", 0.0)
@@ -73,26 +70,6 @@ class _AttentionMode(TorchFunctionMode):
                 "Native CP SDPA expects local dense [batch, heads, sequence, dim] shards."
             )
         return self.attention(*args, **kwargs)
-
-
-def _map_sequence_leaves(tree, dimensions, function):
-    leaves, specification = tree_flatten_with_path(tree)
-    found = set()
-    output = []
-    for path, value in leaves:
-        keys = tuple(
-            getattr(key, "key", getattr(key, "idx", getattr(key, "name", None))) for key in path
-        )
-        if keys in dimensions:
-            if not isinstance(value, torch.Tensor):
-                raise ValueError(f"Declared sequence input {keys} is not a tensor.")
-            value = function(value, dimensions[keys])
-            found.add(keys)
-        output.append(value)
-    missing = set(dimensions) - found
-    if missing:
-        raise ValueError(f"Declared sequence paths are absent: {sorted(missing, key=str)}")
-    return tree_unflatten(output, specification)
 
 
 class CPSequenceLayout:
@@ -126,7 +103,6 @@ class CPSequenceLayout:
         else:
             self.reorder_indices = chronological
         self.local_indices = self.reorder_indices.reshape(self.world_size, -1)[self.rank]
-        self.restore_indices = self.reorder_indices.argsort()
 
     def shard(self, tensor, dim, *, pad_value=0):
         """Select this rank's head-tail tokens, padding only the global sequence tail."""
@@ -139,64 +115,13 @@ class CPSequenceLayout:
             tensor = torch.cat((tensor, tensor.new_full(shape, pad_value)), dim=dim)
         return tensor.index_select(dim, self.local_indices.to(tensor.device))
 
-    def gather(self, tensor, dim):
-        """Differentiably gather local shards and undo head-tail order before execution."""
-        dim %= tensor.ndim
-        if isinstance(tensor, DTensor) or tensor.shape[dim] != self.local_length:
-            raise ValueError("CP gather expects a local dense tensor matching the layout.")
-        if self.world_size > 1:
-            tensor = torch.cat(
-                all_gather(tensor.contiguous(), group=self.mesh.get_group()), dim=dim
-            )
-        tensor = tensor.index_select(dim, self.restore_indices.to(tensor.device))
-        return tensor.narrow(dim, 0, self.sequence_length)
-
-    def partition_valid_mask(self, valid_mask, dim=1):
-        """Keep a full-context mask but count each real token on exactly one CP rank."""
-        dim %= valid_mask.ndim
-        if valid_mask.shape[dim] != self.sequence_length:
-            raise ValueError("Validity length differs from the CP layout.")
-        owned = torch.zeros(self.padded_length, device=valid_mask.device, dtype=torch.bool)
-        owned[self.local_indices.to(valid_mask.device)] = True
-        shape = [1] * valid_mask.ndim
-        shape[dim] = self.sequence_length
-        return valid_mask.bool() & owned[: self.sequence_length].reshape(shape)
-
-    def replicated_batch(self, batch, *, valid_mask=None, sequence_dim=1):
-        """Preserve all full-context inputs; partition only explicit loss-token validity.
-
-        Every rank runs the complete forward/replay. CP gradient reduction recovers
-        the global objective, but this fallback does not reduce activation memory
-        or sequence computation. No structured input dimensions are guessed.
-        """
-        valid_mask = batch.get("valid_mask") if valid_mask is None else valid_mask
-        if valid_mask is None:
-            raise ValueError("Replicated CP requires an explicit token-validity mask.")
-        return {**batch, "valid_mask": self.partition_valid_mask(valid_mask, sequence_dim)}
-
-    def full_context(self, function, args, kwargs, *, input_dims, output_dims):
-        """Gather declared sequence leaves, run dense math, then shard declared outputs.
-
-        Paths address ``{'args': args, 'kwargs': kwargs}``; output paths address
-        the returned pytree. Example: ``input_dims={('args', 0): 1}`` and
-        ``output_dims={(): 1}`` for a tensor-returning recurrent block. Tensor
-        gathering and output selection remain differentiable during replay.
-        """
-        inputs = _map_sequence_leaves({"args": args, "kwargs": kwargs}, input_dims, self.gather)
-        token = _SUSPEND_ATTENTION.set(True)
-        try:
-            output = function(*inputs["args"], **inputs["kwargs"])
-        finally:
-            _SUSPEND_ATTENTION.reset(token)
-        return _map_sequence_leaves(output, output_dims, self.shard)
-
     @contextmanager
     def attention(self):
         """Scope Torch's module-wrapper CP dispatcher without monkeypatching global SDPA.
 
         Keep this scope open through student backward: native CP backward also
         dispatches distributed attention operators. Unsupported blocks must run
-        through ``full_context`` or replicated full-context execution instead.
+        outside this scope through replicated full-context execution instead.
         """
         if self.world_size == 1:
             yield

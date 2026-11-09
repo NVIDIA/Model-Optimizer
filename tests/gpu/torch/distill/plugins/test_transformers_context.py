@@ -24,7 +24,6 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from torch import nn
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers import (
@@ -52,28 +51,6 @@ def cp_mesh():
     if not dist.is_initialized():
         dist.init_process_group("nccl", timeout=timedelta(seconds=90))
     return init_device_mesh("cuda", (size,), mesh_dim_names=("cp",))
-
-
-@pytest.mark.timeout(120)
-def test_cp_layout_full_context_preserves_chronology_and_autograd(cp_mesh):
-    torch.manual_seed(53)
-    full = torch.randn(2, 13, 8, device="cuda", requires_grad=True)
-    layout = CPSequenceLayout(cp_mesh, 13)
-    local = layout.shard(full.detach(), 1).requires_grad_()
-    torch.testing.assert_close(layout.gather(local, 1), full.detach(), rtol=0, atol=0)
-    actual = layout.full_context(
-        lambda value: value.cumsum(1),
-        (local,),
-        {},
-        input_dims={("args", 0): 1},
-        output_dims={(): 1},
-    )
-    expected = full.cumsum(1)
-    valid = layout.shard(torch.ones(2, 13, dtype=torch.bool, device="cuda"), 1)
-    torch.testing.assert_close(actual[valid], layout.shard(expected.detach(), 1)[valid])
-    actual[valid].square().sum().backward()
-    expected.square().sum().backward()
-    torch.testing.assert_close(local.grad, layout.shard(full.grad, 1), rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.timeout(120)
@@ -105,49 +82,6 @@ def test_cp_sdpa_style_matches_serial_forward_and_backward(cp_mesh):
         torch.testing.assert_close(
             actual_input.grad, layout.shard(reference_input.grad, 2), rtol=0.04, atol=0.03125
         )
-
-
-@pytest.mark.parametrize("kind", ["recurrent", "moe"])
-@pytest.mark.timeout(120)
-def test_cp_fallback_and_pointwise_units_preserve_valid_token_gradients(cp_mesh, kind):
-    torch.manual_seed(61)
-    layout = CPSequenceLayout(cp_mesh, 13)
-    if kind == "recurrent":
-        module = nn.GRU(8, 8, batch_first=True).cuda()
-    else:
-        module = DeepseekV41MoE(
-            DeepseekV41MoEConfig(
-                hidden_size=8, moe_intermediate_size=16, n_routed_experts=4, num_experts_per_tok=2
-            )
-        ).cuda()
-    reference = copy.deepcopy(module)
-    inputs = torch.randn(2, 13, 8, device="cuda")
-    valid = torch.ones(2, 13, device="cuda", dtype=torch.bool)
-    valid[:, 10:] = False
-    target = torch.randn_like(inputs)
-    expected = reference(inputs)
-    expected = expected[0] if isinstance(expected, tuple) else expected
-    if kind == "recurrent":
-        batch = layout.replicated_batch({"hidden_states": inputs, "valid_mask": valid})
-        actual = module(batch["hidden_states"])[0]
-        mask, local_target = batch["valid_mask"], target
-    else:
-        actual = module(layout.shard(inputs, 1))
-        mask, local_target = layout.shard(valid, 1), layout.shard(target, 1)
-    ((actual - local_target).square()[mask].sum() / (valid.sum() * 8)).backward()
-    ((expected - target).square()[valid].mean()).backward()
-    count = mask.sum()
-    dist.all_reduce(count, group=cp_mesh.get_group())
-    assert count == valid.sum()
-    for parameter, expected_parameter in zip(
-        module.parameters(), reference.parameters(), strict=True
-    ):
-        if expected_parameter.grad is not None:
-            assert parameter.grad is not None
-            dist.all_reduce(parameter.grad, group=cp_mesh.get_group())
-            torch.testing.assert_close(
-                parameter.grad, expected_parameter.grad, rtol=2e-4, atol=2e-5
-            )
 
 
 @pytest.mark.parametrize(
