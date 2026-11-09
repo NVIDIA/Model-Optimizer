@@ -73,6 +73,7 @@ from .quant_format import (
 )
 from .quant_utils import (
     get_activation_scaling_factor,
+    get_ggml_input_scale,
     get_kv_cache_dtype,
     get_kv_cache_scaling_factor,
     get_quantization_format,
@@ -431,6 +432,7 @@ class GPTModelExporter:
                 print(f"Successfully loaded {len(mtp_state_dict)} MTP tensors")
 
         combined_exclude_modules = self._gather_exclude_modules()
+        self._mark_ggml_input_quantization()
         combined_layer_config_dict = self._gather_layer_config_dict()
         # kv_cache_dtype is only set on attention-owning ranks; writer rank may not be one.
         gathered_kv_cache_dtype = self._gather_kv_cache_dtype()
@@ -1324,6 +1326,11 @@ class GPTModelExporter:
         # along its contraction axis, so the CUDA packer can be used. A weight that keeps pinned
         # scales goes on as the decoding of its codes, whose row slices pack to the pinned rows.
         if is_iq:
+            # W1A4/W2A4 layers also export their NVFP4 input_scale; the slicing rules copy it to
+            # every projection split from a fused module.
+            input_scale = get_ggml_input_scale(getattr(module, "input_quantizer", None))
+            if input_scale is not None:
+                name_to_value["input_scale"] = input_scale
             name_to_value["weight"] = GGML_FORMAT_REGISTRY[qformat].pin_current_codes(
                 module.weight,
                 getattr(module, "weight_quantizer", None),
@@ -2370,6 +2377,18 @@ class GPTModelExporter:
             if modules:
                 combined_exclude_modules.update(modules)
         return sorted(combined_exclude_modules)
+
+    def _mark_ggml_input_quantization(self):
+        """Mark the GGML layers this rank exported with an NVFP4 ``input_scale`` (W1A4/W2A4).
+
+        Every slicing rule copies a fused module's ``input_scale`` to the projections it writes, so
+        the exported names, not the modules, say which HF layers quantize their inputs.
+        """
+        exported = {key for state_dict in self._layer_state_dicts.values() for key in state_dict}
+        for key, qformat in list(self.layer_config_dict.items()):
+            layer = key.removesuffix(".quantization")
+            if qformat in GGML_FORMATS and layer != key and f"{layer}.input_scale" in exported:
+                self.layer_config_dict[f"{layer}.input_quantization"] = QUANTIZATION_NVFP4
 
     def _gather_layer_config_dict(self):
         """Get per-layer quantization metadata from all ranks for hf_quant_config."""

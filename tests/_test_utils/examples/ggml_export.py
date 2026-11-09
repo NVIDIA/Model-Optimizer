@@ -24,11 +24,12 @@ IQ1_S = {"num_bits": "iq1_s", "block_sizes": {-1: 256}, "backend": "ggml"}
 IQ2_XS = {"num_bits": "iq2_xs", "block_sizes": {-1: 256}, "backend": "ggml"}
 
 
-def quantize_tiny_llama(tmp_path, layer_cfgs=(IQ1_S, IQ2_XS)):
+def quantize_tiny_llama(tmp_path, layer_cfgs=(IQ1_S, IQ2_XS), input_cfg=None):
     """Return a two-layer tiny LLaMA whose layer ``i`` MLP takes ``layer_cfgs[i]``, and its tokens.
 
     The default formats have 32- and 16-weight sub-blocks, so the INT8 checkpoint needs a config
-    group for each. The shapes suit vLLM's kernels, and fake quant runs on CPU.
+    group for each. The shapes suit vLLM's kernels, and fake quant runs on CPU. ``input_cfg``
+    quantizes the MLP inputs too; the model then runs on CUDA, which NVFP4 activations need.
     """
     source = create_tiny_llama_dir(
         tmp_path,
@@ -42,6 +43,9 @@ def quantize_tiny_llama(tmp_path, layer_cfgs=(IQ1_S, IQ2_XS)):
         initializer_range=0.05,
     )
     model = AutoModelForCausalLM.from_pretrained(source, dtype=torch.bfloat16)
+    inputs = (
+        [] if input_cfg is None else [{"quantizer_name": "*mlp*input_quantizer", "cfg": input_cfg}]
+    )
     quant_cfg = {
         "quant_cfg": [
             {"quantizer_name": "*", "enable": False},
@@ -49,9 +53,12 @@ def quantize_tiny_llama(tmp_path, layer_cfgs=(IQ1_S, IQ2_XS)):
                 {"quantizer_name": f"*layers.{i}.mlp*weight_quantizer", "cfg": cfg}
                 for i, cfg in enumerate(layer_cfgs)
             ),
+            *inputs,
         ],
         "algorithm": "max",
     }
     token_ids = torch.randint(0, 128, (1, 48), generator=torch.Generator().manual_seed(0))
+    if input_cfg is not None:
+        model, token_ids = model.cuda(), token_ids.cuda()
     mtq.quantize(model, quant_cfg, lambda m: m(token_ids))
     return model, token_ids
