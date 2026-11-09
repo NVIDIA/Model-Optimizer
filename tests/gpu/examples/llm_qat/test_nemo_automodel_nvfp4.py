@@ -27,7 +27,11 @@ from nemo_automodel.components.moe.experts import GroupedExperts
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict, set_state_dict
 from torch.distributed.fsdp import fully_shard
 
-from examples.llm_qat.nemo_automodel.nvfp4 import NVFP4GroupedExperts, export_hf_experts
+from examples.llm_qat.nemo_automodel.nvfp4 import (
+    NVFP4GroupedExperts,
+    _PublishedQDQ,
+    export_hf_experts,
+)
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 
 
@@ -87,6 +91,27 @@ def _inputs(device, dtype=torch.bfloat16):
 def _dequant(w, scale, scale2):
     packed, scale, scale2 = NVFP4QTensor.quantize(w.contiguous(), 16, scale, scale2)
     return packed.dequantize(scale=scale, double_scale=scale2, block_sizes={-1: 16}, dtype=w.dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("fixed_scales", [False, True])
+@pytest.mark.parametrize("transpose", [False, True])
+def test_qdq_chunking_and_straight_through_gradients(dtype, fixed_scales, transpose):
+    torch.manual_seed(123)
+    # Exercise both paths; the larger shape exceeds the real chunk size with a partial tail.
+    for shape in ((32, 32), (2048, 2064)):
+        values = torch.randn(shape, device="cuda", dtype=dtype)
+        inputs = (values.T if transpose else values).requires_grad_()
+        scale2 = torch.tensor(0.0031415927, device="cuda")
+        block_scale = None
+        if fixed_scales:
+            block_scale, _ = NVFP4QTensor.get_weights_scaling_factor(inputs.detach(), 16, scale2)
+        reference = _dequant(inputs.detach(), block_scale, scale2)
+        output = _PublishedQDQ.apply(inputs, block_scale, scale2)
+        torch.testing.assert_close(output, reference, rtol=0, atol=0)
+        gradient = torch.randn_like(inputs)
+        output.backward(gradient)
+        torch.testing.assert_close(inputs.grad, gradient, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])

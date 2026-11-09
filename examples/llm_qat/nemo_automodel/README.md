@@ -104,6 +104,9 @@ pytest tests/gpu/examples/llm_qat/test_nemo_automodel_nvfp4.py -v --durations=10
 
 Tests cover packed parity, dtype preservation, routed and empty gradients,
 rejection without modifying the source, and distributed FSDP2 Adam resume/export.
+QDQ coverage includes the small and chunked paths, a partial final chunk,
+contiguous and transposed tensors, fixed and dynamic block scales, and exact
+straight-through gradients across all three supported compute dtypes.
 The FSDP2 test uses all visible GPUs.
 
 ## Full-model experiment
@@ -113,16 +116,27 @@ streaming loader, mixed-format exporter, and serving-matched forward kernels wit
 recomputed backward passes. Those model-specific extensions are not included in
 this example and are necessary to reproduce the following results.
 
-On 16 GB300 GPUs, BF16 and NVFP4 language-model parity passed against vLLM 0.30
-for five prompts of 256, 256, 500, 299, and 2048 tokens. All 97 captured boundaries
-matched exactly for each prompt. The serving comparison used TP1/EP1, isolated
+In the initial pilot on 16 GB300 GPUs, BF16 and NVFP4 language-model parity passed
+against vLLM 0.30 for five prompts of 256, 256, 500, 299, and 2048 tokens. All 97
+captured boundaries matched exactly for each prompt. The serving comparison used TP1/EP1, isolated
 uncached requests, chunked prefill, and pinned FlashInfer tactics. Zero-update
 export/reload was exact; trained exports had maximum log-probability error below
 6e-6 and top-1 agreement above 99.4%.
 
-Three QAD updates completed with FP32 expert masters, frozen published scales,
-and exact optimizer-state restoration. Peak allocated memory was 166.3 GiB per
-GPU, with about 11.5 minutes per update at global batch 64 and a 2048-token cap.
-The best checkpoint reduced held-out teacher-to-student KL by 11.63% on 32
-examples. This small pilot does not establish task-benchmark accuracy recovery
-or long-run convergence; vision forward was not exercised.
+The subsequent run completed 100 QAD updates on 64 GB300 GPUs with a 16,384-token
+context cap and global batch size 512. Only routed expert master weights were
+trained; published scales and other model components remained frozen. The
+mixed-format exporter preserved all frozen tensors, including vision weights.
+Zero-update identity, checkpoint restoration, and trained-export serving
+readback passed. Continuation stopped at update 160 after held-out KL exceeded
+the run's quality limit; training was not resumed.
+
+Matched BF16/PTQ/update-100 evaluations completed for GPQA-Diamond, IFBench,
+MMMU-Pro, SciCode, AA-LCR, and Terminal-Bench 2.1. These comparisons have not
+established a statistically clear QAD accuracy improvement. Lower distillation
+loss alone does not establish task recovery. Vision forward was not exercised
+during training.
+
+The streaming loader/exporter, serving-parity kernels and bounded backward,
+and full-model training/data/resume runner remain separate follow-up work.
+This standalone adapter does not reproduce that pipeline by itself.
