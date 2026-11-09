@@ -15,8 +15,6 @@
 
 """Entrypoint for Qwen-Image PDD training with released AutoModel components."""
 
-from __future__ import annotations
-
 import logging
 import os
 import sys

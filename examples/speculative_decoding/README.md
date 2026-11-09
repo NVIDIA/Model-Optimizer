@@ -86,6 +86,14 @@ For small base models that fit in GPU memory, we can collocate them with draft m
 
 All default training settings are in `eagle3.yaml`. You can adjust them by editing the YAML file or by specifying command-line overrides with OmegaConf dotlist arguments.
 
+To enable uniform hidden-state mixing, add `eagle.eagle_mix_hidden_states=true` and
+`eagle.eagle_mix_hidden_states_mode=uniform_layer_sample`. Each token samples a complete hidden vector
+from the original input and aligned outputs of prior training-time-test rounds.
+The mode defaults to `sparse_replace`, preserving the existing mixing behavior when
+only `eagle_mix_hidden_states` is enabled.
+Megatron EAGLE supports the same mode: set `eagle_mix_hidden_states=True` and
+`eagle_mix_hidden_states_mode="uniform_layer_sample"` in the `EagleConfig` passed to `mtsp.convert`.
+
 To enable context parallelism for long-context training, add `training.cp_size=<N>`.
 The saved modelopt checkpoint is similar in architecture to HF models. It can be further optimized through **ModelOpt**, e.g., PTQ and QAT.
 
@@ -137,8 +145,7 @@ For large base models, you can stream hidden states from a live `vllm serve` ins
 
 The modes above graft a draft head onto the target. The `external` mode instead
 trains an ordinary pretrained causal LM as the draft: it keeps its own embeddings
-and lm_head, the target is never modified, and the result exports as a plain HF
-checkpoint that TRT-LLM, vLLM and SGLang load with no mode-specific support.
+and lm_head, the target is never modified, and the result is a plain HF checkpoint.
 
 Dump the target's top-k deployment policy once, then train against it:
 
@@ -174,7 +181,9 @@ python scripts/ar_validate.py --model_path $ONLINE_CKPT
 python scripts/export_hf_checkpoint.py --model_path $OUTPUT_DIR --export_path $EXPORT_PATH
 ```
 
-This exports the model from a ModelOpt checkpoint to a deployment-compatible format.
+This exports the model from a ModelOpt checkpoint to a deployment-compatible format. It
+applies to the grafted-head modes above; an external draft needs no export pass, since its
+training output is already a plain HF checkpoint.
 
 ## Deployment
 

@@ -26,6 +26,7 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.model_quant as model_quant
+from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     _get_module_weight_numel,
@@ -797,6 +798,11 @@ _AWQ_SMOOTHQUANT = [mtq.INT4_AWQ_CFG, mtq.INT8_SMOOTHQUANT_CFG]
 _AWQ_CUSTOM = [mtq.INT4_AWQ_CFG, INT8_CUSTOM_QUANT_TEST_CFG]
 _SMOOTHQUANT_ONLY = [mtq.INT8_SMOOTHQUANT_CFG]
 _NONE_SMOOTHQUANT = [None, mtq.INT8_SMOOTHQUANT_CFG]
+# `algorithm: []` calibrates nothing and so adds no mode for the search to drop.
+_BLOCKWISE_UNCALIBRATED_INT8 = [
+    mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+    {**mtq.INT8_DEFAULT_CFG, "algorithm": []},
+]
 
 
 # A covering set rather than the full model x formats x method product: every model, format
@@ -813,6 +819,7 @@ _NONE_SMOOTHQUANT = [None, mtq.INT8_SMOOTHQUANT_CFG]
         (SimpleConv, _AWQ_SMOOTHQUANT, 4.0, 6.0, "aumann_shapley"),
         (SimpleLinear, _NONE_SMOOTHQUANT, 8.0, 11.0, "aumann_shapley"),
         (TransformerBlock, _AWQ_CUSTOM, 4.0, 6.0, "aumann_shapley"),
+        (SimpleLinear, _BLOCKWISE_UNCALIBRATED_INT8, 4.0, 6.0, "gradient"),
     ],
 )
 def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method):
@@ -1216,6 +1223,7 @@ def test_auto_quantize_fails_fast_on_nonfinite_gradients(bad_gradient):
 
     assert "torch.backends.cuda.enable_cudnn_sdp(False)" in str(exc_info.value)
     assert torch.backends.cuda.cudnn_sdp_enabled() == original_cudnn
+    assert model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS  # a scoring failure hands back folding
     assert any(
         f"module '{name}'" in str(exc_info.value)
         for name, module in model.named_modules()

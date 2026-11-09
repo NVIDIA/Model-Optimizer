@@ -15,7 +15,7 @@
 
 """GPT-OSS specs (HF model type ``gpt_oss``)."""
 
-from ..specs import ModelSpec, MoESpec, register
+from ..specs import EPSpec, ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
@@ -23,6 +23,13 @@ register(
     ModelSpec(
         model_type="gpt_oss",
         min_transformers_version="5.5",
+        ep_spec=EPSpec(
+            unsupported=(
+                "GPT-OSS stores its experts transposed, (num_experts, in, out), with gate and up "
+                "interleaved in gate_up_proj, and the expert-parallel export cannot write that "
+                "layout."
+            ),
+        ),
         moe_spec=MoESpec(
             # GPT-OSS fuses gate and up into a single gate_up_proj.
             # transformers names the block GptOssMLP; GptOssMoE is kept for the

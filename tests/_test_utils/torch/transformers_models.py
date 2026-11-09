@@ -41,15 +41,21 @@ from transformers import (
     LlamaForSequenceClassification,
     MixtralConfig,
     NemotronConfig,
+    NemotronHConfig,
     PreTrainedModel,
+    Qwen3_5Config,
+    Qwen3_5MoeConfig,
     Qwen3Config,
     Qwen3MoeConfig,
     Qwen3VLConfig,
-    Qwen3VLTextConfig,
     T5Config,
     T5ForConditionalGeneration,
     ViTConfig,
     ViTImageProcessor,
+)
+from transformers.conversion_mapping import (
+    get_checkpoint_conversion_mapping,
+    register_checkpoint_conversion_mapping,
 )
 
 import modelopt.torch.opt as mto
@@ -227,14 +233,7 @@ def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
         "vocab_size": 32,
         "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
     }
-    # Transformers 4.x names this field rope_scaling; 5.x renamed it to rope_parameters.
-    # Supplying it avoids the 4.57 Qwen3-VL constructor dereferencing a None rope config.
-    rope_field = (
-        "rope_parameters"
-        if "rope_parameters" in getattr(Qwen3VLTextConfig, "__annotations__", {})
-        else "rope_scaling"
-    )
-    text_kwargs[rope_field] = {"rope_type": "default", "mrope_section": [1, 1, 2]}
+    text_kwargs["rope_parameters"] = {"rope_type": "default", "mrope_section": [1, 1, 2]}
     text_kwargs.update(config_kwargs)
     # Pass as dicts — transformers 5.3.0 Qwen3VLConfig.__init__ only handles
     # vision_config/text_config when they are dicts or None, not instances.
@@ -351,9 +350,6 @@ class _TinyQwen35Tokenizer:
 
 
 def _get_tiny_qwen3_5_vl(moe: bool = False, *, tokenizer=None, **config_kwargs) -> PreTrainedModel:
-    # Lazy imports — Qwen3.5-VL requires a recent transformers version.
-    from transformers import Qwen3_5Config, Qwen3_5MoeConfig
-
     set_seed(SEED)
 
     # Vocab + vision token ids normally derive from the reference tokenizer. Tests that do not
@@ -529,16 +525,6 @@ def _match_released_nemotron_h_embedding_name() -> None:
     with every real checkpoint on one tensor. Dropped upstream in 5.16, where this is a no-op
     since there is no such rule left to remove.
     """
-    # Optional dependency: conversion_mapping is transformers 5.x only, while NemotronH also
-    # exists on the 4.57 floor of the support matrix.
-    try:
-        from transformers.conversion_mapping import (
-            get_checkpoint_conversion_mapping,
-            register_checkpoint_conversion_mapping,
-        )
-    except ImportError:
-        return
-
     mapping = get_checkpoint_conversion_mapping("nemotron_h")
     if mapping is None:
         return
@@ -549,10 +535,6 @@ def _match_released_nemotron_h_embedding_name() -> None:
 
 def get_tiny_nemotron_h(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
-
-    # Lazy import — NemotronHConfig only exists in newer transformers builds, and this
-    # module is imported broadly (including by the min-transformers CI job).
-    from transformers import NemotronHConfig
 
     _match_released_nemotron_h_embedding_name()
 
@@ -637,6 +619,105 @@ def create_tiny_deepseek_v3_dir(
         with_tokenizer=with_tokenizer,
         **config_kwargs,
     )
+
+
+##### GLM-5.3-FLASH #####
+def get_tiny_glm5_next(**text_config_kwargs) -> PreTrainedModel:
+    """Tiny GLM-5.3-Flash VLM: one KDA + dense-MLP layer, one sparse-MLA + MoE layer, one vision block."""
+    set_seed(SEED)
+
+    # Lazy import — glm5_next is native only from transformers 5.16.1.
+    from transformers import Glm5NextConfig
+
+    text_kwargs = {
+        "vocab_size": 128,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "moe_intermediate_size": 32,
+        "num_hidden_layers": 2,
+        # "full_attention" maps to the sparse-MLA name of the installed transformers version.
+        "layer_types": ["linear_attention", "full_attention"],
+        "mlp_layer_types": ["dense", "sparse"],
+        "indexer_types": ["full", "full"],
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "q_lora_rank": 32,
+        "kv_lora_rank": 16,
+        "qk_nope_head_dim": 16,
+        "v_head_dim": 16,
+        # Megatron-Bridge reads these released-checkpoint fields, which transformers doesn't define.
+        "linear_attn_config": {"num_heads": 4, "head_dim": 16, "short_conv_kernel_size": 4},
+        "scoring_func": "sigmoid",
+        "index_n_heads": 2,
+        "index_head_dim": 16,
+        "index_topk": 8,
+        "index_kpool": 4,
+        "n_routed_experts": 4,
+        "num_experts_per_tok": 2,
+        "n_shared_experts": 1,
+        "max_position_embeddings": 64,
+        "pad_token_id": 0,
+    }
+    text_kwargs.update(text_config_kwargs)
+    vision_kwargs = {
+        "depth": 1,
+        "hidden_size": 32,
+        "intermediate_size": 64,
+        "num_heads": 2,
+        "image_size": 28,
+        "patch_size": 14,
+        "out_hidden_size": text_kwargs["hidden_size"],
+        "projection_intermediate_size": 64,
+    }
+    cfg = Glm5NextConfig(text_config=text_kwargs, vision_config=vision_kwargs)
+    model = AutoModelForImageTextToText.from_config(cfg, dtype=torch.bfloat16)
+    with torch.no_grad():
+        for name, tensor in [*model.named_parameters(), *model.named_buffers()]:
+            # Perturb the constant-initialized norms, gates and mHC scales, so export tests catch swaps.
+            if (tensor == tensor.flatten()[0]).all():
+                tensor.add_(torch.rand_like(tensor) * 0.1)
+            # FP32 in the released checkpoint, so export tests check them bit-exact.
+            if name.endswith(
+                ("_hc.base", "_hc.scale", "A_log", "dt_bias", "e_score_correction_bias")
+            ):
+                tensor.data = tensor.data.float()
+    return model
+
+
+def create_tiny_glm5_next_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, return_model: bool = False, **config_kwargs
+) -> Path | tuple[Path, PreTrainedModel]:
+    """Save :func:`get_tiny_glm5_next` with the MTP layer released checkpoints have.
+
+    transformers doesn't build the MTP layer, so it is added to the checkpoint here: a copy of the
+    last (sparse) decoder layer without mHC, plus random MTP norms and ``eh_proj``.
+    """
+    dir_path, model = _create_tiny_llm_dir(
+        Path(tmp_path) / "tiny_glm5_next_vl",
+        get_tiny_glm5_next,
+        with_tokenizer=with_tokenizer,
+        return_model=True,
+        num_nextn_predict_layers=1,
+        **config_kwargs,
+    )
+    text_config = model.config.text_config
+    last = f"model.language_model.layers.{text_config.num_hidden_layers - 1}."
+    mtp = f"model.language_model.layers.{text_config.num_hidden_layers}."
+    path = dir_path / "model.safetensors"
+    state_dict = load_file(str(path))
+    for key in list(state_dict):
+        if key.startswith(last) and ".hc_" not in key:
+            state_dict[mtp + key.removeprefix(last)] = state_dict[key].clone()
+    hidden = text_config.hidden_size
+    for name, shape in [
+        ("enorm.weight", (hidden,)),
+        ("hnorm.weight", (hidden,)),
+        ("eh_proj.weight", (hidden, 2 * hidden)),
+        ("shared_head.norm.weight", (hidden,)),
+    ]:
+        state_dict[mtp + name] = torch.randn(shape, dtype=torch.bfloat16)
+    save_file(state_dict, str(path), metadata={"format": "pt"})
+    return (dir_path, model) if return_model else dir_path
 
 
 ##### GLM-5.3-FLASH / DEEPSEEK-V4 (config-only, for vLLM ``load_format="dummy"``) #####

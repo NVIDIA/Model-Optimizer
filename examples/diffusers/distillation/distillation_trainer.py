@@ -28,8 +28,6 @@ Usage:
     python distillation_trainer.py --config configs/distillation_example.yaml
 """
 
-from __future__ import annotations
-
 import argparse
 import gc
 import json

@@ -22,7 +22,7 @@ import torch
 from conftest import make_qkv, make_varlen_meta
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-import modelopt.torch.sparsity.attention_sparsity as mtsa
+import modelopt.torch.sparsity as mts
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:
@@ -417,7 +417,7 @@ class TestSparseNMIntegration:
         assert torch.equal(out_dense, out_n0)
 
     def test_sparse_nm_via_sparsify(self, tiny_llama_dir):
-        """mtsa.sparsify() with N:M sparse softmax produces finite logits that differ from dense."""
+        """mts.sparsify() with N:M sparse softmax produces finite logits that differ from dense."""
         tok = AutoTokenizer.from_pretrained(tiny_llama_dir)
         if tok.pad_token_id is None:
             tok.pad_token_id = tok.eos_token_id
@@ -435,7 +435,7 @@ class TestSparseNMIntegration:
             logits_dense = model_dense(input_ids=ids).logits
         del model_dense
 
-        # Sparse via mtsa.sparsify() with dense_recent_tokens=0 to force sparsity on all tiles
+        # Sparse via mts.sparsify() with dense_recent_tokens=0 to force sparsity on all tiles
         sparse_cfg = {
             "sparse_cfg": {
                 "*attn*": {
@@ -455,7 +455,7 @@ class TestSparseNMIntegration:
             torch_dtype=torch.bfloat16,
             device_map="cuda",
         )
-        mtsa.sparsify(model_sparse, sparse_cfg)
+        mts.sparsify(model_sparse, sparse_cfg)
         assert model_sparse.config._attn_implementation == "modelopt_triton"
         model_sparse.eval()
         with torch.no_grad():

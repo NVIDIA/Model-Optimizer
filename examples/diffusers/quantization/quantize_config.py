@@ -14,7 +14,7 @@
 # limitations under the License.
 import math
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,7 @@ import torch
 from models_utils import MODEL_REGISTRY, ModelType
 
 
-class DataType(str, Enum):
+class DataType(StrEnum):
     """Supported data types for model loading."""
 
     HALF = "Half"
@@ -41,7 +41,7 @@ DataType._dtype_map = {
 }
 
 
-class QuantFormat(str, Enum):
+class QuantFormat(StrEnum):
     """Supported quantization formats."""
 
     INT8 = "int8"
@@ -49,7 +49,7 @@ class QuantFormat(str, Enum):
     FP4 = "fp4"
 
 
-class QuantAlgo(str, Enum):
+class QuantAlgo(StrEnum):
     """Supported quantization algorithms."""
 
     MAX = "max"
@@ -57,7 +57,7 @@ class QuantAlgo(str, Enum):
     SMOOTHQUANT = "smoothquant"
 
 
-class CollectMethod(str, Enum):
+class CollectMethod(StrEnum):
     """Calibration collection methods."""
 
     GLOBAL_MIN = "global_min"

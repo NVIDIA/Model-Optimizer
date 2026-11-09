@@ -17,7 +17,7 @@
 
 import torch
 
-from ..qtensor.base_qtensor import BaseQuantizedTensor
+from ..qtensor.base_qtensor import BaseQuantizedTensor, _refuse_dtensor
 
 __all__ = ["MXFP4QTensor"]
 
@@ -50,34 +50,26 @@ class MXFP4QTensor(BaseQuantizedTensor):
         """Decode E8M0 exponent bytes to floating-point powers of two."""
         return torch.exp2(scale.float() - 127)
 
-    @classmethod
-    def project_e8m0_scale_ste(cls, scale: torch.Tensor) -> torch.Tensor:
-        """Project scales to E8M0 in forward while preserving identity gradients."""
-        projected = cls.decode_e8m0_scale(cls.encode_e8m0_scale(scale))
-        return scale.float() + (projected - scale.float()).detach()
+        def cast_fp4(x):
+            sign = torch.sign(x)
+            sign_bit = (2 - sign) // 2
+            ord_ = torch.sum(
+                (x.abs().unsqueeze(-1) - MXFP4QTensor.E2M1_bounds.to(x.device)) > 0, dim=-1
+            )
+            fp4_val = (sign_bit * 0b1000 + ord_).to(torch.uint8)
+            return fp4_val
 
-    @staticmethod
-    def _cast_fp4(x: torch.Tensor) -> torch.Tensor:
-        sign = torch.sign(x)
-        sign_bit = (2 - sign) // 2
-        ord_ = torch.sum(
-            (x.abs().unsqueeze(-1) - MXFP4QTensor.E2M1_bounds.to(x.device)) > 0, dim=-1
-        )
-        return (sign_bit * 0b1000 + ord_).to(torch.uint8)
+        def fuse_uint4_to_uint8(x):
+            # If the last dimension is odd, pad with zeros
+            # If this behavior is not desired, please modify the code accordingly
+            left_side = x[..., 0::2]  # Even indices (0, 2, 4...)
+            right_side = x[..., 1::2]  # Odd indices (1, 3, 5...)
+            # Put odd indices (higher addresses) in high bits
+            new_data = torch.bitwise_left_shift(right_side, 4)
+            new_data[..., : left_side.shape[-1]] += left_side  # Put even indices in low bits
+            return new_data
 
-    @staticmethod
-    def _fuse_uint4_to_uint8(x: torch.Tensor) -> torch.Tensor:
-        left_side = x[..., 0::2]
-        right_side = x[..., 1::2]
-        new_data = right_side.clone() << 4
-        new_data[..., : left_side.shape[-1]] += left_side
-        return new_data
-
-    @classmethod
-    def quantize_with_scale(
-        cls, input: torch.Tensor, scale: torch.Tensor, block_size: int | None
-    ) -> "MXFP4QTensor":
-        """Quantize using caller-provided E8M0 scale bytes."""
+        _refuse_dtensor(input, cls.__name__)
         if block_size is None:
             block_size = 32
         if not isinstance(block_size, int) or block_size <= 0:

@@ -388,3 +388,26 @@ def test_rejects_invalid_importance(name, importance, match):
 
     with pytest.raises(ValueError, match=match):
         quantize(torch.randn(4, 512), importance=importance)
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_fixed_choices_take_each_group_from_that_choices_encoding(name):
+    """A fixed choice decodes as the encoding giving every group that choice; the search's own pick
+    is the choice of least squared error."""
+    fmt = IQ_FORMAT_REGISTRY[name]
+    groups, size = fmt.choice_groups, 256 // fmt.choice_groups
+    weight = torch.randn(4, 512, generator=torch.Generator().manual_seed(0))
+    shape = (4, 2, groups)
+
+    def decode(**kwargs):
+        packed, logical = fmt.quantize(weight, **kwargs)
+        return fmt.dequantize(packed, logical, dtype=torch.float32).reshape(*shape, size)
+
+    each = torch.stack([decode(choices=torch.full(shape, c)) for c in range(fmt.num_choices)])
+    fixed = torch.randint(0, fmt.num_choices, shape, generator=torch.Generator().manual_seed(1))
+    searched = (each - weight.reshape(*shape, size)).square().sum(-1).argmin(0)
+    for picks, kwargs in [(fixed, {"choices": fixed}), (searched, {})]:
+        expected = each.gather(0, picks[None, ..., None].expand(1, *shape, size))[0]
+        assert torch.equal(decode(**kwargs), expected)
+    with pytest.raises(ValueError, match="choices must lie in"):
+        fmt.quantize(weight, choices=torch.full(shape, fmt.num_choices))
