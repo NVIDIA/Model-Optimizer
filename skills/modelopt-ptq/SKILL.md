@@ -12,6 +12,11 @@ description: >-
 
 # ModelOpt Post-Training Quantization
 
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
+
 Produce a quantized checkpoint from a pretrained model. **Read `examples/hf_ptq/README.md` first** — it has the support matrix, CLI flags, and accuracy guidance.
 
 Use `modelopt-quant-recipe-search` for multi-candidate recipe exploration or

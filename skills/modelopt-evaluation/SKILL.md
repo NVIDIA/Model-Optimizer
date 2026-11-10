@@ -8,6 +8,11 @@ license: Apache-2.0
 
 # NeMo Evaluator Launcher Assistant
 
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
+
 Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints.
 
 ## Completed-run analysis

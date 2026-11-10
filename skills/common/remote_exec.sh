@@ -17,7 +17,7 @@
 # remote_exec.sh — Remote execution utility for ModelOpt agent skills
 #
 # Usage:
-#   source "$SKILL_DIR/remote_exec.sh"
+#   source "$MODELOPT_SKILLS/common/remote_exec.sh"
 #   remote_load_cluster <cluster_name>     # or: remote_load_cluster (uses default)
 #   remote_check_ssh
 #   remote_detect_env                       # detect SLURM vs Docker vs bare metal

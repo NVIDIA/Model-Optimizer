@@ -15,6 +15,11 @@ description: >-
 
 # Quant Recipe Search
 
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
+
 Use this skill when quantization is an iterative recipe search, not a one-off
 PTQ run. The skill owns strategy: define success, choose the search space,
 sequence candidates, and decide the next iteration. It delegates checkpoint

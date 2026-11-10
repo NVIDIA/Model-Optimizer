@@ -24,7 +24,7 @@
 #   .agents/scripts/sync-upstream-skills.sh            # re-vendor at the pinned SHA
 #   UPSTREAM_SHA=<sha> .agents/scripts/sync-upstream-skills.sh   # bump to a new SHA
 #
-# Requires: gh, base64, awk. Run from the repo root.
+# Requires: gh, base64, awk, python3. Run from the repo root.
 #
 # The script overwrites skills/<skill>/ through the
 # .agents/skills compatibility symlink and
@@ -134,6 +134,21 @@ inject_provenance() {
         }
     ' "$path" > "$path.tmp"
     mv "$path.tmp" "$path"
+    python3 - "$path" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+frontmatter, body = path.read_text().split("\n---\n", 1)
+heading, rest = body.lstrip().split("\n\n", 1)
+bootstrap = """Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
+
+"""
+path.write_text(frontmatter + "\n---\n\n" + heading + "\n\n" + bootstrap + rest)
+PY
 }
 
 for skill in launching-evals accessing-mlflow; do
