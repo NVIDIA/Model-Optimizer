@@ -143,11 +143,17 @@ The candidate uses fewer tokens on average on SciCode and AA-Omniscience (p < 0.
 
 ### Prioritize question coverage over repetitions
 
-For MMLU-Pro, we compared more questions evaluated once with fewer questions evaluated repeatedly, using 1,000 responses per model. Both approaches gave similarly stable estimates of the accuracy difference between models. Prioritize question coverage. Only add repetitions when the available questions do not provide enough evidence. The [plots in the next section](#collect-as-much-evaluation-data-as-you-need) show how these extra responses narrow confidence intervals.
+Question-level analysis asks whether Candidate performs better on average on questions like those in the benchmark. It averages repetitions within each question and compares paired differences. Repetition-level (run-level) analysis asks whether Candidate performs better on average across repeated runs of the same fixed questions. It compares aggregate benchmark scores across repetitions.
+
+For SciCode, we test whether Candidate has a lower cap-hit rate than Baseline on the same 294 subtasks. The plot below compares a paired subtask-permutation test with a one-sided Welch t-test on per-repetition cap-hit rates. Using identical responses, question-level analysis reaches p < 0.001 with three repetitions; repetition-level analysis needs six, requiring twice as many responses.
+
+<img src="images/evaluation_guidelines/scicode-cap-analysis-unit.svg" alt="One-sided p-values for fewer candidate cap hits across one to twenty repetitions on the same 294 SciCode subtasks. The paired subtask-permutation test reaches p below 0.001 at three repetitions, or 882 responses per model; the run-level Welch t-test reaches it at six repetitions, or 1,764 responses per model. Welch is unavailable with one repetition." width="640" />
+
+For MMLU-Pro, we compared more questions evaluated once with fewer questions evaluated repeatedly, using 1,000 responses per model. Both approaches gave similarly stable estimates of the accuracy difference between models.
 
 <img src="images/evaluation_guidelines/allocation-accuracy-gap.svg" alt="At a fixed 1,000-response budget, the mean accuracy gap and observed variation remain similar across one to twenty repetitions." width="640" />
 
-Analyze results at the question level: average repeats within each question. Question-level tests can use one repetition; repetition-level t-tests need multiple runs.
+With enough independent questions, one repetition may provide sufficient evidence; see the [MMLU-Pro example in the next section](#collect-as-much-evaluation-data-as-you-need). Repetition-level t-tests are not applicable with only one repetition. On a focused subset, question-level analysis uses differences across its questions, while repetition-level analysis needs repeated runs of that subset. The [comparison skill](../../plugins/modelopt/skills/compare-results/SKILL.md) currently supports only repetition-level analysis. Together, these examples support prioritizing question coverage, then adding repetitions when the available questions do not provide enough evidence.
 
 ### Collect as much evaluation data as you need
 
