@@ -18,77 +18,56 @@
 import math
 
 import torch
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 __all__ = ["masked_lk_lambda_loss", "masked_soft_target_cross_entropy"]
 
 
-class _LKLambdaLoss(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, teacher_logits, student_logits, loss_mask, eta, draft_vocab_indices):
-        teacher_normalizer = torch.logsumexp(teacher_logits.float(), dim=-1, keepdim=True)
-        selected_teacher = (
-            teacher_logits
-            if draft_vocab_indices is None
-            else teacher_logits.index_select(-1, draft_vocab_indices)
-        ).float()
-        conditional_normalizer = (
-            teacher_normalizer
-            if draft_vocab_indices is None
-            else torch.logsumexp(selected_teacher, dim=-1, keepdim=True)
-        )
-        student_normalizer = torch.logsumexp(student_logits.float(), dim=-1, keepdim=True)
-        log_q = student_logits.float() - student_normalizer
-        log_p_conditional = selected_teacher - conditional_normalizer
-        p = (selected_teacher - teacher_normalizer).exp()
-        q = log_q.exp()
-        student_is_lower = q < p
-        overlap = torch.where(student_is_lower, q, p).sum(-1)
-        picked_mass = (q * student_is_lower).sum(-1, keepdim=True)
-        del selected_teacher, p, q, student_is_lower
-        kl = torch.nn.functional.kl_div(log_q, log_p_conditional.exp(), reduction="none").sum(-1)
-        weights = loss_mask.float()
-        weight_sum = weights.sum()
-        weights = weights / weight_sum.masked_fill(weight_sum == 0, 1)
-        blend = torch.exp(-eta * (weights * overlap).sum())
-        ctx.save_for_backward(
-            teacher_logits,
-            student_logits,
-            draft_vocab_indices,
-            teacher_normalizer,
-            conditional_normalizer,
-            student_normalizer,
-            picked_mass,
-            weights,
-            blend,
-        )
-        return (weights * (blend * kl + (1 - blend) * (1 - overlap))).sum()
+def _lk_lambda_loss(
+    divergence: torch.Tensor,
+    overlap: torch.Tensor,
+    weights: torch.Tensor,
+    weight_sum: torch.Tensor,
+    *,
+    eta: float,
+    scale: float = 1.0,
+    mean_acceptance: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Blend weighted divergence and acceptance losses as in DFlash2.
 
-    @staticmethod
-    def backward(ctx, grad_output):
-        (
-            teacher_logits,
-            student_logits,
-            draft_vocab_indices,
-            teacher_normalizer,
-            conditional_normalizer,
-            student_normalizer,
-            picked_mass,
-            weights,
-            blend,
-        ) = ctx.saved_tensors
-        selected_teacher = (
-            teacher_logits
-            if draft_vocab_indices is None
-            else teacher_logits.index_select(-1, draft_vocab_indices)
-        ).float()
-        p = (selected_teacher - teacher_normalizer).exp()
-        p_conditional = (selected_teacher - conditional_normalizer).exp()
-        q = (student_logits.float() - student_normalizer).exp()
-        # Reconstruct probabilities instead of retaining full-width FP32 activations per round.
-        grad = blend * (q - p_conditional)
-        grad += (blend - 1) * q * ((q < p).to(q.dtype) - picked_mass)
-        grad *= (grad_output * weights).unsqueeze(-1)
-        return None, grad.to(student_logits.dtype), None, None, None
+    DFlash2 supplies its unweighted mean acceptance; soft targets use the loss weights.
+    """
+    divergence_loss = (divergence * weights).sum() / weight_sum
+    tv_loss = ((1.0 - overlap) * weights).sum() / weight_sum
+    if mean_acceptance is None:
+        mean_acceptance = (overlap.detach() * weights).sum() / weight_sum
+    blend = scale * torch.exp(-eta * mean_acceptance.detach())
+    return blend * divergence_loss + (1.0 - blend) * tv_loss
+
+
+def _soft_target_lk_loss(
+    teacher_logits: torch.Tensor,
+    student_logits: torch.Tensor,
+    loss_mask: torch.Tensor,
+    eta: float,
+    draft_vocab_indices: torch.Tensor | None,
+) -> torch.Tensor:
+    log_p = teacher_logits.float().log_softmax(-1)
+    if draft_vocab_indices is not None:
+        log_p = log_p.index_select(-1, draft_vocab_indices)
+    p = log_p.exp()
+    p_conditional = p if draft_vocab_indices is None else log_p.softmax(-1)
+    log_q = student_logits.float().log_softmax(-1)
+    q = log_q.exp()
+    # Keep the repaired objective's subgradient at equal probabilities.
+    overlap = torch.where(q < p, q, p).sum(-1)
+    kl = F.kl_div(log_q, p_conditional, reduction="none").sum(-1)
+    weights = loss_mask.float()
+    weight_sum = weights.sum()
+    return _lk_lambda_loss(
+        kl, overlap, weights, weight_sum.masked_fill(weight_sum == 0, 1), eta=eta
+    )
 
 
 def masked_lk_lambda_loss(
@@ -129,8 +108,15 @@ def masked_lk_lambda_loss(
             raise ValueError("Different vocabularies require draft_vocab_indices")
     elif draft_vocab_indices.ndim != 1 or draft_vocab_indices.numel() != student_logits.shape[-1]:
         raise ValueError("draft_vocab_indices must contain one target token ID per draft token")
-    return _LKLambdaLoss.apply(
-        teacher_logits.detach(), student_logits, loss_mask.detach(), eta, draft_vocab_indices
+    # Recompute vocabulary-sized probabilities rather than retain them across draft depths.
+    return checkpoint(
+        _soft_target_lk_loss,
+        teacher_logits.detach(),
+        student_logits,
+        loss_mask.detach(),
+        eta,
+        draft_vocab_indices,
+        use_reentrant=False,
     )
 
 
