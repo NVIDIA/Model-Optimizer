@@ -17,7 +17,7 @@
     "llm"
   ],
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json",
+  "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "ModelOpt",
     "shortDescription": "Optimize, deploy, and evaluate models.",

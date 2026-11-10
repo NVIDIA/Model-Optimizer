@@ -25,14 +25,5 @@
     "./.claude/agents/modelopt-model-quantize-recipe-searcher.md",
     "./.claude/agents/modelopt-model-quantizer.md"
   ],
-  "mcpServers": {
-    "modelopt": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/NVIDIA/Model-Optimizer.git#subdirectory=tools/mcp",
-        "modelopt-mcp"
-      ]
-    }
-  }
+  "mcpServers": "./.claude-plugin/mcp.json"
 }

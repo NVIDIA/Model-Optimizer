@@ -18,7 +18,8 @@ and holds shared configuration.
 
 .claude-plugin/plugin.json  # root Claude plugin manifest
 .codex-plugin/plugin.json   # root Codex plugin manifest
-.mcp.json                   # plugin MCP configuration
+.claude-plugin/mcp.json     # Claude plugin MCP configuration
+.codex-plugin/mcp.json      # Codex plugin MCP configuration
 .claude/agents/             # canonical Claude subagent definitions
 
 skills/                     # canonical skill content
@@ -37,6 +38,9 @@ Repository discovery shares files through the supported agent paths:
   The root manifests load the real `skills/` directory, without installer symlinks.
 - **Claude Code** loads the individual `.claude/agents/*.md` paths listed in
   the root plugin manifest. These canonical files also serve repository users.
+- **MCP servers** load through each plugin manifest. In a plain Claude checkout,
+  use `claude --mcp-config .claude-plugin/mcp.json` or load the plugin with
+  `claude --plugin-dir .`; nested MCP files are not auto-discovered.
 - **Codex** discovers project roles directly under `.codex/agents/`. Codex
   plugins cannot currently install custom roles.
 
