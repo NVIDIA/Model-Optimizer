@@ -650,7 +650,7 @@ def test_a_malformed_variable_refuses_before_the_model_changes(monkeypatch, vari
     with pytest.raises(ValueError, match=variable):
         mtq.auto_quantize(
             model,
-            constraints={"effective_bits": 6.0},
+            constraints={"effective_bits": 8.0},
             quantization_formats=[mtq.INT8_DEFAULT_CFG],
             data_loader=[SimpleLinear.get_input()],
             forward_step=lambda m, batch: m(batch),
