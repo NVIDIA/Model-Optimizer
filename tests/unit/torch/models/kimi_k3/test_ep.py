@@ -163,6 +163,44 @@ def test_fused_experts_dispatch_through_the_experts_interface(monkeypatch):
     torch.testing.assert_close(dispatched, eager)
 
 
+def test_the_eager_loop_sums_a_tokens_results_in_the_routing_weights_dtype():
+    """Kimi-K3's gate gives fp32 routing weights. The checkpoint's own ``moe_infer`` weights each
+    expert's bf16 result in them, sums a token's results in fp32 and casts once, as transformers'
+    grouped forwards and the ``torch_a2a`` combine do. The eager loop, the GPU test's whole-model
+    reference, must sum the same way: summed in bf16, every result is rounded on the way."""
+    config = _config(hidden_act="situ")
+    experts = kimi_k3._build_fused_experts_class(remote_module())(
+        config, config.routed_expert_hidden_size
+    )
+    _randomize(experts)
+    experts.to(torch.bfloat16)
+    gen = torch.Generator().manual_seed(2)
+    num_tokens, width = 64, config.routed_expert_hidden_size
+    tokens = torch.randn(num_tokens, width, generator=gen).to(torch.bfloat16)
+    # Two experts per token: a sum of two results is the same in either order, so the reference
+    # below can match the loop exactly.
+    routes = torch.stack(
+        [torch.randperm(config.num_experts, generator=gen)[:2] for _ in range(num_tokens)]
+    )
+    route_weights = torch.rand(routes.shape, generator=gen)
+
+    with torch.no_grad():
+        got = experts(tokens, routes, route_weights)
+        # Each expert's bf16 result on the tokens routed to it, in the loop's row order, combined as
+        # moe_infer combines them.
+        results = torch.empty(num_tokens, 2, width, dtype=torch.bfloat16)
+        for e in range(config.num_experts):
+            slot, token = (e == routes.T).nonzero(as_tuple=True)
+            gate_up = nn.functional.linear(tokens[token], experts.gate_up_proj[e])
+            results[token, slot] = nn.functional.linear(
+                experts._apply_gate(gate_up), experts.down_proj[e]
+            )
+        want = (results.float() * route_weights[..., None]).sum(dim=1).to(torch.bfloat16)
+
+    assert got.dtype == torch.bfloat16
+    assert torch.equal(got, want)
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

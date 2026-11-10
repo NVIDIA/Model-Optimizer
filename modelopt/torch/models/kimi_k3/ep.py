@@ -1,6 +1,7 @@
 # Adapted from https://github.com/huggingface/transformers/blob/a906d3c4b65095f2308b6a6a193e934d03b8eb5d/src/transformers/models/minimax_m3_vl/modeling_minimax_m3_vl.py
 # (``MiniMaxM3VLExperts``: the fused expert parameters and the eager ``forward`` loop of ``KimiK3Experts``),
-# modified for Kimi-K3's ``situ`` gate and latent expert width.
+# modified for Kimi-K3's ``situ`` gate and latent expert width, and to sum a token's results in the routing
+# weights' dtype.
 # Copyright 2026 the MiniMax AI Team and HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -178,7 +179,15 @@ def _build_fused_experts_class(kmod):
             # Fallback (non-EP / eager) dense per-expert loop; the EP-PTQ path replaces this with the
             # torch_a2a experts forward via config._experts_implementation. Adapted from transformers'
             # MiniMaxM3VLExperts.forward (see the header), with situ gating.
-            final = torch.zeros_like(hidden_states)
+            # A token's weighted results are summed in the routing weights' dtype and cast once, as the
+            # checkpoint's own moe_infer, transformers' grouped forwards and the torch_a2a combine sum
+            # them: in fp32 under Kimi-K3's fp32 gate. Summed into hidden_states' bf16, every result
+            # would be rounded on the way.
+            final = torch.zeros(
+                hidden_states.shape,
+                dtype=torch.promote_types(hidden_states.dtype, top_k_weights.dtype),
+                device=hidden_states.device,
+            )
             with torch.no_grad():
                 # One class past the experts: the id a router gives a token routed to no local expert.
                 mask = nn.functional.one_hot(top_k_index, num_classes=self.num_experts + 1).permute(
@@ -196,7 +205,7 @@ def _build_fused_experts_class(kmod):
                 cur = nn.functional.linear(cur, self.down_proj[expert_idx])
                 cur = cur * top_k_weights[token_idx, top_k_pos, None]
                 final.index_add_(0, token_idx, cur.to(final.dtype))
-            return final
+            return final.to(hidden_states.dtype)
 
     # is_transposed=False: [E, out, in] (like deepseek/qwen). has_gate=True: gate_up is FUSED (2*I) and
     # split by _apply_gate. has_bias=False: bias-free experts.
