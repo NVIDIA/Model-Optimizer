@@ -38,7 +38,15 @@ from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_prepr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
 
-from distill import HAS_DIRECT_HF_SFT, _add_document_boundaries, _document_eod_id, _hf_source
+from distill import (
+    HAS_DIRECT_HF_SFT,
+    _add_document_boundaries,
+    _check_moe_freeze_args,
+    _document_eod_id,
+    _freeze_student_params,
+    _hf_source,
+    _require_grad_from_embedding,
+)
 from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
 
 
@@ -227,11 +235,19 @@ def test_distill_llm_sft(tmp_path, num_gpus):
 
 
 @pytest.mark.skipif(not HAS_DIRECT_HF_SFT, reason="Megatron-Bridge lacks DirectHFSFTDatasetConfig")
-@pytest.mark.parametrize("packed", [False, True])
-def test_distill_llm_sft_hf_chat(tmp_path, num_gpus, packed):
+@pytest.mark.parametrize(
+    ("packed", "freeze_flag"),
+    [
+        (False, None),
+        (True, None),
+        (True, "--train_moe_expert_fc_only"),
+    ],
+)
+def test_distill_llm_sft_hf_chat(tmp_path, num_gpus, packed, freeze_flag):
     """--sft_hf_dataset distills on chat jsonl rendered by the model's chat template.
 
-    ``packed`` runs an MoE student with conversations packed per micro-batch and the aux loss off.
+    ``packed`` runs an MoE student with conversations packed per micro-batch and the aux loss off;
+    ``freeze_flag`` additionally freezes all but the routed-expert FC weights.
     """
     create_dir = create_tiny_qwen3_moe_dir if packed else create_tiny_qwen3_dir
     # The default head_dim=2 leaves only TE's unfused attention, which the 2-GPU sm_120 runner
@@ -263,7 +279,8 @@ def test_distill_llm_sft_hf_chat(tmp_path, num_gpus, packed):
     packing = {"moe_aux_loss_coeff": 0} if packed else {}
     distill_cmd_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--sft"]
-        + (["--sft_in_batch_packing"] if packed else []),
+        + (["--sft_in_batch_packing"] if packed else [])
+        + ([freeze_flag] if freeze_flag else []),
         student_hf_path=teacher_hf_path,
         teacher_hf_path=teacher_hf_path,
         sft_hf_dataset=data_files["train"],
@@ -305,6 +322,172 @@ def test_hf_source_spec(spec, path_or_dataset, split, load_kwargs):
         split,
         load_kwargs,
     )
+
+
+class _ToyMoeStudent(torch.nn.Module):
+    """Parameter names follow Megatron-Core's MoE layout; ``final_norm=False`` drops the final norm."""
+
+    def __init__(self, final_norm=True):
+        super().__init__()
+        mlp = torch.nn.ModuleDict(
+            {
+                "router": torch.nn.Linear(2, 2),
+                "experts": torch.nn.ModuleDict({"linear_fc1": torch.nn.Linear(2, 2)}),
+                "shared_experts": torch.nn.Linear(2, 2),
+            }
+        )
+        fc1 = mlp["experts"].linear_fc1
+        fc1.weight_quantizer = torch.nn.Module()
+        fc1.weight_quantizer.amax_post = torch.nn.Parameter(torch.ones(1))  # restored LSQ scale
+        mlp["experts"].linear_fc2 = torch.nn.Module()
+        mlp["experts"].linear_fc2.weight0 = torch.nn.Parameter(torch.ones(2, 2))  # grouped GEMM
+        self.decoder = torch.nn.ModuleDict(
+            {
+                "layers": torch.nn.ModuleDict(
+                    {
+                        "0": torch.nn.ModuleDict(
+                            {"mlp": mlp, "self_attention": torch.nn.Linear(2, 2)}
+                        )
+                    }
+                )
+            }
+        )
+        if final_norm:
+            self.decoder["final_layernorm"] = torch.nn.LayerNorm(2)
+
+
+def _trainable_names(model):
+    return {n for n, p in model.named_parameters() if p.requires_grad}
+
+
+def test_freeze_student_params():
+    model = _ToyMoeStudent()
+    trainable, frozen = _freeze_student_params(
+        model, freeze_router=True, expert_fc_only=False, check_layout=True
+    )
+    names = _trainable_names(model)
+    assert not any(".router." in n for n in names)
+    assert {n for n in names if ".mlp.experts." in n}
+    assert "decoder.layers.0.self_attention.weight" in names
+    assert trainable + frozen == sum(p.numel() for p in model.parameters())
+    assert frozen == 2 * 2 + 2  # the router weight and bias
+
+    model = _ToyMoeStudent()
+    _freeze_student_params(model, freeze_router=False, expert_fc_only=True, check_layout=True)
+    # Expert FC weights (sequential and grouped) only: biases and quantizer scales stay frozen.
+    assert _trainable_names(model) == {
+        "decoder.layers.0.mlp.experts.linear_fc1.weight",
+        "decoder.layers.0.mlp.experts.linear_fc2.weight0",
+        "decoder.final_layernorm.weight",
+        "decoder.final_layernorm.bias",
+    }
+
+
+def test_expert_fc_only_keeps_only_the_decoder_final_norm():
+    model = _ToyMoeStudent()
+    model.mtp = torch.nn.ModuleDict({"final_layernorm": torch.nn.LayerNorm(2)})
+    model.language_model = torch.nn.Module()
+    model.language_model.decoder = torch.nn.ModuleDict({"final_norm": torch.nn.LayerNorm(2)})
+    _freeze_student_params(model, freeze_router=False, expert_fc_only=True, check_layout=True)
+    names = _trainable_names(model)
+    assert "decoder.final_layernorm.weight" in names
+    assert "language_model.decoder.final_norm.weight" in names
+    assert not any(n.startswith("mtp.") for n in names)
+
+
+def test_freeze_router_keeps_earlier_freezes():
+    # E.g. the LoRA restore freezes the backbone: --freeze_router must not train it again.
+    model = _ToyMoeStudent()
+    model.requires_grad_(False)
+    model.decoder.layers["0"]["mlp"]["experts"].linear_fc1.requires_grad_(True)
+    trainable, frozen = _freeze_student_params(
+        model, freeze_router=True, expert_fc_only=False, check_layout=True
+    )
+    assert _trainable_names(model) == {
+        n for n, _ in model.named_parameters() if ".mlp.experts.linear_fc1." in n
+    }
+    assert trainable + frozen == sum(p.numel() for p in model.parameters())
+
+
+def test_expert_fc_only_rejects_lora_student():
+    model = _ToyMoeStudent()
+    model.decoder.layers["0"]["self_attention"].lora_A = torch.nn.Parameter(torch.zeros(1, 2))
+    with pytest.raises(ValueError, match="LoRA"):
+        _freeze_student_params(model, freeze_router=False, expert_fc_only=True, check_layout=True)
+    assert all(p.requires_grad for p in model.parameters())  # refused before changing anything
+
+
+def test_freeze_student_params_fails_loudly():
+    def refused(model, match, **kwargs):
+        before = {n: p.requires_grad for n, p in model.named_parameters()}
+        with pytest.raises(ValueError, match=match):
+            _freeze_student_params(model, check_layout=True, **kwargs)
+        # A refusal leaves the student as it was.
+        assert {n: p.requires_grad for n, p in model.named_parameters()} == before
+
+    refused(
+        _ToyMoeStudent(final_norm=False),
+        "no trainable dense parameter",
+        freeze_router=False,
+        expert_fc_only=True,
+    )
+    refused(torch.nn.Linear(2, 2), "no MoE router", freeze_router=True, expert_fc_only=False)
+    refused(torch.nn.Linear(2, 2), "no routed-expert", freeze_router=False, expert_fc_only=True)
+    # Another pipeline stage may hold none of these parameters, so the layout is not checked there.
+    _freeze_student_params(
+        torch.nn.Linear(2, 2), freeze_router=True, expert_fc_only=False, check_layout=False
+    )
+
+
+class LanguageModelEmbedding(torch.nn.Module):  # matched by class name, like Megatron's
+    def __init__(self, tuple_out=False):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(2, 2), requires_grad=False)
+        self.tuple_out = tuple_out
+
+    def forward(self, x):
+        out = x @ self.weight
+        return (out,) if self.tuple_out else out
+
+
+def test_require_grad_from_embedding():
+    emb = LanguageModelEmbedding()
+    _require_grad_from_embedding(torch.nn.Sequential(emb))
+    assert emb(torch.ones(1, 2)).requires_grad  # frozen weight, but the output carries a graph
+    with pytest.raises(ValueError, match="no LanguageModelEmbedding"):
+        _require_grad_from_embedding(torch.nn.Linear(2, 2))
+    tuple_emb = LanguageModelEmbedding(tuple_out=True)
+    _require_grad_from_embedding(tuple_emb)
+    with pytest.raises(RuntimeError, match="expects a tensor"):
+        tuple_emb(torch.ones(1, 2))
+
+
+@pytest.mark.parametrize("flag", ["freeze_router", "train_moe_expert_fc_only"])
+def test_moe_freeze_flags_need_zero_aux_loss(flag):
+    args = SimpleNamespace(
+        freeze_router=False,
+        train_moe_expert_fc_only=False,
+        trainable_params=None,
+        moe_aux_loss_coeff=0,
+        pp_size=1,
+    )
+    setattr(args, flag, True)
+    _check_moe_freeze_args(args)
+    args.trainable_params = ["*.experts.*"]
+    with pytest.raises(ValueError, match="--trainable_params cannot be combined"):
+        _check_moe_freeze_args(args)
+    args.trainable_params = None
+    for aux in (None, 0.01):
+        args.moe_aux_loss_coeff = aux
+        with pytest.raises(ValueError, match="--moe_aux_loss_coeff 0"):
+            _check_moe_freeze_args(args)
+    args.moe_aux_loss_coeff = 0
+    args.pp_size = 2
+    if flag == "train_moe_expert_fc_only":
+        with pytest.raises(ValueError, match="--pp_size 1"):
+            _check_moe_freeze_args(args)
+    else:
+        _check_moe_freeze_args(args)
 
 
 def test_distill_validate_only(tmp_path, num_gpus):
