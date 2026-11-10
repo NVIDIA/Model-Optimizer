@@ -258,7 +258,7 @@ def _task_from_metadata(artifacts_dir):
     """Task name declared next to the artifacts, or None if it is not unambiguous.
 
     Reads ``metadata.yaml`` then ``config.yml``. Both matter: the documented rsync
-    (``launching-evals``/``analyze-results``) copies ``config.yml`` but not
+    (``modelopt-launching-evals``/``analyze-results``) copies ``config.yml`` but not
     ``metadata.yaml``, so keying off metadata alone leaves the documented layout with
     no declared name at all.
 

@@ -93,8 +93,8 @@ unvalidated checkpoint.
 #### Step 2b — serving canary (MANDATORY before Step 3)
 
 The canary itself is **already specified** by the ptq skill: see
-`ptq/references/checkpoint-validation.md` (required gate, canary query and the
-`Serving canary` row of its report table) and `ptq/SKILL.md`. Run it there rather
+`modelopt-ptq/references/checkpoint-validation.md` (required gate, canary query and the
+`Serving canary` row of its report table) and `modelopt-ptq/SKILL.md`. Run it there rather
 than re-deriving it here — `gate_ptq.py` checks size, coverage and metadata, not
 whether the checkpoint *loads*, and skipping the canary has cost a full baseline
 eval against a checkpoint the serving stack could never load.
@@ -180,7 +180,7 @@ baseline.
 
 #### Uncertainty — check BEFORE trusting any per-task verdict
 
-Use the [compare-results assessment](../compare-results/references/assess-results.md)
+Use the [compare-results assessment](../modelopt-compare-results/references/assess-results.md)
 against the allowed loss, in matching units. A point estimate within threshold
 or an SE below it does not establish acceptance; require the entire signed-loss
 confidence interval above the minimum acceptable margin.
@@ -277,7 +277,7 @@ the final path after any move.
 ## Triage (gate failure → decision)
 
 For completed evaluations, apply
-[evaluation run validation](../evaluation/references/run-validation.md) before
+[evaluation run validation](../modelopt-evaluation/references/run-validation.md) before
 triage; its policy overrides retry actions below. Warn but do not retry solely
 for failures below tolerance. For runs that fail tolerance or an independent
 validation check, return findings and a recommendation to the parent/user for

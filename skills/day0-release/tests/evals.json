@@ -20,7 +20,7 @@
   {
     "name": "quantize-only-does-not-trigger-day0",
     "skills": [
-      "ptq"
+      "modelopt-ptq"
     ],
     "query": "Quantize org/PLACEHOLDER-MODEL to NVFP4 and save the checkpoint.",
     "files": [],
@@ -33,7 +33,7 @@
   {
     "name": "evaluate-only-does-not-trigger-day0",
     "skills": [
-      "evaluation"
+      "modelopt-evaluation"
     ],
     "query": "Run MMLU-Pro on the endpoint I already have serving at http://host:8000.",
     "files": [],
@@ -44,7 +44,7 @@
   },
   {
     "name": "ptq-smoke-test-cleanup",
-    "skills": ["day0-release", "ptq", "deployment"],
+    "skills": ["day0-release", "modelopt-ptq", "modelopt-deployment"],
     "query": "Run the day-0 workflow for ./source with NVFP4. The quantizer's temporary serving smoke test starts but generation fails; I did not ask to keep it running.",
     "files": [],
     "expected_behavior": [
@@ -72,7 +72,7 @@
     "name": "regression-reports-and-stops-in-v1",
     "skills": [
       "day0-release",
-      "compare-results"
+      "modelopt-compare-results"
     ],
     "query": "Day-0 release for org/PLACEHOLDER-MODEL nvfp4; validated comparable GPQA runs completed the declared plan, external sanity passed, and signed loss Candidate - Baseline is -3 pp with valid two-sided 95% CI [-4,-2] pp against margin -1 pp.",
     "files": [],
@@ -85,7 +85,7 @@
   },
   {
     "name": "unresolved-uncertainty-blocks-release",
-    "skills": ["day0-release", "compare-results"],
+    "skills": ["day0-release", "modelopt-compare-results"],
     "query": "Assess three separate day-0 candidates against M=-1 pp. All runs are validated and comparable, with external sanity passed. Candidate A has signed loss -0.5 pp, valid 95% CI [-1.5,0.5] pp; B has signed loss -3 pp, valid 95% CI [-8,2] pp. Both completed their declared run plans. C has one full run per side and no justified task-specific uncertainty method. Can any be published?",
     "files": [],
     "expected_behavior": [
@@ -97,7 +97,7 @@
   },
   {
     "name": "within-margin-needs-verbosity",
-    "skills": ["day0-release", "compare-results"],
+    "skills": ["day0-release", "modelopt-compare-results"],
     "query": "The day-0 candidate completed all declared runs and passed validation, comparability, and external sanity. Every task's valid signed-loss 95% CI is wholly above M=-1 pp (GPQA: [-0.8,0.2] pp). No verbosity check has run. Is it publishable?",
     "files": [],
     "expected_behavior": [
@@ -107,7 +107,7 @@
   },
   {
     "name": "exploratory-stopping-and-selection",
-    "skills": ["day0-release", "compare-results"],
+    "skills": ["day0-release", "modelopt-compare-results"],
     "query": "I kept adding runs and checking ordinary Welch CIs until one of several NVFP4 candidates cleared the margin. I retained every run. Can day-0 release accept the winning candidate now?",
     "files": [],
     "expected_behavior": [

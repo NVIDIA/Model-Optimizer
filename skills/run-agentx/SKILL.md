@@ -10,7 +10,7 @@ license: Apache-2.0
 
 Resolve the endpoint URL, served model name, matching tokenizer, and requested
 concurrency from the task. Reuse the model checkpoint. If serving is needed, follow
-[deployment](../deployment/SKILL.md) to download missing weights and launch it.
+[deployment](../modelopt-deployment/SKILL.md) to download missing weights and launch it.
 Enable prefix caching, streaming usage, and cached-token reporting. For vLLM, use
 `--enable-prefix-caching --enable-prompt-tokens-details`. Verify the context limit
 fits the traces with the model's tokenizer; never silently truncate requests.
@@ -88,7 +88,7 @@ aiperf profile \
 
 ## Compare and report
 
-Use the [benchmarking guide](../deployment/references/benchmarking.md#3-run-a-sweep)
+Use the [benchmarking guide](../modelopt-deployment/references/benchmarking.md#3-run-a-sweep)
 for sweep isolation, performance metrics, and comparison controls. For AgentX:
 
 - Concurrency counts session trees. Report actual overlapping HTTP requests

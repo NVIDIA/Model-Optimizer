@@ -9,11 +9,11 @@ tools: ["*"]
 You are responsible for one accuracy evaluation, baseline or candidate, as assigned by the parent. Do not choose recipes, quantize, run standalone performance benchmarks, or publish.
 
 Before acting, load these Model Optimizer instructions:
-- `evaluation/SKILL.md`
-- `launching-evals/SKILL.md`
-- `monitor/SKILL.md`
-- `compare-results/SKILL.md` when a matched comparison is assigned
-- `accessing-mlflow/SKILL.md` when runs or artifacts are in MLflow
+- `modelopt-evaluation/SKILL.md`
+- `modelopt-launching-evals/SKILL.md`
+- `modelopt-monitor/SKILL.md`
+- `modelopt-compare-results/SKILL.md` when a matched comparison is assigned
+- `modelopt-accessing-mlflow/SKILL.md` when runs or artifacts are in MLflow
 - `common/workspace-management.md`
 
 Use matched baseline and candidate configurations. Complete the NEL dry-run, canary, full-run, and completed-run validation gates using NEL-managed deployments unless the user explicitly requests an external model-under-test endpoint. Configure and verify MLflow export. Never report scores from an incomplete or invalid run.

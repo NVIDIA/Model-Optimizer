@@ -15,7 +15,7 @@
 
 """Day-0 post-quantization checkpoint gate.
 
-Mirrors the required checks in ptq/references/checkpoint-validation.md:
+Mirrors the required checks in modelopt-ptq/references/checkpoint-validation.md:
   1. Output smaller than source. Growth blocks unless either the declared
      ``source_precision`` is already at or below the recipe's target bits (waived up to
      ``_INHERENT_GROWTH_MAX``, since scale bytes can still grow), or
@@ -164,7 +164,7 @@ def evaluate_checkpoint(summary):
             # about compression when the real problem is the recipe name.
             checks["size"] += " (not assessed: unknown recipe)"
         elif ratio >= 1.0:
-            # Blocking by default (ptq/references/checkpoint-validation.md: a ratio >= 1.0 for
+            # Blocking by default (modelopt-ptq/references/checkpoint-validation.md: a ratio >= 1.0 for
             # a compression recipe blocks "unless the user explicitly accepts the explanation").
             # Two distinct waivers, deliberately not conflated:
             #   source_precision -- we can check the claim, so it is bounded by the growth an
@@ -213,7 +213,7 @@ def evaluate_checkpoint(summary):
                     )
                 # Every branch points at the reference: the bounded-claim branch quotes a
                 # bare number, which is the one an operator is most likely to question.
-                why += " (see ptq/references/checkpoint-validation.md)"
+                why += " (see modelopt-ptq/references/checkpoint-validation.md)"
                 failures.append(("SIZE_NOT_REDUCED", f"output {ratio:.3f}x source, {why}"))
 
     # Check 2 — coverage.

@@ -24,7 +24,7 @@ and holds shared configuration.
 
 skills/                     # canonical skill content
 ├── common/                 # shared support
-└── <skill-name>/SKILL.md
+└── <skill-name>/SKILL.md    # catalog workflows use modelopt-<name>
 ```
 
 ## How each agent finds these
@@ -49,7 +49,7 @@ Repository discovery shares files through the supported agent paths:
 - **Always edit skills under root `skills/`**.
 - Claude Code subagents belong in `.claude/agents/` as real files.
 - Codex custom roles belong in `.codex/agents/`.
-- Vendored-verbatim skills (`launching-evals`, `accessing-mlflow`) are managed
+- Upstream-derived skills (`modelopt-launching-evals`, `modelopt-accessing-mlflow`) are managed
   by `.agents/scripts/sync-upstream-skills.sh` — do not modify by hand.
 - New skills go in `skills/<skill-name>/SKILL.md`.
 - Shared support files go in `skills/common/`.
