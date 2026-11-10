@@ -210,7 +210,7 @@ def test_iq_recipe_matches_packing_contract(qformat, block_size, effective_bits)
         ("iq2_s", IQ2_S_BLOCK_SIZE, IQ2_S_EFFECTIVE_BITS),
     ],
 )
-def test_iq_experts_only_recipe_quantizes_the_routed_experts_with_imatrix(
+def test_iq_experts_only_recipe_quantizes_the_routed_experts_with_local_hessian(
     qformat, block_size, effective_bits
 ):
     quantize = load_recipe(f"general/ptq/{qformat}_experts_only").quantize.model_dump(
@@ -227,7 +227,7 @@ def test_iq_experts_only_recipe_quantizes_the_routed_experts_with_imatrix(
         assert weight_cfg["backend"] == "ggml"
         assert weight_cfg["block_sizes"][-1] == block_size
         assert weight_cfg["effective_bits"] == effective_bits
-    assert quantize["algorithm"] == {"method": "imatrix"}
+    assert quantize["algorithm"] == {"method": "local_hessian"}
 
 
 # --- RecipeSupersededAction: the flags --recipe replaces ----------------------------------------

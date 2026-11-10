@@ -206,9 +206,9 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
     original = copy.deepcopy(moe.mlp)
     inputs = _inputs(rows=96, columns=HIDDEN)
     calls = _record_importance(monkeypatch)
-    # The shipped experts-only recipe, which calibrates in a single pass.
+    # The shipped experts-only recipe's quantizers, calibrated with imatrix in a single pass.
     recipe = load_recipe("general/ptq/iq2_xxs_experts_only").quantize.model_dump()
-    assert recipe["algorithm"]["method"] == "imatrix"
+    recipe["algorithm"] = {"method": "imatrix"}
     mtq.quantize(moe, recipe, lambda m: m(inputs))
 
     # The shared expert stays in BF16.
@@ -243,7 +243,7 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
 
 
 def test_hf_export_writes_each_fused_expert_s_pinned_rows(moe):
-    # imatrix leaves the experts' weights unrounded, and export splits gate_up into gate and up.
+    # The recipe leaves the experts' weights unrounded, and export splits gate_up into gate and up.
     recipe = load_recipe("general/ptq/iq2_xxs_experts_only").quantize.model_dump()
     mtq.quantize(moe, recipe, lambda m: m(_inputs(rows=96, columns=HIDDEN)))
     experts = moe.mlp.experts

@@ -59,15 +59,15 @@ supported combinations.
 | `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
 | `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
 | `iq1_s` | IQ1_S W1A16, MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for weights GPTQ left |
-| `iq1_s_experts_only` | IQ1_S W1A16, MoE routed experts only | none | imatrix |
+| `iq1_s_experts_only` | IQ1_S W1A16, MoE routed experts only | none | local Hessian |
 | `iq1_m` | IQ1_M W1A16 (1.75 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for weights GPTQ left |
-| `iq1_m_experts_only` | IQ1_M W1A16 (1.75 bpw), MoE routed experts only | none | imatrix |
+| `iq1_m_experts_only` | IQ1_M W1A16 (1.75 bpw), MoE routed experts only | none | local Hessian |
 | `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for weights GPTQ left |
-| `iq2_xxs_experts_only` | IQ2_XXS W2A16 (2.06 bpw), MoE routed experts only | none | imatrix |
+| `iq2_xxs_experts_only` | IQ2_XXS W2A16 (2.06 bpw), MoE routed experts only | none | local Hessian |
 | `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for weights GPTQ left |
-| `iq2_xs_experts_only` | IQ2_XS W2A16 (2.31 bpw), MoE routed experts only | none | imatrix |
+| `iq2_xs_experts_only` | IQ2_XS W2A16 (2.31 bpw), MoE routed experts only | none | local Hessian |
 | `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for weights GPTQ left |
-| `iq2_s_experts_only` | IQ2_S W2A16 (2.56 bpw), MoE routed experts only | none | imatrix |
+| `iq2_s_experts_only` | IQ2_S W2A16 (2.56 bpw), MoE routed experts only | none | local Hessian |
 | `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
 
 </details>
@@ -161,8 +161,9 @@ activations and tensor-core math are what deliver the throughput.
   fused-MoE experts.
 - **`iq1_s_experts_only` / `iq1_m_experts_only` / `iq2_xxs_experts_only` /
   `iq2_xs_experts_only` / `iq2_s_experts_only`** — the same IQ formats on the MoE routed
-  experts only (`*.experts.*`, `*block_sparse_moe*`), calibrated with imatrix alone; shared
-  experts, dense layers and attention stay in BF16.
+  experts only (`*.experts.*`, `*block_sparse_moe*`), calibrated with `local_hessian` alone,
+  without layerwise calibration; shared experts, dense layers and attention stay in BF16. It holds
+  each expert weight's Hessian blocks, `in_features` KiB, on the GPU until that weight is encoded.
 - **`q8_0`** — GGML-compatible weight-only quantization on eligible linear layers,
   with BF16 activations; `lm_head`, MoE routers, `conv1d` and the vision branch stay
   in BF16. Q8_0 uses 8.5 bits per weight and requires no calibration data. Quantized
