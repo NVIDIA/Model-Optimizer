@@ -32,13 +32,11 @@ __all__ = ["configure_trainable_parameters", "initialize_student_weights"]
 
 
 def initialize_student_weights(
-    model: nn.Module, weight_init: str, checkpoint_dir: str | Path
+    model: nn.Module, qdq_student_weight: bool, checkpoint_dir: str | Path
 ) -> nn.Module:
     """Initialize selected student weights on a fresh run, preserving native resumes."""
-    if weight_init not in ("checkpoint", "qdq"):
-        raise ValueError("weight_init must be 'checkpoint' or 'qdq'.")
     if (
-        weight_init == "checkpoint"
+        not qdq_student_weight
         or (Path(checkpoint_dir) / "latest_checkpointed_iteration.txt").is_file()
     ):
         return model

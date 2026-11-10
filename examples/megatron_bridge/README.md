@@ -436,9 +436,9 @@ Use Bridge/Core versions with HybridModel support.
 
 ### Student latent-weight initialization
 
-`--student_weight_init checkpoint` (default) retains stored floating latent weights;
-`qdq` initializes them from the restored quantizers' Q→DQ output. This is format-independent,
-supports mixed quantization, and preserves quantizers and calibration state.
+By default, the student keeps its checkpoint's floating latent weights. Add
+`--qdq_student_weight` to initialize trainable weights from the restored quantizers' Q→DQ
+output. This is format-independent and supports mixed quantization.
 
 Use an uncompressed, adapter-free student checkpoint. GPTQ, if desired, runs during PTQ;
 initialization reuses its saved state. Native resumes skip initialization.
