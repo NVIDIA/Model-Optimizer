@@ -75,7 +75,7 @@ class GGMLLocalHessianEncoder(LocalHessianEncoder):
                 if ggml_format.weighted:
                     kwargs["importance"] = moments.sqrt().to(weight.device)
                 hessian = hessian.to(device=weight.device, dtype=torch.float32)
-                # Symmetrized, as the CUDA search reads each block by column.
+                # Symmetrized, as the search's refinement update assumes.
                 hessian = (hessian + hessian.transpose(1, 2)) / 2
                 ridge = perc_damp * hessian.diagonal(dim1=1, dim2=2).mean()
                 hessian.diagonal(dim1=1, dim2=2).add_(ridge)

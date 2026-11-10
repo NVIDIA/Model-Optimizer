@@ -41,6 +41,11 @@ them:
 `test_specs_vs_transformers.py` needs no edit: it reads which models to check, and
 which to skip, from the registry.
 
+A model type that is not a lowercase module name (`NemotronH_Nano_VL_V2`) gets a snake_case
+package name (`nemotron_h_nano_vl_v2`), as transformers puts `EvollaModel` in `evolla`. No code
+derives a package from a model type: the spec's `model_type` stays the exact HF string, and every
+reference names the package explicitly.
+
 The file is named for what it holds, not for who reads it: a model's spec is general
 model data, and export is only its first consumer.
 
@@ -76,6 +81,7 @@ A `ModelSpec` holds one attribute per section, each `None` unless the model fill
 | `moe_spec` (`MoESpec`) | MoE architecture facts only — block classes, expert projection naming, which layout that naming describes | the model is dense |
 | `export_spec` (`ExportSpec`) | Per-model data *and policy* of the unified HF export path, e.g. whether grouped expert export is validated for this model | export needs nothing model-specific |
 | `ep_spec` (`EPSpec`) | Per-model data of the expert-parallel PTQ path: the `base_model_ep_plan` to attach and the config it goes on, the transformers release it needs, or why the model cannot be expert-parallel yet | the model is dense, or stock transformers already ships all of it |
+| `ptq_spec` (`PTQSpec`) | Per-model facts of the Hugging Face PTQ flow (`examples/hf_ptq`): how it loads (device map, precision keyword), whether it is a VLM wrapper, why its generation preview is skipped or decoded as it is, why `--use_fsdp2` refuses it. Each field replaces a check on the model's name in the example; read it through `get_ptq_spec` | the flow's generic behavior fits the model |
 
 `None` means "the model has nothing to say about this", which stays distinct from a
 filled-in-but-empty section.
@@ -107,9 +113,10 @@ Keep architecture-specific loading and calibration helpers alongside the model's
 `specs.py` (for example, `nemotron_h/mtp.py`). The `hf.py` dispatcher loads these
 helpers on demand; examples call its loading context and calibration hook.
 
-A helper module registered in `hf.py`'s `_PLUGINS` defines any of these hooks, all
-optional, and lists exactly the ones it defines in `__all__`. The dispatcher rejects any
-other name there, so a misspelled hook fails instead of being skipped.
+A model type's helper modules, registered in `hf.py`'s `_PLUGINS` (one module or several), define
+any of these hooks, all optional, and each lists exactly the ones it defines in `__all__`. The
+dispatcher rejects any other name there, and two of a type's modules defining one hook, so a
+misspelled or doubled hook fails instead of being skipped.
 
 | Hook | Called by | Default without it |
 |---|---|---|
@@ -117,6 +124,10 @@ other name there, so a misspelled hook fails instead of being skipped.
 | `has_mtp_weights(checkpoint_path)` | `checkpoint_has_mtp` | `False` |
 | `prefers_bundled_code(hf_config, checkpoint_path, config_kwargs)` | `prefers_bundled_code` | `False` |
 | `prepare_for_calibration(model)` | `prepare_model_for_calibration` | nothing |
+| `forward_calibration_batch(model, batch)` | `forward_calibration_batch` | the caller's plain forward (returns `False`) |
+| `load_calibration_processor(checkpoint_path, trust_remote_code)` | `load_calibration_processor` | `None`: the model brings no calibration data |
+| `make_calibration_dataloader(model, processor, dataset_names, calib_size, batch_size, device)` | `make_calibration_dataloader` | `None`: the caller's text or image-text data |
+| `calibration_sample_input(model)` | `calibration_sample_input` | `None`: the caller builds a token-id sample |
 
 Do not import runtime helpers from a model package's `__init__.py`: registering
 specs must remain independent of optional Transformers and calibration imports.

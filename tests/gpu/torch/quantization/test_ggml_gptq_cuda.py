@@ -21,8 +21,11 @@ import torch
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, choice_search
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.ggml.gptq import compensated_block_hessian
+from modelopt.torch.quantization.utils.calib_utils import compute_hessian_inverse
 
 
 def _iq1_s_config(algorithm):
@@ -167,3 +170,18 @@ def test_format_shards_saved_on_gpus_merge_on_a_host_without_them(tmp_path, monk
     model, state = search(tmp_path / "merged.pth")
     assert state["best"]["recipe"] == expected["best"]["recipe"]
     torch.testing.assert_close(model(inputs), reference(inputs), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("num_bits", ["iq2_xxs", "iq2_xs", "iq2_s", "iq1_s", "iq1_m"])
+def test_fused_choice_search_matches_the_pytorch_search(monkeypatch, num_bits):
+    get_cuda_ext_ggml(raise_if_failed=True)  # without it, both searches would be the PyTorch one
+    ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    inputs = _correlated_inputs()
+    weight = torch.randn(64, 512, generator=torch.Generator().manual_seed(1)).cuda()
+    h_inv = compute_hessian_inverse(inputs.T @ inputs / len(inputs), weight, 0.3)
+    hessian = compensated_block_hessian(h_inv, slice(256, 512))[None]
+    block = weight[:, 256:].contiguous()
+
+    fused = choice_search.search_choices(ggml_format, block, hessian)
+    monkeypatch.setattr(choice_search, "get_cuda_ext_ggml", lambda: None)
+    assert torch.equal(fused, choice_search.search_choices(ggml_format, block, hessian))
