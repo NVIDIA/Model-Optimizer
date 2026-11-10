@@ -254,6 +254,9 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
     assert ready
     assert model.model.layers[0].mlp.down_proj.weight_quantizer.is_enabled
     assert model.model.layers[0].self_attn.k_bmm_quantizer.is_enabled
+    # An existing file without an extension is read as is, as the searcher loads it.
+    (tmp_path / "legacy").write_bytes((tmp_path / "search" / "rank0.pth").read_bytes())
+    assert run("legacy")[0]
     # Another method's scores are refused, as a resumed search refuses them.
     kl_div = ModelOptAutoQuantizeRecipe(
         auto_quantize=recipe.auto_quantize.model_copy(update={"auto_quantize_method": "kl_div"})

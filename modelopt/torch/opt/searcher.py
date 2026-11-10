@@ -57,6 +57,18 @@ SearchStateDict = dict[str, Any]  # state dict for searcher
 __all__ = ["BaseSearcher"]
 
 
+def is_directory_checkpoint(checkpoint: str) -> bool:
+    """Whether a search keeps ``checkpoint`` as a directory of per-rank ``rank<N>.pth`` files.
+
+    That is a path that exists as a directory, ends with a separator, or has no file extension.
+    """
+    return (
+        os.path.isdir(checkpoint)
+        or checkpoint.endswith(os.sep)
+        or not os.path.splitext(checkpoint)[1]
+    )
+
+
 class BaseSearcher(ABC):
     """A basic search interface that can be used to search/optimize a model.
 
@@ -251,13 +263,7 @@ class BaseSearcher(ABC):
         if checkpoint is None:
             return None
         checkpoint = str(checkpoint)
-        # Detect directory: exists as dir, ends with separator, or has no file extension
-        is_dir_path = (
-            os.path.isdir(checkpoint)
-            or checkpoint.endswith(os.sep)
-            or not os.path.splitext(checkpoint)[1]
-        )
-        if is_dir_path:
+        if is_directory_checkpoint(checkpoint):
             return os.path.join(checkpoint, f"rank{dist.rank()}.pth")
         if dist.is_initialized():
             dirname, basename = os.path.split(checkpoint)

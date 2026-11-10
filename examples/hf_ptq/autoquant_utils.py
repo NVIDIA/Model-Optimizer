@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
+from modelopt.torch.opt.searcher import is_directory_checkpoint
 from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import safe_load
@@ -529,14 +530,13 @@ def _kv_cache_entries(kv_cache_quant_cfg: dict) -> list[dict]:
 
 
 def _search_checkpoint_file(checkpoint: str) -> str:
-    """The file a one-process search keeps at ``checkpoint``: a directory's ``rank0.pth``."""
-    if (
-        os.path.isdir(checkpoint)
-        or checkpoint.endswith(os.sep)
-        or not os.path.splitext(checkpoint)[1]
-    ):
-        return os.path.join(checkpoint, "rank0.pth")
-    return checkpoint
+    """The file a one-process search keeps at ``checkpoint``: a directory's ``rank0.pth``.
+
+    An existing file is read as is, even without an extension, as the searcher's load does.
+    """
+    if os.path.isfile(checkpoint) or not is_directory_checkpoint(checkpoint):
+        return checkpoint
+    return os.path.join(checkpoint, "rank0.pth")
 
 
 def _scored_auto_quantize_state(checkpoint: str) -> dict | None:
