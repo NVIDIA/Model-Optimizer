@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- Add ``--embedding_shard`` to ``examples/windows/onnx_ptq/genai_llm/quantize.py`` to AWQ-calibrate ONNX decoders exported with ``inputs_embeds``, such as Qwen3.5 / Qwen3.6 hybrid models. RTN no longer loads a calibration dataset, and small initializers now stay inside the saved ``.onnx`` file instead of the external data file.
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
 - The functional quantized-weight export API now exports the KV cache: ``capture_kv_cache_export_state`` returns an attention module's ``k_scale`` / ``v_scale``, and ``build_hf_quantization_config`` takes the KV-cache formats from ``get_kv_cache_export_spec``.
 - The functional quantized-weight export API now packs weight-only MXFP4 (``W4A16_MXFP4``) weights, e.g. MXFP4 QAT of GPT-OSS experts, and rejects layers with rotated weight or input quantizers or custom quantization backends, which a packed weight cannot reproduce.

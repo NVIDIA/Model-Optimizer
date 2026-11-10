@@ -23,6 +23,7 @@ import onnx
 import torch
 from datasets import load_dataset
 from onnx import helper
+from quantize_utils import input_shape_profiles, make_embedded_input, save_quantized_model
 from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoTokenizer
 
@@ -159,6 +160,8 @@ def get_calib_inputs(
     max_calib_rows_to_load,
     add_position_ids,
     trust_remote_code,
+    onnx_path,
+    embedding_shard,
 ):
     # from transformers import LlamaConfig
     # config = LlamaConfig.from_pretrained(
@@ -172,6 +175,11 @@ def get_calib_inputs(
     )
     tokenizer.add_special_tokens({"pad_token": "[PAD]"})
     tokenizer.pad_token = tokenizer.eos_token
+
+    graph_inputs = list(onnx.load(onnx_path, load_external_data=False).graph.input)
+    embedded_decoder = any(value.name == "inputs_embeds" for value in graph_inputs)
+    if embedded_decoder and not embedding_shard:
+        raise ValueError("An ONNX graph with inputs_embeds requires --embedding_shard")
 
     assert calib_size <= max_calib_rows_to_load, (
         "calib size should be no more than max_calib_rows_to_load"
@@ -227,24 +235,36 @@ def get_calib_inputs(
     )
 
     batched_inputs_list = []
-    for i in range(number_of_batched_samples):
-        input_ids = batched_input_ids[i]
-        attention_mask = batched_attention_mask[i]
+    if embedded_decoder:
+        from safetensors import safe_open
 
-        inputs = make_model_input(
-            config,
-            input_ids,
-            attention_mask,
-            add_past_kv_inputs,
-            device,
-            use_fp32,
-            use_buffer_share,
-            add_position_ids,
-        )
-        inputs = {
-            input_name: torch_tensor.cpu().numpy() for input_name, torch_tensor in inputs.items()
-        }
-        batched_inputs_list.append(inputs)
+        with safe_open(embedding_shard, framework="pt", device="cpu") as checkpoint:
+            embedding_weights = checkpoint.get_tensor("model.language_model.embed_tokens.weight")
+            zero_cache = {}
+            for input_ids, attention_mask in zip(batched_input_ids, batched_attention_mask):
+                batched_inputs_list.append(
+                    make_embedded_input(
+                        input_ids, attention_mask, graph_inputs, embedding_weights, zero_cache
+                    )
+                )
+    else:
+        for i in range(number_of_batched_samples):
+            inputs = make_model_input(
+                config,
+                batched_input_ids[i],
+                batched_attention_mask[i],
+                add_past_kv_inputs,
+                device,
+                use_fp32,
+                use_buffer_share,
+                add_position_ids,
+            )
+            batched_inputs_list.append(
+                {
+                    input_name: torch_tensor.cpu().numpy()
+                    for input_name, torch_tensor in inputs.items()
+                }
+            )
 
     print(f"\n--Quantize-Script-- number of batched inputs = {len(batched_inputs_list)}\n")
     return batched_inputs_list
@@ -352,31 +372,39 @@ def main(args):
     if not os.path.exists(output_dir_path):
         os.makedirs(output_dir_path)
 
-    calib_inputs = get_calib_inputs(
-        args.dataset,
-        args.model_name,
-        cache_dir,
-        args.calib_size,
-        args.batch_size,
-        512,
-        device,
-        args.use_fp32,
-        args.use_buffer_share,
-        args.add_past_kv_inputs,
-        128,
-        args.add_position_ids,
-        args.trust_remote_code,
-    )
+    calib_inputs = []
+    if args.algo not in ["rtn", "rtn_dq"] and not args.use_random_calib:
+        calib_inputs = get_calib_inputs(
+            args.dataset,
+            args.model_name,
+            cache_dir,
+            args.calib_size,
+            args.batch_size,
+            512,
+            device,
+            args.use_fp32,
+            args.use_buffer_share,
+            args.add_past_kv_inputs,
+            128,
+            args.add_position_ids,
+            args.trust_remote_code,
+            args.onnx_path,
+            args.embedding_shard,
+        )
 
     input_shapes_profile_data = None
     if any(ep in ["NvTensorRtRtx", "trt"] for ep in args.calibration_eps) and (
         args.algo not in ["rtn", "rtn_dq"]
     ):
         # TRT EPs use min/opt/max profiles for dynamic model inputs.
-        input_shapes_profile_data = create_input_shapes_profile(
-            args.model_name,
-            args.calibration_eps,
-            trust_remote_code=args.trust_remote_code,
+        input_shapes_profile_data = (
+            input_shape_profiles(args.calibration_eps, calib_inputs[0])
+            if calib_inputs and "inputs_embeds" in calib_inputs[0]
+            else create_input_shapes_profile(
+                args.model_name,
+                args.calibration_eps,
+                trust_remote_code=args.trust_remote_code,
+            )
         )
     print(
         f"\n--Quantize-Script-- input_shapes_profile is None? - {input_shapes_profile_data is None}\n"
@@ -410,13 +438,7 @@ def main(args):
     quantized_onnx_model = convert_opset_to_21_proto(quantized_onnx_model)
 
     t = time.time()
-    onnx.save_model(
-        quantized_onnx_model,
-        args.output_path,
-        save_as_external_data=True,
-        location=os.path.basename(args.output_path) + "_data",
-        size_threshold=0,
-    )
+    save_quantized_model(quantized_onnx_model, args.output_path)
     logging.info(f"Saving to {args.output_path} took {time.time() - t} seconds")
     print("\nDone\n")
 
@@ -432,6 +454,10 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="Input ONNX model path.",
+    )
+    parser.add_argument(
+        "--embedding_shard",
+        help="Safetensors shard containing model.language_model.embed_tokens.weight for embedded ONNX inputs.",
     )
     parser.add_argument(
         "--output_path",

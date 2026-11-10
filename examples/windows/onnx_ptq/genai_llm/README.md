@@ -48,6 +48,13 @@ python quantize.py --model_name=meta-llama/Meta-Llama-3-8B \
                           --calib_size=32 --algo=awq_lite --dataset=cnn
 ```
 
+For a Qwen3.5/3.6 decoder exported with `inputs_embeds`, pass `--embedding_shard` pointing to the
+source checkpoint's safetensors shard containing
+`model.language_model.embed_tokens.weight`. The tokenizer and shard must come from
+the same checkpoint used for the ONNX export. Only that shard is needed for AWQ
+calibration; RTN needs no embedding shard. Qwen3.6 models also require a
+Transformers version that recognizes `qwen3_5` (verified with 5.12.1).
+
 ### Command Line Arguments
 
 The table below lists key command-line arguments of the ONNX PTQ example script.
@@ -58,6 +65,7 @@ The table below lists key command-line arguments of the ONNX PTQ example script.
 | `--dataset` | cnn (default), pilevel | Choose calibration dataset: cnn_dailymail or pile-val. |
 | `--algo` | awq_lite (default), awq_clip, rtn, rtn_dq | Select the quantization algorithm. |
 | `--onnx_path` | input .onnx file path | Path to the input ONNX model. |
+| `--embedding_shard` | safetensors shard path | Source token embeddings for ONNX decoders with `inputs_embeds` (AWQ only). |
 | `--output_path` | output .onnx file path | Path to save the quantized ONNX model. |
 | `--use_zero_point` | Default: zero-point is disabled | Use this option to enable zero-point based quantization. |
 | `--block-size` | 32, 64, 128 (default) | Block size for AWQ. |
