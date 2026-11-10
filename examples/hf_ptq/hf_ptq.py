@@ -95,7 +95,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
-from modelopt.torch.utils import enable_determinism, print_rank_0
+from modelopt.torch.utils import deterministic_attn_implementation, enable_determinism, print_rank_0
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -1316,12 +1316,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--deterministic",
         help=(
-            "Reproducible PTQ: calibrate with eager attention, whose result for a sample does "
-            "not depend on the other samples in its batch (that of the SDPA kernels does), seed "
-            "every random number generator and use deterministic torch kernels (an op without "
-            "one only warns). The scales then depend on which samples are used, not on their "
-            "order in the dataset or on the batch size. Eager attention takes more memory than "
-            "SDPA."
+            "Reproducible PTQ: calibrate with an attention implementation whose result for a "
+            "sample does not depend on the other samples in its batch (that of the default SDPA "
+            "does): eager, which takes more memory than SDPA, or modelopt_sdpa_efficient, SDPA's "
+            "memory-efficient kernel for every batch, if passed as --attn_implementation. Any "
+            "other --attn_implementation falls back to eager. Also seed every random number "
+            "generator and use deterministic torch kernels (an op without one only warns). The "
+            "scales then depend on which samples are used, not on their order in the dataset or "
+            "on the batch size."
         ),
         default=False,
         action="store_true",
@@ -1455,7 +1457,8 @@ def parse_args() -> argparse.Namespace:
         "--attn_implementation",
         help=(
             "Specify the attention implementation to use. "
-            "This arg will be passed to the HF model loading if specified."
+            "This arg will be passed to the HF model loading if specified. "
+            "With --deterministic, only eager and modelopt_sdpa_efficient are used."
         ),
         default=None,
         type=str,
@@ -1568,12 +1571,7 @@ def parse_args() -> argparse.Namespace:
         parser.error("--calib_seq must be positive.")
 
     if args.deterministic:
-        if args.attn_implementation not in (None, "eager"):
-            parser.error(
-                "--deterministic needs --attn_implementation eager, the one whose result for a "
-                "sample does not depend on which samples share its batch."
-            )
-        args.attn_implementation = "eager"
+        args.attn_implementation = deterministic_attn_implementation(args.attn_implementation)
 
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")

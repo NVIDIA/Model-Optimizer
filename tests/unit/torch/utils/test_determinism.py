@@ -21,7 +21,11 @@ import numpy as np
 import pytest
 import torch
 
-from modelopt.torch.utils import enable_determinism
+from modelopt.torch.utils import (
+    DETERMINISTIC_ATTN_IMPLEMENTATIONS,
+    deterministic_attn_implementation,
+    enable_determinism,
+)
 
 
 @pytest.fixture
@@ -53,3 +57,21 @@ def test_enable_determinism():
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":0:0"
     with pytest.warns(UserWarning, match="CUBLAS_WORKSPACE_CONFIG=:0:0"):
         enable_determinism(7)
+
+
+def test_attention_falls_back_to_eager_unless_it_is_deterministic():
+    assert deterministic_attn_implementation() == "eager"
+    assert deterministic_attn_implementation("eager") == "eager"
+    with pytest.warns(UserWarning, match="'sdpa'.*using eager"):
+        assert deterministic_attn_implementation("sdpa") == "eager"
+
+
+def test_the_efficient_sdpa_is_registered_with_transformers():
+    pytest.importorskip("transformers")
+    from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    for name in DETERMINISTIC_ATTN_IMPLEMENTATIONS:
+        assert deterministic_attn_implementation(name) == name
+    assert "modelopt_sdpa_efficient" in ALL_ATTENTION_FUNCTIONS
+    assert "modelopt_sdpa_efficient" in ALL_MASK_ATTENTION_FUNCTIONS

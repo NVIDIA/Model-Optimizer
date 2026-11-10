@@ -1119,17 +1119,20 @@ def test_one_rank_per_node_runs_the_gpu_memory_monitor(
     assert len(launched) == launches
 
 
-def test_deterministic_calibrates_with_eager_attention(monkeypatch):
+def test_deterministic_attention_falls_back_to_eager(monkeypatch):
     flags = ["--pyt_ckpt_path", "/models/Qwen3-0.6B", "--deterministic"]
     _, args = _parse_hf_ptq_args(monkeypatch, *flags)
     assert args.deterministic
     assert args.attn_implementation == "eager"
 
-    _, args = _parse_hf_ptq_args(monkeypatch, *flags, "--attn_implementation", "eager")
-    assert args.attn_implementation == "eager"
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, *flags, "--attn_implementation", "modelopt_sdpa_efficient"
+    )
+    assert args.attn_implementation == "modelopt_sdpa_efficient"
 
-    with pytest.raises(SystemExit):
-        _parse_hf_ptq_args(monkeypatch, *flags, "--attn_implementation", "sdpa")
+    with pytest.warns(UserWarning, match="using eager"):
+        _, args = _parse_hf_ptq_args(monkeypatch, *flags, "--attn_implementation", "sdpa")
+    assert args.attn_implementation == "eager"
 
     _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
     assert args.attn_implementation is None

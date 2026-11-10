@@ -23,9 +23,19 @@ import torch
 
 from .logging import print_rank_0, warn_rank_0
 
-__all__ = ["enable_determinism"]
+__all__ = [
+    "DETERMINISTIC_ATTN_IMPLEMENTATIONS",
+    "deterministic_attn_implementation",
+    "enable_determinism",
+]
 
 _DETERMINISTIC_CUBLAS_CONFIGS = (":4096:8", ":16:8")
+_SDPA_EFFICIENT = "modelopt_sdpa_efficient"
+
+# The attention implementations that give a sample the same activations whatever else is in its
+# batch. transformers' default SDPA does not: it runs another kernel for a sample when a row of its
+# batch is padded, and yet another at batch size 1.
+DETERMINISTIC_ATTN_IMPLEMENTATIONS = ("eager", _SDPA_EFFICIENT)
 
 
 def enable_determinism(seed: int) -> None:
@@ -50,3 +60,53 @@ def enable_determinism(seed: int) -> None:
         )
     torch.use_deterministic_algorithms(True, warn_only=True)
     print_rank_0(f"Deterministic mode: seeded every RNG with {seed}, deterministic torch kernels.")
+
+
+def deterministic_attn_implementation(requested: str | None = None) -> str:
+    """Return the attention implementation to load a model with for a reproducible run.
+
+    That is ``requested`` if it is one of ``DETERMINISTIC_ATTN_IMPLEMENTATIONS``, else ``"eager"``,
+    with a warning when something else was asked for. ``"modelopt_sdpa_efficient"`` is SDPA pinned
+    to PyTorch's memory-efficient kernel, with a mask for every batch: like eager it runs one kernel
+    whatever the batch holds, and unlike eager it never builds the attention matrix. It is
+    registered with transformers here, so call this before loading the model.
+    """
+    if requested is None or requested == "eager":
+        return "eager"
+    if requested not in DETERMINISTIC_ATTN_IMPLEMENTATIONS:
+        warn_rank_0(
+            f"Attention implementation {requested!r} runs another kernel for a sample depending on "
+            f"the other samples in its batch; using eager. Reproducible runs accept "
+            f"{', '.join(DETERMINISTIC_ATTN_IMPLEMENTATIONS)}."
+        )
+        return "eager"
+    _register_sdpa_efficient()
+    return requested
+
+
+def _register_sdpa_efficient() -> None:
+    """Make ``modelopt_sdpa_efficient`` an attention implementation of transformers' models."""
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    from transformers import AttentionInterface
+    from transformers.integrations.sdpa_attention import sdpa_attention_forward
+    from transformers.masking_utils import AttentionMaskInterface, sdpa_mask
+
+    def attention(module, query, key, value, attention_mask, **kwargs):
+        # What eager implements and SDPA does not: dropping it would calibrate another model.
+        unsupported = [name for name in ("softcap", "s_aux") if kwargs.get(name) is not None]
+        if unsupported:
+            raise NotImplementedError(
+                f"{_SDPA_EFFICIENT} does not support {' and '.join(unsupported)}, which "
+                f"{type(module).__name__} uses: use eager attention."
+            )
+        with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+            return sdpa_attention_forward(module, query, key, value, attention_mask, **kwargs)
+
+    def mask(*args, **kwargs):
+        # transformers drops the mask of a batch without a padded row, so that SDPA can run its
+        # flash kernel on it. Every batch gets a mask here, so every batch runs the same kernel.
+        kwargs["allow_is_causal_skip"] = False
+        return sdpa_mask(*args, **kwargs)
+
+    AttentionInterface.register(_SDPA_EFFICIENT, attention)
+    AttentionMaskInterface.register(_SDPA_EFFICIENT, mask)
