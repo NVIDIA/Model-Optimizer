@@ -175,6 +175,28 @@ def test_shape_rtn(tmp_path, block_size, layers_8bit, opset):
     np.testing.assert_allclose(outputs[0], outputs[1], rtol=1e-5, atol=1e-5)
 
 
+@pytest.mark.parametrize(("opset", "plugin_opset"), [(20, 999), (21, 1)])
+def test_direct_rtn_checks_standard_onnx_opset(tmp_path, opset, plugin_opset):
+    source = _matmul_model(
+        w=np.ones((8, 1), dtype=np.float32),
+        in_shape=(1, 8),
+        out_shape=(1, 1),
+        tmp_path=tmp_path,
+        opset=opset,
+    )
+    model = onnx.load(source)
+    model.opset_import.insert(0, onnx.helper.make_opsetid("trt.plugins", plugin_opset))
+
+    if opset < 21:
+        original_bytes = model.SerializeToString()
+        with pytest.raises(ValueError, match="requires opset 21"):
+            quantize_int4(model, "rtn", block_size=8)
+        assert model.SerializeToString() == original_bytes
+    else:
+        quantized = quantize_int4(model, "rtn", block_size=8)
+        assert any(node.op_type == "QuantizeLinear" for node in quantized.graph.node)
+
+
 def test_shape_awq(tmp_path):
     # Test shape compatibility
     onnx_dataloader = [{"x": np.random.rand(96, 288).astype(np.float32)}]

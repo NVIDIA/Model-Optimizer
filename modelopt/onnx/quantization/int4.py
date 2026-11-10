@@ -56,7 +56,7 @@ from modelopt.onnx.quantization.quant_utils import (
     rtn,
     update_block_size,
 )
-from modelopt.onnx.utils import QDQ_PRECISION_MIN_OPSET, get_opset_version, save_onnx
+from modelopt.onnx.utils import QDQ_PRECISION_MIN_OPSET, save_onnx
 
 __all__ = ["quantize"]
 
@@ -1550,7 +1550,11 @@ def quantize(
         onnx_model = onnx_path
 
     min_opset = QDQ_PRECISION_MIN_OPSET["int4"]
-    if calibration_method in ["rtn", "rtn_dq"] and get_opset_version(onnx_model) < min_opset:
+    standard_opset = next(
+        (opset.version for opset in onnx_model.opset_import if opset.domain in ("", "ai.onnx")),
+        0,
+    )
+    if calibration_method in ["rtn", "rtn_dq"] and standard_opset < min_opset:
         raise ValueError(
             f"Standard ONNX INT4 RTN export requires opset {min_opset} or later. "
             "Use modelopt.onnx.quantization.quantize to upgrade older models automatically."
