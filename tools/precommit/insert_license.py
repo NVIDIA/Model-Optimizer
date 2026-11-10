@@ -17,7 +17,9 @@
 
 A file with code copied from a third party keeps the original copyright header on top and the NVIDIA
 header below it (CONTRIBUTING.md, "Copying code from other sources"). Lucas-C's ``insert-license``
-looks for the header only in the top five lines, so this hook replaces it for python and shell files:
+cannot check that layout, even with a larger ``--detect-license-in-X-top-lines``: it needs the
+SPDX line to read exactly ``Apache-2.0``, and it inserts a missing header at the top of the file.
+This hook replaces it for python and shell files:
 
 * It accepts the NVIDIA header anywhere in the file's leading comment block, with any past year and
   any ``SPDX-License-Identifier`` expression that starts with ``Apache-2.0`` (e.g. ``AND MIT``).
