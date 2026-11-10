@@ -31,6 +31,9 @@ def test_lk_compiled_cuda_matches_fp32_reference(dtype, truncated, mask_kind):
     teacher[..., ::7] = -torch.inf
     indices = torch.randperm(128, device="cuda")[:64] if truncated else None
     student = torch.randn(2, 16, 64 if truncated else 128, device="cuda", dtype=dtype)
+    student.masked_fill_(
+        torch.isneginf(teacher if indices is None else teacher[..., indices]), -torch.inf
+    )
     mask = torch.randint(0, 2, (2, 16), device="cuda").float()
     if mask_kind == "fractional":
         mask /= mask.numel()

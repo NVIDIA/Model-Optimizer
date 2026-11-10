@@ -62,7 +62,8 @@ def _soft_target_lk_loss(
     q = log_q.exp()
     # Keep the repaired objective's subgradient at equal probabilities.
     overlap = torch.where(q < p, q, p).sum(-1)
-    kl = F.kl_div(log_q, p_conditional, reduction="none").sum(-1)
+    # Zero teacher mass contributes zero KL, including when the student mass is zero.
+    kl = F.kl_div(log_q.masked_fill(p_conditional == 0, 0), p_conditional, reduction="none").sum(-1)
     weights = loss_mask.float()
     weight_sum = weights.sum()
     return _lk_lambda_loss(

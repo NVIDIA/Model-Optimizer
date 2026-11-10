@@ -75,6 +75,17 @@ def test_lk_loss_matches_reference_and_only_differentiates_student(truncated, et
         torch.testing.assert_close(actual, torch.zeros_like(actual), atol=1e-6, rtol=0)
 
 
+@pytest.mark.parametrize("mask_weight", [0.0, 1.0])
+def test_lk_identical_zero_probabilities_have_zero_loss_and_gradients(mask_weight):
+    teacher = torch.tensor([[[0.0, -torch.inf, 0.0]]], requires_grad=True)
+    student = teacher.detach().clone().requires_grad_()
+    loss = masked_lk_lambda_loss(teacher, student, torch.full((1, 1), mask_weight))
+    torch.testing.assert_close(loss, torch.zeros_like(loss), atol=0, rtol=0)
+    loss.backward()
+    torch.testing.assert_close(student.grad, torch.zeros_like(student), atol=0, rtol=0)
+    assert teacher.grad is None
+
+
 def test_lk_truncated_overlap_keeps_missing_teacher_mass():
     teacher = torch.tensor([[[0.1, 0.3, 0.2, 0.4]]]).log().requires_grad_()
     indices = torch.tensor([3, 0, 1])
