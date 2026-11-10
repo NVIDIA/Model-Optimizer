@@ -31,6 +31,7 @@ from modelopt.onnx.autocast.nodeclassifier import (
     NodeRuleBase,
 )
 from modelopt.onnx.autocast.referencerunner import ReferenceRunner, TensorStats
+from modelopt.onnx.autocast.utils import setup_mappings
 
 configure_logging("DEBUG")
 
@@ -544,3 +545,42 @@ def test_node_classifier_with_multi_batch_calibration(test_model):
         # Verify classification works correctly
         assert len(fp16_nodes) + len(fp32_nodes) == 2
         assert not set(fp16_nodes).intersection(set(fp32_nodes))
+
+
+@pytest.mark.parametrize("square_op", ["Pow", "Mul"])
+def test_norm_variance_stays_high_precision_without_reference_data(square_op):
+    """An RMSNorm variance overflows fp16 for |x| > 256, which random reference data misses."""
+    square_inputs = ["x", "two"] if square_op == "Pow" else ["x", "x"]
+    nodes = [
+        helper.make_node(square_op, square_inputs, ["sq"], name="square"),
+        helper.make_node("ReduceMean", ["sq", "axes"], ["var"], name="reduce", keepdims=1),
+        helper.make_node("Add", ["var", "eps"], ["var_eps"], name="add_eps"),
+        helper.make_node("Sqrt", ["var_eps"], ["rms"], name="sqrt"),
+        helper.make_node("Div", ["x", "rms"], ["normed"], name="div"),
+        helper.make_node("Mul", ["normed", "weight"], ["y"], name="scale"),
+    ]
+    initializers = [
+        numpy_helper.from_array(np.array(2.0, dtype=np.float32), "two"),
+        numpy_helper.from_array(np.array([-1], dtype=np.int64), "axes"),
+        numpy_helper.from_array(np.array(1e-6, dtype=np.float32), "eps"),
+        numpy_helper.from_array(np.ones(8, dtype=np.float32), "weight"),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "rmsnorm",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 4, 8])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 4, 8])],
+        initializers,
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+    _, initializer_map, node_to_init_map = setup_mappings(model)
+
+    def classify(**kwargs):
+        return NodeClassifier(model, node_to_init_map, initializer_map, **kwargs).run()
+
+    fp16_nodes, fp32_nodes = classify()
+    assert set(fp32_nodes) == {"square", "reduce", "add_eps", "sqrt"}
+    assert set(fp16_nodes) == {"div", "scale"}
+
+    fp16_nodes, fp32_nodes = classify(op_types_to_include=[square_op, "ReduceMean", "Add", "Sqrt"])
+    assert fp32_nodes == []
