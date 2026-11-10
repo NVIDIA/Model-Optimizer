@@ -97,6 +97,7 @@ from modelopt.torch.quantization.utils import (
     quantizer_attr_names,
 )
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+from modelopt.torch.quantization.utils.packed_experts import is_packed, unpack_experts
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import (
@@ -916,6 +917,9 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
         # unquantized is written as-is, so cast it to the export dtype like the rest of the model.
         if get_quantization_format(sub_module) == QUANTIZATION_NONE:
             sub_module.weight = nn.Parameter(sub_module.weight.to(ctx.dtype), requires_grad=False)
+    elif is_packed(sub_module):
+        # Decompressed as a decompressing load holds them, so they export as that load's would.
+        unpack_experts(sub_module)
     handler = ExportModuleRegistry.match(sub_module)
     if handler is not None:
         handler(name, sub_module, ctx)

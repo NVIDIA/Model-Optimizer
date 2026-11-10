@@ -514,6 +514,27 @@ def test_mlflow_experiment_falls_back_to_qformat_without_a_recipe(monkeypatch):
     assert args.mlflow_experiment == "tester/hf_ptq/Llama-3.3-70B-Instruct-nvfp4"
 
 
+@pytest.mark.parametrize(
+    ("extra_args", "packed"),
+    [
+        (("--qformat", "nvfp4"), True),  # max calibration reads the experts' weights only
+        (("--qformat", "int4_awq"), False),  # an algorithm that may rewrite them
+        (("--qformat", "nvfp4", "--no-keep_compressed_experts"), False),
+        (("--qformat", "int4_awq", "--keep_compressed_experts"), True),
+    ],
+)
+def test_mxfp4_experts_stay_packed_unless_calibration_may_rewrite_them(
+    monkeypatch, extra_args, packed
+):
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/m", *extra_args)
+    mxfp4 = SimpleNamespace(quantization_config={"quant_method": "mxfp4"})
+
+    assert hf_ptq._keeps_compressed_experts(args, mxfp4) is packed
+    assert hf_ptq._keeps_compressed_experts(args, SimpleNamespace()) is (
+        "--keep_compressed_experts" in extra_args
+    )
+
+
 def test_mlflow_is_off_by_default(monkeypatch):
     _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
 

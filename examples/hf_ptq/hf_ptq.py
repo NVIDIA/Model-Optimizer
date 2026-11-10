@@ -42,6 +42,7 @@ from example_utils import (
     exports_tensorrt_llm_checkpoint,
     generate_excludes_prompt,
     get_model,
+    get_original_hf_quant_method,
     get_tokenizer,
     keep_the_experts_implementation,
     layerwise_export_requested,
@@ -357,6 +358,38 @@ def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
         )
 
 
+def _keeps_compressed_experts(args: argparse.Namespace, hf_config) -> bool:
+    """Whether to keep an MXFP4 checkpoint's experts packed through calibration.
+
+    ``--keep_compressed_experts`` decides when given. By default they stay packed unless the
+    calibration may update weights in place, which packed experts refuse: AutoQuantize, or an
+    algorithm other than max.
+    """
+    if get_original_hf_quant_method(hf_config) != "mxfp4":
+        return bool(args.keep_compressed_experts)  # get_model refuses True
+    if args.keep_compressed_experts is not None:
+        return args.keep_compressed_experts
+    recipe = load_recipe(args.recipe) if args.recipe is not None else None
+    if recipe is None:
+        algorithm = QUANT_CFG_CHOICES.get(args.qformat, {}).get("algorithm")
+    elif isinstance(recipe, ModelOptAutoQuantizeRecipe):
+        algorithm = "AutoQuantize"
+    else:
+        algorithm = recipe.quantize.model_dump().get("algorithm")
+    steps = algorithm if isinstance(algorithm, list) else [algorithm]
+    rewriting = {step.get("method") if isinstance(step, dict) else step for step in steps}
+    rewriting -= {"max", None}
+    if rewriting:
+        print(
+            f"Loading the MXFP4 experts decompressed: the {', '.join(sorted(map(str, rewriting)))} "
+            "calibration may update their weights in place, which packed experts refuse "
+            "(--keep_compressed_experts keeps them packed)."
+        )
+        return False
+    print("Keeping the MXFP4 experts packed (--no-keep_compressed_experts decompresses them).")
+    return True
+
+
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
@@ -368,6 +401,8 @@ def load_model(args: argparse.Namespace):
             hf_config=hf_config,
             trust_remote_code=args.trust_remote_code,
             attn_implementation=args.attn_implementation,
+            # Refused there when asked for: the expert-parallel load decompresses the experts.
+            keep_compressed=bool(args.keep_compressed_experts),
         )
     elif plan.is_fsdp_dense:
         if args.experts_implementation is not None:
@@ -396,6 +431,7 @@ def load_model(args: argparse.Namespace):
             offload_folder=args.offload_folder,
             max_cpu_memory_gb=args.max_cpu_memory_gb,
             max_gpu_memory_gb=args.max_gpu_memory_gb,
+            keep_compressed=_keeps_compressed_experts(args, hf_config),
         )
     else:
         assert args.qformat in QUANT_CFG_CHOICES, (
@@ -1488,6 +1524,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--keep_compressed_experts",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Keep an MXFP4 checkpoint's routed experts (e.g. openai/gpt-oss-120b) packed, at 4.25 "
+            "bits a weight instead of 16, decompressing them on use; the export is the same. By "
+            "default they stay packed unless the calibration may update weights in place "
+            "(AutoQuantize, or an algorithm other than max), which packed experts refuse."
+        ),
+    )
+    parser.add_argument(
         "--offload_folder",
         type=str,
         default=None,
@@ -1562,6 +1609,11 @@ def parse_args() -> argparse.Namespace:
         parser.error("--use_fsdp2 does not support --vllm_fakequant_export.")
     if args.use_fsdp2 and args.cast_mxfp4_to_nvfp4:
         parser.error("--use_fsdp2 does not support --cast_mxfp4_to_nvfp4.")
+    if args.keep_compressed_experts and (args.use_fsdp2 or args.low_memory_mode):
+        parser.error(
+            "--keep_compressed_experts keeps the experts of a whole-model load packed, not of "
+            "--use_fsdp2's or --low_memory_mode's."
+        )
 
     if args.offload_folder is not None and args.low_memory_mode:
         parser.error("--offload_folder (disk-offload) is not compatible with --low_memory_mode.")

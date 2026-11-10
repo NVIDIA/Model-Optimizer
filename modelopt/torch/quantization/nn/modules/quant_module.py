@@ -28,6 +28,7 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ...tensor_quant import QUANT_DESC_8BIT_PER_TENSOR
 from ...utils import is_torch_export_mode
+from ...utils.packed_experts import is_packed
 from .tensor_quantizer import SequentialQuantizer, TensorQuantizer
 
 __all__ = [
@@ -179,6 +180,11 @@ class QuantModule(DynamicModule):
 
     def _validate_fold_weight(self):
         """Validate that weight folding is supported before any module is modified."""
+        if is_packed(self):
+            raise ValueError(
+                f"{type(self).__name__}'s experts are stored packed in MXFP4, which cannot hold "
+                "folded weights; decompress them first (unpack_experts)."
+            )
 
     def fold_weight(self, keep_attrs: bool = False):
         """Bake each fake-quant weight quantizer into its weight for faster eval.
