@@ -17,6 +17,7 @@
 
 import argparse
 import copy
+import os
 import warnings
 from fnmatch import fnmatch
 from typing import Any
@@ -28,6 +29,8 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
+from modelopt.torch.utils import distributed as dist
+from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.dataset_utils import create_forward_loop, model_type_is_enc_dec
 from modelopt.torch.utils.distributed import size as world_size
 
@@ -407,6 +410,113 @@ def _recipe_is_kv_auto_quantize(recipe: str | None) -> bool:
         stage is not None and stage.constraints.cost_model == "kv_cache"
         for stage in (loaded_recipe.auto_quantize, loaded_recipe.kv_auto_quantize)
     )
+
+
+def _check_auto_quantize_shard_args(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    """Parse ``--auto_quantize_format_shard`` and refuse shard flags a run cannot use."""
+    if args.auto_quantize_format_shard is not None:
+        try:
+            index, count = (int(v) for v in args.auto_quantize_format_shard.split("/"))
+        except ValueError:
+            parser.error("--auto_quantize_format_shard must be INDEX/COUNT, e.g. 0/5.")
+        args.auto_quantize_format_shard = (index, count)
+    if (args.auto_quantize_format_shard is not None or args.auto_quantize_merge_shards) and not (
+        args.auto_quantize_checkpoint and _recipe_is_auto_quantize(args.recipe)
+    ):
+        parser.error(
+            "--auto_quantize_format_shard and --auto_quantize_merge_shards need a weight "
+            "AutoQuantize --recipe and --auto_quantize_checkpoint."
+        )
+    if args.auto_quantize_format_shard is not None and args.auto_quantize_merge_shards:
+        parser.error("A format shard cannot also merge shards.")
+    if args.auto_quantize_format_shard is not None and args.batch_size == 0:
+        # A probed batch size follows each shard's free memory; the merge needs equal step counts.
+        parser.error(
+            "--auto_quantize_format_shard needs an explicit --batch_size, the same in every shard."
+        )
+
+
+def _auto_quantize_finalize_config(
+    recipe: ModelOptAutoQuantizeRecipe, args: argparse.Namespace
+) -> dict | None:
+    """The frozen quantize config to calibrate the source weights with, once the scores are saved.
+
+    Refuses ``finalize_algorithm`` and format shards where the scores cannot pass between runs,
+    and merges ``--auto_quantize_merge_shards`` into ``--auto_quantize_checkpoint`` first. Returns
+    None while the search still has to run, and always for a format shard.
+    """
+    primary = recipe.auto_quantize
+    finalize = primary.finalize_algorithm is not None
+    # Off unless given, like the shard flag auto_quantize reads, for args built without them.
+    format_shard = getattr(args, "auto_quantize_format_shard", None)
+    merge_shards = getattr(args, "auto_quantize_merge_shards", None)
+    if not (finalize or format_shard is not None or merge_shards):
+        return None
+    if (
+        primary.constraints.cost_model == "kv_cache"
+        or recipe.kv_auto_quantize is not None
+        or not args.auto_quantize_checkpoint
+    ):
+        raise ValueError(
+            "auto_quantize.finalize_algorithm, --auto_quantize_format_shard and "
+            "--auto_quantize_merge_shards need a weight search without a KV-cache search, "
+            "and --auto_quantize_checkpoint to hand the scores between runs."
+        )
+    if dist.is_initialized():
+        # Each rank would search into its own file, which the merge and the scores lookup below
+        # do not read.
+        raise ValueError(
+            "auto_quantize.finalize_algorithm, --auto_quantize_format_shard and "
+            "--auto_quantize_merge_shards run in one process; launch hf_ptq without torchrun "
+            "and without --use_fsdp2."
+        )
+    checkpoint = _search_checkpoint_file(args.auto_quantize_checkpoint)
+    if merge_shards and not os.path.exists(checkpoint):
+        mtq.merge_auto_quantize_checkpoints(
+            [_search_checkpoint_file(path) for path in merge_shards.split(",")], checkpoint
+        )
+    if not finalize or format_shard is not None:
+        return None
+    search_state = _scored_auto_quantize_state(checkpoint)
+    if search_state is None:
+        return None
+    # Freeze the per-layer formats for this budget, with the recipe's KV-cache config.
+    quant_cfg = mtq.get_auto_quantize_config(
+        search_state,
+        {"effective_bits": primary.constraints.effective_bits},
+        algorithm=primary.finalize_algorithm,
+    )
+    kv_cfg = _mtq_inputs_from_auto_quantize_config(
+        primary, args, fixed_quantize_config=recipe.quantize
+    )["kv_cache_quant_cfg"]
+    if kv_cfg is not None:
+        quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(quant_cfg, kv_cfg["quant_cfg"])
+    return quant_cfg
+
+
+def _search_checkpoint_file(checkpoint: str) -> str:
+    """The file a one-process search keeps at ``checkpoint``: a directory's ``rank0.pth``."""
+    if (
+        os.path.isdir(checkpoint)
+        or checkpoint.endswith(os.sep)
+        or not os.path.splitext(checkpoint)[1]
+    ):
+        return os.path.join(checkpoint, "rank0.pth")
+    return checkpoint
+
+
+def _scored_auto_quantize_state(checkpoint: str) -> dict | None:
+    """The search state in ``checkpoint`` (a file) if it holds every format's scores."""
+    if not os.path.isfile(checkpoint):
+        return None
+    # Memory-mapped on the CPU: finalizing reads the scores, not every format's calibration.
+    state = safe_load(checkpoint, map_location="cpu", mmap=True)
+    stats = state.get("candidate_stats") or {}
+    if state.get("format_shard") is not None or not stats:
+        return None
+    return state
 
 
 def _select_unpadded_logits(logits: torch.Tensor, batch: dict[str, Any]) -> torch.Tensor:

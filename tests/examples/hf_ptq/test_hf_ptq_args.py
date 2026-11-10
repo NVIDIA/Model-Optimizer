@@ -258,7 +258,7 @@ def test_hf_ptq_refuses_finalize_and_shards_before_searching(monkeypatch, refusa
         else "general/auto_quantize/nvfp4_fp8_at_5p4bits"
     )
     if refusal == "distributed":
-        monkeypatch.setattr(hf_ptq.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr("modelopt.torch.utils.distributed.is_initialized", lambda: True)
     monkeypatch.setattr(hf_ptq, "auto_quantize", lambda *_args, **_kwargs: pytest.fail("searched"))
     args = SimpleNamespace(
         auto_quantize_checkpoint="search.pth",
