@@ -335,6 +335,14 @@ def get_args():
         "--kd_loss_alpha is 1.0 and the student is quantized except for its MTP head.",
     )
     parser.add_argument(
+        "--skip_frozen_mtp",
+        action="store_true",
+        help="Skip the frozen MTP head (see --freeze_mtp) in the student's and teacher's training "
+        "forwards: its layers and its extra output-layer pass. Evaluation still runs it, and its "
+        "weights are saved unchanged. Supports GPTModel-based models (e.g. Qwen3.5 / Qwen3.6) "
+        "with --pp_size 1.",
+    )
+    parser.add_argument(
         "--moe_aux_loss_coeff",
         type=float,
         default=None,
@@ -501,6 +509,8 @@ def get_args():
         args.num_layers_in_first_pipeline_stage or args.num_layers_in_last_pipeline_stage
     ):
         raise ValueError("--num_layers_in_first/last_pipeline_stage require --pp_size > 1.")
+    if args.skip_frozen_mtp and args.pp_size > 1:
+        raise ValueError("--skip_frozen_mtp needs --pp_size 1.")
     if args.recompute_num_layers_per_stage is not None:
         if args.recompute_granularity != "full" or args.recompute_method != "block":
             raise ValueError(
@@ -770,6 +780,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         logit_kl_top_p=args.logit_kl_top_p,
         logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,
         freeze_mtp=args.freeze_mtp,
+        skip_frozen_mtp=args.skip_frozen_mtp,
     )
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
