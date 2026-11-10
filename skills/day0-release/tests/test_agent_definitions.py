@@ -17,7 +17,7 @@ import re
 import tomllib
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[5]
+_ROOT = Path(__file__).resolve().parents[3]
 _CODEX_AGENTS = _ROOT / ".codex" / "agents"
 _CLAUDE_AGENTS = _ROOT / "plugins" / "modelopt" / "agents"
 _CLAUDE_LINKS = _ROOT / ".claude" / "agents"
