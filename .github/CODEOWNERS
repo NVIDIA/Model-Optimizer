@@ -66,6 +66,13 @@ modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 
 # Agent plugin (skills, agent config)
 /plugins @NVIDIA/modelopt-agents-codeowners
+/skills @NVIDIA/modelopt-agents-codeowners
+/.agents @NVIDIA/modelopt-agents-codeowners
+/.claude @NVIDIA/modelopt-agents-codeowners
+/.codex @NVIDIA/modelopt-agents-codeowners
+/.claude-plugin @NVIDIA/modelopt-agents-codeowners
+/.codex-plugin @NVIDIA/modelopt-agents-codeowners
+/.mcp.json @NVIDIA/modelopt-agents-codeowners
 
 # Requirements files are owned by the setup team regardless of location
 requirements*.txt @NVIDIA/modelopt-setup-codeowners
