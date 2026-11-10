@@ -145,6 +145,7 @@ def get_mcore_gpt_model(
     normalization: str = "LayerNorm",
     transformer_impl: str = "modelopt" if HAS_TE else "local",
     use_cpu_initialization: bool = False,
+    share_embeddings_and_output_weights: bool = False,
     bf16: bool = True,
     sequence_parallel: bool = False,
     use_te: bool = False,
@@ -295,7 +296,7 @@ def get_mcore_gpt_model(
         max_sequence_length=max_sequence_length,
         pre_process=is_pipeline_first_stage(),
         post_process=is_pipeline_last_stage(),
-        share_embeddings_and_output_weights=False,
+        share_embeddings_and_output_weights=share_embeddings_and_output_weights,
         position_embedding_type=position_embedding_type,
     )
     return model.to(torch.bfloat16) if bf16 else model
