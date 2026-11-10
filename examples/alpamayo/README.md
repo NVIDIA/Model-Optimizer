@@ -86,7 +86,9 @@ model = AlpamayoR1.from_pretrained("./alpamayo-fp8", dtype=torch.float16)
 model = model.to(device="cuda", dtype=torch.float16).eval()  # as in quantize.py
 # Build model_inputs as make_joint_calibration_forward_loop in quantize.py does.
 with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-    pred_xyz, pred_rot = model.sample_trajectories_from_data_with_vlm_rollout(data=model_inputs)
+    pred_xyz, pred_rot = model.sample_trajectories_from_data_with_vlm_rollout(
+        data=model_inputs, max_generation_length=256  # as in quantize.py
+    )
 ```
 
 For an NVFP4 `--real-quant` checkpoint, use `.to("cuda")` without `dtype`:
