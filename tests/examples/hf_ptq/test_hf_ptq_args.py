@@ -38,7 +38,7 @@ from modelopt.recipe.presets import QUANT_CFG_CHOICES, RecipeSupersededAction
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils import mlflow as mlflow_lib
-from modelopt.torch.utils import safe_save
+from modelopt.torch.utils import safe_load, safe_save
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.mlflow import describe_run, run_tags
 
@@ -271,6 +271,19 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
     )
     with pytest.raises(ValueError, match="quantization_formats do not match"):
         run("search", fp8_only)
+    # So are another KL context's; a checkpoint that records none was scored without one.
+    state = safe_load(tmp_path / "search" / "rank0.pth")
+    state["method"] = "kl_div"
+    del state["scoring_config"]
+    safe_save(state, tmp_path / "kl_div.pth")
+    lowest = ModelOptAutoQuantizeRecipe(
+        auto_quantize=kl_div.auto_quantize.model_copy(
+            update={"method_options": {"context": "lowest"}}
+        )
+    )
+    with pytest.raises(ValueError, match="scored with"):
+        run("kl_div.pth", lowest)
+    assert run("kl_div.pth", kl_div)[0]
 
     for index in range(2):
         assert not run(f"shard{index}", auto_quantize_format_shard=(index, 2))[0]
