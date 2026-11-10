@@ -236,9 +236,7 @@ def auto_quantize(
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
     print(f"{'Enable' if kv_cache_quant_cfg is not None else 'Disable'} KV cache quantization")
     if kv_cache_quant_cfg is not None:
-        kv_entries = [
-            e for e in copy.deepcopy(kv_cache_quant_cfg["quant_cfg"]) if e["quantizer_name"] != "*"
-        ]
+        kv_entries = _kv_cache_entries(kv_cache_quant_cfg)
         mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_entries)
         if not _kv_cfg_uses_constant_amax(kv_entries):
             with mtq.set_quantizer_by_cfg_context(
@@ -499,8 +497,30 @@ def _auto_quantize_finalize_config(
         primary, args, fixed_quantize_config=recipe.quantize
     )["kv_cache_quant_cfg"]
     if kv_cfg is not None:
-        quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(quant_cfg, kv_cfg["quant_cfg"])
+        quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(quant_cfg, _kv_cache_entries(kv_cfg))
     return quant_cfg
+
+
+def _auto_quantize_finalizes(recipe: ModelOptAutoQuantizeRecipe, args: argparse.Namespace) -> bool:
+    """Whether this run finalizes saved scores, or the shards it merges, instead of searching."""
+    if (
+        recipe.auto_quantize.finalize_algorithm is None
+        or args.auto_quantize_format_shard is not None
+        or not args.auto_quantize_checkpoint
+    ):
+        return False
+    if args.auto_quantize_merge_shards:
+        return True
+    checkpoint = _search_checkpoint_file(args.auto_quantize_checkpoint)
+    return _scored_auto_quantize_state(checkpoint) is not None
+
+
+def _kv_cache_entries(kv_cache_quant_cfg: dict) -> list[dict]:
+    """A uniform KV-cache config's entries to add after the selected weight formats.
+
+    Its ``*`` entries are left out: there they would reset every weight quantizer.
+    """
+    return [e for e in copy.deepcopy(kv_cache_quant_cfg["quant_cfg"]) if e["quantizer_name"] != "*"]
 
 
 def _search_checkpoint_file(checkpoint: str) -> str:

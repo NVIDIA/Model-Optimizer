@@ -28,6 +28,7 @@ import torch
 from accelerate.hooks import remove_hook_from_module
 from autoquant_utils import (
     _auto_quantize_finalize_config,
+    _auto_quantize_finalizes,
     _check_auto_quantize_shard_args,
     _get_autoquant_memory_probe,
     _quantize_config_explicitly_enables_kv,
@@ -37,6 +38,7 @@ from autoquant_utils import (
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from example_utils import (
     HF_PTQ,
+    _layerwise_blocks,
     _prepare_quant_cfg,
     build_quant_cfg,
     create_vlm_calibration_forward,
@@ -1075,6 +1077,12 @@ def quantize_main(
 
     layerwise_cfgs = recipe_layerwise_blocks(recipe)
     is_layerwise = any(cfg.get("enable", False) for cfg in layerwise_cfgs)
+    if aq_config is not None and _auto_quantize_finalizes(recipe, args):
+        # This run only calibrates the frozen formats with finalize_algorithm, so its batch is
+        # sized for that algorithm (one layer at a time, if layerwise) rather than for the search.
+        is_layerwise = any(
+            block.get("enable", False) for block in _layerwise_blocks(aq_config.finalize_algorithm)
+        )
 
     # The value is a placeholder, replaced with --export_path below; presence is the switch.
     args.layerwise_export = layerwise_export_requested(layerwise_cfgs)

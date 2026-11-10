@@ -38,6 +38,7 @@ from modelopt.recipe.presets import QUANT_CFG_CHOICES, RecipeSupersededAction
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils import mlflow as mlflow_lib
+from modelopt.torch.utils import safe_save
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.mlflow import describe_run, run_tags
 
@@ -206,6 +207,16 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
                 QuantizeConfig(**QUANT_CFG_CHOICES["nvfp4"]),
             ],
             finalize_algorithm="max",
+            # A "*" entry, as a whole KV-only config starts, must not reset the frozen formats.
+            kv_cache=QuantizeConfig(
+                quant_cfg=[
+                    {"quantizer_name": "*", "enable": False},
+                    {
+                        "quantizer_name": "*[kv]_bmm_quantizer",
+                        "cfg": {"num_bits": (4, 3), "use_constant_amax": True},
+                    },
+                ]
+            ),
         )
     )
     input_ids = torch.arange(8).unsqueeze(0)
@@ -241,6 +252,7 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
     ready, model = run("search")
     assert ready
     assert model.model.layers[0].mlp.down_proj.weight_quantizer.is_enabled
+    assert model.model.layers[0].self_attn.k_bmm_quantizer.is_enabled
     # Another method's scores are refused, as a resumed search refuses them.
     kl_div = ModelOptAutoQuantizeRecipe(
         auto_quantize=recipe.auto_quantize.model_copy(update={"auto_quantize_method": "kl_div"})
@@ -683,6 +695,47 @@ def test_layerwise_calibration_batch_reaches_the_dataloader(
     with pytest.raises(_DataloaderReachedError):
         hf_ptq.quantize_main(args, None, None, None, False, None, None, torch.device("cpu"))
     assert batch_sizes == [expected]
+
+
+@pytest.mark.parametrize("scored", [False, True], ids=["search", "finalize"])
+def test_a_finalizing_run_sizes_its_batch_for_the_finalize_algorithm(monkeypatch, tmp_path, scored):
+    """Once the scores are saved, the run only calibrates: one layer at a time, here."""
+    checkpoint = tmp_path / "search.pth"
+    if scored:
+        safe_save({"method": "gradient", "candidate_stats": {"layer": {}}}, str(checkpoint))
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        *("--pyt_ckpt_path", "/models/Qwen3-0.6B"),
+        *("--recipe", "general/auto_quantize/nvfp4_fp8_at_5p4bits"),
+        *("--auto_quantize_checkpoint", str(checkpoint)),
+    )
+    searched = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits")
+    layerwise_gptq = {"method": "gptq", "layerwise": {"enable": True}}
+    recipe = searched.model_copy(
+        update={
+            "auto_quantize": searched.auto_quantize.model_copy(
+                update={"finalize_algorithm": layerwise_gptq}
+            )
+        }
+    )
+    monkeypatch.setattr(hf_ptq, "load_recipe", lambda _recipe: recipe)
+    monkeypatch.setattr(hf_ptq, "calibration_sample_input", lambda *_args: None)
+    monkeypatch.setattr(hf_ptq, "get_max_batch_size", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(hf_ptq, "get_max_layerwise_batch_size", lambda *_args, **_kwargs: 7)
+
+    class _DataloaderReachedError(Exception):
+        pass
+
+    batch_sizes = []
+
+    def make_calib_dataloader(args, *_args, **_kwargs):
+        batch_sizes.append(args.batch_size)
+        raise _DataloaderReachedError
+
+    monkeypatch.setattr(hf_ptq, "make_calib_dataloader", make_calib_dataloader)
+    with pytest.raises(_DataloaderReachedError):
+        hf_ptq.quantize_main(args, None, None, None, False, None, None, torch.device("cpu"))
+    assert batch_sizes == [7 if scored else 3]
 
 
 def test_calib_seq_must_be_positive(monkeypatch):
