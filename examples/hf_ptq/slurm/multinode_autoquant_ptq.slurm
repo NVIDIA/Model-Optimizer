@@ -23,7 +23,8 @@
 # when the model needs several to hold its weights. Shards beyond the number of searched formats
 # split a format's layer groups, so adding nodes keeps cutting the scoring time, until a shard's
 # calibration dominates. Step 2 merges the shards, solves the recipe's budget and exports on one
-# node; rerun it with another budget's recipe (same search otherwise) to solve that budget too.
+# node. Rerunning it with a recipe that changes only the budget solves that budget too; the shipped
+# Qwen3.6 budgets also differ in KL scoring context, so each needs its own shards.
 #
 # The defaults search Qwen3.6-35B-A3B at 3 bits, whose recipe deals six recipes to the shards (five
 # formats and BF16, which its KL scoring context measures too); a multiple of six balances best.

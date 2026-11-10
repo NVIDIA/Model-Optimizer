@@ -296,9 +296,14 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="scoring signature"):
         run("shapley.pth", shapley)
 
+    # Shards save shard<INDEX>.pth, as in a directory --auto_quantize_checkpoint, and a merge list
+    # takes those files or their directories.
     for index in range(2):
-        assert not run(f"shard{index}", auto_quantize_format_shard=(index, 2))[0]
-    shards = f"{tmp_path / 'shard0'},{tmp_path / 'shard1'}"
+        assert not run(f"s{index}/shard{index}.pth", auto_quantize_format_shard=(index, 2))[0]
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(ValueError, match="no shard"):
+        run("merged", auto_quantize_merge_shards=str(tmp_path / "empty"))
+    shards = f"{tmp_path / 's0'},{tmp_path / 's1' / 'shard1.pth'}"
     assert run("merged", auto_quantize_merge_shards=shards)[0]
     assert (tmp_path / "merged" / "rank0.pth").is_file()
 

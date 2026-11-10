@@ -1507,9 +1507,10 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Comma-separated format-shard checkpoints, or a directory of shard*.pth files, to "
-            "merge into --auto_quantize_checkpoint (if it does not exist yet) before the search, "
-            "which then restores every format's calibration and scores instead of computing them."
+            "Comma-separated format-shard checkpoints, or directories of the shard*.pth files "
+            "that shards save there, to merge into --auto_quantize_checkpoint (if it does not "
+            "exist yet) before the search, which then restores every format's calibration and "
+            "scores instead of computing them."
         ),
     )
     parser.add_argument(

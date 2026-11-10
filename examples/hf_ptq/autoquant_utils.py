@@ -495,12 +495,7 @@ def _auto_quantize_finalize_config(
         )
     checkpoint = _search_checkpoint_file(args.auto_quantize_checkpoint)
     if merge_shards and not os.path.exists(checkpoint):
-        mtq.merge_auto_quantize_checkpoints(
-            sorted(str(path) for path in Path(merge_shards).glob("shard*.pth"))
-            if os.path.isdir(merge_shards)
-            else [_search_checkpoint_file(path) for path in merge_shards.split(",")],
-            checkpoint,
-        )
+        mtq.merge_auto_quantize_checkpoints(_shard_checkpoint_files(merge_shards), checkpoint)
     if not finalize or format_shard is not None:
         return None
     search_state = _scored_auto_quantize_state(checkpoint)
@@ -581,6 +576,21 @@ def _search_checkpoint_file(checkpoint: str, name: str = "rank0.pth") -> str:
     if os.path.isfile(checkpoint) or not is_directory_checkpoint(checkpoint):
         return checkpoint
     return os.path.join(checkpoint, name)
+
+
+def _shard_checkpoint_files(merge_shards: str) -> list[str]:
+    """The checkpoints ``--auto_quantize_merge_shards`` names: files, or directories' shards."""
+    files = []
+    for entry in merge_shards.split(","):
+        if not os.path.isdir(entry):
+            files.append(entry)
+            continue
+        # The shard<INDEX>.pth files format shards save in a directory --auto_quantize_checkpoint.
+        found = sorted(str(path) for path in Path(entry).glob("shard*.pth"))
+        if not found:
+            raise ValueError(f"{entry} holds no shard*.pth checkpoints to merge.")
+        files += found
+    return files
 
 
 def _scored_auto_quantize_state(checkpoint: str) -> dict | None:
