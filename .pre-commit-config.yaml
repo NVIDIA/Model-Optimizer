@@ -82,6 +82,12 @@ repos:
         language: system
         files: ^(tools/launcher/examples/.*\.yaml|tools/precommit/check_launcher_yaml\.py)$
 
+      - id: check-env-knobs
+        name: read MODELOPT_* environment variables only through modelopt/env.py
+        entry: python3 tools/precommit/check_env_knobs.py
+        language: system
+        files: ^(modelopt|examples)/.*\.py$
+
   # Instructions to change license file if ever needed:
   # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
   - repo: https://github.com/Lucas-C/pre-commit-hooks

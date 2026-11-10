@@ -32,6 +32,7 @@ from torch.distributed.fsdp import FSDPModule
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
+from modelopt import env
 from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
@@ -323,9 +324,6 @@ def postprocess_amax(model: nn.Module, key: str, post_process_fn) -> nn.Module:
     return model
 
 
-_SKIP_WEIGHT_QUANT_CHECK_ENV = "MODELOPT_SKIP_WEIGHT_QUANT_CHECK"
-
-
 def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
     """Raise when a config asks for weight quantization but no weight quantizer is enabled.
 
@@ -350,7 +348,7 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     pattern's *final* entry, since entries apply in order and the last one for a pattern
     wins — before looking at the model at all.
     """
-    if os.environ.get(_SKIP_WEIGHT_QUANT_CHECK_ENV) == "1":
+    if env.skip_weight_quant_check():
         return
 
     # Later entries override earlier ones, so only each pattern's final state states intent.
@@ -396,7 +394,7 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
         "Under pipeline parallelism, a rank whose local stage genuinely has none of the "
         "targeted modules (e.g. a pure-attention stage under an experts-only recipe) hits "
         "this too, while other ranks proceed into calibration -- a collective hang, not "
-        f"just a wrong per-rank verdict. Set {_SKIP_WEIGHT_QUANT_CHECK_ENV}=1 to bypass this "
+        "just a wrong per-rank verdict. Set MODELOPT_SKIP_WEIGHT_QUANT_CHECK=1 to bypass this "
         "check in that situation -- note this is process-global, so it silences the check "
         "on every rank, not only the one with the legitimately empty stage."
     )

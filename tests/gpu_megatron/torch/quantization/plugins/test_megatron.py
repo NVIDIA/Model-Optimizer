@@ -94,9 +94,6 @@ from modelopt.torch.quantization.plugins.megatron_indexer import (
     _QuantMegatronIndexer,
     rotate_activation,
 )
-from modelopt.torch.quantization.plugins.transformer_engine import (
-    _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
-)
 from modelopt.torch.quantization.qtensor import QTensorWrapper
 from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
@@ -820,9 +817,9 @@ def test_te_grouped_compiled_weight_quantizer_loop(
         return compiled
 
     if compile_enabled:
-        monkeypatch.setenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, "1")
+        monkeypatch.setenv("MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP", "1")
     else:
-        monkeypatch.delenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, raising=False)
+        monkeypatch.delenv("MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP", raising=False)
     monkeypatch.setattr(torch, "compile", fake_compile)
     initialize_for_megatron(seed=SEED)
     model = _gpt_model_provider(
@@ -902,10 +899,10 @@ def test_te_grouped_real_compile_weight_quantizer_loop(distributed_setup_size_1,
     # One cached input batch, shared across both models for an apples-to-apples compare.
     forward = get_forward(model_eager)
 
-    monkeypatch.delenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, raising=False)
+    monkeypatch.delenv("MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP", raising=False)
     mtq.quantize(model_eager, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
 
-    monkeypatch.setenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, "1")
+    monkeypatch.setenv("MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP", "1")
     mtq.quantize(model_compiled, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
 
     grouped_eager = [
