@@ -18,6 +18,10 @@ model-generated responses: 104 correct and 104 containing reasoning loops. After
 (KTO beta 0.05, learning rate 1e-6) with simulated NVFP4 quantization, Candidate was exported to
 NVFP4.
 
+The evaluated checkpoints are available in the `checkpoint collection
+<https://modelopt.nvidia.com/hub/?collection=20eb6348-d437-4842-a67a-73d325238a27>`__
+(NVIDIA internal access required).
+
 Evaluation setup
 ----------------
 
