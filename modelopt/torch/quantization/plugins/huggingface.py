@@ -1164,7 +1164,10 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                 self._forward_count += 1
         self._stacked_weights = {}
         try:
-            return super().forward(*args, **kwargs)
+            # Experts kept packed run decompressed: opened here as well, as quantizer insertion and
+            # expert parallelism can each replace the forward their packing wrapped.
+            with unpacked(self):
+                return super().forward(*args, **kwargs)
         finally:
             # Autograd keeps what backward needs; holding more would pin every expert's copy.
             self._stacked_weights = {}
@@ -1184,18 +1187,20 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
         The base impl uses singular ``*_weight_quantizer`` and skips fused-
         experts modules, so weight-only calibration never reaches per-expert
-        quantizers without this override.
+        quantizers without this override. Experts kept packed are read decompressed, in a window
+        held open across the yields.
         """
-        for weight_name, quantizers_name in (
-            (self._first_proj_attr, self._first_proj_weight_quantizers_attr),
-            ("down_proj", "down_proj_weight_quantizers"),
-        ):
-            weight = getattr(self, weight_name, None)
-            quantizers = getattr(self, quantizers_name, None)
-            if weight is None or quantizers is None:
-                continue
-            for idx, q in enumerate(quantizers):
-                yield self.get_expert_weight(weight_name, idx), q
+        with unpacked(self, writeback=True):
+            for weight_name, quantizers_name in (
+                (self._first_proj_attr, self._first_proj_weight_quantizers_attr),
+                ("down_proj", "down_proj_weight_quantizers"),
+            ):
+                weight = getattr(self, weight_name, None)
+                quantizers = getattr(self, quantizers_name, None)
+                if weight is None or quantizers is None:
+                    continue
+                for idx, q in enumerate(quantizers):
+                    yield self.get_expert_weight(weight_name, idx), q
 
     def iter_weight_quantizers_for_calibration(self):
         """Yield the per-expert weight quantizers without slicing the fused 3-D weight.

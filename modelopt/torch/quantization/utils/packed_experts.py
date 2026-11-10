@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fused MoE experts kept in their checkpoint's MXFP4 format, and decompressed on use.
+"""Fused MoE experts kept in their checkpoint's compressed format, and decompressed on use.
 
-A checkpoint that stores its routed experts in MXFP4 holds them in 4.25 bits a weight; decompressed
-at load they take 16. :func:`pack_experts` keeps them as stored instead: each projection ``<proj>`` of
-the experts module holds the packed values, ``(num_experts, out, in // 2)`` bytes, and
-``<proj>_scales`` the E8M0 scales, ``(num_experts, out, in // 32)``.
+A checkpoint that stores its routed experts in a 4-bit format holds them in about 4.25 bits a
+weight; decompressed at load they take 16. :func:`pack_experts` keeps them as stored instead: each
+projection ``<proj>`` of the experts module holds its packed values, beside the other tensors the
+format stores, ``<proj><suffix>``. MXFP4 (:class:`PackedFormat`) stores its E8M0 scales as
+``<proj>_scales``.
 
 Every call of the module's forward runs on the decompressed projections, put in place of the packed
 ones for that call (:func:`unpacked`), so the module computes what its decompressing load would. A
@@ -26,7 +27,8 @@ reader outside the forward opens the same window through
 :func:`~modelopt.torch.quantization.utils.enable_weight_access_and_writeback`, and the export
 decompresses the module for good (:func:`unpack_experts`) before it writes it. The packed format
 cannot hold a change, so the window refuses one, as a fold does: calibration that updates weights in
-place needs the experts decompressed at load.
+place needs the experts decompressed at load. A projection sharded over the experts (a ``DTensor``)
+decompresses this rank's experts, sharded alike.
 """
 
 import functools
@@ -35,12 +37,37 @@ from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
 
 from .numeric_utils import dequantize_mxfp4
 
-__all__ = ["holds_packed_experts", "is_packed", "pack_experts", "unpack_experts", "unpacked"]
+__all__ = [
+    "PackedFormat",
+    "holds_packed_experts",
+    "is_packed",
+    "pack_experts",
+    "unpack_experts",
+    "unpacked",
+]
 
 _STATE = "_modelopt_packed_experts"
+
+
+class PackedFormat:
+    """How each expert of a packed projection is stored, and how it decompresses: MXFP4 here."""
+
+    def stored(
+        self, name: str, out: int, inp: int
+    ) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
+        """The tensors one expert of projection ``name``, ``(out, inp)`` decompressed, is stored as.
+
+        ``suffix -> (shape, dtype)``, the suffix ``""`` naming the projection's own parameter.
+        """
+        return {"": ((out, inp // 2), torch.uint8), "_scales": ((out, inp // 32), torch.uint8)}
+
+    def decompress(self, name: str, stored: dict[str, torch.Tensor], dtype: torch.dtype):
+        """Experts ``(e, ...)`` of projection ``name``, stored as :meth:`stored` says, decompressed."""
+        return dequantize_mxfp4(stored[""], stored["_scales"], dtype)
 
 
 @dataclass
@@ -52,6 +79,9 @@ class _PackedExperts:
     # Whether the decompressed projections are stored (num_experts, in, out), as GPT-OSS's are.
     transposed: bool
     dtype: torch.dtype
+    packed_format: PackedFormat
+    # The suffixes of the tensors stored beside each packed projection.
+    siblings: tuple[str, ...]
     # The packed projections the open window put aside, by name.
     packed: dict[str, nn.Parameter] = field(default_factory=dict)
 
@@ -72,15 +102,17 @@ def pack_experts(
     projections: "tuple[str, ...]" = ("gate_up_proj", "down_proj"),
     *,
     transposed: bool = False,
+    packed_format: PackedFormat | None = None,
 ) -> None:
-    """Store ``module``'s expert ``projections`` in MXFP4, for a load to fill with the checkpoint's.
+    """Store ``module``'s expert ``projections`` packed, for a load to fill with the checkpoint's.
 
     Each is a 3-D parameter, ``(num_experts, out, in)``, or ``(num_experts, in, out)`` when
-    ``transposed``. It is replaced by a packed one of the same name, on the same device, beside its
-    scales ``<proj>_scales``; it decompresses to the parameter's dtype. The module's forward then runs
-    on the decompressed projections. Checked before anything changes, so a refusal leaves the module
-    as it was.
+    ``transposed``. It is replaced by the tensors ``packed_format`` (MXFP4 by default) stores it as,
+    on the same device: a packed one of the same name, and its siblings. It decompresses to the
+    parameter's dtype. The module's forward then runs on the decompressed projections. Checked before
+    anything changes, so a refusal leaves the module as it was.
     """
+    packed_format = packed_format or PackedFormat()
     if is_packed(module):
         raise ValueError(f"{type(module).__name__}'s experts are already packed.")
     if "forward" in vars(module):
@@ -89,27 +121,29 @@ def pack_experts(
             f"{type(module).__name__} already has its forward wrapped; pack its experts before."
         )
     weights: dict[str, nn.Parameter] = {}
+    layouts = {}
     for name in projections:
         weight = getattr(module, name, None)
         if not isinstance(weight, nn.Parameter) or weight.dim() != 3:
             raise ValueError(f"{type(module).__name__}.{name} is not a 3-D expert parameter.")
-        if weight.shape[1 if transposed else 2] % 32:
+        out, inp = (weight.shape[2], weight.shape[1]) if transposed else weight.shape[1:]
+        if inp % 32:
             raise ValueError(
-                f"{type(module).__name__}.{name} {tuple(weight.shape)}: MXFP4 packs the input "
-                "dimension in blocks of 32."
+                f"{type(module).__name__}.{name} {tuple(weight.shape)}: the packed formats pack "
+                "the input dimension in blocks of 32."
             )
-        weights[name] = weight
+        weights[name], layouts[name] = weight, packed_format.stored(name, out, inp)
     dtypes = {weight.dtype for weight in weights.values()}
     if len(dtypes) != 1:
         raise ValueError(f"{type(module).__name__}'s expert projections differ in dtype: {dtypes}.")
     for name, weight in weights.items():
-        experts, d1, d2 = weight.shape
-        out, inp = (d2, d1) if transposed else (d1, d2)
-        for suffix, last in (("", inp // 2), ("_scales", inp // 32)):
-            packed = torch.empty(experts, out, last, dtype=torch.uint8, device=weight.device)
+        for suffix, (shape, dtype) in layouts[name].items():
+            packed = torch.empty(len(weight), *shape, dtype=dtype, device=weight.device)
             setattr(module, name + suffix, nn.Parameter(packed, requires_grad=False))
+    siblings = tuple(suffix for suffix in layouts[next(iter(layouts))] if suffix)
     shapes = {name: weight.shape for name, weight in weights.items()}
-    setattr(module, _STATE, _PackedExperts(shapes, transposed, dtypes.pop()))
+    state = _PackedExperts(shapes, transposed, dtypes.pop(), packed_format, siblings)
+    setattr(module, _STATE, state)
     # On the instance, not by a subclass, so the module keeps its class's forward, by which modules
     # are matched to their quantized versions; looked up when called, so a quantized one is reached,
     # which is why converting the module keeps it (DynamicModule.convert).
@@ -123,15 +157,32 @@ def _forward(module: nn.Module, *args, **kwargs):
         return type(module).forward(module, *args, **kwargs)
 
 
-def _decompress(module: nn.Module, state: _PackedExperts, name: str, blocks: torch.Tensor):
-    """Packed projection ``name``, decompressed and laid out as a decompressing load holds it."""
-    scales = getattr(module, name + "_scales")
+def _local(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.to_local() if isinstance(tensor, DTensor) else tensor
+
+
+def _decompress(module: nn.Module, state: _PackedExperts, name: str, packed: torch.Tensor):
+    """Packed projection ``name``, decompressed and laid out as a decompressing load holds it.
+
+    This rank's experts of a projection sharded over the experts, sharded alike.
+    """
+    stored = {"": _local(packed)}
+    stored.update((suffix, _local(getattr(module, name + suffix))) for suffix in state.siblings)
+    decompress = functools.partial(state.packed_format.decompress, name, dtype=state.dtype)
     if not state.transposed:
-        return dequantize_mxfp4(blocks, scales, state.dtype)
-    weight = torch.empty(state.shapes[name], dtype=state.dtype, device=blocks.device)
-    for expert in range(weight.shape[0]):  # one expert at a time bounds the transient
-        weight[expert] = dequantize_mxfp4(blocks[expert], scales[expert], state.dtype).T
-    return weight
+        weight = decompress(stored)
+    else:
+        experts, device = len(stored[""]), stored[""].device
+        weight = torch.empty(experts, *state.shapes[name][1:], dtype=state.dtype, device=device)
+        for expert in range(experts):  # one expert at a time bounds the transient
+            weight[expert] = decompress({k: v[expert : expert + 1] for k, v in stored.items()})[0].T
+    if not isinstance(packed, DTensor):
+        return weight
+    shape = (packed.shape[0], *weight.shape[1:])
+    stride = torch.empty(shape, device="meta").stride()
+    return DTensor.from_local(
+        weight, packed.device_mesh, packed.placements, run_check=False, shape=shape, stride=stride
+    )
 
 
 @contextmanager
@@ -167,18 +218,20 @@ def unpacked(module: nn.Module, writeback: bool = False):
                 name
                 for name, weight in unpacked_weights.items()
                 if current[name] is not weight
-                or not torch.equal(weight, _decompress(module, state, name, packed[name]))
+                or not torch.equal(
+                    _local(weight), _local(_decompress(module, state, name, packed[name]))
+                )
             ]
             if changed:
                 raise ValueError(
                     f"{type(module).__name__}.{', '.join(changed)} changed, but its experts are "
-                    "stored packed in MXFP4, which cannot hold the change. Load the checkpoint "
-                    "with its experts decompressed to update them."
+                    "stored packed, which cannot hold the change. Load the checkpoint with its "
+                    "experts decompressed to update them."
                 )
 
 
 def unpack_experts(module: nn.Module) -> None:
-    """Decompress ``module``'s packed expert projections for good, and drop their scales."""
+    """Decompress ``module``'s packed expert projections for good, and drop what they stored."""
     state = getattr(module, _STATE, None)
     if state is None:
         return
@@ -190,7 +243,8 @@ def unpack_experts(module: nn.Module) -> None:
             else _decompress(module, state, name, module._parameters[name])
         )
         module._parameters[name] = nn.Parameter(weight.data, requires_grad=False)
-        delattr(module, name + "_scales")
+        for suffix in state.siblings:
+            delattr(module, name + suffix)
     delattr(module, _STATE)
     forward = vars(module).get("forward")
     if isinstance(forward, functools.partial) and forward.func is _forward:

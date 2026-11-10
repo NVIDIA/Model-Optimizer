@@ -25,6 +25,7 @@ import os
 import torch
 from safetensors import safe_open
 
+from modelopt.torch.quantization.utils.packed_experts import PackedFormat, pack_experts
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.moe import config_levels, require_transformers
 
@@ -256,6 +257,138 @@ def _compressedify(conv, compressor, scheme, param_names):
     return new
 
 
+# What a projection kept packed stores under each name a compressed-tensors scheme stores a weight
+# as: the packed values in the projection's own parameter, the scales beside it. weight_shape is the
+# projection's, so it is not kept.
+_PACKED_SUFFIX = {"weight_packed": "", "weight_scale": "_scales"}
+
+
+def _make_pack_op_class(param_names):
+    """The per-expert op of a load keeping the experts packed: their stored tensors, as stored.
+
+    Each owned expert's tensors of each stored name are stacked, the sources' (gate, then up)
+    concatenated along the output rows, as the decompressing load fuses them decompressed, and
+    handed to the projection and its siblings. ``MergeModulelist`` has the loader shard the experts.
+    """
+    # transformers is optional, and core_model_loading is new in transformers 5.
+    from transformers.core_model_loading import MergeModulelist
+
+    anchor = "." + param_names[0]
+
+    class PackExperts(MergeModulelist):
+        def __init__(self):
+            super().__init__(dim=0)  # dim unused: convert is overridden
+
+        @torch.no_grad()
+        def convert(self, input_dict, *args, full_layer_name=None, **kwargs):
+            if full_layer_name is None:
+                raise RuntimeError("PackExperts: this transformers names no target to load into.")
+            parts: dict[str, list[torch.Tensor]] = {pn: [] for pn in param_names}
+            for pat in [p for p in input_dict if p.removesuffix("$").endswith(anchor)]:
+                marker = "$" if pat.endswith("$") else ""
+                stem = pat.removesuffix("$")[: -len(anchor)]
+                for pn in param_names:
+                    experts = input_dict.pop(stem + "." + pn + marker, None)
+                    if experts is not None:
+                        parts[pn].append(torch.stack([t for t in experts if t is not None]))
+            if input_dict:
+                raise ValueError(f"PackExperts: unconsumed checkpoint keys {sorted(input_dict)}")
+            counts = {len(t) for tensors in parts.values() for t in tensors}
+            if len(counts) != 1:
+                raise ValueError(f"PackExperts: the stored tensors hold {counts} experts each")
+            return {
+                full_layer_name + _PACKED_SUFFIX[pn]: torch.cat(tensors, dim=1)
+                for pn, tensors in parts.items()
+                if pn in _PACKED_SUFFIX
+            }
+
+    return PackExperts
+
+
+def _keep_packed(conv, param_names):
+    """Rewrite a per-expert converter to fuse the experts' stored tensors as they are stored."""
+    by_pname: dict[str, list[str]] = {pn: [] for pn in param_names}
+    for p in conv.source_patterns:
+        stem = p.removesuffix("$").removesuffix(".weight")
+        for pn in param_names:
+            by_pname[pn].append(stem + "." + pn + "$")
+    new = _decompressing_converter_class()(
+        source_patterns=[s for pn in param_names for s in by_pname[pn]],
+        target_patterns=getattr(conv, "_original_target_patterns", conv.target_patterns),
+        operations=[_make_pack_op_class(param_names)()],
+    )
+    new._reversible = conv
+    for attr in ("scope_prefix", "base_model_prefix", "force_cpu"):
+        if hasattr(conv, attr):
+            setattr(new, attr, getattr(conv, attr))
+    return new
+
+
+class _CompressedTensorsExperts(PackedFormat):
+    """Experts kept as a compressed-tensors scheme stores a weight, decompressed one at a time.
+
+    Each with the scheme's compressor, as the decompressing load decompresses it. ``layouts`` holds
+    one expert's stored tensors of each projection, its sources fused: ``name -> {stored name:
+    (shape, dtype)}``.
+    """
+
+    def __init__(self, compressor, scheme, param_names, layouts):
+        self.compressor, self.scheme, self.param_names = compressor, scheme, param_names
+        self.layouts = layouts
+        self.shapes: dict[str, tuple[int, int]] = {}
+
+    def stored(self, name, out, inp):
+        layout = self.layouts[name]
+        if layout["weight_packed"][0][0] != out:
+            raise ValueError(
+                f"The checkpoint stores {name} with {layout['weight_packed'][0][0]} rows an expert, "
+                f"where the model's has {out}."
+            )
+        self.shapes[name] = (out, inp)
+        return {_PACKED_SUFFIX[pn]: layout[pn] for pn in layout}
+
+    def decompress(self, name, stored, dtype):
+        shape = {"weight_shape": torch.tensor(self.shapes[name])}
+        extra = shape if "weight_shape" in self.param_names else {}
+        return torch.stack(
+            [
+                self.compressor.decompress(
+                    {**{pn: stored[_PACKED_SUFFIX[pn]][e] for pn in self.layouts[name]}, **extra},
+                    self.scheme,
+                )["weight"].to(dtype)
+                for e in range(len(stored[""]))
+            ]
+        )
+
+
+def _pack_rewritten_experts(model, rewritten, layouts, compression) -> int:
+    """Store the experts the ``rewritten`` converters load packed, as the checkpoint stores them.
+
+    ``layouts`` holds one expert's stored tensors of each source, ``"<source>.<name>" -> (shape,
+    dtype)``, as :func:`_stored_layouts` reads them. Returns how many modules it packed.
+    """
+    compressor, scheme, param_names, _ = compression
+    fused: dict[str, dict] = {}
+    for conv in rewritten:
+        target = getattr(conv, "_original_target_patterns", conv.target_patterns)[0]
+        leaf = target.removesuffix("$").rpartition(".")[2]
+        sources = [p.removesuffix("$").removesuffix(".weight") for p in conv.source_patterns]
+        layout = {}
+        for pn in (pn for pn in param_names if pn in _PACKED_SUFFIX):
+            shapes = [layouts[f"{s.rpartition('.')[2]}.{pn}"] for s in sources]
+            rows = sum(shape[0] for shape, _ in shapes)
+            layout[pn] = ((rows, *shapes[0][0][1:]), shapes[0][1])
+        fused[leaf] = layout
+    packed_format = _CompressedTensorsExperts(compressor, scheme, param_names, fused)
+    packed = 0
+    for module in model.modules():
+        names = tuple(n for n in fused if getattr(module._parameters.get(n), "ndim", 0) == 3)
+        if names:
+            pack_experts(module, names, packed_format=packed_format)
+            packed += 1
+    return packed
+
+
 # Whether the load under way is one whose converters the hooks rewrote (from_pretrained asks for the
 # mapping before it reads a tensor). Module state: the loader materializes in worker threads.
 _LOAD = {"decompressing": False}
@@ -276,11 +409,14 @@ def _install_keep_int_native():
 
     # Any other argument passes through, positionally or by keyword: a release may add some.
     def spawn_materialize(thread_pool, tensor, device=None, dtype=None, *args, **kwargs):
-        if _LOAD["decompressing"] and dtype is not None and dtype.is_floating_point:
+        if _LOAD["decompressing"] and dtype is not None:
             # A safetensors slice is judged by its stored dtype, without reading it.
             stored = tensor.get_dtype() if hasattr(tensor, "get_dtype") else None
-            if not (stored.startswith(("F", "BF")) if stored else tensor.is_floating_point()):
-                dtype = None  # keep packed/shape/zero-point/g_idx integers native
+            floating = stored.startswith(("F", "BF")) if stored else tensor.is_floating_point()
+            if floating != dtype.is_floating_point:
+                # keep packed/shape/zero-point/g_idx integers native, and the float scales of a
+                # projection kept packed, whose integer target would truncate them
+                dtype = None
         return orig(thread_pool, tensor, device, dtype, *args, **kwargs)
 
     setattr(spawn_materialize, "_onfly_patched", True)
@@ -290,6 +426,49 @@ def _install_keep_int_native():
 # Marks a config whose model's converters the installed hooks rewrite (holds the names each
 # compressed weight is stored under).
 _MARK = "_modelopt_onfly_decompress"
+# Marks a config whose model's experts the hooks keep packed (holds _stored_layouts' layouts).
+_PACKED_MARK = "_modelopt_onfly_keep_packed"
+
+# The safetensors dtypes a compressed expert's tensors are stored in.
+_SAFETENSORS_DTYPES = {
+    "U8": torch.uint8,
+    "I8": torch.int8,
+    "I32": torch.int32,
+    "I64": torch.int64,
+    "BF16": torch.bfloat16,
+}
+
+
+def _stored_layouts(ckpt_dir, param_names) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
+    """How the checkpoint stores one expert: ``"<source>.<stored name>" -> (shape, dtype)``.
+
+    E.g. ``"w1.weight_packed"``, read from the safetensors headers. Every expert's must be alike.
+    """
+    # A plugin: it imports huggingface_hub, which this module needs nowhere else.
+    from modelopt.torch.utils.plugins.hf_checkpoint_utils import checkpoint_tensor_files
+
+    by_file: dict[str, list[str]] = {}
+    for name, file in checkpoint_tensor_files(ckpt_dir).items():
+        if ".experts." in name and name.rpartition(".")[2] in param_names:
+            by_file.setdefault(file, []).append(name)
+    layouts: dict[str, tuple[tuple[int, ...], torch.dtype]] = {}
+    for file, names in by_file.items():
+        with safe_open(os.path.join(ckpt_dir, file), framework="pt") as f:
+            for name in names:
+                stem, _, stored = name.rpartition(".")
+                tensor = f.get_slice(name)
+                layout = (tuple(tensor.get_shape()), _SAFETENSORS_DTYPES.get(tensor.get_dtype()))
+                if layout[1] is None:
+                    raise NotImplementedError(
+                        f"The checkpoint stores {name} as {tensor.get_dtype()}, which keeping the "
+                        "experts packed does not handle. Load it decompressed."
+                    )
+                if layouts.setdefault(f"{stem.rpartition('.')[2]}.{stored}", layout) != layout:
+                    raise NotImplementedError(
+                        f"The checkpoint's experts store {name} as {layout}, unlike its others: "
+                        "keeping them packed needs every expert stored alike. Load it decompressed."
+                    )
+    return layouts
 
 
 def _mark(hf_config, stored_as):
@@ -311,14 +490,16 @@ def stored_names(hf_config) -> tuple[str, ...]:
     raise ValueError("The config is not marked for on-the-fly decompression: install it first.")
 
 
-def _checked_compression(hf_config):
+def _checked_compression(hf_config, keep_packed: bool = False):
     """What :func:`install_onfly_decompress` checks before it installs anything, changing nothing.
 
     Returns the checkpoint's compression (:func:`_read_compression`) and the one this process already
     decompresses, or ``None``. Raises what the install refuses: a raw dict, a dtype other than the
     experts' bfloat16 at any config level, transformers before 5.8, the checkpoint's
     compressed-tensors scheme, a config with nothing to decompress, and a process already
-    decompressing a checkpoint compressed differently.
+    decompressing a checkpoint compressed differently. With ``keep_packed``, a scheme storing more
+    than packed values and their scales too: packed gate and up stay one tensor, and only those two
+    run along the weight's rows, as the fused projection's must.
     """
     if isinstance(hf_config, dict):
         # The load finds the hooks by a mark on the config object, which a dict cannot carry.
@@ -353,34 +534,55 @@ def _checked_compression(hf_config):
             f"checkpoint (stored params {installed[2]}); one compressed differently ('{compression[3]}', "
             f"stored params {compression[2]}) needs a process of its own"
         )
+    source = compression if compression is not None else installed
+    if keep_packed and source is not None:
+        stored = source[2]
+        if stored[0] != "weight_packed" or set(stored) - {*_PACKED_SUFFIX, "weight_shape"}:
+            raise NotImplementedError(
+                f"install_onfly_decompress: keeping the experts packed handles a scheme storing "
+                f"packed values and their scales, and this checkpoint's stores {stored}. Load it "
+                "decompressed."
+            )
     return compression, installed
 
 
-def decompression_refusal(hf_config) -> str | None:
+def decompression_refusal(hf_config, keep_packed: bool = False) -> str | None:
     """Why :func:`install_onfly_decompress` would refuse ``hf_config``, or ``None``, installing nothing.
 
     The install's own checks (:func:`_checked_compression`), for a model spec's ``prepare_refusal``
     to ask before the plan is decided.
     """
     try:
-        _checked_compression(hf_config)
+        _checked_compression(hf_config, keep_packed)
     except (ImportError, NotImplementedError, RuntimeError, TypeError, ValueError) as e:
         return str(e)
     return None
 
 
-def install_onfly_decompress(hf_config):
+def install_onfly_decompress(hf_config, *, keep_packed: bool = False, ckpt_path=None):
     """Make ``from_pretrained`` decompress the experts of the checkpoint ``hf_config`` describes.
 
     Call before ``from_pretrained``. The hooks are process-wide but rewrite only the converters of a
     model built from a config they marked: one compressed checkpoint per process, installing again
     for it marks that config too, and one compressed differently is refused.
+
+    ``keep_packed`` keeps them as stored instead, decompressed on use
+    (:mod:`~modelopt.torch.quantization.utils.packed_experts`), as the checkpoint at ``ckpt_path``
+    stores them: the load fuses each expert's stored tensors as they are, and they decompress as this
+    load would decompress them.
     """
-    compression, installed = _checked_compression(hf_config)
+    compression, installed = _checked_compression(hf_config, keep_packed)
     # transformers is optional: this module imports without it.
     import transformers.modeling_utils as mu
     from transformers.core_model_loading import WeightConverter
 
+    if keep_packed:
+        if ckpt_path is None:
+            raise ValueError(
+                "install_onfly_decompress: keeping the experts packed needs the checkpoint's path, "
+                "to read how it stores them."
+            )
+        setattr(hf_config, _PACKED_MARK, _stored_layouts(ckpt_path, (compression or installed)[2]))
     if installed is not None:
         # The same checkpoint through a config of its own, which its load must find marked too, or a
         # marked config prepared again.
@@ -393,21 +595,29 @@ def install_onfly_decompress(hf_config):
 
     def patched(*args, **kwargs):
         convs = orig(*args, **kwargs)
-        config = getattr(args[0] if args else kwargs["model"], "config", None)
+        model = args[0] if args else kwargs["model"]
+        config = getattr(model, "config", None)
         _LOAD["decompressing"] = is_marked(config)
         if not _LOAD["decompressing"]:
             # Not the compressed checkpoint: rewritten, an uncompressed MoE's experts would match no
             # stored key and load newly initialized without an error.
             return convs
-        out, rewritten = [], 0
+        layouts = next(
+            (s for c in config_levels(config) if (s := getattr(c, _PACKED_MARK, None)) is not None),
+            None,
+        )
+        out, rewritten = [], []
         for c in convs:
             # only the per-expert MoE converters (have `.weight` sources under `.experts.`, which
             # leaves a shared expert's `shared_experts.` out, as check_compressed_keys does)
             if isinstance(c, WeightConverter) and any(
                 ".experts." in p and p.endswith((".weight", ".weight$")) for p in c.source_patterns
             ):
-                out.append(_compressedify(c, compressor, scheme, param_names))
-                rewritten += 1
+                if layouts is None:
+                    out.append(_compressedify(c, compressor, scheme, param_names))
+                else:
+                    out.append(_keep_packed(c, param_names))
+                rewritten.append(c)
             else:
                 out.append(c)
         if not rewritten:
@@ -416,11 +626,21 @@ def install_onfly_decompress(hf_config):
                 "install_onfly_decompress: the model's conversion mapping has no per-expert "
                 "converter to rewrite, so its compressed experts would load newly initialized."
             )
-        # from_pretrained loads from a copy of the marked config; the mark must not reach the config
+        if layouts is not None and not _pack_rewritten_experts(
+            model, rewritten, layouts, compression
+        ):
+            # Before the load sizes the device map or shards the experts, as both read them. With
+            # none packed, the experts would match no tensor the converters hand over.
+            raise RuntimeError(
+                "install_onfly_decompress: no module of the model holds the experts the rewritten "
+                "converters load, so none can be kept packed."
+            )
+        # from_pretrained loads from a copy of the marked config; the marks must not reach the config
         # a later save writes, at any level. Cleared once the experts' converters are rewritten.
         for c in config_levels(config):
-            if hasattr(c, _MARK):
-                delattr(c, _MARK)
+            for mark in (_MARK, _PACKED_MARK):
+                if hasattr(c, mark):
+                    delattr(c, mark)
         return out
 
     setattr(patched, "_onfly_compression", compression)
