@@ -43,6 +43,7 @@ from .numeric_utils import dequantize_mxfp4
 
 __all__ = [
     "PackedFormat",
+    "decompressed_shape",
     "holds_packed_experts",
     "is_packed",
     "pack_experts",
@@ -95,6 +96,14 @@ def holds_packed_experts(module: nn.Module) -> bool:
     """Whether ``module``'s expert projections hold packed bytes now: packed, with no window open."""
     state = getattr(module, _STATE, None)
     return state is not None and not state.packed
+
+
+def decompressed_shape(module: nn.Module, name: str) -> torch.Size:
+    """The shape of ``module``'s expert projection ``name`` decompressed, whether packed or not."""
+    state = getattr(module, _STATE, None)
+    if state is not None and name in state.shapes:
+        return state.shapes[name]
+    return getattr(module, name).shape
 
 
 def pack_experts(

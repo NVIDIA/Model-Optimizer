@@ -51,7 +51,7 @@ from ..nn.modules.tensor_quantizer import _try_stacked_fake_quant
 from ..utils import replace_function, sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
 from ..utils.numeric_utils import E8M0_BIAS, unpack_e2m1
-from ..utils.packed_experts import unpacked
+from ..utils.packed_experts import decompressed_shape, unpacked
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 
@@ -1748,7 +1748,7 @@ def _transposed_experts(modules) -> list[str]:
     stored ``(num_experts, out_dim, in_dim)``, its first projection takes the dim ``down_proj`` puts
     out, which stored transposed it never does. A non-gated container (``up_proj``, as Nemotron-H's)
     matches no :func:`_fused_experts_wrapper`, so only its ``is_transposed`` is read, and its own
-    wrapper is responsible for the layout.
+    wrapper is responsible for the layout. Experts kept packed show it by their decompressed shapes.
     """
     return sorted(
         {
@@ -1757,7 +1757,8 @@ def _transposed_experts(modules) -> list[str]:
             if getattr(module, "is_transposed", False)
             or (
                 (wrapper := _fused_experts_wrapper(module)) is not None
-                and getattr(module, wrapper._first_proj_attr).shape[-1] != module.down_proj.shape[1]
+                and decompressed_shape(module, wrapper._first_proj_attr)[-1]
+                != decompressed_shape(module, "down_proj")[1]
             )
         }
     )

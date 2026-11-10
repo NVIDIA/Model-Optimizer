@@ -1137,12 +1137,13 @@ def test_experts_kept_packed_calibrate_and_export_as_decompressed_ones(tmp_path,
     )
     import modelopt.torch.quantization as mtq
     from modelopt.torch.export import export_hf_checkpoint
+    from modelopt.torch.quantization.plugins.huggingface import _transposed_experts
     from modelopt.torch.quantization.utils.packed_experts import is_packed
 
     _compressed_mixtral(tmp_path / "ckpt", fmt)
     inputs = torch.randint(0, 64, (2, 12), generator=torch.Generator().manual_seed(1))
     logits, exported = {}, {}
-    for keep in (False, True):
+    for keep in (True, False):
         config = AutoConfig.from_pretrained(tmp_path / "ckpt")
         onfly.install_onfly_decompress(config, keep_packed=keep, ckpt_path=tmp_path / "ckpt")
         del config.quantization_config  # as the expert-parallel load does
@@ -1153,6 +1154,9 @@ def test_experts_kept_packed_calibrate_and_export_as_decompressed_ones(tmp_path,
         assert is_packed(experts) is keep
         if keep:  # stored as the checkpoint stores them, no bf16 copy
             assert not experts.gate_up_proj.is_floating_point()
+            # Read by their decompressed shapes, or quantization would register their class as
+            # transposed and leave it unquantized, unless a decompressed load registered it first.
+            assert not _transposed_experts([experts])
             # Wrapped again, as transformers' expert parallelism wraps the forward, which
             # quantizer insertion then replaces.
             inner = experts.forward
