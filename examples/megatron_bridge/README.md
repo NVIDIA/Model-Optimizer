@@ -442,6 +442,19 @@ selection fails if that state has not been restored before wrapping. Native chec
 restores FP32 masters, Adam state, and training counters afterward.
 Use Bridge/Core versions with HybridModel support.
 
+### Student latent-weight initialization
+
+By default, the student keeps its checkpoint's floating latent weights. Add
+`--qdq_student_weight` to initialize trainable weights from the restored quantizers' Q→DQ
+output. This is format-independent and supports mixed quantization.
+
+Use an uncompressed, adapter-free student checkpoint. GPTQ, if desired, runs during PTQ;
+initialization reuses its saved state. Native resumes skip initialization. With a fresh output
+directory, the flag rejects trained sources identified by Bridge metadata or a nonzero Megatron
+iteration path. Omit the flag to retain trained latents; use the original output directory for an optimizer resume.
+Dynamic quantizers and BF16 inverse transforms can change forward values after initialization.
+The observed loss-spike benefit is specific to the IQ2 experiments; other formats are not established.
+
 ### LoRA QAD
 
 Add `--lora_rank` to PTQ to train low-rank weight updates with the usual QAD flow:
