@@ -7,8 +7,8 @@ These instructions apply to AI-assisted work in this repository.
 - Start with `README.md` for project overview and install.
 - Use `modelopt/` for source, `tests/` for focused test coverage, and
   `examples/` or `docs/` for usage patterns.
-- **Agent skills live under root `skills/`**. `plugins/modelopt/skills`,
-  `.agents/skills`, and `.claude/skills` expose them through relative symlinks. Shared agent config and scripts
+- **Agent skills live under root `skills/`**, inside the repository-root plugin.
+  `.agents/skills` and `.claude/skills` expose them through relative symlinks. Shared agent config and scripts
   remain under `.agents/`. See `.agents/README.md` for the convention.
 
 ## Coding guidelines

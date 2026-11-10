@@ -16,11 +16,10 @@ and holds shared configuration.
 .codex/
 └── agents/                 # Codex project role definitions
 
-plugins/modelopt/
-├── .claude-plugin/
-├── .codex-plugin/
-├── agents/                 # Claude Code subagent definitions
-└── skills → ../../skills
+.claude-plugin/plugin.json  # root Claude plugin manifest
+.codex-plugin/plugin.json   # root Codex plugin manifest
+.mcp.json                   # plugin MCP configuration
+.claude/agents/             # canonical Claude subagent definitions
 
 skills/                     # canonical skill content
 ├── common/                 # shared support
@@ -29,23 +28,22 @@ skills/                     # canonical skill content
 
 ## How each agent finds these
 
-Each agent points at `.agents/` through whatever mechanism it supports — never
-a copy:
+Repository discovery shares files through the supported agent paths:
 
 - **Claude Code** only auto-discovers skills under `.claude/skills/`, so
   `.claude/skills/` holds relative symlinks into `.agents/skills/`.
 - **Repository agents** use `.agents/skills`, a relative symlink to root `skills/`.
-- **Claude Code and Codex plugins** load `plugins/modelopt/skills` directly.
-- **Claude Code** loads subagents from `plugins/modelopt/agents/` through the
-  plugin, while `.claude/agents/*.md` symlinks expose them to repository users.
+- **Both marketplaces** select the repository root as the plugin source.
+  The root manifests load the real `skills/` directory, without installer symlinks.
+- **Claude Code** loads the individual `.claude/agents/*.md` paths listed in
+  the root plugin manifest. These canonical files also serve repository users.
 - **Codex** discovers project roles directly under `.codex/agents/`. Codex
   plugins cannot currently install custom roles.
 
 ## Editing rules
 
 - **Always edit skills under root `skills/`**.
-- Claude Code subagents belong in `plugins/modelopt/agents/`, not
-  `.claude/agents/`.
+- Claude Code subagents belong in `.claude/agents/` as real files.
 - Codex custom roles belong in `.codex/agents/`.
 - Vendored-verbatim skills (`launching-evals`, `accessing-mlflow`) are managed
   by `.agents/scripts/sync-upstream-skills.sh` — do not modify by hand.
