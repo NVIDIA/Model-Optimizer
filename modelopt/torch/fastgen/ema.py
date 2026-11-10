@@ -22,16 +22,12 @@ class rather than a framework-specific callback. The caller decides when to call
 (via :meth:`copy_to`).
 """
 
-from __future__ import annotations
-
 import copy
-from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 
-if TYPE_CHECKING:
-    from .config import EMAConfig
+from .config import EMAConfig
 
 __all__ = ["ExponentialMovingAverage"]
 

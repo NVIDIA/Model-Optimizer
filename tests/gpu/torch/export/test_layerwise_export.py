@@ -311,7 +311,8 @@ def test_export_matches_whole_model_export(
         assert (export_dir / artifact).is_file(), f"{artifact} missing"
 
 
-def test_config_only_export_is_finishable(tmp_path):
+@pytest.mark.parametrize("save_modelopt_state", [False, True])
+def test_config_only_export_is_finishable(tmp_path, recwarn, save_modelopt_state):
     """No caller-supplied exporter: calibration builds one and announces it to be finished.
 
     Held in a local instead, the run would leave layer shards with no tail, index or config.
@@ -323,7 +324,9 @@ def test_config_only_export_is_finishable(tmp_path):
 
     exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
     assert exporter is not None, "calibration did not attach the exporter it built"
-    exporter.finalize()
+    recwarn.clear()
+    export_hf_checkpoint(model, export_dir=export_dir, save_modelopt_state=save_modelopt_state)
+    assert any("save_modelopt_state" in str(w.message) for w in recwarn) == save_modelopt_state
     for artifact in ("model-tail.safetensors", "model.safetensors.index.json", "config.json"):
         assert (export_dir / artifact).is_file(), f"{artifact} missing"
     assert getattr(model, LAYERWISE_EXPORTER_ATTR, None) is None, (

@@ -38,54 +38,199 @@
 
 """GPTQ helper and Hessian utilities for calibration."""
 
+import functools
+import queue
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+
 import torch
 import torch.distributed as dist
 
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import (
+    get_available_gpu_memory,
+    get_process_gpus,
+    print_rank_0,
+    warn_rank_0,
+)
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
-from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
-# Used fraction of a GPU's memory above which GPTQ keeps new Hessians off it.
-_HESSIAN_GPU_MEM_LIMIT = 0.65
+# A GPU takes a new Hessian only if enough memory stays available after it for the calibration
+# forward that follows. Until GPTQ has measured that forward on the GPU, keep this share free.
+_HESSIAN_UNMEASURED_RESERVE = 0.35
+# Once measured, keep this multiple of the most a calibration forward added on the GPU, and at
+# least this share of the GPU.
+_HESSIAN_RESERVE_MARGIN = 1.5
+_HESSIAN_MIN_RESERVE = 0.1
+# The most memory a GPTQ calibration forward has added on each GPU, by device index.
+_calib_forward_peak: dict[int, int] = {}
 
 
-def _gpu_is_full(device) -> bool:
-    return get_used_gpu_mem_fraction(device) > _HESSIAN_GPU_MEM_LIMIT
+def _gpu_has_room(gpu: int, nbytes: int) -> bool:
+    """Whether ``nbytes`` more on ``gpu`` leaves the calibration forward the memory it needs."""
+    total = torch.cuda.get_device_properties(gpu).total_memory
+    peak = _calib_forward_peak.get(gpu)
+    if peak is None:
+        reserve = _HESSIAN_UNMEASURED_RESERVE * total
+    else:
+        reserve = max(_HESSIAN_MIN_RESERVE * total, _HESSIAN_RESERVE_MARGIN * peak)
+    return get_available_gpu_memory(gpu) - nbytes >= reserve
+
+
+def reset_calib_forward_memory():
+    """Forget measured calibration forwards; a new run, maybe of another model, measures afresh."""
+    _calib_forward_peak.clear()
+
+
+@contextmanager
+def track_calib_forward_memory():
+    """Record the memory the enclosed calibration forward adds on each GPU, for Hessian placement.
+
+    PyTorch's peak counters are reset first: otherwise an earlier peak, such as the previous
+    layer's Hessians and GPTQ updates, would count as forward memory and send Hessians to the CPU
+    for nothing.
+    """
+    gpus = get_process_gpus() if torch.cuda.is_available() else []
+    allocated = {}
+    for gpu in gpus:
+        torch.cuda.reset_peak_memory_stats(gpu)
+        allocated[gpu] = torch.cuda.memory_allocated(gpu)
+    yield
+    for gpu in gpus:
+        added = torch.cuda.max_memory_allocated(gpu) - allocated[gpu]
+        _calib_forward_peak[gpu] = max(_calib_forward_peak.get(gpu, 0), added)
 
 
 def _hessian_offload_device(nbytes: int) -> torch.device:
-    """Where a Hessian goes when its weight's GPU is full: the emptiest GPU with room, else CPU.
+    """Where a Hessian goes when its weight's GPU lacks room: the emptiest GPU with room, else CPU.
 
     A model sharded over several GPUs leaves the ones not holding the current layer idle, and a
     Hessian there costs a device-to-device copy per update instead of a host copy and a CPU
     rescale of the whole matrix. Only GPUs this process already holds memory on are candidates,
-    and only outside distributed runs, so no other job's or rank's GPU is touched. A candidate
-    must also have the Hessian's ``nbytes`` free.
+    and only outside distributed runs, so no other job's or rank's GPU is touched.
     """
-    if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
-        gpus = [i for i in range(torch.cuda.device_count()) if torch.cuda.memory_reserved(i)]
-        for gpu in sorted(gpus, key=get_used_gpu_mem_fraction):
-            if _gpu_is_full(gpu):
-                break
-            if torch.cuda.mem_get_info(gpu)[0] > nbytes:
-                return torch.device("cuda", gpu)
+    for gpu in sorted(_own_gpus(), key=get_available_gpu_memory, reverse=True):
+        if _gpu_has_room(gpu, nbytes):
+            return torch.device("cuda", gpu)
     return torch.device("cpu")
 
 
-def update_hessian(input, hessian, n_samples):
+def _own_gpus() -> list[int]:
+    """GPUs this process already holds memory on; none in a multi-rank run, where they may be another rank's."""
+    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+        return []
+    return get_process_gpus()
+
+
+def _update_room(helper, weight, block_size) -> int:
+    """Bytes a GPU needs to run ``helper``'s update of ``weight``, as measured with the CUDA codecs.
+
+    The Hessian, the inverse and their temporaries; the float32 copy of the weight with a
+    dtype-conversion temporary (a projection much wider than its input makes the weight the larger
+    part); the block's errors and up to four temporaries of a group no wider than the block, each
+    as large as the weight when the input is no wider than a block; and the codec's tables and
+    scratch, about 35 MiB on a GPU's first update. Logging the error afterwards holds the original
+    in its own dtype and up to five float32 weight-sized tensors: the result, the original, the
+    error and two products. Through both, a GGML format that keeps its scales holds the unrounded
+    weight in its own dtype, counted for every format. On top comes the helper's own scratch
+    (:meth:`GPTQHelper.update_scratch`), such as a search over each block's local scales.
+    """
+    columns = weight.shape[-1]
+    rows = weight.numel() // columns
+    block = min(block_size, columns)
+    weights = 4 * rows * (2 * columns + 5 * block)
+    if helper.log_mse:
+        weights = max(weights, (5 * 4 + weight.element_size()) * weight.numel())
+    unrounded = weight.element_size() * weight.numel()
+    scratch = helper.update_scratch(weight)
+    return 2**26 + 32 * helper.hessian.numel() + weights + unrounded + scratch
+
+
+def update_expert_weights(work, block_size, perc_damp):
+    """Run the GPTQ updates of ``(helper, weight)`` pairs, spread over this process's GPUs.
+
+    Expert updates are independent, and in a layerwise run of a model sharded over several GPUs
+    only the current layer's GPU works. Helpers whose update can run on any device run in one
+    worker thread per GPU this process uses that has room for an update, each writing its result
+    back to its weight; the others, or all of them when fewer than two GPUs qualify, run in turn on
+    their weight's device.
+    """
+    movable = [(h, w) for h, w in work if w.is_cuda and h.updates_on_any_device()]
+    # A worker holds one expert at a time.
+    room = max((_update_room(h, w, block_size) for h, w in movable), default=0)
+    gpus = [torch.device("cuda", g) for g in _own_gpus() if get_available_gpu_memory(g) > room]
+    if len(gpus) < 2 or len(movable) < 2:
+        movable = []
+
+    def update(item, device):
+        helper, weight = item
+        helper.update_weights(block_size, perc_damp, weight, device=device)
+        helper.free()
+
+    moved = {id(helper) for helper, _ in movable}
+    for item in work:
+        if id(item[0]) not in moved:
+            update(item, None)
+    if not movable:
+        return
+
+    pending: queue.SimpleQueue = queue.SimpleQueue()
+    for item in movable:
+        pending.put(item)
+
+    def next_item(device):
+        try:
+            return pending.get_nowait()
+        except queue.Empty:
+            return None
+
+    run_on_each_gpu(gpus, next_item, update)
+    for device in {weight.device for _, weight in movable}:
+        torch.cuda.synchronize(device)
+
+
+def run_on_each_gpu(gpus, next_item, run):
+    """Call ``run(item, device)`` on the items ``next_item(device)`` hands out, one thread per GPU.
+
+    ``next_item`` returns the next item for that GPU, or ``None`` when there is none left; each GPU's
+    items can be its own or come from a queue all of them share. The first item runs in the caller's
+    thread with ``device=None``, on the device its data is on, so lazy setup that is not thread-safe,
+    such as loading a format's CUDA extension, happens once before the workers start.
+    """
+    first = next_item(gpus[0])
+    if first is not None:
+        run(first, None)
+    inference = torch.is_inference_mode_enabled()
+
+    def worker(device):
+        # The device, grad mode and inference mode are per thread: take the caller's.
+        torch.cuda.set_device(device)
+        with torch.inference_mode() if inference else torch.no_grad():
+            while (item := next_item(device)) is not None:
+                run(item, device)
+        torch.cuda.synchronize(device)
+
+    with ThreadPoolExecutor(len(gpus)) as pool:
+        for future in [pool.submit(worker, device) for device in gpus]:
+            future.result()
+
+
+def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
     """Update hessian matrix with new input samples using incremental formula.
 
     Args:
         input: Input tensor (batch_size, ..., features)
         hessian: Current Hessian matrix to update in-place
         n_samples: Number of samples already processed
+        input_dtype: The dtype the GEMM reads ``input`` in: ``torch.float32``, or
+            ``torch.bfloat16`` for a tensor-core GEMM that accumulates in float32.
+
     Returns:
         Tuple of (updated_hessian, new_sample_count)
 
     Note: input must be non-empty (batch_size > 0); a zero-sized input causes division by zero.
     """
     # Flatten to 2D (total_tokens, features) first, so batch_size counts tokens
-    input_flat = input.reshape(-1, input.shape[-1]).float()
+    input_flat = input.reshape(-1, input.shape[-1])
     batch_size = input_flat.shape[0]
 
     if batch_size == 0:  # in MOEs some experts receive no tokens
@@ -95,14 +240,69 @@ def update_hessian(input, hessian, n_samples):
     # once per expert per forward, and separate scale and add passes each rewrite all of H.
     scale = n_samples / (n_samples + batch_size)
     n_samples += batch_size
+    alpha = 2 / n_samples
+    if bfloat16_hessian_gemm(input_dtype, input_flat):
+        # BF16 products are exact in float32, so a tensor-core GEMM writing float32 differs from a
+        # float32 GEMM only in how it rounds the sums: up to ~3e-5 of the Hessian's diagonal at 32K
+        # tokens per batch. It is 9-16x faster on GB300 and needs no float32 copy of the inputs.
+        input_flat = input_flat.to(torch.bfloat16)
+        if hessian.device == input_flat.device:
+            torch.addmm(
+                hessian,
+                input_flat.t(),
+                input_flat,
+                beta=scale,
+                alpha=alpha,
+                out_dtype=torch.float32,
+                out=hessian,
+            )
+        else:
+            gram = torch.mm(input_flat.t(), input_flat, out_dtype=torch.float32)
+            hessian.mul_(scale).add_(gram.to(hessian.device), alpha=alpha)
+        return hessian, n_samples
+
+    input_flat = input_flat.float()
     if hessian.device == input_flat.device:
-        hessian.addmm_(input_flat.t(), input_flat, beta=scale, alpha=2 / n_samples)
+        hessian.addmm_(input_flat.t(), input_flat, beta=scale, alpha=alpha)
     else:
-        hessian.mul_(scale).add_(
-            (input_flat.t() @ input_flat).to(hessian.device), alpha=2 / n_samples
-        )
+        hessian.mul_(scale).add_((input_flat.t() @ input_flat).to(hessian.device), alpha=alpha)
 
     return hessian, n_samples
+
+
+def bfloat16_hessian_gemm(input_dtype: torch.dtype, inputs: torch.Tensor) -> bool:
+    """Whether a Hessian GEMM over ``inputs`` runs on bfloat16 with float32 output.
+
+    True when ``input_dtype`` asks for bfloat16 and the inputs' GPU has such GEMMs; when they are
+    missing, warns once per device and returns False, so the caller computes in float32.
+    """
+    if input_dtype != torch.bfloat16:
+        return False
+    if inputs.is_cuda and _has_float32_out_gemm(inputs.device):
+        return True
+    _warn_bfloat16_hessian_unavailable(inputs.device)
+    return False
+
+
+@functools.cache
+def _has_float32_out_gemm(device: torch.device) -> bool:
+    """Whether GEMMs on CUDA ``device`` take bfloat16 inputs and write float32 (``out_dtype``)."""
+    try:
+        x = torch.zeros(1, 1, device=device, dtype=torch.bfloat16)
+        h = torch.mm(x, x, out_dtype=torch.float32)
+        torch.addmm(h, x, x, out_dtype=torch.float32, out=h)
+        torch.bmm(x[None], x[None], out_dtype=torch.float32)
+    except (TypeError, RuntimeError):
+        return False
+    return True
+
+
+@functools.cache
+def _warn_bfloat16_hessian_unavailable(device: torch.device) -> None:
+    warn_rank_0(
+        f"hessian_input_dtype='bfloat16' needs CUDA GEMMs that take out_dtype, which {device} lacks "
+        "with this torch; computing its Hessians in float32."
+    )
 
 
 def compute_hessian_inverse(hessian, weight, perc_damp):
@@ -167,6 +367,8 @@ class GPTQHelper:
         weight_quantizer=None,
         weight=None,
         log_mse=True,
+        hessian_input_dtype="float32",
+        local_hessian_scales=False,
     ):
         """Initialize GPTQHelper with module state and Hessian storage.
 
@@ -174,11 +376,14 @@ class GPTQHelper:
         one expert's slice of an HF fused-MoE parameter; by default the helper owns
         ``module.weight`` and ``module.weight_quantizer``. ``log_mse=False`` skips the logged
         Hessian-weighted error, which costs two weight-by-Hessian matmuls.
+        ``hessian_input_dtype`` is the dtype the Hessian GEMM reads the inputs in, by name.
         """
         self.module = module
         self.name = name
         self.fused = fused
         self.importance_weighted = importance_weighted
+        self.local_hessian_scales = local_hessian_scales
+        self.hessian_input_dtype = getattr(torch, hessian_input_dtype)
         self._weight_quantizer = weight_quantizer
         self.log_mse = log_mse
         weight = module.weight if weight is None else weight
@@ -186,8 +391,10 @@ class GPTQHelper:
         device = weight.device
         if device.type == "meta":
             device = torch.device("cpu")
-        elif offload_to_cpu and device.type == "cuda" and _gpu_is_full(device):
-            device = _hessian_offload_device(4 * in_features**2)
+        elif offload_to_cpu and device.type == "cuda":
+            index = torch.cuda.current_device() if device.index is None else device.index
+            if not _gpu_has_room(index, 4 * in_features**2):
+                device = _hessian_offload_device(4 * in_features**2)
         self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
         self.n_samples = 0
         # Set by update_weights(); listed here for documentation.
@@ -222,7 +429,9 @@ class GPTQHelper:
     def accumulate(self, inputs):
         """Add a batch of this weight's inputs, after input quantization, to the Hessian."""
         inputs = inputs.to_local() if hasattr(inputs, "to_local") else inputs
-        self.hessian, self.n_samples = update_hessian(inputs, self.hessian, self.n_samples)
+        self.hessian, self.n_samples = update_hessian(
+            inputs, self.hessian, self.n_samples, self.hessian_input_dtype
+        )
 
     def cleanup(self):
         """Unpatch the module's forward method."""
@@ -253,20 +462,35 @@ class GPTQHelper:
         self.weight = None
         self.h_inv = None
 
-    def update_weights(self, block_size, perc_damp, weight=None):
+    def updates_on_any_device(self) -> bool:
+        """Whether :meth:`update_weights` may run on a device other than its weight's.
+
+        True only for helpers whose update reads no quantizer state, which lives on the weight's
+        device, and fits the room :func:`update_expert_weights` checks for.
+        """
+        return False
+
+    def update_scratch(self, weight) -> int:
+        """Bytes the update of ``weight`` holds beyond the GPTQ solve's, such as a format's search."""
+        return 0
+
+    def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run GPTQ blockwise weight update on this helper's weight.
 
         Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update, logs MSE, and
         overwrites ``weight`` (default ``module.weight``) in place, so an expert's slice of a
-        fused 3-D parameter is written back into that parameter.
+        fused 3-D parameter is written back into that parameter. The update runs on ``device``,
+        by default the weight's; only a helper whose :meth:`updates_on_any_device` is true may
+        pass another.
         """
         weight = self.module.weight if weight is None else weight
-        hessian = self.hessian.to(weight.device)
-        self.weight = weight.data.float().clone()
+        device = weight.device if device is None else device
+        hessian = self.hessian.to(device)
+        self.weight = weight.data.to(device, torch.float32, copy=True)
         self._prepare_hessian_inverse(hessian, perc_damp)
         self._blockwise_update(block_size)
         if self.log_mse:
-            self._print_mse_error(hessian, weight)
+            self._print_mse_error(hessian, weight.data.to(device))
         weight.data.copy_(self.weight.reshape(weight.shape))
 
     # ------------------------------------------------------------------
@@ -406,26 +630,32 @@ def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
     _GPTQ_HELPER_REGISTRY[backend] = factory
 
 
-class ImatrixEncoder:
-    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
-
-    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
-    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
-    """
+class _WeightEncoder:
+    """An encoder a one-pass calibration hands each weight whose quantizer it accepts."""
 
     def accepts(self, quantizer) -> bool:
         """Whether this encoder handles ``quantizer``; decided before calibration runs."""
         raise NotImplementedError
 
     def validate(self, weight: torch.Tensor, quantizer) -> None:
-        """Raise if :meth:`encode` would refuse ``weight``; checked before calibration runs."""
+        """Raise if ``encode`` would refuse ``weight``; checked before calibration runs."""
+
+
+class ImatrixEncoder(_WeightEncoder):
+    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
+
+    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
+    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
+    """
 
     def encode(
         self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
     ) -> torch.Tensor:
-        """Return ``weight`` fake-quantized by ``quantizer``, weighted by ``second_moments``.
+        """Encode ``weight`` weighted by ``second_moments`` and return the weight to keep.
 
-        ``second_moments`` is ``None`` when no calibration input reached the weight.
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``second_moments`` is ``None`` when no calibration input
+        reached the weight.
         """
         raise NotImplementedError
 
@@ -440,3 +670,38 @@ def register_imatrix_encoder(backend: str, encoder: ImatrixEncoder) -> None:
     ``weight_quantizer.backend`` has a registered encoder.
     """
     _IMATRIX_ENCODER_REGISTRY[backend] = encoder
+
+
+class LocalHessianEncoder(_WeightEncoder):
+    """Encodes a weight once, its search guided by its inputs' local Hessian.
+
+    :func:`modelopt.torch.quantization.model_calib.local_hessian_calibrate` collects ``E[x x^T]``
+    over each ``block_size`` input columns of every weight whose quantizer an encoder accepts, then
+    calls :meth:`encode` with it instead of searching an amax.
+    """
+
+    block_size: int
+
+    def encode(
+        self, weight: torch.Tensor, quantizer, hessian: torch.Tensor | None, perc_damp: float
+    ) -> torch.Tensor:
+        """Encode ``weight`` guided by ``hessian`` and return the weight to keep.
+
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``hessian`` is ``[in_features // block_size, block_size,
+        block_size]``, or ``None`` when no calibration input reached the weight. ``perc_damp`` is
+        the fraction of its mean diagonal to add to its diagonal where the encoder scores by it.
+        """
+        raise NotImplementedError
+
+
+_LOCAL_HESSIAN_ENCODER_REGISTRY: dict[str, LocalHessianEncoder] = {}
+
+
+def register_local_hessian_encoder(backend: str, encoder: LocalHessianEncoder) -> None:
+    """Register the :class:`LocalHessianEncoder` for a quantizer backend.
+
+    :func:`modelopt.torch.quantization.model_calib.local_hessian_calibrate` encodes the weights
+    whose ``weight_quantizer.backend`` has one, and searches an amax for the rest.
+    """
+    _LOCAL_HESSIAN_ENCODER_REGISTRY[backend] = encoder

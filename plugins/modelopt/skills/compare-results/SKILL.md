@@ -38,8 +38,8 @@ change is being measured, typically a further quantized version of the baseline.
    credible comparable reference exists, label the baseline externally
    unverified rather than claiming the check passed, then continue using the
    validated measured baseline.
-7. Compute exact deltas outside the chat context when there are multiple tasks
-   or repeated runs.
+7. Follow [Assess results](references/assess-results.md) to compute deltas and
+   uncertainty; mark unavailable uncertainty explicitly.
 8. Report comparability, external baseline sanity, and quantized-feasibility
    verdicts before interpreting the delta as model quality. If the user did not
    provide an acceptance threshold, report feasibility as inconclusive instead
@@ -93,8 +93,11 @@ must be reported.
 Include:
 
 - Baseline and candidate identifiers.
-- Per-task metric path, baseline score, candidate score, delta, and stderr if
-  available.
+- Per-task metric path, baseline and candidate scores with SEs, signed loss
+  (`Candidate - Baseline` for accuracy; negative is worse), confidence intervals
+  and method, sample/run counts, and an Assessment column.
+  Mark unavailable uncertainty explicitly; keep the assessment concise, not a
+  statistics tutorial.
 - Per-task external reference score, source URL, known protocol differences,
   percentage-point difference, and sanity status (`verified`, `failed`, or
   `externally unverified`).

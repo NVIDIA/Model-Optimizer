@@ -21,33 +21,36 @@ layer-by-layer calibration, and :class:`_CheckpointState` for persisting
 per-layer calibration progress to disk.
 """
 
-from __future__ import annotations
-
+import functools
 import json
 import os
 import shutil
 from collections import deque
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any, Self
 
 import torch
 import torch.nn as nn
 
+from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import print_rank_0, warn_rank_0
+from modelopt.torch.utils import (
+    get_available_gpu_memory,
+    get_process_gpus,
+    print_rank_0,
+    warn_rank_0,
+)
+from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.network import (
     bind_forward_method,
     get_module_device,
     unpatch_forward_method,
 )
+from modelopt.torch.utils.serialization import safe_load, safe_save
 
 from .core_utils import has_accelerate_offload
-
-if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
-
-    from modelopt.torch.opt.searcher import ForwardLoop
 
 
 class _EarlyStopForwardError(Exception):
@@ -361,6 +364,15 @@ class LayerActivationCollector:
                     if depth[0] > 1:
                         raise
                     return None
+                except torch.cuda.OutOfMemoryError as e:
+                    # The forward loop would split the data batch and retry, but the layer in 'run'
+                    # mode replays the batch it cached at full size, one cached batch per call: a
+                    # retry cannot shrink it and would replay the next batch's inputs instead.
+                    raise RuntimeError(
+                        "Layerwise calibration ran out of GPU memory. Splitting the batch now "
+                        "cannot help, since each decoder layer replays its cached inputs at the "
+                        "size they were cached with; rerun with a smaller calibration batch size."
+                    ) from e
                 except RuntimeError as e:
                     if "meta" not in str(e).lower():
                         raise
@@ -577,6 +589,162 @@ class LayerActivationCollector:
         return self.get_input_activations(next_layer, forward_loop)
 
 
+def _cuda_bytes_per_gpu(obj: Any, out: dict[int, int] | None = None) -> dict[int, int]:
+    """Bytes of the CUDA tensors in a nested args/kwargs structure, per GPU."""
+    out = {} if out is None else out
+    if isinstance(obj, torch.Tensor):
+        if obj.is_cuda:
+            out[obj.device.index] = out.get(obj.device.index, 0) + obj.nbytes
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            _cuda_bytes_per_gpu(value, out)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            _cuda_bytes_per_gpu(value, out)
+    return out
+
+
+def _capture_layer_inputs(
+    model: nn.Module, layer: nn.Module, batch_size: int, seq_len: int, device: torch.device
+):
+    """Run *model* on a dummy batch until *layer* and return the ``(args, kwargs)`` it receives."""
+    input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
+    # One left-pad position, like padded calibration rows, so the model builds the explicit
+    # attention mask that calibration batches get instead of a cheaper causal-only path.
+    attention_mask = torch.ones_like(input_ids)
+    attention_mask[:, 0] = 0
+    info = layer._layerwise_calib
+    info.mode = "capture"
+    try:
+        with _disable_use_cache(model):
+            model(input_ids, attention_mask=attention_mask)
+    finally:
+        info.mode = "original"
+    (inputs,) = info.collected_inputs
+    info.collected_inputs = []
+    return inputs
+
+
+def _forward_peak_per_gpu(layer: nn.Module, args: tuple, kwargs: dict) -> dict[int, int]:
+    """Peak memory one forward of *layer* adds on each GPU."""
+    base = {}
+    for gpu in get_process_gpus():
+        torch.cuda.reset_peak_memory_stats(gpu)
+        base[gpu] = torch.cuda.memory_allocated(gpu)
+    layer(*args, **kwargs)
+    return {
+        gpu: torch.cuda.max_memory_allocated(gpu) - base.get(gpu, 0) for gpu in get_process_gpus()
+    }
+
+
+def _gpu_index(device: torch.device) -> int | None:
+    """CUDA device index of *device*; ``None`` if it is not a GPU."""
+    if device.type != "cuda":
+        return None
+    return torch.cuda.current_device() if device.index is None else device.index
+
+
+def _layer_batch_fit(
+    model: nn.Module,
+    layer: nn.Module,
+    gpus: set[int],
+    seq_len: int,
+    num_samples: int,
+    memory_fraction: float,
+    device: torch.device,
+) -> int | None:
+    """Largest batch whose forward through *layer* fits; ``None`` if no GPU memory grows with it.
+
+    Layers of the same kind on other *gpus* cost what *layer* costs on its own GPU, so those GPUs'
+    memory limits the batch too.
+    """
+    # The first forward only warms up: it also allocates one-off buffers like cuBLAS's workspace.
+    for _ in range(2):
+        args, kwargs = _capture_layer_inputs(model, layer, 1, seq_len, device)
+        cached_per_sample = _cuda_bytes_per_gpu((args, kwargs))
+        one = _forward_peak_per_gpu(layer, args, kwargs)
+        del args, kwargs
+    try:
+        args, kwargs = _capture_layer_inputs(model, layer, 2, seq_len, device)
+        two = _forward_peak_per_gpu(layer, args, kwargs)
+    except RuntimeError as e:
+        # Capturing inputs reports running out of memory as a RuntimeError raised from it.
+        if not any(isinstance(x, torch.cuda.OutOfMemoryError) for x in (e, e.__cause__)):
+            raise
+        two = None
+    finally:
+        args = kwargs = None
+    if two is None:
+        # One sample fits but two do not: release what the failed forward left cached.
+        torch.cuda.empty_cache()
+        return 1
+
+    costs = {}
+    for gpu, peak in two.items():
+        per_sample = peak - one.get(gpu, 0)
+        if per_sample > 0:
+            costs[gpu] = (per_sample, one.get(gpu, 0) - per_sample, cached_per_sample.get(gpu, 0))
+    home = _gpu_index(get_module_device(layer))
+    if home in costs:
+        for gpu in gpus:
+            costs.setdefault(gpu, costs[home])
+    fits = []
+    for gpu, (per_sample, fixed, cached) in costs.items():
+        # Layerwise calibration caches every sample's inputs for this layer and the next.
+        available = get_available_gpu_memory(gpu) - 2 * num_samples * cached
+        fits.append(int((memory_fraction * available - fixed) // per_sample))
+    return min(fits, default=None)
+
+
+@torch.no_grad()
+def get_max_layerwise_batch_size(
+    model: nn.Module,
+    seq_len: int,
+    max_batch_size: int,
+    num_samples: int,
+    memory_fraction: float = 0.5,
+    device: torch.device | None = None,
+) -> int:
+    """Largest calibration batch, up to *max_batch_size*, whose decoder-layer forwards fit.
+
+    Layerwise calibration runs one decoder layer at a time, so a full-model batch probe such as
+    :func:`get_max_batch_size <modelopt.torch.utils.dataset_utils.get_max_batch_size>` both
+    overstates the memory a batch needs and risks running out of it. Instead, the first layer
+    of each kind (by module classes and parameter shapes: dense or MoE, full or linear attention,
+    and per-layer widths such as Nemotron-NAS's) runs on one and two samples of *seq_len* tokens,
+    and the growth of its peak memory on each GPU is that GPU's cost per sample; every other GPU
+    that runs a layer of that kind is charged the same. A batch fits
+    when the layer's forward stays within *memory_fraction* of the GPU's available memory, after
+    the inputs layerwise calibration caches for all *num_samples*; the rest is left for
+    quantizers and Hessians. A layer that fits one sample but not two gives a batch of one. The
+    dummy token ids go to *device*, by default the model's. All ranks return the same, smallest
+    batch.
+    """
+    batch_size = max_batch_size
+    layers = LayerActivationCollector.get_decoder_layers(model)
+    if layers and torch.cuda.is_available() and max_batch_size > 1:
+        kinds: dict[tuple, list[nn.Module]] = {}
+        for layer in layers:
+            classes = tuple(sorted({type(m).__name__ for m in layer.modules()}))
+            shapes = tuple(tuple(p.shape) for p in layer.parameters())
+            kinds.setdefault((classes, shapes), []).append(layer)
+        device = device or get_module_device(model)
+        collector = LayerActivationCollector(model)
+        collector._patch_all_layers(layers)
+        try:
+            for same_kind in kinds.values():
+                indexes = (_gpu_index(get_module_device(layer)) for layer in same_kind)
+                gpus = {gpu for gpu in indexes if gpu is not None}
+                fit = _layer_batch_fit(
+                    model, same_kind[0], gpus, seq_len, num_samples, memory_fraction, device
+                )
+                if fit is not None:
+                    batch_size = min(batch_size, fit)
+        finally:
+            collector._unpatch_all_layers()
+    return max(1, min(dist.allgather(batch_size)))
+
+
 def _move_to_device(obj: Any, device: torch.device) -> Any:
     """Recursively move tensors to *device*. Non-tensors are returned as-is."""
     if isinstance(obj, torch.Tensor):
@@ -587,6 +755,45 @@ def _move_to_device(obj: Any, device: torch.device) -> Any:
         moved = [_move_to_device(v, device) for v in obj]
         return type(obj)(moved)
     return obj
+
+
+@functools.cache
+def _hf_cache_types() -> tuple[type, ...]:
+    """HF KV-cache classes that decoder-layer inputs may hold (empty without transformers)."""
+    try:
+        from transformers import cache_utils
+    except ImportError:
+        return ()
+    names = ("Cache", "CacheLayerMixin", "LinearAttentionCacheLayerMixin")
+    bases = tuple(b for n in names if (b := getattr(cache_utils, n, None)) is not None)
+    if not bases:
+        return ()
+    return tuple(
+        c for c in vars(cache_utils).values() if isinstance(c, type) and issubclass(c, bases)
+    )
+
+
+def _load_checkpoint_file(path: str, map_location: Any, *, allow_caches: bool = False) -> Any:
+    """Load a checkpoint file without unpickling arbitrary objects.
+
+    The checkpoint directory is user-chosen and may be writable by others, so its files are
+    untrusted input and are never loaded with ``weights_only=False`` (an explicit
+    ``weights_only=True`` is not overridden by ``TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD``). ModelOpt's
+    process-global safe globals (calibrators, QTensors, configs, hparams) still apply; files that
+    can hold layer inputs (``allow_caches``) additionally accept HF KV-cache classes.
+    """
+    try:
+        with torch.serialization.safe_globals(_hf_cache_types() if allow_caches else ()):
+            return safe_load(path, map_location=map_location, weights_only=True)
+    except (OSError, MemoryError, torch.OutOfMemoryError):
+        raise  # not a checkpoint problem; a fresh directory would not help
+    except Exception as e:  # a corrupt or forged file can fail the unpickler in many ways
+        raise RuntimeError(
+            f"Cannot resume from {path}: it could not be loaded as plain tensors/containers. "
+            "If the file was modified or truncated, use a fresh checkpoint directory; if a layer "
+            "input type is unsupported, disable checkpointing; if the error below is about "
+            f"memory, free memory and retry. Original error: {e}"
+        ) from e
 
 
 def _read_manifest(checkpoint_dir: str) -> dict | None:
@@ -653,12 +860,12 @@ def _save_layer_files(
         shutil.rmtree(d)
     os.makedirs(d)
     if weights is not None:
-        torch.save(weights, os.path.join(d, "weights.pt"))
+        safe_save(weights, os.path.join(d, "weights.pt"))
     elif quantizer_buffers is not None:
-        torch.save(quantizer_buffers, os.path.join(d, "quantizer_buffers.pt"))
+        safe_save(quantizer_buffers, os.path.join(d, "quantizer_buffers.pt"))
     if qstate is not None:
-        torch.save(qstate, os.path.join(d, "quantizer_state.pt"))
-    torch.save(output_meta, os.path.join(d, "output_meta.pt"))
+        safe_save(qstate, os.path.join(d, "quantizer_state.pt"))
+    safe_save(output_meta, os.path.join(d, "output_meta.pt"))
 
 
 def detect_resume_point(checkpoint_dir: str) -> tuple[int, dict] | None:
@@ -759,7 +966,7 @@ class _CheckpointState:
         save_every: int = 1,
         calib_mutates_weights: bool = True,
         save_layer_state: bool = True,
-    ) -> _CheckpointState | None:
+    ) -> Self | None:
         """Create from folder. Detects resume point. Returns None if no checkpoint_dir."""
         if not checkpoint_dir:
             return None
@@ -808,9 +1015,8 @@ class _CheckpointState:
 
         for i in range(self.start_layer):
             d = _layer_dir(self.checkpoint_dir, i)
-            # weights_only=False is safe: file is internally generated by _save_layer, not user-supplied
-            meta = torch.load(
-                os.path.join(d, "output_meta.pt"), map_location="cpu", weights_only=False
+            meta = _load_checkpoint_file(
+                os.path.join(d, "output_meta.pt"), "cpu", allow_caches=True
             )
             layers[i]._layerwise_calib.output_meta = meta
 
@@ -818,8 +1024,7 @@ class _CheckpointState:
         next_inputs_path = os.path.join(d, "next_inputs.pt")
         if not os.path.isfile(next_inputs_path):
             raise FileNotFoundError(f"Cannot resume: next_inputs.pt missing for layer {last_ckpt}")
-        # weights_only=False is safe: file is internally generated by _save_layer, not user-supplied
-        next_inputs = torch.load(next_inputs_path, map_location="cpu", weights_only=False)
+        next_inputs = _load_checkpoint_file(next_inputs_path, "cpu", allow_caches=True)
         resume_device = get_module_device(layers[self.start_layer])
         next_inputs = _move_to_device(next_inputs, resume_device)
         return next_inputs
@@ -847,28 +1052,19 @@ class _CheckpointState:
             # materialized — otherwise get_module_device can return meta.
             with enable_weight_access_and_writeback(layer, model, names):
                 layer_device = get_module_device(layer)
-                # weights_only=False is safe: files are internally generated by _save_layer
-                qstate = torch.load(
-                    os.path.join(d, "quantizer_state.pt"),
-                    map_location=layer_device,
-                    weights_only=False,
-                )
+                qstate = _load_checkpoint_file(os.path.join(d, "quantizer_state.pt"), layer_device)
                 restore_quantizer_state(layer, dummy_config, {"quantizer_state": qstate})
                 weights_path = os.path.join(d, "weights.pt")
                 buffers_path = os.path.join(d, "quantizer_buffers.pt")
                 if os.path.isfile(weights_path):
-                    weights = torch.load(
-                        weights_path, map_location=layer_device, weights_only=False
-                    )
+                    weights = _load_checkpoint_file(weights_path, layer_device)
                     layer.load_state_dict(weights, strict=False, assign=True)
                 elif os.path.isfile(buffers_path):
                     # Non-mutating calibration mode: restore just the TensorQuantizer
                     # state_dict (carries _amax). The layer's other weights were not
                     # modified, so the in-memory values already match what would have
                     # been saved.
-                    quantizer_buffers = torch.load(
-                        buffers_path, map_location=layer_device, weights_only=False
-                    )
+                    quantizer_buffers = _load_checkpoint_file(buffers_path, layer_device)
                     set_quantizer_state_dict(layer, quantizer_buffers)
                 else:
                     # restore_quantizer_state freshly registered _amax via torch.empty;
@@ -945,7 +1141,7 @@ class _CheckpointState:
 
         # Window boundary: write next_inputs.pt + manifest to commit the window.
         if next_layer_inputs is not None:
-            torch.save(
+            safe_save(
                 _move_to_device(next_layer_inputs, _cpu),
                 os.path.join(_layer_dir(self.checkpoint_dir, layer_idx), "next_inputs.pt"),
             )

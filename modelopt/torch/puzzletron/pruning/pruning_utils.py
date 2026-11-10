@@ -67,14 +67,6 @@ class HiddenSizeInitMode(Enum):
     CopyAsIs = "CopyAsIs"
 
 
-def _lm_head_dim(config, descriptor: Type[ModelDescriptor]) -> int:
-    lm_config = descriptor.get_language_model_config(config)
-    head_dim = getattr(lm_config, "head_dim", None)
-    if head_dim is not None:
-        return head_dim
-    return lm_config.hidden_size // lm_config.num_attention_heads
-
-
 def resolve_pruning_mixin(
     pruning_mixin, descriptor: Type[ModelDescriptor]
 ) -> PruningMixIn | List[PruningMixIn]:

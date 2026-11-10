@@ -20,6 +20,7 @@ import pytest
 import torch
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.fs_utils import assert_unmodified_tree
+from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 from safetensors.torch import load_file
 
 # Mapping from backend name to accelerate config file
@@ -118,7 +119,21 @@ def dataset_cache_dir(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def nvfp4_ptq_dir(tiny_qwen3_path, tmp_path_factory, dataset_cache_dir):
+def tied_qwen3_path(tmp_path_factory):
+    """Tiny Qwen3 with tied embeddings, which accelerate 1.14 could not shard with FSDP2."""
+    model_dir = create_tiny_qwen3_dir(
+        tmp_path_factory.mktemp("tied_qwen3"),
+        with_tokenizer=True,
+        hidden_size=512,
+        intermediate_size=512,
+        tie_word_embeddings=True,
+    )
+    with assert_unmodified_tree(model_dir) as path:
+        yield str(path)
+
+
+@pytest.fixture(scope="module")
+def nvfp4_ptq_dir(tied_qwen3_path, tmp_path_factory, dataset_cache_dir):
     """NVFP4 PTQ checkpoint shared by the QAT and QAD tests, which only read it.
 
     quantize.py ignores the QAD-only config keys, so qat_nvfp4.yaml and qad_nvfp4.yaml give the
@@ -128,7 +143,7 @@ def nvfp4_ptq_dir(tiny_qwen3_path, tmp_path_factory, dataset_cache_dir):
     _run_quantize(
         "configs/train/qat_nvfp4.yaml",
         [
-            "--model_name_or_path", tiny_qwen3_path,
+            "--model_name_or_path", tied_qwen3_path,
             "--recipe", "general/ptq/nvfp4_default-kv_fp8",
             "--calib_size", "64",
             "--output_dir", str(ptq_dir),
@@ -233,7 +248,7 @@ def test_qwen3_lora_qat_nvfp4(tiny_qwen3_path, tmp_path):
     "fsdp2",
     pytest.param("deepspeed", marks=pytest.mark.nightly),
 ])
-def test_qwen3_qad_nvfp4(tiny_qwen3_path, nvfp4_ptq_dir, dataset_cache_dir, tmp_path, backend):
+def test_qwen3_qad_nvfp4(tied_qwen3_path, nvfp4_ptq_dir, dataset_cache_dir, tmp_path, backend):
     qad_output_dir = tmp_path / "qad"
 
     # QAD (quantization-aware distillation) of the shared quantized student
@@ -244,7 +259,7 @@ def test_qwen3_qad_nvfp4(tiny_qwen3_path, nvfp4_ptq_dir, dataset_cache_dir, tmp_
             "--do_train", "True",
             "--output_dir", str(qad_output_dir),
             "--distill", "True",
-            "--teacher_model", tiny_qwen3_path,
+            "--teacher_model", tied_qwen3_path,
         ],
         backend=backend,
         cache_dir=dataset_cache_dir,

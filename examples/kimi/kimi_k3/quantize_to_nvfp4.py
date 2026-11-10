@@ -76,8 +76,6 @@ Usage (CPU partition, no GPU needed; ``--jobs`` shards convert in parallel):
         --jobs 8
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import math

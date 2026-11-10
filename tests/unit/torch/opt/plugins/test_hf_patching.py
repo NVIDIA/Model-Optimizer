@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest.mock import Mock
+
+import huggingface_hub
 import pytest
 import torch
 import torch.nn as nn
@@ -26,8 +29,29 @@ from transformers import AutoModelForCausalLM
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.plugins.huggingface import _get_modelopt_state_path
 from modelopt.torch.opt.plugins.transformers import _restore_qtensor_wrappers
 from modelopt.torch.quantization.qtensor import QTensorWrapper
+
+
+@pytest.mark.parametrize(
+    ("load_kwargs", "cache_result", "filename", "expected"),
+    [
+        ({}, "cached-state.pth", "modelopt_state.pth", "cached-state.pth"),
+        ({"subfolder": "unet"}, "cached-state.pth", "unet/modelopt_state.pth", "cached-state.pth"),
+        ({"subfolder": "unet"}, None, "unet/modelopt_state.pth", ""),
+        ({"subfolder": "unet"}, huggingface_hub._CACHED_NO_EXIST, "unet/modelopt_state.pth", ""),
+    ],
+    ids=["default-cached", "subfolder-cached", "subfolder-missing", "subfolder-known-missing"],
+)
+def test_get_modelopt_state_path_cached(monkeypatch, load_kwargs, cache_result, filename, expected):
+    cache_lookup = Mock(return_value=cache_result)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", cache_lookup)
+
+    result = _get_modelopt_state_path("test-org/test-model", **load_kwargs)
+
+    cache_lookup.assert_called_once_with("test-org/test-model", filename)
+    assert result == expected
 
 
 @pytest.mark.parametrize(

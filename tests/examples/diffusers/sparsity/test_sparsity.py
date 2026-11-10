@@ -30,7 +30,7 @@ import torch
 from _test_utils.examples.run_command import run_example_command
 from diffusers import AutoencoderKLWan, WanPipeline
 
-import modelopt.torch.sparsity.attention_sparsity as mtsa
+import modelopt.torch.sparsity as mts
 from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
@@ -199,7 +199,7 @@ def test_wan22_calibrated_export(tiny_wan22_path, tmp_path):
     }
     config = {"sparse_cfg": sparse_cfg}
     for transformer in [pipe.transformer, pipe.transformer_2]:
-        mtsa.sparsify(transformer, config)
+        mts.sparsify(transformer, config)
 
     # Inject calibration params (simulating a successful log-space calibration).
     test_log_a = math.log(1.5)
@@ -248,8 +248,9 @@ def test_wan22_calibrated_export(tiny_wan22_path, tmp_path):
         # threshold_scale_factor lives inside the skip_softmax group.
         tsf = group_0["threshold_scale_factor"]
         assert tsf["formula"] == "a * exp(b * target_sparsity)"
-        assert tsf["prefill"]["a"] == pytest.approx(math.exp(test_log_a))
-        assert tsf["prefill"]["b"] == pytest.approx(test_b)
+        assert tsf["coefficients"]["a"] == pytest.approx(math.exp(test_log_a))
+        assert tsf["coefficients"]["b"] == pytest.approx(test_b)
+        assert isinstance(group_0["target_sparsity"], float)  # scalar, as VisualGen expects
 
         # Calibrated mode — no raw_threshold.
         assert "raw_threshold" not in group_0

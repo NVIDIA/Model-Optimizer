@@ -30,8 +30,6 @@ The quantized graph keeps Q/DQ nodes; the TRT compile step is what turns
 them into TRT precision layers.
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 

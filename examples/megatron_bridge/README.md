@@ -18,11 +18,11 @@ This directory contains examples of using Model Optimizer with the [NeMo Megatro
 This README is the getting-started guide, with each workflow shown on small models (mostly Qwen3-8B).
 
 > [!TIP]
-> For complete end-to-end workflows on larger models, see the [tutorials](tutorials/README.md): [Nemotron-3-Nano-30B-A3B](tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) pruning + distillation + quantization, [Qwen3.6-35B-A3B](tutorials/Qwen3.6-35B-A3B/README.md) W4A4 NVFP4 + QAD, and [NemotronH omni VL](tutorials/NemotronH-Omni-W4A4-QAD/README.md) W4A4 + QAD.
+> For complete end-to-end workflows on larger models, see the [tutorials](tutorials/README.md): [Nemotron-3-Nano-30B-A3B](tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) pruning + distillation + quantization, [Qwen3.6-35B-A3B](tutorials/Qwen3.6-35B-A3B/README.md) W4A4 NVFP4 + QAD, and [NVIDIA Nemotron 3.5 Super VL](tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/README.md) W4A4 + QAD.
 
 ## Pre-Requisites
 
-Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.08`) which has all the dependencies installed.
+Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.10`) which has all the dependencies installed.
 
 To get the ModelOpt examples scripts, mount your Model-Optimizer repo to the container as follows:
 
@@ -32,7 +32,7 @@ if [ ! -d "${MODELOPT_DIR}" ]; then
   git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
 fi
 
-export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.08
+export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.10
 docker run \
   --gpus all \
   --shm-size=16GB \
@@ -46,12 +46,15 @@ docker run \
   ${DOCKER_IMAGE} bash
 ```
 
-Some features (e.g. [`--vllm_fakequant_export`](#evaluating-a-qad-checkpoint-in-vllm-with-fake-quantization)) need a newer Megatron-Bridge than the one in `nvcr.io/nvidia/nemo:26.08`. Until a NeMo container includes it, check out Megatron-Bridge at the commit ModelOpt's CI tests against, together with its Megatron-LM submodule:
+> [!NOTE]
+> The `nemo:26.10.00` container's Transformer Engine has no sm_120 kernels (RTX PRO 6000 fails with `no kernel image is available for execution on the device`). CI works around it by copying the same-version PyPI `libtransformer_engine.so` over the container's, see [`te-all-gpu-archs`](../../.github/actions/te-all-gpu-archs/action.yml). The `nemo:26.10.01` patch release is expected to fix it.
+
+Some features (e.g. [`--vllm_fakequant_export`](#evaluating-a-qad-checkpoint-in-vllm-with-fake-quantization), `--fake_quant_weight_cache` and GLM-5.3-Flash support) need a newer Megatron-Bridge than the one in `nvcr.io/nvidia/nemo:26.10`. Until `nemo:26.12` ships it, check out Megatron-Bridge at the commit ModelOpt's CI tests against, together with its Megatron-LM submodule:
 
 ```bash
 export MBRIDGE_DIR=${PWD}/Megatron-Bridge
 git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git ${MBRIDGE_DIR}
-git -C ${MBRIDGE_DIR} checkout 1d9caf7324e608aca7181de40be26a6387976210
+git -C ${MBRIDGE_DIR} checkout 24b6adc89f5429e55863abc4cee56173eb5eff1a
 git -C ${MBRIDGE_DIR} submodule update --init 3rdparty/Megatron-LM
 ```
 
@@ -212,12 +215,6 @@ With pre-tokenized data, `--document_boundaries` (`--mbs 1`, `--cp_size 1`) rest
 each EOD-separated document of a window instead of the whole window. Tokenize the data with
 `--append_eod`: the student tokenizer's EOS marks each document's end. Chat-template data has no
 EOD between conversations, so distill.py rejects it.
-
-> [!IMPORTANT]
-> Packed training (`--sft_in_batch_packing` or `--document_boundaries`) of Gated DeltaNet models
-> (e.g. Qwen3.5 / Qwen3.6) needs `flash-linear-attention` >= 0.5.2: earlier versions compute the
-> packed linear attention wrongly. `nemo:26.08` ships 0.4.2, so run
-> `python -m pip install -r requirements.txt` in this directory first.
 
 Teacher and student must share a tokenizer — distillation scores the teacher on the student's
 token ids, and the KD losses compare the two models' logits elementwise over the vocab dimension.
@@ -385,6 +382,12 @@ Qwen3-8B (36 layers) on 4 pipeline stages, this places 10/10/10/6 layers:
 The split applies to both student and teacher, so it must be valid for each. The best values depend on the model,
 sequence length, and GPU memory: measure per-stage time and memory over a few iterations before choosing them.
 
+Each micro-batch forward, and each activation recomputation, fake-quantizes all student weights again, although they
+only change at the optimizer step. `--fake_quant_weight_cache` fake-quantizes each weight once per step and reuses it.
+This keeps an extra BF16 copy of the student's quantized weights on every GPU. The step is bit-identical to an
+uncached one. It needs a straight-through weight gradient (`pass_through_bwd`, the default). The more micro-batches
+per step, and the more expensive the weight format, the more it saves. It needs a [newer Megatron-Bridge](#pre-requisites) than `nemo:26.10`.
+
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 
 #### Evaluating a QAD checkpoint in vLLM with fake quantization
@@ -407,6 +410,29 @@ python ../vllm_serve/vllm_serve_fakequant.py /tmp/Qwen3-8B-NVFP4-QAD-vllm-fq -tp
 ```
 
 Weight-only formats leave no quantizer enabled after folding, so no sidecars are written and stock `vllm serve` loads the export as a plain BF16 checkpoint. This mode needs a Megatron-Bridge that writes the quantizer sidecars; see [Pre-Requisites](#pre-requisites).
+
+### Full-rank routed-expert QAD
+
+Use an adapter-free, fake-quantized student with uncompressed floating weights.
+The standard distillation command accepts `--trainable_params` (alias `--trainable_parameter_patterns`); for
+DeepSeek-V4-Flash with SequentialMLP experts, append:
+
+```bash
+--no_moe_grouped_gemm \
+--trainable_params \
+  '*.local_experts.*.linear_fc1.weight' \
+  '*.local_experts.*.linear_fc2.weight'
+```
+
+Every pattern must match each local model chunk; stages without matches are unsupported.
+Only selected parameters in the distilled student train; the teacher stays frozen.
+For VLMs, names are relative to `language_model`; vision/projector settings are untouched.
+Quantizers and activation gradients remain enabled; unsupported activation stacks are rejected.
+
+Reuse the selection and `--student_megatron_path` with ModelOpt state on native resume;
+selection fails if that state has not been restored before wrapping. Native checkpointing
+restores FP32 masters, Adam state, and training counters afterward.
+Use Bridge/Core versions with HybridModel support.
 
 ### LoRA QAD
 

@@ -113,12 +113,11 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
     rmsnorm = (torch.nn.RMSNorm, torch.nn.modules.normalization.RMSNorm)
     env_before = os.environ.copy()
     path_before = list(sys.path)
-    cwd = os.getcwd()
     output = io.StringIO()
     try:
         sys.path.insert(0, str(example_dir))  # as `python <script>.py` does
-        os.chdir(example_dir)  # match the subprocess path, which runs from the example dir
         with (
+            contextlib.chdir(example_dir),  # match the subprocess path, which runs from there
             _restored_logging(output),
             warnings.catch_warnings(),
             patch.object(sys, "argv", argv),
@@ -136,7 +135,6 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
         e.captured_output = output.getvalue()
         raise
     finally:
-        os.chdir(cwd)
         _pop_modules(local_names)
         sys.modules.update(shadowed)
         _restore_sys_path(path_before)

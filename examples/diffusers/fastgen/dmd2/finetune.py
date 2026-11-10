@@ -19,8 +19,6 @@ Parses the YAML config + CLI overrides with AutoModel's argument parser, then ha
 control to :class:`DMD2DiffusionRecipe`.
 """
 
-from __future__ import annotations
-
 import logging
 import os
 import sys

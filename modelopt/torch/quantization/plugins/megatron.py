@@ -58,7 +58,7 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
-from ..ggml.common import PINNED_PAYLOAD_PREFIX
+from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
 from ..nn import (
     GroupedQuantizer,
     QuantModule,
@@ -569,7 +569,11 @@ class _MegatronParallelLinear(_ParallelLinear):
                 self._process_quantizer_amax(k, v, quantizer_state_dict)
             elif k == "input_quantizer._pre_quant_scale":
                 self._process_activation_quantizer_pre_quant_scale(k, v, quantizer_state_dict)
-            elif self._parameter_to_keep_in_quantizer_state_dict(k) or PINNED_PAYLOAD_PREFIX in k:
+            elif (
+                self._parameter_to_keep_in_quantizer_state_dict(k)
+                or PINNED_PAYLOAD_PREFIX in k
+                or PINNED_IMPORTANCE_PREFIX in k
+            ):
                 quantizer_state_dict[k] = v
             elif "quantizer" in k:
                 warn_rank_0(
@@ -620,6 +624,9 @@ class _MegatronColumnParallelLinear(_MegatronParallelLinear):
             if k.endswith("_global_amax"):
                 continue
             if "weight_quantizer." in k:
+                # A pinned payload's importance spans the input columns, which are not sharded here.
+                if PINNED_IMPORTANCE_PREFIX in k:
+                    continue
                 weight_quantizer_axis = self.get_submodule(k.rsplit(".", 1)[0]).axis
                 # GGML payloads are ``[out_features, in_features / block, block_bytes]``.
                 if weight_quantizer_axis is not None or PINNED_PAYLOAD_PREFIX in k:
@@ -660,7 +667,11 @@ class _MegatronRowParallelLinear(_MegatronParallelLinear):
                     weight_quantizer_axis = self.weight_quantizer[0].axis
                 elif "weight_quantizer.1." in k:
                     weight_quantizer_axis = self.weight_quantizer[1].axis
-                if isinstance(weight_quantizer_axis, tuple) or PINNED_PAYLOAD_PREFIX in k:
+                # A pinned payload's importance spans the input columns this layer shards. GGML
+                # quantizers have a tuple axis, so this is checked first.
+                if PINNED_IMPORTANCE_PREFIX in k:
+                    shard_axis_dict[k] = 0
+                elif isinstance(weight_quantizer_axis, tuple) or PINNED_PAYLOAD_PREFIX in k:
                     shard_axis_dict[k] = 1
             if k == "input_quantizer._pre_quant_scale":
                 shard_axis_dict[k] = 0
@@ -853,7 +864,15 @@ class _QuantTEMCoreColumnParallelLinear(_QuantTELinear, _MegatronColumnParallelL
 
 @QuantModuleRegistry.register({TELinear: "te_mcore_Linear"})
 class _QuantTEMCoreLinear(_QuantTELinear):
-    pass
+    def _setup(self):
+        # Sync ranges over the replicas of this layer: its pipeline stage's tensor-, data- and
+        # context-parallel ranks (which may see different sequence shards). The default group
+        # spans all ranks, which hangs or mixes layers across pipeline stages.
+        if self.parallel_state is None and mcore_parallel.model_parallel_is_initialized():
+            self.parallel_state = ParallelState(
+                mcore_parallel.get_tensor_and_data_parallel_group(with_context_parallel=True)
+            )
+        super()._setup()
 
 
 @QuantModuleRegistry.register(
@@ -1141,6 +1160,21 @@ if HAS_GDN:
                 data_parallel_group,
                 mcore_parallel.get_tensor_model_parallel_group(),
             )
+            # The fused in_proj ends with the beta / alpha gates, which recipes and every export
+            # keep in BF16 (vLLM's in_proj_ba is too narrow for FP4 kernels), so leave them
+            # unquantized here too.
+            names = list(getattr(self, "in_proj_split_names", ()))
+            if not isinstance(self.in_proj, TELayerNormColumnParallelLinear):
+                warn_rank_0(
+                    f"GatedDeltaNet in_proj is a {type(self.in_proj).__name__}, so fake quantization"
+                    " also quantizes its beta / alpha gates, which exports keep in BF16."
+                )
+            elif names[-2:] == ["beta", "alpha"]:
+                local_rows = sum(self.in_proj_split_sections)
+                gate_rows = sum(self.in_proj_split_sections[-2:])
+                self.in_proj._modelopt_unquantized_output_rows = slice(
+                    local_rows - gate_rows, local_rows
+                )
 
         @contextmanager
         def _quantized_gdn_kernel(self):

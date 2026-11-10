@@ -136,7 +136,7 @@ def run_perplexity_on_models(
                         "Error": "None",
                     }
                 )
-            except Exception as e:  # noqa: PERF203
+            except Exception as e:
                 print(f"  Error for input length {input_len}: {e!s}")
                 results.append(
                     {
@@ -221,7 +221,7 @@ def run_perplexity_on_models(
                             "Error": "None",
                         }
                     )
-                except Exception as e:  # noqa: PERF203
+                except Exception as e:
                     print(f"  Error for input length {input_len}: {e!s}")
                     results.append(
                         {

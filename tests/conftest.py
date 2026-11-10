@@ -15,6 +15,7 @@
 
 import os
 import platform
+import re
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ import torch.distributed as dist
 from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.mlflow import FakeMlflow, pin_tracking_env
 from _test_utils.torch.distributed.utils import init_process
+from _test_utils.transient_errors import TRANSIENT_MARKERS, TransientError
 
 import modelopt.torch.opt as mto
 
@@ -72,7 +74,7 @@ _DEFAULT_TIMEOUT = {
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip flag-gated tests and apply a default per-test timeout based on the test directory."""
+    """Skip flag-gated tests, apply a default per-test timeout, and rerun transient failures once."""
     skip_marks = [
         ("manual", "--run-manual"),
         ("nightly", "--run-nightly"),
@@ -102,6 +104,10 @@ def pytest_collection_modifyitems(config, items):
                 "_DEFAULT_TIMEOUT in tests/conftest.py."
             )
         item.add_marker(pytest.mark.timeout(_DEFAULT_TIMEOUT[group]))
+
+    for item in items:
+        only_rerun = [TransientError, *map(re.escape, TRANSIENT_MARKERS)]
+        item.add_marker(pytest.mark.flaky(reruns=1, reruns_delay=10, only_rerun=only_rerun))
 
 
 # General Fixtures #################################################################################

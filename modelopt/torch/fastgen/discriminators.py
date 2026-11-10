@@ -25,8 +25,6 @@ logits ``[B, num_heads]``. The model-specific work of producing those tensors
 lives in the per-model plugins (``plugins/qwen_image.py``).
 """
 
-from __future__ import annotations
-
 import torch
 from torch import nn
 

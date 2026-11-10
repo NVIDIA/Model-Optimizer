@@ -69,7 +69,7 @@ def split_config_and_weights(
     config,
     weights: dict[str, torch.tensor],
     prefix: str = "transformer",
-    layer_config_dict: dict = {},
+    layer_config_dict: dict | None = None,
 ):
     """Util function to split the weights or any torch.Tensor in nested config to weights.
 
@@ -79,6 +79,8 @@ def split_config_and_weights(
     layer_config_dict: A dictionary containing layerwise quantization format information and awq_block_size information
     when relevant. It is used to export quantization.json for auto_quant checkpoint.
     """
+    if layer_config_dict is None:
+        layer_config_dict = {}
     if isinstance(config, dict):
         for k, v in config.items():
             if k == "lm_head" and "medusa_heads" not in prefix:

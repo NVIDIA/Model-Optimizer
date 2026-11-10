@@ -16,6 +16,7 @@
 import copy
 import inspect
 import json
+from fnmatch import fnmatch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -107,6 +108,25 @@ def test_export_diffusers_models_non_quantized(tmp_path, model_factory):
     assert "quantization_config" not in config_data
 
 
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("save_modelopt_state", [False, True])
+@torch.no_grad()
+def test_export_diffusers_save_modelopt_state(
+    tmp_path, enable_hf_checkpointing, quantized, save_modelopt_state
+):
+    model = get_tiny_unet().eval()
+    inputs = generate_diffusion_dummy_inputs(model, torch.device("cpu"), torch.float32)
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(**inputs))
+    if not quantized:
+        # Keep ModelOpt state while exercising the non-quantized save branch.
+        mtq.disable_quantizer(model, "*")
+    export_dir = tmp_path / "export_unet"
+
+    export_hf_checkpoint(model, export_dir=export_dir, save_modelopt_state=save_modelopt_state)
+
+    assert (export_dir / "modelopt_state.pth").is_file() == save_modelopt_state
+
+
 @pytest.fixture
 def tiny_pipeline(request, tmp_path, tiny_tokenizer):
     """Build and reload a tiny pipeline without accessing the Hugging Face Hub."""
@@ -134,8 +154,9 @@ def tiny_pipeline(request, tmp_path, tiny_tokenizer):
             scheduler=diffusers.UniPCMultistepScheduler(
                 prediction_type="flow_prediction", use_flow_sigmas=True, flow_shift=3.0
             ),
-            transformer=get_tiny_wan22_transformer(),
-            transformer_2=get_tiny_wan22_transformer(),
+            # A head dim of 16 makes every Linear input a multiple of the NVFP4 block size.
+            transformer=get_tiny_wan22_transformer(attention_head_dim=16),
+            transformer_2=get_tiny_wan22_transformer(attention_head_dim=16),
             boundary_ratio=0.875,
         )
         settings = ("boundary_ratio", "expand_timesteps")
@@ -193,6 +214,51 @@ def test_export_diffusers_pipeline_config(tmp_path, tiny_pipeline, selection):
     reloaded = type(pipe).from_pretrained(export_dir, **omitted)
     for setting in settings:
         assert reloaded.config[setting] == pipe.config[setting]
+
+
+@pytest.mark.parametrize("tiny_pipeline", ["wan22"], indirect=True)
+@pytest.mark.parametrize(
+    "quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG], ids=["fp8", "nvfp4"]
+)
+@pytest.mark.parametrize("num_inference_steps", [1, 2], ids=["starved", "covered"])
+@torch.no_grad()
+def test_export_diffusers_refuses_uncalibrated_static_inputs(
+    tmp_path, tiny_pipeline, quant_cfg, num_inference_steps
+):
+    """A one-step calibration never runs Wan 2.2's transformer_2, so export refuses it."""
+    pipe, _ = tiny_pipeline
+
+    def calibrate(_):
+        # As in the diffusers example, calibration runs the whole pipeline.
+        pipe(
+            prompt="a cat",
+            num_inference_steps=num_inference_steps,
+            height=16,
+            width=16,
+            num_frames=5,
+            output_type="latent",
+        )
+
+    # One pass calibrates both backbones, so no quantized forward runs: NVFP4 fake quant needs CUDA.
+    backbones = nn.ModuleList([pipe.transformer, pipe.transformer_2])
+    mtq.quantize(backbones, copy.deepcopy(quant_cfg), calibrate)
+    export_dir = tmp_path / "export_pipeline"
+
+    if num_inference_steps == 1:
+        with pytest.raises(ValueError, match="transformer_2"):
+            export_hf_checkpoint(pipe, export_dir=export_dir)
+        assert not any(export_dir.glob("*"))
+    else:
+        export_hf_checkpoint(pipe, export_dir=export_dir)
+        for component in ("transformer", "transformer_2"):
+            exported = {}
+            for shard in (export_dir / component).glob("*.safetensors"):
+                exported.update(load_file(str(shard)))
+            scaled = [key for key in exported if key.endswith(".weight_scale")]
+            assert scaled
+            assert all(
+                key.removesuffix("weight_scale") + "input_scale" in exported for key in scaled
+            )
 
 
 @pytest.mark.parametrize(
@@ -455,6 +521,92 @@ def test_export_diffusion_component_kv_metadata(
     assert {key for key in exported if "quantizer" in key} == set(expected_kv)
     for key, value in expected_kv.items():
         torch.testing.assert_close(exported[key], value)
+
+
+_WAN_VAE_DECODER_RESNET_CONVS = "*decoder.*resnets.*.conv[12]*"
+
+
+def _quantize_tiny_wan_vae(quant_cfg, keep):
+    """Quantize a tiny Wan VAE as the diffusers example does for text-to-video.
+
+    Calibration runs only ``decode``, as a text-to-video pipeline does, and then every quantizer
+    outside ``keep`` is disabled. Channel counts are multiples of 16, as in the released Wan VAEs.
+    """
+    torch.manual_seed(0)
+    vae = get_tiny_wan22_vae(base_dim=32).eval()
+    latents = torch.randn(1, 16, 2, 2, 2)
+    mtq.quantize(vae, copy.deepcopy(quant_cfg), lambda m: m.decode(latents))
+    mtq.disable_quantizer(vae, lambda name: not fnmatch(name, keep))
+    return vae
+
+
+@torch.no_grad()
+def test_export_wan_vae_nvfp4_conv3d(tmp_path):
+    """Every Wan VAE conv the config declares as NVFP4 is exported packed with its scales."""
+    vae = _quantize_tiny_wan_vae(mtq.NVFP4_DEFAULT_CFG, _WAN_VAE_DECODER_RESNET_CONVS)
+    convs = {name: m for name, m in vae.named_modules() if isinstance(m, nn.Conv3d)}
+    expected = {
+        name: (
+            m.weight.shape[0],
+            m.weight[0].numel(),
+            m.weight_quantizer.amax.float().squeeze() / (6 * 448),
+            m.input_quantizer.amax.float().squeeze() / (6 * 448),
+        )
+        for name, m in convs.items()
+        if m.weight_quantizer.is_enabled
+    }
+    assert 0 < len(expected) < len(convs)
+
+    export_hf_checkpoint(vae, export_dir=tmp_path)
+
+    exported = {}
+    for shard in tmp_path.glob("*.safetensors"):
+        exported.update(load_file(str(shard)))
+    config = _load_config(tmp_path / "config.json")["quantization_config"]
+    assert config["quant_algo"] == "NVFP4"
+    assert config["config_groups"]["group_0"]["targets"] == ["Conv3d"]
+    for name in convs:
+        # The config declares every conv outside ``ignore`` as NVFP4, so exactly those are packed.
+        assert any(fnmatch(name, pattern) for pattern in config["ignore"]) == (name not in expected)
+        weight = exported[f"{name}.weight"]
+        if name not in expected:
+            assert weight.is_floating_point()
+            assert f"{name}.weight_scale" not in exported
+            continue
+        out_channels, k, weight_scale_2, input_scale = expected[name]
+        assert weight.dtype == torch.uint8
+        assert weight.shape == (out_channels, k // 2)
+        assert exported[f"{name}.weight_scale"].dtype == torch.float8_e4m3fn
+        assert exported[f"{name}.weight_scale"].shape == (out_channels, k // 16)
+        torch.testing.assert_close(exported[f"{name}.weight_scale_2"], weight_scale_2)
+        torch.testing.assert_close(exported[f"{name}.input_scale"], input_scale)
+
+
+@pytest.mark.parametrize(
+    ("quant_cfg", "keep", "export_kwargs", "error", "match"),
+    [
+        (mtq.FP8_DEFAULT_CFG, _WAN_VAE_DECODER_RESNET_CONVS, {}, NotImplementedError, "NVFP4"),
+        (mtq.W4A16_NVFP4_CFG, _WAN_VAE_DECODER_RESNET_CONVS, {}, NotImplementedError, "input"),
+        # Text-to-video calibration never runs the encoder, so its convs have no input amax.
+        (mtq.NVFP4_DEFAULT_CFG, "*resnets.*.conv[12]*", {}, ValueError, "calibrated"),
+        (
+            mtq.NVFP4_DEFAULT_CFG,
+            _WAN_VAE_DECODER_RESNET_CONVS,
+            {"padding_strategy": "row"},
+            NotImplementedError,
+            "padding",
+        ),
+    ],
+    ids=["fp8", "weight_only_nvfp4", "uncalibrated_encoder", "gemm_padding"],
+)
+@torch.no_grad()
+def test_export_wan_vae_conv3d_fails_closed(tmp_path, quant_cfg, keep, export_kwargs, error, match):
+    """Unsupported Wan VAE conv exports raise instead of writing a mislabeled checkpoint."""
+    vae = _quantize_tiny_wan_vae(quant_cfg, keep)
+
+    with pytest.raises(error, match=match):
+        export_hf_checkpoint(vae, export_dir=tmp_path, **export_kwargs)
+    assert not (tmp_path / "config.json").exists()
 
 
 def test_svdquant_diffusers_export_promotes_clean_keys():
