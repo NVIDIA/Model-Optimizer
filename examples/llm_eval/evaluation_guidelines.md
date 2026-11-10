@@ -57,15 +57,15 @@ We evaluate on 294 of 338 SciCode subtasks, excluding the 44 used for KTO recove
 
 ### Show where the model improves or worsens
 
-We first average each model’s correctness across repetitions of each question, then compute **Candidate − Baseline** for each question. Repeated responses are not additional independent questions. All three benchmarks use t-based 95% confidence intervals and one-sided paired t-tests to check whether the mean difference is above or below zero. Changes are reported in percentage points (pp), not relative percentages. For simplicity, this example treats questions and SciCode subtasks as independent.
+We first average each model’s correctness across repetitions of each question, then compute **Candidate − Baseline** for each question. We calculate t-based 95% confidence intervals across these paired question-level differences. Changes are reported in percentage points (pp), not relative percentages. For simplicity, this example treats questions and SciCode subtasks as independent.
 
-| Benchmark | Baseline | Candidate | Difference [95% CI], pp | Candidate higher, p-value | Baseline higher, p-value |
+Our primary question is whether Candidate is better than Baseline. A one-sided paired t-test can detect improvement with less data than a two-sided test for any difference. “Yes” marks p < 0.05; “no evidence” means improvement was not established. Reverse-direction p-values are reported for context.
+
+| Benchmark | Baseline | Candidate | Difference [95% CI], pp | Candidate higher, p-value | Baseline higher, p-value (context) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| MMLU-Pro | 84.51% | 84.26% | −0.26 [−0.61, +0.10] | 0.920 — no evidence | 0.080 — no evidence |
-| SciCode | 43.52% | 44.90% | +1.38 [+0.08, +2.67] | 0.019 — yes | 0.981 — no evidence |
-| AA-Omniscience | 21.80% | 21.92% | +0.12 [−0.64, +0.88] | 0.381 — no evidence | 0.619 — no evidence |
-
-“Yes” marks p < 0.05; “no evidence” means the test did not establish the stated direction.
+| MMLU-Pro | 84.51% | 84.26% | −0.26 [−0.61, +0.10] | 0.920 — no evidence | 0.080 |
+| SciCode | 43.52% | 44.90% | +1.38 [+0.08, +2.67] | 0.019 — yes | 0.981 |
+| AA-Omniscience | 21.80% | 21.92% | +0.12 [−0.64, +0.88] | 0.381 — no evidence | 0.619 |
 
 On SciCode, the candidate is more accurate than the baseline (+1.38 pp; p = 0.019).
 
