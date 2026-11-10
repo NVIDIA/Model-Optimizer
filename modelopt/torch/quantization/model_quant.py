@@ -42,7 +42,7 @@ from modelopt.torch.quantization.conversion import (
     set_quantizer_attributes_partial,
     set_quantizer_by_cfg,
 )
-from modelopt.torch.utils import atomic_print, restore_training_modes
+from modelopt.torch.utils import atomic_print, restore_training_modes, safe_load, safe_save
 
 from . import model_calib
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
@@ -52,6 +52,7 @@ from .algorithms import (
     _algorithm_methods,
     _refuse_layerwise_dirs,
     _rewrites_weights,
+    merge_auto_quantize_shards,
 )
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
@@ -75,6 +76,7 @@ __all__ = [
     "enable_quantizer",
     "fold_weight",
     "get_auto_quantize_config",
+    "merge_auto_quantize_checkpoints",
     "postprocess_amax",
     "print_quant_summary",
     "quantize",
@@ -828,6 +830,7 @@ def auto_quantize(
     checkpoint: str | None = None,
     module_search_spaces: list[dict[str, Any]] | None = None,
     fixed_quantization_config: dict[str, Any] | str | None = None,
+    format_shard: tuple[int, int] | None = None,
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
@@ -1023,6 +1026,14 @@ def auto_quantize(
             active while searched modules are scored, is calibrated only with its own algorithm,
             and remains part of the effective-bits numerator and denominator. This is one
             integrated AutoQuantize operation, not staged PTQ followed by AutoQuantize.
+        format_shard: Optional ``(index, count)`` to calibrate and score only every ``count``-th
+            searched format starting at ``index`` (in canonical compression order), so the
+            formats can run in ``count`` parallel processes on the same model, data and
+            arguments; formats a group holds fixed are calibrated by every shard. Each shard
+            saves its scores to ``checkpoint`` without solving; combine the shard checkpoints
+            with :func:`merge_auto_quantize_checkpoints` and pass the result as ``checkpoint``
+            to solve. Scores are per (group, format), so the merged search is the unsharded
+            one. Gradient and KL-divergence methods only.
 
     Returns: A tuple (model, state_dict) where ``model`` is the searched and quantized model and
         ``state_dict`` contains the history and detailed stats of the search procedure.
@@ -1085,6 +1096,8 @@ def auto_quantize(
 
     method_name, method_config = _parse_auto_quantize_method(method)
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
+    if is_kv_search and format_shard is not None:
+        raise ValueError("format_shard is not supported for KV-cache AutoQuantize.")
     if is_kv_search:
         assert constraints is not None
         assert quantization_formats is not None
@@ -1230,6 +1243,7 @@ def auto_quantize(
         "disabled_layers": disabled_layers,
         "verbose": verbose,
         "checkpoint": checkpoint,
+        "format_shard": format_shard,
     }
     if method_config:
         # Only the selected method's declared options are accepted; core inputs (loaders,
@@ -1250,11 +1264,12 @@ def auto_quantize(
     searcher.validate_search_input(search_constraints, search_config)
 
     # A weight-rewriting candidate's refusals need the converted quantizers to tell which weights it
-    # rewrites. A failure before any candidate calibrates then hands back the unconverted modules,
-    # so the caller can retry on the same model, which a converted model would refuse. The saved
-    # modules hold every weight conversion replaces (HF Conv1D's), so other searches save none and
-    # the searcher drops them once those checks pass.
-    if rewrites_weights:
+    # rewrites, as does a format shard's check of its count against the searched formats. A failure
+    # before any candidate calibrates then hands back the unconverted modules, so the caller can
+    # retry on the same model, which a converted model would refuse. The saved modules hold every
+    # weight conversion replaces (HF Conv1D's), so other searches save none and the searcher drops
+    # them once those checks pass.
+    if rewrites_weights or format_shard is not None:
         searcher.restore_unconverted = _save_module_attributes(model)
     # Calibration turns pre-quant-scale folding off for the whole process. Hand back the policy
     # found here on every exit, also after a failure while scoring, so later calibrations fold.
@@ -1280,6 +1295,37 @@ def auto_quantize(
         model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = folding_pqs_to_weights
 
     return model, searcher.state_dict()
+
+
+def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint: str) -> None:
+    """Combine the checkpoints of every ``format_shard`` of one search into one checkpoint.
+
+    Pass ``checkpoint`` to :func:`auto_quantize` with the shards' other arguments (and no
+    ``format_shard``) to restore every format's calibration and scores and solve. The shard files
+    are memory-mapped on the CPU, so any host can merge them, and the restore moves each
+    calibration onto the model's devices. Under distributed scoring, merge each rank's files
+    separately. Shards that recorded different search setups (formats, groups, method, cost, or
+    calibration and scoring step counts) are refused; running every shard on the same weights
+    and batches is up to the caller.
+
+    Args:
+        shard_checkpoints: The checkpoint file of each shard ``0..count-1``, in any order.
+        checkpoint: Output file; must not exist.
+    """
+    if os.path.exists(checkpoint):
+        raise FileExistsError(f"{checkpoint} exists; merge into a new checkpoint file.")
+    merged = merge_auto_quantize_shards(
+        [safe_load(path, map_location="cpu", mmap=True) for path in shard_checkpoints]
+    )
+    os.makedirs(os.path.dirname(checkpoint) or ".", exist_ok=True)
+    # Created exclusively: a file that appeared since the check is refused, not overwritten.
+    f = open(checkpoint, "xb")
+    try:
+        with f:
+            safe_save(merged, f)
+    except BaseException:
+        os.unlink(checkpoint)  # only this call's partial file, so the merge can be retried
+        raise
 
 
 def get_auto_quantize_config(search_state, constraints=None, verbose=False):
