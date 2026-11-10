@@ -63,6 +63,8 @@ We first average each model’s correctness across repetitions of each question,
 
 Our primary question is whether Candidate is better than Baseline. A one-sided paired t-test can detect improvement with less data than a two-sided test for any difference. “Yes” marks p < 0.05; “no evidence” means improvement was not established. Reverse-direction p-values are reported for context.
 
+Choose test directions before inspecting results. We use p < 0.05 for each test, without a stricter threshold for testing multiple metrics. Testing more metrics gives noise more opportunities to appear as an improvement.
+
 | Benchmark | Baseline | Candidate | Difference [95% CI], pp | Candidate higher, p-value | Baseline higher, p-value (context) |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | MMLU-Pro | 84.51% | 84.26% | −0.26 [−0.61, +0.10] | 0.920 — no evidence | 0.080 |
@@ -98,32 +100,35 @@ Rare failures can make t-based approximations unreliable, so we use paired-boots
 
 The candidate has fewer cap hits on both SciCode and AA-Omniscience (p < 0.001).
 
-| Benchmark | Baseline cap rate | Candidate cap rate | Difference [95% CI], pp | Candidate lower, p-value | Candidate higher, p-value |
+| Benchmark | Baseline cap rate | Candidate cap rate | Difference [95% CI], pp | Candidate lower, p-value | Candidate higher, p-value (context) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| MMLU-Pro | 0.05% (10/20,000) | 0.03% (6/20,000) | −0.02 [−0.07, +0.02] | 0.244 — no evidence | 0.878 — no evidence |
-| SciCode | 1.29% (76/5,880) | 0.00% (0/5,880) | −1.29 [−1.70, −0.92] | <0.001 — yes | 1.000 — no evidence |
-| AA-Omniscience | 1.77% (106/6,000) | 0.85% (51/6,000) | −0.92 [−1.38, −0.48] | <0.001 — yes | 1.000 — no evidence |
+| MMLU-Pro | 0.05% (10/20,000) | 0.03% (6/20,000) | −0.02 [−0.07, +0.02] | 0.244 — no evidence | 0.878 |
+| SciCode | 1.29% (76/5,880) | 0.00% (0/5,880) | −1.29 [−1.70, −0.92] | <0.001 — yes | 1.000 |
+| AA-Omniscience | 1.77% (106/6,000) | 0.85% (51/6,000) | −0.92 [−1.38, −0.48] | <0.001 — yes | 1.000 |
 
 #### Missing final answers
 
 The candidate also reduced missing final answers on SciCode and AA-Omniscience (p < 0.001).
 
-| Benchmark | Baseline | Candidate | Difference [95% CI], pp | Candidate lower, p-value | Candidate higher, p-value |
+| Benchmark | Baseline | Candidate | Difference [95% CI], pp | Candidate lower, p-value | Candidate higher, p-value (context) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| MMLU-Pro | 0.05% (10/20,000) | 0.03% (6/20,000) | −0.02 [−0.07, +0.02] | 0.244 — no evidence | 0.878 — no evidence |
-| SciCode | 1.31% (77/5,880) | 0.00% (0/5,880) | −1.31 [−1.72, −0.94] | <0.001 — yes | 1.000 — no evidence |
-| AA-Omniscience | 1.77% (106/6,000) | 0.85% (51/6,000) | −0.92 [−1.38, −0.48] | <0.001 — yes | 1.000 — no evidence |
+| MMLU-Pro | 0.05% (10/20,000) | 0.03% (6/20,000) | −0.02 [−0.07, +0.02] | 0.244 — no evidence | 0.878 |
+| SciCode | 1.31% (77/5,880) | 0.00% (0/5,880) | −1.31 [−1.72, −0.94] | <0.001 — yes | 1.000 |
+| AA-Omniscience | 1.77% (106/6,000) | 0.85% (51/6,000) | −0.92 [−1.38, −0.48] | <0.001 — yes | 1.000 |
 
 #### Abstention
 
 [AA-Omniscience public v1](https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public) distinguishes abstention from incorrect guessing. The Codex assistant graded responses against reference answers, blinded to checkpoint identity. The reported configuration was GPT-6.1 Sol (xhigh); a pinned judge snapshot was not independently verified. Deliberate abstentions exclude empty answers and uncertain guesses.
 
-| Measure | Baseline | Candidate | Difference [95% CI], pp | Candidate higher, p-value | Candidate lower, p-value |
+| Measure | Baseline | Candidate | Difference [95% CI], pp | Candidate higher, p-value | Candidate lower, p-value (context) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Deliberate abstention | 13.30% (798/6,000) | 14.55% (873/6,000) | +1.25 [+0.23, +2.27] | 0.009 — yes | 0.993 — no evidence |
-| Incorrect answers | 62.03% (3,722/6,000) | 61.72% (3,703/6,000) | −0.32 [−1.57, +0.97] | 0.696 — no evidence | 0.322 — no evidence |
+| Deliberate abstention | 13.30% (798/6,000) | 14.55% (873/6,000) | +1.25 [+0.23, +2.27] | 0.009 — yes | 0.993 |
 
-The candidate abstained more often (p = 0.009), with no evidence of a change in incorrect-answer rates.
+| Measure | Baseline | Candidate | Difference [95% CI], pp | Candidate lower, p-value | Candidate higher, p-value (context) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Incorrect answers | 62.03% (3,722/6,000) | 61.72% (3,703/6,000) | −0.32 [−1.57, +0.97] | 0.322 — no evidence | 0.696 |
+
+The candidate abstained more often (p = 0.009), with no evidence of fewer incorrect answers (p = 0.322).
 
 ### Measure inference efficiency
 
@@ -131,11 +136,11 @@ Compare mean and median completion tokens, including reasoning, to assess how mu
 
 For mean length, we use the same question-level paired t-tests and t-based 95% confidence intervals as accuracy.
 
-| Benchmark | Baseline: mean / median | Candidate: mean / median | Change: mean / median, % | Mean change [95% CI], tokens | Candidate shorter, p-value | Candidate longer, p-value |
+| Benchmark | Baseline: mean / median | Candidate: mean / median | Change: mean / median, % | Mean change [95% CI], tokens | Candidate shorter, p-value | Candidate longer, p-value (context) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| MMLU-Pro | 2,803 / 2,157 | 2,759 / 2,145 | −1.6% / −0.6% | −44 [−99, +11] | 0.057 — no evidence | 0.943 — no evidence |
-| SciCode | 6,188 / 3,205 | 3,048 / 1,802 | −50.7% / −43.8% | −3,140 [−3,666, −2,614] | <0.001 — yes | 1.000 — no evidence |
-| AA-Omniscience | 4,280 / 1,756 | 3,097 / 1,705 | −27.6% / −2.9% | −1,183 [−1,764, −602] | <0.001 — yes | 1.000 — no evidence |
+| MMLU-Pro | 2,803 / 2,157 | 2,759 / 2,145 | −1.6% / −0.6% | −44 [−99, +11] | 0.057 — no evidence | 0.943 |
+| SciCode | 6,188 / 3,205 | 3,048 / 1,802 | −50.7% / −43.8% | −3,140 [−3,666, −2,614] | <0.001 — yes | 1.000 |
+| AA-Omniscience | 4,280 / 1,756 | 3,097 / 1,705 | −27.6% / −2.9% | −1,183 [−1,764, −602] | <0.001 — yes | 1.000 |
 
 The candidate uses fewer tokens on average on SciCode and AA-Omniscience (p < 0.001).
 
@@ -177,10 +182,10 @@ To rule out a 1 pp accuracy loss for the candidate versus the baseline, the non-
 
 Freeze a subset from earlier baseline failures to screen for targeted improvements. We report the 11 held-out subtasks, with ten matched repetitions—110 responses per model.
 
-| Benchmark | Baseline cap rate | Candidate cap rate | Difference [95% CI], pp | Candidate lower, p-value | Candidate higher, p-value |
+| Benchmark | Baseline cap rate | Candidate cap rate | Difference [95% CI], pp | Candidate lower, p-value | Candidate higher, p-value (context) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| SciCode | 1.29% (76/5,880) | 0.00% (0/5,880) | −1.29 [−1.70, −0.92] | <0.001 — yes | 1.000 — no evidence |
-| Focused subset | 10.91% (12/110) | 0.00% (0/110) | −10.91 [−18.18, −5.45] | 0.004 — yes | 1.000 — no evidence |
+| SciCode | 1.29% (76/5,880) | 0.00% (0/5,880) | −1.29 [−1.70, −0.92] | <0.001 — yes | 1.000 |
+| Focused subset | 10.91% (12/110) | 0.00% (0/110) | −10.91 [−18.18, −5.45] | 0.004 — yes | 1.000 |
 
 The focused held-out subset detects fewer candidate cap hits with 110 responses per model. Use it for a quick check of known weaknesses, then evaluate broader accuracy and reliability separately.
 
