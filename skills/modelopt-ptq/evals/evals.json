@@ -2,11 +2,10 @@
   "skill_name": "modelopt-ptq",
   "evals": [
     {
-      "id": 1,
+      "id": "1",
       "prompt": "Quantize Qwen3-0.6B to nvfp4",
       "expected_output": "Quantized checkpoint produced with config.json + safetensors via hf_ptq.py",
-      "files": [],
-      "expectations": [
+      "assertions": [
         "Skill auto-triggers and reads SKILL.md",
         "Checks README support table — Qwen3 is listed",
         "Takes path 4A or 4B depending on environment",
@@ -15,11 +14,10 @@
       ]
     },
     {
-      "id": 2,
+      "id": "2",
       "prompt": "Quantize HuggingFaceTB/SmolLM-135M to nvfp4",
       "expected_output": "Agent follows 4C path, determines hf_ptq.py works via auto-detection, runs smoke test then full calibration",
-      "files": [],
-      "expectations": [
+      "assertions": [
         "Checks README — SmolLM is NOT listed",
         "Reads unsupported-models.md (4C path)",
         "Investigates model source — finds standard LlamaForCausalLM",
@@ -29,11 +27,10 @@
       ]
     },
     {
-      "id": 3,
+      "id": "3",
       "prompt": "Quantize OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview to nvfp4",
       "expected_output": "Agent identifies VLM with trust_remote_code, follows unlisted model path, handles custom modeling code in checkpoint dir",
-      "files": [],
-      "expectations": [
+      "assertions": [
         "Checks README — InternVL is NOT listed",
         "Reads unsupported-models.md (4C path)",
         "Finds modeling code in checkpoint dir (trust_remote_code model)",
@@ -43,11 +40,10 @@
       ]
     },
     {
-      "id": 4,
+      "id": "4",
       "prompt": "Quantize supermmx/FakeUnsupported-0.6B to nvfp4",
       "expected_output": "Agent patches ModelOpt plugin directly, then runs hf_ptq.py",
-      "files": [],
-      "expectations": [
+      "assertions": [
         "Checks README — model is NOT listed",
         "Reads unsupported-models.md (4C path)",
         "Finds modeling_fake_model.py — uses trust_remote_code",
@@ -59,11 +55,10 @@
       ]
     },
     {
-      "id": 5,
+      "id": "5",
       "prompt": "Quantize MiniMax-M2.5 to nvfp4",
       "expected_output": "Agent detects FP8 pre-quantized checkpoint, relies on _QuantFP8Linear plugin for standard FP8Linear modules, dequantizes non-standard MoE expert weights manually, then runs PTQ",
-      "files": [],
-      "expectations": [
+      "assertions": [
         "Checks README — MiniMax-M2.5 is NOT listed",
         "Reads unsupported-models.md (4C path)",
         "Detects FP8 quantization_config in config.json (Step B)",
@@ -74,16 +69,36 @@
       ]
     },
     {
-      "id": 6,
+      "id": "6",
       "prompt": "Quantize an FP8 source checkpoint with a partial NVFP4 recipe, then evaluate the quantized checkpoint",
       "expected_output": "Agent treats post-PTQ checkpoint validation as a required gate before submitting any eval",
-      "files": [],
-      "expectations": [
+      "assertions": [
         "After PTQ completes, reads checkpoint-validation.md before creating or submitting eval jobs",
         "Reports source safetensors size, output safetensors size, and output/source ratio",
         "Reports layer precision counts, including NVFP4/FP8/intended quantized layers, BF16 or excluded layers, unexpected unquantized layers, and declaration mismatches",
         "Checks metadata consistency against the source checkpoint and records any diffs",
         "Stops before eval submission if the size ratio is >= 1.0 for a compression recipe, if intended layer coverage is missing, or if metadata changes unexpectedly"
+      ]
+    },
+    {
+      "id": "ptq-standalone-install",
+      "prompt": "Only the ptq skill is installed in an isolated ptq catalog directory. No ModelOpt plugin, sibling skills or MCP servers are installed. I have an existing patched ModelOpt checkout at ./Model-Optimizer. Without launching GPU jobs or changing that checkout, show how to resolve this workflow's common files and any companion references it needs.",
+      "expected_output": "Uses the existing source checkout for shared support and needed companion references, preserves patches, and keeps installed skill paths distinct from source paths.",
+      "assertions": [
+        "Resolves MODELOPT_ROOT to the existing checkout and records its revision without git pull, checkout or reset",
+        "Resolves common files and missing companion entrypoints under skills in the checkout",
+        "Keeps SKILL_DIR at the installed entrypoint for its own resources instead of assuming sibling catalog directories",
+        "Does not require a ModelOpt or MLflow MCP server or launch GPU jobs for reference resolution"
+      ]
+    },
+    {
+      "id": "ptq-negative",
+      "prompt": "Prepare a command to serve an existing FP8 checkpoint with vLLM. Do not quantize or run commands.",
+      "expected_output": "Serving guidance, routed to deployment; no calibration or checkpoint export.",
+      "expected_skill": null,
+      "assertions": [
+        "Does not invoke the ptq workflow",
+        "Does not execute commands or launch jobs"
       ]
     }
   ]

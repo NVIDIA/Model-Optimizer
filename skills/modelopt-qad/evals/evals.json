@@ -1,0 +1,58 @@
+{
+  "skill_name": "modelopt-qad",
+  "evals": [
+    {
+      "id": "qad-budget",
+      "prompt": "I explicitly want QAD for my measured BF16-to-PTQ gap. Which information do you need before launching? Do not run commands.",
+      "expected_output": "Requests the target model/run and loop or GPU-hour budget before any training.",
+      "assertions": [
+        "Does not treat the QAD request as an unlimited training budget",
+        "Requires validated comparable BF16/PTQ evidence",
+        "Does not submit jobs"
+      ]
+    },
+    {
+      "id": "qad-bridge-plan",
+      "prompt": "Plan Megatron Bridge QAD for an authorized dense NVFP4 run with a 4 GPU-hour budget and a validated 4% PTQ gap. No execution.",
+      "expected_output": "Plans PTQ compatibility, topology, data preparation, training, export, and benchmark recovery gates.",
+      "assertions": [
+        "Preserves preceding PTQ recipe settings",
+        "Reads Bridge docs and chooses topology from model and memory needs",
+        "Keeps EP=1 for dense models and TP=1 for static-block NVFP4",
+        "Uses modelopt-ptq checkpoint validation before evaluating exports"
+      ]
+    },
+    {
+      "id": "qad-hf",
+      "prompt": "I authorize HF Transformers QAD with a one-loop budget. Show the plan, without launching.",
+      "expected_output": "Honors HF choice and consults llm_qat documentation.",
+      "assertions": [
+        "Uses examples/llm_qat README and ARGUMENTS",
+        "Plans quantize then distill then export",
+        "Does not impose Bridge topology or Slurm chaining on HF"
+      ]
+    },
+    {
+      "id": "qad-negative",
+      "prompt": "Improve this PTQ recipe for Day 0. I have not authorized QAD.",
+      "expected_output": "Uses recipe search/PTQ without starting QAD.",
+      "expected_skill": null,
+      "assertions": [
+        "Does not start QAD training",
+        "Does not infer QAD authorization from a Day 0 request"
+      ]
+    },
+    {
+      "id": "qad-standalone-install",
+      "prompt": "Only modelopt-qad is installed in an isolated catalog directory. Reuse an existing patched ModelOpt checkout at ./Model-Optimizer. Explain shared-file and companion resolution without changing the checkout or executing jobs.",
+      "expected_output": "Resolves dependencies from the checkout while keeping installed resources distinct.",
+      "assertions": [
+        "Sets MODELOPT_ROOT to the existing checkout and MODELOPT_SKILLS to its root skills directory",
+        "Preserves patches and branch",
+        "Resolves common files under skills/common and companions under skills/modelopt-<name>",
+        "Keeps SKILL_DIR at the executing skill",
+        "Does not launch jobs"
+      ]
+    }
+  ]
+}
