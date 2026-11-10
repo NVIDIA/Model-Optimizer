@@ -1,5 +1,6 @@
 ---
 name: modelopt-quant-recipe-search
+license: Apache-2.0
 description: >-
   Use when the user asks to find, search for, or optimize the best quantization
   recipe for a model, including direct requests like "find the best quantization

@@ -1,5 +1,6 @@
 ---
 name: modelopt-speculative-decoding
+license: Apache-2.0
 description: >-
   Train, debug, and validate a speculative decoding draft model (EAGLE3, DFlash,
   DSpark, Domino) through the ModelOpt launcher pipeline. Use when the user wants

@@ -1,5 +1,6 @@
 ---
 name: modelopt-qad
+license: Apache-2.0
 description: >-
   Run explicitly requested ModelOpt Quantization-Aware Distillation (QAD) through
   Megatron Bridge (recommended) or Hugging Face Transformers to

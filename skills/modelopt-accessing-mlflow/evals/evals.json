@@ -1,0 +1,46 @@
+{
+  "skill_name": "modelopt-accessing-mlflow",
+  "evals": [
+    {
+      "id": "mlflow-local",
+      "prompt": "Compare these supplied exported MLflow configs and artifacts. No MLflow MCP is available; do not contact services.",
+      "expected_output": "Uses local artifacts and states any missing evidence.",
+      "assertions": [
+        "Does not invent MCP access or metrics",
+        "Preserves provenance of supplied artifacts",
+        "Uses modelopt-compare-results for validated accuracy comparison"
+      ]
+    },
+    {
+      "id": "mlflow-lookup",
+      "prompt": "Plan an MLflow lookup for invocation abc123 without executing or assuming credentials.",
+      "expected_output": "Distinguishes invocation IDs from run IDs and locates matching runs.",
+      "assertions": [
+        "Plans search by invocation metadata rather than treating abc123 as a run ID",
+        "Does not expose or fabricate credentials"
+      ]
+    },
+    {
+      "id": "mlflow-negative",
+      "prompt": "Check the live status of Slurm job 12345. No MLflow lookup is requested.",
+      "expected_output": "Routes live status to monitoring instead of treating MLflow as live scheduler state.",
+      "expected_skill": null,
+      "assertions": [
+        "Does not assume pending or running Slurm jobs have exported MLflow runs",
+        "Uses modelopt-monitor"
+      ]
+    },
+    {
+      "id": "accessing-mlflow-standalone-install",
+      "prompt": "Only modelopt-accessing-mlflow is installed in an isolated catalog directory. Reuse an existing patched ModelOpt checkout at ./Model-Optimizer. Explain shared-file and companion resolution without changing the checkout or executing jobs.",
+      "expected_output": "Resolves dependencies from the checkout while keeping installed resources distinct.",
+      "assertions": [
+        "Sets MODELOPT_ROOT to the existing checkout and MODELOPT_SKILLS to its root skills directory",
+        "Preserves patches and branch",
+        "Resolves common files under skills/common and companions under skills/modelopt-<name>",
+        "Keeps SKILL_DIR at the executing skill",
+        "Does not launch jobs"
+      ]
+    }
+  ]
+}
