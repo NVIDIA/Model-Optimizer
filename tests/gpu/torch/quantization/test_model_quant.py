@@ -53,7 +53,7 @@ def test_initialize_cuda_weight_formats(config):
     assert model.weight.grad is not None and torch.isfinite(model.weight.grad).all()
 
 
-def test_initialize_weight_memory_and_time(record_property):
+def test_initialize_weight_memory_and_time(record_property, capsys):
     model = nn.Sequential(*(nn.Linear(4096, 4096, bias=False) for _ in range(4)))
     model = model.to(device="cuda", dtype=torch.bfloat16)
     inputs = torch.randn(2, 4096, device="cuda", dtype=torch.bfloat16)
@@ -66,5 +66,13 @@ def test_initialize_weight_memory_and_time(record_property):
     mtq.initialize_qdq_weights(model)
     end.record()
     torch.cuda.synchronize()
-    record_property("initialization_ms", start.elapsed_time(end))
-    record_property("initialization_extra_peak_bytes", torch.cuda.max_memory_allocated() - baseline)
+    elapsed_ms = start.elapsed_time(end)
+    extra_peak_bytes = torch.cuda.max_memory_allocated() - baseline
+    record_property("initialization_ms", elapsed_ms)
+    record_property("initialization_extra_peak_bytes", extra_peak_bytes)
+    with capsys.disabled():
+        print(
+            f"QDQ initialization: device={torch.cuda.get_device_name()}, "
+            f"format=NVFP4, dtype=BF16, weights=4x4096x4096, "
+            f"elapsed_ms={elapsed_ms:.3f}, extra_peak_allocated_bytes={extra_peak_bytes}"
+        )
