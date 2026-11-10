@@ -31,6 +31,7 @@ __all__ = [
     "DFlashConfig",
     "EagleConfig",
     "ExternalDraftConfig",
+    "MTPConfig",
     "MedusaConfig",
     "eagle3_default_config",
     "eagle_mtp_default_config",
@@ -481,6 +482,64 @@ class MedusaConfig(ModeloptBaseConfig):
     )
 
 
+class MTPConfig(ModeloptBaseConfig):
+    """Offline training settings for a checkpoint-native MTP module."""
+
+    mtp_adapter: str = ModeloptField(
+        default="auto",
+        min_length=1,
+        description=(
+            "Native MTP checkpoint adapter. Use 'auto' to select from checkpoint metadata."
+        ),
+    )
+
+    mtp_loss_type: Literal["lk_lambda", "soft_target_ce"] = ModeloptField(
+        default="lk_lambda",
+        description=("Token distillation objective. Available options: lk_lambda, soft_target_ce."),
+    )
+
+    mtp_lk_eta: float = ModeloptField(
+        default=3.0,
+        ge=0,
+        allow_inf_nan=False,
+        description=("Decay rate for the LK-lambda blend. Zero selects pure KL."),
+    )
+
+    mtp_loss_decay_factor: float = ModeloptField(
+        default=1.0,
+        gt=0,
+        le=1,
+        allow_inf_nan=False,
+        description=("The per-round loss decay factor for native MTP training."),
+    )
+
+    mtp_ttt_steps: int = ModeloptField(
+        default=1,
+        strict=True,
+        ge=1,
+        description=("The number of training-time-test steps for native MTP boosting."),
+    )
+
+    mtp_mix_hidden_states: bool = ModeloptField(
+        default=False,
+        description=("Whether to mix hidden states across rounds. Requires mtp_ttt_steps >= 2."),
+    )
+
+    mtp_mix_hidden_states_mode: Literal["uniform_layer_sample"] = ModeloptField(
+        default="uniform_layer_sample",
+        description=(
+            "Hidden state mixing variant used when mtp_mix_hidden_states=True. "
+            "Available options: uniform_layer_sample."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_mix_hidden_states_steps(self) -> Self:
+        if self.mtp_mix_hidden_states and self.mtp_ttt_steps < 2:
+            raise ValueError("mtp_mix_hidden_states requires mtp_ttt_steps >= 2")
+        return self
+
+
 class ExternalDraftConfig(ModeloptBaseConfig):
     """External (standalone) draft model config.
 
@@ -593,6 +652,24 @@ class EagleConfig(ModeloptBaseConfig):
 
     eagle_loss_decay_factor: float = ModeloptField(
         default=0.9, description=("The decay factor for multiple eagle_loss.")
+    )
+
+    eagle_loss_type: Literal["soft_target_ce", "lk_lambda"] = ModeloptField(
+        default="soft_target_ce",
+        description=(
+            "Token distillation objective. Available options: soft_target_ce, lk_lambda. "
+            "LK lambda is only supported by the Hugging Face backend."
+        ),
+    )
+
+    eagle_lk_eta: float = ModeloptField(
+        default=3.0,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Decay rate for the LK-lambda blend when eagle_loss_type='lk_lambda'. "
+            "Zero selects pure KL."
+        ),
     )
 
     eagle_architecture_config: dict = ModeloptField(

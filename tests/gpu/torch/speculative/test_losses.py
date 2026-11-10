@@ -39,11 +39,17 @@ def test_lk_compiled_cuda_matches_fp32_reference(dtype, truncated, mask_kind):
         mask /= mask.numel()
     elif mask_kind == "empty":
         mask.zero_()
+    # Masked tokens may have positive teacher mass where the student has zero mass.
+    student.masked_fill_((mask == 0).unsqueeze(-1), -torch.inf)
+    student[..., 0].masked_fill_(mask == 0, 0)
     reference_student = student.float().requires_grad_()
     expected = masked_lk_lambda_loss(
         teacher.float(), reference_student, mask, draft_vocab_indices=indices
     )
     expected.backward()
+    assert torch.isfinite(expected)
+    assert torch.isfinite(reference_student.grad).all()
+    assert torch.count_nonzero(reference_student.grad[mask == 0]) == 0
     compiled = torch.compile(masked_lk_lambda_loss, fullgraph=True)
     for loss_fn in (masked_lk_lambda_loss, compiled):
         actual_student = student.detach().clone().requires_grad_()

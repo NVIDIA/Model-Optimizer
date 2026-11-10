@@ -38,7 +38,8 @@ def _lk_lambda_loss(
 
     DFlash2 supplies its unweighted mean acceptance; soft targets use the loss weights.
     """
-    divergence_loss = (divergence * weights).sum() / weight_sum
+    # A masked token can have infinite KL when only the student assigns zero mass.
+    divergence_loss = (divergence.masked_fill(weights == 0, 0) * weights).sum() / weight_sum
     tv_loss = ((1.0 - overlap) * weights).sum() / weight_sum
     if mean_acceptance is None:
         mean_acceptance = (overlap.detach() * weights).sum() / weight_sum

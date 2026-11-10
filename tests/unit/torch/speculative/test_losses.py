@@ -22,6 +22,8 @@ from modelopt.torch.speculative.losses import masked_lk_lambda_loss
 
 
 def _reference(teacher, student, mask, eta, indices=None):
+    valid = mask != 0
+    teacher, student, mask = teacher[valid], student[valid], mask[valid]
     p = teacher.detach().float().log_softmax(-1).exp()
     teacher = teacher.detach().float()
     if indices is not None:
@@ -42,7 +44,15 @@ def _reference(teacher, student, mask, eta, indices=None):
 @pytest.mark.parametrize("eta", [0.0, 3.0])
 @pytest.mark.parametrize(
     "case",
-    ["random", "identical", "empty_mask", "extreme", "zero_probability", "fractional_weights"],
+    [
+        "random",
+        "identical",
+        "empty_mask",
+        "extreme",
+        "zero_probability",
+        "masked_zero_student_probability",
+        "fractional_weights",
+    ],
 )
 def test_lk_loss_matches_reference_and_only_differentiates_student(truncated, eta, case):
     torch.manual_seed(17)
@@ -56,13 +66,15 @@ def test_lk_loss_matches_reference_and_only_differentiates_student(truncated, et
         student = teacher.detach().clone() if indices is None else teacher.detach()[..., indices]
     elif case == "extreme":
         student *= 1000
-    student = student.requires_grad_()
-    reference_student = student.detach().clone().requires_grad_()
     mask = torch.tensor([[0, 1, 1, 0, 1], [1, 0, 1, 1, 0]], dtype=torch.float32)
     if case == "empty_mask":
         mask.zero_()
     elif case == "fractional_weights":
         mask *= torch.linspace(0.01, 0.09, mask.numel()).reshape_as(mask)
+    if case in ("empty_mask", "masked_zero_student_probability"):
+        student[..., 0].masked_fill_(mask == 0, -torch.inf)
+    student = student.requires_grad_()
+    reference_student = student.detach().clone().requires_grad_()
     expected = _reference(teacher, reference_student, mask, eta, indices)
     actual = masked_lk_lambda_loss(teacher, student, mask, eta=eta, draft_vocab_indices=indices)
     torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)

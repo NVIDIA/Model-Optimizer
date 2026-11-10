@@ -410,6 +410,15 @@ trainer.save_model("<output_dir>")
 
 See `main.py` for the full example including tokenizer setup, dataset loading, and checkpoint handling.
 
+### Native MTP Boosting
+
+Native multi-token prediction (MTP) boosting fine-tunes a model's existing MTP
+module using target-model supervision. Only the MTP module is trained. LK lambda
+is the default loss; set `mtp_loss_type="soft_target_ce"` to use cross-entropy.
+
+The [Python API](../../modelopt/torch/speculative/mtp/adapter.py) currently requires
+a custom model adapter.
+
 ## Support Matrix
 
 | Model | Medusa | EAGLE1/2 | EAGLE3 |

@@ -126,6 +126,12 @@ class EagleModule(nn.Module):
 
         return args, kwargs
 
+    def prepare_initial_hidden_states(self, base_outputs):
+        """Project auxiliary features for EAGLE3, or reuse the base output state."""
+        if self.config.use_aux_hidden_state:
+            return self.fc(base_outputs.aux_hiddens)
+        return base_outputs.out_hiddens
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -135,6 +141,7 @@ class EagleModule(nn.Module):
         past_key_values: Cache | None = None,
         use_cache: bool | None = None,
         output_attentions: bool | None = False,
+        input_ids: torch.LongTensor | None = None,
     ):
         """Forward function for EagleModule."""
         batch_size, seq_length, _ = hidden_states.shape
@@ -205,6 +212,7 @@ class EagleBaseModelOutput:
     logits: torch.Tensor | None = None
     input_embeds: torch.Tensor | None = None
     loss: torch.Tensor | None = None
+    draft_hiddens: torch.Tensor | None = None
 
     @classmethod
     def from_offline_dict(cls, d: dict):
@@ -215,4 +223,5 @@ class EagleBaseModelOutput:
             logits=d.get("base_model_logits"),
             input_embeds=d.get("base_model_input_embeds"),
             loss=None,
+            draft_hiddens=d.get("draft_hidden_states"),
         )
