@@ -497,7 +497,8 @@ def _auto_quantize_finalize_config(
             f"{primary.auto_quantize_method}. Finalize them with the recipe that scored them, "
             "or search again into another --auto_quantize_checkpoint."
         )
-    # So are scores taken for other candidate formats, processed as the search processes them.
+    # So are scores taken for other candidate formats, processed as the search processes them,
+    # or with other scoring options, such as another KL context.
     inputs = _mtq_inputs_from_auto_quantize_config(
         primary, args, fixed_quantize_config=recipe.quantize
     )
@@ -514,19 +515,13 @@ def _auto_quantize_finalize_config(
         "quantization_formats": formats,
         "module_search_spaces": search_spaces,
         "fixed_quantization_config": fixed,
+        **(primary.method_options or {}),
     }
-    mismatch = searcher.candidate_mismatch(search_state)
+    mismatch = searcher.candidate_mismatch(search_state) or searcher.scoring_mismatch(search_state)
     if mismatch:
         raise ValueError(
             f"{checkpoint} does not hold the recipe's scores: {mismatch} Finalize them with the "
             "recipe that scored them, or search again into another --auto_quantize_checkpoint."
-        )
-    # So are scores taken under other scoring options, such as another KL context.
-    scored_with = searcher.scoring_config_from(search_state.get("scoring_config"))
-    if scored_with != searcher.scoring_config_from(primary.method_options):
-        raise ValueError(
-            f"{checkpoint} was scored with {scored_with}, not the recipe's method_options "
-            f"{primary.method_options}. Use a different --auto_quantize_checkpoint."
         )
     # Freeze the per-layer formats for this budget, with the recipe's KV-cache config.
     quant_cfg = mtq.get_auto_quantize_config(

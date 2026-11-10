@@ -941,6 +941,17 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         options = options or {}
         return {key: options.get(key, defaults[key]) for key in sorted(self.scoring_config_keys)}
 
+    def scoring_mismatch(self, state: dict) -> str | None:
+        """How the scores in ``state`` were taken other than this search's config takes them.
+
+        Options a checkpoint does not record count as the defaults it was scored with.
+        """
+        restored = self.scoring_config_from(state.get("scoring_config"))
+        current = self.scoring_config_from(self.config)
+        if restored != current:
+            return f"Checkpoint scoring options {restored} do not match current {current}."
+        return None
+
     def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
         """Sanitize the search config dict."""
         config = config or {}
@@ -1534,16 +1545,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 f"current=({self.config['cost_model']}, {self.config['active_moe_expert_ratio']}). "
                 "Use a different checkpoint path."
             )
-        scoring_config = self.scoring_config_from(self.config)
-        # A checkpoint saved before scoring options were recorded was scored with the defaults.
-        restored_scoring_config = self.scoring_config_from(getattr(self, "scoring_config", None))
-        if self.candidate_stats and restored_scoring_config != scoring_config:
-            raise ValueError(
-                f"Checkpoint scoring options {restored_scoring_config} do not match "
-                f"current {scoring_config}. Use a different checkpoint path."
-            )
+        mismatch = self.scoring_mismatch(self.state_dict()) if self.candidate_stats else None
+        if mismatch:
+            raise ValueError(f"{mismatch} Use a different checkpoint path.")
         self.method = self.method_name
-        self.scoring_config = scoring_config
+        self.scoring_config = self.scoring_config_from(self.config)
         self.cost_model = self.config["cost_model"]
         self.cost = self.config["cost"]
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]

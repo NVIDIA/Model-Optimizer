@@ -281,9 +281,20 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
             update={"method_options": {"context": "lowest"}}
         )
     )
-    with pytest.raises(ValueError, match="scored with"):
+    with pytest.raises(ValueError, match="scoring options"):
         run("kl_div.pth", lowest)
     assert run("kl_div.pth", kl_div)[0]
+    # And Aumann-Shapley scores taken along other paths: 4 path nodes, where the recipe has 2.
+    signature = {"version": 1, "path_variant": "module_output_replay_v1", "damage_link": "coverage"}
+    state.update(method="aumann_shapley", scoring_signature={**signature, "num_path_nodes": 4})
+    safe_save(state, tmp_path / "shapley.pth")
+    shapley = ModelOptAutoQuantizeRecipe(
+        auto_quantize=kl_div.auto_quantize.model_copy(
+            update={"auto_quantize_method": "aumann_shapley"}
+        )
+    )
+    with pytest.raises(ValueError, match="scoring signature"):
+        run("shapley.pth", shapley)
 
     for index in range(2):
         assert not run(f"shard{index}", auto_quantize_format_shard=(index, 2))[0]
