@@ -162,3 +162,24 @@ def test_nvfp4_layers_are_carried_over_as_they_are(tmp_path):
     for name, tensor in before.items():
         if name.startswith("model.layers.1.mlp."):
             assert torch.equal(after[name], tensor)
+
+
+def test_a_uniform_export_becomes_uniform_int8_pb_wo(tmp_path):
+    model, _ = quantize_tiny_llama(tmp_path, (IQ1_S, IQ1_S))
+    export_hf_checkpoint(model, export_dir=tmp_path / "ggml")
+
+    convert_ggml_to_int8.convert_ggml_export_to_int8(tmp_path / "ggml", tmp_path / "int8")
+
+    original = json.loads((tmp_path / "ggml" / "hf_quant_config.json").read_text())
+    original = original["quantization"]
+    assert (original["quant_algo"], original["packing"]) == ("IQ1_S", "ggml")
+    quantization = json.loads((tmp_path / "int8" / "hf_quant_config.json").read_text())
+    # The keys describing the GGML payloads go with them.
+    kept = {k: v for k, v in original.items() if k not in convert_ggml_to_int8._GGML_PAYLOAD_KEYS}
+    assert quantization["quantization"] == {**kept, "quant_algo": "INT8_PB_WO", "group_size": 32}
+    config = json.loads((tmp_path / "int8" / "config.json").read_text())["quantization_config"]
+    assert (config["quant_method"], config["quant_algo"], config["group_size"]) == (
+        "modelopt",
+        "INT8_PB_WO",
+        32,
+    )

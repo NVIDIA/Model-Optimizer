@@ -41,6 +41,8 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
 
 _INDEX = "model.safetensors.index.json"
 _HF_QUANT_CONFIG = "hf_quant_config.json"
+# Uniform-export keys that describe the GGML payloads the INT8 tensors replace.
+_GGML_PAYLOAD_KEYS = ("effective_bits", "block_payload_bytes", "packing")
 
 
 def convert_ggml_export_to_int8(
@@ -163,6 +165,8 @@ def _int8_quantization(quantization: dict, layer_formats: dict[str, GGMLFormat])
             }
     else:
         (ggml_format,) = set(layer_formats.values())
+        for key in _GGML_PAYLOAD_KEYS:
+            quantization.pop(key, None)
         quantization.update(quant_algo="INT8_PB_WO", group_size=ggml_format.int8_group_size)
     return quantization
 

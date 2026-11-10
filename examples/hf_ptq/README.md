@@ -779,6 +779,8 @@ Each weight keeps its GGML integer level as its int8 `weight`, and the step of i
 
 vLLM serves group-32 layers (IQ1_S, IQ2_XXS, Q8_0) with Marlin and group-16 layers (IQ1_M, IQ2_XS, IQ2_S) with Humming. On Blackwell GPUs, Marlin is much slower at large batch sizes, so set `VLLM_DISABLED_KERNELS=MarlinLinearKernel` to use Humming for group 32 as well.
 
+In fp16 models, also disable `ExllamaLinearKernel`: until [vllm-project/vllm#60921](https://github.com/vllm-project/vllm/pull/60921) lands, it takes fp16 group-16 layers and reads the wrong group scales.
+
 #### SGLang
 
 ```python
