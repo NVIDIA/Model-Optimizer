@@ -190,6 +190,118 @@ def test_hf_ptq_runs_weight_then_kv_autoquantize_stages(monkeypatch):
     assert calls[1]["checkpoint"] == "kv-search.pth"
 
 
+def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
+    """Directory checkpoints, as the searcher lays them out, reach the merge and the finalize."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(
+        tensor_quant,
+        "dynamic_block_quantize_op",
+        lambda inputs, *_args, **_kwargs: torch.zeros_like(inputs),
+    )
+    recipe = ModelOptAutoQuantizeRecipe(
+        auto_quantize=AutoQuantizeConfig(
+            constraints=AutoQuantizeConstraints(effective_bits=6.0),
+            candidate_formats=[
+                QuantizeConfig(**QUANT_CFG_CHOICES["fp8"]),
+                QuantizeConfig(**QUANT_CFG_CHOICES["nvfp4"]),
+            ],
+            finalize_algorithm="max",
+        )
+    )
+    input_ids = torch.arange(8).unsqueeze(0)
+    data = [{"input_ids": input_ids, "labels": input_ids.clone()}]
+
+    def run(checkpoint, **flags):
+        model = get_tiny_qwen3(num_hidden_layers=1)
+        args = SimpleNamespace(
+            qformat="fp8",
+            calib_with_images=False,
+            inference_pipeline_parallel=1,
+            use_fsdp2=False,
+            kv_cache_qformat="none",
+            batch_size=1,
+            auto_quantize_checkpoint=str(tmp_path / checkpoint),
+            kv_auto_quantize_checkpoint=None,
+            auto_quantize_format_shard=None,
+            auto_quantize_merge_shards=None,
+            local_checkpoint_path="dummy",
+            hub_model_id=None,
+            cast_mxfp4_to_nvfp4=False,
+            layerwise_export=False,
+            specdec_offline_dataset=None,
+        )
+        vars(args).update(flags)
+        ready = hf_ptq._run_auto_quantize_recipe(
+            args, recipe, model, model, None, False, data, False
+        )
+        return ready, model
+
+    # Unsharded: the search saves the scores, and the rerun finalizes a fresh model.
+    assert not run("search")[0]
+    ready, model = run("search")
+    assert ready
+    assert model.model.layers[0].mlp.down_proj.weight_quantizer.is_enabled
+
+    for index in range(2):
+        assert not run(f"shard{index}", auto_quantize_format_shard=(index, 2))[0]
+    shards = f"{tmp_path / 'shard0'},{tmp_path / 'shard1'}"
+    assert run("merged", auto_quantize_merge_shards=shards)[0]
+    assert (tmp_path / "merged" / "rank0.pth").is_file()
+
+
+@pytest.mark.parametrize("refusal", ["kv_followup", "distributed"])
+def test_hf_ptq_refuses_finalize_and_shards_before_searching(monkeypatch, refusal):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    recipe = load_recipe(
+        "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
+        if refusal == "kv_followup"
+        else "general/auto_quantize/nvfp4_fp8_at_5p4bits"
+    )
+    if refusal == "distributed":
+        monkeypatch.setattr(hf_ptq.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(hf_ptq, "auto_quantize", lambda *_args, **_kwargs: pytest.fail("searched"))
+    args = SimpleNamespace(
+        auto_quantize_checkpoint="search.pth",
+        kv_auto_quantize_checkpoint=None,
+        auto_quantize_format_shard=(0, 2),
+        auto_quantize_merge_shards=None,
+    )
+
+    match = "without a KV-cache search" if refusal == "kv_followup" else "run in one process"
+    with pytest.raises(ValueError, match=match):
+        hf_ptq._run_auto_quantize_recipe(args, recipe, None, None, None, False, [], False)
+
+
+def test_auto_quantize_format_shard_flags(monkeypatch):
+    cli = [
+        "--pyt_ckpt_path",
+        "/models/Qwen3-0.6B",
+        "--recipe",
+        "general/auto_quantize/nvfp4_fp8_at_5p4bits",
+        "--auto_quantize_checkpoint",
+        "search.pth",
+    ]
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, *cli, "--auto_quantize_format_shard", "1/2", "--batch_size", "1"
+    )
+    assert args.auto_quantize_format_shard == (1, 2)
+
+    for bad in (
+        ["--auto_quantize_format_shard", "1-2", "--batch_size", "1"],
+        ["--auto_quantize_format_shard", "1/2"],  # a probed batch size can differ per shard
+        [
+            "--auto_quantize_format_shard",
+            "1/2",
+            "--batch_size",
+            "1",
+            "--auto_quantize_merge_shards",
+            "s0.pth",
+        ],
+    ):
+        with pytest.raises(SystemExit):
+            _parse_hf_ptq_args(monkeypatch, *cli, *bad)
+
+
 def test_hf_ptq_runs_real_weight_then_kv_autoquantize_stages(monkeypatch):
     """Exercise the shipped gradient-weight -> KL-div KV composition without mocked stages."""
     hf_ptq = _import_hf_ptq(monkeypatch)

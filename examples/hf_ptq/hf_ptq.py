@@ -98,6 +98,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
+from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import print_rank_0, safe_load
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
@@ -679,15 +680,28 @@ def _run_auto_quantize_recipe(
     # Off unless given, like the shard flags autoquant_utils reads, for args built without them.
     format_shard = getattr(args, "auto_quantize_format_shard", None)
     merge_shards = getattr(args, "auto_quantize_merge_shards", None)
-    if finalize and (primary_is_kv or followup_kv is not None or not args.auto_quantize_checkpoint):
-        raise ValueError(
-            "auto_quantize.finalize_algorithm needs a weight search without a KV-cache search "
-            "and --auto_quantize_checkpoint to hand the scores to the finalizing run."
+    if finalize or format_shard is not None or merge_shards:
+        if primary_is_kv or followup_kv is not None or not args.auto_quantize_checkpoint:
+            raise ValueError(
+                "auto_quantize.finalize_algorithm, --auto_quantize_format_shard and "
+                "--auto_quantize_merge_shards need a weight search without a KV-cache search, "
+                "and --auto_quantize_checkpoint to hand the scores between runs."
+            )
+        if dist.is_initialized():
+            # Each rank would search into its own file, which the merge and the scores lookup
+            # below do not read.
+            raise ValueError(
+                "auto_quantize.finalize_algorithm, --auto_quantize_format_shard and "
+                "--auto_quantize_merge_shards run in one process; launch hf_ptq without torchrun "
+                "and without --use_fsdp2."
+            )
+        checkpoint = _search_checkpoint_file(args.auto_quantize_checkpoint)
+    if merge_shards and not os.path.exists(checkpoint):
+        mtq.merge_auto_quantize_checkpoints(
+            [_search_checkpoint_file(path) for path in merge_shards.split(",")], checkpoint
         )
-    if merge_shards and not os.path.exists(args.auto_quantize_checkpoint):
-        mtq.merge_auto_quantize_checkpoints(merge_shards.split(","), args.auto_quantize_checkpoint)
     if finalize and format_shard is None:
-        search_state = _scored_auto_quantize_state(args.auto_quantize_checkpoint)
+        search_state = _scored_auto_quantize_state(checkpoint)
         if search_state is not None:
             # Freeze the per-layer formats for this budget and calibrate the source weights.
             quant_cfg = mtq.get_auto_quantize_config(
@@ -769,10 +783,19 @@ def _run_auto_quantize_recipe(
     return True
 
 
+def _search_checkpoint_file(checkpoint: str) -> str:
+    """The file a one-process search keeps at ``checkpoint``: a directory's ``rank0.pth``."""
+    if (
+        os.path.isdir(checkpoint)
+        or checkpoint.endswith(os.sep)
+        or not os.path.splitext(checkpoint)[1]
+    ):
+        return os.path.join(checkpoint, "rank0.pth")
+    return checkpoint
+
+
 def _scored_auto_quantize_state(checkpoint: str) -> dict | None:
-    """The single-process search state at ``checkpoint`` if it holds every format's scores."""
-    if os.path.isdir(checkpoint) or not os.path.splitext(checkpoint)[1]:
-        checkpoint = os.path.join(checkpoint, "rank0.pth")
+    """The search state in ``checkpoint`` (a file) if it holds every format's scores."""
     if not os.path.isfile(checkpoint):
         return None
     # Memory-mapped on the CPU: finalizing reads the scores, not every format's calibration.
@@ -1626,6 +1649,11 @@ def parse_args() -> argparse.Namespace:
         )
     if args.auto_quantize_format_shard is not None and args.auto_quantize_merge_shards:
         parser.error("A format shard cannot also merge shards.")
+    if args.auto_quantize_format_shard is not None and args.batch_size == 0:
+        # A probed batch size follows each shard's free memory; the merge needs equal step counts.
+        parser.error(
+            "--auto_quantize_format_shard needs an explicit --batch_size, the same in every shard."
+        )
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
 
