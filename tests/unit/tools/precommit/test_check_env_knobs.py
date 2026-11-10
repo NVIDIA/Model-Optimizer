@@ -34,6 +34,10 @@ import check_env_knobs
         ('os.environ["MODELOPT_X"]', True),
         ('"MODELOPT_X" in os.environ', True),
         ('os.environ["MODELOPT_X"] += ",more"', True),
+        ('os.getenv(key="MODELOPT_X")', True),
+        ('import os as _os; _os.getenv("MODELOPT_X")', True),
+        ('from os import environ as _environ; _environ["MODELOPT_X"]', True),
+        ('from os import getenv as _getenv; _getenv("MODELOPT_X")', True),
         ('os.environ["MODELOPT_X"] = "1"', False),
         ('del os.environ["MODELOPT_X"]', False),
         ('os.putenv("MODELOPT_X", "1")', False),
@@ -41,7 +45,8 @@ import check_env_knobs
     ],
 )
 def test_library_file_fails_on_a_read_but_not_on_a_write(tmp_path, monkeypatch, statement, is_read):
-    """Setting or deleting a variable passes; a read fails, including the read inside ``+=``."""
+    """Setting or deleting a variable passes; a read fails, also under an alias or with ``key=``,
+    including the read inside ``+=``."""
     monkeypatch.setattr(check_env_knobs, "_REPO_ROOT", tmp_path)
     path = tmp_path / "modelopt" / "module.py"
     path.parent.mkdir()
