@@ -143,10 +143,11 @@ class GGMLGPTQHelper(GPTQHelper):
             source=weight if self._searched else None,
         )
         self._packed = self._unrounded = self._importance = self._searched = None
-        if device is not None and torch.device(device) != weight.device:
+        target = weight.device if device is None else torch.device(device)
+        if target.type == "cuda" and target != weight.device:
             # The weight's GPU's allocator does not see the copies into it running on this
             # device's stream, so emptying its cache could release their targets mid-copy.
-            torch.cuda.current_stream(device).synchronize()
+            torch.cuda.current_stream(target).synchronize()
 
     def _blockwise_update(self, block_size):
         quantizer = self.weight_quantizer
