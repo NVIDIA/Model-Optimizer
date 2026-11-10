@@ -152,7 +152,7 @@ def test_shape_rtn(tmp_path, block_size, layers_8bit, opset):
     )
     if opset < 21:
         for method in ["rtn", "rtn_dq"]:
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="requires opset 21"):
                 quantize_int4(onnx_path, method, block_size=block_size, layers_8bit=layers_8bit)
         return
     outputs = []
@@ -234,7 +234,7 @@ def test_int4_gather(tmp_path, calibration_method, opset):
     if opset < 21:
         source_model = onnx.load(m)
         source_bytes = source_model.SerializeToString()
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="requires opset 21"):
             quantize_int4(
                 source_model,
                 calibration_method=calibration_method,
