@@ -670,6 +670,8 @@ def test_serialized_empty_conversations_falls_back_to_messages(tiny_tokenizer, c
         ("tools", [1]),
         ("tools", "[1]"),
         ("reasoning_effort", {"effort": "high"}),
+        ("messages", [{"role": "user"}, {"role": "assistant", "content": "reply"}]),
+        ("messages", '[{"role":"user"},{"role":"assistant","content":"reply"}]'),
     ],
 )
 def test_getitem_resamples_malformed_fields(tiny_tokenizer, project_root_path, field, value):
@@ -682,7 +684,8 @@ def test_getitem_resamples_malformed_fields(tiny_tokenizer, project_root_path, f
 
     tiny_tokenizer.chat_template = "{{ messages[0]['content'] }}"
     valid = {"conversation_id": "valid", "messages": [{"role": "user", "content": "hello"}]}
-    if field == "reasoning_effort":
+    uses_gpt_oss = field in ("reasoning_effort", "messages")
+    if uses_gpt_oss:
         tiny_tokenizer.chat_template = (
             project_root_path
             / "tools/launcher/examples/openai/gpt-oss-20b/chat_template_train.jinja"
@@ -699,10 +702,42 @@ def test_getitem_resamples_malformed_fields(tiny_tokenizer, project_root_path, f
             add_generation_prompt=False,
             return_dict=False,
         )
-        if field == "reasoning_effort"
+        if uses_gpt_oss
         else tiny_tokenizer("hello", add_special_tokens=False)["input_ids"]
     )
     assert sample["token_ids"] == expected
+
+
+@pytest.mark.parametrize(
+    "assistant_content", [{}, {"content": None}, {"content": [{"type": "text", "text": "reply"}]}]
+)
+def test_tool_calls_and_content_lists_remain_valid(tiny_tokenizer, assistant_content):
+    tiny_tokenizer.add_tokens(["f", "reply"])
+    tiny_tokenizer.chat_template = (
+        "{{ messages[0]['content'][0]['text'] }} {% generation %}"
+        "{% if messages[1]['content'] %}{{ messages[1]['content'][0]['text'] }}"
+        "{% else %}{{ messages[1]['tool_calls'][0]['function']['name'] }}{% endif %}"
+        "{% endgeneration %}"
+    )
+    entry = {
+        "conversation_id": "tool-call",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "question"}]},
+            {
+                "role": "assistant",
+                "tool_calls": [{"type": "function", "function": {"name": "f", "arguments": "{}"}}],
+                **assistant_content,
+            },
+        ],
+    }
+    sample = StreamingDataset(
+        [entry], tiny_tokenizer, config=StreamingConfig(answer_only_loss=True)
+    )._tokenize_entry(entry)
+    assert sample is not None
+    expected = "question reply" if assistant_content.get("content") else "question f"
+    expected_ids = tiny_tokenizer(expected, add_special_tokens=False)["input_ids"]
+    assert sample["token_ids"] == expected_ids
+    assert sample["loss_mask"].tolist() == [0] * (len(expected_ids) - 1) + [1]
 
 
 @pytest.mark.parametrize("tools", [[], "[]"])

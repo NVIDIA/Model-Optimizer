@@ -324,6 +324,12 @@ class StreamingDataset(Dataset):
             return None
         if cid is None or not convs or not isinstance(convs, list):
             return None
+        if any(
+            not isinstance(message, dict)
+            or (message.get("role") == "user" and "content" not in message)
+            for message in convs
+        ):
+            return None
         tools = template_kwargs.get("tools")
         if tools is not None and not (
             isinstance(tools, list) and all(isinstance(tool, dict) for tool in tools)
