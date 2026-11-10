@@ -248,7 +248,8 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
         return ready, model
 
     # Unsharded: the search saves the scores, and the rerun finalizes a fresh model.
-    assert not run("search")[0]
+    ready, model = run("search")
+    assert not ready and not model.model.layers[0].self_attn.k_bmm_quantizer.is_enabled
     ready, model = run("search")
     assert ready
     assert model.model.layers[0].mlp.down_proj.weight_quantizer.is_enabled

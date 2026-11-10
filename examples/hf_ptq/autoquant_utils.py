@@ -228,7 +228,12 @@ def auto_quantize(
         language_model,
         **auto_quantize_kwargs,
     )
-    if inputs["search_domain"] == "kv_cache" or format_shard is not None:
+    # A format shard, and a search whose finalizing run calibrates the KV cache, only save scores.
+    if (
+        inputs["search_domain"] == "kv_cache"
+        or format_shard is not None
+        or getattr(aq_config, "finalize_algorithm", None) is not None
+    ):
         return language_model
 
     # KV cache quantization is uniform; applied after the LP search.
