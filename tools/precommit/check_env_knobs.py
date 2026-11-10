@@ -16,10 +16,11 @@
 """Pre-commit hook: read ``MODELOPT_*`` environment variables only through ``modelopt/env.py``.
 
 ``modelopt/env.py`` holds one documented accessor per ``MODELOPT_*`` variable ModelOpt reads. The hook
-fails on an ``os.environ`` or ``os.getenv`` access to a ``MODELOPT_*`` name in any other Python file
-under ``modelopt/``. Under ``examples/`` it fails only on a name ``modelopt/env.py`` reads: an example
-keeps its own variables, but reads the library's through their accessors. A name is recognized as a
-string literal, the leading text of an f-string, or a module-level string constant.
+fails on a read of a ``MODELOPT_*`` variable through ``os.environ`` or ``os.getenv`` in any other
+Python file under ``modelopt/``; setting or deleting one is not a read. Under ``examples/`` it
+fails only on a name ``modelopt/env.py`` reads: an example keeps its own variables, but reads the
+library's through their accessors. A name is recognized as a string literal, the leading text of an
+f-string, or a module-level string constant.
 """
 
 import ast
@@ -31,9 +32,9 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _ENV_MODULE = _REPO_ROOT / "modelopt" / "env.py"
 _PREFIX = "MODELOPT_"
-# os.environ methods and os functions whose first argument is a variable's name.
+# os.environ methods and os functions that return a variable's value, given its name first.
 _ENVIRON_METHODS = {"get", "pop", "setdefault"}
-_OS_FUNCTIONS = {"getenv", "putenv", "unsetenv"}
+_OS_FUNCTIONS = {"getenv"}
 
 
 def _is_os(node: ast.expr) -> bool:
@@ -48,7 +49,7 @@ def _is_environ(node: ast.expr) -> bool:
 
 
 def _is_env_function(func: ast.expr) -> bool:
-    """``os.environ.get`` and the like, or ``os.getenv`` and the like, also imported from ``os``."""
+    """``os.environ.get`` and the like, or ``os.getenv``, also imported from ``os``."""
     if isinstance(func, ast.Attribute):
         return (func.attr in _ENVIRON_METHODS and _is_environ(func.value)) or (
             func.attr in _OS_FUNCTIONS and _is_os(func.value)
@@ -57,12 +58,23 @@ def _is_env_function(func: ast.expr) -> bool:
 
 
 def _accessed_names(tree: ast.AST) -> Iterator[ast.expr]:
-    """The name expression of every environment access in ``tree``."""
+    """The name expression of every environment read in ``tree``."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and node.args and _is_env_function(node.func):
             yield node.args[0]
-        elif isinstance(node, ast.Subscript) and _is_environ(node.value):
+        elif (
+            isinstance(node, ast.Subscript)
+            and _is_environ(node.value)
+            and isinstance(node.ctx, ast.Load)
+        ):
             yield node.slice
+        elif (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.target, ast.Subscript)
+            and _is_environ(node.target.value)
+        ):
+            # ``os.environ[name] += ...`` reads the variable before setting it.
+            yield node.target.slice
         elif (
             isinstance(node, ast.Compare)
             and isinstance(node.ops[0], (ast.In, ast.NotIn))
