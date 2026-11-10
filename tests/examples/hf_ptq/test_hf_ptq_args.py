@@ -211,7 +211,7 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
     input_ids = torch.arange(8).unsqueeze(0)
     data = [{"input_ids": input_ids, "labels": input_ids.clone()}]
 
-    def run(checkpoint, **flags):
+    def run(checkpoint, aq_recipe=recipe, **flags):
         model = get_tiny_qwen3(num_hidden_layers=1)
         args = SimpleNamespace(
             qformat="fp8",
@@ -232,7 +232,7 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
         )
         vars(args).update(flags)
         ready = hf_ptq._run_auto_quantize_recipe(
-            args, recipe, model, model, None, False, data, False
+            args, aq_recipe, model, model, None, False, data, False
         )
         return ready, model
 
@@ -241,6 +241,12 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
     ready, model = run("search")
     assert ready
     assert model.model.layers[0].mlp.down_proj.weight_quantizer.is_enabled
+    # Another method's scores are refused, as a resumed search refuses them.
+    kl_div = ModelOptAutoQuantizeRecipe(
+        auto_quantize=recipe.auto_quantize.model_copy(update={"auto_quantize_method": "kl_div"})
+    )
+    with pytest.raises(ValueError, match="gradient scores"):
+        run("search", kl_div)
 
     for index in range(2):
         assert not run(f"shard{index}", auto_quantize_format_shard=(index, 2))[0]
