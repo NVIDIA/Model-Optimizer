@@ -21,9 +21,9 @@ When you optimize a reasoning model with NVIDIA Model Optimizer, how do you veri
 
 You may assume that reliable evaluation requires many repetitions. But could repeating by default waste time? How many questions and repetitions do you need to measure improvements and rule out regressions?
 
-This guide helps you evaluate models optimized with NVIDIA Model Optimizer faster and more reliably.
+This guide helps you evaluate models quickly and reliably during optimization experiments.
 
-For benchmark commands, see the [LLM evaluation examples](README.md). For an AI-assisted workflow using NeMo Evaluator Launcher, see the [ModelOpt evaluation skill](../../plugins/modelopt/skills/evaluation/SKILL.md).
+For standardized evaluation and acceptance checks before releasing optimized models, follow the [ModelOpt evaluation skill](../../../plugins/modelopt/skills/evaluation/SKILL.md) and [ModelOpt results-comparison skill](../../../plugins/modelopt/skills/compare-results/SKILL.md). For benchmark commands, see the [LLM evaluation examples](../README.md).
 
 **What should you measure, and how?**
 
@@ -40,22 +40,7 @@ For benchmark commands, see the [LLM evaluation examples](README.md). For an AI-
 
 ## What should you measure, and how?
 
-We compare two NVFP4 Qwen3.6-35B-A3B checkpoints to show you how to put these recommendations into practice. Baseline is after [post-training quantization (PTQ) and quantization-aware distillation (QAD)](https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md), before recovery training. PTQ reduces numerical precision after training; QAD uses a teacher model to recover accuracy in the quantized model. This baseline preserved accuracy but had more doomed reasoning loops.
-
-Candidate was trained directly from Baseline using Kahneman–Tversky Optimization (KTO), which learns from desirable and undesirable responses, aiming to reduce those loops while preserving accuracy.
-
-This guide focuses on evaluation methodology; the KTO recovery results illustrate the recommendations. A detailed companion tutorial, coming soon, will explain how KTO was applied and provide checkpoint provenance, evaluation configurations, paired results, and analysis scripts.
-
-We use MMLU-Pro, SciCode and AA-Omniscience to illustrate these evaluation guidelines.
-
-We evaluate on 294 of 338 SciCode subtasks, excluding the 44 used for KTO recovery training. KTO used model-generated responses, not reference answers.
-
-| Benchmark | Questions or subtasks | Repetitions | Responses per model |
-| --- | ---: | ---: | ---: |
-| MMLU-Pro | 1,000 questions sampled across all 14 subjects | 20 | 20,000 |
-| SciCode | 294 subtasks | 20 | 5,880 |
-| SciCode focused subset | 11 challenging, loop-prone held-out subtasks | 10 | 110 |
-| AA-Omniscience public v1 | 600 questions | 10 | 6,000 |
+We compare two NVFP4 Qwen3.6-35B-A3B checkpoints. Baseline underwent [post-training quantization (PTQ) and quantization-aware distillation (QAD)](https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md), preserving accuracy but increasing doomed reasoning loops. Candidate was trained directly from Baseline using Kahneman–Tversky Optimization (KTO), which learns from desirable and undesirable responses, aiming to reduce those loops while preserving accuracy. We use MMLU-Pro, SciCode and AA-Omniscience to illustrate these evaluation guidelines. See the [reproducibility notes](reproducibility/README.md).
 
 ### Show where the model improves or worsens
 
@@ -150,13 +135,13 @@ The candidate uses fewer tokens on average on SciCode and AA-Omniscience (p < 0.
 
 Question-level analysis asks whether Candidate performs better on average on questions like those in the benchmark. It averages repetitions within each question and compares paired differences. Repetition-level (run-level) analysis asks whether Candidate performs better on average across repeated runs of the same fixed questions. It compares aggregate benchmark scores across repetitions.
 
-For SciCode, we test whether Candidate has a lower cap-hit rate than Baseline on the same 294 subtasks. The plot below compares a paired subtask-permutation test with a one-sided Welch t-test on per-repetition cap-hit rates. Using identical responses, question-level analysis reaches p < 0.001 with three repetitions; repetition-level analysis needs six, requiring twice as many responses. This SciCode cap-hit comparison illustrates fast experimentation with fewer repetitions. For a standardized evaluation and acceptance procedure, follow the [ModelOpt evaluation skill](../../plugins/modelopt/skills/evaluation/SKILL.md) and [ModelOpt results-comparison skill](../../plugins/modelopt/skills/compare-results/SKILL.md). Its smaller budgets do not replace the skills’ validation or [minimum-run requirements](../../plugins/modelopt/skills/evaluation/recipes/tasks/aa/scicode.md#at-least-8-runs-mandatory).
+For SciCode, we test whether Candidate has a lower cap-hit rate than Baseline on the same 294 subtasks. The plot below compares a paired subtask-permutation test with a one-sided Welch t-test on per-repetition cap-hit rates. Using identical responses, question-level analysis reaches p < 0.001 with three repetitions; repetition-level analysis needs six, requiring twice as many responses. This SciCode cap-hit comparison illustrates fast experimentation with fewer repetitions. For a standardized evaluation and acceptance procedure, follow the [ModelOpt evaluation skill](../../../plugins/modelopt/skills/evaluation/SKILL.md) and [ModelOpt results-comparison skill](../../../plugins/modelopt/skills/compare-results/SKILL.md). Its smaller budgets do not replace the skills’ validation or [minimum-run requirements](../../../plugins/modelopt/skills/evaluation/recipes/tasks/aa/scicode.md#at-least-8-runs-mandatory).
 
-<img src="images/evaluation_guidelines/scicode-cap-analysis-unit.svg" alt="One-sided p-values for fewer candidate cap hits across one to twenty repetitions on the same 294 SciCode subtasks. The paired subtask-permutation test reaches p below 0.001 at three repetitions, or 882 responses per model; the run-level Welch t-test reaches it at six repetitions, or 1,764 responses per model. Welch is unavailable with one repetition." width="640" />
+<img src="images/scicode-cap-analysis-unit.svg" alt="One-sided p-values for fewer candidate cap hits across one to twenty repetitions on the same 294 SciCode subtasks. The paired subtask-permutation test reaches p below 0.001 at three repetitions, or 882 responses per model; the run-level Welch t-test reaches it at six repetitions, or 1,764 responses per model. Welch is unavailable with one repetition." width="640" />
 
 For MMLU-Pro, we compared more questions evaluated once with fewer questions evaluated repeatedly, using 1,000 responses per model. Both approaches gave similarly stable estimates of the accuracy difference between models.
 
-<img src="images/evaluation_guidelines/allocation-accuracy-gap.svg" alt="At a fixed 1,000-response budget, the mean accuracy gap and observed variation remain similar across one to twenty repetitions." width="640" />
+<img src="images/allocation-accuracy-gap.svg" alt="At a fixed 1,000-response budget, the mean accuracy gap and observed variation remain similar across one to twenty repetitions." width="640" />
 
 With enough independent questions, one repetition may provide sufficient evidence; see the [MMLU-Pro example in the next section](#collect-as-much-evaluation-data-as-you-need). Repetition-level t-tests are not applicable with only one repetition. On a focused subset, question-level analysis uses differences across its questions, while repetition-level analysis needs repeated runs of that subset. The SciCode and MMLU-Pro comparisons support prioritizing question coverage, then adding repetitions when the available questions do not provide enough evidence.
 
@@ -170,13 +155,13 @@ The plots below are retrospective examples. Their threshold crossings are not va
 
 Among the tested sizes, the p-value first fell below 0.05 at 588 responses, and below 0.001 at 882 per model. The full 5,880 responses were unnecessary to establish evidence of fewer candidate cap hits at those thresholds.
 
-<img src="images/evaluation_guidelines/scicode-cap-data-volume.svg" alt="SciCode cap-hit rate evidence excluding the 44 recovery-training subtasks: blue points increase coverage from ten to 294 subtasks with one repetition; green points add repetitions on all 294 subtasks, reaching 5,880 responses per model. Subsets of ten to 150 subtasks observe no cap hits and have no informative bootstrap interval. The lower panel shows permutation p-values." width="640" />
+<img src="images/scicode-cap-data-volume.svg" alt="SciCode cap-hit rate evidence excluding the 44 recovery-training subtasks: blue points increase coverage from ten to 294 subtasks with one repetition; green points add repetitions on all 294 subtasks, reaching 5,880 responses per model. Subsets of ten to 150 subtasks observe no cap hits and have no informative bootstrap interval. The lower panel shows permutation p-values." width="640" />
 
 **How many responses rule out a 1 pp accuracy loss on MMLU-Pro?**
 
 To rule out a 1 pp accuracy loss for the candidate versus the baseline, the non-inferiority test first reached p < 0.05 at 750 responses, p < 0.01 at 3,000, and p < 0.001 at 12,000 per model among the tested sizes.
 
-<img src="images/evaluation_guidelines/mmlu-accuracy-data-volume.svg" alt="MMLU-Pro paired accuracy differences with t-based 95% confidence intervals. Blue points increase question coverage from 50 to 1,000 with one evaluation each; green points add repetitions on all 1,000 questions up to 20,000 responses per model. The lower panel shows one-sided non-inferiority p-values for a loss below 1 pp, with a dashed line at p = 0.05." width="640" />
+<img src="images/mmlu-accuracy-data-volume.svg" alt="MMLU-Pro paired accuracy differences with t-based 95% confidence intervals. Blue points increase question coverage from 50 to 1,000 with one evaluation each; green points add repetitions on all 1,000 questions up to 20,000 responses per model. The lower panel shows one-sided non-inferiority p-values for a loss below 1 pp, with a dashed line at p = 0.05." width="640" />
 
 ### Test known weaknesses on a focused subset
 

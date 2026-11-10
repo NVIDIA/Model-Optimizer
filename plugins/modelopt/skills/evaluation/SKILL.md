@@ -10,7 +10,7 @@ license: Apache-2.0
 
 Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints.
 
-For guidance on evaluation design, metrics, data budgets, and interpreting model comparisons, see [Evaluation guidelines](https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/llm_eval/evaluation_guidelines.md).
+Use this skill with the [ModelOpt results-comparison skill](../compare-results/SKILL.md) for standardized evaluation and acceptance checks before releasing optimized models. For guidance on evaluation design, metrics, data budgets, and interpreting comparisons during optimization experiments, see [Evaluation guidelines](https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/llm_eval/evaluation_guidelines/README.md).
 
 ## Completed-run analysis
 

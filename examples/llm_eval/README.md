@@ -4,7 +4,7 @@ This folder includes popular 3rd-party LLM benchmarks for LLM accuracy evaluatio
 
 The following instructions show how to evaluate the Model Optimizer quantized LLM with the benchmarks, including the TensorRT-LLM deployment.
 
-For guidance on evaluation design, metrics, data budgets, and interpreting model comparisons, see [Evaluation guidelines](evaluation_guidelines.md). For AI-assisted workflows, see the skills for [running evaluations](../../plugins/modelopt/skills/evaluation/SKILL.md) and [comparing results](../../plugins/modelopt/skills/compare-results/SKILL.md).
+For guidance on evaluation design, metrics, data budgets, and interpreting model comparisons, see [Evaluation guidelines](evaluation_guidelines/README.md). For AI-assisted workflows, see the skills for [running evaluations](../../plugins/modelopt/skills/evaluation/SKILL.md) and [comparing results](../../plugins/modelopt/skills/compare-results/SKILL.md).
 
 ## NeMo Evaluator
 
