@@ -943,6 +943,11 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
     resumed = search(tmp_path / "interrupted.pth", (0, 2))[1]["candidate_stats"]
     for name, stats in safe_load(shards[0])["candidate_stats"].items():
         assert resumed[name]["raw_scores"] == stats["raw_scores"]
+    if method == "kl_div":  # saved before scoring options were recorded, it resumes as before
+        unrecorded = safe_load(shards[0])
+        del unrecorded["scoring_config"]
+        safe_save(unrecorded, tmp_path / "unrecorded.pth")
+        search(tmp_path / "unrecorded.pth", (0, 2))
 
     merged = tmp_path / "merged.pth"
     merge_states = model_quant.merge_auto_quantize_shards
