@@ -12,8 +12,6 @@
   - [Prioritize question coverage over repetitions](#prioritize-question-coverage-over-repetitions)
   - [Collect as much evaluation data as you need](#collect-as-much-evaluation-data-as-you-need)
   - [Test known weaknesses on a focused subset](#test-known-weaknesses-on-a-focused-subset)
-- [Future work](#future-work)
-- [Acknowledgments](#acknowledgments)
 
 ## Introduction
 
@@ -173,13 +171,3 @@ Freeze a subset from earlier baseline failures to screen for targeted improvemen
 | Focused subset | 10.91% (12/110) | 0.00% (0/110) | −10.91 [−18.18, −5.45] | 0.004 — yes | 1.000 |
 
 The focused held-out subset detects fewer candidate cap hits with 110 responses per model. Use it for a quick check of known weaknesses, then evaluate broader accuracy and reliability separately.
-
-## Future work
-
-A user should be able to ask “Is there an unacceptable regression?” or “Is the candidate better than the baseline?”, specifying the acceptable regression margin, p-value threshold, and confidence level. Future evaluation tools could choose how many questions and repetitions to use, select appropriate statistical tests, and report accuracy, cap hits, missing final answers, output length, and uncertainty.
-
-Check independence assumptions: this example treats SciCode subtasks as independent. Related subtasks from the same parent problem may require grouped analysis to avoid overstating evidence.
-
-## Acknowledgments
-
-Thanks to Keval Morabia, whose [Qwen3.6 Model Optimizer tutorial](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B) served as the starting point for this guide and already applies many of the practices described here.
