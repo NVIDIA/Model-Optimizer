@@ -242,6 +242,42 @@ def test_an_update_that_may_move_fits_its_room(
         assert peak <= calib_utils._update_room(helper, linear.weight, block_size)
 
 
+def test_a_moved_update_has_landed_when_it_returns(need_2_gpus, monkeypatch):
+    """An update run on another GPU has finished writing the weight's GPU when it returns, so the
+    caller may free the module and empty the cache without releasing memory its copies still write.
+    """
+    get_cuda_ext_ggml(raise_if_failed=True)  # updates move only with the CUDA encoders
+    # Over 10 MiB, so the weight has a segment of its own that empty_cache() can release.
+    linear = torch.nn.Linear(2048, 4096, bias=False, dtype=torch.bfloat16, device="cuda:0")
+    inputs = torch.randn(512, 2048, dtype=torch.bfloat16, device="cuda:0")
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(linear, config, forward_loop=lambda m: m(inputs))
+    helper = GGMLGPTQHelper(linear, "linear", log_mse=False)
+    helper.accumulate(inputs)
+    blockwise_update = GGMLGPTQHelper._blockwise_update
+
+    def blockwise_update_then_stall(self, block_size):
+        blockwise_update(self, block_size)
+        torch.cuda._sleep(10**8)  # holds the copies back to the weight's GPU for tens of ms
+
+    monkeypatch.setattr(GGMLGPTQHelper, "_blockwise_update", blockwise_update_then_stall)
+    worker = torch.device("cuda", 1)
+    with torch.cuda.device(worker):
+        helper.update_weights(256, 0.3, linear.weight, device=worker)
+    del helper, linear
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize(worker)  # raises if a copy wrote released memory
+
+
 @pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])
 def test_hessian_of_a_full_gpu_falls_back_to_the_cpu(need_2_gpus, monkeypatch, blocker):
     """With no other GPU that can take it, or on any rank of a multi-rank run, it goes to the CPU."""
