@@ -291,7 +291,6 @@ class PrecisionConverter:
             self.model = onnx_utils.infer_types(
                 self.model, self.use_standalone_type_inference, strict_mode=True, check_type=True
             )
-            self._fill_unknown_output_dims()
 
         # Update value_info_map and initializer_map with casts we added
         self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
@@ -301,6 +300,8 @@ class PrecisionConverter:
         # Remove redundant casts
         self._cleanup()
 
+        # Runs after cleanup, which can rename a cast after an FP32 producer to a graph output.
+        self._fill_unknown_output_dims()
         self._restore_original_io_metadata()
 
         self._sanity_check()
