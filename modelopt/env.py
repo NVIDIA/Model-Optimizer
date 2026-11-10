@@ -23,11 +23,17 @@ An accessor is named after its variable, lowercased and without ``MODELOPT_``. A
 unset, and a value the accessor cannot parse raises a ``ValueError`` naming the variable. A rule relating
 a variable to another one or to the run is checked where the value is used.
 
+The first read of a variable also raises if a ``MODELOPT_*`` variable ModelOpt does not read is set under
+a name closest to it, such as ``MODELOPT_EP_DEGRE``: most likely it is that variable misspelled, which
+would otherwise leave it at its default. Other names ModelOpt does not read are left alone, since
+launchers and tools set ``MODELOPT_*`` variables of their own.
+
 This module needs only the standard library, so code that must not import torch reads its variables here
 too. A new variable gets its accessor here: the ``check-env-knobs`` pre-commit hook refuses a
 ``MODELOPT_*`` read anywhere else under ``modelopt/``.
 """
 
+import difflib
 import os
 
 __all__ = [
@@ -39,13 +45,36 @@ __all__ = [
     "tegrouped_compile_weight_loop",
 ]
 
+_PREFIX = "MODELOPT_"
+# Each accessor is named after its variable, so the accessors name every variable read here.
+_KNOBS = frozenset(_PREFIX + name.upper() for name in __all__)
 _YES = ("1", "true", "yes", "on")
 _NO = ("0", "false", "no", "off")
+# Variables whose first read found no misspelled twin set; the check scans the whole environment.
+_CHECKED: set[str] = set()
 
 
 def _text(name: str) -> str:
     """``name``'s value without surrounding whitespace; ``""`` when it is unset or blank."""
+    if name not in _CHECKED:
+        _refuse_misspelling_of(name)
+        _CHECKED.add(name)
     return (os.environ.get(name) or "").strip()
+
+
+def _refuse_misspelling_of(name: str) -> None:
+    """Raise if a variable ModelOpt does not read is set under a name closest to ``name``."""
+    suffixes = [knob.removeprefix(_PREFIX) for knob in _KNOBS]
+    for key in os.environ:
+        if key.startswith(_PREFIX) and key not in _KNOBS:
+            # Compared without the shared prefix, at a cutoff no variable set by a launcher or a tool reaches.
+            closest = difflib.get_close_matches(
+                key.removeprefix(_PREFIX), suffixes, n=1, cutoff=0.85
+            )
+            if closest == [name.removeprefix(_PREFIX)]:
+                raise ValueError(
+                    f"{key} is set, but ModelOpt reads no such variable: did you mean {name}?"
+                )
 
 
 def _flag(name: str, default: bool) -> bool:

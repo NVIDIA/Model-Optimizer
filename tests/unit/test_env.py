@@ -46,3 +46,22 @@ def test_yes_no_variable_refuses_any_other_value(monkeypatch):
     monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "enabled")
     with pytest.raises(ValueError, match="MODELOPT_NVFP4_TRITON_SWEEP='enabled'"):
         env.nvfp4_triton_sweep()
+
+
+def test_misspelled_variable_raises_when_the_variable_it_misspells_is_read(monkeypatch):
+    """Another tool's variable is left alone, while a misspelling raises at its variable's first read."""
+    monkeypatch.setattr(env, "_CHECKED", set())
+    monkeypatch.setenv("MODELOPT_STATE_PATH", "state.pth")
+    monkeypatch.setenv("MODELOPT_SKIP_WEIGHT_QUANT_CHEK", "1")
+    assert env.nvfp4_triton_sweep() is True
+    with pytest.raises(
+        ValueError,
+        match=r"MODELOPT_SKIP_WEIGHT_QUANT_CHEK is set.*MODELOPT_SKIP_WEIGHT_QUANT_CHECK",
+    ):
+        env.skip_weight_quant_check()
+
+
+def test_each_accessor_reads_the_variable_it_is_named_after():
+    """The misspelling check knows the variables by their accessors' names."""
+    for name in env.__all__:
+        assert f"MODELOPT_{name.upper()}" in getattr(env, name).__code__.co_consts, name
