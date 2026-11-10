@@ -41,10 +41,12 @@ def test_incumbent_preserves_external_payload_and_decoding(name, bundle_size):
 
 
 @pytest.mark.parametrize("name", ["iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s"])
-def test_alternatives_can_change_native_fields_and_improve_reconstruction(name):
+@pytest.mark.parametrize("weighted", [False, True])
+def test_alternatives_can_change_native_fields_and_improve_reconstruction(name, weighted):
     packed = torch.from_numpy(packed_blocks(name)[:1]).unsqueeze(0)
     target = -torch.from_numpy(expected_values(name)[:1]).reshape(1, 256)
-    candidates = build_candidates(name, target, packed)
+    importance = torch.linspace(0.1, 2.0, 256) if weighted else None
+    candidates = build_candidates(name, target, packed, importance=importance)
     assert candidates.coefficients.shape[-2] == 5
     assert candidates.valid_mask[..., 0].all()
     assert candidates.valid_mask[..., 1:].any()

@@ -89,7 +89,7 @@ class GGMLGPTQHelper(GPTQHelper):
         The update reads only the weight, its Hessian and the format's codec, but the PyTorch
         fallback's scratch grows with ``block_chunk_size``, past the room the update is checked for.
         """
-        return get_cuda_ext_ggml() is not None
+        return _GSQ_CAPTURE.get() is None and get_cuda_ext_ggml() is not None
 
     def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
@@ -105,7 +105,7 @@ class GGMLGPTQHelper(GPTQHelper):
         importance = None if self._importance is None else self._importance.to(weight.device)
         pin_packed_weight(quantizer, quantizer.num_bits, self._packed.to(weight.device), importance)
         if capture is not None:
-            capture(self, teacher, covariance, self._packed)
+            capture(self, teacher, covariance, self._packed.to(weight.device))
         self._packed = self._unrounded = self._importance = None
 
     def _blockwise_update(self, block_size):

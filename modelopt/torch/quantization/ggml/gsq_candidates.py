@@ -19,11 +19,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .common import chunk_importance, importance_blocks, iq2_tile_terms, narrow_to_float32
-from .iq1_s import _search_shifted_grid, iq1_s_grid
-from .iq2_s import iq2_s_grid
-from .iq2_xs import iq2_xs_grid
-from .iq2_xxs import iq2_xxs_grid
+from .common import chunk_importance, importance_blocks
 from .registry import IQ_FORMAT_REGISTRY
 
 __all__ = ["build_candidates"]
@@ -107,7 +103,7 @@ def build_candidates(
             stop = min(start + block_chunk_size, len(d))
             alt_entries, alt_auxiliary, alt_local, error = _alternatives(
                 format_name,
-                narrow_to_float32(flat_weight[start:stop]),
+                flat_weight[start:stop],
                 d[start:stop],
                 chunk_importance(block_importance, start, stop),
             )
@@ -172,59 +168,29 @@ def build_candidates(
 
 
 def _alternatives(name, weight, d, weights):
-    count = weight.shape[0]
-    vectors = weight.reshape(count, 32, 8)
-    if name.startswith("iq1"):
-        error, entries = _search_shifted_grid(vectors, d, iq1_s_grid(weight.device), weights)
-        if name == "iq1_s":
-            error = error.reshape(count, 8, 4, 16).sum(2)
-            entries = entries.reshape(count, 8, 4, 16).transpose(-1, -2)
-            choice = torch.arange(16, device=weight.device).reshape(1, 1, 16)
-            auxiliary = (choice >> 3).unsqueeze(-1).expand_as(entries)
-            local = (choice & 7).expand_as(error)
-        else:
-            error, shifts = error.reshape(count, 32, 2, 8).min(2)
-            entries = entries.reshape(count, 32, 2, 8).gather(2, shifts.unsqueeze(2)).squeeze(2)
-            error = error.reshape(count, 16, 2, 8).sum(2)
-            entries = entries.reshape(count, 16, 2, 8).transpose(-1, -2)
-            auxiliary = shifts.reshape(count, 16, 2, 8).transpose(-1, -2)
-            local = torch.arange(8, device=weight.device).reshape(1, 1, 8).expand_as(error)
-    else:
-        grid = {"iq2_s": iq2_s_grid, "iq2_xs": iq2_xs_grid, "iq2_xxs": iq2_xxs_grid}[name](
-            weight.device
-        )
-        negative = vectors < 0
-        odd = negative.sum(-1).remainder(2).bool() if name != "iq2_s" else None
-        xnorm = (vectors.square() if weights is None else weights * vectors.square()).sum(-1)
-        error = torch.full((count, 32, 16), torch.inf, dtype=torch.float32, device=weight.device)
-        entries = torch.zeros((count, 32, 16), dtype=torch.int64, device=weight.device)
-        qnorm = grid.square().sum(-1)
-        for start in range(0, len(grid), 64):
-            tile = grid[start : start + 64]
-            dot, norm = iq2_tile_terms(vectors.abs(), tile, qnorm[start : start + 64], weights, odd)
-            for code in range(16):
-                scale = d[:, None, None] * ((2 * code + 1) / 8)
-                values = (xnorm[..., None] - 2 * scale * dot + scale.square() * norm).clamp_min_(0)
-                best, index = values.min(-1)
-                replace = best < error[..., code]
-                error[..., code] = torch.where(replace, best, error[..., code])
-                entries[..., code] = torch.where(replace, index + start, entries[..., code])
-        signs = negative.unsqueeze(-2).expand(count, 32, 16, 8)
-        if odd is not None:
-            products = vectors.abs().unsqueeze(-2) * grid[entries]
-            if weights is not None:
-                products *= weights.unsqueeze(-2)
-            flip = torch.nn.functional.one_hot(products.argmin(-1), 8).bool()
-            signs = signs ^ (flip & odd[..., None, None])
-        auxiliary = (signs.long() << torch.arange(8, device=weight.device)).sum(-1)
-        if odd is not None:
-            auxiliary &= 127
-        groups = 8 if name == "iq2_xxs" else 16
-        error = error.reshape(count, groups, 32 // groups, 16).sum(2)
-        entries = entries.reshape(count, groups, 32 // groups, 16).transpose(-1, -2)
-        auxiliary = auxiliary.reshape(count, groups, 32 // groups, 16).transpose(-1, -2)
-        local = torch.arange(16, device=weight.device).reshape(1, 1, 16).expand_as(error)
-    return entries, auxiliary, local, error
+    fmt = IQ_FORMAT_REGISTRY[name]
+    packed, _ = fmt.quantize(
+        weight.reshape(1, -1),
+        scales=d.half(),
+        importance=None if weights is None else weights.reshape(-1),
+        every_choice=True,
+    )
+    entries, auxiliary, local, _ = _unpack_fields(name, packed.reshape(-1, fmt.block_bytes))
+    count, groups = weight.shape[0], fmt.choice_groups
+    vectors = 32 // groups
+    decoded = fmt.dequantize(
+        packed.reshape(-1, 1, fmt.block_bytes),
+        torch.tensor([fmt.num_choices * count, 256]),
+        dtype=torch.float32,
+    ).reshape(fmt.num_choices, count, 256)
+    error = (decoded - weight.float()).square().reshape(fmt.num_choices, count, 32, 8)
+    if weights is not None:
+        error *= weights
+    error = error.reshape(fmt.num_choices, count, groups, 256 // groups).sum(-1)
+    entries = entries.reshape(fmt.num_choices, count, groups, vectors).permute(1, 2, 0, 3)
+    auxiliary = auxiliary.reshape(fmt.num_choices, count, groups, vectors).permute(1, 2, 0, 3)
+    local = local.reshape(fmt.num_choices, count, groups).permute(1, 2, 0)
+    return entries, auxiliary, local, error.permute(1, 2, 0)
 
 
 def _unpack_fields(name, packed):

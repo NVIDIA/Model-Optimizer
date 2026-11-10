@@ -932,3 +932,29 @@ There are many quantization schemes supported in the example scripts:
 1. The W4A8 AWQ is an extension of the INT4 AWQ quantization that it also uses FP8 for activation for more speed up and acceleration.
 
 1. The [NVFP4](https://blogs.nvidia.com/blog/generative-ai-studio-ces-geforce-rtx-50-series/) is one of the new FP4 formats supported by NVIDIA Blackwell GPU and demonstrates good accuracy compared with other 4-bit alternatives. NVFP4 can be applied to both model weights as well as activations, providing the potential for both a significant increase in math throughput and reductions in memory footprint and memory bandwidth usage compared to the FP8 data format on Blackwell. For higher accuracy with NVFP4 PTQ, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only`. `nvfp4_mlp_only` restricts NVFP4 quantization to MLP (and MoE) layers only, leaving attention layers in higher precision. `nvfp4_experts_only` quantizes only expert layers (`*mlp.experts*` and `*block_sparse_moe*`), ideal for MoE models. `nvfp4_omlp_only` extends MLP-only by also quantizing the `o_proj` layer, providing a middle ground between full NVFP4 and MLP-only quantization.
+
+## Experimental IQ GSQ refinement
+
+GPTQ-initialized GSQ supports dense linear weights in a single process. Fused and grouped
+expert weights are unsupported. Calibration uses the GPTQ prefix; refinement preserves
+the native IQ format and stored bit rate.
+
+Run on a CUDA allocation with ModelOpt and the HF PTQ example dependencies available:
+
+```bash
+python examples/hf_ptq/gsq_iq.py \
+  --model-path /path/to/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+  --model-revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+  --dataset-revision b08601e04326c79dfdd32d625aee71d232d685c3 \
+  --num-steps 200 500 --output-dir /path/to/experiment
+```
+
+Use `--dry-run` first to verify the official cached snapshot, hash the actual source weights,
+and prepare the fixed data without loading the model. The full command runs all five formats;
+`--formats iq2_s` runs one format. Reusing the same output directory resumes only when verified
+source artifacts, data, settings, and implementation identity match.
+
+The library entrypoint is `modelopt.torch.quantization.ggml.gsq.quantize_iq_gsq`. It uses an
+existing IQ GPTQ recipe, returns native states for each requested budget, and leaves the model
+at GPTQ. `result.activate(model, 200)` activates GSQ; `result.activate(model, 0)` restores GPTQ.
+The driver saves these native states in `result.pt` and paired measurements in `results.json`.

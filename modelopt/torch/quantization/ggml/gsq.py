@@ -136,6 +136,21 @@ def quantize_iq_gsq(
         raise ValueError("IQ GSQ currently supports a single process.")
     if _GSQ_CAPTURE.get() is not None:
         raise ValueError("IQ GSQ calibration cannot be nested.")
+    for name, module in model.named_modules():
+        weight = getattr(module, "weight", None)
+        if (
+            hasattr(module, "num_experts")
+            or hasattr(module, "num_gemms")
+            or (
+                isinstance(weight, torch.Tensor)
+                and weight.ndim > 2
+                and not isinstance(module, torch.nn.modules.conv._ConvNd)
+            )
+        ):
+            raise ValueError(
+                f"IQ GSQ supports only dense 2-D weights; fused or grouped experts at {name!r} "
+                "are unsupported."
+            )
     names = {id(module): name for name, module in model.named_modules()}
     result = IQGSQResult()
     directory = None if checkpoint_dir is None else Path(checkpoint_dir)
@@ -143,6 +158,8 @@ def quantize_iq_gsq(
         directory.mkdir(parents=True, exist_ok=True)
 
     def capture(helper, teacher, covariance, payload):
+        if helper._weight_quantizer is not None or teacher.ndim != 2:
+            raise ValueError("IQ GSQ does not support per-expert GPTQ helpers.")
         name = names[id(helper.module)]
         format_name = helper.weight_quantizer.num_bits
         if format_name not in IQ_FORMAT_REGISTRY:
