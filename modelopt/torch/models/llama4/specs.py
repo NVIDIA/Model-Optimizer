@@ -15,9 +15,20 @@
 
 """Llama4 specs (HF model type ``llama4``)."""
 
-from ..specs import ModelSpec, MoESpec, register
+from ..specs import EPSpec, ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
+
+# transformers ships a base_model_ep_plan for Llama-4, which alone would route it into the
+# expert-parallel path.
+EP_UNSUPPORTED = (
+    "Llama-4's MoE block routes tokens itself and runs every expert densely, rather than "
+    "dispatching its top-k through the experts interface, and its experts are stored transposed, "
+    "(num_experts, in, out), which the expert-parallel export cannot write."
+)
+
+# Generation from the quantized model, not the original, is what breaks.
+POST_PTQ_GENERATION_UNSUPPORTED = "Llama4 Maverick generation after quantization has a bug"
 
 # Llama4TextExperts is fused: one module holding 3-D gate_up_proj and down_proj
 # parameters, run through torch.bmm. There is no (gate, up) pair left to fuse, and the
@@ -27,6 +38,8 @@ register(
     ModelSpec(
         model_type="llama4",
         min_transformers_version="5.5",
+        ep_spec=EPSpec(unsupported=EP_UNSUPPORTED),
+        ptq_spec=PTQSpec(post_ptq_generation_unsupported=POST_PTQ_GENERATION_UNSUPPORTED),
         moe_spec=MoESpec(
             block_names=("Llama4TextMoe",),
             expert_linear_names=("gate_up_proj", "down_proj"),

@@ -35,7 +35,13 @@ from modelopt.torch.export.quantized_weight_export import (
     split_quantized_weight_export_state,
 )
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.nn import GroupedQuantizer, NVFP4StaticQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    GroupedQuantizer,
+    NVFP4StaticQuantizer,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
+from modelopt.torch.quantization.qtensor import MXFP4QTensor
 
 
 def _fp8_linear() -> nn.Linear:
@@ -158,6 +164,19 @@ def test_functional_fp8_export_is_repeatable():
         torch.testing.assert_close(base[name], repeated[name])
 
 
+def test_functional_weight_only_mxfp4_export_packs_mxfp4_blocks():
+    torch.manual_seed(0)
+    module = _capture_linear("w4a16_mxfp4").to(torch.bfloat16)
+    state = capture_quantized_weight_export_state(module)
+
+    exported = export_quantized_weight_tensors(module.weight, state, torch.bfloat16)
+
+    packed, scales = MXFP4QTensor.quantize(module.weight.detach(), block_size=32)
+    assert set(exported) == {"weight", "weight_scale"}
+    torch.testing.assert_close(exported["weight"], packed._quantized_data, rtol=0, atol=0)
+    torch.testing.assert_close(exported["weight_scale"], scales.reshape(128, 8), rtol=0, atol=0)
+
+
 def test_functional_fp8_export_matches_the_fake_quantized_bf16_weight():
     torch.manual_seed(0)
     module = nn.Linear(64, 64, bias=False).to(torch.bfloat16)
@@ -190,6 +209,10 @@ _CAPTURE_FORMAT_CONFIGS = {
         "num_bits": (2, 1),
         "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
     },
+    "w4a16_mxfp4": {
+        "num_bits": (2, 1),
+        "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+    },
 }
 
 
@@ -202,14 +225,21 @@ def _capture_linear(quantization_format):
             **({"num_bits": (4, 3), "type": "dynamic"} if "axis" in cfg else cfg)
         )
     )
-    if quantization_format == "fp8_pb_wo":
+    if quantization_format in {"fp8_pb_wo", "w4a16_mxfp4"}:
         module.input_quantizer.disable()
     return module
 
 
-@pytest.mark.parametrize("quantization_format", _CAPTURE_FORMAT_CONFIGS)
-def test_capture_preserves_format_state_and_detaches_tensors(quantization_format):
+@pytest.mark.parametrize(
+    ("quantization_format", "constant_amax"),
+    [(name, False) for name in _CAPTURE_FORMAT_CONFIGS] + [("mxfp4", True), ("mxfp8", True)],
+)
+def test_capture_preserves_format_state_and_detaches_tensors(quantization_format, constant_amax):
     module = _capture_linear(quantization_format)
+    if constant_amax:
+        for quantizer in (module.weight_quantizer, module.input_quantizer):
+            quantizer.set_from_attribute_config({"use_constant_amax": True})
+            assert quantizer.export_amax() is None
     cfg = _CAPTURE_FORMAT_CONFIGS[quantization_format]
     expected = {}
     if quantization_format == "fp8_pc_pt":
@@ -259,7 +289,7 @@ def test_capture_preserves_format_state_and_detaches_tensors(quantization_format
 def test_capture_requires_calibration_only_for_static_scales(quantization_format):
     module = _capture_linear(quantization_format)
 
-    if quantization_format in {"mxfp8", "mxfp4"}:
+    if quantization_format in {"mxfp8", "mxfp4", "w4a16_mxfp4"}:
         state = capture_quantized_weight_export_state(module)
         assert state.quantization_format == quantization_format
         assert not state.tensors
@@ -373,19 +403,16 @@ def test_unquantized_weight_has_no_export_state_or_spec():
     [
         pytest.param(4, {"num_bits": 8}, "int8_wo", id="int8-weight-only"),
         pytest.param(
-            32,
-            {
-                "num_bits": (2, 1),
-                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            },
-            "weight-only MXFP4",
-            id="mxfp4-weight-only",
-        ),
-        pytest.param(
             128,
             {"num_bits": (4, 3), "block_sizes": {-2: 64, -1: 128}},
             "only with 128x128 blocks",
             id="fp8-rectangular-blocks",
+        ),
+        pytest.param(
+            8,
+            {"num_bits": (4, 3), "axis": None, "backend": "custom"},
+            "custom quantization backends",
+            id="custom-backend",
         ),
     ],
 )
@@ -396,6 +423,57 @@ def test_export_spec_rejects_unsupported_quantization(features, quantizer_cfg, e
     module.input_quantizer.disable()
 
     with pytest.raises(NotImplementedError, match=error):
+        get_quantized_weight_export_spec(module)
+
+
+@pytest.mark.parametrize(
+    ("quantization_format", "quantizer_name", "mode"),
+    [
+        ("w4a16_mxfp4", "weight_quantizer", "rotate"),
+        ("w4a16_mxfp4", "weight_quantizer", "rotate_back"),
+        ("w4a16_mxfp4", "input_quantizer", "rotate"),
+        ("mxfp4", "weight_quantizer", "rotate"),
+        ("mxfp4", "weight_quantizer", "rotate_back"),
+        ("mxfp4", "input_quantizer", "rotate"),
+        ("mxfp4", "input_quantizer", "rotate_back"),
+    ],
+)
+def test_export_rejects_rotated_quantizers(quantization_format, quantizer_name, mode):
+    module = _capture_linear(quantization_format)
+    getattr(module, quantizer_name).set_from_attribute_config(
+        {"rotate": {"enable": True, "mode": mode}}
+    )
+
+    with pytest.raises(NotImplementedError, match="rotated quantizers"):
+        get_quantized_weight_export_spec(module)
+    with pytest.raises(NotImplementedError, match="rotated quantizers"):
+        capture_quantized_weight_export_state(module)
+
+
+def test_export_rejects_rotation_on_disabled_weight_quantizer():
+    module = _capture_linear("w4a16_mxfp4")
+    module.weight_quantizer.set_from_attribute_config({"rotate": {"enable": True}})
+    module.weight_quantizer.disable()
+
+    with pytest.raises(NotImplementedError, match="rotated quantizers"):
+        get_quantized_weight_export_spec(module)
+
+
+def test_export_allows_disabled_input_quantizer_that_rotates_back():
+    module = _capture_linear("w4a16_mxfp4")
+    module.input_quantizer.set_from_attribute_config(
+        {"rotate": {"enable": True, "mode": "rotate_back"}}
+    )
+
+    assert get_quantized_weight_export_spec(module).quantization_format == "w4a16_mxfp4"
+
+
+def test_export_rejects_sequential_input_quantizers():
+    module = _capture_linear("w4a16_mxfp4")
+    enabled = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3)))
+    module.input_quantizer = SequentialQuantizer(module.input_quantizer, enabled)
+
+    with pytest.raises(NotImplementedError, match="sequential input quantizers"):
         get_quantized_weight_export_spec(module)
 
 
@@ -503,6 +581,7 @@ _FUNCTIONAL_FORMAT_CASES = (
     ("fp8_pb_wo", "FP8_PB_WO", 128, 8, False),
     ("mxfp8", "MXFP8", 32, 8, True),
     ("mxfp4", "MXFP4", 32, 4, True),
+    ("w4a16_mxfp4", "W4A16_MXFP4", 32, 4, False),
     ("nvfp4", "NVFP4", 16, 4, True),
     ("w4a16_nvfp4", "W4A16_NVFP4", 16, 4, False),
     ("w4a8_nvfp4_fp8", "W4A8_NVFP4_FP8", 16, 4, True),
@@ -739,18 +818,49 @@ def _kv_attention(k_cfg, v_cfg, k_amax=896.0, v_amax=224.0) -> nn.Module:
         (_FP8_KV, _NVFP4_KV, "FP8_K_NVFP4_V", 2.0, 0.5),
     ],
 )
-def test_kv_cache_capture(k_cfg, v_cfg, quantization_format, k_scale, v_scale):
+@pytest.mark.parametrize(
+    ("constant_axes", "keep_amax"),
+    [((), False), (("k", "v"), False), (("k", "v"), True), (("k",), False), (("v",), True)],
+)
+def test_kv_cache_capture(
+    k_cfg, v_cfg, quantization_format, k_scale, v_scale, constant_axes, keep_amax, recwarn
+):
     attention = _kv_attention(k_cfg, v_cfg)
+    for axis in constant_axes:
+        quantizer = getattr(attention, f"{axis}_bmm_quantizer")
+        quantizer.set_from_attribute_config({"use_constant_amax": True})
+        if not keep_amax:
+            del quantizer._amax
+            assert quantizer.export_amax() is None
+    k_scale = 1.0 if "k" in constant_axes else k_scale
+    v_scale = 1.0 if "v" in constant_axes else v_scale
+    original_buffers = {name: value.clone() for name, value in attention.named_buffers()}
 
     state = capture_kv_cache_export_state(attention)
 
+    calibrated_fp8_k = quantization_format in {"FP8", "FP8_K_NVFP4_V"} and "k" not in constant_axes
+    assert sum("Large KV activation" in str(w.message) for w in recwarn) == int(calibrated_fp8_k)
     assert get_kv_cache_export_spec(attention) == state.quantization_format == quantization_format
     torch.testing.assert_close(state.k_scale.squeeze(), torch.tensor(k_scale))
     torch.testing.assert_close(state.v_scale.squeeze(), torch.tensor(v_scale))
     assert not state.k_scale.requires_grad and state.k_scale.device.type == "cpu"
     if quantization_format == "FP8":
         unclamped = capture_kv_cache_export_state(attention, clamp_fp8_scales=False)
-        assert unclamped.v_scale.item() == 0.5
+        assert unclamped.v_scale.item() == (1.0 if "v" in constant_axes else 0.5)
+    assert set(dict(attention.named_buffers())) == set(original_buffers)
+    for name, value in attention.named_buffers():
+        torch.testing.assert_close(value, original_buffers[name])
+
+
+def test_kv_cache_capture_ignores_stale_dynamic_constant_amax():
+    cfg = {**_FP8_KV, "type": "dynamic", "use_constant_amax": True}
+    attention = _kv_attention(cfg, _FP8_KV)
+
+    state = capture_kv_cache_export_state(attention, clamp_fp8_scales=False)
+
+    assert state.k_scale.item() == 1.0
+    assert state.v_scale.item() == 0.5
+    assert attention.k_bmm_quantizer._amax.item() == 896.0
 
 
 def test_kv_cache_spec_rejects_what_it_cannot_export():
@@ -768,6 +878,10 @@ def test_kv_cache_spec_rejects_what_it_cannot_export():
     attention = _kv_attention({"num_bits": 8}, {"num_bits": 8})
     with pytest.raises(NotImplementedError, match="'INT8' KV cache"):
         get_kv_cache_export_spec(attention)
+
+    mx = {**_CAPTURE_FORMAT_CONFIGS["mxfp8"], "use_constant_amax": True}
+    with pytest.raises(RuntimeError, match="Missing calibrated KV-cache scales"):
+        capture_kv_cache_export_state(_kv_attention(mx, mx))
 
     affine_fp8 = {**_FP8_KV, "bias": {-2: None, -4: None, "type": "static"}}
     attention = _kv_attention(affine_fp8, affine_fp8)

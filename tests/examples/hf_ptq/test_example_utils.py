@@ -21,41 +21,136 @@ recording path, checkpoint-path resolution, and the sidecar copy.
 """
 
 import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
-from _test_utils.torch.transformers_models import get_tiny_nemotron_h
+from _test_utils.torch.transformers_models import (
+    create_tiny_qwen3_moe_dir,
+    get_tiny_llama,
+    get_tiny_nemotron_h,
+)
 from safetensors.torch import save_file
-from transformers import AutoModelForCausalLM, LlamaConfig
+from transformers import AutoModelForCausalLM, GenerationMixin, LlamaConfig
 
+from modelopt.torch.models import PTQSpec
+from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 
-@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+@pytest.mark.parametrize(
+    ("model_type", "architectures"),
+    [
+        ("qwen3_5", None),
+        ("qwen3_5_moe", None),
+        ("llava", ["LlavaForConditionalGeneration"]),
+        ("NemotronH_Nano_VL_V2", ["NemotronH_Nano_VL_V2"]),
+    ],
+)
 @pytest.mark.parametrize(
     ("calib_with_images", "packed_location", "error"),
     [
         (False, None, None),
-        (True, None, "text-only inputs"),
+        (True, None, None),
         (False, "root", "pack-quantized"),
         (False, "text", "pack-quantized"),
     ],
 )
-def test_fsdp2_qwen_vlm_requires_text_only_calibration(
-    model_type, calib_with_images, packed_location, error
-):
+def test_fsdp2_vlm_validation(model_type, architectures, calib_with_images, packed_location, error):
     args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=calib_with_images)
-    config = SimpleNamespace(model_type=model_type, vision_config={}, text_config=SimpleNamespace())
+    config = SimpleNamespace(
+        model_type=model_type,
+        architectures=architectures,
+        vision_config={},
+        text_config=SimpleNamespace(),
+    )
     if packed_location is not None:
         target = config if packed_location == "root" else config.text_config
         target.quantization_config = {"quant_method": "compressed-tensors"}
     expected = pytest.raises(NotImplementedError, match=error) if error else nullcontext()
     with expected:
         example_utils.validate_fsdp2_supported(args, config)
+
+
+def test_fsdp2_refuses_a_model_its_spec_lists():
+    """Found by model type, not by what the checkpoint path is called."""
+    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=False)
+    config = SimpleNamespace(model_type="llava_llama", architectures=["LlavaLlamaModel"])
+    with pytest.raises(NotImplementedError, match="VILA"):
+        example_utils.validate_fsdp2_supported(args, config)
+
+
+def test_fsdp2_refuses_encoder_decoder():
+    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=False)
+    config = SimpleNamespace(model_type="t5", architectures=["T5ForConditionalGeneration"])
+    config.is_encoder_decoder = True
+    with pytest.raises(NotImplementedError, match="encoder-decoder"):
+        example_utils.validate_fsdp2_supported(args, config)
+
+
+class _ImageOnlyVLM(torch.nn.Module):
+    def forward(self, pixel_values, input_ids=None):  # e.g. Nemotron Nano VL
+        pass
+
+
+class _TextCapableVLM(torch.nn.Module):
+    def forward(self, input_ids=None, pixel_values=None):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("model", "requires_images"),
+    [(_ImageOnlyVLM, True), (_TextCapableVLM, False), (torch.nn.Linear, False)],
+)
+def test_forward_requires_images(model, requires_images):
+    assert example_utils.forward_requires_images(model) is requires_images
+    assert example_utils.forward_requires_images(model.__new__(model)) is requires_images
+
+
+@pytest.mark.parametrize(
+    ("model_class", "calib_with_images", "refused"),
+    [(_ImageOnlyVLM, False, True), (_ImageOnlyVLM, True, False), (_TextCapableVLM, False, False)],
+)
+def test_fsdp2_refuses_image_only_forward_before_loading(
+    monkeypatch, model_class, calib_with_images, refused
+):
+    """Refused from the config alone, before any rank reads the checkpoint, unless images are given."""
+    monkeypatch.setattr(example_utils, "resolve_model_class", lambda *_: model_class)
+    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=calib_with_images)
+    config = SimpleNamespace(model_type="vlm", architectures=["VLM"], vision_config={})
+    expected = (
+        pytest.raises(NotImplementedError, match="requires image inputs")
+        if refused
+        else nullcontext()
+    )
+    with expected:
+        example_utils.validate_fsdp2_supported(args, config)
+
+
+@pytest.mark.parametrize(
+    ("ranks", "qformat", "recipe", "refused"),
+    [
+        (2, "w4a8_awq_beta", None, True),
+        (2, "fp8", "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits", True),
+        (2, "fp8", None, False),
+        (1, "w4a8_awq_beta", None, False),
+    ],
+)
+def test_fsdp2_refuses_awq_on_several_ranks_before_loading(
+    monkeypatch, ranks, qformat, recipe, refused
+):
+    """Each rank would fold its own AWQ scale into its weight shard, which the library refuses
+    only once the model is loaded: the example refuses at argument validation."""
+    monkeypatch.setattr(example_utils.dist_utils, "size", lambda: ranks)
+    args = SimpleNamespace(local_checkpoint_path="local-model", qformat=qformat, recipe=recipe)
+    expected = (
+        pytest.raises(NotImplementedError, match="AWQ calibration") if refused else nullcontext()
+    )
+    with expected:
+        example_utils.validate_fsdp2_supported(args, SimpleNamespace(model_type="llama"))
 
 
 def _write_safetensors(path, tensors):
@@ -114,6 +209,14 @@ def test_mtp_preparation_matches_loader(tmp_path, loader, trust_remote_code):
     assert not any("MTP weights may remain unquantized" in str(w.message) for w in caught)
 
 
+def test_get_model_loads_with_the_requested_experts_implementation(tmp_path):
+    """hf_ptq's --experts_implementation reaches the fused experts: eager calibrates them as earlier
+    releases did, where transformers would pick grouped_mm for this model."""
+    path = create_tiny_qwen3_moe_dir(tmp_path)
+    model = example_utils.get_model(str(path), device="cpu", experts_implementation="eager")
+    assert model.config._experts_implementation == "eager"
+
+
 @pytest.mark.parametrize("failure_at", [1, 2])
 def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at):
     config = LlamaConfig(architectures=["LlamaForCausalLM"])
@@ -159,6 +262,60 @@ def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at
 def test_build_quant_cfg_sets_moe_calib_experts_ratio_on_every_algorithm(algorithm, expected):
     quant_cfg = example_utils.build_quant_cfg({"quant_cfg": [], "algorithm": algorithm}, None, 0.5)
     assert quant_cfg["algorithm"] == expected
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["the-model", "a-model-around-it"])
+def test_a_preview_keeps_generate_from_switching_the_experts_implementation(monkeypatch, wrapped):
+    """On a GPU, ``generate`` switches a ``grouped_mm`` MoE's experts to ``batched_mm`` for decoding,
+    which ModelOpt's quantizers do not intercept (the preview after PTQ decodes unquantized experts)
+    and which Transformers refuses for an FSDP2-wrapped class (``FSDPQwen3MoeForCausalLM does not
+    support setting experts implementation``). The hook ``generate`` enters is out of the way for the
+    preview, and back after it, also when the previewed model generates through a submodule, as a
+    Nemotron-VL model's ``chat`` generates through its language model."""
+    entered = []
+
+    @contextmanager
+    def switch(self):
+        entered.append(type(self).__name__)
+        raise ValueError(f"{type(self).__name__} does not support setting experts implementation.")
+        yield
+
+    monkeypatch.setattr(GenerationMixin, "_optimize_model_for_decode", switch)
+    model = get_tiny_llama()
+    # The model around it has no hook of its own; the preview generates through the inner one.
+    previewed = torch.nn.ModuleDict({"language_model": model}) if wrapped else model
+    input_ids = torch.tensor([[1, 2, 3]])
+
+    # Some releases enter the hook only for the decode steps after the first token.
+    with pytest.raises(ValueError, match="does not support setting experts implementation"):
+        model.generate(input_ids, max_new_tokens=3)
+    with example_utils.keep_the_experts_implementation(previewed):
+        model.generate(input_ids, max_new_tokens=3)
+
+    assert entered == ["LlamaForCausalLM"]  # only the first, unprotected call reached the hook
+    assert "_optimize_model_for_decode" not in vars(model)
+
+
+def test_a_model_without_the_decode_hook_is_previewed_as_it_is():
+    model = torch.nn.Linear(1, 1)
+
+    with example_utils.keep_the_experts_implementation(model):
+        assert "_optimize_model_for_decode" not in vars(model)
+    assert not hasattr(model, "_optimize_model_for_decode")
+
+
+def test_a_decode_hook_on_the_model_itself_is_put_back_and_previews_nest():
+    """A hook bound on the model instance is restored rather than dropped, and a preview inside
+    another leaves the outer one's stand-in in place."""
+    model = torch.nn.Linear(1, 1)
+    own = model._optimize_model_for_decode = object()
+
+    with example_utils.keep_the_experts_implementation(model):
+        with example_utils.keep_the_experts_implementation(model):
+            pass
+        assert model._optimize_model_for_decode is nullcontext
+
+    assert model._optimize_model_for_decode is own
 
 
 def test_get_original_hf_quant_method_mxfp4_dict():
@@ -228,19 +385,22 @@ def test_resolve_init_config_falls_back_when_rederive_raises():
 @pytest.mark.parametrize(
     (
         "architecture",
+        "model_type",
         "model_class_name",
         "expected_config_dtype_kwarg",
         "unexpected_config_dtype_kwarg",
     ),
     [
-        ("DeciLMForCausalLM", "AutoModelForCausalLM", "torch_dtype", "dtype"),
-        ("LlamaForCausalLM", "LlamaForCausalLM", "dtype", "torch_dtype"),
+        ("DeciLMForCausalLM", "nemotron-nas", "AutoModelForCausalLM", "torch_dtype", "dtype"),
+        ("DeciLMForCausalLM", "deci", "AutoModelForCausalLM", "torch_dtype", "dtype"),
+        ("LlamaForCausalLM", "llama", "LlamaForCausalLM", "dtype", "torch_dtype"),
     ],
 )
 def test_get_model_uses_expected_dtype_kwarg(
     monkeypatch,
     tmp_path,
     architecture,
+    model_type,
     model_class_name,
     expected_config_dtype_kwarg,
     unexpected_config_dtype_kwarg,
@@ -249,11 +409,11 @@ def test_get_model_uses_expected_dtype_kwarg(
     hf_config = SimpleNamespace(
         architectures=[architecture],
         dtype=torch.float16,
-        model_type="llama",
+        model_type=model_type,
         torch_dtype=torch.bfloat16,
     )
 
-    class FakeModel:
+    class FakeModel(torch.nn.Module):  # load_pretrained records its plan on every module
         def eval(self):
             calls["eval"] = True
 
@@ -296,8 +456,6 @@ def test_get_model_uses_expected_dtype_kwarg(
         monkeypatch.delattr(example_utils.transformers, architecture, raising=False)
     else:
         monkeypatch.setattr(example_utils.transformers, model_class_name, FakeLlamaForCausalLM)
-    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
-    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
@@ -314,21 +472,32 @@ def test_get_model_uses_expected_dtype_kwarg(
 
 
 @pytest.mark.parametrize(
-    ("model_type", "architecture", "device_count", "expected_device_map"),
+    ("model_type", "architecture", "device_count", "use_seq_device_map", "expected_device_map"),
     [
         # DiffusionGemma ties encoder/decoder weights; "auto" can split a tied pair
         # across GPUs, so multi-GPU loads must fall back to "sequential".
-        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 2, "sequential"),
-        # Detection must also work off ``architectures`` alone, without ``model_type``.
-        (None, "DiffusionGemmaForConditionalGeneration", 2, "sequential"),
+        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 2, False, "sequential"),
         # Single GPU cannot split a tied pair, so it keeps the unrestricted "auto" map.
-        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 1, "auto"),
+        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 1, False, "auto"),
         # "gemma" is a substring of "diffusiongemma"; other Gemmas must not match.
-        ("gemma3", "Gemma3ForCausalLM", 2, "auto"),
+        ("gemma3", "Gemma3ForCausalLM", 2, False, "auto"),
+        # T5 and BART cannot take a device map at all, whatever the run asks for.
+        ("t5", "T5ForConditionalGeneration", 2, False, None),
+        ("t5", "T5ForConditionalGeneration", 2, True, None),
+        ("bart", "BartForConditionalGeneration", 2, False, None),
+        # A wrapper that cannot take "auto" loads on one device, unless the run asks for sequential.
+        ("NemotronH_Nano_VL_V2", "NemotronH_Nano_VL_V2", 2, False, None),
+        ("NemotronH_Nano_VL_V2", "NemotronH_Nano_VL_V2", 2, True, "sequential"),
     ],
 )
-def test_get_model_device_map_for_diffusion_gemma(
-    monkeypatch, tmp_path, model_type, architecture, device_count, expected_device_map
+def test_get_model_device_map(
+    monkeypatch,
+    tmp_path,
+    model_type,
+    architecture,
+    device_count,
+    use_seq_device_map,
+    expected_device_map,
 ):
     calls = {}
     hf_config = SimpleNamespace(
@@ -338,7 +507,7 @@ def test_get_model_device_map_for_diffusion_gemma(
         torch_dtype=torch.bfloat16,
     )
 
-    class FakeModel:
+    class FakeModel(torch.nn.Module):  # load_pretrained records its plan on every module
         def eval(self):
             calls["eval"] = True
 
@@ -363,58 +532,24 @@ def test_get_model_device_map_for_diffusion_gemma(
     # (e.g. Gemma3ForCausalLM) reappears on the next ``hasattr`` and the real one loads.
     # raising=False: DiffusionGemma may not exist in the installed transformers.
     monkeypatch.setattr(example_utils.transformers, architecture, FakeArchitecture, raising=False)
-    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
-    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
     monkeypatch.setattr(torch.cuda, "device_count", lambda: device_count)
 
-    example_utils.get_model(str(tmp_path), device="cuda", trust_remote_code=True)
+    example_utils.get_model(
+        str(tmp_path),
+        device="cuda",
+        trust_remote_code=True,
+        use_seq_device_map=use_seq_device_map,
+    )
 
     assert calls["from_pretrained"]["device_map"] == expected_device_map
     # Sequential caps per-GPU memory; "auto" must stay unrestricted.
     if expected_device_map == "sequential":
         assert calls["from_pretrained"]["max_memory"] == {0: 1024 * 0.8}
-    else:
+    elif not use_seq_device_map:
         assert "max_memory" not in calls["from_pretrained"]
-
-
-@pytest.mark.parametrize(
-    ("hf_config", "expected"),
-    [
-        (SimpleNamespace(model_type="diffusion_gemma", architectures=None), True),
-        (SimpleNamespace(model_type=None, architectures=["DiffusionGemmaForCausalLM"]), True),
-        (SimpleNamespace(model_type="gemma3", architectures=["Gemma3ForCausalLM"]), False),
-        # Multi-modal wrappers keep the family name on the nested ``text_config``.
-        (
-            SimpleNamespace(
-                model_type="multimodal",
-                architectures=["SomeWrapperForConditionalGeneration"],
-                text_config=SimpleNamespace(model_type="diffusion_gemma"),
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model_type="multimodal",
-                text_config=SimpleNamespace(architectures=["DiffusionGemmaForCausalLM"]),
-            ),
-            True,
-        ),
-        # A non-DiffusionGemma nested config must not match.
-        (
-            SimpleNamespace(
-                model_type="multimodal", text_config=SimpleNamespace(model_type="gemma3")
-            ),
-            False,
-        ),
-        # Stub configs may omit either attribute entirely.
-        (SimpleNamespace(), False),
-    ],
-)
-def test_is_diffusion_gemma(hf_config, expected):
-    assert example_utils.is_diffusion_gemma(hf_config) is expected
 
 
 @pytest.mark.parametrize(
@@ -467,7 +602,7 @@ def test_get_model_selects_bundled_or_builtin_class(
             raise builtin_config_error
         return hf_config
 
-    class FakeModel:
+    class FakeModel(torch.nn.Module):  # load_pretrained records its plan on every module
         def eval(self):
             return None
 
@@ -492,8 +627,6 @@ def test_get_model_selects_bundled_or_builtin_class(
     monkeypatch.setattr(example_utils, "AutoModelForCausalLM", _record("bundled"))
     monkeypatch.setattr(example_utils.transformers, architecture, _record("builtin"), raising=False)
     monkeypatch.setattr(example_utils, "prepare_model_for_loading", lambda *a, **k: nullcontext())
-    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
-    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
@@ -525,6 +658,22 @@ def test_nemotron_h_prefers_bundled_code_for_unsupported_block_type(monkeypatch)
     assert example_utils.prefers_bundled_code("nemotron_h", hf_config, "ckpt", {})
     monkeypatch.setattr(modeling, "MIXER_TYPES", {"mamba": object, "mlp": object})
     assert not example_utils.prefers_bundled_code("nemotron_h", hf_config, "ckpt", {})
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected"),
+    [
+        ("deepseek", True),
+        ("deepseek_v3", True),
+        ("deepseek_v32", True),
+        ("deepseek_v4", True),
+        ("kimi_k2", True),  # the DeepseekV3ForCausalLM architecture under its own model type
+        ("kimi_k25", False),  # its own architecture, KimiK25ForConditionalGeneration
+        ("llama", False),
+    ],
+)
+def test_deepseek_architectures_prefer_bundled_code(model_type, expected):
+    assert example_utils.prefers_bundled_code(model_type, SimpleNamespace(), "ckpt", {}) is expected
 
 
 # ---------- get_tokenizer ----------------------------------------------------
@@ -685,3 +834,190 @@ class _Recipe:
 def test_recipe_layerwise_blocks(recipe, expected):
     """Both recipe shapes normalize to dicts, so callers need no shape-aware access."""
     assert example_utils.recipe_layerwise_blocks(recipe) == expected
+
+
+# Small enough that the dense part fits any GPU.
+_TINY = {
+    "hidden_size": 16,
+    "intermediate_size": 32,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "vocab_size": 32,
+}
+
+
+@pytest.mark.parametrize(
+    ("device", "world_size", "device_map"),
+    [
+        ("cuda:1", 4, {"": "cuda:1"}),
+        (torch.device("cuda:1"), 4, {"": "cuda:1"}),
+        ("cuda:1", 1, "auto"),
+        (torch.device("cpu"), 1, "cpu"),
+    ],
+    ids=["str", "torch_device", "single_process", "cpu"],
+)
+def test_a_rank_device_pins_the_whole_model_to_it(
+    monkeypatch, tmp_path, device, world_size, device_map
+):
+    """Under torchrun each rank asks for its own cuda:<local_rank>; "auto" would let every rank's
+    accelerate pick the same idle GPU. A single process spreads the model over the GPUs, whatever
+    GPU it names, and keeps it on a CPU it names, as the torch.device hf_ptq's run hands in. Only a
+    single process's load is held to a memory limit sized over the node's GPUs: the pinned map would
+    ignore one."""
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+    # No GPU on the node holds the model, so sizing it over the node limits its memory.
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 0, "cpu": 1 << 40})
+    placed = []
+
+    plan = DistributionPlan(world_size)
+
+    def load_pretrained(ckpt_path, auto_class, **kwargs):
+        assert kwargs["distribution"] == plan
+        placed.append((kwargs["device_map"], "max_memory" in kwargs))
+        return torch.nn.Linear(1, 1)
+
+    monkeypatch.setattr(example_utils, "load_pretrained", load_pretrained)
+
+    example_utils.get_model(str(tmp_path), device=device, distribution=plan)
+
+    assert placed == [(device_map, world_size == 1)]
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    ["pack-quantized", "mxfp4", "sequential-map"],
+)
+def test_every_load_path_keeps_the_rank_pin(monkeypatch, tmp_path, checkpoint):
+    """A pack-quantized or MXFP4 checkpoint loads through a path of its own, and a model spec can
+    ask for a sequential map on a multi-GPU node; each would otherwise place every rank's copy over
+    the same GPUs."""
+    quantization_config = {
+        "pack-quantized": {"quant_method": "compressed-tensors", "format": "pack-quantized"},
+        "mxfp4": {"quant_method": "mxfp4"},
+    }.get(checkpoint)
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"], quantization_config=quantization_config, **_TINY
+    ).save_pretrained(tmp_path)
+    if checkpoint == "sequential-map":
+        monkeypatch.setattr(
+            example_utils,
+            "get_ptq_spec",
+            lambda model_type: PTQSpec(sequential_device_map="its weights are tied"),
+        )
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(example_utils, "_unpack_compressed_linear_weights", lambda *args: None)
+    placed = []
+
+    def load_pretrained(ckpt_path, auto_class, **kwargs):
+        placed.append(kwargs["device_map"])
+        return torch.nn.Linear(1, 1)
+
+    monkeypatch.setattr(example_utils, "load_pretrained", load_pretrained)
+
+    example_utils.get_model(str(tmp_path), device="cuda:1", distribution=DistributionPlan(4))
+
+    assert placed == [{"": "cuda:1"}]
+
+
+@pytest.mark.parametrize(
+    ("device", "kwargs", "match"),
+    [
+        ("cuda:1", {"use_seq_device_map": True}, "--use_seq_device_map"),
+        # "auto" would let every rank's accelerate pick the same idle GPU.
+        ("cuda", {}, "names no GPU"),
+    ],
+    ids=["sequential_map", "unindexed_device"],
+)
+def test_a_placement_over_shared_gpus_is_refused_where_each_rank_holds_its_own_copy(
+    tmp_path, device, kwargs, match
+):
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+
+    with pytest.raises(ValueError, match=match):
+        example_utils.get_model(
+            str(tmp_path), device=device, distribution=DistributionPlan(4), **kwargs
+        )
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [DistributionPlan(4, ep_size=4), DistributionPlan(4, dense="fsdp")],
+    ids=["expert_parallel", "fsdp"],
+)
+def test_a_plan_that_shards_the_model_is_refused(monkeypatch, tmp_path, plan):
+    """get_model loads a whole model on every rank; a plan that shards it goes to load_pretrained."""
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+    monkeypatch.setattr(example_utils, "load_pretrained", lambda *a, **k: pytest.fail("loaded"))
+
+    with pytest.raises(ValueError, match="shards the model over the ranks"):
+        example_utils.get_model(str(tmp_path), device="cuda:1", distribution=plan)
+
+
+def test_without_a_plan_the_load_decides_and_refuses_sharding_knobs_it_cannot_honor(
+    monkeypatch, tmp_path
+):
+    """get_model hands load_pretrained only a plan its caller gave. Without one the load decides
+    as before, so a MODELOPT_* knob asking to shard over a launch whose process group is not set up
+    is refused, rather than ignored for a one-rank plan."""
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+
+    with pytest.raises(RuntimeError, match="MODELOPT_FSDP_SIZE=world ask to shard"):
+        example_utils.get_model(str(tmp_path), device="cuda:0")
+
+
+# ---------- create_vlm_calibration_loop --------------------------------------
+
+
+class _Wrapper(torch.nn.Module):
+    """Records the kwargs its forward gets; no ``extract_feature``, like an omni wrapper."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.calls: list[dict] = []
+
+    def forward(self, **kwargs):
+        self.calls.append(kwargs)
+        return torch.zeros(1)
+
+
+def _vlm_batch():
+    return {
+        "input_ids": torch.ones(1, 4, dtype=torch.long),
+        "pixel_values": torch.zeros(2, 3, 8, 8),
+        "attention_mask": torch.ones(1, 4, dtype=torch.long),
+        "position_ids": None,
+    }
+
+
+@pytest.mark.parametrize("model_type", ["nemotron_h_omni", "NemotronH_Nano_Omni_Reasoning_V3"])
+def test_the_calibration_loop_lets_the_models_plugin_run_the_batch(model_type):
+    """An omni wrapper's own calibration forward carries the dtype cast and ``use_cache=False``,
+    which the loop's plain forward would bypass."""
+    model = _Wrapper(SimpleNamespace(model_type=model_type, is_encoder_decoder=False))
+    model.vision_model = SimpleNamespace(config=SimpleNamespace(torch_dtype=torch.bfloat16))
+
+    example_utils.create_vlm_calibration_loop(model, [_vlm_batch()])(model)
+
+    assert len(model.calls) == 1
+    passed = model.calls[0]
+    assert passed["use_cache"] is False
+    assert passed["pixel_values"].dtype is torch.bfloat16
+    assert "position_ids" not in passed
+
+
+def test_the_calibration_loop_keeps_the_plain_forward_for_encoder_decoder_vlms():
+    """An encoder-decoder VLM batch is renamed to ``decoder_input_ids``, which a calibration
+    forward looking for ``input_ids`` would not recognise, silently skipping calibration."""
+    model = _Wrapper(SimpleNamespace(model_type="nemotron_parse", is_encoder_decoder=True))
+
+    example_utils.create_vlm_calibration_loop(model, [_vlm_batch()])(model)
+
+    assert len(model.calls) == 1
+    passed = model.calls[0]
+    assert "decoder_input_ids" in passed, "the encoder-decoder rename reached the model"
+    assert "input_ids" not in passed
+    assert passed["pixel_values"].dtype is torch.float32, "no calibration forward touched it"

@@ -56,7 +56,7 @@ from modelopt.onnx.quantization.quant_utils import (
     rtn,
     update_block_size,
 )
-from modelopt.onnx.utils import QDQ_PRECISION_MIN_OPSET, save_onnx
+from modelopt.onnx.utils import QDQ_PRECISION_MIN_OPSET, export_onnx, save_onnx
 
 __all__ = ["quantize"]
 
@@ -370,7 +370,7 @@ def quantize_rtn(
             )
 
     logger.info(f"RTN quantization completed in {time.time() - t_start:.2f} seconds")
-    model = gs.export_onnx(graph)
+    model = export_onnx(graph)
     model.ir_version = 10
 
     return model
@@ -700,7 +700,7 @@ def _quantize_awq_clip(
 
         logger.info("Exporting the quantized graph")
         t = time.time()
-        model = gs.export_onnx(graph_gs)
+        model = export_onnx(graph_gs)
         # Set ir_version to 10, remove it once ORT supports ir_version 11
         model.ir_version = 10
         logger.info(f"Exporting took {time.time() - t} seconds")
@@ -1431,7 +1431,7 @@ def _quantize_awq_lite(
 
         logger.info("Exporting the quantized graph")
         t = time.time()
-        model = gs.export_onnx(graph_gs)
+        model = export_onnx(graph_gs)
         # Set ir_version to 10, remove it once ORT supports ir_version 11
         model.ir_version = 10
         logger.info(f"Exporting took {time.time() - t} seconds")

@@ -256,14 +256,14 @@ class QATTrainer(ModelOptHFTrainer):
 
     def training_step(self, *args, **kwargs):
         """Training step."""
-        gc.collect()
+        self._collect_garbage(freeze=True)
         if self.quant_cfg is not None and not is_quantized(self.model):
             self._quantize_model()
         return super().training_step(*args, **kwargs)
 
     def prediction_step(self, *args, **kwargs):
         """Prediction step."""
-        gc.collect()
+        self._collect_garbage()
         if self.quant_cfg is not None and not is_quantized(self.model):
             self._quantize_model()
         return super().prediction_step(*args, **kwargs)

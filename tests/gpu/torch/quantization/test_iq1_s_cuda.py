@@ -26,12 +26,18 @@ def _extension():
     return extension
 
 
+def _pack(weight):
+    blocks = weight.contiguous().reshape(-1, 256)
+    scales = iq1_s_module._predict_iq1_s_scales(blocks)
+    return _extension().iq1_s_pack(weight, iq1_s_grid("cuda"), scales)
+
+
 def test_iq1_s_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch):
     generator = torch.Generator(device="cuda").manual_seed(1234)
     weight = torch.randn((8, 256), generator=generator, device="cuda", dtype=torch.bfloat16)
 
-    packed = _extension().iq1_s_pack(weight, iq1_s_grid("cuda")).reshape(8, 1, 50)
-    packed_again = _extension().iq1_s_pack(weight, iq1_s_grid("cuda")).reshape(8, 1, 50)
+    packed = _pack(weight).reshape(8, 1, 50)
+    packed_again = _pack(weight).reshape(8, 1, 50)
     monkeypatch.setattr(iq1_s_module, "get_cuda_ext_ggml", lambda: None)
     reference, shape = quantize_iq1_s(weight)
     reconstructed = dequantize_iq1_s(packed, shape)
@@ -48,7 +54,7 @@ def test_iq1_s_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch):
 
 def test_iq1_s_cuda_zero_encoding_matches_ggml_block_layout():
     weight = torch.zeros((1, 256), device="cuda", dtype=torch.bfloat16)
-    packed = _extension().iq1_s_pack(weight, iq1_s_grid("cuda")).reshape(1, 1, 50)
+    packed = _pack(weight).reshape(1, 1, 50)
     shape = torch.tensor(weight.shape, device="cuda")
 
     assert not packed.any()
@@ -59,7 +65,7 @@ def test_iq1_s_cuda_nonfinite_policy_matches_pytorch_encoder(monkeypatch):
     weight = torch.randn((1, 256), device="cuda", dtype=torch.bfloat16)
     weight[0, :3] = torch.tensor([torch.nan, torch.inf, -torch.inf], device="cuda")
 
-    packed = _extension().iq1_s_pack(weight, iq1_s_grid("cuda")).reshape(1, 1, 50)
+    packed = _pack(weight).reshape(1, 1, 50)
     monkeypatch.setattr(iq1_s_module, "get_cuda_ext_ggml", lambda: None)
     reference, _ = quantize_iq1_s(weight)
 
@@ -89,6 +95,27 @@ def test_iq1_s_cuda_float64_matches_pytorch_encoder():
     packed, _ = quantize_iq1_s(weight.cuda())
 
     assert torch.equal(reference, packed.cpu())
+
+
+def test_iq1_s_float32_scale_matches_on_every_path(monkeypatch):
+    """Block maxima where ``amax / 16.875`` and ``amax * (1 / 16.875)`` round to different FP16 d.
+
+    CUDA divides by a Python scalar as a reciprocal multiply, so these blocks once got a different
+    d from the CUDA encoder than from the PyTorch one on the same GPU.
+    """
+    hex_amax = ("0x1.9fb726p-1", "0x1.73319cp+1", "0x1.a1a91cp-1", "0x1.0ace42p+1")
+    amax = torch.tensor([float.fromhex(h) for h in hex_amax], device="cuda")
+    generator = torch.Generator(device="cuda").manual_seed(3)
+    weight = (torch.rand((4, 256), generator=generator, device="cuda") * 1.8 - 0.9) * amax[:, None]
+    weight[:, 7] = amax
+
+    packed, _ = quantize_iq1_s(weight)
+    reference, _ = quantize_iq1_s(weight.cpu())
+    monkeypatch.setattr(iq1_s_module, "get_cuda_ext_ggml", lambda: None)
+    fallback, _ = quantize_iq1_s(weight)
+
+    assert torch.equal(packed.cpu(), reference)
+    assert torch.equal(fallback.cpu(), reference)
 
 
 def test_iq1_s_cuda_saturates_finite_values_above_the_float32_range():

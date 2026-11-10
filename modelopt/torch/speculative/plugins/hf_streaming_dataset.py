@@ -41,7 +41,8 @@ import base64
 import os
 import re
 import time
-from typing import TypedDict
+from collections.abc import Iterable, Sequence
+from typing import TypedDict, cast
 
 import httpx
 import torch
@@ -199,7 +200,7 @@ class StreamingDataset(Dataset):
 
     def __init__(
         self,
-        entries: list[dict],
+        entries: Iterable[dict],
         tokenizer,
         config: StreamingConfig | None = None,
     ):
@@ -213,17 +214,24 @@ class StreamingDataset(Dataset):
         Args:
             entries: Untokenized per-sample dicts from the input jsonl. Schema is
                 subclass-defined (see :meth:`_tokenize_entry`); passed to :meth:`_fetch`.
+                A sized, indexable source (e.g. an Arrow-backed ``datasets.Dataset``) is
+                kept as is, so its rows stay memory-mapped; any other iterable is
+                materialized into a list.
             tokenizer: HF tokenizer; used for client-side tokenization and the
                 server/client loss-mask alignment in :meth:`_fetch`.
             config: Tuning knobs (timeout, answer_only_loss, ...); defaults to
                 ``self.config_cls()``. See :class:`StreamingConfig`.
         """
-        if not entries:
-            raise ValueError("entries is empty")
         self.tokenizer = tokenizer
         self.config = config if config is not None else self.config_cls()
-        # Materialize to a plain list so DataLoader worker processes fork it cheaply.
-        self.entries = list(entries)
+        # Keep an indexable source (e.g. an Arrow-backed datasets.Dataset) as is: list()
+        # would copy every row into each rank, and each forked worker would copy it again.
+        if hasattr(entries, "__len__") and hasattr(entries, "__getitem__"):
+            self.entries = cast("Sequence[dict]", entries)
+        else:
+            self.entries = list(entries)
+        if len(self.entries) == 0:
+            raise ValueError("entries is empty")
         # Per-process consecutive-failure counter for the circuit breaker. Reset to 0
         # on every successful fetch; tripped only by fetch failures (not unfit entries).
         self._consecutive_fail = 0
@@ -405,7 +413,7 @@ class EagleVllmStreamingDataset(StreamingDataset):
 
     def __init__(
         self,
-        entries: list[dict],
+        entries: Iterable[dict],
         tokenizer,
         config: EagleVllmStreamingConfig,
     ):

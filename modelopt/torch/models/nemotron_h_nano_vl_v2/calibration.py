@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Nemotron VL calibration helpers.
+"""Calibration support for the Nemotron VL wrappers.
 
 Nemotron Nano VL v2 remote-code wrapper `forward()` is not ideal to call during PTQ calibration because it may:
 - Call `torch.distributed.get_rank()` unconditionally
@@ -31,10 +31,14 @@ from typing import Any
 
 import torch
 
+__all__ = ["forward_calibration_batch"]
+
 
 def _accepted_kwargs(fn, kwargs: dict) -> dict:
-    """Drop keys ``fn`` cannot accept, so a wrapper with a narrow forward signature does not
-    trade one ``AttributeError`` for a ``TypeError``. Callables taking ``**kwargs`` are left alone.
+    """Drop keys ``fn`` cannot accept; callables taking ``**kwargs`` are left alone.
+
+    A wrapper with a narrow forward signature then does not trade one ``AttributeError`` for a
+    ``TypeError``.
     """
     try:
         params = inspect.signature(fn).parameters
@@ -147,3 +151,20 @@ def safe_nemotron_vl_forward(full_model: torch.nn.Module, batch: dict[str, Any])
         use_cache=False,
         return_dict=False,
     )
+
+
+def forward_calibration_batch(model: torch.nn.Module, batch: dict[str, Any]) -> bool:
+    """Run one calibration batch through the safe multimodal forward, or decline it.
+
+    Declines an encoder-decoder model (Nemotron-Parse): its batch carries ``decoder_input_ids``,
+    which the helper does not recognise, so routing it here would return without a forward pass and
+    silently skip calibration. Declines a wrapper that has the InternVL ``extract_feature`` but no
+    ``img_context_token_id``, which the helper's InternVL branch cannot drive. An omni wrapper
+    defines neither and takes the helper's fallback.
+    """
+    if getattr(model.config, "is_encoder_decoder", False):
+        return False
+    if hasattr(model, "extract_feature") and not hasattr(model, "img_context_token_id"):
+        return False
+    safe_nemotron_vl_forward(model, batch)
+    return True

@@ -79,6 +79,8 @@ jobs:
           echo "PATH=${PATH}:/usr/local/tensorrt/targets/x86_64-linux-gnu/bin" >> $GITHUB_ENV
       - if: contains(inputs.docker_image, 'nvidia/nemo:')
         uses: ./.github/actions/megatron-from-source
+      - if: contains(inputs.docker_image, 'nvidia/nemo:')
+        uses: ./.github/actions/te-all-gpu-archs
       - name: Install dependencies
         shell: bash
         run: |
