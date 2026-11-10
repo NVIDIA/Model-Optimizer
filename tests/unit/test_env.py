@@ -53,6 +53,7 @@ def test_misspelled_variable_raises_when_the_variable_it_misspells_is_read(monke
     monkeypatch.setattr(env, "_CHECKED", set())
     monkeypatch.setenv("MODELOPT_STATE_PATH", "state.pth")
     monkeypatch.setenv("MODELOPT_SKIP_WEIGHT_QUANT_CHEK", "1")
+    monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "1")
     assert env.nvfp4_triton_sweep() is True
     with pytest.raises(
         ValueError,
