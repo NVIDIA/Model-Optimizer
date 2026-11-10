@@ -500,8 +500,9 @@ def _checked_compression(hf_config, keep_packed: bool = False):
     experts' bfloat16 at any config level, transformers before 5.8, the checkpoint's
     compressed-tensors scheme, a config with nothing to decompress, and a process already
     decompressing a checkpoint compressed differently. With ``keep_packed``, a scheme storing more
-    than packed values and their scales too: packed gate and up stay one tensor, and only those two
-    run along the weight's rows, as the fused projection's must.
+    than packed values and their scales, or scales other than per row or group of a row (the channel
+    and group strategies): packed gate and up stay one tensor, and what it stores must run along the
+    weight's rows, as the fused projection's do.
     """
     if isinstance(hf_config, dict):
         # The load finds the hooks by a mark on the config object, which a dict cannot carry.
@@ -539,11 +540,17 @@ def _checked_compression(hf_config, keep_packed: bool = False):
     source = compression if compression is not None else installed
     if keep_packed and source is not None:
         stored = source[2]
-        if stored[0] != "weight_packed" or set(stored) - {*_PACKED_SUFFIX, "weight_shape"}:
+        strategy = getattr(getattr(source[1], "weights", None), "strategy", None)
+        strategy = getattr(strategy, "value", strategy)  # compressed-tensors keeps the enum's value
+        if (
+            stored[0] != "weight_packed"
+            or set(stored) - {*_PACKED_SUFFIX, "weight_shape"}
+            or strategy not in ("channel", "group")
+        ):
             raise NotImplementedError(
                 f"install_onfly_decompress: keeping the experts packed handles a scheme storing "
-                f"packed values and their scales, and this checkpoint's stores {stored}. Load it "
-                "decompressed."
+                f"packed values and their scales per row or group of a row, and this checkpoint's "
+                f"stores {stored} with {strategy} scales. Load it decompressed."
             )
     return compression, installed
 
