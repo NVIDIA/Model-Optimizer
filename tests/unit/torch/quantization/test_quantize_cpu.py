@@ -632,6 +632,63 @@ def test_skip_weight_quant_check_env_var_bypasses_the_guard():
         mtq.quantize(model, config, lambda m: m(m.get_input()))
 
 
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "MODELOPT_SKIP_WEIGHT_QUANT_CHECK",
+        "MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP",
+        "MODELOPT_NVFP4_TRITON_SWEEP",
+    ],
+)
+def test_a_malformed_variable_refuses_before_the_model_changes(monkeypatch, variable):
+    """Quantizing reads it once the model has begun to change, so the entry points parse it first."""
+    model = SimpleLinear()
+    forward_loop = lambda m: m(m.get_input())  # noqa: E731
+    monkeypatch.setenv(variable, "enabled")
+    with pytest.raises(ValueError, match=variable):
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+    with pytest.raises(ValueError, match=variable):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=[SimpleLinear.get_input()],
+            forward_step=lambda m, batch: m(batch),
+            loss_func=lambda output, batch: output.sum(),
+        )
+    assert not is_quantized(model)
+
+    monkeypatch.delenv(variable)
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+    quantized = repr(model)
+    monkeypatch.setenv(variable, "enabled")
+    with pytest.raises(ValueError, match=variable):
+        # A config that would disable every quantizer.
+        mtq.quantize(model, {"quant_cfg": [{"quantizer_name": "*", "enable": False}]}, forward_loop)
+    with pytest.raises(ValueError, match=variable):
+        mtq.calibrate(model, "max", forward_loop)
+    assert repr(model) == quantized
+
+
+def _malformed_variable_on_one_rank_job(rank, size):
+    model = SimpleLinear()
+    malformed = {"MODELOPT_SKIP_WEIGHT_QUANT_CHECK": "enabled"} if rank == 1 else {}
+    # Rank 1 raises its own error; rank 0 one naming it.
+    error = ValueError if rank == 1 else RuntimeError
+    with (
+        bounded_collectives(),
+        mock.patch.dict(os.environ, malformed),
+        pytest.raises(error, match="MODELOPT_SKIP_WEIGHT_QUANT_CHECK='enabled'"),
+    ):
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(m.get_input()))
+    assert not is_quantized(model)
+
+
+def test_a_malformed_variable_on_one_rank_refuses_on_every_rank(cpu_dist_workers):
+    """A rank refusing alone would leave the other waiting for it in calibration."""
+    cpu_dist_workers.run(_malformed_variable_on_one_rank_job)
+
+
 class _ToyIndexer(torch.nn.Module):
     """Stands in for a framework's sparse-attention indexer (vLLM ``Indexer``, MCore ``CSAIndexer``)."""
 

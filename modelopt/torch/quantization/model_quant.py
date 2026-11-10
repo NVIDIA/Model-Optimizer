@@ -188,6 +188,28 @@ def _refuse_awq_on_a_sharded_fsdp2_model(
         )
 
 
+def _refuse_a_malformed_variable() -> None:
+    """Parse the ``MODELOPT_*`` variables quantizing reads, which raises on a malformed one.
+
+    Their readers (the weight check, module conversion, calibration) run once the model has begun
+    to change, so the entry points call this before they change it. In a distributed run each rank
+    parses its own environment, and every rank raises if one fails: a rank raising alone would
+    leave the others waiting for it in calibration.
+    """
+
+    def parse() -> None:
+        env.skip_weight_quant_check()
+        env.tegrouped_compile_weight_loop()
+        env.nvfp4_triton_sweep()
+
+    # all_reduce refuses a distributed launch with no process group, where each rank quantizes on
+    # its own.
+    if dist.is_distributed_run():
+        dist.all_reduce("its MODELOPT_* variables", parse, combine=lambda _: None)
+    else:
+        parse()
+
+
 # TODO: Descriptors for the supported algorithms
 def calibrate(
     model: nn.Module,
@@ -219,6 +241,7 @@ def calibrate(
     """
     _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
     _refuse_unsupported_distributed_calibration(model, algorithm)
+    _refuse_a_malformed_variable()
     if forward_loop is not None:
         # get the number of arguments of forward_loop
         num_args = len(inspect.signature(forward_loop).parameters)
@@ -575,6 +598,7 @@ def quantize(
     quantize_config = QuantizeConfig(**dict(config))
     _refuse_awq_on_a_sharded_fsdp2_model(model, config.get("algorithm"))
     _refuse_unsupported_distributed_calibration(model, config.get("algorithm"))
+    _refuse_a_malformed_variable()
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
@@ -1080,6 +1104,7 @@ def auto_quantize(
             "that quantization replaces and distributed_forward_loop restores. Quantize it with "
             "mtq.quantize through distributed_forward_loop, or AutoQuantize in a single process."
         )
+    _refuse_a_malformed_variable()
 
     method_name, method_config = _parse_auto_quantize_method(method)
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
