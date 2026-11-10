@@ -21,37 +21,14 @@ import torch
 
 pytest.importorskip("diffusers")
 from diffusers import UNet2DConditionModel
-
-try:
-    from diffusers.models.transformers import DiTTransformer2DModel, FluxTransformer2DModel
-except Exception:  # pragma: no cover - optional diffusers models
-    DiTTransformer2DModel = None
-    FluxTransformer2DModel = None
-
-try:
-    from diffusers.models.transformers import Flux2Transformer2DModel
-except Exception:  # pragma: no cover - optional diffusers models
-    Flux2Transformer2DModel = None
-
-try:
-    from diffusers.models.transformers import WanTransformer3DModel
-except Exception:  # pragma: no cover - optional diffusers models
-    WanTransformer3DModel = None
-
-try:
-    from diffusers.models.autoencoders import AutoencoderKLWan
-except Exception:  # pragma: no cover - optional diffusers models
-    AutoencoderKLWan = None
-
-try:
-    from diffusers.models.transformers import QwenImageTransformer2DModel
-except Exception:  # pragma: no cover - optional diffusers models
-    QwenImageTransformer2DModel = None
-
-try:
-    from diffusers.models.autoencoders import AutoencoderKLQwenImage
-except Exception:  # pragma: no cover - optional diffusers models
-    AutoencoderKLQwenImage = None
+from diffusers.models.autoencoders import AutoencoderKLQwenImage, AutoencoderKLWan
+from diffusers.models.transformers import (
+    DiTTransformer2DModel,
+    Flux2Transformer2DModel,
+    FluxTransformer2DModel,
+    QwenImageTransformer2DModel,
+    WanTransformer3DModel,
+)
 
 import modelopt.torch.opt as mto
 
@@ -79,9 +56,6 @@ def get_tiny_unet(**config_kwargs) -> UNet2DConditionModel:
 
 def get_tiny_dit(**config_kwargs):
     """Create a tiny DiTTransformer2DModel for testing."""
-    if DiTTransformer2DModel is None:
-        pytest.skip("DiTTransformer2DModel is not available in this diffusers version.")
-
     kwargs = {
         "num_attention_heads": 2,
         "attention_head_dim": 8,
@@ -99,9 +73,6 @@ def get_tiny_dit(**config_kwargs):
 
 def get_tiny_flux(**config_kwargs):
     """Create a tiny FluxTransformer2DModel for testing."""
-    if FluxTransformer2DModel is None:
-        pytest.skip("FluxTransformer2DModel is not available in this diffusers version.")
-
     kwargs = {
         "patch_size": 1,
         "in_channels": 4,
@@ -121,9 +92,6 @@ def get_tiny_flux(**config_kwargs):
 
 def get_tiny_flux2(**config_kwargs):
     """Create a tiny Flux2Transformer2DModel for testing."""
-    if Flux2Transformer2DModel is None:
-        pytest.skip("Flux2Transformer2DModel is not available in this diffusers version.")
-
     kwargs = {
         "patch_size": 1,
         "in_channels": 16,
@@ -182,9 +150,6 @@ def df_modelopt_state_and_output_tester(model_ref, model_test):
 
 def get_tiny_wan22_transformer(**config_kwargs):
     """Create a tiny WanTransformer3DModel for testing."""
-    if WanTransformer3DModel is None:
-        pytest.skip("WanTransformer3DModel is not available in this diffusers version.")
-
     kwargs = {
         "patch_size": (1, 2, 2),
         "num_attention_heads": 2,
@@ -205,9 +170,6 @@ def get_tiny_wan22_transformer(**config_kwargs):
 
 def get_tiny_wan22_vae(**config_kwargs):
     """Create a tiny AutoencoderKLWan for testing."""
-    if AutoencoderKLWan is None:
-        pytest.skip("AutoencoderKLWan is not available in this diffusers version.")
-
     kwargs = {
         "base_dim": 3,
         "z_dim": 16,
@@ -324,9 +286,6 @@ def get_tiny_qwen_image_transformer(**config_kwargs):
       (the bundled text encoder is bypassed), so pair this with
       ``--data.dataloader.text_embed_dim=<joint_attention_dim>``.
     """
-    if QwenImageTransformer2DModel is None:
-        pytest.skip("QwenImageTransformer2DModel is not available in this diffusers version.")
-
     kwargs = {
         "patch_size": 2,
         "in_channels": 64,  # vae z_dim (16) * 2x2 patch
@@ -351,9 +310,6 @@ def get_tiny_qwen_image_transformer(**config_kwargs):
 
 def get_tiny_qwen_image_vae(**config_kwargs):
     """Create a tiny AutoencoderKLQwenImage for testing (z_dim=16 to match the transformer)."""
-    if AutoencoderKLQwenImage is None:
-        pytest.skip("AutoencoderKLQwenImage is not available in this diffusers version.")
-
     kwargs = {
         "base_dim": 8,
         "z_dim": 16,  # = transformer out_channels
@@ -438,8 +394,6 @@ def create_tiny_qwen_image_pipeline_dir(tmp_path: Path) -> Path:
     (16) so the pipeline runs end-to-end during quantization calibration. The saved
     dir loads with ``QwenImagePipeline.from_pretrained(path)``.
     """
-    if QwenImageTransformer2DModel is None or AutoencoderKLQwenImage is None:
-        pytest.skip("QwenImage diffusers classes not available in this diffusers version.")
     from diffusers import FlowMatchEulerDiscreteScheduler, QwenImagePipeline
 
     transformers = pytest.importorskip("transformers")

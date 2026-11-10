@@ -20,8 +20,6 @@ Covers R2.1 (GAN branches must raise a clear ``RuntimeError`` when
 reject FSDP-wrapped teachers when ``deep_copy=True``).
 """
 
-from __future__ import annotations
-
 import pytest
 import torch
 from torch import nn

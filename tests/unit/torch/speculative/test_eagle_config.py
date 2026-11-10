@@ -23,6 +23,34 @@ from pydantic import ValidationError
 from modelopt.recipe.config import ModelOptEagleRecipe
 from modelopt.torch.speculative.config import EagleConfig
 
+# --- Hidden-state mixing mode validator tests ---
+
+
+@pytest.mark.parametrize("mix_hidden_states", [False, True])
+def test_mix_hidden_states_mode_default_sparse_replace(mix_hidden_states):
+    """Existing configs retain sparse mixing without specifying a mode."""
+    cfg = EagleConfig.model_validate({"eagle_mix_hidden_states": mix_hidden_states})
+
+    assert cfg.eagle_mix_hidden_states_mode == "sparse_replace"
+
+
+@pytest.mark.parametrize("mode", ["sparse_replace", "uniform_layer_sample"])
+def test_mix_hidden_states_mode_valid(mode):
+    cfg = EagleConfig.model_validate(
+        {"eagle_mix_hidden_states": True, "eagle_mix_hidden_states_mode": mode}
+    )
+
+    assert cfg.eagle_mix_hidden_states_mode == mode
+
+
+@pytest.mark.parametrize("mode", [None, "random_weights"])
+def test_mix_hidden_states_mode_unknown_error(mode):
+    """Unknown mixing modes fail Literal validation."""
+    with pytest.raises(ValidationError) as exc_info:
+        EagleConfig.model_validate({"eagle_mix_hidden_states_mode": mode})
+    assert exc_info.value.errors()[0]["type"] == "literal_error"
+
+
 # --- rope scaling consistency validator tests ---
 
 

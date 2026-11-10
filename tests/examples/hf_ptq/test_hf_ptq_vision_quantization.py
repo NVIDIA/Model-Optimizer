@@ -20,6 +20,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from modelopt.torch.utils.distributed import DistributionPlan
+
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 
 
@@ -56,6 +58,7 @@ def test_image_calibration_model_target_follows_recipe(
         trust_remote_code=False,
         use_seq_device_map=False,
         attn_implementation=None,
+        experts_implementation=None,
         offload_folder=None,
         max_cpu_memory_gb=None,
         max_gpu_memory_gb=None,
@@ -64,13 +67,14 @@ def test_image_calibration_model_target_follows_recipe(
     )
 
     monkeypatch.setattr(hf_ptq, "get_model", lambda *args, **kwargs: full_model)
+    # A single process's plan, decided without reading the "dummy" checkpoint.
+    monkeypatch.setattr(hf_ptq, "resolve_distribution", lambda args: (DistributionPlan(), None))
     # A VLM's extracted language model reports its own sub-config type; hf_ptq must keep the root's.
     monkeypatch.setattr(
         hf_ptq,
         "hf_model_type",
         lambda model: "qwen3_vl" if model is full_model else "qwen3_vl_text",
     )
-    monkeypatch.setattr(hf_ptq, "is_nemotron_vl", lambda model: False)
     monkeypatch.setattr(
         hf_ptq.AutoProcessor,
         "from_pretrained",
@@ -109,6 +113,7 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
     args = SimpleNamespace(
         qformat="fp8",
         calib_with_images=True,
+        use_fsdp2=False,
         specdec_offline_dataset=None,
         layerwise_export=False,
     )
@@ -143,7 +148,7 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
     )
     monkeypatch.setattr(hf_ptq.mtq, "quantize", quantize)
 
-    # Force the Nemotron reinsertion branch: a full-model recipe target must not be assigned as
+    # Force the VLM-wrapper reinsertion branch: a full-model recipe target must not be assigned as
     # its own nested language model.
     hf_ptq.mono_quantize(
         args,
@@ -153,7 +158,7 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
         model_type="qwen3_vl",
         calibration_only=False,
         calib_dataloader=calib_dataloader,
-        is_nemotron_vl_model=True,
+        vlm_wrapper=True,
     )
 
     assert calls == {

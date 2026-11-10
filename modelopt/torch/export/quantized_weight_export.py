@@ -51,6 +51,7 @@ from .quant_format import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_MXFP4,
     QUANTIZATION_W4A16_NVFP4,
+    STATIC_INPUT_SCALE_FORMATS,
 )
 from .quant_utils import (
     _get_quantization_from_quantizers,
@@ -79,7 +80,7 @@ _NVFP4_EXPORT_FORMATS = {
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 }
-_MXFP4_EXPORT_FORMATS = {QUANTIZATION_MXFP4, QUANTIZATION_W4A8_MXFP4_FP8}
+_MXFP4_EXPORT_FORMATS = {QUANTIZATION_MXFP4, QUANTIZATION_W4A16_MXFP4, QUANTIZATION_W4A8_MXFP4_FP8}
 _FUNCTIONAL_WEIGHT_EXPORT_FORMATS = (
     _NVFP4_EXPORT_FORMATS
     | _MXFP4_EXPORT_FORMATS
@@ -91,12 +92,6 @@ _FUNCTIONAL_WEIGHT_EXPORT_FORMATS = (
     }
 )
 _KV_CACHE_EXPORT_FORMATS = {KV_CACHE_FP8, KV_CACHE_FP8_K_NVFP4_V, KV_CACHE_NVFP4}
-_STATIC_INPUT_SCALE_FORMATS = {
-    QUANTIZATION_FP8,
-    QUANTIZATION_NVFP4,
-    QUANTIZATION_W4A8_NVFP4_FP8,
-    QUANTIZATION_W4A8_MXFP4_FP8,
-}
 
 
 class _UnsupportedQuantizedWeightExportFormatError(NotImplementedError):
@@ -349,6 +344,17 @@ def _resolve_quantized_weight_export_inputs(
         return None
     quantized_view, weight_quantizer = resolved
     input_quantizer = _input_quantizer(module, weight_name)
+    # Neither a packed nor an unquantized weight can carry a rotation of the weight or its input.
+    # A disabled quantizer still rotates unless it rotates back.
+    if any(
+        isinstance(quantizer, TensorQuantizer)
+        and quantizer.rotate_is_enabled
+        and (quantizer.is_enabled or not quantizer.rotate_back_is_enabled)
+        for quantizer in (weight_quantizer, input_quantizer)
+    ):
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            f"Functional export does not support rotated quantizers for {weight_name!r}"
+        )
     if not weight_quantizer.is_enabled:
         return None
     quantization_format = _get_quantization_from_quantizers(
@@ -360,9 +366,16 @@ def _resolve_quantized_weight_export_inputs(
         raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
         )
-    if quantization_format == QUANTIZATION_W4A16_MXFP4:
+    if isinstance(input_quantizer, SequentialQuantizer):
         raise _UnsupportedQuantizedWeightExportFormatError(
-            "Functional export does not support weight-only MXFP4"
+            f"Functional export does not support sequential input quantizers for {weight_name!r}"
+        )
+    if any(
+        quantizer is not None and quantizer.is_enabled and quantizer.backend is not None
+        for quantizer in (weight_quantizer, input_quantizer)
+    ):
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            f"Functional export does not support custom quantization backends for {weight_name!r}"
         )
     if quantization_format == QUANTIZATION_FP8_PB_WO and weight_quantizer.block_sizes != {
         -2: 128,
@@ -378,7 +391,7 @@ def _resolve_quantized_weight_export_inputs(
         )
     # NVFP4 dynamic block scales still require a fixed global input scale.
     if (
-        quantization_format in _STATIC_INPUT_SCALE_FORMATS
+        quantization_format in STATIC_INPUT_SCALE_FORMATS
         and input_quantizer is not None
         and input_quantizer.is_enabled
         and (input_quantizer._dynamic or input_quantizer.is_mx_format)
@@ -474,7 +487,7 @@ def capture_quantized_weight_export_state(
 
     if input_quantizer is not None and input_quantizer.is_enabled:
         input_amax = input_quantizer.export_amax()
-        if input_amax is None and quantization_format in _STATIC_INPUT_SCALE_FORMATS:
+        if input_amax is None and quantization_format in STATIC_INPUT_SCALE_FORMATS:
             raise RuntimeError(f"Missing calibrated static input scale for {weight_name!r}")
         if input_amax is not None:
             input_scale = (
@@ -550,11 +563,16 @@ def capture_kv_cache_export_state(
     """Capture the ``k_scale`` / ``v_scale`` of one attention module, or ``None`` when not quantized.
 
     ``clamp_fp8_scales`` raises FP8 cache scales to at least 1.0, as the other exporters do.
+    With ``cpu=False``, constants follow a calibrated peer or attention tensor's device;
+    a stateless, parameterless attention module with no buffers falls back to CPU.
     """
     quantization_format = get_kv_cache_export_spec(attention)
     if quantization_format is None:
         return None
-    k_scale, v_scale = get_kv_cache_scaling_factor(attention, clamp_fp8_scales=clamp_fp8_scales)
+    scales = get_kv_cache_scaling_factor(
+        attention, clamp_fp8_scales=clamp_fp8_scales, resolve_constant_amax=True
+    )
+    k_scale, v_scale = scales
     if k_scale is None or v_scale is None:
         raise RuntimeError("Missing calibrated KV-cache scales")
     if cpu:
@@ -929,6 +947,7 @@ def build_hf_quantization_config(
         if state is not None:
             requires_input = state.quantization_format not in {
                 QUANTIZATION_FP8_PB_WO,
+                QUANTIZATION_W4A16_MXFP4,
                 QUANTIZATION_W4A16_NVFP4,
             }
             if state.input_quantizer_enabled != requires_input:

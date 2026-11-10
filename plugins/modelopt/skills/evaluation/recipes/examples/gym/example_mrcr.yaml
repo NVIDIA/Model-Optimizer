@@ -245,12 +245,7 @@ evaluation:
                   if [ -n "$PYTHONPATH" ]; then export PYTHONPATH="/opt/Gym:$_gym_sp:$PYTHONPATH"
                   else export PYTHONPATH="/opt/Gym:$_gym_sp"; fi
 
-                  # SECRETS: `set -x` traces AFTER expansion, so without this the params'
-                  # $HF_TOKEN lands in the log (and in MLflow via log_logs). The rollout
-                  # call below is already safe via the heredoc.
-                  set +x
                   ng_prepare_benchmark {{config.params.extra.nemo_gym.data_prep_params}} {{config.params.extra.nemo_gym.common_params}}
-                  set -x
                   # The rollout command is written to a script and run from it, rather than passed
                   # to `bash -c '...'`. Gym params can legitimately CONTAIN single quotes, which
                   # would close a single-quoted `bash -c` wrapper early; Hydra then receives the
@@ -258,16 +253,20 @@ evaluation:
                   # The heredoc delimiter is QUOTED ('GYM_RUN_EOF') so nothing expands while
                   # writing: $$ and $DUMMY_API_KEY land in the script literally and are expanded
                   # at run time by the shell that executes it, which is what we want.
-                  cat > /tmp/gym_run.sh <<'GYM_RUN_EOF'
-                  echo $$ > /tmp/gym_eval_pgid
+                  # Private mktemp dir, not fixed /tmp names a co-tenant could pre-create or swap.
+                  __gym_tmp=$(mktemp -d)
+                  export GYM_PGID_FILE="$__gym_tmp/pgid"
+                  cat > "$__gym_tmp/run.sh" <<'GYM_RUN_EOF'
+                  echo $$ > "$GYM_PGID_FILE"
                   exec ng_e2e_collect_rollouts {{config.params.extra.nemo_gym.collect_rollout_params}} {{config.params.extra.nemo_gym.common_params}}
                   GYM_RUN_EOF
-                  setsid --wait bash /tmp/gym_run.sh &
+                  setsid --wait bash "$__gym_tmp/run.sh" &
                   __ev=$!
                   __rc=0; wait "$__ev" || __rc=$?
                   echo "Evaluator Gym finished!"
-                  __pg=$(cat /tmp/gym_eval_pgid 2>/dev/null || echo)
+                  __pg=$(cat "$GYM_PGID_FILE" 2>/dev/null || echo)
                   [ -n "$__pg" ] && kill -9 -"$__pg" 2>/dev/null || true
+                  rm -rf "$__gym_tmp"
                   timeout 60 ray stop --force >/dev/null 2>&1 || true
                   # uid-scoped: an unscoped pkill would kill other jobs' Ray daemons.
                   pkill -9 -u "$(id -u)" -f raylet >/dev/null 2>&1 || true
@@ -280,9 +279,9 @@ evaluation:
                 #   config_n3_1m.yaml   -> mrcr_n3_1m_benchmark_simple_agent   (this template)
                 #   config_n3_128k.yaml -> mrcr_n3_128k_benchmark_simple_agent
                 #   config.yaml         -> mrcr_benchmark_simple_agent
+                # No +hf_token=: prepare reads HF_TOKEN from env, and argv is world-readable in /proc.
                 data_prep_params: >-
                   "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/mrcr/config_n3_1m.yaml]"
-                  +hf_token=$HF_TOKEN
                   ++use_cached_prepared_benchmarks=true
                 # NEVER put '#' inside this folded (>-) scalar — it folds to one line and
                 # comments out every override after it.

@@ -19,11 +19,13 @@ from collections.abc import Callable
 
 import torch
 
+from ..extensions import get_cuda_ext_ggml
 from ..utils.calib_utils import GPTQHelper, register_gptq_helper
+from .choice_search import search_choices, search_scratch
 from .common import floored_second_moments, pin_packed_weight
 from .registry import GGML_FORMAT_REGISTRY
 
-__all__ = ["GGMLGPTQHelper", "gptq_group_update"]
+__all__ = ["GGMLGPTQHelper", "compensated_block_hessian", "gptq_group_update"]
 
 
 def gptq_group_update(
@@ -67,6 +69,20 @@ def gptq_group_update(
         weight[:, block_end:].addmm_(errs, h_inv[block_start:block_end, block_end:], alpha=-1)
 
 
+def compensated_block_hessian(h_inv: torch.Tensor, columns: slice) -> torch.Tensor:
+    """The Hessian GPTQ's error on one block of columns is measured by, ``[n, n]``.
+
+    Once the later columns compensate, fixing the block to ``q`` costs ``||(w - q) inv(U_gg)||^2``
+    (the error :func:`gptq_group_update` folds forward), that is ``inv(U_gg^T U_gg)``: the inverse of
+    the block of ``inv(H)`` restricted to the not-yet-quantized columns, where ``U`` is ``h_inv``.
+    """
+    u = h_inv[columns, columns]
+    u_inv = torch.linalg.solve_triangular(
+        u, torch.eye(u.shape[0], device=u.device, dtype=u.dtype), upper=True
+    )
+    return u_inv @ u_inv.T
+
+
 class GGMLGPTQHelper(GPTQHelper):
     """GPTQ for ``ggml``-backend weight quantizers, one GGML block of columns at a time.
 
@@ -75,15 +91,55 @@ class GGMLGPTQHelper(GPTQHelper):
     the columns its outputs depend on most. The raw diagonal is heavy-tailed, so a few outlier columns would
     dominate the search; its root keeps the column ranking at half the log-range.
     The payload GPTQ chose is pinned to the weight quantizer, so later forwards and export use
-    those exact codes rather than encoding the GPTQ'd weight again, which would not return them.
+    those exact codes. For a format that keeps its pinned scales, the weight is left at what GPTQ
+    encoded each block from -- the error-compensated weight before rounding -- rather than at its
+    decoding: under the pinned scales and importance it encodes to the same codes, and QAD trains
+    it from there like an unquantized weight instead of from the grid points.
+    With ``local_hessian_scales``, formats with per-group choices pick each block's by
+    :func:`~.choice_search.search_choices` under :func:`compensated_block_hessian`, and the weight
+    left keeps those codes until QAD changes it.
     """
 
-    def update_weights(self, block_size, perc_damp, weight=None):
+    def updates_on_any_device(self):
+        """Whether the CUDA encoders are available.
+
+        The update reads only the weight, its Hessian and the format's codec, but the PyTorch
+        fallback's scratch grows with ``block_chunk_size``, past the room the update is checked for.
+        """
+        return get_cuda_ext_ggml() is not None
+
+    def update_scratch(self, weight):
+        """The local-Hessian search's scratch, when ``local_hessian_scales`` picks the local scales."""
+        ggml_format = GGML_FORMAT_REGISTRY[self.weight_quantizer.num_bits]
+        if not self._searches(ggml_format):
+            return 0
+        return search_scratch(ggml_format, weight.numel() // weight.shape[-1])
+
+    def _searches(self, ggml_format):
+        """Whether ``local_hessian_scales`` picks this weight's local scales.
+
+        A Hessian no calibration input reached leaves the identity inverse: the plain search.
+        """
+        return self.local_hessian_scales and ggml_format.num_choices > 0 and self.n_samples > 0
+
+    def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
-        super().update_weights(block_size, perc_damp, weight)
+        weight = self.module.weight if weight is None else weight
+        self._weight_dtype = weight.dtype
+        super().update_weights(block_size, perc_damp, weight, device)
+        if self._unrounded is not None:
+            weight.data.copy_(self._unrounded.reshape(weight.shape))
         quantizer = self.weight_quantizer
-        pin_packed_weight(quantizer, quantizer.num_bits, self._packed)
-        self._packed = None
+        importance = None if self._importance is None else self._importance.to(weight.device)
+        # Re-encoding would re-pick searched local scales, so the pin keeps them for this weight.
+        pin_packed_weight(
+            quantizer,
+            quantizer.num_bits,
+            self._packed.to(weight.device),
+            importance,
+            source=weight if self._searched else None,
+        )
+        self._packed = self._unrounded = self._importance = self._searched = None
 
     def _blockwise_update(self, block_size):
         quantizer = self.weight_quantizer
@@ -97,15 +153,38 @@ class GGMLGPTQHelper(GPTQHelper):
         if self.importance_weighted and ggml_format.weighted:
             diagonal = floored_second_moments(self.hessian.diagonal().to(self.weight.device))
             importance = None if diagonal is None else diagonal.sqrt()
+        self._importance = importance
+        # A format that keeps its scales re-encodes the weight it is left with, so encode each
+        # group as that weight will hold it, rounded to its dtype.
+        self._unrounded = (
+            torch.empty_like(self.weight, dtype=self._weight_dtype)
+            if ggml_format.payload_scales is not None
+            else None
+        )
+
+        search = self._searched = self._searches(ggml_format)
 
         def quantize_group(group, columns):
             kwargs = {} if importance is None else {"importance": importance[columns]}
+            dtype = group.dtype
+            if self._unrounded is not None:
+                self._unrounded[:, columns] = group
+                group = self._unrounded[:, columns]
+            if search:
+                kwargs["choices"] = search_choices(
+                    ggml_format,
+                    group,
+                    compensated_block_hessian(self.h_inv, columns)[None],
+                    kwargs.get("importance"),
+                    block_chunk_size,
+                    decode_chunk_size,
+                )
             packed, shape = ggml_format.quantize(
                 group.contiguous(), block_chunk_size=block_chunk_size, **kwargs
             )
             payloads.append(packed)
             return ggml_format.dequantize(
-                packed, shape, dtype=group.dtype, block_chunk_size=decode_chunk_size
+                packed, shape, dtype=dtype, block_chunk_size=decode_chunk_size
             )
 
         gptq_group_update(

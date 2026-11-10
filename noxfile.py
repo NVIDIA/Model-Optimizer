@@ -37,8 +37,6 @@ nox.options.envdir = "/tmp/.nox"
 nox.options.reuse_existing_virtualenvs = True
 
 TORCH_VERSIONS = {
-    "torch_28": "torchvision~=0.23.0",
-    "torch_29": "torchvision~=0.24.0",
     "torch_210": "torchvision~=0.25.0",
     "torch_211": "torchvision~=0.26.0",
     "torch_212": "torchvision~=0.27.0",
@@ -63,12 +61,16 @@ def _cov_args():
 _CPU_ONLY_ENV = {"CUDA_VISIBLE_DEVICES": ""}
 
 
-@nox.session(python=["3.10", "3.11", "3.12", "3.13", "3.14"])
+@nox.session(python=["3.11", "3.12", "3.13", "3.14"])
 @nox.parametrize("tf_ver", [nox.param(k, id=k) for k in TRANSFORMERS_VERSIONS])
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
 def unit(session, torch_ver, tf_ver):
     """Unit tests — parametrized over torch and transformers versions."""
-    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]")
+    # compressed-tensors runs the real-library tests of on-the-fly expert decompression; it goes in
+    # with the torchvision pin so the resolver keeps the leg's torch. Not in dev-test: the
+    # transformers-free partial_unit(torch) lane installs that extra, and compressed-tensors pulls in
+    # transformers.
+    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]", "compressed-tensors")
     tf_pins = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pins:
         session.install(*tf_pins)
@@ -218,6 +220,9 @@ def gpu(session):
     _install_built_from_source(session, "fast_hadamard_transform")
     session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
     _install_built_from_source(session, "mamba_ssm", "causal_conv1d")
+    # quack-kernels (via mamba-ssm) pins an older nvidia-cutlass-dsl than the image's
+    # nvidia-cutlass-operators needs, and Inductor (torch >= 2.14) imports it to compile any matmul.
+    session.run("python", "-m", "pip", "uninstall", "-y", "nvidia-cutlass-operators")
     # Every wheel is built: CI saves the wheelhouse only then, so a run that stopped halfway cannot
     # freeze a partial wheelhouse under the cache key.
     with open(os.path.join(_wheelhouse(), ".complete"), "w"):
@@ -225,14 +230,14 @@ def gpu(session):
     session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
 
 
-# Container: nvcr.io/nvidia/nemo:26.08 or later
+# Container: nvcr.io/nvidia/nemo:26.10 or later
 @nox.session(venv_backend="none")
 def gpu_megatron(session):
     # NeMo containers have transformers 5.x but a system-wide installed trtllm which does not support it causing import errors
     session.run("pip", "uninstall", "-y", "tensorrt_llm")
     # Pre-installed nvidia-modelopt shadows the editable install
     session.run("pip", "uninstall", "-y", "nvidia-modelopt")
-    session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test,dev-fla]")
+    session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
     session.run("python", "-m", "pytest", "tests/gpu_megatron", *_cov_args())
 
 

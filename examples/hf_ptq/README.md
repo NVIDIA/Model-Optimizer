@@ -139,7 +139,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>10.</sup>GPT-OSS ships with native MXFP4 weights; NVFP4 export is produced via the closed-form `--cast_mxfp4_to_nvfp4` cast (see [MXFP4 → NVFP4 cast](#mxfp4--nvfp4-cast-for-gpt-oss)).* \
 > *<sup>11.</sup>Vision-language model (VLM): by default, only the language model is quantized while the vision encoder is kept in high precision. Pass `--vlm` to the shell script (see [VLM quantization](#vlm-quantization)).* \
 > *<sup>12.</sup>For VLMs, `int8_smoothquant` only supports TensorRT-LLM checkpoint export and is not compatible with the TensorRT-LLM torch backend.* \
-> *<sup>13.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).* \
+> *<sup>13.</sup>The Nemotron VL model types `NemotronH_Nano_VL_V2`, `NemotronH_Nano_Omni_Reasoning_V3`, `nemotron_h_omni`, `Llama_Nemotron_Nano_VL` and `nemotron_parse` calibrate with image-text pairs by default; other VLMs need `--calib_with_images`. The default does not apply with `--use_fsdp2`, where these types need the flag too, or with an AutoQuantize recipe, whose calibration is text-only. See [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).* \
 > *<sup>14.</sup>Qwen3-VL and dense Qwen3.5 VLM checkpoints support opt-in FP8 vision encoder quantization through model-specific recipes. Vision Linear layers, including primary and deepstack merger Linears where present, are quantized; patch embedding and vision-attention BMMs remain in high precision. MoE variants are not validated by these recipes.* \
 > *<sup>15.</sup>Kimi K3 uses the calibration-free [streaming converter](../kimi/README.md) because its routed experts are released as packed MXFP4 tensors; it does not use the in-memory `hf_ptq.py` flow.*
 
@@ -174,6 +174,8 @@ scripts/huggingface_example.sh --model $HF_PATH --quant <QFORMAT> --tp [1|2|4|8]
 > *If the Huggingface model calibration fails on a multi-GPU system due to mismatched tensor placement, please try setting CUDA_VISIBLE_DEVICES to a smaller number.*
 
 > *FP8 calibration over a large model with limited GPU memory is not recommended but possible with the [accelerate](https://huggingface.co/docs/accelerate/en/usage_guides/big_modeling) package. Please tune the device_map setting in [`example_utils.py`](./example_utils.py) if needed for model loading and the calibration process can be slow.*
+
+> *Models with linear-attention layers (Qwen3-Next, Qwen3.5, Qwen3.8, GLM-5.x Flash, Kimi Linear, OLMo Hybrid) run those layers through Transformers' slow PyTorch reference kernels unless the [flash-linear-attention](https://github.com/fla-org/flash-linear-attention) kernels are installed: `pip install "fla-core>=0.5.2"` (earlier versions compute packed Gated DeltaNet sequences wrongly). Install it only where these models run on GPU, since Transformers then uses the kernels for CPU tensors too, and they fail there. On GLM-5.3-Flash over 4x GB300 they more than halved layerwise GPTQ calibration, mostly because the fused kernels need far less memory per sample, so a larger calibration batch fits.*
 
 > *Huggingface models trained with `modelopt.torch.speculative` can be used as regular Huggingface models in PTQ. Note: there is a known issue with Huggingface models loaded across multiple GPUs for inference (i.e., "Expected all tensors to be on the same device, but found at least two devices..."). When encountered this error in PTQ of speculative decoding models, try reducing the number of GPUs used.*
 
@@ -608,9 +610,17 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 
 ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
 
-> *KV-cache AutoQuantize recipes are not supported with `--use_fsdp2` and are rejected before model loading. Distributed KV sensitivity scoring, selection, and checkpoint writes must be synchronized before this combination can be enabled safely. Existing weight AutoQuantize recipes retain their previous experimental warning with FSDP2.*
+> *Weight and KV-cache AutoQuantize with `--use_fsdp2` are experimental, and refused when a candidate format is one of those refused below.*
 
 > *Nemotron-H checkpoints containing MTP weights are not supported with `--use_fsdp2` and are rejected before distributed model loading. Remove `--use_fsdp2` to load and calibrate the MTP modules; the distributed loader does not construct them.*
+
+> *AWQ calibration (`awq_lite`, `awq_full`), as the AWQ formats and recipes use, AutoQuantize candidates included, is not supported with `--use_fsdp2` on more than one rank and is rejected before distributed model loading: each rank would fold its own smoothing scale into its weight shard. Drop `--use_fsdp2` (the single-process `device_map` still spreads the model over all the GPUs), run on one rank, or use a non-AWQ format.*
+
+> *With `--use_fsdp2` on more than one GPU, calibration other than AWQ that keeps its statistics on each rank is refused when quantization starts: SVDQuant (`--qformat nvfp4_svdquant`), local Hessian (`nvfp4_w4a4_weight_local_hessian`), imatrix (the `iq*` formats), the recipes that use them, and AutoQuantize recipes with such a candidate format. Each rank calibrates on its own share of the data, so the ranks would calibrate their shards of a weight differently. Run these without `--use_fsdp2`. For AWQ, see the note above.*
+
+> *`nvfp4_awq_clip` still works with `--use_fsdp2` on more than one GPU: it calibrates with AWQ-Clip alone, which folds no smoothing scale into the weights, and its clip search averages each candidate clip's loss over the ranks, so every rank takes the same clip.*
+
+> *On more than one GPU, with `--use_fsdp2` or in any other `torchrun` launch of several ranks, a calibration batch that runs out of memory is not retried in smaller pieces, since a rank that runs out of memory partway through a forward would leave the others waiting in its collectives. With `--batch_size 0`, each rank estimates the batch size from one forward and the ranks use the smallest, which is not probed for out-of-memory either: set `--batch_size` if calibration runs out of memory.*
 
 ### Usage
 
@@ -642,7 +652,47 @@ torchrun \
 
 See [Recipe-based Quantization](#recipe-based-quantization) for the recipe format and built-in recipe names. The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
 
+[AutoQuantize recipes](#autoquantize) use the same `torchrun` launch. With FSDP2, `--batch_size` is per rank and defaults to 1; recipe `score_size` is global. Use shared checkpoint directories and restore all `rank<N>.pth` files together, with the same world size, model, recipe, and data.
+
+Vision-language checkpoints keep their conditional-generation architecture and vision tower on this path. They calibrate on text by default; `--calib_with_images` calibrates the full model on image-text samples split across ranks, and is required for a model whose forward needs images. The vision tower is quantized only if the recipe enables it. For Qwen3.5 (`qwen3_5`, `qwen3_5_moe`) mixed-format export, linear-attention QKV/Z and B/A projections retain their separate runtime-fusion groups. Weight AutoQuantize with FSDP2 remains experimental.
+
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
+
+> *Set `MODELOPT_FSDP2_EXPORT=nogather` to move each tensor once, to the one rank that writes it, instead of all-gathering each FSDP2 unit on every rank as the default export does. Fused MoE experts then stay sharded, and a conversion mapping that splits or merges tensors, which the default export refuses, is reversed as a single-process export reverses it. It does not overwrite a checkpoint already in the export directory.*
+
+## Expert-Parallel Post-Training Quantization for MoE Models
+
+Under `torchrun`, `hf_ptq.py` shards an MoE model's routed experts across the ranks (expert parallelism) instead of loading the whole model on every GPU. Each rank holds `num_experts / ep_degree` experts and calibrates on its own shard of the calibration data. An all-to-all sends every token to the rank that owns its expert, so each expert's quantizers see the tokens routed to it from all ranks. The dense (non-expert) part is replicated on every rank, or FSDP2-sharded when it does not fit one GPU. Each rank then writes its share of the unified HF checkpoint, without gathering the model onto one GPU.
+
+A model can be expert-parallel when its config declares a `base_model_ep_plan`. transformers ships one for several MoEs, and ModelOpt supplies the plan or an adapter for others (see the `ep_spec` entries in `modelopt/torch/models/*/specs.py`). Expert parallelism needs transformers 5.7 or newer, and some models a newer release; a run that cannot be expert-parallel is refused before loading.
+
+```bash
+torchrun --nproc_per_node=<num_gpus_per_node> \
+    hf_ptq.py \
+    --pyt_ckpt_path <path_to_moe_model> \
+    --recipe general/ptq/nvfp4_default-kv_fp8 \
+    --calib_size <num_calib_samples> \
+    --export_path <export_path>
+```
+
+To run across nodes, add the `--nnodes`, `--node_rank`, `--master_addr` and `--master_port` flags shown in [Manual (run on each node)](#manual-run-on-each-node). `--calib_size` is the total over all ranks. The export directory and the Hugging Face cache (`HF_HOME`) must be on storage every node can see: every rank writes its share of the checkpoint, and rank 0 downloads a Hub model for the others to read.
+
+Under Slurm, [`slurm/multinode_ep_ptq.slurm`](./slurm/multinode_ep_ptq.slurm) is a ready-to-run example that quantizes Qwen3-235B-A22B to NVFP4 across nodes. Edit its `CONFIG` block and submit:
+
+```bash
+sbatch --nodes=2 slurm/multinode_ep_ptq.slurm
+```
+
+Two environment variables override the automatic distribution plan:
+
+| Variable | Default | Effect |
+| :--- | :--- | :--- |
+| `MODELOPT_EP_DEGREE` | `auto` | Expert-parallel degree. `auto` picks the largest degree that divides both the routed-expert count and the world size, or 1 for a model whose spec refuses expert parallelism or needs a newer transformers. Below the world size, each group of `MODELOPT_EP_DEGREE` ranks holds a full set of experts, and the groups calibrate on different data. |
+| `MODELOPT_FSDP_SIZE` | `auto` | Whether to FSDP2-shard the dense part. `auto` shards it when it would take more than 60% of one GPU's memory; `world` always shards it; `1` replicates it. With `MODELOPT_EP_DEGREE` below the world size the export cannot write a sharded dense part yet, so such a run fails before loading. |
+
+On more than one rank, `max` and `mse` calibration have run on GPUs; `gptq`, `smoothquant`, `awq_clip` and `nvfp4_act_headroom` are supported but not yet run on GPUs; `awq_lite`, `awq_full`, `svdquant`, `local_hessian` and `imatrix`, and `max` or `mse` with `distributed_sync` off, are refused before quantizing; and an LSQ recipe runs with a warning, since nothing has checked its learnable scales across ranks yet.
+
+A run that cannot shard the model the way the plan asks fails before loading, rather than loading the whole model on every rank. `--use_fsdp2` skips expert parallelism and uses the [FSDP2 path](#multi-node-post-training-quantization-with-fsdp2) instead. Expert parallelism refuses GPT-OSS and Llama-4: their experts are stored transposed, which the expert-parallel export cannot write yet. `--use_fsdp2` refuses their released checkpoints too (GPT-OSS's carry an MXFP4 `quantization_config`, and Llama-4's are multimodal), so quantize those in a single process (without `torchrun`), which spreads the model over the node's GPUs.
 
 ## Evaluate Accuracy
 

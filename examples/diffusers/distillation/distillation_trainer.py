@@ -28,8 +28,6 @@ Usage:
     python distillation_trainer.py --config configs/distillation_example.yaml
 """
 
-from __future__ import annotations
-
 import argparse
 import gc
 import json
@@ -1504,6 +1502,7 @@ class DistillationTrainer(LtxvTrainer):
         # Calculate how many raw steps to skip and how many to run
         total_raw_steps = cfg.optimization.steps * cfg.optimization.gradient_accumulation_steps
         skip_raw_steps = resume_step * cfg.optimization.gradient_accumulation_steps
+        saved_this_step = False
 
         with progress:
             # Initial validation before training starts (skip if resuming)
@@ -1616,6 +1615,7 @@ class DistillationTrainer(LtxvTrainer):
                         )
                         if not saved_this_step:
                             self._save_training_state()
+                            saved_this_step = True
                         # Break out of the training loop; post-loop code
                         # will collect stats and return.
                         break
@@ -1700,8 +1700,9 @@ class DistillationTrainer(LtxvTrainer):
             global_batch_size=cfg.optimization.batch_size * self._accelerator.num_processes,
         )
 
-        # Save final training state (for potential resume)
-        self._save_training_state()
+        # Interval and time-limit saves may already have checkpointed the final step.
+        if not saved_this_step:
+            self._save_training_state()
 
         # Save inference-ready model weights (standalone safetensors file)
         saved_path = self._save_checkpoint()

@@ -62,6 +62,35 @@ def export_config_producer() -> dict[str, str]:
     return {"name": "modelopt", "version": mo_version}
 
 
+def _check_methods_and_backends(sparse_cfg: dict) -> tuple[set[str], set[str]]:
+    """Return the methods and backends of the layer configs, rejecting mixes conversion can't apply.
+
+    It reads only ``sparse_cfg``, so ``mts.sparsify`` can call it before changing the model.
+    """
+    # Collect methods and backends only from layer configs (identified by having a "method" key).
+    # Other dict entries (e.g. "calibration") are not layer configs.
+    layer_cfgs = [v for v in sparse_cfg.values() if isinstance(v, dict) and "method" in v]
+    methods = {v["method"] for v in layer_cfgs}
+    backends = {v.get("backend", "pytorch") for v in layer_cfgs}
+
+    if "vsa" in methods:
+        # Reject mixed VSA + non-VSA configs (VSA patches SDPA globally per-module,
+        # while softmax-patching methods need attn_implementation="eager").
+        non_vsa_methods = methods - {"vsa"}
+        if non_vsa_methods:
+            raise ValueError(
+                f"Cannot mix VSA with other sparse attention methods ({non_vsa_methods}). "
+                f"VSA patches F.scaled_dot_product_attention, which is incompatible "
+                f"with softmax-patching or triton methods."
+            )
+    elif "triton" in backends and "pytorch" in backends:
+        raise ValueError(
+            "Mixed backends ('triton' and 'pytorch') in the same model are not "
+            "supported. All sparse attention layers must use the same backend."
+        )
+    return methods, backends
+
+
 def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) -> None:
     """Set the correct attn_implementation based on the sparse attention method/backend.
 
@@ -74,39 +103,18 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
       directly in ``SparseAttentionModule.forward()``, so no ``attn_implementation``
       change is needed.
 
-    This is called automatically during ``mtsa.sparsify()`` so users never need
+    This is called automatically during ``mts.sparsify()`` so users never need
     to manually set ``attn_implementation``.
     """
     sparse_cfg = config.sparse_cfg if hasattr(config, "sparse_cfg") else {}
-
-    # Collect methods and backends only from layer configs (identified by having a "method" key).
-    # Other dict entries (e.g. "calibration") are not layer configs.
-    layer_cfgs = [v for v in sparse_cfg.values() if isinstance(v, dict) and "method" in v]
-    methods = {v.get("method") for v in layer_cfgs}
-    backends = {v.get("backend", "pytorch") for v in layer_cfgs}
+    methods, backends = _check_methods_and_backends(sparse_cfg)
 
     # VSA patches F.scaled_dot_product_attention directly — it does not change
     # attn_implementation.  Skip the rest for VSA-only configs.
     if methods == {"vsa"}:
         return
 
-    # Reject mixed VSA + non-VSA configs (VSA patches SDPA globally per-module,
-    # while softmax-patching methods need attn_implementation="eager").
-    non_vsa_methods = methods - {"vsa"}
-    if "vsa" in methods and non_vsa_methods:
-        raise ValueError(
-            f"Cannot mix VSA with other sparse attention methods ({non_vsa_methods}). "
-            f"VSA patches F.scaled_dot_product_attention, which is incompatible "
-            f"with softmax-patching or triton methods."
-        )
-
     model_config = getattr(model, "config", None)
-
-    if "triton" in backends and "pytorch" in backends:
-        raise ValueError(
-            "Mixed backends ('triton' and 'pytorch') in the same model are not "
-            "supported. All sparse attention layers must use the same backend."
-        )
 
     if "triton" in backends:
         from modelopt.torch.kernels.sparsity.attention import register_triton_attention
@@ -354,6 +362,21 @@ def update_sparse_attention_metadata(
     )
 
 
+def get_sparse_attention_mode_state(
+    model: nn.Module,
+) -> tuple[SparseAttentionConfig, MetadataDict] | None:
+    """Return the config and metadata of the latest ``sparse_attention`` mode applied to ``model``."""
+    # Wrappers and containers of converted models have no mode state of their own.
+    if not hasattr(model, ModeloptStateManager._state_key):
+        return None
+    mode_states = [
+        (config, metadata)
+        for mode, config, metadata in ModeloptStateManager(model).modes_with_states()
+        if str(mode) == "sparse_attention"
+    ]
+    return mode_states[-1] if mode_states else None
+
+
 def _get_sparse_softmax_export_config(module: SparseAttentionModule) -> dict[str, Any] | None:
     """Return N:M sparse-softmax export metadata for one sparse attention module."""
     method_config = getattr(module, "_method_config", {})
@@ -372,7 +395,9 @@ def _get_sparse_softmax_export_config(module: SparseAttentionModule) -> dict[str
     return sparse_softmax_config
 
 
-def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
+def export_sparse_attention_config(
+    model: nn.Module, *, for_diffusion: bool = False
+) -> dict[str, Any] | None:
     """Extract sparse attention config for export to config.json.
 
     Extracts calibrated skip-softmax parameters and N:M sparse-softmax metadata
@@ -384,6 +409,10 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
 
     Args:
         model: Model with sparse attention applied
+        for_diffusion: Emit the single-phase schema read by the TRT-LLM VisualGen
+            runtime: one ``threshold_scale_factor.coefficients`` block and a scalar
+            ``target_sparsity``. The default is the LLM schema, with per-phase
+            (``prefill``/``decode``) blocks and a ``{phase: ratio}`` dict.
 
     Returns:
         Dictionary with sparse attention config for HuggingFace config.json export.
@@ -473,6 +502,21 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
         skip_group["threshold_scale_factor"] = export_threshold_scale_factor(calibration_params)
         if target_sparse_ratio is not None:
             skip_group["target_sparsity"] = target_sparse_ratio
+        if for_diffusion:
+            # Diffusion calibrates a single (prefill) phase; VisualGen rejects phase-keyed dicts.
+            tsf = skip_group["threshold_scale_factor"]
+            phases = {p: tsf.pop(p) for p in ("prefill", "decode") if p in tsf}
+            if phases:
+                tsf["coefficients"] = phases.get("prefill") or next(iter(phases.values()))
+            ratio = skip_group.get("target_sparsity")
+            if isinstance(ratio, dict):
+                scalar = (
+                    ratio["prefill"] if "prefill" in ratio else next(iter(ratio.values()), None)
+                )
+                if scalar is None:
+                    del skip_group["target_sparsity"]  # VisualGen needs a scalar
+                else:
+                    skip_group["target_sparsity"] = scalar
         config_groups[f"group_{group_idx}"] = skip_group
         group_idx += 1
 
@@ -502,8 +546,9 @@ def disable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Ca
             For example: "*lm_head*", "*layer_0*", etc.
 
     Example:
+        >>> import modelopt.torch.sparsity as mts
         >>> import modelopt.torch.sparsity.attention_sparsity as sparse_attn
-        >>> model = sparse_attn.sparsify(model, config)
+        >>> model = mts.sparsify(model, config)
         >>> # Disable sparse attention for lm_head
         >>> sparse_attn.disable_sparse_attention(model, "*lm_head*")
     """
@@ -529,8 +574,9 @@ def enable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Cal
             For example: "*attention*", "*attn*", etc.
 
     Example:
+        >>> import modelopt.torch.sparsity as mts
         >>> import modelopt.torch.sparsity.attention_sparsity as sparse_attn
-        >>> model = sparse_attn.sparsify(model, config)
+        >>> model = mts.sparsify(model, config)
         >>> # Re-enable sparse attention for all attention modules
         >>> sparse_attn.enable_sparse_attention(model, "*attention*")
     """

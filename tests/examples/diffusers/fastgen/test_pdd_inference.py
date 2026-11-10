@@ -15,8 +15,6 @@
 
 """Diffusers serialization seam for a trained Qwen-Image PDD projection."""
 
-from __future__ import annotations
-
 import pathlib
 import sys
 
