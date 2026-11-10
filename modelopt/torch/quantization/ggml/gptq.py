@@ -147,7 +147,7 @@ class GGMLGPTQHelper(GPTQHelper):
         The update reads only the weight, its Hessian and the format's codec, but the PyTorch
         fallback's scratch grows with ``block_chunk_size``, past the room the update is checked for.
         """
-        return get_cuda_ext_ggml() is not None
+        return _GSQ_CAPTURE.get() is None and get_cuda_ext_ggml() is not None
 
     def update_scratch(self, weight):
         """The scratch of the row gain, and of the local-Hessian search when it picks the local scales."""
@@ -198,7 +198,7 @@ class GGMLGPTQHelper(GPTQHelper):
             search_scales=search_scales,
         )
         if capture is not None:
-            capture(self, teacher, covariance, self._packed)
+            capture(self, teacher, covariance, self._packed.to(weight.device))
         self._packed = self._unrounded = self._importance = self._searched = None
         self._search_scales = None
         target = weight.device if device is None else torch.device(device)
