@@ -1292,6 +1292,15 @@ class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
         (the GGML IQ1 and IQ2 formats) weight it by the square root of the Hessian diagonal,
         llama.cpp's imatrix statistic. Other formats ignore it.""",
     )
+    local_hessian_scales: bool = ModeloptField(
+        default=False,
+        title="Pick each block's local scales by the GPTQ-compensated block Hessian.",
+        description="""When True, formats with per-group choices (the GGML IQ1 and IQ2 local
+        scales) pick them, block by block, by the layer-output error GPTQ incurs for that block
+        once the later columns compensate -- as ``local_hessian`` does with the plain block
+        Hessian -- instead of by the (importance-weighted) squared error. Other formats ignore
+        it.""",
+    )
 
 
 class ImatrixCalibConfig(QuantizeAlgorithmConfig):

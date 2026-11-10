@@ -135,7 +135,7 @@ def test_a_sharded_nemotron_vl_model_previews_in_lockstep(monkeypatch, plan, loc
     monkeypatch.setitem(sys.modules, "vlm_utils", vlm_utils)
     model = _PreviewModel(plan)
 
-    example_utils.run_nemotron_vl_preview(
+    example_utils.run_vlm_preview(
         model, get_tiny_tokenizer(), torch.tensor([[1, 2, 3]]), _CKPT, "stage", allow_fallback=True
     )
 
