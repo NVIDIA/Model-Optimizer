@@ -425,6 +425,8 @@ def _check_auto_quantize_shard_args(
             index, count = (int(v) for v in args.auto_quantize_format_shard.split("/"))
         except ValueError:
             parser.error("--auto_quantize_format_shard must be INDEX/COUNT, e.g. 0/5.")
+        if not 0 <= index < count:
+            parser.error("--auto_quantize_format_shard needs 0 <= INDEX < COUNT.")
         args.auto_quantize_format_shard = (index, count)
     if (args.auto_quantize_format_shard is not None or args.auto_quantize_merge_shards) and not (
         args.auto_quantize_checkpoint and _recipe_is_auto_quantize(args.recipe)

@@ -310,6 +310,7 @@ def test_auto_quantize_format_shard_flags(monkeypatch):
 
     for bad in (
         ["--auto_quantize_format_shard", "1-2", "--batch_size", "1"],
+        ["--auto_quantize_format_shard", "2/2", "--batch_size", "1"],  # before loading the model
         ["--auto_quantize_format_shard", "1/2"],  # a probed batch size can differ per shard
         [
             "--auto_quantize_format_shard",
