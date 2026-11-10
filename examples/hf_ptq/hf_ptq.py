@@ -1057,9 +1057,6 @@ def quantize_main(
         export_quantized(args, full_model, language_model, model_type)
         return
 
-    # Detect if this is a Nemotron VL model using architecture-based detection.
-    is_nemotron_vl_model = is_nemotron_vl(full_model)
-
     # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
     recipe = None
     if args.recipe is not None:

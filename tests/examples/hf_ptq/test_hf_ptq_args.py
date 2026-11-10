@@ -206,7 +206,6 @@ def test_save_quantized_state_happens_after_mxfp4_to_nvfp4_cast(monkeypatch):
     )
     args.verbose = False
 
-    monkeypatch.setattr(hf_ptq, "is_nemotron_vl", lambda model: False)
     monkeypatch.setattr(
         hf_ptq, "make_calib_dataloader", lambda *a, **k: (object(), None)
     )
