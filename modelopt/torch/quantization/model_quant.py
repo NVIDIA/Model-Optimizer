@@ -1391,11 +1391,24 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
     seen = {}
     storage_ranges = {}
     for module in model.modules():
-        if not isinstance(module, QuantModule):
-            continue
+        uses = (
+            module.iter_weights_for_calibration()
+            if isinstance(module, QuantModule)
+            else ((parameter, None) for parameter in module.parameters(recurse=False))
+        )
         validated = False
-        for weight, quantizer in module._iter_weights_for_initialization(trainable_only):
-            if not validated:
+        for weight, quantizer in uses:
+            members = (
+                list(quantizer)
+                if isinstance(quantizer, SequentialQuantizer)
+                else [quantizer]
+                if quantizer is not None
+                else []
+            )
+            selected = (not trainable_only or weight.requires_grad) and any(
+                q.is_enabled and q._if_quant for q in members
+            )
+            if selected and not validated:
                 module._validate_fold_weight()
                 validated = True
             if (
@@ -1403,9 +1416,12 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
                 or not weight.is_floating_point()
                 or weight.is_meta
             ):
-                raise ValueError("Weight initialization requires materialized floating weights.")
-            members = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
-            for member in members:
+                if selected:
+                    raise ValueError(
+                        "Weight initialization requires materialized floating weights."
+                    )
+                continue
+            for member in members if selected else []:
                 if not member.fake_quant or member._if_calib:
                     raise ValueError(
                         "Restore calibrated fake quantizers before weight initialization."
@@ -1415,10 +1431,18 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
                     scale.is_meta or not bool((torch.isfinite(scale) & (scale != 0)).all())
                 ):
                     raise ValueError("Weight pre-quantization scales must be finite and nonzero.")
+                if scale is not None:
+                    local = weight.to_local() if hasattr(weight, "to_local") else weight
+                    try:
+                        if torch.broadcast_shapes(local.shape, scale.shape) != local.shape:
+                            raise ValueError("Pre-scale broadcasting changes the weight shape.")
+                    except RuntimeError as error:
+                        raise ValueError("Pre-scale must broadcast to the weight shape.") from error
             if weight.numel():
-                key = module._weight_initialization_key(weight)
+                key = QuantModule._weight_initialization_key(weight)
+                quantizer = quantizer if selected else None
                 if key in seen and seen[key] is not quantizer:
-                    raise ValueError("A shared weight has different weight quantizers.")
+                    raise ValueError("A shared weight has incompatible initialization uses.")
                 if key not in seen:
                     device, pointer, offset, shape, stride, _ = key
                     start = offset * weight.element_size()
@@ -1426,11 +1450,14 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
                         offset + sum((size - 1) * step for size, step in zip(shape, stride)) + 1
                     ) * weight.element_size()
                     spans = storage_ranges.setdefault((device, pointer), [])
-                    if any(start < high and low < end for low, high in spans):
+                    if any(
+                        start < high and low < end and (selected or other is not None)
+                        for low, high, other in spans
+                    ):
                         raise ValueError(
                             "Overlapping weight views cannot be initialized separately."
                         )
-                    spans.append((start, end))
+                    spans.append((start, end, quantizer))
                 seen[key] = quantizer
     invalidate_weight_cache(model)
     try:

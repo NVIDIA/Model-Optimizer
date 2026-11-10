@@ -85,28 +85,38 @@ def test_initialize_qdq_weights_undoes_pre_scale():
     assert quantizer.is_enabled
 
 
-@pytest.mark.parametrize("transpose", [False, True])
-def test_initialize_qdq_weights_refuses_ambiguous_alias_before_changes(transpose):
+@pytest.mark.parametrize("alias", ["quantized", "transpose", "frozen", "disabled", "unquantized"])
+def test_initialize_qdq_weights_refuses_ambiguous_alias_before_changes(alias):
     model = nn.ModuleList([nn.Linear(16, 16), nn.Linear(16, 16)])
-    model[1].weight = nn.Parameter(model[0].weight.T) if transpose else model[0].weight
+    model[1].weight = nn.Parameter(model[0].weight.T if alias == "transpose" else model[0].weight)
     mtq.quantize(
         model, mtq.INT8_WEIGHT_ONLY_CFG, lambda modules: [m(torch.randn(2, 16)) for m in modules]
     )
+    if alias == "frozen":
+        model[1].weight.requires_grad_(False)
+    elif alias == "disabled":
+        model[1].weight_quantizer.disable()
+    elif alias == "unquantized":
+        weight = model[1].weight
+        model[1] = nn.Linear(16, 16)
+        model[1].weight = weight
     before = {name: p.detach().clone() for name, p in model.named_parameters()}
     with pytest.raises(ValueError):
-        mtq.initialize_qdq_weights(model)
+        mtq.initialize_qdq_weights(model, trainable_only=True)
     for name, p in model.named_parameters():
         torch.testing.assert_close(p, before[name], rtol=0, atol=0)
 
 
-def test_initialize_qdq_weights_validates_all_scales_before_changes():
+@pytest.mark.parametrize("scale", [torch.zeros(16), torch.ones(8), torch.ones(2, 16, 16)])
+def test_initialize_qdq_weights_validates_all_scales_before_changes(scale):
     model = nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16))
     mtq.quantize(model, mtq.INT8_WEIGHT_ONLY_CFG, lambda m: m(torch.randn(2, 16)))
-    model[1].weight_quantizer.pre_quant_scale = torch.zeros(16)
-    before = model[0].weight.detach().clone()
+    model[1].weight_quantizer.pre_quant_scale = scale
+    before = {name: p.detach().clone() for name, p in model.named_parameters()}
     with pytest.raises(ValueError):
         mtq.initialize_qdq_weights(model)
-    torch.testing.assert_close(model[0].weight, before, rtol=0, atol=0)
+    for name, parameter in model.named_parameters():
+        torch.testing.assert_close(parameter, before[name], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("rotate_back", [False, True])
