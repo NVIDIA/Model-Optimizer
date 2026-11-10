@@ -7,7 +7,7 @@ and holds shared configuration.
 
 ```text
 .agents/
-├── skills → ../plugins/modelopt/skills
+├── skills → ../skills
 ├── plugins/
 │   └── marketplace.json   # Codex marketplace
 ├── scripts/                # shared helper scripts (sync-upstream-skills.sh, …)
@@ -20,9 +20,11 @@ plugins/modelopt/
 ├── .claude-plugin/
 ├── .codex-plugin/
 ├── agents/                 # Claude Code subagent definitions
-└── skills/                 # canonical SKILL.md files
-    ├── common/             # shared skill support files
-    └── <skill-name>/SKILL.md
+└── skills → ../../skills
+
+skills/                     # canonical skill content
+├── common/                 # shared support
+└── modelopt-<name>/SKILL.md
 ```
 
 ## How each agent finds these
@@ -32,8 +34,7 @@ a copy:
 
 - **Claude Code** only auto-discovers skills under `.claude/skills/`, so
   `.claude/skills/` holds relative symlinks into `.agents/skills/`.
-- **Repository agents** use `.agents/skills`, a relative symlink into the
-  plugin.
+- **Repository agents** use `.agents/skills`, a relative symlink to root `skills/`.
 - **Claude Code and Codex plugins** load `plugins/modelopt/skills` directly.
 - **Claude Code** loads subagents from `plugins/modelopt/agents/` through the
   plugin, while `.claude/agents/*.md` symlinks expose them to repository users.
@@ -42,14 +43,15 @@ a copy:
 
 ## Editing rules
 
-- **Always edit skills under `plugins/modelopt/skills/`**.
+- **Always edit skills under `skills/`**.
 - Claude Code subagents belong in `plugins/modelopt/agents/`, not
   `.claude/agents/`.
 - Codex custom roles belong in `.codex/agents/`.
-- Vendored-verbatim skills (`launching-evals`, `accessing-mlflow`) are managed
-  by `.agents/scripts/sync-upstream-skills.sh` — do not modify by hand.
-- New skills go in `plugins/modelopt/skills/<skill-name>/SKILL.md`.
-- Shared support files go in `plugins/modelopt/skills/common/`.
+- Upstream-derived skills (`modelopt-launching-evals`, `modelopt-accessing-mlflow`)
+  are managed by `.agents/scripts/sync-upstream-skills.sh`, which reapplies local
+  naming, loading guidance, and reference changes.
+- New skills go in `skills/<skill-name>/SKILL.md`.
+- Shared support files go in `skills/common/`.
 
 ## Review baseline
 

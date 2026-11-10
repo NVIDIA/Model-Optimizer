@@ -16,24 +16,21 @@
 
 # Re-vendor upstream Claude skills from NVIDIA-NeMo/Evaluator at a pinned SHA.
 #
-# Scope: only skills we vendor verbatim (launching-evals, accessing-mlflow).
-# The `evaluation` skill is a *modified* fork of upstream nel-assistant and is
+# Scope: upstream-derived launching-evals and accessing-mlflow.
+# The `modelopt-evaluation` skill is a *modified* fork of upstream nel-assistant and is
 # NOT managed by this script — update it manually when pulling upstream changes.
 #
 # Usage:
 #   .agents/scripts/sync-upstream-skills.sh            # re-vendor at the pinned SHA
 #   UPSTREAM_SHA=<sha> .agents/scripts/sync-upstream-skills.sh   # bump to a new SHA
 #
-# Requires: gh, base64, awk. Run from the repo root.
+# Requires: gh, base64, awk, python3. Run from the repo root.
 #
-# The script overwrites plugins/modelopt/skills/<skill>/ through the
-# .agents/skills compatibility symlink and
-# re-applies our provenance lines into each SKILL.md frontmatter. If you have
-# local changes to a vendored skill, they will be lost — that is expected,
-# since vendored-verbatim skills should not be modified locally.
+# Overwrite upstream files and reapply local naming/loading adaptations.
+# Preserve locally owned evals and skill cards; review upstream file removals manually.
 #
 # Note: .claude/skills/ (and other agent-specific skill dirs) are symlinks to
-# plugins/modelopt/skills/ — see .agents/README.md.
+# skills/ — see .agents/README.md.
 
 set -euo pipefail
 
@@ -44,7 +41,7 @@ SHORT_SHA="${SHA:0:7}"
 
 UPSTREAM_REPO="NVIDIA-NeMo/Evaluator"
 UPSTREAM_BASE="packages/nemo-evaluator-launcher/.claude/skills"
-DEST_BASE=".agents/skills"
+DEST_BASE="skills"
 
 if [[ ! -d "$DEST_BASE" ]]; then
     echo "error: run from the repo root (expected $DEST_BASE/ to exist)" >&2
@@ -85,7 +82,7 @@ fetch_skill_recursive() {
         fi
 
         if [[ "$type" == "file" ]]; then
-            local dst="$DEST_BASE/$skill/$rel_path"
+            local dst="$DEST_BASE/modelopt-$skill/$rel_path"
             echo "  fetch: $dst"
             fetch_file "$UPSTREAM_BASE/$skill/$rel_path" "$dst"
         elif [[ "$type" == "dir" ]]; then
@@ -99,7 +96,7 @@ fetch_skill_recursive() {
 inject_provenance() {
     local skill="$1"
     local extra_note="${2:-}"
-    local path="$DEST_BASE/$skill/SKILL.md"
+    local path="$DEST_BASE/modelopt-$skill/SKILL.md"
 
     awk -v sha="$SHA" -v short="$SHORT_SHA" -v skill="$skill" -v extra="$extra_note" '
         BEGIN { in_fm = 0; injected = 0; fm_end_seen = 0 }
@@ -111,6 +108,7 @@ inject_provenance() {
         /^# Note: this skill depends on the mlflow-mcp/ && in_fm && !fm_end_seen { next }
         /^# configured in the user/ && in_fm && !fm_end_seen { next }
         {
+            if (in_fm && !fm_end_seen && $0 ~ /^name: /) $0 = "name: modelopt-" skill
             print
             if ($0 == "---") {
                 if (in_fm == 0) { in_fm = 1 }
@@ -118,7 +116,7 @@ inject_provenance() {
             }
             if (in_fm && !injected && $0 ~ /^description: /) {
                 print "license: Apache-2.0"
-                print "# Vendored verbatim from NVIDIA NeMo Evaluator (commit " short ")"
+                print "# Adapted from NVIDIA NeMo Evaluator (commit " short ")"
                 print "# https://github.com/NVIDIA-NeMo/Evaluator/tree/" sha "/packages/nemo-evaluator-launcher/.claude/skills/" skill
                 print "# To re-sync: .agents/scripts/sync-upstream-skills.sh"
                 if (extra != "") {
@@ -135,7 +133,6 @@ inject_provenance() {
 for skill in launching-evals accessing-mlflow; do
     echo ""
     echo "== $skill =="
-    rm -rf "${DEST_BASE:?}/$skill"
     fetch_skill_recursive "$skill"
 
     case "$skill" in
@@ -147,8 +144,48 @@ for skill in launching-evals accessing-mlflow; do
             inject_provenance "$skill"
             ;;
     esac
+    python3 - "$DEST_BASE/modelopt-$skill" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+entry = root / "SKILL.md"
+text = entry.read_text()
+frontmatter, body = text.split("---", 2)[1:]
+bootstrap = """Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
+
+"""
+guidance = {
+    "modelopt-launching-evals": (
+        "Before reporting scores, load the `modelopt-evaluation` companion and apply its\n"
+        "`references/run-validation.md` gates. For supplied local artifacts, work offline;\n"
+        "do not require cluster access or launch a replacement run without authorization.\n\n"
+    ),
+    "modelopt-accessing-mlflow": (
+        "For supplied exported artifacts, work offline; missing MCP access is not a\n"
+        "blocker. State missing evidence rather than inventing runs or metrics. Use\n"
+        "`modelopt-compare-results` for validated baseline-vs-candidate comparisons.\n\n"
+    ),
+}
+heading, rest = body.lstrip().split("\n\n", 1)
+entry.write_text(
+    "---" + frontmatter + "---\n\n" + heading + "\n\n"
+    + bootstrap + guidance[root.name] + rest
+)
+for path in root.rglob("*.md"):
+    text = path.read_text()
+    for name in ("launching-evals", "accessing-mlflow", "evaluation", "compare-results"):
+        text = text.replace("`" + name + "`", "`modelopt-" + name + "`")
+    path.write_text(text)
+PY
 done
 
+# Preserve source-specific portability and baseline-comparison guidance.
+git apply --unidiff-zero .agents/patches/evaluator-portability.patch
+
 echo ""
-echo "Done. Review with: git diff $DEST_BASE/launching-evals $DEST_BASE/accessing-mlflow"
+echo "Done. Review with: git diff $DEST_BASE/modelopt-launching-evals $DEST_BASE/modelopt-accessing-mlflow"
 echo "If the SHA changed, update DEFAULT_SHA at the top of this script before committing."

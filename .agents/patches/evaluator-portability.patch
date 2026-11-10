@@ -1,0 +1,28 @@
+diff --git b/skills/modelopt-launching-evals/SKILL.md a/skills/modelopt-launching-evals/SKILL.md
+index 29ccabb785..d1a5ff712b 100644
+--- b/skills/modelopt-launching-evals/SKILL.md
++++ a/skills/modelopt-launching-evals/SKILL.md
+@@ -74 +74 @@ The complete evaluation workflow is divided into the following steps you should
+-- **PPP** = Slurm account (the `account` field in cluster_config.yaml). When the user says "change PPP to X", update the account value (e.g., `coreai_dlalgo_compeval` → `coreai_dlalgo_llm`).
++- **PPP** = Slurm account / project portfolio code (the `account` field in cluster_config.yaml). When the user says "change PPP to X", update the account value (e.g., `<old_account>` → `<new_account>`).
+@@ -76 +76 @@ The complete evaluation workflow is divided into the following steps you should
+-- **HF cache requirement**: For configs with `HF_HUB_OFFLINE=1`, models must be pre-downloaded to the HF cache on each cluster before launching. **Before running a model on a new cluster, always ask the user if the model is already cached there.** If not, on the cluster login node: `python3 -m venv hf_cli && source hf_cli/bin/activate && pip install huggingface_hub` then `HF_HOME=/lustre/fsw/portfolios/coreai/users/<username>/cache/huggingface hf download <model>`. Without this, vLLM will fail with `LocalEntryNotFoundError`.
++- **HF cache requirement**: For configs with `HF_HUB_OFFLINE=1`, models must be pre-downloaded to the HF cache on each cluster before launching. **Before running a model on a new cluster, always ask the user if the model is already cached there.** If not, on the cluster login node: `python3 -m venv hf_cli && source hf_cli/bin/activate && pip install huggingface_hub` then `HF_HOME=<your_hf_cache_path> hf download <model>` (on lustre-style HPC clusters this is typically under `/lustre/.../<group>/users/<username>/cache/huggingface`). Without this, vLLM will fail with `LocalEntryNotFoundError`.
+diff --git b/skills/modelopt-launching-evals/references/analyze-results.md a/skills/modelopt-launching-evals/references/analyze-results.md
+index d42c462ab0..e95950feb0 100644
+--- b/skills/modelopt-launching-evals/references/analyze-results.md
++++ a/skills/modelopt-launching-evals/references/analyze-results.md
+@@ -52,0 +53 @@ Check logs for silent errors that may invalidate results:
++8. **Model baseline comparison**: For quantized runs, compare results against the matching baseline model run when available. The baseline may be unquantized or simply less quantized (for example, FP8 as the baseline for NVFP4). Use the same benchmark version, task config, serving args, token limits, dataset setup, and infrastructure before treating the delta as a quantization effect.
+@@ -57 +57,0 @@ Present key metrics from `results.yml` in a table and summarize the metrics from
+-
+diff --git b/skills/modelopt-launching-evals/references/debug-failed-runs.md a/skills/modelopt-launching-evals/references/debug-failed-runs.md
+index e94d3bb89f..5783dc7ac8 100644
+--- b/skills/modelopt-launching-evals/references/debug-failed-runs.md
++++ a/skills/modelopt-launching-evals/references/debug-failed-runs.md
+@@ -73 +73 @@ tail -200 $LOGS/client-*.log
+-- **Image pull failure**: `manifest not found` or `pyxis: child 1 failed` — verify image tag exists. Drop `:5005` from GitLab container registry URLs.
++- **Image pull failure**: `manifest not found` or `pyxis: child 1 failed` — verify image tag exists. If the image is on an on-prem GitLab registry, drop the registry port suffix (e.g. `:5005`) from the URL.
+@@ -83 +83 @@ tail -200 $LOGS/client-*.log
+-- **Container not found**: Applies to both `deployment.image` and task-level eval container. Drop `:5005` from GitLab registry URLs.
++- **Container not found**: Applies to both `deployment.image` and task-level eval container. For on-prem GitLab registries, drop the registry port suffix (e.g. `:5005`) from the URL.

@@ -1,0 +1,69 @@
+{
+  "skill_name": "modelopt-compare-results",
+  "evals": [
+    {
+      "id": "baseline-vs-quantized-delta",
+      "prompt": "Compare the baseline and quantized NEL runs and tell me the accuracy drop",
+      "expected_output": "Establishes the baseline and candidate before computing deltas.",
+      "assertions": [
+        "Establishes the baseline and candidate before computing deltas",
+        "Identifies baseline and candidate run artifacts before computing deltas",
+        "Checks that both runs were validated before accepting scores",
+        "Uses task recipe Score Extraction sections for canonical score fields",
+        "Verifies prompt/template, generation settings, reasoning handling, sample counts, judge/simulator setup, and score field comparability",
+        "Computes exact per-task deltas outside the chat context when there are multiple tasks or repeated runs",
+        "Labels the result as not apples-to-apples if comparability checks fail",
+        "Reports quantization feasibility as inconclusive when no acceptance threshold is provided"
+      ]
+    },
+    {
+      "id": "missing-baseline",
+      "prompt": "Is this quantized eval good enough if I only have the quantized run?",
+      "expected_output": "Does not treat a standalone quantized score as a release-ready delta.",
+      "assertions": [
+        "Does not treat a standalone quantized score as a release-ready delta",
+        "Establishes the matching baseline from the PTQ source model/checkpoint or asks the user for one",
+        "Delegates missing baseline or candidate evaluations to the evaluation skill",
+        "Explains that the baseline config must match task versions, serving args, dataset setup, credentials, cluster, and container except for the checkpoint/model"
+      ],
+      "acceptable_skills": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "interval-based-assessments",
+      "prompt": "Compare seven validated, comparable accuracy tasks using signed loss Candidate - Baseline in pp and margin M=-1 pp. The supplied CIs are valid two-sided 95% intervals from independent planned runs: A mean=-0.5, CI=[-1.5,0.5]; B mean=-3, CI=[-8,2]; C mean=-0.3, CI=[-0.8,0.2]; D mean=-3, CI=[-4,-2]; E has one full run per side and no task-specific uncertainty method; F mean=-0.5, CI=[-1,0]; G has independent baseline runs [60,60] and candidate runs [59.5,59.5]. What are their assessments?",
+      "expected_output": "Classifies A and B as Inconclusive despite their means falling on opposite sides of the margin.",
+      "assertions": [
+        "Classifies A and B as Inconclusive despite their means falling on opposite sides of the margin",
+        "Classifies C as Within margin and D as Substantial regression",
+        "Reports E uncertainty unavailable due to insufficient samples, without treating in-run repeats as independent full runs",
+        "Leaves F unresolved because equality at the margin is not Within margin",
+        "Reports G uncertainty unavailable as a degenerate case, not a zero-width confidence interval or confidence-based acceptance",
+        "Does not infer significance from overlapping individual score intervals or substitute a p-value against zero for the margin assessment",
+        "Explains how the evidence compares without prescribing reruns or a stopping plan"
+      ]
+    },
+    {
+      "id": "compare-results-standalone-install",
+      "prompt": "Only the compare-results skill is installed in an isolated compare-results catalog directory. No ModelOpt plugin, sibling skills or MCP servers are installed. I have an existing patched ModelOpt checkout at ./Model-Optimizer. Without launching GPU jobs or changing that checkout, show how to resolve this workflow's common files and any companion references it needs.",
+      "expected_output": "Uses the existing source checkout for shared support and needed companion references, preserves patches, and keeps installed skill paths distinct from source paths.",
+      "assertions": [
+        "Resolves MODELOPT_ROOT to the existing checkout and records its revision without git pull, checkout or reset",
+        "Resolves common files and missing companion entrypoints under skills in the checkout",
+        "Keeps SKILL_DIR at the installed entrypoint for its own resources instead of assuming sibling catalog directories",
+        "Does not require a ModelOpt or MLflow MCP server or launch GPU jobs for reference resolution"
+      ]
+    },
+    {
+      "id": "compare-results-negative",
+      "prompt": "Prepare a PTQ command for one fixed FP8 format. Do not run it or compare accuracy.",
+      "expected_output": "Single-recipe guidance routed to PTQ; no baseline comparison.",
+      "expected_skill": null,
+      "assertions": [
+        "Does not invoke the compare-results workflow",
+        "Does not execute commands or launch jobs"
+      ]
+    }
+  ]
+}

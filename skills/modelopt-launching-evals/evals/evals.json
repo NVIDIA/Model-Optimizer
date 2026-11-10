@@ -1,0 +1,47 @@
+{
+  "skill_name": "modelopt-launching-evals",
+  "evals": [
+    {
+      "id": "launching-evals-analysis",
+      "prompt": "Analyze my completed NEL run from supplied local artifacts. Do not launch jobs or connect to external services.",
+      "expected_output": "Inspects artifacts and validates results before reporting scores.",
+      "assertions": [
+        "Does not launch another evaluation",
+        "Uses supplied artifacts without assuming cluster access",
+        "Applies modelopt-evaluation completed-run validation"
+      ]
+    },
+    {
+      "id": "launching-evals-resume",
+      "prompt": "Plan how to inspect and resume failed NEL invocation abc123; do not run commands.",
+      "expected_output": "Inspects invocation state and failure before choosing resume.",
+      "assertions": [
+        "Uses NEL info/status to plan diagnosis",
+        "Retains invocation IDs and artifacts",
+        "Does not claim a resumed run passed"
+      ]
+    },
+    {
+      "id": "launching-evals-negative",
+      "prompt": "Create a new NEL config only; do not execute it.",
+      "expected_output": "Routes config creation to modelopt-evaluation.",
+      "expected_skill": null,
+      "assertions": [
+        "Does not run or resume evaluations",
+        "Uses the configuration workflow"
+      ]
+    },
+    {
+      "id": "launching-evals-standalone-install",
+      "prompt": "Only modelopt-launching-evals is installed in an isolated catalog directory. Reuse an existing patched ModelOpt checkout at ./Model-Optimizer. Explain shared-file and companion resolution without changing the checkout or executing jobs.",
+      "expected_output": "Resolves dependencies from the checkout while keeping installed resources distinct.",
+      "assertions": [
+        "Sets MODELOPT_ROOT to the existing checkout and MODELOPT_SKILLS to its root skills directory",
+        "Preserves patches and branch",
+        "Resolves common files under skills/common and companions under skills/modelopt-<name>",
+        "Keeps SKILL_DIR at the executing skill",
+        "Does not launch jobs"
+      ]
+    }
+  ]
+}

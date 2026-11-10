@@ -1,0 +1,57 @@
+{
+  "skill_name": "modelopt-speculative-decoding",
+  "evals": [
+    {
+      "id": "specdec-configure",
+      "prompt": "Using the ModelOpt speculative-decoding skill, plan an EAGLE3 training pipeline for a target model. No GPU or credentials are available. Identify the source references and dry-run command; do not submit a job.",
+      "expected_output": "A configuration plan grounded in the EAGLE3 algorithm sheet and configure-stage procedure, with the dry-run command and explicit missing runtime inputs.",
+      "assertions": [
+        "Reads references/stages/configure.md and references/algorithms/eagle3.md",
+        "Locates existing launcher examples and the speculative-decoding recipe in ModelOpt source",
+        "Uses the launcher dry-run path without submitting training",
+        "Does not invent a validated acceptance rate"
+      ]
+    },
+    {
+      "id": "specdec-dflash-variant",
+      "prompt": "Explain which ModelOpt references and configuration namespace to use for a DSpark draft-training pipeline, without launching training or changing files.",
+      "expected_output": "Read the shared DFlash algorithm sheet and the DSpark delta alongside the relevant stage; use the DFlash recipe type and configuration namespace.",
+      "assertions": [
+        "Reads DFlash first, then the DSpark variant sheet",
+        "Treats DSpark as a DFlash variant rather than an unrelated pipeline",
+        "Does not invent model-specific training flags or submit jobs"
+      ]
+    },
+    {
+      "id": "specdec-acceptance-evidence",
+      "prompt": "All four tasks in my draft-training pipeline show completed, but I have no acceptance-rate output or target threshold. Can we declare success? Do not run jobs.",
+      "expected_output": "Task completion alone does not prove the acceptance gate; obtain the relevant algorithm requirements and validation artifacts before a verdict.",
+      "assertions": [
+        "Reads references/stages/validate.md and the selected algorithm sheet",
+        "Distinguishes task completion from measured acceptance-rate evidence",
+        "Does not invent a threshold or a successful result"
+      ]
+    },
+    {
+      "id": "speculative-decoding-standalone-install",
+      "prompt": "Only the speculative-decoding skill is installed in an isolated speculative-decoding catalog directory. No ModelOpt plugin, sibling skills or MCP servers are installed. I have an existing patched ModelOpt checkout at ./Model-Optimizer. Without launching GPU jobs or changing that checkout, show how to resolve this workflow's common files and any companion references it needs.",
+      "expected_output": "Uses the existing source checkout for shared support and needed companion references, preserves patches, and keeps installed skill paths distinct from source paths.",
+      "assertions": [
+        "Resolves MODELOPT_ROOT to the existing checkout and records its revision without git pull, checkout or reset",
+        "Resolves common files and missing companion entrypoints under skills in the checkout",
+        "Keeps SKILL_DIR at the installed entrypoint for its own resources instead of assuming sibling catalog directories",
+        "Does not require a ModelOpt or MLflow MCP server or launch GPU jobs for reference resolution"
+      ]
+    },
+    {
+      "id": "speculative-decoding-negative",
+      "prompt": "Prepare a command to serve an existing quantized checkpoint. Do not execute it or train a draft.",
+      "expected_output": "Serving guidance routed to deployment; no draft training or speculative pipeline.",
+      "expected_skill": null,
+      "assertions": [
+        "Does not invoke the speculative-decoding workflow",
+        "Does not execute commands or launch jobs"
+      ]
+    }
+  ]
+}

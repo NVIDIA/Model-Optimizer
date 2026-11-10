@@ -1,0 +1,57 @@
+{
+  "skill_name": "modelopt-quant-recipe-search",
+  "evals": [
+    {
+      "id": "recipe-objective",
+      "prompt": "Plan a quantization recipe search for a dense 8B model. I have a BF16 checkpoint but have not chosen the deployment GPU, quantization family, performance objective, or accuracy benchmarks. Do not launch anything.",
+      "expected_output": "Ask for the missing optimization goal, quantization family, acceptance surface, and deployment constraints before recommending a best recipe.",
+      "assertions": [
+        "Does not silently choose FP8 or NVFP4 as the optimization target",
+        "Requests the optimization objective, quantization family and benchmark set",
+        "Does not launch calibration, serving, evaluation or QAD"
+      ]
+    },
+    {
+      "id": "recipe-portfolio",
+      "prompt": "Plan an NVFP4 recipe search to reduce memory on Blackwell with at most 1 percentage point loss per benchmark against BF16. The tasks are MMLU-Pro and GSM8K. Propose candidates and evidence to collect; do not run jobs.",
+      "expected_output": "A controlled portfolio including full-precision and FP8 baselines, an AutoQuant candidate and a manual candidate, with matched accuracy evaluations and memory measurements.",
+      "assertions": [
+        "Keeps both benchmark losses within the requested per-task acceptance rule",
+        "Includes an AutoQuant candidate and a controlled manual or sensitivity-guided candidate",
+        "Accounts for scale metadata, excluded modules and runtime fusion constraints",
+        "Does not recommend a winner without measured accuracy and cost evidence"
+      ]
+    },
+    {
+      "id": "recipe-runtime-fusion",
+      "prompt": "A mixed-precision candidate puts the gate and up projections of one fused MoE expert in different quantization formats. Its checkpoint metadata looks consistent, but vLLM rejects it. Should I call the recipe infeasible? Explain the next step without running jobs.",
+      "expected_output": "Repair or isolate runtime compatibility before judging model quality, preserving compatible formats within fused groups.",
+      "assertions": [
+        "Identifies fused gate/up compatibility as a separate constraint from checkpoint metadata",
+        "Routes serving diagnosis to deployment and checkpoint production to PTQ",
+        "Does not label an unevaluated candidate best or launch QAD"
+      ]
+    },
+    {
+      "id": "quant-recipe-search-standalone-install",
+      "prompt": "Only the quant-recipe-search skill is installed in an isolated quant-recipe-search catalog directory. No ModelOpt plugin, sibling skills or MCP servers are installed. I have an existing patched ModelOpt checkout at ./Model-Optimizer. Without launching GPU jobs or changing that checkout, show how to resolve this workflow's common files and any companion references it needs.",
+      "expected_output": "Uses the existing source checkout for shared support and needed companion references, preserves patches, and keeps installed skill paths distinct from source paths.",
+      "assertions": [
+        "Resolves MODELOPT_ROOT to the existing checkout and records its revision without git pull, checkout or reset",
+        "Resolves common files and missing companion entrypoints under skills in the checkout",
+        "Keeps SKILL_DIR at the installed entrypoint for its own resources instead of assuming sibling catalog directories",
+        "Does not require a ModelOpt or MLflow MCP server or launch GPU jobs for reference resolution"
+      ]
+    },
+    {
+      "id": "quant-recipe-search-negative",
+      "prompt": "Prepare a PTQ command for one fixed FP8 recipe. Do not run jobs or search other recipes.",
+      "expected_output": "Single-recipe guidance routed to PTQ; no candidate sweep.",
+      "expected_skill": null,
+      "assertions": [
+        "Does not invoke the quant-recipe-search workflow",
+        "Does not execute commands or launch jobs"
+      ]
+    }
+  ]
+}
