@@ -143,7 +143,7 @@ If you are an external contributor, seek guidance from `@NVIDIA/modelopt-setup-c
 
   If the third-party code is also Apache 2.0, no change is needed (`SPDX-License-Identifier: Apache-2.0` remains correct).
 - **Update `LICENSE`:** Add the third-party copyright holder to the appropriate license section in the [`LICENSE`](./LICENSE) file under *Third-Party Software Notices*. If the third-party license is not already listed there, add a new section with the full license text.
-- **Exclude from license pre-commit hook:** Exclude copied files from the license pre-commit hook so it doesn't auto-add the NVIDIA Apache 2.0 license on top of the file. Add the file path to the `exclude` list in the `insert-license` hook in [`.pre-commit-config.yaml`](./.pre-commit-config.yaml).
+- **License pre-commit hook:** For python and shell files, the `insert-license` hook ([`tools/precommit/insert_license.py`](./tools/precommit/insert_license.py)) inserts the NVIDIA header below a leading third-party header that has a copyright notice, and fails if the NVIDIA header is above it. For C, C++ and CUDA files, add the file path to an `exclude` list of the `insert-license-c` hook in [`.pre-commit-config.yaml`](./.pre-commit-config.yaml) so it doesn't add the NVIDIA header on top of the file.
 
 See [`modelopt/torch/quantization/utils/calib_utils.py`](./modelopt/torch/quantization/utils/calib_utils.py) for an example of the correct license header format.
 
