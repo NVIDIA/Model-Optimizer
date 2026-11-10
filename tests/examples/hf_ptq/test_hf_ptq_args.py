@@ -528,11 +528,14 @@ def test_mxfp4_experts_stay_packed_unless_calibration_may_rewrite_them(
 ):
     hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/m", *extra_args)
     mxfp4 = SimpleNamespace(quantization_config={"quant_method": "mxfp4"})
+    whole = DistributionPlan()
 
-    assert hf_ptq._keeps_compressed_experts(args, mxfp4) is packed
-    assert hf_ptq._keeps_compressed_experts(args, SimpleNamespace()) is (
-        "--keep_compressed_experts" in extra_args
-    )
+    assert hf_ptq._keeps_compressed_experts(args, mxfp4, whole) is packed
+    # Nothing to keep packed in an unquantized checkpoint, loaded whole or expert-parallel.
+    for plan in (whole, DistributionPlan(world_size=2, ep_size=2)):
+        assert hf_ptq._keeps_compressed_experts(args, SimpleNamespace(), plan) is (
+            "--keep_compressed_experts" in extra_args
+        )
 
 
 def test_mlflow_is_off_by_default(monkeypatch):

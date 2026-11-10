@@ -261,6 +261,8 @@ def _compressedify(conv, compressor, scheme, param_names):
 # as: the packed values in the projection's own parameter, the scales beside it. weight_shape is the
 # projection's, so it is not kept.
 _PACKED_SUFFIX = {"weight_packed": "", "weight_scale": "_scales"}
+# The parameters a projection kept packed stores beside its own, which shard over the experts with it.
+PACKED_SIBLINGS = tuple(suffix for suffix in _PACKED_SUFFIX.values() if suffix)
 
 
 def _make_pack_op_class(param_names):

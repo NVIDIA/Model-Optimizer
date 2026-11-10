@@ -120,6 +120,7 @@ except ImportError:
 __all__ = [
     "build_meta_causal_lm",
     "fsdp2_wrap",
+    "keep_compressed_refusal",
     "load_and_prepare_ep",
     "load_pretrained",
     "parallel_load_and_prepare_fsdp2",
@@ -958,6 +959,32 @@ def _mxfp4_experts_kept_packed():
         hf_modeling_utils.get_model_conversion_mapping = stock
 
 
+def keep_compressed_refusal(hf_config, plan: DistributionPlan) -> str | None:
+    """Why :func:`load_pretrained` would refuse ``keep_compressed=True`` under ``plan``, or ``None``.
+
+    Read from ``hf_config`` as :func:`~modelopt.torch.utils.distributed.resolve_distribution_plan`
+    returns it with ``plan``, changing nothing. A whole-model load keeps the experts of an MXFP4
+    checkpoint packed, and the expert-parallel load those of a compressed-tensors checkpoint it
+    decompresses as they load, when its scheme stores packed values and their scales alone.
+    """
+    # By the plan alone, as _route decides, which the load checks against the run.
+    if plan.is_expert_parallel:
+        if not _decompressed_as_loaded(hf_config):
+            return (
+                "the expert-parallel load keeps packed the experts of a compressed-tensors "
+                "checkpoint it decompresses as they load, and this checkpoint has none."
+            )
+        # Imported here for the reason _decompressed_as_loaded gives.
+        from modelopt.torch.models import _onfly_decompress
+
+        return _onfly_decompress.decompression_refusal(hf_config, keep_packed=True)
+    if plan.is_fsdp_dense:
+        return f"the {_FSDP2} load {plan!r} loads unquantized checkpoints only."
+    if _ckpt_quant_method(hf_config) == "mxfp4":
+        return None
+    return "a whole-model load keeps the experts of an MXFP4 checkpoint packed, and this is none."
+
+
 def load_pretrained(
     ckpt_path: str,
     auto_class: Any = None,
@@ -972,12 +999,15 @@ def load_pretrained(
     ``distribution`` is the :class:`~modelopt.torch.utils.distributed.DistributionPlan` to load by:
     every rank takes rank 0's or, when rank 0 passes none, :func:`resolve_distribution_plan`'s.
 
-    ``keep_compressed`` keeps the routed experts of an MXFP4 checkpoint packed as stored, 4.25 bits a
-    weight, which a whole-model load with ``quantization_config=Mxfp4Config(dequantize=True)`` would
-    decompress to bf16. They decompress on use: for each forward of the experts, for a weight read
-    through :func:`~modelopt.torch.quantization.utils.enable_weight_access_and_writeback`, and for
-    good at the export (:mod:`~modelopt.torch.quantization.utils.packed_experts`). So calibration and
-    the export compute what the decompressing load would, and an algorithm that updates the experts'
+    ``keep_compressed`` keeps the routed experts of a checkpoint that stores them compressed packed
+    as stored, which the load would decompress to bf16: an MXFP4 checkpoint's (4.25 bits a weight)
+    in a whole-model load with ``quantization_config=Mxfp4Config(dequantize=True)``, and a
+    compressed-tensors checkpoint's in the expert-parallel load, which decompresses them as they
+    load (:func:`load_and_prepare_ep`). They decompress on use: for each forward of the experts, for
+    a weight read through
+    :func:`~modelopt.torch.quantization.utils.enable_weight_access_and_writeback`, and for good at
+    the export (:mod:`~modelopt.torch.quantization.utils.packed_experts`). So calibration and the
+    export compute what the decompressing load would, and an algorithm that updates the experts'
     weights in place is refused. A load that keeps no experts packed is refused.
 
     * ``ep_size > 1``: :func:`load_and_prepare_ep` shards an MoE's routed experts over the process
@@ -1157,10 +1187,9 @@ def load_pretrained(
                 f"{sharded} only apply to the expert-parallel load, but {plan!r} gives every rank "
                 "the whole model; pass a plan with ep_size > 1 to shard an MoE's routed experts."
             )
-        if keep_compressed and route is not None:
+        if keep_compressed and route == _FSDP2:
             raise NotImplementedError(
-                f"keep_compressed keeps the MXFP4 experts of a whole-model load packed; the {route} "
-                f"load {plan!r} asks for decompresses them."
+                f"keep_compressed: {keep_compressed_refusal(hf_config, plan)}"
             )
         # Whether the decision chose this sharded layout with nothing asking for it: by rank 0's GPU
         # memory for the FSDP2 load, by the model's routed experts for the expert-parallel one.
@@ -1206,6 +1235,8 @@ def load_pretrained(
                 prepared=prepared,
             )
         )
+    if route == _EXPERT_PARALLEL:
+        load_kwargs["keep_compressed"] = keep_compressed
     if route is not None:
         model = _load_sharded(route, ckpt_path, load_kwargs)
         # A sharded load finds the unplaced keys while it places the weights.
@@ -3069,6 +3100,7 @@ def load_and_prepare_ep(
     hf_config=None,
     require_lm_head: bool = True,
     hub_options: dict | None = None,
+    keep_compressed: bool = False,
 ) -> nn.Module:
     """Load a MoE causal LM expert-parallel for PTQ: each rank holds its share of the routed experts.
 
@@ -3097,6 +3129,10 @@ def load_and_prepare_ep(
     ``from_pretrained``. The caller records the plan on the model
     (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), as :func:`load_pretrained`
     does; :func:`~modelopt.torch.utils.moe.expert_parallel_mesh` then finds its mesh.
+
+    ``keep_compressed`` keeps the routed experts of a compressed-tensors checkpoint, which this load
+    otherwise decompresses as they load, packed as stored, each rank holding its share, as
+    :func:`load_pretrained` describes.
     """
     if not plan.is_expert_parallel:
         raise ValueError(f"{plan!r} shards no routed experts, which is what this load is for.")
@@ -3174,6 +3210,8 @@ def load_and_prepare_ep(
                 f"The expert-parallel load cannot dequantize a {quant_method!r} checkpoint: it loads "
                 f"{loads}. Start from an unquantized copy of the model."
             )
+        if keep_compressed and (why := keep_compressed_refusal(hf_config, plan)) is not None:
+            raise NotImplementedError(f"keep_compressed: {why}")
         # The swapped plan is this load's own: the caller's config keeps the plan its checkpoint declares.
         hf_config = copy.deepcopy(hf_config)
         if _decompressed_as_loaded(hf_config):
@@ -3262,6 +3300,12 @@ def load_and_prepare_ep(
             from modelopt.torch.models import _onfly_decompress
 
             tensor_files = _onfly_decompress.check_compressed_keys(hf_config, ckpt_path)
+            if keep_compressed:
+                # The decompressor is installed for this checkpoint already: this marks the load's
+                # own config for it to keep the experts packed instead.
+                _onfly_decompress.install_onfly_decompress(
+                    hf_config, keep_packed=True, ckpt_path=ckpt_path
+                )
             # Minus "weight": a float format's anchor is .weight itself, and an unplaced plain weight
             # is what the export has always carried as stored.
             compressed_names = set(_onfly_decompress.stored_names(hf_config)) - {"weight"}
@@ -3363,6 +3407,18 @@ def load_and_prepare_ep(
     # Tag every routed-experts container torch_a2a_experts, found as the plan's decision finds them:
     # some plans style only their parameters, grouped_gemm.
     swapped_plan.update(dict.fromkeys(_routed_expert_keys(ep_plan), "torch_a2a_experts"))
+    if keep_compressed:
+        from modelopt.torch.models import _onfly_decompress
+
+        # What a packed projection stores beside it shards over the experts with it.
+        swapped_plan.update(
+            {
+                key + suffix: style
+                for key, style in swapped_plan.items()
+                if style == "grouped_gemm"
+                for suffix in _onfly_decompress.PACKED_SIBLINGS
+            }
+        )
     from_pretrained_kwargs["experts_implementation"] = "torch_a2a"
     ep_cfg.base_model_ep_plan = swapped_plan
     from_pretrained_kwargs["config"] = hf_config
