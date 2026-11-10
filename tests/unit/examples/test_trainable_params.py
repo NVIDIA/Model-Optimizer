@@ -47,7 +47,10 @@ def test_full_rank_training_and_restore(recompute, restore_kind, qdq_student_wei
     configure_trainable_parameters(model, ["1.weight"])
     # Reapplying setup must not nest wrappers or alter quantizer state.
     configure_trainable_parameters(model, ["1.weight"])
-    initialize_student_weights(model, qdq_student_weight, tmp_path / "fresh")
+    ptq_source = tmp_path / "ptq_source"
+    ptq_source.mkdir()
+    torch.save({"step": torch.tensor(0)}, ptq_source / "train_state.pt")
+    initialize_student_weights(model, qdq_student_weight, tmp_path / "fresh", ptq_source)
     torch.testing.assert_close(model(inputs), baseline, rtol=0, atol=0)
     initial_weight = model[1].weight.detach().clone()
     optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=0.1)
@@ -87,6 +90,13 @@ def test_full_rank_training_and_restore(recompute, restore_kind, qdq_student_wei
     (resume_dir / "latest_checkpointed_iteration.txt").write_text("1")
     before_resume = restored[1].weight.detach().clone()
     initialize_student_weights(restored, True, resume_dir)
+    torch.testing.assert_close(restored[1].weight, before_resume, rtol=0, atol=0)
+    source = tmp_path / "source" / "iter_0000001"
+    source.mkdir(parents=True)
+    if restore_kind == "state":
+        torch.save({"step": torch.tensor(1)}, source / "train_state.pt")
+    with pytest.raises(ValueError, match="trained student checkpoint"):
+        initialize_student_weights(restored, True, tmp_path / "fresh_output", source)
     torch.testing.assert_close(restored[1].weight, before_resume, rtol=0, atol=0)
     restored_optimizer = torch.optim.Adam([restored[1].weight], lr=0.1)
     restored_optimizer.load_state_dict(copy.deepcopy(optimizer.state_dict()))

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -137,8 +137,9 @@ def test_initialize_qdq_weights_validates_all_scales_before_changes(scale):
         torch.testing.assert_close(parameter, before[name], rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("rotate_back", [False, True])
-def test_initialize_qdq_weights_returns_to_latent_domain(monkeypatch, rotate_back):
+def test_initialize_qdq_weights_returns_to_latent_domain(monkeypatch, rotate_back, dtype):
     # CPU reference for the CUDA-only normalized Hadamard implementation.
     def hadamard(inputs, rotate_fp32=False, block_size=None):
         pairs = inputs.reshape(*inputs.shape[:-1], -1, 2)
@@ -146,11 +147,12 @@ def test_initialize_qdq_weights_returns_to_latent_domain(monkeypatch, rotate_bac
         return torch.stack((a + b, a - b), -1).reshape(inputs.shape) * (2**-0.5)
 
     monkeypatch.setattr(quantizer_module, "normalized_hadamard_transform", hadamard)
-    model = nn.Linear(16, 8, bias=False)
-    inputs = torch.randn(2, 16)
+    torch.manual_seed(42)
+    model = nn.Linear(16, 8, bias=False, dtype=dtype)
+    inputs = torch.randn(2, 16, dtype=dtype)
     mtq.quantize(model, mtq.INT8_WEIGHT_ONLY_CFG, lambda m: m(inputs))
     q = model.weight_quantizer
-    q.pre_quant_scale = torch.linspace(0.5, 2.0, 16)
+    q.pre_quant_scale = torch.linspace(0.5, 2.0, 16, dtype=dtype)
     q.set_from_attribute_config(
         {"rotate": {"enable": True, "mode": "rotate_back" if rotate_back else "rotate"}}
     )
@@ -159,7 +161,10 @@ def test_initialize_qdq_weights_returns_to_latent_domain(monkeypatch, rotate_bac
     output_before = model(inputs).detach()
     mtq.initialize_qdq_weights(model)
     torch.testing.assert_close(model.weight, expected)
-    torch.testing.assert_close(model(inputs), output_before)
+    relative_error = (
+        model(inputs).float() - output_before.float()
+    ).norm() / output_before.float().norm()
+    assert relative_error < (0.03 if dtype == torch.bfloat16 else 1e-5)
     assert q.rotate_is_enabled and q.rotate_back_is_enabled == rotate_back
 
 
@@ -174,7 +179,8 @@ def test_initialize_qdq_weights_refuses_adapters_before_changes():
         torch.testing.assert_close(parameter, before[name], rtol=0, atol=0)
 
 
-def test_initialize_mixed_weights_with_cache():
+@pytest.mark.parametrize("initialize_children", [False, True])
+def test_initialize_mixed_weights_with_cache(initialize_children):
     model = nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16))
     config = {
         "quant_cfg": [
@@ -196,9 +202,12 @@ def test_initialize_mixed_weights_with_cache():
     mtq.quantize(model, config, lambda m: m(inputs))
     expected = [layer.weight_quantizer(layer.weight).detach().clone() for layer in model]
     enable_weight_cache(model)
-    with weight_cache_scope(model):
+    with weight_cache_scope(model) as stats:
         baseline = model(inputs).detach()
-        mtq.initialize_qdq_weights(model)
+        misses = stats.misses
+        for target in model if initialize_children else [model]:
+            mtq.initialize_qdq_weights(target)
+        assert stats.retained_bytes == 0 and stats.misses == misses
         torch.testing.assert_close(model(inputs), baseline, rtol=0, atol=0)
     for layer, weight in zip(model, expected):
         torch.testing.assert_close(layer.weight, weight, rtol=0, atol=0)

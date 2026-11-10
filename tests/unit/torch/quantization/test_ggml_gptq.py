@@ -440,9 +440,10 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
     [
         ("q8_0", {**GPTQ, "importance_weighted": True}),
         ("iq2_xs", {**GPTQ, "importance_weighted": True}),
+        ("iq2_xxs", {**GPTQ, "importance_weighted": True}),
         ("iq2_xs", {"method": "local_hessian"}),
     ],
-    ids=["q8_0-gptq", "iq2_xs-gptq", "iq2_xs-local_hessian"],
+    ids=["q8_0-gptq", "iq2_xs-gptq", "iq2_xxs-gptq", "iq2_xs-local_hessian"],
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_pin_survives_save_and_restore(num_bits, algorithm, dtype):
@@ -460,7 +461,9 @@ def test_pin_survives_save_and_restore(num_bits, algorithm, dtype):
 
     # Initialization uses the loaded PTQ result; no calibration data is supplied.
     expected = ggml_format.dequantize(pinned, torch.tensor(restored.weight.shape), dtype=dtype)
+    output_before = restored(inputs).detach()
     mtq.initialize_qdq_weights(restored)
+    torch.testing.assert_close(restored(inputs), output_before, rtol=0, atol=0)
     torch.testing.assert_close(restored.weight, expected, rtol=0, atol=0)
     assert restored.weight.dtype == dtype and restored.weight_quantizer.is_enabled
     assert torch.equal(pinned_packed_weight(restored.weight_quantizer, num_bits), pinned)

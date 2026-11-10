@@ -439,8 +439,11 @@ class _QuantTELayerNormLinear(_ParallelLinear):
         if unquantized is not None:
             self.weight.data[rows] = unquantized.to(self.weight.dtype)
 
+    @torch.no_grad()
     def _initialize_qdq_weights(self, trainable_only, initialized):
-        if trainable_only and not self.weight.requires_grad:
+        if not self._is_selected_for_initialization(
+            self.weight, self.weight_quantizer, trainable_only
+        ):
             return
         rows = getattr(self, "_modelopt_unquantized_output_rows", None)
         original = self.weight[rows].detach().clone() if rows is not None else None

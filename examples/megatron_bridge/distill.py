@@ -47,10 +47,17 @@ from megatron.bridge.training.config import (
     ValidationConfig,
 )
 from megatron.bridge.training.distill import distill
-from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
+from megatron.bridge.training.post_training.checkpointing import (
+    _get_modelopt_checkpoint_path,
+    has_modelopt_state,
+)
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
-from trainable_params import configure_trainable_parameters, initialize_student_weights
+from trainable_params import (
+    configure_trainable_parameters,
+    initialize_student_weights,
+    should_initialize_student_weights,
+)
 
 try:
     from megatron.bridge.data.builders import DirectHFSFTDatasetConfig
@@ -661,7 +668,14 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     )
     if args.fake_quant_weight_cache and not student_has_modelopt_state:
         raise ValueError("--fake_quant_weight_cache needs a quantized --student_megatron_path.")
-    if args.qdq_student_weight and not student_has_modelopt_state:
+    initialize_weights = should_initialize_student_weights(
+        args.qdq_student_weight,
+        Path(args.output_dir) / "checkpoints",
+        _get_modelopt_checkpoint_path(args.student_megatron_path)
+        if args.qdq_student_weight and args.student_megatron_path
+        else None,
+    )
+    if initialize_weights and not student_has_modelopt_state:
         raise ValueError(
             "--qdq_student_weight needs ModelOpt quantizer state in --student_megatron_path."
         )
@@ -776,7 +790,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         distill_submodule="language_model" if is_vlm else None,
     )
 
-    if args.trainable_params or args.qdq_student_weight:
+    if args.trainable_params or initialize_weights:
         # Run after initial student restoration; native training resume happens later.
         def _select_trainable_student_hook(model_chunks):
             """Select parameters in the distilled student before the teacher is attached."""
@@ -786,7 +800,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                     student = student.language_model
                 if args.trainable_params:
                     configure_trainable_parameters(student, args.trainable_params)
-                initialize_student_weights(student, args.qdq_student_weight, checkpoint_dir)
+                initialize_student_weights(student, initialize_weights, checkpoint_dir)
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_select_trainable_student_hook, prepend=True)

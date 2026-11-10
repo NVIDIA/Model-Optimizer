@@ -551,7 +551,9 @@ class _QuantHFParallelLinear(_ParallelLinear):
 
     def _initialize_qdq_weights(self, trainable_only, initialized):
         requires_grad = self.weight.requires_grad
-        if trainable_only and not requires_grad:
+        if not self._is_selected_for_initialization(
+            self.weight, self.weight_quantizer, trainable_only
+        ):
             return
         with self.enable_weight_access_and_writeback():
             self.weight.requires_grad_(requires_grad)

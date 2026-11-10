@@ -203,6 +203,17 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
             torch.testing.assert_close(initialized[name], expected, rtol=0, atol=0, msg=name)
             changed |= not torch.equal(initial[name], expected)
         assert changed, "The fresh run did not replace floating latents with QDQ values"
+        reinitialize_cmd = distill_cmd.copy()
+        reinitialize_cmd[reinitialize_cmd.index("--student_megatron_path") + 1] = str(
+            distilled_megatron_path / f"iter_{early_exit_iter:07d}"
+        )
+        reinitialize_cmd[reinitialize_cmd.index("--output_dir") + 1] = str(
+            tmp_path / "fresh_output"
+        )
+        with pytest.raises(ValueError, match="trained student checkpoint"):
+            run_example_command(
+                reinitialize_cmd, example_path="megatron_bridge", setup_free_port=True
+            )
         for name in frozen:
             assert torch.equal(initial[name].view(torch.uint8), trained[name].view(torch.uint8)), (
                 name

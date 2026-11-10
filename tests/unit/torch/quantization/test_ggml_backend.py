@@ -52,11 +52,12 @@ def _substitute(monkeypatch, name, **changes):
     )
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("num_bits", FORMAT_NAMES)
-def test_ggml_backend_via_quantize(num_bits):
+def test_ggml_backend_via_quantize(num_bits, dtype, record_property):
     torch.manual_seed(1234)
-    model = torch.nn.Linear(256, 2, bias=False)
-    inputs = torch.randn(2, 256)
+    model = torch.nn.Linear(256, 2, bias=False, dtype=dtype)
+    inputs = torch.randn(2, 256, dtype=dtype)
     unquantized_output = model(inputs).detach()
     config = {
         "quant_cfg": [
@@ -85,6 +86,20 @@ def test_ggml_backend_via_quantize(num_bits):
     mtq.initialize_qdq_weights(model)
     assert model.weight is parameter and model.weight_quantizer.is_enabled
     torch.testing.assert_close(model.weight, expected_weight, rtol=0, atol=0)
+    # Unpinned formats search scales/codes again: the next forward applies QDQ a second time.
+    codec = GGML_FORMAT_REGISTRY[num_bits]
+    packed, shape = codec.quantize(expected_weight)
+    effective_weight = codec.dequantize(packed, shape, dtype=dtype)
+    after = model(inputs)
+    torch.testing.assert_close(
+        after, torch.nn.functional.linear(inputs, effective_weight), rtol=0, atol=0
+    )
+    relative_error = (after.float() - output.float()).norm() / output.float().norm()
+    record_property("initialization_forward_relative_l2", relative_error.item())
+    if num_bits == "q8_0":
+        torch.testing.assert_close(after, output, rtol=0, atol=0)
+    elif num_bits == "iq2_xxs":
+        assert not torch.equal(after, output)
     for name, value in model.weight_quantizer.named_buffers():
         torch.testing.assert_close(value, buffers[name], rtol=0, atol=0)
 

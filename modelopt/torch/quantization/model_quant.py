@@ -66,8 +66,9 @@ from .lora import has_quant_lora
 from .mode import QuantizeModeRegistry, _rank_local_calibrations, get_modelike_from_algo_cfg
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .qtensor import QTensorWrapper
-from .utils import invalidate_weight_cache, is_quantized, weight_attr_names
+from .utils import is_quantized, weight_attr_names
 from .utils.core_utils import _get_fsdp2_mesh
+from .utils.weight_cache import _suspend_weight_cache
 
 __all__ = [
     "auto_quantize",
@@ -1376,7 +1377,9 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
     Pre-scales and rotations are inverted before storing values, so subsequent forwards
     continue to apply those transforms exactly once. This is initialization, not folding:
     quantizers remain enabled. Uses already-restored calibration state without rerunning
-    calibration or GPTQ. Never call on a resumed training checkpoint.
+    calibration or GPTQ. Never call on a resumed training checkpoint. Dynamic scales/code
+    searches and low-precision inverse transforms can change the subsequent effective weight;
+    this API does not guarantee bitwise-identical forwards.
 
     Args:
         model: Calibrated fake-quantized model with uncompressed floating weights.
@@ -1408,14 +1411,10 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
         validated = False
         for weight, quantizer in uses:
             members = (
-                list(quantizer)
-                if isinstance(quantizer, SequentialQuantizer)
-                else [quantizer]
-                if quantizer is not None
-                else []
+                module._initialization_members(quantizer) if isinstance(module, QuantModule) else ()
             )
-            selected = (not trainable_only or weight.requires_grad) and any(
-                q.is_enabled and q._if_quant for q in members
+            selected = isinstance(module, QuantModule) and module._is_selected_for_initialization(
+                weight, quantizer, trainable_only
             )
             if selected and not validated:
                 module._validate_fold_weight()
@@ -1468,15 +1467,11 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
                         )
                     spans.append((start, end, quantizer))
                 seen[key] = quantizer
-    invalidate_weight_cache(model)
-    try:
-        with preserve_quantizer_attributes_context(model):
-            initialized = set()
-            for module in model.modules():
-                if isinstance(module, QuantModule):
-                    module._initialize_qdq_weights(trainable_only, initialized)
-    finally:
-        invalidate_weight_cache(model)
+    with _suspend_weight_cache(model), preserve_quantizer_attributes_context(model):
+        initialized = set()
+        for module in model.modules():
+            if isinstance(module, QuantModule):
+                module._initialize_qdq_weights(trainable_only, initialized)
     return model
 
 
