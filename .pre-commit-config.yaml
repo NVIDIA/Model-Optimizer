@@ -92,6 +92,10 @@ repos:
         entry: python tools/precommit/insert_license.py
         language: python
         types_or: [python, shell]
+        # Files the hook must skip, as "path|" lines. Files with a third-party header need no entry.
+        exclude: >
+          (?x)^(
+          )$
 
   # Instructions to change license file if ever needed:
   # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
