@@ -2871,6 +2871,32 @@ def test_dynamic_rope_shapes_do_not_alias():
     np.testing.assert_array_equal(output[..., 32:], 1)
 
 
+@pytest.mark.parametrize("keep_io_types", [False, True])
+def test_output_dims_survive_shape_inference_fallback(monkeypatch, keep_io_types):
+    """Output dims that type-only inference cannot re-derive must keep their original value."""
+    weight = numpy_helper.from_array(np.ones((3, 4), dtype=np.float32), name="weight")
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["X", "weight"], ["Y"], name="matmul")],
+        "matmul",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", 3])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["batch", 4])],
+        [weight],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
+    model.ir_version = LATEST_IR_VERSION_SUPPORTED_BY_ORT
+
+    def failing_infer_shapes(*args, **kwargs):
+        raise RuntimeError("forced ONNX shape inference failure")
+
+    # Force infer_types onto its type-only fallback, which cannot re-derive cleared dims.
+    monkeypatch.setattr(onnx_utils, "infer_shapes", failing_infer_shapes)
+    converted_model = convert_to_f16(model, keep_io_types=keep_io_types)
+
+    output_dims = converted_model.graph.output[0].type.tensor_type.shape.dim
+    assert [dim.dim_param or dim.dim_value for dim in output_dims] == ["batch", 4]
+    assert onnx_utils.get_output_shapes(converted_model) == {"Y": [1, 4]}
+
+
 @pytest.mark.parametrize("kind", ["sanitizer", "converter"])
 def test_default_plugin_lists_are_isolated(simple_model, kind):
     model, value_info_map, initializer_map, node_to_init_map = simple_model

@@ -291,6 +291,7 @@ class PrecisionConverter:
             self.model = onnx_utils.infer_types(
                 self.model, self.use_standalone_type_inference, strict_mode=True, check_type=True
             )
+            self._fill_unknown_output_dims()
 
         # Update value_info_map and initializer_map with casts we added
         self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
@@ -305,6 +306,29 @@ class PrecisionConverter:
         self._sanity_check()
 
         return self.model
+
+    def _fill_unknown_output_dims(self) -> None:
+        """Restore graph output dims that shape inference could not re-derive.
+
+        Clearing shapes before inference leaves an output dim with neither a value nor a name when
+        inference cannot derive it again, for example when ONNX shape inference fails and the
+        type-only fallback runs. Precision conversion never changes an output's shape, so such a
+        dim takes back the value or name the original model declared for it.
+        """
+        original_outputs = {
+            output.name: output for output in self.original_network_io_metadata.get("output", [])
+        }
+        for output in self.model.graph.output:
+            original = original_outputs.get(output.name)
+            if original is None or not output.type.tensor_type.HasField("shape"):
+                continue
+            dims = output.type.tensor_type.shape.dim
+            original_dims = original.type.tensor_type.shape.dim
+            if len(dims) != len(original_dims):
+                continue
+            for dim, original_dim in zip(dims, original_dims):
+                if not dim.HasField("dim_value") and not dim.HasField("dim_param"):
+                    dim.CopyFrom(original_dim)
 
     def _ensure_types_are_defined(self):
         """Ensure that all tensor types are defined."""

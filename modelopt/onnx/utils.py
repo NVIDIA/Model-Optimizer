@@ -210,7 +210,8 @@ def _get_tensor_shape(tensor: onnx.ValueInfoProto) -> list[int]:
     Onnx tensors are of type ValueInfoProto and their dimensions are stored in a
     RepeatedCompositeContainer. Each of these dimensions is of type onnx.Dimension.
     In a loop we access each of the Dimension object and create a shape list to return.
-    Dynamic dimensions (i.e. with "dim_param" field) are replaced with 1.
+    Dynamic dimensions (i.e. with "dim_param" field) and unknown dimensions (with neither
+    "dim_value" nor "dim_param") are replaced with 1, so the returned shape keeps the tensor's rank.
 
     Args:
         tensor: Onnx tensor object for which the shape needs to be computed.
@@ -224,13 +225,10 @@ def _get_tensor_shape(tensor: onnx.ValueInfoProto) -> list[int]:
     dimensions = tensor.type.tensor_type.shape.dim
     shape = []
     for dim in dimensions:
-        if dim.HasField("dim_param"):
+        if dim.HasField("dim_value") and dim.dim_value != -1:
+            shape.append(dim.dim_value)
+        else:
             shape.append(1)
-        if dim.HasField("dim_value"):
-            if dim.dim_value == -1:
-                shape.append(1)
-            else:
-                shape.append(dim.dim_value)
 
     return shape
 
