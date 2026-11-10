@@ -85,7 +85,9 @@ fetch_skill_recursive() {
         fi
 
         if [[ "$type" == "file" ]]; then
-            local dst="$DEST_BASE/modelopt-$skill/$rel_path"
+            local local_path="$rel_path"
+            [[ "$local_path" == "tests.json" ]] && local_path="evals/evals.json"
+            local dst="$DEST_BASE/modelopt-$skill/$local_path"
             echo "  fetch: $dst"
             fetch_file "$UPSTREAM_BASE/$skill/$rel_path" "$dst"
         elif [[ "$type" == "dir" ]]; then
