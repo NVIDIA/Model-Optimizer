@@ -17,6 +17,7 @@
 
 import ast
 import copy
+import inspect
 import sys
 import warnings
 import weakref
@@ -40,7 +41,7 @@ pytest.importorskip("transformers")
 import transformers
 from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_params
 from transformers import PretrainedConfig, Qwen3MoeConfig
-from transformers.integrations.finegrained_fp8 import FP8Experts
+from transformers.integrations.finegrained_fp8 import Fp8Dequantize, FP8Experts
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
 
 import modelopt.torch.opt as mto
@@ -156,6 +157,53 @@ def test_native_fp8_experts_dequantized_before_nvfp4_export():
                     decoded - expected.float()
                 ) / torch.linalg.vector_norm(expected.float())
                 assert relative_l2 < 0.15, f"Expert {idx} {name}: relative L2 {relative_l2}"
+    finally:
+        if registered_before is None and QuantModuleRegistry.get(FP8Experts) is not None:
+            QuantModuleRegistry.unregister(FP8Experts)
+
+
+@pytest.mark.parametrize("scale_fmt", ["ue8m0", "float"])
+def test_native_fp4_experts_dequantize_as_the_dequantizing_load(scale_fmt):
+    """Packed FP4 experts (DeepSeek-V4's ``expert_dtype="fp4"``) calibrate and export the weights
+    transformers' dequantizing load gives them, bit for bit, kept packed until unpacked."""
+    config = PretrainedConfig(
+        hidden_size=64, intermediate_size=32, num_experts=2, hidden_act="silu", expert_dtype="fp4"
+    )
+    if "scale_fmt" not in inspect.signature(FP8Experts).parameters:
+        pytest.skip("this transformers' FP8Experts holds no packed FP4 experts")
+    experts = FP8Experts(config, scale_fmt=scale_fmt)
+    assert experts.gate_up_proj.dtype == torch.int8
+    generator = torch.Generator().manual_seed(0)
+    for name in ("gate_up_proj", "down_proj"):
+        weight, scales = getattr(experts, name), getattr(experts, f"{name}_scale_inv")
+        with torch.no_grad():
+            weight.copy_(torch.randint(-128, 128, weight.shape, generator=generator))
+            if scale_fmt == "ue8m0":
+                scales.view(torch.uint8).copy_(torch.randint(118, 130, scales.shape))
+            else:
+                scales.copy_(torch.rand(scales.shape, generator=generator) + 0.5)
+    dequantize = Fp8Dequantize(None)._dequantize_one
+    expected = {
+        name: torch.stack(
+            [
+                dequantize(getattr(experts, name)[e], getattr(experts, f"{name}_scale_inv")[e])
+                for e in range(2)
+            ]
+        ).bfloat16()
+        for name in ("gate_up_proj", "down_proj")
+    }
+
+    registered_before = QuantModuleRegistry.get(FP8Experts)
+    try:
+        mtq.quantize(experts, mtq.NVFP4_DEFAULT_CFG)
+        for name, weight in expected.items():
+            for e in range(2):
+                assert torch.equal(experts.get_expert_weight(name, e, torch.bfloat16), weight[e])
+        with pytest.raises(ValueError, match="unpack_weight"):
+            mtq.fold_weight(experts)
+        experts.unpack_weight()
+        for name, weight in expected.items():
+            assert torch.equal(getattr(experts, name).to(torch.bfloat16), weight)
     finally:
         if registered_before is None and QuantModuleRegistry.get(FP8Experts) is not None:
             QuantModuleRegistry.unregister(FP8Experts)

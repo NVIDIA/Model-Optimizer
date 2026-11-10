@@ -50,6 +50,7 @@ from ..nn.modules.quant_linear import _QuantLinear
 from ..nn.modules.tensor_quantizer import _try_stacked_fake_quant
 from ..utils import replace_function, sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
+from ..utils.numeric_utils import E8M0_BIAS, unpack_e2m1
 from ..utils.packed_experts import unpacked
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
@@ -780,6 +781,12 @@ class _QuantSparseSequentialMoe(QuantModule):
         sync_moe_expert_amax(self.experts, sync_weight_amax=sync_weight_amax)
 
 
+# The dtypes transformers keeps packed FP4 (E2M1) expert weights in, two values a byte.
+_PACKED_FP4_DTYPES = tuple(
+    dtype for dtype in (torch.int8, getattr(torch, "float4_e2m1fn_x2", None)) if dtype is not None
+)
+
+
 def _get_fused_expert_intermediate_dim(module):
     """Resolve the intermediate (expert) dimension from a fused expert module.
 
@@ -1223,7 +1230,12 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
 
 class _QuantFP8Experts(_QuantFusedExperts):
-    """Scale-aware PTQ for native Transformers FP8 experts, dequantized per expert."""
+    """Scale-aware PTQ for native Transformers FP8 or packed FP4 experts, dequantized per expert.
+
+    FP4 experts (``expert_dtype="fp4"``, DeepSeek-V4's) store two E2M1 values a byte with a scale
+    per 32 of them: kept packed, as transformers loads them, and dequantized as its dequantizing load
+    does, so calibration and the export see the same weights.
+    """
 
     # The block scales apply in get_expert_weight, which only the eager forward reaches: transformers'
     # FP8 grouped_mm forward runs its own kernels, which nothing here intercepts. So the grouped
@@ -1240,8 +1252,10 @@ class _QuantFP8Experts(_QuantFusedExperts):
         return self.has_gate
 
     def _setup(self):
-        if getattr(self.config, "expert_dtype", "fp8") != "fp8":
-            raise NotImplementedError("Only FP8 E4M3 native expert weights are supported")
+        if getattr(self.config, "expert_dtype", "fp8") not in ("fp8", "fp4"):
+            raise NotImplementedError(
+                "Only FP8 E4M3 and FP4 E2M1 native expert weights are supported"
+            )
         super()._setup()
 
     def _materialized_dtype(self) -> torch.dtype:
@@ -1260,9 +1274,16 @@ class _QuantFP8Experts(_QuantFusedExperts):
         if weight.element_size() > 1:
             return weight if dtype is None else weight.to(dtype)
         dtype = dtype or self._materialized_dtype()
-        scales = self._local_experts(getattr(self, f"{name}_scale_inv"))[idx].float()
-        rows, cols = self.block_size or (weight.shape[0] // scales.shape[0], weight.shape[1])
-        scales = scales.repeat_interleave(rows, 0).repeat_interleave(cols, 1)
+        scales = self._local_experts(getattr(self, f"{name}_scale_inv"))[idx]
+        if weight.dtype in _PACKED_FP4_DTYPES:
+            # The block each scale covers is read off its grid, and E8M0 bytes are powers of two,
+            # as transformers' dequantizing load reads them.
+            weight = unpack_e2m1(weight)
+            scales = (scales.float() - E8M0_BIAS).exp2() if scales.dtype == torch.uint8 else scales
+            rows, cols = weight.shape[0] // scales.shape[0], weight.shape[1] // scales.shape[1]
+        else:
+            rows, cols = self.block_size or (weight.shape[0] // scales.shape[0], weight.shape[1])
+        scales = scales.float().repeat_interleave(rows, 0).repeat_interleave(cols, 1)
         return (weight.float() * scales[: weight.shape[0], : weight.shape[1]]).to(dtype)
 
     def linear(self, input, weight, weight_scale_inv, activation_scale=None):
@@ -1273,7 +1294,9 @@ class _QuantFP8Experts(_QuantFusedExperts):
         if any(
             getattr(self, name).element_size() == 1 for name in (self._first_proj_attr, "down_proj")
         ):
-            raise ValueError("Call unpack_weight() before folding native FP8 expert weights.")
+            raise ValueError(
+                "Call unpack_weight() before folding native FP8 or FP4 expert weights."
+            )
         super()._validate_fold_weight()
 
     def fold_weight(self, keep_attrs: bool = False):
@@ -1295,7 +1318,9 @@ class _QuantFP8Experts(_QuantFusedExperts):
         dtype = self._materialized_dtype()
         for name in names:
             weight = getattr(self, name)
-            unpacked = torch.empty_like(weight, dtype=dtype)
+            # Shaped by an unpacked expert: packed FP4 holds two values a byte.
+            first = self.get_expert_weight(name, 0, dtype)
+            unpacked = torch.empty(len(weight), *first.shape, dtype=dtype, device=first.device)
             for idx in range(self.num_experts):
                 unpacked[idx].copy_(self.get_expert_weight(name, idx, dtype))
             setattr(self, name, nn.Parameter(unpacked, requires_grad=False))
