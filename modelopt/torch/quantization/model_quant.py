@@ -21,7 +21,7 @@ import inspect
 import os
 import sys
 import warnings
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from typing import Any, cast
@@ -66,7 +66,7 @@ from .lora import has_quant_lora
 from .mode import QuantizeModeRegistry, _rank_local_calibrations, get_modelike_from_algo_cfg
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .qtensor import QTensorWrapper
-from .utils import invalidate_weight_cache, is_quantized
+from .utils import invalidate_weight_cache, is_quantized, weight_attr_names
 from .utils.core_utils import _get_fsdp2_mesh
 
 __all__ = [
@@ -1392,9 +1392,18 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
     storage_ranges = {}
     for module in model.modules():
         uses = (
-            module.iter_weights_for_calibration()
-            if isinstance(module, QuantModule)
-            else ((parameter, None) for parameter in module.parameters(recurse=False))
+            list(module.iter_weights_for_calibration()) if isinstance(module, QuantModule) else []
+        )
+        parameters = list(module.named_parameters(recurse=False, remove_duplicate=False))
+        parameter_uses = Counter(id(parameter) for _, parameter in parameters)
+        weight_names = set(weight_attr_names(module)) if isinstance(module, QuantModule) else set()
+        weight_ids = {id(weight) for weight, _ in uses}
+        # Fused views are represented by their weight attributes; grouped weights by identity.
+        uses.extend(
+            (parameter, None)
+            for name, parameter in parameters
+            if name not in weight_names
+            and (id(parameter) not in weight_ids or parameter_uses[id(parameter)] > 1)
         )
         validated = False
         for weight, quantizer in uses:

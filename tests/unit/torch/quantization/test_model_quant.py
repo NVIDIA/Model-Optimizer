@@ -85,14 +85,32 @@ def test_initialize_qdq_weights_undoes_pre_scale():
     assert quantizer.is_enabled
 
 
-@pytest.mark.parametrize("alias", ["quantized", "transpose", "frozen", "disabled", "unquantized"])
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "quantized",
+        "transpose",
+        "frozen",
+        "disabled",
+        "unquantized",
+        "frozen_bias",
+        "parameter_alias",
+    ],
+)
 def test_initialize_qdq_weights_refuses_ambiguous_alias_before_changes(alias):
     model = nn.ModuleList([nn.Linear(16, 16), nn.Linear(16, 16)])
-    model[1].weight = nn.Parameter(model[0].weight.T if alias == "transpose" else model[0].weight)
+    if alias not in {"frozen_bias", "parameter_alias"}:
+        model[1].weight = nn.Parameter(
+            model[0].weight.T if alias == "transpose" else model[0].weight
+        )
     mtq.quantize(
         model, mtq.INT8_WEIGHT_ONLY_CFG, lambda modules: [m(torch.randn(2, 16)) for m in modules]
     )
-    if alias == "frozen":
+    if alias == "frozen_bias":
+        model[1].bias = nn.Parameter(model[0].weight[0], requires_grad=False)
+    elif alias == "parameter_alias":
+        model[0].extra_parameter = model[0].weight
+    elif alias == "frozen":
         model[1].weight.requires_grad_(False)
     elif alias == "disabled":
         model[1].weight_quantizer.disable()

@@ -37,6 +37,7 @@ from _test_utils.torch.transformers_models import (
 )
 from torch.distributed.checkpoint import FileSystemReader
 
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -196,7 +197,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
         initialized = _load_checkpoint_tensors(distilled_megatron_path / "iter_0000001")
         changed = False
         for name in selected:
-            quantizer = TensorQuantizer({"num_bits": (4, 3), "axis": None})
+            quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), axis=None))
             quantizer.amax = initial[name.removesuffix("weight") + "weight_quantizer._amax"]
             expected = quantizer(initial[name])
             torch.testing.assert_close(initialized[name], expected, rtol=0, atol=0, msg=name)
