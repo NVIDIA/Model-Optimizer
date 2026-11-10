@@ -44,6 +44,8 @@ We compare two NVFP4 Qwen3.6-35B-A3B checkpoints to show you how to put these re
 
 Candidate was trained directly from Baseline using Kahneman–Tversky Optimization (KTO), which learns from desirable and undesirable responses, aiming to reduce those loops while preserving accuracy.
 
+This guide focuses on evaluation methodology; the KTO recovery results illustrate the recommendations. A detailed companion tutorial, coming soon, will explain how KTO was applied and provide checkpoint provenance, evaluation configurations, paired results, and analysis scripts.
+
 We use MMLU-Pro, SciCode and AA-Omniscience to illustrate these evaluation guidelines.
 
 We evaluate on 294 of 338 SciCode subtasks, excluding the 44 used for KTO recovery training. KTO used model-generated responses, not reference answers.
