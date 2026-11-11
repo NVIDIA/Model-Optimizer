@@ -22,7 +22,9 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.models.deepseek_v4 import modeling_ptq_vllm as deepseek_v4_ptq
+from modelopt.torch.models.kimi_k3 import modeling_ptq_vllm as kimi_k3_ptq
+from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins import vllm_mega_moe
 from modelopt.torch.utils.distributed import ParallelState
 
@@ -153,10 +155,10 @@ def test_mega_moe_rejects_unsupported_setups(num_shared_experts, constant_amax, 
 
 
 def test_mega_moe_experts_are_registered():
-    for cls in (vllm_mega_moe.DeepseekV4MegaMoEExperts, vllm_mega_moe.KimiK3MegaMoEExperts):
+    for cls in (deepseek_v4_ptq.DeepseekV4MegaMoEExperts, kimi_k3_ptq.KimiK3MegaMoEExperts):
         if cls is None:
             pytest.skip("this vLLM has no DeepGEMM Mega-MoE experts")
-        assert cls in vllm_mega_moe.QuantModuleRegistry
+        assert cls in QuantModuleRegistry
     assert isinstance(_mega_moe().combine_quantizer, TensorQuantizer)
 
 

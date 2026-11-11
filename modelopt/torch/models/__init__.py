@@ -27,8 +27,9 @@ and read its sections.
 The per-model file is named for what it holds, not for who reads it: a model's spec is
 general model data, and export is only its first consumer.
 
-A package may also hold ``modeling_ptq.py``, the model-specific PTQ wrappers. It is not imported
-here; the HF quantization plugin imports it (see ``README.md``).
+A package may also hold ``modeling_ptq.py`` and ``modeling_ptq_vllm.py``, the model-specific PTQ
+wrappers for transformers and vLLM. They are not imported here; the HF and vLLM quantization
+plugins import them (see ``README.md``).
 """
 
 from .moe import is_moe

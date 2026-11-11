@@ -75,6 +75,12 @@ after the interface wrapper and before the AST-based fallback — and exports no
 type's PTQ code (`step3p7` uses `step3p5`'s) still gets a `modeling_ptq.py` that imports the
 shared one, so loading it by model type works.
 
+vLLM's model-specific wrappers follow the same pattern in `<model_type>/modeling_ptq_vllm.py`,
+on top of the generic ones in the vLLM plugin modules
+(`modelopt/torch/quantization/plugins/vllm*.py`): `plugins/__init__.py` imports every
+`modeling_ptq_vllm` from an explicit list after those, so add the new model type there. A package
+that only holds vLLM modeling (`glm5_next`) has no `specs.py`.
+
 ## Sections
 
 A `ModelSpec` holds one attribute per section, each `None` unless the model fills it:

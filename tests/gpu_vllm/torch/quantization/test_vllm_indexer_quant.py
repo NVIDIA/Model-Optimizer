@@ -31,6 +31,8 @@ import pytest
 import torch
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.models.deepseek_v4 import modeling_ptq_vllm as deepseek_v4_ptq
+from modelopt.torch.models.glm5_next import modeling_ptq_vllm as glm5_next_ptq
 from modelopt.torch.quantization import model_quant
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
@@ -186,7 +188,7 @@ class _NativeV4Indexer(torch.nn.Module):
         return self.outputs
 
 
-class _TestV4Indexer(vllm_indexer._QuantVLLMDeepseekV4Indexer, _NativeV4Indexer):
+class _TestV4Indexer(deepseek_v4_ptq._QuantVLLMDeepseekV4Indexer, _NativeV4Indexer):
     pass
 
 
@@ -205,7 +207,7 @@ def test_deepseek_v4_indexer_requantizes_compressed_keys(
         "state": SimpleNamespace(slot_mapping=state_slots),
     }
     monkeypatch.setattr(
-        vllm_indexer, "get_forward_context", lambda: SimpleNamespace(attn_metadata=metadata)
+        deepseek_v4_ptq, "get_forward_context", lambda: SimpleNamespace(attn_metadata=metadata)
     )
 
     assert indexer(None, None, None, None, positions, None) == (None, None, None)
@@ -303,7 +305,7 @@ def test_deepseek_v4_indexer_rejects_mxfp4(parallel_state_stub, monkeypatch, qua
         torch.ones(2, 4),
     )
     monkeypatch.setattr(
-        vllm_indexer, "get_forward_context", lambda: SimpleNamespace(attn_metadata={})
+        deepseek_v4_ptq, "get_forward_context", lambda: SimpleNamespace(attn_metadata={})
     )
     with pytest.raises(NotImplementedError, match="indexer_kv_dtype"):
         indexer(None, None, None, None, torch.zeros(2, dtype=torch.int64), None)
@@ -325,7 +327,7 @@ class _NativeGlm5NextIndexer(torch.nn.Module):
         return fwht128_quant_fp8(q)
 
 
-class _TestGlm5NextIndexer(vllm_indexer._QuantVLLMGlm5NextIndexer, _NativeGlm5NextIndexer):
+class _TestGlm5NextIndexer(glm5_next_ptq._QuantVLLMGlm5NextIndexer, _NativeGlm5NextIndexer):
     pass
 
 
@@ -336,9 +338,9 @@ def test_glm5next_kpool_cache_writers_requantize_written_pools(
     kv_cache, slot_mapping = written_cache
     before = kv_cache.clone()
     kernel_calls, requantized = [], []
-    requantize = vllm_indexer._requantize_fp8_indexer_k_cache
+    requantize = glm5_next_ptq._requantize_fp8_indexer_k_cache
     monkeypatch.setattr(
-        vllm_indexer,
+        glm5_next_ptq,
         "_requantize_fp8_indexer_k_cache",
         lambda kv_cache, *args: requantized.append(kv_cache) or requantize(kv_cache, *args),
     )
@@ -572,7 +574,7 @@ def scorer_stand_ins(monkeypatch):
 
     Each test starts with no converted indexers and an empty registry of layer owners.
     """
-    monkeypatch.setattr(vllm_indexer, "_glm5next_indexers", weakref.WeakSet())
+    monkeypatch.setattr(glm5_next_ptq, "_glm5next_indexers", weakref.WeakSet())
     monkeypatch.setattr(vllm_layer_scope, "_owners", weakref.WeakValueDictionary())
     fake = _FakeDeepGemm()
     op_module = SimpleNamespace(
