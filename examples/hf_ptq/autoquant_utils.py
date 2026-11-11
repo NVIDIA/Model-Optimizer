@@ -29,7 +29,9 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.opt.searcher import is_directory_checkpoint
+from modelopt.torch.quantization.algorithms import AUTO_QUANTIZE_SEARCHERS
 from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
+from modelopt.torch.quantization.model_quant import _process_search_space
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.dataset_utils import create_forward_loop, model_type_is_enc_dec
@@ -495,15 +497,37 @@ def _auto_quantize_finalize_config(
             f"{primary.auto_quantize_method}. Finalize them with the recipe that scored them, "
             "or search again into another --auto_quantize_checkpoint."
         )
+    # So are scores taken for other candidate formats, processed as the search processes them.
+    inputs = _mtq_inputs_from_auto_quantize_config(
+        primary, args, fixed_quantize_config=recipe.quantize
+    )
+    with warnings.catch_warnings():  # the search already warned about its custom formats
+        warnings.simplefilter("ignore")
+        formats, search_spaces, fixed = _process_search_space(
+            inputs["quantization_formats"],
+            inputs["module_search_spaces"],
+            inputs["fixed_quantization_config"],
+        )
+    searcher = AUTO_QUANTIZE_SEARCHERS[primary.auto_quantize_method]()
+    searcher.config = {
+        **searcher.default_search_config,
+        "quantization_formats": formats,
+        "module_search_spaces": search_spaces,
+        "fixed_quantization_config": fixed,
+    }
+    mismatch = searcher.candidate_mismatch(search_state)
+    if mismatch:
+        raise ValueError(
+            f"{checkpoint} does not hold the recipe's scores: {mismatch} Finalize them with the "
+            "recipe that scored them, or search again into another --auto_quantize_checkpoint."
+        )
     # Freeze the per-layer formats for this budget, with the recipe's KV-cache config.
     quant_cfg = mtq.get_auto_quantize_config(
         search_state,
         {"effective_bits": primary.constraints.effective_bits},
         algorithm=primary.finalize_algorithm,
     )
-    kv_cfg = _mtq_inputs_from_auto_quantize_config(
-        primary, args, fixed_quantize_config=recipe.quantize
-    )["kv_cache_quant_cfg"]
+    kv_cfg = inputs["kv_cache_quant_cfg"]
     if kv_cfg is not None:
         quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(quant_cfg, _kv_cache_entries(kv_cfg))
     return quant_cfg

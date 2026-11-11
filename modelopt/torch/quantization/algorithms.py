@@ -1061,6 +1061,48 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             for search_space in module_search_spaces
         ]
 
+    def _candidate_signatures(self) -> dict:
+        """Checkpoint-stable signatures of this config's global, fixed and per-module candidates."""
+        fixed = self._get_search_recipes(
+            [self.config["fixed_quantization_config"]]
+            if self.config["fixed_quantization_config"] is not None
+            else []
+        )
+        return {
+            "quantization_formats_signature": _quantization_formats_signature(
+                self._get_search_recipes(self.config["quantization_formats"])
+            ),
+            "fixed_quantization_config_signature": fixed[0].checkpoint_signature if fixed else None,
+            "module_search_space_signature": _module_search_space_signature(
+                self._normalize_module_search_spaces(self.config["module_search_spaces"])
+            ),
+        }
+
+    def candidate_mismatch(self, state: dict) -> str | None:
+        """How the candidates of a checkpoint's calibration or scores differ from this config's."""
+        if not (state.get("quantizer_states") or state.get("candidate_stats")):
+            return None
+        current = self._candidate_signatures()
+        restored = state.get("quantization_formats_signature")
+        if restored is None:
+            return (
+                "Checkpoint does not record its quantization_formats signature and cannot be "
+                "safely reused."
+            )
+        if restored != current["quantization_formats_signature"]:
+            return "Checkpoint quantization_formats do not match the current search config."
+        if (
+            state.get("fixed_quantization_config_signature")
+            != current["fixed_quantization_config_signature"]
+        ):
+            return "Checkpoint fixed_quantization_config does not match the current search config."
+        restored = state.get("module_search_space_signature")
+        if (restored is None and current["module_search_space_signature"]) or (
+            restored is not None and restored != current["module_search_space_signature"]
+        ):
+            return "Checkpoint module_search_spaces do not match the current search config."
+        return None
+
     @staticmethod
     def _match_module_search_space(quant_module_names, module_search_spaces):
         """Return the unique rule that fully covers a runtime-grouped decision."""
@@ -1494,59 +1536,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         )
         assert len(fixed_search_recipes) <= 1
         fixed_recipe = fixed_search_recipes[0] if fixed_search_recipes else None
-        quantization_formats_signature = _quantization_formats_signature(default_search_recipes)
-        fixed_quantization_config_signature = (
-            fixed_recipe.checkpoint_signature if fixed_recipe is not None else None
-        )
-        module_search_space_signature = _module_search_space_signature(module_search_spaces)
-        restored_quantization_formats_signature = getattr(
-            self, "quantization_formats_signature", None
-        )
-        restored_fixed_quantization_config_signature = getattr(
-            self, "fixed_quantization_config_signature", None
-        )
-        restored_module_search_space_signature = getattr(
-            self, "module_search_space_signature", None
-        )
         has_restored_calibration_or_scores = bool(self.quantizer_states or self.candidate_stats)
-        if has_restored_calibration_or_scores and restored_quantization_formats_signature is None:
-            raise ValueError(
-                "Checkpoint does not record its quantization_formats signature and cannot be "
-                "safely reused. Use a different checkpoint path."
-            )
-        if (
-            has_restored_calibration_or_scores
-            and restored_quantization_formats_signature != quantization_formats_signature
-        ):
-            raise ValueError(
-                "Checkpoint quantization_formats do not match the current search config. "
-                "Use a different checkpoint path."
-            )
-        if (
-            has_restored_calibration_or_scores
-            and restored_fixed_quantization_config_signature != fixed_quantization_config_signature
-        ):
-            raise ValueError(
-                "Checkpoint fixed_quantization_config does not match the current search config. "
-                "Use a different checkpoint path."
-            )
-        if has_restored_calibration_or_scores and (
-            (restored_module_search_space_signature is None and module_search_space_signature)
-            or (
-                restored_module_search_space_signature is not None
-                and restored_module_search_space_signature != module_search_space_signature
-            )
-        ):
-            raise ValueError(
-                "Checkpoint module_search_spaces do not match the current search config. "
-                "Use a different checkpoint path."
-            )
-        self.quantization_formats_signature = quantization_formats_signature
-        self.fixed_quantization_config_signature = fixed_quantization_config_signature
+        mismatch = self.candidate_mismatch(self.state_dict())
+        if mismatch:
+            raise ValueError(f"{mismatch} Use a different checkpoint path.")
+        for key, signature in self._candidate_signatures().items():
+            setattr(self, key, signature)
         self.fixed_quantization_config = (
             fixed_recipe.config.model_dump() if fixed_recipe is not None else None
         )
-        self.module_search_space_signature = module_search_space_signature
 
         search_recipes = sorted(
             {

@@ -263,6 +263,14 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
     )
     with pytest.raises(ValueError, match="gradient scores"):
         run("search", kl_div)
+    # So are scores taken for other candidate formats.
+    fp8_only = ModelOptAutoQuantizeRecipe(
+        auto_quantize=recipe.auto_quantize.model_copy(
+            update={"candidate_formats": [QuantizeConfig(**QUANT_CFG_CHOICES["fp8"])]}
+        )
+    )
+    with pytest.raises(ValueError, match="quantization_formats do not match"):
+        run("search", fp8_only)
 
     for index in range(2):
         assert not run(f"shard{index}", auto_quantize_format_shard=(index, 2))[0]
