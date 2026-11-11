@@ -842,6 +842,13 @@ class Config:
     minimum_schemes_to_mutate: int = 10
     maximum_mutations: int = 3
     maximum_generation_attempts: int = 100
+    # Minimum number of Concat-group-aware mutations to attempt per region. Controls the
+    # probability of applying a Concat-group mutation to each generated scheme:
+    #   prob = clamp(concat_group_min_samples / num_schemes, 0.05, 0.5)
+    # This ensures that Concat inputs are quantized/dequantized atomically as a group
+    # (all-or-nothing) rather than individually, which avoids mixed-precision mismatches
+    # at Concat boundaries.
+    concat_group_min_samples: int = 5
 
     # Pattern Cache Settings
     pattern_cache_minimum_distance: int = 4
