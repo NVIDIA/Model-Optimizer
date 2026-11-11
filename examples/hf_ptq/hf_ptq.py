@@ -1484,8 +1484,8 @@ def parse_args() -> argparse.Namespace:
             "Path to checkpoint file for saving/restoring weight AutoQuantize search state "
             "(sensitivity scores, costs, etc.). Used with an AutoQuantize --recipe. A run that "
             "finalizes saved scores (auto_quantize.finalize_algorithm) refuses scores from "
-            "another method, scoring options or candidate formats, but takes the other search "
-            "settings (disabled layers, cost model) from the checkpoint: change those with a new "
+            "another method or for other candidate formats, but takes the other search settings "
+            "(disabled layers, cost model) from the checkpoint: change those with a new "
             "checkpoint."
         ),
     )
