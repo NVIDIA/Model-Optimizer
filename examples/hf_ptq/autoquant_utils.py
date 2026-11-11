@@ -547,7 +547,7 @@ def _auto_quantize_finalizes(recipe: ModelOptAutoQuantizeRecipe, args: argparse.
     return _scored_auto_quantize_state(checkpoint) is not None
 
 
-def _kv_cache_entries(kv_cache_quant_cfg: dict) -> list[dict]:
+def _kv_cache_entries(kv_cache_quant_cfg: dict) -> list[Any]:
     """A uniform KV-cache config's entries to add after the selected weight formats.
 
     Its ``*`` entries are left out: there they would reset every weight quantizer.
