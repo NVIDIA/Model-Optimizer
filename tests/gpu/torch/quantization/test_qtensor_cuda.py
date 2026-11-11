@@ -1011,6 +1011,10 @@ class TestMXFP4Padding:
         qtensor, e8m0_scale = MXFP4QTensor.quantize(test_tensor, block_size=32)
 
         assert qtensor._quantized_data.shape[:-1] == test_tensor.shape[:-1]
+        # the crop after padding must not leave a strided view: export writes raw
+        # storage, so a non-contiguous packed tensor would serialize with gaps
+        # between rows for any multi-row shape
+        assert qtensor._quantized_data.is_contiguous()
 
         dequant_tensor = qtensor.dequantize(scale=e8m0_scale, block_sizes={-1: 32})
 
