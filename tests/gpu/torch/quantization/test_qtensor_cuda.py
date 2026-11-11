@@ -24,7 +24,7 @@ from _test_utils.torch.misc import set_seed
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
+from modelopt.torch.quantization.qtensor import MXFP4QTensor, MXFP8QTensor, NVFP4QTensor
 
 set_seed()
 
@@ -988,4 +988,39 @@ class TestQTensor:
         assert torch.allclose(fake_quant_output, real_dequant_output, rtol=5e-2, atol=5e-2), (
             f"Fake quant differs from real quant+dequant: "
             f"max diff = {(fake_quant_output - real_dequant_output).abs().max()}"
+        )
+
+
+class TestMXFP4Padding:
+    """Regression test: MXFP4QTensor used to crash/misalign on non-block-divisible shapes.
+
+    INT4QTensor, NVFP4QTensor and MXFP8QTensor all call ``reduce_block_padding`` before
+    reshaping into blocks of ``block_size``; MXFP4QTensor was the odd one out and called
+    ``input.view(-1, block_size)`` directly, which raises a RuntimeError whenever the input's
+    number of elements isn't a multiple of ``block_size`` (e.g. MoE/TP-sharded weight shapes).
+    """
+
+    @pytest.mark.parametrize("device", ["cuda", "cpu"])
+    @pytest.mark.parametrize(
+        "input_shape",
+        [
+            (4, 32),  # exactly divisible (previously the only supported case)
+            (3, 40),  # total numel (120) not a multiple of block_size (32)
+            (8, 33),  # last dim odd and not block-divisible
+            (3, 5, 48),  # 3D MoE-style shape, not block-divisible
+        ],
+    )
+    def test_mxfp4_quantize_dequantize_non_divisible_shape(self, device, input_shape):
+        test_tensor = torch.randn(input_shape, device=device)
+
+        qtensor, e8m0_scale = MXFP4QTensor.quantize(test_tensor, block_size=32)
+
+        assert qtensor._quantized_data.shape[:-1] == test_tensor.shape[:-1]
+
+        dequant_tensor = qtensor.dequantize(scale=e8m0_scale, block_sizes={-1: 32})
+
+        assert dequant_tensor.shape == input_shape
+        assert torch.allclose(dequant_tensor, test_tensor, rtol=5e-1, atol=5e-1), (
+            f"Dequantized tensor differs from original: "
+            f"max diff = {(dequant_tensor - test_tensor).abs().max()}"
         )
