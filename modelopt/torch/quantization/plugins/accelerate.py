@@ -351,16 +351,19 @@ def init_quantized_weights(
                 **kwargs,
             )
 
-        # from_config() fetches the class auto_map names when the test below holds, and takes
-        # code_revision only then: a class its mapping already has, such as remote code an earlier
-        # load registered, is built with every kwarg it is given.
+        # from_config() takes code_revision only where it fetches the class auto_map names. With no
+        # class mapped for the config it fetches or refuses, also when trust_remote_code is None and
+        # it asks on a terminal. It replaces a library class only if trusted, and builds a class an
+        # earlier load registered with every kwarg it is given.
         class_ref = (getattr(config, "auto_map", None) or {}).get(cls.__name__)
-        if code_revision is not None and class_ref and trust_remote_code:
+        if code_revision is not None and class_ref:
             from transformers.models.auto.auto_factory import _get_model_class
 
             mapping = cls._model_mapping
-            mapped = _get_model_class(config, mapping) if type(config) in mapping else None
-            if mapped is None or mapped.__module__.startswith("transformers."):
+            if type(config) not in mapping or (
+                trust_remote_code
+                and _get_model_class(config, mapping).__module__.startswith("transformers.")
+            ):
                 kwargs["code_revision"] = code_revision
 
         with init_empty_weights():

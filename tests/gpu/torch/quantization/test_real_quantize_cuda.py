@@ -211,18 +211,22 @@ class RemoteLlamaForCausalLM(LlamaForCausalLM):
 """
 
 
-# Stand in for a Hub repo of the code and its commit. The Hub cache and the imported module are
-# keyed by both.
+# Stand in for a Hub repo of the code and two of its commits. The Hub cache and the imported module
+# are keyed by repo and commit, so a load of one commit registers no class for the other.
 _REMOTE_LLAMA_REPO = "nvidia/modelopt-test-remote-llama"
-_REMOTE_LLAMA_COMMIT = hashlib.sha1(_REMOTE_LLAMA.encode(), usedforsecurity=False).hexdigest()
+_REMOTE_LLAMA_COMMITS = {
+    hashlib.sha1(code.encode(), usedforsecurity=False).hexdigest(): code
+    for code in (_REMOTE_LLAMA, _REMOTE_LLAMA + "# Another commit.\n")
+}
+_REMOTE_LLAMA_COMMIT, _REMOTE_LLAMA_COMMIT_ASKED = _REMOTE_LLAMA_COMMITS
 
 
-def _use_remote_code(checkpoint_dir, code_dir=None, code_repo=""):
+def _use_remote_code(checkpoint_dir, code_dir=None, code_repo="", code=_REMOTE_LLAMA):
     """Make the checkpoint's config and model classes its own code, through ``auto_map``.
 
     With ``code_dir`` the code is written there, and ``auto_map`` names it in ``code_repo``.
     """
-    (code_dir or checkpoint_dir).joinpath("modeling_remote_llama.py").write_text(_REMOTE_LLAMA)
+    (code_dir or checkpoint_dir).joinpath("modeling_remote_llama.py").write_text(code)
     config_file = checkpoint_dir / "config.json"
     config = json.loads(config_file.read_text())
     config["model_type"] = "remote_llama"
@@ -265,6 +269,13 @@ def _use_remote_code(checkpoint_dir, code_dir=None, code_repo=""):
             torch.bfloat16,
             id="remote_code_revision",
         ),
+        # Not trusted in the call: transformers asks on a terminal, and the answer here is yes.
+        pytest.param(
+            {"trust_remote_code": None, "code_revision": _REMOTE_LLAMA_COMMIT_ASKED},
+            False,
+            torch.bfloat16,
+            id="remote_code_revision_asked",
+        ),
     ],
 )
 def test_real_quantize_linear(
@@ -284,7 +295,10 @@ def test_real_quantize_linear(
         repo_dir = tmp_path / ("models--" + _REMOTE_LLAMA_REPO.replace("/", "--"))
         code_dir = repo_dir / "snapshots" / load_kwargs["code_revision"]
         code_dir.mkdir(parents=True)
-        _use_remote_code(tiny_llama_dir, code_dir, f"{_REMOTE_LLAMA_REPO}--")
+        code = _REMOTE_LLAMA_COMMITS[load_kwargs["code_revision"]]
+        _use_remote_code(tiny_llama_dir, code_dir, f"{_REMOTE_LLAMA_REPO}--", code)
+        if load_kwargs["trust_remote_code"] is None:
+            monkeypatch.setattr("builtins.input", lambda _: "y")
     elif load_kwargs.get("trust_remote_code"):
         _use_remote_code(tiny_llama_dir)
     if clear_config_dtype:
@@ -298,7 +312,7 @@ def test_real_quantize_linear(
     assert model.model.norm.weight.dtype == expected_dtype
     if "attn_implementation" in load_kwargs:
         assert model.config._attn_implementation == load_kwargs["attn_implementation"]
-    if load_kwargs.get("trust_remote_code"):
+    if "trust_remote_code" in load_kwargs:
         assert type(model).__name__ == "RemoteLlamaForCausalLM"
 
     for _, module in model.named_modules():
