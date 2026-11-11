@@ -288,9 +288,6 @@ You may not need the full evaluation budget to detect an improvement or rule out
 regression. The data needed depends on the model pair, metric, acceptable regression margin, and
 statistical target.
 
-The plots below are retrospective examples. Their threshold crossings are not validated adaptive
-stopping rules or general sample-size prescriptions.
-
 **How many responses show fewer cap hits on SciCode?**
 
 We first compare random subsets of 10–294 subtasks with one repetition, then add repetitions on all
