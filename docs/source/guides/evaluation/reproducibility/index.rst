@@ -18,9 +18,12 @@ model-generated responses: 104 correct and 104 containing reasoning loops. After
 (KTO beta 0.05, learning rate 1e-6) with simulated NVFP4 quantization, Candidate was exported to
 NVFP4.
 
-The evaluated checkpoints are available in the `checkpoint collection
-<https://modelopt.nvidia.com/hub/?collection=20eb6348-d437-4842-a67a-73d325238a27>`__
-(NVIDIA internal access required).
+The evaluated checkpoints and paired measurements are available in the `evaluation collection
+<https://modelopt.nvidia.com/hub/?collection=20eb6348-d437-4842-a67a-73d325238a27>`__.
+It also links to the `analysis record
+<https://gitlab-master.nvidia.com/dkorzekwa/pensieve-harness/-/tree/db855815f43453b714e70f52c8858fe562e12ed3/experiments/reasoning_loop_recovery/2026-11-06_reasoning_model_evaluation>`__,
+pinned to a fixed commit, with selected question/subtask IDs, evaluation settings, analysis scripts
+and seeds. Both sources require NVIDIA internal access.
 
 Evaluation setup
 ----------------
@@ -136,7 +139,7 @@ repetitions, the estimates may be unstable.
 Reproducibility limits
 ----------------------
 
-The exact evaluated QAD and KTO checkpoints are not publicly available. To keep the ModelOpt
-repository lightweight, we include summary results rather than question-level data, generated
-responses, or a full experiment environment, consistent with the `Qwen3.6 PTQ/QAD
+The checkpoints and paired measurements are stored outside the public ModelOpt repository.
+To keep the repository lightweight, we include summary results here rather than question-level
+data, generated responses, or a full experiment environment, consistent with the `Qwen3.6 PTQ/QAD
 tutorial <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md>`__.
