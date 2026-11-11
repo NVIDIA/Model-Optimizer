@@ -242,9 +242,11 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
             assert torch.equal(weight[idx], original_weight[idx])
 
 
-def test_hf_export_writes_each_fused_expert_s_pinned_rows(moe):
-    # The recipe leaves the experts' weights unrounded, and export splits gate_up into gate and up.
+@ENCODERS
+def test_hf_export_writes_each_fused_expert_s_pinned_rows(moe, algorithm):
+    # Both encoders leave the experts' weights unrounded, and export splits gate_up into gate and up.
     recipe = load_recipe("general/ptq/iq2_xxs_experts_only").quantize.model_dump()
+    recipe["algorithm"] = algorithm
     mtq.quantize(moe, recipe, lambda m: m(_inputs(rows=96, columns=HIDDEN)))
     experts = moe.mlp.experts
     pins = [
