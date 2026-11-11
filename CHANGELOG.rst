@@ -92,6 +92,7 @@ Changelog
 - Layerwise-calibration resume (``checkpoint_dir``) now loads checkpoint files with ``weights_only=True``. A checkpoint directory written by an earlier release whose layer inputs hold objects other than tensors, plain containers or Hugging Face dynamic caches can no longer be resumed; recalibrate in a fresh directory, or disable checkpointing.
 - ``export_hf_checkpoint`` now reads how a model is distributed from the plan recorded on it, and raises for an FSDP2-sharded model, or one in a multi-rank run, that carries none. ``load_pretrained`` and ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` record it; for a model you distribute yourself (``fsdp2_wrap`` and ``parallel_load_and_prepare_fsdp2`` record none), or export from several ranks as a DDP script does, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it, e.g. ``DistributionPlan(world_size)`` when every rank holds the whole model.
 - Streaming speculative-decoding training's vLLM connector (``modelopt.torch.speculative.plugins.rdma_hidden_states_connector``) now requires vLLM 0.22 or later. It is tested with vLLM 0.29 and later.
+- The yes/no environment variables ``MODELOPT_NVFP4_TRITON_SWEEP``, ``MODELOPT_SKIP_WEIGHT_QUANT_CHECK`` and ``MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP`` now take ``1``/``0``, ``true``/``false``, ``yes``/``no`` or ``on``/``off`` in any case and raise on any other value, which they used to ignore. ``modelopt.env`` documents every ``MODELOPT_*`` variable ModelOpt reads.
 
 **Deprecations**
 

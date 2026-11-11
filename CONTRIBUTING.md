@@ -73,6 +73,9 @@ and conciseness.
 - **Fix the bug cause, not the side effect.** For bug fixes, find the root cause instead of patching for its side effect.
 - **Validate external input once.** Check types and values at the interface boundary. Internal code can trust those
   checks and avoid redundant assertions.
+- **Read `MODELOPT_*` environment variables only through `modelopt/env.py`.** Each has a documented
+  accessor there that reads the environment when called; add one for a new variable. The `check-env-knobs`
+  pre-commit hook enforces this.
 - **Remove dead code.** Delete unused imports, unreachable branches, and obsolete helpers.
 - **Keep imports at the top of the file.** Place all imports at module top in both source
   and test files so import errors surface at module load time rather than at runtime or

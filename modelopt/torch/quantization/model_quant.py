@@ -32,6 +32,7 @@ from torch.distributed.fsdp import FSDPModule
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
+from modelopt import env
 from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
@@ -193,6 +194,28 @@ def _refuse_awq_on_a_sharded_fsdp2_model(
         )
 
 
+def _refuse_a_malformed_variable() -> None:
+    """Parse the ``MODELOPT_*`` variables quantizing reads, which raises on a malformed one.
+
+    Their readers (the weight check, module conversion, calibration) run once the model has begun
+    to change, so the entry points call this before they change it. In a distributed run each rank
+    parses its own environment, and every rank raises if one fails: a rank raising alone would
+    leave the others waiting for it in calibration.
+    """
+
+    def parse() -> None:
+        env.skip_weight_quant_check()
+        env.tegrouped_compile_weight_loop()
+        env.nvfp4_triton_sweep()
+
+    # all_reduce refuses a distributed launch with no process group, where each rank quantizes on
+    # its own.
+    if dist.is_distributed_run():
+        dist.all_reduce("its MODELOPT_* variables", parse, combine=lambda _: None)
+    else:
+        parse()
+
+
 # TODO: Descriptors for the supported algorithms
 def calibrate(
     model: nn.Module,
@@ -224,6 +247,7 @@ def calibrate(
     """
     _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
     _refuse_unsupported_distributed_calibration(model, algorithm)
+    _refuse_a_malformed_variable()
     if forward_loop is not None:
         # get the number of arguments of forward_loop
         num_args = len(inspect.signature(forward_loop).parameters)
@@ -329,9 +353,6 @@ def postprocess_amax(model: nn.Module, key: str, post_process_fn) -> nn.Module:
     return model
 
 
-_SKIP_WEIGHT_QUANT_CHECK_ENV = "MODELOPT_SKIP_WEIGHT_QUANT_CHECK"
-
-
 def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
     """Raise when a config asks for weight quantization but no weight quantizer is enabled.
 
@@ -356,7 +377,7 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     pattern's *final* entry, since entries apply in order and the last one for a pattern
     wins — before looking at the model at all.
     """
-    if os.environ.get(_SKIP_WEIGHT_QUANT_CHECK_ENV) == "1":
+    if env.skip_weight_quant_check():
         return
 
     # Later entries override earlier ones, so only each pattern's final state states intent.
@@ -402,7 +423,7 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
         "Under pipeline parallelism, a rank whose local stage genuinely has none of the "
         "targeted modules (e.g. a pure-attention stage under an experts-only recipe) hits "
         "this too, while other ranks proceed into calibration -- a collective hang, not "
-        f"just a wrong per-rank verdict. Set {_SKIP_WEIGHT_QUANT_CHECK_ENV}=1 to bypass this "
+        "just a wrong per-rank verdict. Set MODELOPT_SKIP_WEIGHT_QUANT_CHECK=1 to bypass this "
         "check in that situation -- note this is process-global, so it silences the check "
         "on every rank, not only the one with the legitimately empty stage."
     )
@@ -583,6 +604,7 @@ def quantize(
     quantize_config = QuantizeConfig(**dict(config))
     _refuse_awq_on_a_sharded_fsdp2_model(model, config.get("algorithm"))
     _refuse_unsupported_distributed_calibration(model, config.get("algorithm"))
+    _refuse_a_malformed_variable()
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
@@ -1097,6 +1119,7 @@ def auto_quantize(
             "that quantization replaces and distributed_forward_loop restores. Quantize it with "
             "mtq.quantize through distributed_forward_loop, or AutoQuantize in a single process."
         )
+    _refuse_a_malformed_variable()
 
     method_name, method_config = _parse_auto_quantize_method(method)
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
