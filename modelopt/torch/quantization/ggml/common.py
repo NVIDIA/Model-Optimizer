@@ -63,6 +63,7 @@ class _PackedWeightCache:
 
     base_ref: weakref.ReferenceType
     input_key: _CacheKey
+    input_fingerprint: torch.Tensor
     format_name: str
     block_chunk_size: int
     packed_weights: torch.Tensor
@@ -121,6 +122,21 @@ def _input_cache_key(inputs: torch.Tensor) -> _CacheKey | None:
     )
 
 
+def _input_fingerprint(inputs: torch.Tensor) -> torch.Tensor:
+    """Return a position-sensitive device-resident fingerprint of every input element."""
+    bits = inputs.contiguous().view(_SIGNED_INT_OF_SIZE[inputs.element_size()]).reshape(-1)
+    values = bits.to(torch.int64)
+    positions = torch.arange(1, values.numel() + 1, dtype=torch.int64, device=bits.device)
+    return torch.stack(
+        (
+            values.sum(),
+            (values * values).sum(),
+            (values * positions).sum(),
+            (values * values * positions).sum(),
+        )
+    )
+
+
 def _is_contiguous(shape: tuple[int, ...], stride: tuple[int, ...]) -> bool:
     expected = 1
     for size, step in zip(reversed(shape), reversed(stride)):
@@ -135,6 +151,32 @@ def _same_elements(key: _CacheKey, other: _CacheKey) -> bool:
     return (
         (key.data_ptr, key.dtype, key.device, key.version)
         == (other.data_ptr, other.dtype, other.device, other.version)
+        and math.prod(key.shape) == math.prod(other.shape)
+        and _is_contiguous(key.shape, key.stride)
+        and _is_contiguous(other.shape, other.stride)
+    )
+
+
+def _same_input_layout(key: _CacheKey, other: _CacheKey) -> bool:
+    return (
+        key.data_ptr,
+        key.dtype,
+        key.device,
+        key.shape,
+        key.stride,
+    ) == (
+        other.data_ptr,
+        other.dtype,
+        other.device,
+        other.shape,
+        other.stride,
+    )
+
+
+def _same_contiguous_layout(key: _CacheKey, other: _CacheKey) -> bool:
+    return (
+        key.dtype == other.dtype
+        and key.device == other.device
         and math.prod(key.shape) == math.prod(other.shape)
         and _is_contiguous(key.shape, key.stride)
         and _is_contiguous(other.shape, other.stride)
@@ -163,9 +205,19 @@ def _matching_cache(
         and cache.format_name == format_name
     ):
         return None
-    if cache.input_key == input_key or (
-        any_contiguous_view and _same_elements(cache.input_key, input_key)
-    ):
+    # ``inputs`` is often a view created in the forward; under no_grad its requires_grad is False
+    # even for a trainable parameter, so read it from the parameter itself.
+    same_layout = _same_input_layout(cache.input_key, input_key) or (
+        any_contiguous_view and _same_contiguous_layout(cache.input_key, input_key)
+    )
+    if not same_layout:
+        return None
+    same_version = cache.input_key.version == input_key.version
+    if not same_version:
+        return None
+    if not _cache_base(inputs).requires_grad:
+        return cache
+    if torch.equal(cache.input_fingerprint, _input_fingerprint(inputs)):
         return cache
     return None
 
@@ -312,6 +364,7 @@ def fake_quantize_with_cache(
             quantizer._quantizer_cache = _PackedWeightCache(
                 base_ref=weakref.ref(base),
                 input_key=input_key,
+                input_fingerprint=_input_fingerprint(inputs),
                 format_name=format_name,
                 block_chunk_size=block_chunk_size,
                 packed_weights=packed_weights,
