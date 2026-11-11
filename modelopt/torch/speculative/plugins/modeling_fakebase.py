@@ -328,7 +328,16 @@ class FakeBaseModel(PreTrainedModel):
         config_path = resolve_checkpoint_file(source, "tokenizer_config.json")
         metadata = json.loads(config_path.read_text())
         auto_map = metadata.get("auto_map", {})
+        if not isinstance(auto_map, (dict, tuple, list)):
+            raise ValueError("tokenizer_config.json auto_map must be a mapping or sequence")
         custom = auto_map if isinstance(auto_map, (tuple, list)) else auto_map.get("AutoTokenizer")
+        if custom is not None and (
+            not isinstance(custom, (tuple, list))
+            or len(custom) < 2
+            or any(ref is not None and not isinstance(ref, str) for ref in custom[:2])
+            or not (custom[1] or custom[0])
+        ):
+            raise ValueError("tokenizer_config.json auto_map has an invalid AutoTokenizer entry")
         tokenizer_class = tokenizer_class_from_name(metadata.get("tokenizer_class") or "")
         if custom and trust_remote_code:
             tokenizer_class = get_class_from_dynamic_module(

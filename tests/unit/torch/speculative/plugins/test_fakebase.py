@@ -314,6 +314,11 @@ def test_export_source_slice_preserves_source_and_loader_parity(tmp_path, monkey
         "tokenizer_escape",
         "tokenizer_model_collision",
         "tokenizer_alternate_weights",
+        "tokenizer_auto_map_container",
+        "tokenizer_auto_map_mapping",
+        "tokenizer_auto_map_legacy",
+        "tokenizer_auto_map_reference",
+        "tokenizer_auto_map_empty",
     ],
 )
 def test_export_source_slice_rejects_invalid_source(
@@ -334,7 +339,17 @@ def test_export_source_slice_rejects_invalid_source(
             transformers, "BinaryVocabTokenizer", BinaryVocabTokenizer, raising=False
         )
         metadata = {"tokenizer_class": "BinaryVocabTokenizer"}
-        if invalid == "tokenizer_untrusted":
+        if invalid.startswith("tokenizer_auto_map_"):
+            (fake_checkpoint / "assets").mkdir()
+            (fake_checkpoint / "assets/vocab.bin").write_bytes(b"vocabulary")
+            metadata["auto_map"] = {
+                "tokenizer_auto_map_container": 42,
+                "tokenizer_auto_map_mapping": {"AutoTokenizer": "module.Tokenizer"},
+                "tokenizer_auto_map_legacy": ["module.Tokenizer"],
+                "tokenizer_auto_map_reference": {"AutoTokenizer": ["module.Tokenizer", 5]},
+                "tokenizer_auto_map_empty": {"AutoTokenizer": [None, None]},
+            }[invalid]
+        elif invalid == "tokenizer_untrusted":
             metadata["tokenizer_class"] = "UnregisteredRemoteTokenizer"
             metadata["auto_map"] = {
                 "AutoTokenizer": ["tokenization_binary.BinaryVocabTokenizer", None]
@@ -394,7 +409,10 @@ def test_export_source_slice_rejects_invalid_source(
         torch.testing.assert_close(model.embed_tokens.weight, tensors["embed_tokens.weight"])
         torch.testing.assert_close(model.lm_head.weight, tensors["lm_head.weight"])
     destination = tmp_path / "slice"
-    with pytest.raises(PermissionError if invalid == "sidecar_copy" else ValueError):
+    with pytest.raises(
+        PermissionError if invalid == "sidecar_copy" else ValueError,
+        match="auto_map" if invalid.startswith("tokenizer_auto_map_") else None,
+    ):
         FakeBaseModel.export_source_slice(fake_checkpoint, destination)
     assert not destination.exists()
 
