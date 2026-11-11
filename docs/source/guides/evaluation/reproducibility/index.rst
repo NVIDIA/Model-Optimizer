@@ -87,16 +87,51 @@ percentage points; length differences are in tokens, including reasoning tokens.
   intervals by sampling questions with replacement, keeping each question's repetitions and both
   models together. MMLU-Pro and SciCode use 100,000 resamples; AA uses 50,000, preserving 100
   questions per domain. The interval endpoints are the 2.5th and 97.5th percentiles.
-- **P-values for cap-hit, missing-final-answer, abstention, and incorrect-answer rates:** use an
-  exact paired permutation test. For each question, swap the two models' outcomes or leave them
-  unchanged, keeping all repetitions together. The one-sided p-value is the fraction of possible
-  swaps giving a difference at least as extreme in the tested direction, including ties.
 
 The question-level tests treat questions and SciCode subtasks as independent. Related subtasks from
 the same parent problem may need to be analyzed together.
 
 Each test uses p < 0.05. We do not make that threshold stricter because other metrics were also
 tested. Reverse-direction p-values provide context only.
+
+.. _evaluation-pvalue-methods:
+
+Question-level and repetition-level p-values
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For the SciCode benchmark, a response scores 1 if it hits the completion cap and 0 otherwise.
+Both methods test whether Candidate has a lower cap-hit rate, using identical responses from
+294 subtasks at each repetition count.
+
+**Question-level:** average each model's cap-hit outcomes across repetitions within each subtask,
+then subtract Baseline's average from Candidate's. This gives 294 paired differences. To calculate
+the exact `paired permutation p-value
+<https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html>`__,
+swap the models' results within each subtask or leave them unchanged, keeping all repetitions
+together. The p-value is the fraction of possible swaps giving a mean difference equal to or lower
+than the observed difference, including ties.
+
+Cap hits are rare, so most subtask differences are zero. The permutation test avoids relying on a
+t-distribution approximation for these sparse differences. It assumes that the models' results
+within each subtask are interchangeable under the null hypothesis.
+
+The outcomes are binary, but a simple binomial test on pooled responses would ignore question
+pairing and repetitions within each question. With one response per model and question, an
+`exact McNemar test
+<https://www.statsmodels.org/stable/generated/statsmodels.stats.contingency_tables.mcnemar.html>`__
+is another paired option.
+
+We use the same paired permutation method for the guide's cap-hit, missing-final-answer, abstention,
+and incorrect-answer p-values, taking the tail in the stated direction.
+
+**Repetition-level:** for each model and repetition, divide the number of cap hits by 294. Apply a
+`one-sided Welch t-test
+<https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ttest_ind.html>`__
+to the two lists of repetition rates, testing whether Candidate's mean is lower than Baseline's.
+The calculation uses each model's sample variance across repetitions and Welch's degrees of
+freedom. It treats runs as independent and allows different variances for the two models.
+At least two repetitions per model are needed to estimate those variances; with very few
+repetitions, the estimates may be unstable.
 
 Reproducibility limits
 ----------------------

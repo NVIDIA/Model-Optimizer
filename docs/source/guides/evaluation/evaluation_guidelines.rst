@@ -253,17 +253,11 @@ Repetition-level (run-level) analysis asks whether Candidate performs better on 
 repeated runs of the same fixed questions. It compares aggregate benchmark scores across
 repetitions.
 
-For SciCode, we test whether Candidate has a lower cap-hit rate than Baseline on the same 294
-subtasks. The plot below compares a paired subtask-permutation test with a one-sided Welch t-test on
-per-repetition cap-hit rates. Using identical responses, question-level analysis reaches p < 0.001
-with three repetitions; repetition-level analysis needs six, requiring twice as many responses. This
-SciCode cap-hit comparison illustrates fast experimentation with fewer repetitions. For a
-standardized evaluation and acceptance procedure, follow the `ModelOpt evaluation
-skill <https://github.com/NVIDIA/Model-Optimizer/blob/main/plugins/modelopt/skills/evaluation/SKILL.md>`__
-and `ModelOpt results-comparison
-skill <https://github.com/NVIDIA/Model-Optimizer/blob/main/plugins/modelopt/skills/compare-results/SKILL.md>`__.
-Its smaller budgets do not replace the skills’ validation or `minimum-run
-requirements <https://github.com/NVIDIA/Model-Optimizer/blob/main/plugins/modelopt/skills/evaluation/recipes/tasks/aa/scicode.md#at-least-8-runs-mandatory>`__.
+In this SciCode example, question-level analysis detects a lower Candidate cap-hit rate at p < 0.001
+after three repetitions; repetition-level analysis needs six, requiring twice as many responses.
+Both use identical responses from the same 294 subtasks at each repetition count. We calculate both
+p-values using the methods in :ref:`Question-level and repetition-level p-values <evaluation-pvalue-methods>`
+in the reproducibility notes.
 
 .. image:: images/scicode-cap-analysis-unit.svg
    :alt: One-sided p-values for fewer candidate cap hits across one to twenty repetitions on the same 294 SciCode subtasks. The paired subtask-permutation test reaches p below 0.001 at three repetitions, or 882 responses per model; the run-level Welch t-test reaches it at six repetitions, or 1,764 responses per model. Welch is unavailable with one repetition.
