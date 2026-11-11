@@ -112,6 +112,8 @@ def test_pins_the_codes_it_chose(algorithm):
 
     decoded = _decoded(model.weight_quantizer, model.weight.shape)
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
+    # local_hessian leaves the weight as it was; imatrix scales it like its stored scales.
+    assert torch.equal(model.weight.detach(), original) == (algorithm is LOCAL_HESSIAN)
 
     def output_error(weight):
         return ((weight - original) @ inputs.T).square().sum()
@@ -119,22 +121,23 @@ def test_pins_the_codes_it_chose(algorithm):
     assert output_error(decoded) < output_error(plain.weight_quantizer(plain.weight))
 
 
-def test_imatrix_matches_each_blocks_energy_and_keeps_a_weight_encoding_to_its_codes():
-    # The stored scales are rescaled after the search; the weight is scaled alike, so a block QAD
-    # changes is searched again from the codes calibration picked rather than shrunk by a rescan.
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float64])
+def test_imatrix_matches_each_blocks_energy_and_keeps_a_weight_encoding_to_its_codes(dtype):
+    # The stored scales are rescaled after the search and the weight is scaled alike, so the codes
+    # keep each block's energy and a block QAD changes is searched again from them.
     torch.manual_seed(0)
-    model = nn.Linear(512, 16, bias=False)
+    model = nn.Linear(512, 16, bias=False, dtype=dtype)
     original = model.weight.detach().clone()
-    inputs = _inputs()
+    inputs = _inputs().to(dtype)
     mtq.quantize(model, _config(IMATRIX), forward_loop=lambda m: m(inputs))
     quantizer = model.weight_quantizer
     pinned = pinned_packed_weight(quantizer, "iq2_xxs")
 
-    second_moments = _floored(inputs.square().mean(dim=0)).reshape(2, 256)
+    second_moments = _floored(inputs.float().square().mean(dim=0)).reshape(2, 256)
     decoded = _decoded(quantizer, original.shape).reshape(16, 2, 256)
     energy = (second_moments * decoded.square()).sum(-1)
-    target = (second_moments * original.reshape(16, 2, 256).square()).sum(-1)
-    torch.testing.assert_close(energy, target, rtol=2e-3, atol=0)
+    target = (second_moments * original.float().reshape(16, 2, 256).square()).sum(-1)
+    torch.testing.assert_close(energy, target, rtol=1e-2, atol=0)
 
     rescanned, _ = IQ2_XXS.quantize(
         model.weight.detach(),
@@ -224,6 +227,7 @@ def test_a_module_calibration_never_reached_gets_the_plain_search(algorithm):
     packed, shape = IQ2_XXS.plain_quantize(original)
     plain = IQ2_XXS.dequantize(packed, shape, dtype=torch.float32)
     assert torch.equal(_decoded(model["unused"].weight_quantizer, original.shape), plain)
+    assert torch.equal(model["unused"].weight, original) == (algorithm is LOCAL_HESSIAN)
 
 
 def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):

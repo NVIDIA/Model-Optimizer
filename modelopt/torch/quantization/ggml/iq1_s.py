@@ -362,7 +362,7 @@ IQ1_S_FORMAT = GGMLFormat(
     choice_groups=8,
     num_choices=16,
     payload_scales=leading_fp16_scales,
-    scale_fit=ScaleFit(group=32, top=15, levels=_IQ1_LEVELS, signed=True),
+    scale_fit=ScaleFit(group=32, top=15, levels=_IQ1_LEVELS),
     replace_payload_scales=with_leading_fp16_scales,
 )
 
