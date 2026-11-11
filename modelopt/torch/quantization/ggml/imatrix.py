@@ -15,10 +15,13 @@
 
 """imatrix calibration for GGML formats: one encode per weight, weighted by its inputs' ``E[x_j^2]``."""
 
-import torch
-
 from ..utils.calib_utils import ImatrixEncoder, register_imatrix_encoder
-from .common import floored_second_moments, pin_packed_weight, pinned_packed_weight, validate_weight
+from .common import (
+    floored_second_moments,
+    pin_energy_matched,
+    pinned_packed_weight,
+    validate_weight,
+)
 from .registry import GGML_FORMAT_REGISTRY
 
 __all__ = ["GGMLImatrixEncoder"]
@@ -27,12 +30,10 @@ __all__ = ["GGMLImatrixEncoder"]
 class GGMLImatrixEncoder(ImatrixEncoder):
     """Encodes a ``ggml``-backend weight with llama.cpp's imatrix statistic and pins its codes.
 
-    The search is weighted by the square root of ``E[x_j^2]``, as GPTQ's is. Without error
-    compensation the statistic itself is the exact diagonal of the output error, but it is
-    heavy-tailed and, for an MoE expert that sees few calibration tokens, noisy; its root did better
-    on both dense and MoE models. The pinned payload is what later forwards and export use, and it
-    marks the weight as final: a quantizer that already holds one, such as GPTQ's, is left alone.
-    A format that keeps its pinned scales leaves the weight unrounded, as GPTQ does.
+    The encode is :func:`~.common.pin_energy_matched` under ``E[x_j^2]``, the exact diagonal of the
+    output error, whose search takes its square root. The pinned payload is what later forwards
+    and export use, and it marks the weight as final: a quantizer that already holds one, such as
+    GPTQ's, is left alone.
     """
 
     def accepts(self, quantizer) -> bool:
@@ -55,24 +56,9 @@ class GGMLImatrixEncoder(ImatrixEncoder):
     def encode(self, weight, quantizer, second_moments):
         """Encode ``weight`` once, weighted by ``second_moments``, and pin the payload."""
         ggml_format = GGML_FORMAT_REGISTRY[quantizer.num_bits]
-        extra_args = quantizer.backend_extra_args or {}
-        floored = floored_second_moments(second_moments)
-        importance = None if floored is None else floored.sqrt()
-        packed, shape = ggml_format.quantize(
-            weight.contiguous(),
-            block_chunk_size=extra_args.get("block_chunk_size", ggml_format.block_chunk_size),
-            importance=importance,
+        return pin_energy_matched(
+            ggml_format, quantizer, weight, floored_second_moments(second_moments)
         )
-        pin_packed_weight(quantizer, quantizer.num_bits, packed, importance)
-        if ggml_format.payload_scales is not None:
-            return weight
-        decoded = ggml_format.dequantize(
-            packed,
-            shape,
-            dtype=torch.float32,
-            block_chunk_size=extra_args.get("decode_chunk_size", ggml_format.decode_chunk_size),
-        )
-        return decoded.to(weight.dtype)
 
 
 register_imatrix_encoder("ggml", GGMLImatrixEncoder())

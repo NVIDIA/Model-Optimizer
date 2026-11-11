@@ -37,6 +37,7 @@ from .codebooks import iq2_xs_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
+    ScaleFit,
     choice_blocks,
     chunk_importance,
     dequantize_blocks,
@@ -49,6 +50,7 @@ from .common import (
     validate_block_chunk_size,
     validate_packed_weights,
     validate_weight,
+    with_leading_fp16_scales,
 )
 
 __all__ = [
@@ -321,6 +323,9 @@ IQ2_XS_FORMAT = GGMLFormat(
     choice_groups=16,
     num_choices=16,
     payload_scales=leading_fp16_scales,
+    # Fit at llama.cpp's levels 1, 3, 5, the odd steps its grid's 8, 25, 43 (in eighths) round to.
+    scale_fit=ScaleFit(group=16, top=31, levels=((1.0, 3.0, 5.0),), signed=False),
+    replace_payload_scales=with_leading_fp16_scales,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq2_xs and

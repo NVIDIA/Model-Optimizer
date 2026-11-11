@@ -22,6 +22,7 @@ from .choice_search import search_choices
 from .common import (
     GGML_BLOCK_SIZE,
     floored_second_moments,
+    pin_energy_matched,
     pin_packed_weight,
     pinned_packed_weight,
     validate_weight,
@@ -38,9 +39,10 @@ class GGMLLocalHessianEncoder(LocalHessianEncoder):
     per-group choice that search would take by that diagonal is instead picked by the full
     256-column block of the Hessian (:func:`~.choice_search.search_choices`), damped by
     ``perc_damp`` times its mean diagonal: undamped, the picks overfit the calibration inputs. A
-    weight no calibration input reached is encoded plainly. Like imatrix, the pinned payload marks
-    the weight as final, so a quantizer that already holds one, such as GPTQ's, is left alone, and
-    a format that keeps its pinned scales leaves the weight unchanged.
+    weight no calibration input reached gets the plain search, as imatrix gives it. Like imatrix,
+    the pinned payload marks the weight as final, so a quantizer that already holds one, such as
+    GPTQ's, is left alone, and a format that keeps its pinned scales leaves a searched weight
+    unchanged.
     """
 
     block_size = GGML_BLOCK_SIZE
@@ -68,25 +70,28 @@ class GGMLLocalHessianEncoder(LocalHessianEncoder):
         extra_args = quantizer.backend_extra_args or {}
         block_chunk_size = extra_args.get("block_chunk_size", ggml_format.block_chunk_size)
         decode_chunk_size = extra_args.get("decode_chunk_size", ggml_format.decode_chunk_size)
-        kwargs = {}
+        moments = None
         if hessian is not None:
             moments = floored_second_moments(hessian.diagonal(dim1=1, dim2=2).reshape(-1))
-            if moments is not None:
-                if ggml_format.weighted:
-                    kwargs["importance"] = moments.sqrt().to(weight.device)
-                hessian = hessian.to(device=weight.device, dtype=torch.float32)
-                # Symmetrized, as the search's refinement update assumes.
-                hessian = (hessian + hessian.transpose(1, 2)) / 2
-                ridge = perc_damp * hessian.diagonal(dim1=1, dim2=2).mean()
-                hessian.diagonal(dim1=1, dim2=2).add_(ridge)
-                kwargs["choices"] = search_choices(
-                    ggml_format,
-                    weight,
-                    hessian,
-                    kwargs.get("importance"),
-                    block_chunk_size,
-                    decode_chunk_size,
-                )
+        if moments is None:
+            # No calibration input reached the weight: the plain search, as imatrix gives it.
+            return pin_energy_matched(ggml_format, quantizer, weight, None)
+        kwargs = {}
+        if ggml_format.weighted:
+            kwargs["importance"] = moments.sqrt().to(weight.device)
+        hessian = hessian.to(device=weight.device, dtype=torch.float32)
+        # Symmetrized, as the search's refinement update assumes.
+        hessian = (hessian + hessian.transpose(1, 2)) / 2
+        ridge = perc_damp * hessian.diagonal(dim1=1, dim2=2).mean()
+        hessian.diagonal(dim1=1, dim2=2).add_(ridge)
+        kwargs["choices"] = search_choices(
+            ggml_format,
+            weight,
+            hessian,
+            kwargs.get("importance"),
+            block_chunk_size,
+            decode_chunk_size,
+        )
         packed, shape = ggml_format.quantize(
             weight.contiguous(), block_chunk_size=block_chunk_size, **kwargs
         )
@@ -96,7 +101,7 @@ class GGMLLocalHessianEncoder(LocalHessianEncoder):
             quantizer.num_bits,
             packed,
             kwargs.get("importance"),
-            source=weight if "choices" in kwargs else None,
+            source=weight,
         )
         if ggml_format.payload_scales is not None:
             return weight
