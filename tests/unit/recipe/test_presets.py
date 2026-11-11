@@ -201,17 +201,17 @@ def test_iq_recipe_matches_packing_contract(qformat, block_size, effective_bits)
 
 
 @pytest.mark.parametrize(
-    ("qformat", "block_size", "effective_bits"),
+    ("qformat", "block_size", "effective_bits", "method"),
     [
-        ("iq1_s", IQ1_S_BLOCK_SIZE, IQ1_S_EFFECTIVE_BITS),
-        ("iq1_m", IQ1_M_BLOCK_SIZE, IQ1_M_EFFECTIVE_BITS),
-        ("iq2_xxs", IQ2_XXS_BLOCK_SIZE, IQ2_XXS_EFFECTIVE_BITS),
-        ("iq2_xs", IQ2_XS_BLOCK_SIZE, IQ2_XS_EFFECTIVE_BITS),
-        ("iq2_s", IQ2_S_BLOCK_SIZE, IQ2_S_EFFECTIVE_BITS),
+        ("iq1_s", IQ1_S_BLOCK_SIZE, IQ1_S_EFFECTIVE_BITS, "imatrix"),
+        ("iq1_m", IQ1_M_BLOCK_SIZE, IQ1_M_EFFECTIVE_BITS, "imatrix"),
+        ("iq2_xxs", IQ2_XXS_BLOCK_SIZE, IQ2_XXS_EFFECTIVE_BITS, "local_hessian"),
+        ("iq2_xs", IQ2_XS_BLOCK_SIZE, IQ2_XS_EFFECTIVE_BITS, "local_hessian"),
+        ("iq2_s", IQ2_S_BLOCK_SIZE, IQ2_S_EFFECTIVE_BITS, "local_hessian"),
     ],
 )
-def test_iq_experts_only_recipe_quantizes_the_routed_experts_with_local_hessian(
-    qformat, block_size, effective_bits
+def test_iq_experts_only_recipe_quantizes_the_routed_experts(
+    qformat, block_size, effective_bits, method
 ):
     quantize = load_recipe(f"general/ptq/{qformat}_experts_only").quantize.model_dump(
         exclude_unset=True
@@ -227,7 +227,7 @@ def test_iq_experts_only_recipe_quantizes_the_routed_experts_with_local_hessian(
         assert weight_cfg["backend"] == "ggml"
         assert weight_cfg["block_sizes"][-1] == block_size
         assert weight_cfg["effective_bits"] == effective_bits
-    assert quantize["algorithm"] == {"method": "local_hessian"}
+    assert quantize["algorithm"] == {"method": method}
 
 
 # --- RecipeSupersededAction: the flags --recipe replaces ----------------------------------------
