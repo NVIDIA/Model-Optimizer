@@ -35,6 +35,7 @@ from modelopt.torch.quantization.kv_cache_auto_quant import (
     _validate_kv_only_config,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.utils.distributed import ParallelState
 
 
 @pytest.fixture
@@ -741,27 +742,94 @@ def test_public_kv_autoquant_rejects_unmatched_or_unexportable_candidates_before
         assert {name: type(module) for name, module in model.named_modules()} == original_types
 
 
-def test_public_kv_autoquant_rejects_distributed_execution_before_mutation(monkeypatch):
+@pytest.mark.parametrize("unsupported_sharding", [False, True])
+def test_public_kv_autoquant_rejects_invalid_inputs_before_mutation(
+    monkeypatch, unsupported_sharding
+):
     model = get_tiny_llama(num_hidden_layers=1)
     original_types = {name: type(module) for name, module in model.named_modules()}
-    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
-
-    with pytest.raises(RuntimeError, match="single-process only"):
+    if unsupported_sharding:
+        monkeypatch.setattr(model_quant.dist, "size", lambda: 2)
+        monkeypatch.setattr(model_quant.dist, "is_dtensor_sharded", lambda _: True)
+        monkeypatch.setattr(model_quant.dist, "is_fsdp2_model", lambda _: False)
+    error = NotImplementedError if unsupported_sharding else ValueError
+    message = (
+        "supports DP/FSDP2, not TP" if unsupported_sharding else "non-empty quantization_formats"
+    )
+    with pytest.raises(error, match=message):
         mtq.auto_quantize(
             model,
             {"effective_bits": 8.0, "cost_model": "kv_cache"},
             [],
             [],
-            lambda *_: pytest.fail("Distributed validation must fail before search."),
+            lambda *_: pytest.fail("Invalid formats must fail before search."),
         )
 
     assert not hasattr(model, "_modelopt_state")
     assert {name: type(module) for name, module in model.named_modules()} == original_types
 
 
-def test_public_kv_autoquant_rejects_preceding_quantization_before_search():
+@pytest.mark.parametrize("group", ["tensor_parallel_group", "expert_model_parallel_group"])
+def test_public_kv_autoquant_rejects_tp_ep_before_forward(monkeypatch, group):
+    model = get_tiny_llama(num_hidden_layers=1)
+    original_types = {name: type(module) for name, module in model.named_modules()}
+    model.parallel_state = ParallelState()
+    monkeypatch.setattr(getattr(model.parallel_state, group), "world_size", lambda: 2)
+    with pytest.raises(NotImplementedError, match="supports DP/FSDP2, not TP or EP"):
+        mtq.auto_quantize(
+            model,
+            {"effective_bits": 8.0, "cost_model": "kv_cache"},
+            [_kv_config((4, 3), 8.0).model_dump(exclude_none=True)],
+            [torch.ones((1, 8), dtype=torch.long)],
+            lambda *_: pytest.fail("TP/EP must be rejected before calibration."),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+    assert not hasattr(model, "_modelopt_state")
+    assert {name: type(module) for name, module in model.named_modules()} == original_types
+
+
+def test_gradient_then_kv_autoquant_resumes_without_forward(tmp_path, monkeypatch):
+    batches = [torch.arange(16).reshape(1, 16)]
+    states = []
+    for resume in (False, True):
+        model = get_tiny_llama(num_attention_heads=2)
+        if resume:
+            monkeypatch.setattr(
+                model, "forward", lambda *_a, **_kw: pytest.fail("Resume forwarded")
+            )
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=["FP8_DEFAULT_CFG"],
+            data_loader=batches,
+            forward_step=lambda m, x: m(input_ids=x, labels=x, use_cache=False),
+            loss_func=lambda output, _: output.loss,
+            num_calib_steps=1,
+            num_score_steps=1,
+            method="gradient",
+            checkpoint=str(tmp_path / "weights.pth"),
+            verbose=False,
+        )
+        _, state = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0, "cost_model": "kv_cache"},
+            quantization_formats=[_kv_config((4, 3), 8.0).model_dump(exclude_none=True)],
+            data_loader=batches,
+            forward_step=lambda m, x: m(input_ids=x, use_cache=False).logits,
+            num_calib_steps=1,
+            num_score_steps=1,
+            method="kl_div",
+            checkpoint=str(tmp_path / "kv.pth"),
+            verbose=False,
+        )
+        states.append(state)
+    assert states[0]["search_signature"] == states[1]["search_signature"]
+    assert states[0]["layers"] == states[1]["layers"]
+    assert states[0]["best"] == states[1]["best"]
+
+
+def test_public_kv_autoquant_preserves_preceding_weight_quantization():
     model = get_tiny_llama(num_hidden_layers=2)
     model = mtq.quantize(
         model,
@@ -770,7 +838,7 @@ def test_public_kv_autoquant_rejects_preceding_quantization_before_search():
                 {"quantizer_name": "*", "enable": False},
                 {
                     "quantizer_name": "*.weight_quantizer",
-                    "cfg": {"num_bits": (4, 3), "axis": None},
+                    "cfg": {"num_bits": (4, 3), "axis": None, "constant_amax": 1.0},
                     "enable": True,
                 },
             ],
@@ -788,13 +856,135 @@ def test_public_kv_autoquant_rejects_preceding_quantization_before_search():
         "effective_bits": 8.0,
     }
 
-    with pytest.raises(NotImplementedError, match="requires an unquantized model"):
+    data = [{"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}]
+    weight_quantizer = model.model.layers[0].self_attn.q_proj.weight_quantizer
+
+    model, _ = mtq.auto_quantize(
+        model,
+        {"effective_bits": 8.0, "cost_model": "kv_cache"},
+        [candidate],
+        data,
+        lambda search_model, batch: search_model(**batch).logits,
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
+
+    assert weight_quantizer.is_enabled
+    assert weight_quantizer.num_bits == (4, 3)
+    assert weight_quantizer.amax == 1.0
+    assert all(
+        layer.self_attn.k_bmm_quantizer.is_enabled and layer.self_attn.v_bmm_quantizer.is_enabled
+        for layer in model.model.layers
+    )
+
+
+def _quantized_weight_baseline(bits, *, constant_amax=1.0, axis=None):
+    quantizer_cfg = _quantizer_cfg(bits, constant_amax=constant_amax)
+    quantizer_cfg["axis"] = axis
+    return mtq.quantize(
+        get_tiny_llama(num_hidden_layers=1),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*.weight_quantizer",
+                    "cfg": quantizer_cfg,
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+
+
+def test_kv_autoquant_checkpoint_rejects_changed_preceding_quantization(
+    tmp_path, nvfp4_fake_quant_stub
+):
+    candidate = _kv_config((4, 3), 8.0, algorithm=None, constant_amax=1.0).model_dump()
+    data = [{"input_ids": torch.randint(0, 16, (1, 8))}]
+    checkpoint = str(tmp_path / "kv_search.pth")
+
+    mtq.auto_quantize(
+        _quantized_weight_baseline((4, 3)),
+        {"effective_bits": 8.0, "cost_model": "kv_cache"},
+        [candidate],
+        data,
+        lambda model, batch: model(**batch).logits,
+        num_calib_steps=1,
+        num_score_steps=1,
+        checkpoint=checkpoint,
+    )
+
+    mtq.auto_quantize(
+        _quantized_weight_baseline((4, 3)),
+        {"effective_bits": 8.0, "cost_model": "kv_cache"},
+        [candidate],
+        data,
+        lambda *_: pytest.fail("An identical preceding state must restore without rescoring."),
+        num_calib_steps=1,
+        num_score_steps=1,
+        checkpoint=checkpoint,
+    )
+
+    with pytest.raises(
+        ValueError, match=r"preceding non-K/V quantizer.*recompute KV sensitivities"
+    ):
         mtq.auto_quantize(
-            model,
+            _quantized_weight_baseline((2, 1)),
             {"effective_bits": 8.0, "cost_model": "kv_cache"},
             [candidate],
-            [],
-            lambda *_: pytest.fail("Validation must fail before search."),
+            data,
+            lambda *_: pytest.fail("A stale checkpoint must be rejected before scoring."),
             num_calib_steps=1,
             num_score_steps=1,
+            checkpoint=checkpoint,
+        )
+
+
+@pytest.mark.parametrize(
+    ("first_kwargs", "second_kwargs", "mutate_second_amax"),
+    [
+        ({"constant_amax": 1.0}, {"constant_amax": 2.0}, False),
+        (
+            {"constant_amax": 1.0, "axis": None},
+            {"constant_amax": 1.0, "axis": 0},
+            False,
+        ),
+        ({"constant_amax": 1.0}, {"constant_amax": 1.0}, True),
+    ],
+    ids=("constant-amax", "axis", "calibrated-amax"),
+)
+def test_kv_autoquant_checkpoint_rejects_changed_preceding_state(
+    tmp_path, first_kwargs, second_kwargs, mutate_second_amax
+):
+    candidate = _kv_config((4, 3), 8.0, algorithm=None, constant_amax=1.0).model_dump()
+    data = [{"input_ids": torch.randint(0, 16, (1, 8))}]
+    checkpoint = str(tmp_path / "kv_search.pth")
+
+    mtq.auto_quantize(
+        _quantized_weight_baseline((4, 3), **first_kwargs),
+        {"effective_bits": 8.0, "cost_model": "kv_cache"},
+        [candidate],
+        data,
+        lambda model, batch: model(**batch).logits,
+        num_calib_steps=1,
+        num_score_steps=1,
+        checkpoint=checkpoint,
+    )
+
+    second_model = _quantized_weight_baseline((4, 3), **second_kwargs)
+    if mutate_second_amax:
+        for name, module in second_model.named_modules():
+            if name.endswith("weight_quantizer") and module.is_enabled:
+                module.amax = module.amax * 2
+
+    with pytest.raises(ValueError, match="preceding non-K/V quantizer"):
+        mtq.auto_quantize(
+            second_model,
+            {"effective_bits": 8.0, "cost_model": "kv_cache"},
+            [candidate],
+            data,
+            lambda *_: pytest.fail("A stale checkpoint must be rejected before scoring."),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint,
         )

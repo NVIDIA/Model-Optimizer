@@ -23,11 +23,6 @@ def _select_path(remote_id: str, local_id: str) -> str:
     return remote_id
 
 
-BART_PATH = _select_path(
-    remote_id="facebook/bart-large-cnn",
-    local_id="bart-large-cnn",
-)
-
 T5_PATH = _select_path(
     remote_id="google-t5/t5-small",
     local_id="t5-small",
@@ -36,11 +31,6 @@ T5_PATH = _select_path(
 MIXTRAL_PATH = _select_path(
     remote_id="AIChenKai/TinyLlama-1.1B-Chat-v1.0-x2-MoE",
     local_id="TinyLlama-1.1B-Chat-v1.0-x2-MoE",
-)
-
-WHISPER_PATH = _select_path(
-    remote_id="openai/whisper-tiny",
-    local_id="whisper-tiny",
 )
 
 TINY_LLAMA_PATH = _select_path(
@@ -67,9 +57,4 @@ SD3_PATH = _select_path(
 FLUX_SCHNELL_PATH = _select_path(
     remote_id="hf-internal-testing/tiny-flux-pipe",
     local_id="FLUX.1-schnell",
-)
-
-PIXART_PATH = _select_path(
-    remote_id="PixArt-alpha/PixArt-XL-2-1024-MS",
-    local_id="PixArt-XL-2-1024-MS",
 )

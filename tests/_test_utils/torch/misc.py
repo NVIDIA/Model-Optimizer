@@ -27,7 +27,7 @@ def compare_outputs(out1, out2, rtol=1e-5, atol=1e-8):
     for i, (t1, t2) in enumerate(zip(out1, out2)):
         try:
             assert torch.allclose(t1.to(torch.float32), t2.to(torch.float32), rtol, atol)
-        except AssertionError:  # noqa: PERF203
+        except AssertionError:
             diff = torch.abs(t1 - t2)
             print(f"\n{i=}")
             print(f"{t1=}")

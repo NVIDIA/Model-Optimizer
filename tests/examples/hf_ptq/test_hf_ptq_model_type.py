@@ -1,0 +1,269 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""hf_ptq keys its model-specific behavior on the root model's Hugging Face ``model_type``."""
+
+import importlib
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+from transformers import WhisperProcessor
+
+from modelopt.torch.models.whisper import calibration as whisper_calibration
+
+_EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
+
+
+class _Model(torch.nn.Module):
+    """A model whose ``generate`` is ``generate``: the previews read the module's distribution plan."""
+
+    def __init__(self, generate, config=None):
+        super().__init__()
+        self.generate = generate
+        if config is not None:
+            self.config = config
+
+
+@pytest.fixture
+def hf_ptq(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.syspath_prepend(str(_EXAMPLES_DIR))
+    return importlib.import_module("hf_ptq")
+
+
+@pytest.mark.parametrize(
+    ("model_type", "skips_generation"),
+    [
+        ("deepseek_v3", True),
+        ("deepseek_v32", True),
+        ("kimi_k2", True),  # DeepSeek-V3 architecture under its own model_type
+        ("kimi_k25", True),  # VLM wrapping a kimi_k2 language model
+        ("nemotron_h", True),
+        ("llama", False),
+    ],
+)
+def test_pre_quantize_generation_skip(hf_ptq, model_type: str, skips_generation: bool):
+    generate_calls = []
+    full_model = _Model(lambda *args, **kwargs: generate_calls.append(1) or "out")
+    args = SimpleNamespace(specdec_offline_dataset=None, skip_generate=False)
+    batch = {"input_ids": torch.ones(2, 4, dtype=torch.long)}
+
+    _, _, generated = hf_ptq.pre_quantize(args, full_model, model_type, None, [batch], False)
+
+    assert (generated is None) == skips_generation
+    assert len(generate_calls) == (0 if skips_generation else 1)
+
+
+@pytest.mark.parametrize(
+    ("ids", "mask"), [([0, 0, 1, 2], [0, 0, 1, 1]), ([1, 2, 0, 0], [1, 1, 0, 0])]
+)
+def test_pre_quantize_preview_removes_padding(hf_ptq, ids, mask):
+    calls = []
+    model = _Model(lambda ids, **kwargs: calls.append((ids, kwargs)) or ids)
+    args = SimpleNamespace(specdec_offline_dataset=None, skip_generate=False)
+    batch = {"input_ids": torch.tensor([ids]), "attention_mask": torch.tensor([mask])}
+    prompt, attention_mask, _ = hf_ptq.pre_quantize(args, model, "llama", None, [batch], False)
+    assert torch.equal(prompt, torch.tensor([[1, 2]]))
+    assert torch.equal(attention_mask, torch.ones_like(prompt))
+    assert torch.equal(calls[0][0], prompt)
+
+
+def _config(model_type: str, is_encoder_decoder: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        model_type=model_type, is_encoder_decoder=is_encoder_decoder, architectures=None
+    )
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (_config("longt5", True), True),
+        (_config("plbart", True), True),
+        (_config("t5gemma", True), True),
+        (_config("whisper", True), True),
+        (_config("llama", False), False),
+        # Structurally encoder-decoder, but generate() returns prompt+canvas concatenated.
+        (_config("diffusion_gemma", True), False),
+    ],
+)
+def test_generate_excludes_prompt(hf_ptq, config: SimpleNamespace, expected: bool):
+    assert hf_ptq.generate_excludes_prompt(SimpleNamespace(config=config)) is expected
+
+
+@pytest.mark.parametrize(
+    ("config", "generated"),
+    [
+        # Encoder-decoder generate() returns only the decoder sequence, shorter than the prompt.
+        (_config("longt5", True), [[7, 8]]),
+        # Decoder-only generate() returns the prompt followed by the answer.
+        (_config("llama", False), [[1, 2, 3, 4, 5, 7, 8]]),
+    ],
+)
+def test_post_quantize_preview_keeps_whole_answer(
+    hf_ptq, monkeypatch: pytest.MonkeyPatch, capsys, config: SimpleNamespace, generated
+):
+    """The preview must decode the answer, not slice a prompt-length prefix off it."""
+    monkeypatch.setattr(hf_ptq, "export_quantized", lambda *args, **kwargs: None)
+    full_model = _Model(lambda *args, **kwargs: torch.tensor(generated), config)
+    tokenizer = SimpleNamespace(
+        batch_decode=lambda ids, **kwargs: [" ".join(map(str, row.tolist())) for row in ids]
+    )
+    args = SimpleNamespace(specdec_offline_dataset=None, verbose=False)
+
+    hf_ptq.post_quantize(
+        args,
+        full_model,
+        full_model,
+        config.model_type,
+        tokenizer,
+        None,
+        torch.tensor([[1, 2, 3, 4, 5]]),
+        None,
+        torch.tensor(generated),
+        False,
+        None,
+        None,
+    )
+
+    assert "example outputs after ptq: ['7 8']" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("model_type", "generates"), [("llama4", False), ("llama4_text", False), ("llama", True)]
+)
+def test_post_quantize_generation_skip(
+    hf_ptq, monkeypatch: pytest.MonkeyPatch, recwarn, model_type: str, generates: bool
+):
+    monkeypatch.setattr(hf_ptq, "export_quantized", lambda *args, **kwargs: None)
+    generate_calls = []
+
+    def generate(*args, **kwargs):
+        generate_calls.append(1)
+        return torch.tensor([[1, 2, 3, 4, 5]])
+
+    full_model = _Model(generate, _config(model_type, False))
+    tokenizer = SimpleNamespace(
+        batch_decode=lambda ids, **kwargs: [" ".join(map(str, row.tolist())) for row in ids]
+    )
+    args = SimpleNamespace(specdec_offline_dataset=None, verbose=False)
+
+    hf_ptq.post_quantize(
+        args,
+        full_model,
+        full_model,
+        model_type,
+        tokenizer,
+        None,
+        torch.tensor([[1, 2, 3, 4, 5]]),
+        None,
+        torch.tensor([[1, 2, 3, 4, 5]]),
+        False,
+        None,
+        None,
+    )
+
+    assert len(generate_calls) == (1 if generates else 0)
+    skipped = any("Skipping generation sample" in str(w.message) for w in recwarn)
+    assert skipped is not generates
+
+
+def test_pre_quantize_previews_the_batchs_speech_features(hf_ptq):
+    """A speech batch carries ``input_features``, not ``input_ids``: the preview feeds those."""
+    generate_calls = []
+    full_model = _Model(lambda features, **kwargs: generate_calls.append(features) or "out")
+    args = SimpleNamespace(specdec_offline_dataset=None, skip_generate=False)
+    batch = {"input_features": torch.ones(2, 80, 3000)}
+
+    preview, _, generated = hf_ptq.pre_quantize(args, full_model, "whisper", None, [batch], False)
+
+    assert preview.shape == (1, 80, 3000)
+    assert generated == "out"
+    assert generate_calls[0].shape == (1, 80, 3000)
+
+
+def test_pre_quantize_prefers_token_ids_when_a_batch_carries_both(hf_ptq):
+    """An audio-capable VLM's image-text batch can carry ``input_features`` beside ``input_ids``."""
+    full_model = _Model(lambda ids, **kwargs: "out")
+    args = SimpleNamespace(specdec_offline_dataset=None, skip_generate=False)
+    batch = {
+        "input_ids": torch.ones(2, 4, dtype=torch.long),
+        "input_features": torch.ones(2, 80, 3000),
+    }
+
+    preview, _, _ = hf_ptq.pre_quantize(args, full_model, "llama", None, [batch], False)
+
+    assert preview.shape == (1, 4)
+
+
+def test_post_quantize_decodes_through_the_processor_when_there_is_no_tokenizer(
+    hf_ptq, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    monkeypatch.setattr(hf_ptq, "export_quantized", lambda *args, **kwargs: None)
+    full_model = _Model(lambda *args, **kwargs: torch.tensor([[7, 8]]), _config("whisper", True))
+    processor = SimpleNamespace(
+        tokenizer=SimpleNamespace(
+            batch_decode=lambda ids, **kwargs: [" ".join(map(str, row.tolist())) for row in ids]
+        )
+    )
+    args = SimpleNamespace(specdec_offline_dataset=None, verbose=False)
+
+    hf_ptq.post_quantize(
+        args,
+        full_model,
+        full_model,
+        "whisper",
+        None,
+        processor,
+        torch.ones(1, 80, 3000),
+        None,
+        torch.tensor([[7, 8]]),
+        False,
+        "the transcript",
+        None,
+    )
+
+    out = capsys.readouterr().out
+    assert "example test input: the transcript" in out
+    assert "example outputs after ptq: 7 8" in out
+
+
+def test_make_calib_dataloader_takes_a_model_types_own_calibration_data(
+    hf_ptq, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        whisper_calibration,
+        "get_speech_dataset_dataloader",
+        lambda **kwargs: ("loader", "transcript"),
+    )
+    args = SimpleNamespace(
+        specdec_offline_dataset=None,
+        calib_with_images=False,
+        dataset=None,
+        calib_size=[8],
+        batch_size=2,
+    )
+    language_model = _Model(None)
+    language_model.dtype = torch.float32
+
+    result = hf_ptq.make_calib_dataloader(
+        args,
+        language_model,
+        object.__new__(WhisperProcessor),
+        None,
+        torch.device("cpu"),
+        "whisper",
+    )
+
+    assert result == ("loader", "transcript")

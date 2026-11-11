@@ -30,7 +30,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="minimax",
-        min_transformers_version="4.57",
+        min_transformers_version="5.5",
         moe_spec=MoESpec(
             block_names=("MiniMaxSparseMoeBlock",),
             expert_linear_names=("w1", "w2", "w3"),

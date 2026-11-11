@@ -5,6 +5,9 @@
 - Benchmark: <https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/mrcr>
 - Resource server: <https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mrcr/configs/mrcr.yaml>
 - Dataset: `openai/mrcr` (HF, gated → `HF_TOKEN`)
+- **Source of truth:** `configs/benchmarks/mrcr/bench.yaml` + `manifest.yaml` (1M) and
+  `configs/benchmarks/mrcr-128k/` (128K) in nvidia-eval-factory-benchmarking
+  (`dl/JoC/competitive_evaluation/…`) — re-check before a scored run.
 
 Long-context retrieval. Each task is a long multi-turn conversation with N
 near-identical "needle" responses; the model must reproduce the Nth verbatim
@@ -56,10 +59,21 @@ Sets the context cap, the dataset, **and the metric prefix**. The golden uses 1M
 | `benchmarks/mrcr/config_n3_128k.yaml` | 131,072 (gated NVIDIA) | `mrcr_n3_128k_benchmark_simple_agent` | 1 |
 | `benchmarks/mrcr/config.yaml` | none (`o200k_base`) | `mrcr_benchmark_simple_agent` | 4 |
 
+**Pick the largest variant within the checkpoint's trained context**
+(`max_position_embeddings`, under `text_config` on multimodal configs). The template's 1M
+follows the golden; on a 262K model, 1M (via `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`) measures
+extrapolation, not long-context quality — use 128K, and change the serving envelope with it
+(below).
+
 The n3 variants drop over-long samples, so all three are different datasets and
 **not comparable to each other**. Pick one, keep it fixed across baseline and
 candidate, and set it in **both** `data_prep_params` and `collect_rollout_params`
 — changing one prepares one dataset and rolls out another.
+
+Upstream's `mrcr-128k/bench.yaml` uses a condensed gym schema (`benchmark:`/`prepare_args`/
+`run_args`) whose bootstrap lives in upstream `configs/models/gym_eval_command.yaml`, not the
+image. This template keeps the explicit form (same Gym pin `a431501a`); a standalone config on
+the condensed schema must carry that `command:` block itself.
 
 The `num_repeats` column is what each variant **declares upstream**, not
 necessarily what runs: for `type: benchmark` datasets the value is a placeholder
@@ -67,14 +81,23 @@ and the runner decides. The template therefore pins `++num_repeats=1` in
 `common_params`, so **report `pass@1` regardless of variant** unless you raise it
 deliberately. **Do not change repeat counts when aligning to a golden.**
 
-### Serving envelope (1M)
+### Serving envelope (1M; 128K delta below)
 
 - `--max-model-len 1100000` **+** `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` in
   `deployment.env_vars` — vLLM otherwise refuses a len above the checkpoint's
   `max_position_embeddings`.
 - `gpu_memory_utilization: 0.95` (vs the usual 0.85) — driven by **sequence
   length**, not prefix caching: a ~1M-token context needs a far larger KV
-  allocation, and prefix-cache blocks come out of the same pool.
+  allocation, and prefix-cache blocks come out of the same pool. The template's
+  `command:` must pass `--gpu-memory-utilization ${deployment.gpu_memory_utilization}`:
+  replacing `command:` drops the launcher's default flag, and vLLM falls back to 0.9.
+- **128K instead:** set `--max-model-len` to the checkpoint's trained context — it must
+  exceed 131,072 with room for the uncapped answer — and drop
+  `VLLM_ALLOW_LONG_MAX_MODEL_LEN`. Leaving `1100000` in place can stop a replica from
+  starting even though it could serve every 128K request. The 0.95 memory bump is for 1M's
+  KV; 128K can keep the model's usual value. Upstream 128K runs `parallelism: 256`, tags
+  MLflow `benchmark: nemo_gym.mrcr_128k` (1M: `nemo_gym.mrcr`), and a full run is
+  **1470** rollouts.
 - `--enable-prefix-caching`, `--enable-chunked-prefill`,
   `--max-num-batched-tokens 131072`.
 - **KV dtype: follow the checkpoint, not this template.** Read
@@ -90,10 +113,10 @@ deliberately. **Do not change repeat counts when aligning to a golden.**
 - Fan out via `execution.num_nodes` / `num_instances` (HAProxy pattern A —
   `references/multi-node.md`). **Size these from the cluster's GPUs-per-node**, do
   not copy: pick TP for the model, fill the node with DP, then choose instances for
-  the replica count you want. `parallelism` is the total across instances, so
-  `--max-num-seqs = ceil(parallelism / num_instances / DP)`. The golden ran 4 nodes
-  × (TP2 × DP2) on 4-GPU nodes = 8 replicas, `ceil(256/4/2) = 32` each; the same 8
-  replicas on 8-GPU nodes is 2 × (TP2 × DP4).
+  the replica count you want. The golden ran 4 nodes × (TP2 × DP2) on 4-GPU nodes =
+  8 replicas; the same 8 replicas on 8-GPU nodes is 2 × (TP2 × DP4).
+- **`parallelism: 512` (1M; 128K: 256) deliberately exceeds server capacity** so requests queue at the
+  endpoint — don't derive `--max-num-seqs` from it (golden: 8 replicas × 32 = 256 in flight).
 - **`--max-num-seqs` is a ceiling, not a target.** MRCR is the most KV-bound task
   in the skill — ~1M input tokens per request against AA-LCR's ~120K — so AA-LCR's
   rule applies harder: oversubscribe and vLLM preempts, and recomputing a 1M-token
@@ -140,26 +163,17 @@ NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
 
 ## Canary
 
-MRCR's gym path takes `++limit=N` (the launcher-level `limit_samples` does not
-reach the gym). **Not verified on this pinned commit** — treat the first ~30 min
-of the real run as the canary. `++limit` caps rollouts
-only: the 1M tokenize/drop-over-long **prepare pass still runs in full**, so a
-5-sample canary is not cheap. Append it to `collect_rollout_params` in your copy
-of the YAML — easier than re-pasting the whole folded scalar through `-o`:
-
-```yaml
-                collect_rollout_params: >-
-                  ...
-                  ++limit=5          # canary only — remove for the scored run
-```
-
-Then watch the first ~30 min of the real run:
+Set `limit_samples` (the template gates `++limit` on it, as canonical does) — in the YAML,
+or `-o ++evaluation.nemo_evaluator_config.config.params.limit_samples=5` (not
+`++config.params…`). It caps rollouts only; the prepare pass still runs in full. Then watch
+the first ~30 min of the real run:
 
 ```bash
 RD=<output_dir>/<run>/nemo_gym.0
 grep -A1 "=== NeMo Gym commit ===" $RD/logs/client-*.log | grep -c a431501a  # pin applied
 grep -ciE "ModuleNotFoundError|tiktoken" $RD/logs/client-*.log   # pre_cmd didn't take
 wc -l $RD/artifacts/evaluator_rollouts.jsonl                     # rollouts flowing
+ls $RD/artifacts/model_calls | head                              # observability capture on
 ```
 
 **Preempted vs timed out.** A 1M run routinely exceeds 4h. `TIMEOUT` auto-resumes
@@ -186,7 +200,7 @@ the evaluator maps the two to each other, so either works today.
 | `pass@1/accuracy` | **REPORT THIS** — already 0-100, do not ×100 |
 | `n_needles=2\|4\|8/pass@1/accuracy` | per-stratum — **always quote too** |
 | `mean/reward` | same number as a 0-1 fraction (= `mean/seq_match_ratio`) |
-| `mean/prefix_matched` | prefix-gate pass rate; **~0.55 is healthy** |
+| `mean/prefix_matched` | prefix-gate pass rate; ~0.55 on the 1M golden, higher on 128K — a collapse toward 0 is the signal |
 
 ```bash
 python3 -c "
@@ -205,6 +219,6 @@ at `--max-model-len 1100000`).
 Reference shape (reviewed golden, BF16 Nano 3.5, 1M): `pass@1 = 26.91` (2/4/8
 needles = 36.81 / 27.12 / 16.74), 2363/2363 rollouts, parallelism 256, 4 nodes /
 4 instances. Use it to sanity-check shape, not as a bar for another model — a
-rollout count well below 2363 (full runs only — a `++limit` canary is expected
+rollout count well below 2363 (1470 for 128K; full runs only — a `++limit` canary is expected
 to be short) means tasks were lost (e.g. a walltime resume) and
 the score covers fewer tasks than the reference.

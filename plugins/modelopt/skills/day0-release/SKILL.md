@@ -1,6 +1,6 @@
 ---
 name: day0-release
-description: Deterministic end-to-end driver for day-0 quantized-checkpoint releases — chains PTQ → evaluation → comparison with enforced gates between stages (the evaluation stage deploys the checkpoint itself), and returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE). Use when the user asks to "release a model at day-0", "quantize and validate model X is within N% of baseline and tell me if it's publishable", or "run the full day-0 workflow". Do NOT use for single-stage requests — quantizing only (use ptq), serving only (use deployment), evaluating only (use evaluation), or comparing two existing runs (use compare-results).
+description: Deterministic end-to-end driver for day-0 quantized-checkpoint releases — chains PTQ → evaluation → comparison with enforced gates between stages (the evaluation stage deploys the checkpoint itself), and returns a publish decision (ACCEPT / REGRESSION / INDETERMINATE / ANOMALOUS / INFEASIBLE). Use when the user asks to "release a model at day-0", "quantize and validate model X is within N% of baseline and tell me if it's publishable", or "run the full day-0 workflow". Do NOT use for single-stage requests — quantizing only (use ptq), serving only (use deployment), evaluating only (use evaluation), or comparing two existing runs (use compare-results).
 license: Apache-2.0
 ---
 
@@ -117,13 +117,26 @@ produced a wrong verdict on a large MoE, in opposite directions:
 
 The baseline is the **source** (pre-quantization) model on the same task set and
 sampling params. Always run a fresh baseline via the **evaluation** skill,
-which deploys the source model itself. Gate with `gate_run.py`.
+which deploys the source model itself. Gate every run with `gate_run.py`.
+
+Before submitting either side, record per-task run counts, uncertainty method,
+and stopping rule. For retry-level Welch, plan at least two fresh independent
+full-benchmark runs per side (SciCode: at least eight), increasing these fixed
+counts up front if more precision is needed. One AA-suite invocation does not
+supply multiple full runs for GPQA or IFBench: in-run repeats are not independent
+retry scores. A task-specific method using repeat/trial data instead must justify
+its observation unit and dependence assumptions.
+
+Complete the declared plan before the final assessment. Result-dependent reruns,
+repeated looks, or selecting candidates on these results are exploratory: require
+independent confirmation under a fresh declared plan, or a justified
+sequential/selection-aware method, before confidence-based ACCEPT.
 
 ### Step 4 — Quantized eval
 
 Invoke the **evaluation** skill on the quantized checkpoint, matching the
-baseline's task set and sampling params. The evaluation skill stands up the
-serving endpoint itself (it builds the `deployment.command`, e.g. a
+baseline's task set, sampling params, and declared run plan. The evaluation skill
+stands up the serving endpoint itself (it builds the `deployment.command`, e.g. a
 `vllm serve …`), so a serving failure surfaces here as a failed `gate_run.py`
 with `DEPLOYMENT_HEALTH_FAILED`. When that happens, **drop to the deployment
 skill** to reproduce and debug serving in isolation (serve the checkpoint
@@ -165,24 +178,14 @@ rerun the baseline. If no credible comparable external score exists, record the
 baseline as externally unverified and continue using the validated measured
 baseline.
 
-#### Statistical power — check BEFORE trusting any per-task verdict
+#### Uncertainty — check BEFORE trusting any per-task verdict
 
-A task whose measurement noise rivals the threshold cannot decide a gate. Confirm
-each task's repeat count gives a standard error below the threshold; otherwise
-mark it `INDETERMINATE` rather than reporting a pass/fail.
+Use the [compare-results assessment](../compare-results/references/assess-results.md)
+against the allowed loss, in matching units. A point estimate within threshold
+or an SE below it does not establish acceptance; require the entire signed-loss
+confidence interval above the minimum acceptable margin.
 
-For example, on a 1 % gate on DeepSeek-V4-Pro, both tasks that originally failed passed once measured properly:
-
-| task | runs pooled | drop | verdict |
-| --- | --- | --- | --- |
-| SciCode | 1 | 2.96 pp | REGRESSION |
-| SciCode | 8 | **-0.96 pp** | PASS |
-| IFBench | 5 | 2.73 pp | REGRESSION |
-| IFBench | 16 | **0.63 pp** | PASS |
-
-Add precision by submitting the benchmark **more times**, not by raising
-`num_repeats` within a run. SciCode's floor is **8 runs per side**, pooled as a
-mean — `recipes/tasks/aa/scicode.md`.
+Apply Step 3's declared run/stopping plan.
 
 **Re-running does not guarantee fresh samples.** With a warm NEL response cache a "re-run" can
 replay cached responses — two runs came back bit-identical to 16 digits. But an equal score is a
@@ -204,16 +207,19 @@ normalizes the drop accordingly, so `--threshold 0.01` means "≤1 pt on a 0-100
 task / ≤0.01 on a 0-1 task" uniformly. Pass `--scales '{"task": max}'` to
 override inference if a task's scores happen to fall in an ambiguous range.
 
-`gate_compare.py` checks only the candidate delta; it cannot override a failed
-external baseline check. Combined decision:
+`gate_compare.py` is a preliminary point-estimate check, not the final accuracy
+verdict. It cannot override external sanity or the interval assessment. Combined
+decision (external sanity failures and implausible scores take precedence):
 
-- **ACCEPT (accuracy only)** — no external check failed and every task is within
-  the candidate threshold → continue to **Step 5b**. This verdict covers accuracy
-  alone; advance to Step 6 only once the verbosity gate also passes. A missing
-  comparable external score is not a failure; report it as externally unverified.
-- **REGRESSION** — one or more tasks exceed threshold. **v1 stops here and
-  reports** which tasks regressed by how much. (Picking the next recipe and
-  re-running is deferred — see Scope.)
+- **ACCEPT (accuracy only)** — no external check failed and every task's
+  assessment is **Within margin** → continue to **Step 5b**. Advance to Step 6
+  only once the verbosity gate also passes. A missing comparable external score
+  is not a failure; report it as externally unverified.
+- **REGRESSION** — at least one task's assessment is **Substantial regression**.
+  **v1 stops here and reports** which tasks regressed by how much.
+- **INDETERMINATE** — otherwise, any task's target assessment is unresolved or
+  unavailable (including insufficient valid runs). Stop with `do-not-publish`;
+  report the missing evidence rather than accepting the point-estimate verdict.
 - **ANOMALOUS** — external baseline sanity failed, or scores are otherwise
   implausible (e.g. baseline lower than candidate by a large margin, or a task
   score is outside its valid range) → correct the baseline or surface it.
@@ -257,7 +263,7 @@ Tasks sharing no sample count are `not_comparable`, not a delta. Means under
 ### Step 6 — Closeout
 
 Report the decision with: source vs output size + ratio, per-task baseline /
-candidate / delta / within-threshold, **the verbosity verdict from Step 5b**,
+candidate / signed-loss CI / margin / assessment, **the verbosity verdict from Step 5b**,
 external source and sanity status, MLflow run IDs, and a publish recommendation
 (publish / do-not-publish). Archive artifacts to the workspace.
 
@@ -270,6 +276,13 @@ the final path after any move.
 
 ## Triage (gate failure → decision)
 
+For completed evaluations, apply
+[evaluation run validation](../evaluation/references/run-validation.md) before
+triage; its policy overrides retry actions below. Warn but do not retry solely
+for failures below tolerance. For runs that fail tolerance or an independent
+validation check, return findings and a recommendation to the parent/user for
+review; do not automatically resubmit.
+
 Map a gate's `failure_class` to the next action:
 
 | `failure_class` | Action |
@@ -281,7 +294,7 @@ Map a gate's `failure_class` to the next action:
 | `CHECKPOINT_NOT_SERVABLE` | The Step 2b canary could not load/generate. Usually a tensor-naming or config-schema mismatch between the exporter and the serving stack, or missing/dangling auxiliary files (tokenizer). Fix the export; do not evaluate. |
 | `VERBOSITY_EXCEEDED` | Re-check run hygiene first (mixed reasoning effort, partial runs, unequal sample counts) — that has explained every false positive so far. If the delta survives matched, complete runs, it is a real behavioural change; do not publish on accuracy alone. |
 | `DEPLOYMENT_HEALTH_FAILED` | Drop to the **deployment** skill: reproduce serving standalone (`/health` + one generation), debug flags / image / TP / env, then carry the working command into NEL's `deployment.command` and retry the eval. If it can't serve, `POINT_INFEASIBLE`. |
-| `EVAL_JUDGE_FAILED` | Usually transient (auth / rate limit) — wait and retry. |
+| `EVAL_JUDGE_FAILED` | For completed runs, apply evaluation run validation above; return tolerance failures to the parent/user without automatic retry. Otherwise investigate auth/rate limits before retrying. |
 | `SAMPLE_ACCOUNTING_FAILED` | Investigate dropped/failed samples before trusting scores. |
 | `EXTERNAL_BASELINE_MISMATCH` | Investigate baseline configuration, correct it, rerun the baseline, and repeat external sanity before comparison. |
 | `USER_CONFIG_ERROR` | Correct it from the request, workspace, or model/config metadata and retry; if irrecoverable, return `ANOMALOUS` with evidence. |
@@ -303,6 +316,7 @@ Return a decision, not a raw artifact:
 
 - `ACCEPT` + report + publish recommendation
 - `REGRESSION` + which tasks failed the threshold and by how much
+- `INDETERMINATE` + unresolved tasks, missing evidence, and `do-not-publish`
 - `ANOMALOUS` / `INFEASIBLE` + reason and next automated action
 - Always: workspace path + MLflow run IDs for traceability
 

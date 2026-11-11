@@ -12,7 +12,9 @@
       "Runs stages in fixed order: setup, PTQ, serving canary, baseline eval, quantized eval, compare, verbosity gate, closeout",
       "Does not treat the accuracy compare as the final verdict: runs gate_verbosity.py before the closeout and reports both gates",
       "Runs the gate after each stage and does not advance past a failed gate",
-      "Returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE), not just raw scores"
+      "Declares per-task run counts, uncertainty method, and stopping rule before baseline or candidate submission; plans at least two independent full runs per side for Welch and at least eight for SciCode",
+      "Does not count GPQA or IFBench in-run repeats as independent full runs, or assume a single AA-suite invocation suffices for Welch",
+      "Returns a publish decision (ACCEPT / REGRESSION / INDETERMINATE / ANOMALOUS / INFEASIBLE), not just raw scores"
     ]
   },
   {
@@ -41,6 +43,18 @@
     ]
   },
   {
+    "name": "ptq-smoke-test-cleanup",
+    "skills": ["day0-release", "ptq", "deployment"],
+    "query": "Run the day-0 workflow for ./source with NVFP4. The quantizer's temporary serving smoke test starts but generation fails; I did not ask to keep it running.",
+    "files": [],
+    "expected_behavior": [
+      "Keeps the quantizer responsible for smoke-test evidence and cleanup",
+      "Stops the temporary service and verifies shutdown on failure, as on success or interruption",
+      "Reports cleanup failures as blockers and does not proceed to evaluation after a failed smoke test",
+      "Hands off the checkpoint and validated serving configuration, never the smoke-test endpoint"
+    ]
+  },
+  {
     "name": "ptq-gate-blocks-on-coverage-miss",
     "skills": [
       "day0-release"
@@ -60,13 +74,47 @@
       "day0-release",
       "compare-results"
     ],
-    "query": "Day-0 release for org/PLACEHOLDER-MODEL nvfp4; the quantized GPQA score is 3 points below baseline.",
+    "query": "Day-0 release for org/PLACEHOLDER-MODEL nvfp4; validated comparable GPQA runs completed the declared plan, external sanity passed, and signed loss Candidate - Baseline is -3 pp with valid two-sided 95% CI [-4,-2] pp against margin -1 pp.",
     "files": [],
     "expected_behavior": [
       "Runs gate_compare.py with the accuracy threshold",
-      "Classifies a beyond-threshold drop as REGRESSION",
+      "Classifies the CI wholly below the margin as REGRESSION, not merely the beyond-threshold mean",
       "Reports which tasks regressed and by how much",
       "Does NOT auto-select a new recipe and re-run in v1 (that loop is deferred)"
+    ]
+  },
+  {
+    "name": "unresolved-uncertainty-blocks-release",
+    "skills": ["day0-release", "compare-results"],
+    "query": "Assess three separate day-0 candidates against M=-1 pp. All runs are validated and comparable, with external sanity passed. Candidate A has signed loss -0.5 pp, valid 95% CI [-1.5,0.5] pp; B has signed loss -3 pp, valid 95% CI [-8,2] pp. Both completed their declared run plans. C has one full run per side and no justified task-specific uncertainty method. Can any be published?",
+    "files": [],
+    "expected_behavior": [
+      "Returns INDETERMINATE and do-not-publish for A and B because both intervals cross the margin",
+      "Reports uncertainty unavailable and returns INDETERMINATE with do-not-publish for C",
+      "Does not promote A to ACCEPT or B to REGRESSION based on point estimates or gate_compare.py alone",
+      "Reports unresolved tasks and missing evidence rather than auto-selecting a new recipe"
+    ]
+  },
+  {
+    "name": "within-margin-needs-verbosity",
+    "skills": ["day0-release", "compare-results"],
+    "query": "The day-0 candidate completed all declared runs and passed validation, comparability, and external sanity. Every task's valid signed-loss 95% CI is wholly above M=-1 pp (GPQA: [-0.8,0.2] pp). No verbosity check has run. Is it publishable?",
+    "files": [],
+    "expected_behavior": [
+      "Returns accuracy-only ACCEPT because all task intervals are Within margin",
+      "Requires Step 5b verbosity gate before Step 6 or a publish recommendation"
+    ]
+  },
+  {
+    "name": "exploratory-stopping-and-selection",
+    "skills": ["day0-release", "compare-results"],
+    "query": "I kept adding runs and checking ordinary Welch CIs until one of several NVFP4 candidates cleared the margin. I retained every run. Can day-0 release accept the winning candidate now?",
+    "files": [],
+    "expected_behavior": [
+      "Labels result-dependent reruns, repeated looks, and candidate selection exploratory",
+      "Does not claim retaining every run preserves nominal coverage",
+      "Requires independent confirmation under a fresh declared plan or a justified sequential/selection-aware method before confidence-based ACCEPT",
+      "Keeps the release INDETERMINATE and do-not-publish without that evidence"
     ]
   }
 ]

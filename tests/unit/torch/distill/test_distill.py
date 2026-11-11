@@ -15,6 +15,7 @@
 
 import inspect
 import warnings
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -24,6 +25,17 @@ from torchvision.models import alexnet
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
+
+
+class LinearModel(nn.Module):
+    def __init__(self, scale):
+        super().__init__()
+        self.linear = nn.Linear(2, 2, bias=False)  # Wx
+        with torch.no_grad():
+            self.linear.weight.copy_(scale * torch.eye(2))
+
+    def forward(self, inputs):
+        return self.linear(inputs)
 
 
 def get_input_tensor():
@@ -80,6 +92,25 @@ def test_distillation_model_loss_params():
     assert next(kd_loss.parameters()).dtype == torch.float16
 
 
+def test_mgd_loss_does_not_backprop_into_teacher():
+    teacher_layer = nn.Conv2d(3, 48, 1)
+    out_s = torch.randn(2, 32, 8, 8, requires_grad=True)
+    out_t = teacher_layer(torch.randn(2, 3, 8, 8))
+
+    mtd.MGDLoss(32, 48)(out_s, out_t).backward()
+
+    assert out_s.grad is not None
+    assert teacher_layer.weight.grad is None
+
+
+def test_loss_balancer_requires_forward():
+    class NoForwardBalancer(mtd.DistillationLossBalancer):
+        pass
+
+    with pytest.raises(TypeError, match="abstract"):
+        NoForwardBalancer()
+
+
 def test_distillation_model_no_balancer():
     student = tiny_mobilenet().train()
     config = {
@@ -125,6 +156,23 @@ def test_distillation_model_mft():
     distillation_model(input_tensor)
     loss = distillation_model.compute_kd_loss(labels=labels)
     assert isinstance(loss, torch.Tensor) and loss.numel() == 1
+
+
+def test_mft_loss_accepts_sequence_shaped_logits():
+    """MFTLoss flattens the logits it is given, so the labels have to follow them."""
+    torch.manual_seed(0)
+    batch, seq_len, vocab = 2, 8, 50
+    logits_s = torch.randn(batch, seq_len, vocab)
+    logits_t = torch.randn(batch, seq_len, vocab)
+    labels = torch.randint(0, vocab, (batch, seq_len))
+
+    loss = mtd.MFTLoss()(logits_s, logits_t, labels)
+
+    # One label per position, so flattening first must not change the result.
+    flattened = mtd.MFTLoss()(
+        logits_s.reshape(-1, vocab), logits_t.reshape(-1, vocab), labels.reshape(-1)
+    )
+    assert torch.allclose(loss, flattened)
 
 
 def test_distillation_mode_default_config():
@@ -269,10 +317,29 @@ def test_duplicate_fwd_hook_call(distillation_model):
     distillation_model.train()
 
     with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")  # the latch, not the interpreter, must bound the count
         distillation_model(get_input_tensor())
         distillation_model(get_input_tensor())
         distillation_model(get_input_tensor())
-        assert len(w) == 2  # one for student and one for teacher
+        stale = [x for x in w if "already has an intermediate output stored" in str(x.message)]
+        assert len(stale) == 2  # one for student and one for teacher
+        assert all("compute_kd_loss" in str(x.message) for x in stale)
+
+
+def test_stale_output_warning_rearms_after_consuming(distillation_model):
+    """Activation Checkpointing re-runs forwards, so consuming a capture must re-arm the notice."""
+    distillation_model.train()
+    input_tensor = get_input_tensor()
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        distillation_model(input_tensor)
+        distillation_model(input_tensor)  # unconsumed -> reported once per module
+        distillation_model.compute_kd_loss()
+        distillation_model(input_tensor)
+        distillation_model(input_tensor)  # unconsumed again -> reported again
+        stale = [x for x in w if "already has an intermediate output stored" in str(x.message)]
+        assert len(stale) == 4
 
 
 def test_teacher_fwd_only(distillation_model):
@@ -289,6 +356,63 @@ def test_student_fwd_only(distillation_model):
 
     assert distillation_model.teacher_model._intermediate_output is None
     assert distillation_model._intermediate_output is not None
+
+
+@pytest.mark.parametrize("context_name", ["only_student_forward", "only_teacher_forward"])
+@pytest.mark.parametrize("inner_enabled", [False, True])
+@pytest.mark.parametrize("raise_in_inner", [False, True])
+def test_nested_forward_contexts(context_name, inner_enabled, raise_in_inner):
+    student, teacher = LinearModel(1), LinearModel(2)
+    model = mtd.convert(
+        student, mode=[("kd_loss", {"teacher_model": teacher, "criterion": nn.MSELoss()})]
+    )
+    context = getattr(model, context_name)
+    inputs = torch.ones(1, 2)
+    calls = {"student": 0, "teacher": 0}
+
+    def count_student(module, inputs):
+        calls["student"] += 1
+
+    def count_teacher(module, inputs):
+        calls["teacher"] += 1
+
+    model.linear.register_forward_pre_hook(count_student)
+    teacher.linear.register_forward_pre_hook(count_teacher)
+    expected = inputs if context_name == "only_student_forward" else 2 * inputs
+
+    with context():
+        torch.testing.assert_close(model(inputs), expected)
+        with (
+            pytest.raises(RuntimeError, match="inner failure") if raise_in_inner else nullcontext(),
+            context(enable=inner_enabled),
+        ):
+            torch.testing.assert_close(model(inputs), expected)
+            if raise_in_inner:
+                raise RuntimeError("inner failure")
+        torch.testing.assert_close(model(inputs), expected)
+
+    assert calls["teacher"] == (0 if context_name == "only_student_forward" else 3)
+    assert calls["student"] == (3 if context_name == "only_student_forward" else 0)
+    torch.testing.assert_close(model(inputs), inputs)
+    assert calls["teacher"] == (1 if context_name == "only_student_forward" else 4)
+    assert calls["student"] == (4 if context_name == "only_student_forward" else 1)
+
+    with pytest.raises(RuntimeError, match="outer failure"), context():
+        raise RuntimeError("outer failure")
+    with context(enable=False):
+        torch.testing.assert_close(model(inputs), inputs)
+    assert calls["teacher"] == (2 if context_name == "only_student_forward" else 5)
+    assert calls["student"] == (5 if context_name == "only_student_forward" else 2)
+
+    other_context = (
+        model.only_teacher_forward
+        if context_name == "only_student_forward"
+        else model.only_student_forward
+    )
+    with context():
+        with other_context():
+            torch.testing.assert_close(model(inputs), inputs)
+        torch.testing.assert_close(model(inputs), expected)
 
 
 def test_train_eval_mode_switch(distillation_model):

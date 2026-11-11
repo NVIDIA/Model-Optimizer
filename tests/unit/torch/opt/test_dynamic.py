@@ -152,3 +152,25 @@ def test_dm_attribute_manager():
     manager.pop_attr("bmax")
     manager.pop_level()
     assert not manager, "manager should be empty!"
+
+
+def test_register_subclass_inherits_the_registered_base():
+    """Subclasses that override forward are skipped by the automatic lookup."""
+    registry = _DMRegistryCls("test_subclass")
+
+    @registry.register({nn.Linear: "linear"})
+    class _DynLinear(DynamicModule):
+        def _setup(self):
+            pass
+
+    class _Overriding(nn.Linear):
+        def forward(self, x):
+            return super().forward(x)
+
+    assert _Overriding not in registry
+    registry.register_subclass(_Overriding, "linear")
+    assert _Overriding in registry
+    # idempotent, and a class with no registered base is left alone
+    registry.register_subclass(_Overriding, "linear")
+    registry.register_subclass(nn.LayerNorm, "linear")
+    assert nn.LayerNorm not in registry

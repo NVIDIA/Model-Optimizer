@@ -19,13 +19,14 @@ import contextlib
 import copy
 import importlib
 import json
+import os
 import re
-import shutil
 import tempfile
+import traceback
 import warnings
 from builtins import ValueError
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,8 @@ from safetensors.torch import save_file
 
 from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    copy_non_model_files,
+    copy_off_index_safetensors,
     locate_source_keys,
     off_index_safetensors_files,
     sanitize_hf_config_for_deployment,
@@ -63,15 +66,31 @@ try:
 except ImportError:
     HAS_DIFFUSERS = False
 
+try:
+    from transformers import PretrainedConfig, PreTrainedModel
+
+    _TRANSFORMERS_MODEL_TYPES: tuple[type, ...] = (PreTrainedModel,)
+    _TRANSFORMERS_CONFIG_TYPES: tuple[type, ...] = (PretrainedConfig,)
+except ImportError:
+    _TRANSFORMERS_MODEL_TYPES = ()
+    _TRANSFORMERS_CONFIG_TYPES = ()
+
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+from modelopt.torch.quantization.algorithms import (
+    _linear_attn_ba_group_key,
+    _linear_attn_qkvz_group_key,
+)
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
-from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
+    _cast_per_block_scale_to_fp8,
+    cutlass_fp4_scale_to_modelopt_fp4_scale,
+)
 from modelopt.torch.quantization.utils import (
     fsdp2_aware_weight_update,
     module_name_maps,
@@ -80,7 +99,13 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
-from modelopt.torch.utils.distributed import is_fsdp2_model
+from modelopt.torch.utils.distributed import (
+    all_reduce,
+    broadcast_from,
+    distribution_plan,
+    is_fsdp2_model,
+)
+from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
 from modelopt.torch.utils.perf import maybe_clear_cuda_cache
 
 try:
@@ -89,7 +114,7 @@ except ImportError:
     export_sparse_attention_config = None
 
 # Importing the built-in handlers installs their entries in the two registries.
-from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
+from . import hf_export_handlers as _hf_export_handlers
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
@@ -101,7 +126,7 @@ from .quant_aware_conversion import (
 )
 from .quant_format import (
     FUSION_FREE_FORMATS,
-    IQ_FORMATS,
+    GGML_FORMATS,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
     QUANTIZATION_FP8_PC_PT,
@@ -116,6 +141,7 @@ from .quant_format import (
 )
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
+    _get_uncalibrated_static_input_module_names,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -319,7 +345,6 @@ def collect_shared_input_modules(
     def _input_hook(module, input, output):
         """Update dictionary with list of all modules that share the same input."""
         if len(input) > 0 and isinstance(input[0], torch.Tensor):
-            # TODO: Handle DBRX MoE case
             input_to_linear[input[0]].append(module)
 
     def _output_hook(module, input, output):
@@ -364,6 +389,23 @@ def collect_shared_input_modules(
     return input_to_linear, output_to_layernorm
 
 
+def _shared_input_fusion_groups(model, input_to_linear):
+    """Keep Qwen's QKVZ and BA runtime groups separate despite their shared input."""
+    for tensor, modules in input_to_linear.items():
+        groups = defaultdict(list)
+        for module in modules:
+            name = getattr(module, "name", "")
+            key = _linear_attn_qkvz_group_key(model, name) or _linear_attn_ba_group_key(model, name)
+            groups[key].append(module)
+        for key, group in groups.items():
+            if key is not None:
+                assert len({get_quantization_format(module) for module in group}) == 1, (
+                    "Modules have different quantization formats"
+                )
+        for group in groups.values():
+            yield tensor, group, len(groups) == 1
+
+
 def _fuse_shared_input_modules(
     model: nn.Module,
     input_to_linear: dict,
@@ -393,7 +435,7 @@ def _fuse_shared_input_modules(
     fused_linears = {}
     fused_count = 0
 
-    for tensor, modules in input_to_linear.items():
+    for tensor, modules, can_fuse_layernorm in _shared_input_fusion_groups(model, input_to_linear):
         # Get quantization format for this group of modules
         # (must be re-evaluated per group as different modules may have different formats)
         group_quant_format = get_quantization_format(modules[0]) if modules else quantization_format
@@ -427,6 +469,7 @@ def _fuse_shared_input_modules(
             # Fuse layernorms (for AWQ)
             if (
                 fuse_layernorms
+                and can_fuse_layernorm
                 and output_to_layernorm is not None
                 and group_quant_format is not None
                 and group_quant_format != QUANTIZATION_NONE
@@ -458,11 +501,62 @@ def _fusion_update_context(model: nn.Module, modules: list[nn.Module], names=Non
     return fsdp2_aware_weight_update(model, modules, names=names)
 
 
+def _llm_dummy_forward(model: torch.nn.Module) -> None:
+    """Run a dummy forward that reaches every fusable linear of an LLM or VLM language model."""
+    model_hf_type = hf_model_type(model)
+    fake_input = torch.ones([1, 2], dtype=torch.long).to(model.device)
+    decoder_fake_input = fake_input
+
+    # Check if this is a VL model that needs special input handling
+    is_vl_model = is_multimodal_model(model)
+
+    if model_hf_type == "whisper":
+        # For Whisper models, we need to pass a fake input with the specific sequence length
+        from transformers import AutoFeatureExtractor
+
+        feature_extractor = AutoFeatureExtractor.from_pretrained(model.name_or_path)
+        fake_input = torch.ones(
+            [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
+        ).to(model.device)
+
+    # Nemotron VL checkpoints are remote-code models: match on config.architectures, the
+    # field the loader dispatches on, as is_multimodal_model does, and on the class name for a
+    # model built from a config without architectures.
+    architectures = getattr(getattr(model, "config", None), "architectures", None) or []
+    is_nemotron = any("nemotron" in name.lower() for name in [*architectures, type(model).__name__])
+    if is_vl_model and is_nemotron:
+        # For Nemotron VL models, run optimization on just the language model/decoder.
+        # This avoids needing pixel_values for the vision encoder.
+        language_model_lineage = get_language_model_from_vl(model)
+
+        if language_model_lineage is not None:
+            language_model = language_model_lineage[-1]
+            print(
+                f"Running optimization on language model with fake_input shape: {fake_input.shape}"
+            )
+            # Calling the submodule skips the FSDP2 root's pre-forward; gather the root's params.
+            with fsdp2_root_unsharded(model):
+                # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
+                language_model(fake_input, use_cache=False)
+        else:
+            raise ValueError(
+                f"Cannot extract language_model from Nemotron VL model ({type(model).__name__}). "
+                "This is required for requantization/resmoothing optimization. "
+                "Please ensure the model architecture is supported or file an issue."
+            )
+    elif getattr(model.config, "is_encoder_decoder", False):
+        # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
+        model(fake_input, decoder_input_ids=decoder_fake_input)
+    elif hasattr(model, "get_dummy_inputs"):
+        # For speculative decoding models (EAGLE, etc.), use model-provided dummy inputs
+        model(**model.get_dummy_inputs())
+    else:
+        model(fake_input)
+
+
 def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     """Group modules that take the same input and register shared parameters in module."""
-    # TODO: Handle DBRX MoE
     quantization_format = get_quantization_format(model)
-    model_type = type(model).__name__.lower()
     model_hf_type = hf_model_type(model)
     module_names = set()
     # Built once: every fusion below resolves module names through it.
@@ -491,52 +585,8 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 with _fusion_update_context(model, modules, names):
                     preprocess_linear_fusion(modules, resmooth_only=True)
 
-    # Define the dummy forward function for LLM
-    def llm_dummy_forward():
-        fake_input = torch.ones([1, 2], dtype=torch.long).to(model.device)
-        decoder_fake_input = fake_input
-
-        # Check if this is a VL model that needs special input handling
-        is_vl_model = is_multimodal_model(model)
-
-        if model_type.startswith("whisper"):
-            # For Whisper models, we need to pass a fake input with the specific sequence length
-            from transformers import AutoFeatureExtractor
-
-            feature_extractor = AutoFeatureExtractor.from_pretrained(model.name_or_path)
-            fake_input = torch.ones(
-                [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
-            ).to(model.device)
-
-        if is_vl_model and "nemotron" in model_type:
-            # For Nemotron VL models, run optimization on just the language model/decoder.
-            # This avoids needing pixel_values for the vision encoder.
-            language_model_lineage = get_language_model_from_vl(model)
-
-            if language_model_lineage is not None:
-                language_model = language_model_lineage[-1]
-                print(
-                    f"Running optimization on language model with fake_input shape: {fake_input.shape}"
-                )
-                # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
-                language_model(fake_input, use_cache=False)
-            else:
-                raise ValueError(
-                    f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
-                    "This is required for requantization/resmoothing optimization. "
-                    "Please ensure the model architecture is supported or file an issue."
-                )
-        elif getattr(model.config, "is_encoder_decoder", False):
-            # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
-            model(fake_input, decoder_input_ids=decoder_fake_input)
-        elif hasattr(model, "get_dummy_inputs"):
-            # For speculative decoding models (EAGLE, etc.), use model-provided dummy inputs
-            model(**model.get_dummy_inputs())
-        else:
-            model(fake_input)
-
     input_to_linear, output_to_layernorm = collect_shared_input_modules(
-        model, llm_dummy_forward, collect_layernorms=True
+        model, lambda: _llm_dummy_forward(model), collect_layernorms=True
     )
 
     fused_linears = _fuse_shared_input_modules(
@@ -586,15 +636,6 @@ def _compressed_per_block_scale(
     scale = getattr(weight_quantizer, "_scale", None)
     if scale is None or not (scale.dtype == torch.uint8 and scale.ndim == 1):
         return scale
-    try:
-        from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-            cutlass_fp4_scale_to_modelopt_fp4_scale,
-        )
-    except ImportError as e:
-        raise ImportError(
-            "This weight was compressed by TensorRT-LLM, so its NVFP4 block scale is "
-            "cutlass-swizzled, but tensorrt_llm cannot be imported to convert it for export."
-        ) from e
     return cutlass_fp4_scale_to_modelopt_fp4_scale(scale, weight.metadata["shape"][-2:])
 
 
@@ -607,6 +648,12 @@ def _export_quantized_weight(
 
     The export includes converting weight tensor to correct quantized values and quantized dtype,
     and registering scaling factors.
+
+    An export handler packs through ``hf_export_handlers._export_weight`` rather than calling this
+    directly: on the keep-fused export an FSDP2-owned weight must be packed inside its unit's
+    weight-update window, which that helper (or the fused-experts handler, around its fold) opens.
+    Packed outside it, the unit's next reshard puts FSDP2's unquantized shard back, and the
+    checkpoint is written unquantized.
 
     Tied-weight dedup is not handled here: both sides of a tie are packed independently
     (identically, once ``sync_tied_input_amax`` has equalized their scales), and the
@@ -629,14 +676,16 @@ def _export_quantized_weight(
             "which dispatches to the streaming writer that materialises weights layer-by-layer."
         )
 
-    if quantization_format in IQ_FORMATS:
+    if quantization_format in GGML_FORMATS:
         if weight_name != "weight":
             raise NotImplementedError(
-                "IQ unified export currently supports modules with a standard 'weight' "
+                "GGML unified export currently supports modules with a standard 'weight' "
                 f"attribute, got {weight_name!r} on {type(sub_module).__name__}"
             )
-        quantize_iq = IQ_FORMAT_REGISTRY[quantization_format].quantize
-        packed_weight, _ = quantize_iq(weight.to(dtype))
+        # Encode the module's own weight: rounding it to ``dtype`` first could change its codes.
+        packed_weight = GGML_FORMAT_REGISTRY[quantization_format].pack(
+            weight, getattr(sub_module, quantizer_attrs.weight_quantizer, None)
+        )
         setattr(sub_module, weight_name, nn.Parameter(packed_weight, requires_grad=False))
         maybe_clear_cuda_cache()
         return
@@ -859,10 +908,14 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
     if ctx.is_modelopt_qlora and hasattr(sub_module, "base_layer"):
         return
     # Restore unpacked weight so the export path can read the live quantizer state.
-    if hasattr(sub_module, "weight_packed") or (
-        "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
-    ):
+    if hasattr(sub_module, "weight_packed"):
         sub_module.unpack_weight()
+    elif "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1:
+        sub_module.unpack_weight()
+        # unpack_weight() dequantizes to torch's default dtype (fp32). A layer the recipe leaves
+        # unquantized is written as-is, so cast it to the export dtype like the rest of the model.
+        if get_quantization_format(sub_module) == QUANTIZATION_NONE:
+            sub_module.weight = nn.Parameter(sub_module.weight.to(ctx.dtype), requires_grad=False)
     handler = ExportModuleRegistry.match(sub_module)
     if handler is not None:
         handler(name, sub_module, ctx)
@@ -870,7 +923,7 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
 
 def _resolve_export_dtype(model: nn.Module, dtype: torch.dtype | None) -> torch.dtype:
     """Return the export dtype, defaulting to the model's own and warning on a mismatch."""
-    configured_dtype = getattr(model.config, "torch_dtype", None)
+    configured_dtype = getattr(model.config, "dtype", None)
     if dtype is None:
         if configured_dtype is not None:
             return configured_dtype
@@ -938,6 +991,7 @@ def _process_quantized_modules(
     model: nn.Module,
     dtype: torch.dtype,
     is_modelopt_qlora: bool = False,
+    keep_fused_experts: bool = False,
 ) -> None:
     """Process all quantized modules in model, export weights in-place.
 
@@ -953,18 +1007,28 @@ def _process_quantized_modules(
     # No per-module dedup cache: tied duplicates are dropped by name in postprocess_state_dict.
     # The handlers pack whatever weight they are handed, and nothing here materializes a shard --
     # FSDP2 models go through collect_export_tensors instead, which packs inside a gather window.
-    assert not is_fsdp2_model(model), (
-        "_process_quantized_modules cannot pack a sharded model; use collect_export_tensors"
-    )
+    # The no-gather writer is the deliberate exception: it packs each rank's LOCAL shard and never
+    # materializes a full tensor, and the experts stay fused for that, so keep_fused_experts, which
+    # only the no-gather writer passes, is what allows a sharded model here.
+    if is_fsdp2_model(model) and not keep_fused_experts:
+        raise RuntimeError(
+            "_process_quantized_modules cannot pack an FSDP2-sharded model: pack it in "
+            "collect_export_tensors' gather windows, or export it with the no-gather writer."
+        )
     ctx = ExportContext(
         model=model,
         dtype=dtype,
         is_modelopt_qlora=is_modelopt_qlora,
         model_type=hf_model_type(model),
+        keep_fused_experts=keep_fused_experts,
     )
 
-    for name, sub_module in model.named_modules():
-        _dispatch_export_handler(name, sub_module, ctx)
+    # The no-gather export sets keep_fused_experts on this context, which lets a sharded model past
+    # the check above: each FSDP2 unit's modules are then packed in one weight window, held across
+    # them.
+    with _hf_export_handlers.held_fsdp2_weight_windows(ctx):
+        for name, sub_module in model.named_modules():
+            _dispatch_export_handler(name, sub_module, ctx)
 
 
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
@@ -1015,15 +1079,68 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
     return dtype, tied_map, quant_config
 
 
-def pack_quantized_weights(model, dtype, is_modelopt_qlora: bool = False) -> None:
-    """Quantize every module's weight in place, then rebuild the fused MoE linears."""
-    # Deferred: modelopt.torch.quantization.plugins.huggingface imports transformers at module
-    # scope, and transformers is an optional extra -- importing it here keeps
-    # ``import modelopt.torch.export`` working without it.
-    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+def pack_quantized_weights(
+    model, dtype, is_modelopt_qlora: bool = False, keep_fused_experts: bool = False
+) -> None:
+    """Quantize every module's weight in place, then rebuild the fused MoE linears.
 
-    _process_quantized_modules(model, dtype, is_modelopt_qlora)
+    ``keep_fused_experts`` is for the no-gather distributed FSDP2 export: it leaves MoE experts
+    fused and sharded through the fold, so each rank materializes only its LOCAL experts instead
+    of all N on every rank. The per-expert split happens later, in the writer.
+    """
+    # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
+    # per-model PTQ module at module scope here would risk an import cycle.
+    from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
+
+    _process_quantized_modules(
+        model, dtype, is_modelopt_qlora, keep_fused_experts=keep_fused_experts
+    )
     _reconstruct_fused_moe_linear(model)
+
+
+def _hf_shard_flags(model: nn.Module) -> tuple[bool, bool]:
+    """Return ``(fsdp2_sharded, ep_sharded)`` for an HF model about to be exported, from its plan.
+
+    Expert parallelism shards the experts too, just not by FSDP2: transformers pre-slices the expert
+    params across the EP group. The two are reported separately because a model can be both at once,
+    FSDP2-dense with expert-parallel experts. A diffusers pipeline is not a module, and nothing here
+    distributes one.
+    """
+    if not isinstance(model, nn.Module):
+        return False, False
+    plan = distribution_plan(model)
+    return plan.is_fsdp_dense, plan.is_expert_parallel
+
+
+def _process_hf_model_for_export(
+    model: nn.Module, dtype: torch.dtype | None = None, is_modelopt_qlora: bool = False
+) -> dict[str, Any]:
+    """Fold a quantized HF model's quantizers into its weights in place; return its quant config.
+
+    The processing half of an export, for a caller that serializes the model itself: the no-gather
+    writer, which writes each rank's shard. Afterwards the model's own state dict holds the
+    deployment weights. Nothing is gathered, so it runs on a live FSDP2 or expert-parallel model;
+    there the fused MoE experts stay fused, since each rank folds only its local shard, and the
+    writer then splits each rank's experts into per-expert tensors.
+    """
+    dtype, _, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
+    # Only the no-gather writer calls this, and only for a sharded model, so the experts stay fused
+    # without reading the plan a second time.
+    pack_quantized_weights(model, dtype, is_modelopt_qlora, keep_fused_experts=True)
+    return quant_config
+
+
+def _diffusion_quantization_target_types(model: nn.Module) -> list[str]:
+    """Return stable type targets for homogeneous NVFP4 diffusion modules."""
+    target_types = set()
+    for sub_module in model.modules():
+        if get_quantization_format(sub_module) != QUANTIZATION_NVFP4:
+            continue
+        if any(cls.__name__ == "WanCausalConv3d" for cls in type(sub_module).__mro__):
+            target_types.add("Conv3d")
+        elif is_quantlinear(sub_module):
+            target_types.add("Linear")
+    return sorted(target_types)
 
 
 def _export_transformers_checkpoint(
@@ -1233,6 +1350,8 @@ def _export_diffusers_checkpoint(
     export_dir: Path,
     components: list[str] | None,
     max_shard_size: int | str = "10GB",
+    export_attention_quantizers: bool | None = None,
+    save_modelopt_state: bool = False,
     **kwargs,
 ) -> None:
     """Internal: Export diffusion(-like) model/pipeline checkpoint.
@@ -1250,6 +1369,11 @@ def _export_diffusers_checkpoint(
         max_shard_size: Maximum size of each shard file. If the model exceeds this size,
             it will be sharded into multiple files and a .safetensors.index.json will be
             created. Use smaller values like "5GB" or "2GB" to force sharding.
+        export_attention_quantizers: Preserve enabled Q/K/V BMM quantizer state for
+            runtimes that consume legacy attention ``_amax`` keys, such as static FP8 FLUX.
+            None preserves these keys for FLUX.1 and omits them for other diffusion
+            components. Transformers components always retain them for KV-cache scales.
+        save_modelopt_state: Whether to save ModelOpt state with HF checkpointing enabled.
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors`. See its docstring for details.
     """
@@ -1266,6 +1390,24 @@ def _export_diffusers_checkpoint(
     module_components = {
         name: comp for name, comp in all_components.items() if isinstance(comp, nn.Module)
     }
+
+    # Refuse before any component is fused, packed or written.
+    uncalibrated = {
+        name: module_names
+        for name, comp in module_components.items()
+        if (module_names := _get_uncalibrated_static_input_module_names(comp))
+    }
+    if uncalibrated:
+        details = "; ".join(
+            f"{name}: {len(module_names)} layer(s), e.g. {module_names[0]}"
+            for name, module_names in uncalibrated.items()
+        )
+        raise ValueError(
+            f"Static input quantizers were never calibrated ({details}): the checkpoint would "
+            "declare their input scales without containing them. Calibrate with data that runs "
+            "these layers, or leave the layers unquantized by disabling both their weight and "
+            "input quantizers."
+        )
 
     # Best-effort diffusers pipeline check (kept for folder layout + model_index.json behavior)
     is_diffusers_pipe = False
@@ -1294,6 +1436,14 @@ def _export_diffusers_checkpoint(
 
         # Infer dtype if not provided
         component_dtype = dtype if dtype is not None else infer_dtype_from_model(component)
+        is_transformers_component = isinstance(component, _TRANSFORMERS_MODEL_TYPES)
+        # TRT-LLM's static FP8 FLUX.1 path consumes the legacy Q/K/V amax keys.
+        # Transformers components need these keys for their declared KV-cache scheme.
+        keep_attention_quantizers = is_transformers_component or (
+            isinstance(component, diffusers.FluxTransformer2DModel)
+            if export_attention_quantizers is None
+            else export_attention_quantizers
+        )
 
         if is_quantized:
             # Fuse QKV linears that share the same input (unify amax values)
@@ -1305,7 +1455,23 @@ def _export_diffusers_checkpoint(
             # dummy forward fails for it, fail loudly rather than silently skipping
             # fusion (which would export un-unified amax values).
             is_qwen_component = "qwen" in type(component).__name__.lower()
-            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component)
+            # Image-conditioned Wan also requires a successful dummy forward for fusion.
+            is_wan_i2v_component = (
+                HAS_DIFFUSERS
+                and isinstance(component, diffusers.WanTransformer3DModel)
+                and getattr(getattr(component, "config", None), "image_dim", None) is not None
+            )
+            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component or is_wan_i2v_component)
+
+            target_types = _diffusion_quantization_target_types(component)
+            if "Conv3d" in target_types and (
+                kwargs.get("padding_strategy") is not None
+                or kwargs.get("enable_swizzle_layout", False)
+            ):
+                raise NotImplementedError(
+                    "NVFP4 GEMM padding/swizzling is not defined for Conv3d exports. "
+                    "Export without padding_strategy/enable_swizzle_layout."
+                )
 
             # Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
@@ -1320,7 +1486,12 @@ def _export_diffusers_checkpoint(
             # promoted buffers are always removed, even if save / post-process / config
             # update raises (keeps the live module reusable for a repeated export).
             try:
-                quant_config = get_quant_config(component, is_modelopt_qlora=False)
+                quant_config = get_quant_config(
+                    component,
+                    is_modelopt_qlora=False,
+                    # Native diffusion components (including LTX-2) have no KV cache.
+                    include_kv_cache=is_transformers_component,
+                )
                 if quant_config:
                     quantization_details = quant_config.get("quantization", {})
                     # Record the SVDQuant low-rank size so consumers know the LoRA shape.
@@ -1329,19 +1500,23 @@ def _export_diffusers_checkpoint(
                         if svdquant_rank is not None:
                             quantization_details["lora_rank"] = svdquant_rank
                 hf_quant_config = (
-                    convert_hf_quant_config_format(quant_config) if quant_config else None
+                    convert_hf_quant_config_format(quant_config, target_types=target_types)
+                    if quant_config
+                    else None
                 )
 
                 # Save the component
                 # - diffusers ModelMixin.save_pretrained does NOT accept state_dict parameter
                 # - for non-diffusers modules (e.g., LTX-2 transformer), fall back to torch.save
                 if hasattr(component, "save_pretrained"):
-                    with hide_quantizers_from_state_dict(component):
+                    with hide_quantizers_from_state_dict(component, keep_attention_quantizers):
                         component.save_pretrained(
-                            component_export_dir, max_shard_size=max_shard_size
+                            component_export_dir,
+                            max_shard_size=max_shard_size,
+                            save_modelopt_state=save_modelopt_state,
                         )
                 else:
-                    with hide_quantizers_from_state_dict(component):
+                    with hide_quantizers_from_state_dict(component, keep_attention_quantizers):
                         _save_component_state_dict_safetensors(component, component_export_dir)
 
                 # Post-process — merge, metadata, padding, swizzle
@@ -1367,13 +1542,17 @@ def _export_diffusers_checkpoint(
                 _remove_promoted_quantizer_tensors(component)
         # Non-quantized component: just save as-is
         elif hasattr(component, "save_pretrained"):
-            component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
+            component.save_pretrained(
+                component_export_dir,
+                max_shard_size=max_shard_size,
+                save_modelopt_state=save_modelopt_state,
+            )
         else:
             _save_component_state_dict_safetensors(component, component_export_dir)
 
         # Update config.json with sparse attention info (both quantized and non-quantized)
         if export_sparse_attention_config is not None:
-            sparse_attn_config = export_sparse_attention_config(component)
+            sparse_attn_config = export_sparse_attention_config(component, for_diffusion=True)
             if sparse_attn_config is not None:
                 config_path = component_export_dir / "config.json"
                 if config_path.exists():
@@ -1438,12 +1617,20 @@ def _export_diffusers_checkpoint(
         if not is_partial_export and not model_index_path.exists() and hasattr(pipe, "save_config"):
             pipe.save_config(export_dir)
 
-        # Last resort: synthesize a minimal model_index.json from exported components.
+        # Preserve pipeline settings while listing only the exported components.
         if not model_index_path.exists() and hasattr(pipe, "config") and pipe.config is not None:
+            pipeline_components = pipe.components
             model_index = {
-                "_class_name": type(pipe).__name__,
-                "_diffusers_version": diffusers.__version__,
+                key: value
+                for key, value in json.loads(pipe.to_json_string()).items()
+                if key not in pipeline_components and not key.startswith("_")
             }
+            model_index.update(
+                {
+                    "_class_name": type(pipe).__name__,
+                    "_diffusers_version": diffusers.__version__,
+                }
+            )
             for name, comp in all_components.items():
                 module = type(comp).__module__
                 library = module.split(".")[0]
@@ -1510,13 +1697,34 @@ def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
         gc.do_sample = True
 
 
+def _copy_non_model_files_from_source(model: nn.Module, export_dir: "str | Path") -> None:
+    """Copy the source checkpoint's non-model files into the export, from local disk only.
+
+    See ``copy_non_model_files``. Exporters never fetch from the Hub: a model loaded by Hub ID
+    gets a warning instead, since its cache holds only the files loading needed.
+    """
+    source = _source_checkpoint(model)
+    if source is None:
+        return
+    if not Path(source).is_dir():
+        warnings.warn(
+            f"The source checkpoint {source!r} is not a local directory, so its non-model files "
+            "(tokenizer, processor, remote code, chat templates, ...) were not copied into the "
+            "export. Get a local copy first with modelopt.torch.export.ensure_local_checkpoint "
+            "and load the model from that directory."
+        )
+        return
+    copy_non_model_files(source, export_dir)
+
+
 def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
-    """Write config.json, generation_config.json, and trust_remote_code modeling files.
+    """Write config.json and generation_config.json, then copy the source's non-model files.
 
     For exporters that stream weights out themselves and never hand a state dict to
     ``save_pretrained``, which is not an option here: MoE models (e.g. DSR1) share expert
     storage across layers, so safetensors' shared-tensor check fires even on an empty dict.
-    The ``*.py`` files are what ``trust_remote_code`` checkpoints (e.g. NemotronH) need.
+    The non-model files include the ``*.py`` modules ``trust_remote_code`` checkpoints (e.g.
+    NemotronH) need.
     """
     _sanitize_generation_config_for_save(model)
     # transformers' own revert_weight_conversion cannot handle quantized state dicts.
@@ -1530,12 +1738,7 @@ def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
         with contextlib.suppress(Exception):
             model.generation_config.save_pretrained(str(export_dir))
 
-    src_dir = Path(getattr(model.config, "_name_or_path", "") or "")
-    if src_dir.is_dir():
-        for py_file in src_dir.glob("*.py"):
-            dst = export_dir / py_file.name
-            if not dst.exists():
-                shutil.copy2(py_file, dst)
+    _copy_non_model_files_from_source(model, export_dir)
 
 
 def export_speculative_decoding(
@@ -1581,10 +1784,17 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
-def _revert_hf_quant_config_names(hf_quant_config: dict, name_mapper: Callable[[str], str]) -> dict:
+def _revert_hf_quant_config_names(
+    hf_quant_config: dict,
+    name_mapper: Callable[[str], str],
+    *,
+    module_names: Iterable[str] = (),
+) -> dict:
     """Return a name-reverted copy, leaving the input untouched if mapping fails."""
     mapped_quant_config = copy.deepcopy(hf_quant_config)
-    revert_quant_config_names(mapped_quant_config.get("quantization", {}), name_mapper)
+    revert_quant_config_names(
+        mapped_quant_config.get("quantization", {}), name_mapper, module_names=module_names
+    )
     return mapped_quant_config
 
 
@@ -1598,7 +1808,13 @@ def _revert_quant_config_names_best_effort(
     try:
         name_mapper = build_reverse_name_mapper(model)
         if name_mapper is not None and hf_quant_config:
-            return _revert_hf_quant_config_names(hf_quant_config, name_mapper)
+            # Parameter owners only, as the resident export passes: a container or quantizer whose
+            # name a rename moves into a wildcard would expand that wildcard into every module.
+            return _revert_hf_quant_config_names(
+                hf_quant_config,
+                name_mapper,
+                module_names={name.rpartition(".")[0] for name, _ in model.named_parameters()},
+            )
     except Exception as exc:
         warnings.warn(
             f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
@@ -1613,12 +1829,16 @@ def _source_checkpoint(model: nn.Module) -> str | None:
     Prefers ``_modelopt_source_checkpoint`` (recorded at load time by
     ``record_unplaced_source_keys``). A model that reached export without going through that path
     still knows its own provenance via ``config._name_or_path``, and the several places this is
-    asked must agree on the answer -- otherwise, for instance, a weight is carried but its sidecar
+    asked must agree on the answer -- otherwise, for instance, a weight is carried but its off-index
     tensors never reach ``exclude_modules`` because the two halves disagreed about where the
     checkpoint was.
     """
-    return getattr(model, "_modelopt_source_checkpoint", None) or getattr(
-        getattr(model, "config", None), "_name_or_path", None
+    # ``or None``: a model built with ``from_config`` has ``_name_or_path == ""``, which would
+    # otherwise name the current directory.
+    return (
+        getattr(model, "_modelopt_source_checkpoint", None)
+        or getattr(getattr(model, "config", None), "_name_or_path", None)
+        or None
     )
 
 
@@ -1648,15 +1868,17 @@ def carryable_unplaced_keys(model: nn.Module) -> list[str]:
 
 
 def off_index_tensor_names(model: nn.Module) -> list[str]:
-    """Tensor names in the checkpoint's off-index safetensors sidecars.
+    """Tensor names in the checkpoint's off-index weight files.
 
-    Those files (GLM-4.7's ``mtp.safetensors``) are copied into the export verbatim rather than
-    loaded, so they are never ``unexpected_keys`` and :func:`carryable_unplaced_keys` cannot see
-    them -- yet their tensors land in the export in original precision exactly like a carried
-    weight, and must reach ``exclude_modules`` the same way. Before this mechanism existed
+    Those files (GLM-4.7's ``mtp.safetensors``) are copied into the export verbatim by
+    :func:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.copy_off_index_safetensors` rather
+    than loaded, so they are never among the unplaced source keys and
+    :func:`carryable_unplaced_keys` cannot see them -- yet their tensors land in the export in
+    original precision exactly like a carried weight, and must reach ``exclude_modules`` the same
+    way. Before this mechanism existed
     ``_add_mtp_exclusions`` covered them by globbing for ``mtp*``.
 
-    Reads safetensors headers only, never tensor data, and stays silent when the sidecars or the
+    Reads safetensors headers only, never tensor data, and stays silent when those files or the
     library cannot be read: an absent exclusion is a deployment problem, but so is an export that
     dies while computing one.
     """
@@ -1674,49 +1896,39 @@ def off_index_tensor_names(model: nn.Module) -> list[str]:
 
 
 def unplaced_keys_for(model: nn.Module, ckpt: "str | Path") -> list[str]:
-    """Every source key the model has no parameter for, from both accountings.
+    """The source keys the model has no parameter for, as recorded when it was loaded.
 
-    Neither source is sufficient alone, and each covers the other's blind spot:
+    The loaders that build a model for export --
+    :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` and
+    ``parallel_load_and_prepare_fsdp2`` -- work this out once, at load time
+    (``record_unplaced_source_keys``), and the export only reads it back. A model loaded some other
+    way, by a caller's own ``from_pretrained`` say, has no record: the same derivation then runs
+    once, here, and is recorded so nothing derives it again.
 
-    * The **structural** pass (``unplaced_source_keys``) walks the checkpoint index and asks, for
-      each source key, whether the built model has a parameter for it -- resolving the key through
-      Transformers' renames and converters first. Being structural it is unaffected by
-      ``_keys_to_ignore_on_load_unexpected``, and being source-keyed it names tensors that exist on
-      disk. It cannot see a key the index omits.
-    * The **recorded** set is the loader's own ``unexpected_keys``. It sees tensors the index omits,
-      because the loader enumerates the contents of every shard it opens. But Transformers filters
-      it through the architecture's ignore rules -- Qwen3-Next drops ``^mtp.*``, DeepSeek-V3 and GLM
-      drop their MTP prefixes -- so for exactly the MTP heads this mechanism exists to carry it can
-      come back EMPTY. It can also report post-conversion target names (a fused
-      ``...experts.gate_up_proj``) that exist in no shard, and one such name can stand for several
-      source tensors.
-
-    Taking the union means an architecture's ignore rules cannot hide a weight, a fused name cannot
-    strand the tensors behind it, and a key missing from the index is still carried. Recorded names
-    that no shard backs are dropped by :func:`locate_source_keys`, which is the right outcome: the
-    structural pass has already named the real source keys for any converted target.
-
-    The structural pass needs ``model_load_utils``, which imports transformers and accelerate at
-    module scope. Where those are absent the recorded set stands alone -- degraded, but no worse
-    than before this function existed.
+    That derivation needs ``model_load_utils``, which imports transformers and accelerate at module
+    scope. Where those are absent an unrecorded model carries nothing, with a warning; a recorded
+    one needs neither.
     """
-    recorded = getattr(model, "_modelopt_unplaced_source_keys", None) or []
-    structural: list[str] = []
-    try:
-        from modelopt.torch.utils.plugins.model_load_utils import unplaced_source_keys
+    # Local import breaks the cycle: layerwise_export imports this module.
+    from .layerwise_export import LAYERWISE_EXPORTER_ATTR
 
-        structural = unplaced_source_keys(model, str(ckpt))
+    exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
+    snapshot = getattr(exporter, "_source_key_snapshot", None)
+    if snapshot is not None and snapshot[0] == str(ckpt):
+        return list(snapshot[1])
+
+    if hasattr(model, "_modelopt_unplaced_source_keys"):
+        return list(model._modelopt_unplaced_source_keys)
+    try:
+        from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
+
+        return record_unplaced_source_keys(model, str(ckpt))
     except Exception as exc:
-        # Warn regardless of whether anything was recorded: a non-empty recorded set is not
-        # proof the union is complete, since the structural pass is what catches keys an
-        # architecture's ignore rules dropped from the recorded set in the first place. Staying
-        # quiet here just because recorded happens to be non-empty is the same silent
-        # degradation this function exists to avoid.
         warnings.warn(
-            f"Could not derive unplaced source keys structurally ({exc}); relying on the "
-            "loader's report, which its architecture may have filtered."
+            f"Could not derive unplaced source keys ({exc}), so the export carries none. Loading "
+            "with modelopt.torch.utils.plugins.model_load_utils.load_pretrained records them."
         )
-    return sorted({*structural, *recorded})
+        return []
 
 
 # Placeholder for keys_only resolution: the name is real, the tensor is never read.
@@ -1728,13 +1940,13 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
 
     A checkpoint can hold parameters the built model has no home for -- an MTP head, an auxiliary
     tower -- which means quantization never sees them and they would be missing from the exported
-    checkpoint unless they are copied across verbatim. ``parallel_load_and_prepare_fsdp2`` records
-    which keys those were (:attr:`_modelopt_unplaced_source_keys`) and where they came from; this
-    reads them on demand rather than holding them in memory from load to export.
+    checkpoint unless they are copied across verbatim. The loader records which keys those were
+    (:attr:`_modelopt_unplaced_source_keys`) and where they came from (see :func:`unplaced_keys_for`);
+    this reads them on demand rather than holding them in memory from load to export.
 
     Deliberately architecture-agnostic: the question asked at load time was "does the model have a
     parameter for this checkpoint key", not "is this an MTP head", so anything the model did not
-    load is carried through. Returns an empty dict when the model was not loaded that way.
+    load is carried through. Returns an empty dict when there is no source checkpoint to read.
 
     Best-effort: a checkpoint that cannot be re-read warns rather than failing the export, since
     the rest of the weights are already correct.
@@ -1744,19 +1956,13 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     state use this: the FSDP2 writer only emits ``extra_state_dict`` from rank 0, so having every
     rank materialize an MTP head (10 GB+ in bf16 on a large MoE) is host memory read and dropped.
     """
-    # The recorded list is never treated as final, empty or not. An earlier revision returned
-    # early when the loader recorded [], reasoning that it "had already answered" -- but
-    # Transformers filters unexpected_keys through _keys_to_ignore_on_load_unexpected, and
-    # Qwen3-Next ignores ^mtp.*, so for exactly the MTP heads this exists to carry the report comes
-    # back empty and the export silently shipped without them. See unplaced_keys_for.
-    #
     # These are pure filesystem checks and deliberately sit ABOVE the try below: deciding that
     # there is nothing to carry must not depend on an optional import succeeding.
     ckpt = _source_checkpoint(model)
     if not ckpt or not Path(ckpt).is_dir():
         # A hub id rather than a local path, or no provenance at all -- nothing to read. Quiet
         # when nothing was recorded, because there is no reason to think anything is missing. But
-        # if the loader DID report unplaced keys, they are about to be dropped, and dropping them
+        # if the loader DID record unplaced keys, they are about to be dropped, and dropping them
         # silently is the failure this whole path exists to prevent.
         recorded = getattr(model, "_modelopt_unplaced_source_keys", None) or []
         if recorded:
@@ -1775,6 +1981,7 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     ):
         return {}
 
+    keys: list[str] | None = None
     try:
         keys = unplaced_keys_for(model, ckpt)
         if not keys:
@@ -1814,6 +2021,83 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     return out
 
 
+# Config attributes a distributed load sets to describe THIS RUN rather than the checkpoint: the
+# DistributedConfig transformers stamps on the config when it shards the model (the EP degree and tp
+# plan the export happened to use; not JSON-serializable either), and the base_model_ep_plan the EP
+# loader swapped to the torch_a2a styles, which exist only while ModelOpt is imported.
+_DISTRIBUTED_RUN_CONFIG_ATTRS = ("distributed_config", "base_model_ep_plan")
+
+
+@contextlib.contextmanager
+def _source_distributed_config_attrs(model: nn.Module):
+    """Within the block, every config holds the run attributes its source ``config.json`` declared.
+
+    transformers drops ``base_model_tp_plan`` and ``base_model_pp_plan`` when it serializes a config,
+    but not ``base_model_ep_plan``, so without this the export ships a plan whose styles nothing but
+    ModelOpt can load. Each config -- the root and every nested one, e.g. a VLM's ``text_config``,
+    where the plan lives -- gets the value its source ``config.json`` holds at the same place, or
+    loses the attribute when the source has none: the config a single-GPU export writes. A source
+    that cannot be read counts as having none. The run's values come back on exit, since the
+    sharded model still reads them (transformers' ``tp_plan`` checks ``distributed_config``).
+    """
+    source: Any = {}
+    ckpt = _source_checkpoint(model)
+    if ckpt and Path(ckpt, "config.json").is_file():
+        with contextlib.suppress(OSError, ValueError):
+            source = json.loads(Path(ckpt, "config.json").read_text())
+
+    _missing = object()
+    saved: list[tuple[Any, str, Any]] = []
+
+    def use_source(config: Any, source: Any) -> None:
+        source = source if isinstance(source, dict) else {}
+        for attr in _DISTRIBUTED_RUN_CONFIG_ATTRS:
+            if attr in vars(config) or attr in source:
+                saved.append((config, attr, vars(config).get(attr, _missing)))
+                if attr in source:
+                    setattr(config, attr, source[attr])
+                elif attr in vars(config):
+                    delattr(config, attr)
+        for key, sub_config in list(vars(config).items()):
+            if isinstance(sub_config, _TRANSFORMERS_CONFIG_TYPES):
+                use_source(sub_config, source.get(key))
+
+    try:
+        use_source(model.config, source)
+        yield
+    finally:
+        for config, attr, value in reversed(saved):
+            if value is _missing:
+                if attr in vars(config):
+                    delattr(config, attr)
+            else:
+                setattr(config, attr, value)
+
+
+def _write_base_config(model: nn.Module, export_dir: Path) -> None:
+    """Write the no-gather export's non-weight files, once every rank has written its shards.
+
+    ``save_non_weight_artifacts`` writes them, as it does for the FSDP2 streaming writer; this
+    keeps the config attributes an expert-parallel run sets out of config.json.
+    """
+    with _source_distributed_config_attrs(model):
+        save_non_weight_artifacts(model, export_dir)
+
+
+def _no_gather_export_asked() -> bool:
+    """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export.
+
+    ``nogather`` picks it; unset, empty or ``streaming`` keeps the default streaming path. Any other
+    value raises: a misspelled one would otherwise quietly take the path it was set to avoid.
+    """
+    value = os.environ.get("MODELOPT_FSDP2_EXPORT") or "streaming"
+    if value not in ("nogather", "streaming"):
+        raise ValueError(
+            f"MODELOPT_FSDP2_EXPORT={value!r}: expected 'nogather', or 'streaming', the default."
+        )
+    return value == "nogather"
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1842,12 +2126,17 @@ def export_hf_checkpoint(
         export_dir: The target export path.
         save_modelopt_state: Whether to save the modelopt state_dict.
         components: Only used for diffusers pipelines. Optional list of component names
-            to export. If None, all quantized components are exported.
+            to export. If None, all components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors` for diffusion model exports.
-            See its docstring for supported keys.
+            See its docstring for supported keys. Diffusion exports also accept
+            ``export_attention_quantizers=True`` to retain enabled Q/K/V BMM quantizer
+            state for runtimes using legacy ``*_bmm_quantizer._amax`` keys, or False
+            to omit it. When unspecified, FLUX.1 retains enabled Q/K/V quantizers for
+            runtime compatibility; other diffusion components omit them.
+            Transformers components always retain them for KV-cache scales.
     """
     # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
     # source so the exported checkpoint is the complete model. Merged here, ahead of the path
@@ -1857,30 +2146,88 @@ def export_hf_checkpoint(
     # emits it from rank 0 alone, so on the other ranks a full read is host memory spent and thrown
     # away -- and the carried set is the large stuff. The KEY list is still resolved everywhere,
     # because get_quant_config runs per rank and the configs have to agree.
-    _writes_extra = (
-        not (
-            torch.distributed.is_available()
-            and torch.distributed.is_initialized()
-            and is_fsdp2_model(model)
+    # Expert parallelism shards the experts too, just not by FSDP2 -- transformers pre-slices the
+    # expert params across the EP group. Computed here rather than with the other predicates below
+    # because the carry-over gate needs it and runs ahead of them (the layerwise and diffusers paths
+    # return before those are reached).
+    _fsdp2_sharded, _ep_sharded = _hf_shard_flags(model)
+    # Under expert parallelism each rank holds only its own experts' ModelOpt state, so the
+    # rank-0 save would write an incomplete one. Refused before any collective, alike on every rank.
+    if _ep_sharded and save_modelopt_state:
+        raise NotImplementedError(
+            "save_modelopt_state=True is not supported for an expert-parallel export: each rank "
+            "holds only its own experts' ModelOpt state."
         )
-        or torch.distributed.get_rank() == 0
-    )
-    _carried = read_unplaced_weights(model, keys_only=not _writes_extra)
+    if _fsdp2_sharded and _ep_sharded:
+        plan = distribution_plan(model)
+        # With fewer expert-parallel ranks than the world, FSDP2 shards the dense part within each
+        # expert-parallel group and replicates it across them, and the no-gather writer every
+        # expert-parallel export takes assembles a dense tensor only from a dim-0 shard over the
+        # whole world. Refused here, before anything is folded, not after the export has begun.
+        if plan.edp > 1:
+            raise NotImplementedError(
+                f"The export cannot write this plan's dense part: with ep_size={plan.ep_size} of "
+                f"world_size={plan.world_size} and dense='fsdp', it is sharded within each of the "
+                f"{plan.edp} expert-parallel groups and replicated across them. Set "
+                f"MODELOPT_EP_DEGREE={plan.world_size} if that divides the expert count, or "
+                "MODELOPT_FSDP_SIZE=1 to replicate the dense part."
+            )
+    if _ep_sharded:
+        # An offloaded model would take the streaming path below, which is not expert-parallel-aware:
+        # every rank would write its own experts over the others', with no error. Offload is set up
+        # per rank, so the ranks decide together and refuse alike, before anything is folded.
+        if all_reduce("accelerate offload", lambda: has_accelerate_offload(model), any):
+            raise NotImplementedError(
+                "An expert-parallel export cannot take the offloaded streaming path: it is not "
+                "expert-parallel-aware, and every rank would write its own experts over the "
+                "others'. Load the expert-parallel model without accelerate offload."
+            )
+        # Each rank holds only its own experts' quantizers, so they are agreed on before any folds.
+        _agree_on_fused_expert_quantization(model)
+    # Either form of sharding, including the hybrid where both hold: a model can be FSDP2-dense AND
+    # expert-parallel, so these are tracked separately rather than as an either/or.
+    _sharded_export = _ep_sharded or _fsdp2_sharded
+    # A sharded export reads and hands over the carried weights on rank 0 alone, since both sharded
+    # writers take extra_state_dict from that one sender: on any other rank, reading them (889
+    # tensors on GLM-5.3-Flash, its MTP layer) would be host memory spent for nothing. This gates
+    # the tensors only. Every rank still resolves their names, which _modelopt_carried_over_names
+    # below records alike on every rank for the quant config.
+    _writes_extra = not _sharded_export or torch.distributed.get_rank() == 0
+    _carried: dict = {}
+
+    def carried_over_names() -> list[str]:
+        # Everything the export writes in original precision straight from the source, by either
+        # mechanism: tensors carried here, and the off-index weight files copied verbatim alongside.
+        # get_quant_config reads this to seed exclude_modules; recorded here because it runs before
+        # that, and because only this point knows what was actually written rather than what was
+        # merely unplaced.
+        _carried.update(read_unplaced_weights(model, keys_only=not _writes_extra))
+        return sorted({*_carried, *off_index_tensor_names(model)})
+
+    if _sharded_export:
+        # Rank 0 reads the source here and sends every rank its names, so a failure of that read
+        # fails every rank rather than leave the others waiting in the export's first collective.
+        model._modelopt_carried_over_names = broadcast_from("carried weights", carried_over_names)
+    else:
+        model._modelopt_carried_over_names = carried_over_names()
     if _writes_extra and _carried:
         extra_state_dict = {**_carried, **(extra_state_dict or {})}
-    # Everything the export writes in original precision straight from the source, by either
-    # mechanism: tensors carried above, and the off-index sidecars copied verbatim alongside.
-    # get_quant_config reads this to seed exclude_modules; recorded here because it runs before
-    # that, and because only this point knows what was actually written rather than what was
-    # merely unplaced.
-    model._modelopt_carried_over_names = sorted({*_carried, *off_index_tensor_names(model)})
 
     from .layerwise_export import LAYERWISE_EXPORTER_ATTR
 
     exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
     if exporter is not None:
+        if save_modelopt_state:
+            warnings.warn(
+                "save_modelopt_state=True is not supported in the layerwise export "
+                "path and will be ignored."
+            )
         # Per-layer export wrote the shards during calibration; this writes the rest.
         exporter.finalize(extra_state_dict=extra_state_dict)
+        # Into the exporter's directory, which is where finalize() wrote: export_dir may differ
+        # when the recipe's layerwise.export_dir chose it.
+        if _writes_extra:
+            copy_off_index_safetensors(_source_checkpoint(model), exporter.export_dir)
         return
 
     export_dir = Path(export_dir)
@@ -1896,22 +2243,38 @@ def export_hf_checkpoint(
             export_dir,
             components,
             max_shard_size,
+            save_modelopt_state=save_modelopt_state,
             **kwargs,
         )
         return
 
-    is_fsdp2_sharded = (
-        torch.distributed.is_available()
-        and torch.distributed.is_initialized()
-        and is_fsdp2_model(model)
+    is_fsdp2_sharded = _fsdp2_sharded
+
+    # An expert-parallel model is sharded too, just not by FSDP2: transformers pre-slices the expert
+    # params across the EP group, so save_pretrained sees a tensor-parallel model and refuses it
+    # outright. There is no gather fallback for that shape, so EP always takes the no-gather writer,
+    # FSDP2-sharded dense included (the hybrid is both at once). A model sharded by FSDP2 alone keeps
+    # the existing path unless MODELOPT_FSDP2_EXPORT=nogather opts it in, as rank 0 reads it: the
+    # two writers issue different collectives, so ranks that read their environments differently
+    # would wait in collectives the others never join. Derived from _ep_sharded above so the
+    # carry-over gate and this cannot disagree about what EP is.
+    is_ep_sharded = _ep_sharded
+    use_no_gather_writer = is_ep_sharded or (
+        is_fsdp2_sharded and broadcast_from("MODELOPT_FSDP2_EXPORT", _no_gather_export_asked)
     )
-    # Not the global rank: a non-FSDP2 export writes the whole checkpoint from every process.
-    rank = torch.distributed.get_rank() if is_fsdp2_sharded else 0
+
+    # The rank used to gate the single-writer steps below. It must be the real rank whenever the
+    # checkpoint is written cooperatively -- under expert parallelism every process would otherwise
+    # read 0 here, all of them would rewrite config.json at once, and one would truncate the file
+    # another was reading. A non-sharded export does write the whole checkpoint from every process,
+    # which is what the 0 is for.
+    rank = torch.distributed.get_rank() if (is_fsdp2_sharded or is_ep_sharded) else 0
     # Offloaded models take the streaming path: it materializes one layer at a time and
     # writes each straight to a shard file, so peak memory is one layer plus one shard
     # buffer instead of the whole quantized state dict.
     _offloaded = has_accelerate_offload(model)
 
+    error: BaseException | None = None
     try:
         if _offloaded:
             # Imported here rather than at module scope: the streaming exporter imports the
@@ -1934,6 +2297,45 @@ def export_hf_checkpoint(
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
             hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
+        elif use_no_gather_writer:
+            # Opt-in alternative to the streaming path below: never replicate a unit across ranks.
+            # Each tensor is sent to exactly one owner over batched point-to-point sends, instead of
+            # every rank entering a gather window and all but one discarding the result. Same
+            # outputs; the win grows with world size, where the replicated gather costs ~world x the
+            # bytes. Left opt-in so the default path is unchanged.
+            # Imported here: the writer imports unified_export_hf_streaming, which imports this module.
+            from .distributed_writer import check_export_destination, distributed_save_hf_checkpoint
+
+            _qlora = kwargs.get("is_modelopt_qlora", False)
+            # Before the fold below changes the model in place: refused only by the writer, after
+            # it, the model could not be exported again, even to an empty directory.
+            check_export_destination(export_dir)
+            # Folds in place; the model is sharded here, so the MoE experts stay fused and each rank
+            # folds only its local experts. The writer then splits each rank's experts into
+            # per-expert tensors.
+            hf_quant_config = _process_together(model, dtype, _qlora)
+            if getattr(model, "hf_quantizer", None) is not None:
+                model.hf_quantizer = None
+            reverted = distributed_save_hf_checkpoint(
+                model,
+                export_dir,
+                maxbound=448,  # the KV cache scale is amax / 448 for FP8 and NVFP4, as above
+                kv_cache_format=_get_kv_cache_postprocess_config(
+                    (hf_quant_config or {}).get("quantization", {})
+                ),
+                max_shard_size=max_shard_size,
+                is_modelopt_qlora=_qlora,
+                extra_state_dict=extra_state_dict,
+            )
+            if rank == 0:
+                _write_base_config(model, export_dir)
+                # As the streaming path below: every FSDP2 rank holds the same ModelOpt state.
+                if save_modelopt_state and ModeloptStateManager.is_converted(model):
+                    torch.save(modelopt_state(model), export_dir / _MODELOPT_STATE_SAVE_NAME)
+                # The weights keep their in-memory names when any rank could not revert them, and
+                # the quant config has to name the modules as the weights do.
+                if reverted:
+                    hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
         elif is_fsdp2_sharded:
             # FSDP2 multi-rank: stream each rank's owned units straight to its own shard files, so
             # a rank buffers its own share of the model rather than the whole checkpoint, and the
@@ -1985,14 +2387,22 @@ def export_hf_checkpoint(
                 mapped_quant_config = hf_quant_config
                 if name_mapper is not None and hf_quant_config:
                     mapped_quant_config = _revert_hf_quant_config_names(
-                        hf_quant_config, name_mapper
+                        hf_quant_config,
+                        name_mapper,
+                        module_names=(
+                            key.removesuffix(".weight")
+                            for key in export_state_dict
+                            if key.endswith(".weight")
+                        ),
                     )
                 export_state_dict = mapped_state_dict
                 hf_quant_config = mapped_quant_config
             except Exception as exc:
                 warnings.warn(
-                    f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
-                    "names may not match the original HF hub checkpoint."
+                    f"Quant-aware reverse weight conversion skipped ({exc}); all exported "
+                    "tensors and quantization config retain their in-memory names, including "
+                    "unrelated submodels. Deployment loaders expecting the original HF hub "
+                    "layout may fail to load or skip these weights."
                 )
 
             _sanitize_generation_config_for_save(model)
@@ -2014,13 +2424,123 @@ def export_hf_checkpoint(
 
         if rank == 0:
             _write_hf_export_config(model, hf_quant_config, export_dir)
+            copy_off_index_safetensors(_source_checkpoint(model), export_dir)
+            if not (_offloaded or is_fsdp2_sharded or use_no_gather_writer):
+                # The streaming paths and the no-gather writer already did, from
+                # save_non_weight_artifacts.
+                _copy_non_model_files_from_source(model, export_dir)
 
     except Exception as e:
+        error = e
+        # Print (not just warnings.warn, which the default filter can dedupe/suppress) BEFORE the
+        # barrier below: under FSDP2/EP every other rank is still waiting there, so a failing rank
+        # that raises straight into `finally` blocks on that barrier forever without this rank's
+        # traceback ever reaching the log -- the job just hangs with no visible error. A single
+        # process has no barrier, and the interpreter prints the traceback.
+        if is_fsdp2_sharded or is_ep_sharded:
+            print(
+                f"[export_hf_checkpoint] rank {torch.distributed.get_rank()} failed:\n"
+                f"{traceback.format_exc()}",
+                flush=True,
+            )
         warnings.warn(
             "Cannot export model to the model_config. The modelopt-optimized model state_dict"
             " can be saved with torch.save for further inspection."
         )
         raise e
+    except BaseException as e:
+        # An exit or an interrupt on one rank must fail the others too, or they return as if the
+        # checkpoint were whole.
+        error = e
+        raise
     finally:
-        if is_fsdp2_sharded:
-            torch.distributed.barrier()
+        # Every rank waits for the writer to finish. Without this the ranks that wrote nothing exit
+        # first and the job hangs on the ones still writing.
+        if is_fsdp2_sharded or is_ep_sharded:
+            _finish_export_together(error)
+
+
+def _agree_on_fused_expert_quantization(model: nn.Module) -> None:
+    """Refuse, on every rank, a fused-experts projection quantized for some experts and not others.
+
+    The no-gather export writes each projection's experts as one fused tensor, so they must be all
+    quantized or all not. Under expert parallelism a rank holds only its own experts' quantizers
+    and sees only its share: ranks that disagree would fold differently, and only the quantized
+    ones would join the writer's input-scale all-reduce. So every rank's view is gathered, and every
+    rank raises, before any of them folds. Collective.
+    """
+
+    def states() -> dict[str, str]:
+        found: dict[str, str] = {}
+        for name, module in model.named_modules():
+            if _hf_export_handlers._has_fused_experts_quantizers(module):
+                for proj in (getattr(module, "_first_proj_attr", "gate_up_proj"), "down_proj"):
+                    # As iter_weights_for_calibration does: a layout may register only the first.
+                    quantizers = getattr(module, f"{proj}_weight_quantizers", None)
+                    if quantizers is None:
+                        continue
+                    enabled = [q.is_enabled for q in quantizers]
+                    found[f"{name}.{proj}"] = (
+                        "quantized" if all(enabled) else "mixed" if any(enabled) else "unquantized"
+                    )
+        return found
+
+    def agree(per_rank: list[dict[str, str]]) -> dict[str, str]:
+        # A projection's state where every rank reports the same one, else what each rank reported.
+        merged: dict[str, str] = {}
+        for key in sorted(set().union(*per_rank)):
+            seen = [found.get(key, "absent") for found in per_rank]
+            merged[key] = (
+                seen[0]
+                if len(set(seen)) == 1
+                else ", ".join(f"rank {r}: {state}" for r, state in enumerate(seen))
+            )
+        return merged
+
+    agreed = all_reduce("fused expert quantization", states, agree)
+    unsupported = {k: v for k, v in agreed.items() if v not in ("quantized", "unquantized")}
+    if unsupported:
+        raise NotImplementedError(
+            "The expert-parallel export writes each fused-experts projection as one tensor, so its "
+            "experts must be all quantized or all unquantized, on every rank: "
+            + "; ".join(f"{key} ({state})" for key, state in unsupported.items())
+        )
+
+
+def _process_together(
+    model: nn.Module, dtype: torch.dtype | None, is_modelopt_qlora: bool
+) -> dict[str, Any]:
+    """:func:`_process_hf_model_for_export` on every rank, raising on all of them if any failed.
+
+    Each rank folds only its own shard, so processing can fail on one rank alone -- one rank's
+    experts mixing quantized and unquantized ones, say. That rank would leave for the closing
+    consensus while its peers start the writer's collectives, and the two would not match.
+    """
+    quant_config: list[dict[str, Any]] = []
+
+    def processed() -> bool:
+        quant_config.append(_process_hf_model_for_export(model, dtype, is_modelopt_qlora))
+        return True
+
+    all_reduce("export processed", processed, all)
+    return quant_config[0]
+
+
+def _finish_export_together(error: BaseException | None) -> None:
+    """Wait for every rank to finish writing, and raise on all of them if any failed.
+
+    A barrier alone lets the ranks whose writes succeeded return, and the run carries on as if the
+    checkpoint were whole while another rank's export raised. Every rank's outcome is gathered
+    instead (:func:`~modelopt.torch.utils.distributed.all_reduce`), so every rank raises with the
+    failing rank's error. That holds for a rank that fails outside the writer's raw collectives,
+    whose peers meet it here or in one of the writer's labeled steps. A rank failing while its peers
+    wait in a raw collective, the point-to-point transfers that move the dense tensors to their
+    owners (a receive buffer that does not fit, say), still leaves them waiting there.
+    """
+
+    def exported() -> bool:
+        if error is not None:
+            raise error
+        return True
+
+    all_reduce("export_ok", exported, all)

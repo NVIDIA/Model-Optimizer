@@ -319,8 +319,6 @@ def convert_to_tensorrt_llm_config(
             config["eos_token_id"] = model_config.eos_token_id
             config["bos_token_id"] = model_config.bos_token_id
             config["pad_token_id"] = model_config.pad_token_id
-    elif decoder_type == "dbrx":
-        config["clip_qkv"] = first_attention_decoder_config.clip_qkv
 
     elif decoder_type == "mllama":
         num_layers = config["num_hidden_layers"]

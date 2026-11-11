@@ -19,25 +19,38 @@ Covers the transformers-native V3 family (V3, R1, V3.1). The remote-code
 ``DeepseekMoE`` block of DeepSeek-MoE is a separate spec under ``deepseek``.
 """
 
-from ..specs import ExportSpec, ModelSpec, MoESpec, register
+from ..deepseek.specs import GENERATION_UNSUPPORTED
+from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
+
+# The plan for transformers releases that ship none for deepseek_v3 (before 5.13). From 5.13 its own
+# plan wins (an existing plan always does, see apply_distributed_support): the same experts, plus an
+# ep_router entry for the gate, which the load swaps for torch_a2a_router (global ids, unmasked). No
+# gate entry here on purpose: the router is logits-only and the MoE block computes GLOBAL top-k ids,
+# so the experts already receive unmasked global ids -- what the all-to-all dispatch wants.
+BASE_MODEL_EP_PLAN = {
+    "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+    "layers.*.mlp.experts.down_proj": "grouped_gemm",
+    "layers.*.mlp.experts": "moe_tp_experts",
+}
 
 # DeepseekV3MoE is invisible to the generic MoE detection: its class name does not end
 # in "SparseMoeBlock" and it calls its router ``gate``, so neither the name test nor the
 # structural router+experts test in is_moe matches. block_names below is what puts it on
 # the MoE path at all.
 #
-# The experts container changed upstream. transformers 4.57 builds an nn.ModuleList of
-# DeepseekV3MLP, which is the naming recorded here; 5.x replaces it with a fused, 3-D
-# DeepseekV3Experts holding gate_up_proj/down_proj. The fused layout resolves through
-# the structural first-projection check in get_expert_linear_names and never consults
-# this naming -- the same split Mixtral has across the same releases.
+# The naming recorded here is for an nn.ModuleList of DeepseekV3MLP experts (remote code and
+# transformers 4.x). transformers 5.x uses a fused, 3-D DeepseekV3Experts holding
+# gate_up_proj/down_proj, which resolves through the structural first-projection check in
+# get_expert_linear_names and never consults this naming -- the same split as Mixtral.
 register(
     ModelSpec(
         model_type="deepseek_v3",
-        min_transformers_version="4.57",
+        min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
+        ep_spec=EPSpec(base_model_ep_plan=BASE_MODEL_EP_PLAN),
+        ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),
         moe_spec=MoESpec(
             block_names=("DeepseekV3MoE",),
             expert_linear_names=("gate_proj", "down_proj", "up_proj"),

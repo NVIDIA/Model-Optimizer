@@ -20,39 +20,24 @@ from functools import partial
 from types import ModuleType
 from typing import TYPE_CHECKING
 
-import diffusers
 import onnx
 import torch
+from diffusers.models.attention_dispatch import AttentionBackendName, attention_backend
 from diffusers.models.attention_processor import Attention
 from diffusers.models.lora import LoRACompatibleConv, LoRACompatibleLinear
-from packaging.version import parse as parse_version
-
-if parse_version(diffusers.__version__) >= parse_version("0.35.0"):
-    from diffusers.models.attention import AttentionModuleMixin
-    from diffusers.models.attention_dispatch import AttentionBackendName, attention_backend
-    from diffusers.models.transformers.transformer_flux import FluxAttention
-    from diffusers.models.transformers.transformer_ltx import LTXAttention
-    from diffusers.models.transformers.transformer_wan import WanAttention
-
-    try:
-        from diffusers.models.transformers.transformer_flux2 import (
-            Flux2Attention,
-            Flux2ParallelSelfAttention,
-        )
-    except ImportError:
-        Flux2Attention = None
-        Flux2ParallelSelfAttention = None
-else:
-    AttentionModuleMixin = type("_dummy_type_no_instance", (), {})  # pylint: disable=invalid-name
+from diffusers.models.transformers.transformer_flux import FluxAttention
+from diffusers.models.transformers.transformer_flux2 import (
+    Flux2Attention,
+    Flux2ParallelSelfAttention,
+)
+from diffusers.models.transformers.transformer_ltx import LTXAttention
+from diffusers.models.transformers.transformer_wan import WanAttention
 from torch.autograd import Function
 from torch.nn import functional as F
 from torch.onnx import symbolic_helper
 
 if TYPE_CHECKING:
-    if hasattr(torch.onnx._internal, "jit_utils"):
-        from torch.onnx._internal.jit_utils import GraphContext
-    else:  # torch >= 2.9
-        from torch.onnx._internal.torchscript_exporter.jit_utils import GraphContext
+    from torch.onnx._internal.torchscript_exporter.jit_utils import GraphContext
 
 from ...export_onnx import export_fp8_mha
 from ...nn import (
@@ -134,9 +119,18 @@ def _quantized_sdpa(self, *args, **kwargs):
     query, key, value = fp8_sdpa_args[:3]
 
     if not torch.onnx.is_in_onnx_export():
-        query = self.q_bmm_quantizer(query)
-        key = self.k_bmm_quantizer(key)
-        value = self.v_bmm_quantizer(value)
+        # FP8SDPA only builds the ONNX graph and has no backward; the native op keeps QAT working.
+        return self.bmm2_output_quantizer(
+            original_scaled_dot_product_attention(
+                self.q_bmm_quantizer(query),
+                self.k_bmm_quantizer(key),
+                self.v_bmm_quantizer(value),
+                attn_mask=param_dict["attn_mask"],
+                dropout_p=param_dict["dropout_p"],
+                is_causal=param_dict["is_causal"],
+                scale=param_dict["scale"],
+            )
+        )
 
     q_quantized_scale = self.q_bmm_quantizer._get_amax(query)
     k_quantized_scale = self.k_bmm_quantizer._get_amax(key)
@@ -196,24 +190,21 @@ class _QuantAttention(_QuantFunctionalMixin):
 QuantModuleRegistry.register({Attention: "Attention"})(_QuantAttention)
 
 
-if AttentionModuleMixin.__module__.startswith(diffusers.__name__):
+class _QuantAttentionModuleMixin(_QuantAttention):
+    """Quantized AttentionModuleMixin for performing attention-related computations."""
 
-    class _QuantAttentionModuleMixin(_QuantAttention):
-        """Quantized AttentionModuleMixin for performing attention-related computations."""
+    def forward(self, *args, **kwargs):
+        with attention_backend(AttentionBackendName.NATIVE):
+            return super().forward(*args, **kwargs)
 
-        def forward(self, *args, **kwargs):
-            with attention_backend(AttentionBackendName.NATIVE):
-                return super().forward(*args, **kwargs)
 
-    QuantModuleRegistry.register({FluxAttention: "FluxAttention"})(_QuantAttentionModuleMixin)
-    QuantModuleRegistry.register({WanAttention: "WanAttention"})(_QuantAttentionModuleMixin)
-    QuantModuleRegistry.register({LTXAttention: "LTXAttention"})(_QuantAttentionModuleMixin)
-    if Flux2Attention is not None:
-        QuantModuleRegistry.register({Flux2Attention: "Flux2Attention"})(_QuantAttentionModuleMixin)
-    if Flux2ParallelSelfAttention is not None:
-        QuantModuleRegistry.register({Flux2ParallelSelfAttention: "Flux2ParallelSelfAttention"})(
-            _QuantAttentionModuleMixin
-        )
+QuantModuleRegistry.register({FluxAttention: "FluxAttention"})(_QuantAttentionModuleMixin)
+QuantModuleRegistry.register({WanAttention: "WanAttention"})(_QuantAttentionModuleMixin)
+QuantModuleRegistry.register({LTXAttention: "LTXAttention"})(_QuantAttentionModuleMixin)
+QuantModuleRegistry.register({Flux2Attention: "Flux2Attention"})(_QuantAttentionModuleMixin)
+QuantModuleRegistry.register({Flux2ParallelSelfAttention: "Flux2ParallelSelfAttention"})(
+    _QuantAttentionModuleMixin
+)
 
 
 original_scaled_dot_product_attention = F.scaled_dot_product_attention

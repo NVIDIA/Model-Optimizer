@@ -17,7 +17,7 @@
 
 Single source of truth for FP4 decision-boundary rounding.  Used by:
   - ``../gemm/fp4_kernel.py``         (standalone blockwise fake quant)
-  - ``../gemm/fp4_kernel_hopper.py``  (Hopper block-pointer variant)
+  - ``../gemm/fp4_kernel_hopper.py``  (2D-tiled variant, compute >= 8.9)
   - ``../gemm/gptq_fused_kernel.py``  (fused GPTQ scalar path)
   - ``../attention/bmm2_qdq.py``      (P/V operand qdq in the attention BMM2 kernel)
 

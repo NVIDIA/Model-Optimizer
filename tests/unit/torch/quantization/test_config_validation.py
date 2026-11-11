@@ -710,3 +710,9 @@ class TestFourOverSixBlockSizes:
     def test_nvfp4_four_over_six_cfg_needs_calibration(self):
         """The 4/6 preset is statically calibrated, so it requires calibration."""
         assert need_calibration(mtq.NVFP4_FOUR_OVER_SIX_CFG)
+
+
+@pytest.mark.parametrize("block_size", [0, -256])
+def test_gptq_block_size_must_be_positive(block_size):
+    with pytest.raises(ValidationError):
+        GPTQCalibConfig(block_size=block_size)

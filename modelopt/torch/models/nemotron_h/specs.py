@@ -15,15 +15,34 @@
 
 """Nemotron-H specs (HF model type ``nemotron_h``)."""
 
-from ..specs import ExportSpec, ModelSpec, MoESpec, register
+from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
+
+# Ungated experts, so ``up_proj``/``down_proj`` rather than a gate/up pair. The gate emits logits and
+# the MoE block runs its own group-limited top-k, so the plan has no router entry and the experts
+# receive global expert ids -- which the expert-parallel all-to-all experts forward routes on. The
+# loader maps ``nemotron_experts_ep``, a name no transformers style carries, to that forward.
+BASE_MODEL_EP_PLAN = {
+    "layers.*.mixer.experts.up_proj": "grouped_gemm",
+    "layers.*.mixer.experts.down_proj": "grouped_gemm",
+    "layers.*.mixer.experts": "nemotron_experts_ep",
+}
+
+# The hybrid SSM/Mamba modeling code does not work with accelerate's big model inference when several
+# GPUs are used, in the checkpoint's own code and in transformers' port from v5.3.
+GENERATION_UNSUPPORTED = (
+    "its hybrid SSM modeling code does not work with accelerate's big model inference "
+    "on several GPUs"
+)
 
 register(
     ModelSpec(
         model_type="nemotron_h",
-        min_transformers_version="5.3",
+        min_transformers_version="5.5",
+        ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),
         export_spec=ExportSpec(grouped_expert_export=True),
+        ep_spec=EPSpec(base_model_ep_plan=BASE_MODEL_EP_PLAN),
         moe_spec=MoESpec(
             # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
             block_names=("NemotronHMOE",),

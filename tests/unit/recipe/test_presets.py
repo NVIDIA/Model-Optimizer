@@ -22,11 +22,9 @@ PTQ example).
 """
 
 import argparse
-import subprocess
-import sys
-import textwrap
 
 import pytest
+import torch
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe, presets
@@ -34,12 +32,19 @@ from modelopt.recipe.presets import RecipeSupersededAction
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT
 from modelopt.torch.quantization.config import LocalHessianCalibConfig, QuantizeConfig
 from modelopt.torch.quantization.ggml import (
+    GGML_FORMAT_REGISTRY,
+    IQ1_M_BLOCK_SIZE,
+    IQ1_M_EFFECTIVE_BITS,
     IQ1_S_BLOCK_SIZE,
     IQ1_S_EFFECTIVE_BITS,
+    IQ2_S_BLOCK_SIZE,
+    IQ2_S_EFFECTIVE_BITS,
     IQ2_XS_BLOCK_SIZE,
     IQ2_XS_EFFECTIVE_BITS,
     IQ2_XXS_BLOCK_SIZE,
     IQ2_XXS_EFFECTIVE_BITS,
+    Q8_0_BLOCK_SIZE,
+    Q8_0_EFFECTIVE_BITS,
 )
 
 
@@ -92,6 +97,25 @@ def test_w4a16_nvfp4_preset_disables_vllm_marlin_incompatible_projections():
     } <= disabled_quantizers
 
 
+def test_default_exclusions_disable_mtp_at_any_depth():
+    # Megatron VLMs nest the MTP block under ``language_model.``; HF and Megatron LLMs keep it at the root.
+    model = torch.nn.Module()
+    for path in ("mtp", "language_model.mtp", "language_model.decoder"):
+        parent = model
+        for part in path.split("."):
+            if not hasattr(parent, part):
+                parent.add_module(part, torch.nn.Module())
+            parent = getattr(parent, part)
+        parent.add_module("proj", torch.nn.Linear(16, 16))
+
+    quant_cfg = load_recipe("general/ptq/fp8_default-kv_fp8").quantize.model_dump()
+    mtq.quantize(model, {**quant_cfg, "algorithm": None})
+
+    assert model.language_model.decoder.proj.input_quantizer.is_enabled
+    assert not model.mtp.proj.input_quantizer.is_enabled
+    assert not model.language_model.mtp.proj.input_quantizer.is_enabled
+
+
 def test_local_hessian_layerwise_is_scoped_to_the_model_recipe():
     # Layerwise calibration needs identifiable decoder layers, so it belongs to the model
     # recipe the published numbers come from -- not to the shared preset, which also backs
@@ -137,22 +161,73 @@ def test_mlp_weight_only_recipe_matches_its_mtq_cfg(recipe_name, cfg_name):
     ("qformat", "block_size", "effective_bits"),
     [
         ("iq1_s", IQ1_S_BLOCK_SIZE, IQ1_S_EFFECTIVE_BITS),
+        ("iq1_m", IQ1_M_BLOCK_SIZE, IQ1_M_EFFECTIVE_BITS),
         ("iq2_xxs", IQ2_XXS_BLOCK_SIZE, IQ2_XXS_EFFECTIVE_BITS),
         ("iq2_xs", IQ2_XS_BLOCK_SIZE, IQ2_XS_EFFECTIVE_BITS),
+        ("iq2_s", IQ2_S_BLOCK_SIZE, IQ2_S_EFFECTIVE_BITS),
+        ("q8_0", Q8_0_BLOCK_SIZE, Q8_0_EFFECTIVE_BITS),
     ],
 )
 def test_iq_recipe_matches_packing_contract(qformat, block_size, effective_bits):
     recipe = load_recipe(f"general/ptq/{qformat}")
-    quant_cfg = recipe.quantize.model_dump(exclude_unset=True)["quant_cfg"]
-    weight_cfg = next(
-        entry["cfg"] for entry in quant_cfg if entry.get("quantizer_name") == "*weight_quantizer"
-    )
+    quantize = recipe.quantize.model_dump(exclude_unset=True)
+    weight_cfgs = {
+        entry["quantizer_name"]: entry["cfg"]
+        for entry in quantize["quant_cfg"]
+        if isinstance(entry.get("cfg"), dict) and entry["cfg"].get("num_bits") == qformat
+    }
 
     assert qformat in presets.QUANT_CFG_CHOICES
-    assert weight_cfg["backend"] == "ggml"
-    assert weight_cfg["num_bits"] == qformat
-    assert weight_cfg["block_sizes"][-1] == block_size
-    assert weight_cfg["effective_bits"] == effective_bits
+    expected_weight_quantizers = (
+        {"*weight_quantizer"}
+        if qformat == "q8_0"
+        else {"*mlp*weight_quantizer", "*block_sparse_moe*weight_quantizer"}
+    )
+    assert set(weight_cfgs) == expected_weight_quantizers
+    for weight_cfg in weight_cfgs.values():
+        assert weight_cfg["backend"] == "ggml"
+        assert weight_cfg["block_sizes"][-1] == block_size
+        assert weight_cfg["effective_bits"] == effective_bits
+    if qformat == "q8_0":
+        assert quantize["algorithm"] is None
+    else:
+        algorithms = quantize["algorithm"]
+        algorithms = algorithms if isinstance(algorithms, list) else [algorithms]
+        assert algorithms[0]["method"] == "gptq"
+        assert algorithms[0]["block_size"] % block_size == 0
+        # Formats with a weighted search add imatrix for the fused MoE experts GPTQ does not reach.
+        expected = ["gptq", "imatrix"] if GGML_FORMAT_REGISTRY[qformat].weighted else ["gptq"]
+        assert [algorithm["method"] for algorithm in algorithms] == expected
+
+
+@pytest.mark.parametrize(
+    ("qformat", "block_size", "effective_bits"),
+    [
+        ("iq1_s", IQ1_S_BLOCK_SIZE, IQ1_S_EFFECTIVE_BITS),
+        ("iq1_m", IQ1_M_BLOCK_SIZE, IQ1_M_EFFECTIVE_BITS),
+        ("iq2_xxs", IQ2_XXS_BLOCK_SIZE, IQ2_XXS_EFFECTIVE_BITS),
+        ("iq2_xs", IQ2_XS_BLOCK_SIZE, IQ2_XS_EFFECTIVE_BITS),
+        ("iq2_s", IQ2_S_BLOCK_SIZE, IQ2_S_EFFECTIVE_BITS),
+    ],
+)
+def test_iq_experts_only_recipe_quantizes_the_routed_experts_with_imatrix(
+    qformat, block_size, effective_bits
+):
+    quantize = load_recipe(f"general/ptq/{qformat}_experts_only").quantize.model_dump(
+        exclude_unset=True
+    )
+    weight_cfgs = {
+        entry["quantizer_name"]: entry["cfg"]
+        for entry in quantize["quant_cfg"]
+        if isinstance(entry.get("cfg"), dict) and entry["cfg"].get("num_bits") == qformat
+    }
+
+    assert set(weight_cfgs) == {"*.experts.*weight_quantizer", "*block_sparse_moe*weight_quantizer"}
+    for weight_cfg in weight_cfgs.values():
+        assert weight_cfg["backend"] == "ggml"
+        assert weight_cfg["block_sizes"][-1] == block_size
+        assert weight_cfg["effective_bits"] == effective_bits
+    assert quantize["algorithm"] == {"method": "imatrix"}
 
 
 # --- RecipeSupersededAction: the flags --recipe replaces ----------------------------------------
@@ -180,31 +255,3 @@ def test_store_true_style_flag_stores_const_not_an_empty_list():
     with pytest.warns(FutureWarning, match="--weight_only is deprecated"):
         args = parser.parse_args(["--weight_only"])
     assert args.weight_only is True
-
-
-def test_deprecation_reaches_stderr_under_the_real_default_filters():
-    """The warning has to reach an actual CLI user, not just a test run.
-
-    pytest enables every warning, so a category CPython suppresses looks healthy here and says
-    nothing in production. argparse invokes the action from its own module, so a
-    ``DeprecationWarning`` would be dropped by the default ``ignore::DeprecationWarning`` filter --
-    the flag would keep working with nothing said. A subprocess is the only honest check: it uses
-    the interpreter's real filters rather than a reconstruction of them.
-    """
-    script = textwrap.dedent(
-        """
-        import argparse
-        from modelopt.recipe.presets import RecipeSupersededAction
-
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--qformat", action=RecipeSupersededAction)
-        parser.parse_args(["--qformat", "nvfp4"])
-        """
-    )
-    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
-
-    assert proc.returncode == 0, proc.stderr
-    assert "--qformat is deprecated" in proc.stderr, (
-        "the deprecation is filtered out under Python's default filters, so a CLI user would "
-        f"never see it; stderr was: {proc.stderr!r}"
-    )

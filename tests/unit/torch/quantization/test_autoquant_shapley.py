@@ -22,7 +22,6 @@ damage-bound search, and use of the shared linear-program solver.
 """
 
 import copy
-import functools
 import itertools
 import math
 from collections import namedtuple
@@ -31,7 +30,6 @@ import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.model_quant as _model_quant
@@ -775,7 +773,7 @@ def _shapley_data_parallel(rank, size, baseline):
         assert got == pytest.approx(scores, rel=1e-3, abs=1e-9), f"{name}: {got} vs {scores}"
 
 
-def test_data_parallel_aumann_shapley(skip_on_windows):
+def test_data_parallel_aumann_shapley(cpu_dist_workers):
     """Data parallel aumann shapley."""
     _model, single = _search(
         _Block(seed=0), method={"method": "aumann_shapley", "num_path_nodes": 2}
@@ -785,9 +783,7 @@ def test_data_parallel_aumann_shapley(skip_on_windows):
         "f_corner": single["damage_model"]["f_corner"],
         "scores": {name: stat["scores"] for name, stat in single["candidate_stats"].items()},
     }
-    spawn_multiprocess_job(
-        2, functools.partial(_shapley_data_parallel, baseline=baseline), backend="gloo"
-    )
+    cpu_dist_workers.run(_shapley_data_parallel, baseline=baseline)
 
 
 def test_anchor_ceiling_rejects_non_finite_measurements():

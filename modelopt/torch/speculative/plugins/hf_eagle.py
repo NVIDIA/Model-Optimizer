@@ -43,8 +43,8 @@ from .modeling_eagle import EagleBaseModelOutput, EagleModule
 from .modeling_fakebase import (
     _BASE_MODEL_PATHS,
     _EMBED_TOKENS_PATHS,
-    _FINAL_NORM_PATHS,
     _LM_HEAD_PATHS,
+    find_final_norm_path,
 )
 from .modeling_final_norm import _maybe_apply_base_final_norm
 
@@ -66,6 +66,9 @@ def default_eagle_aux_layer_ids(num_layers: int) -> list[int]:
 @EagleDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
 class HFEagleModel(EagleModel):
     """Eagle Model Class for huggingface models."""
+
+    # EAGLE returns a microbatch-mean loss; Trainer must apply accumulation scaling.
+    accepts_loss_kwargs = False
 
     # Context-parallel degree, set by the training script when it launches with cp_size > 1.
     eagle_cp_size: int = 1
@@ -138,14 +141,7 @@ class HFEagleModel(EagleModel):
 
         # Final pre-lm_head norm is OPTIONAL (set None if absent): used to re-normalize the
         # un-normed final hidden captured by vLLM in the offline/streaming path.
-        self.base_model_norm_path = None
-        for path in _FINAL_NORM_PATHS:
-            try:
-                assert isinstance(self.get_submodule(path), torch.nn.Module)
-                self.base_model_norm_path = path
-                break
-            except Exception:
-                continue
+        self.base_model_norm_path = find_final_norm_path(self)
 
     def _activate_torch_compile(self):
         import torch._dynamo
@@ -154,13 +150,15 @@ class HFEagleModel(EagleModel):
 
         compile_targets: list[tuple[str, dict[str, Any]]] = [
             ("_prepare_eagle_inputs", {}),
-            ("_eagle_forward", {"mode": "max-autotune"}),
+            # No CUDA graphs: "max-autotune" enables them, and recording them intermittently fails
+            # in training (cudaStreamCaptureStatusInvalidated / "graph recording observed ...").
+            ("_eagle_forward", {"mode": "max-autotune-no-cudagraphs"}),
             ("_eagle_loss", {"fullgraph": True}),
         ]
         for name, kwargs in compile_targets:
             try:
                 setattr(self, name, torch.compile(getattr(self, name), dynamic=False, **kwargs))
-            except Exception:  # noqa: PERF203
+            except Exception:
                 print_rank_0(f"Disabling torch.compile for {name} due to compilation error.")
 
     def get_dummy_inputs(self) -> dict:
@@ -357,7 +355,7 @@ class HFEagleModel(EagleModel):
         arch_config = config.eagle_architecture_config
 
         # Populate base-model-dependent fields before constructing PretrainedConfig,
-        # since transformers >=5.4 validates rope_scaling during __init__.
+        # since transformers validates rope_scaling during __init__.
         arch_config["hidden_size"] = self._base_llm_config.hidden_size
         arch_config["vocab_size"] = self._base_llm_config.vocab_size
         arch_config["max_position_embeddings"] = self._base_llm_config.max_position_embeddings
@@ -366,7 +364,7 @@ class HFEagleModel(EagleModel):
             rope_scaling["rope_theta"] = arch_config["rope_theta"]
 
         # Use the base model's config class so fields like max_position_embeddings are declared
-        # before transformers>=5.5 rope standardization runs in __post_init__.
+        # before transformers' rope standardization runs in __post_init__.
         base_config_cls = type(self._base_llm_config)
         self.eagle_config = base_config_cls.from_dict(arch_config)
         self.eagle_config.eagle_decoder_type = self.eagle_decoder_type
@@ -427,12 +425,21 @@ class HFEagleModel(EagleModel):
             self._activate_torch_compile()
 
         self._cached_attn_blk_masks = {}
+        self._cached_attn_blk_mask_context = None
 
-    def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step):
+    def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step, *, device, dtype):
+        context = (seq_length, device, dtype, self.eagle_config._attn_implementation)
+        if context != self._cached_attn_blk_mask_context:
+            self._cached_attn_blk_masks.clear()
+            self._cached_attn_blk_mask_context = context
         # compile and cached flex attention masks in first call
         if ttt_step not in self._cached_attn_blk_masks:
             self._cached_attn_blk_masks.update(
-                {ttt_step: self._compute_ttt_attention_mask(batch_size, seq_length, ttt_step)}
+                {
+                    ttt_step: self._compute_ttt_attention_mask(
+                        batch_size, seq_length, ttt_step, device=device, dtype=dtype
+                    )
+                }
             )
         return self._cached_attn_blk_masks[ttt_step]
 
@@ -549,20 +556,18 @@ class HFEagleModel(EagleModel):
         )
 
     def _compute_ttt_attention_mask(
-        self, batch_size, seq_length, ttt_step
+        self, batch_size, seq_length, ttt_step, *, device, dtype
     ) -> BlockMask | torch.Tensor:
         """Return TTT attention_mask tensor of type BlockMask or Tensor depends on eagle attn impl."""
         msk_func = get_ttt_msk_func(seq_length, ttt_step)
-        dtype = (
-            getattr(self._base_llm_config, "dtype", None)
-            or self.eagle_module.layers[0].input_layernorm.weight.dtype
-        )
         dtypemin = torch.finfo(dtype).min
         q_len = seq_length
         kv_len = seq_length * (1 + ttt_step)
         if self.eagle_config._attn_implementation == "flex_attention":
             # Return block mask for flex attention
-            block_mask = create_block_mask(msk_func, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len)
+            block_mask = create_block_mask(
+                msk_func, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len, device=device
+            )
             return block_mask
         else:
             # Return tensor mask for non-flex attention
@@ -571,10 +576,10 @@ class HFEagleModel(EagleModel):
                 None,
                 torch.arange(q_len).view(1, 1, q_len, 1),
                 torch.arange(kv_len).view(1, 1, 1, kv_len),
-            ).to(self.device)
-            tensor_mask = torch.full_like(
-                tensor_mask, 0, dtype=dtype, device=self.device
-            ).masked_fill(~tensor_mask, dtypemin)
+            ).to(device)
+            tensor_mask = torch.full_like(tensor_mask, 0, dtype=dtype, device=device).masked_fill(
+                ~tensor_mask, dtypemin
+            )
 
             return tensor_mask
 
@@ -759,16 +764,29 @@ class HFEagleModel(EagleModel):
                 base_outputs,
             )
 
-        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph.
+        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph. Capture is
+        # off for now (see _activate_torch_compile); this keeps re-enabling it safe.
         self.eagle_module._maybe_init_rope(device=eagle_input_hiddens.device)
 
         # ====Run eagle forward with extra training-time-test steps====
         num_ttt_steps = self.eagle_ttt_steps if self.training else 1
+        aligned_hidden_states_history = (
+            [eagle_input_hiddens]
+            if self.eagle_mix_hidden_states
+            and self.eagle_mix_hidden_states_mode == "uniform_layer_sample"
+            else None
+        )
         for ttt_step in range(num_ttt_steps):
             eagle_attention_mask = (
                 eagle_attn_mask_0
                 if self.eagle_mix_hidden_states or ttt_step == 0
-                else self._get_ttt_attention_mask(b, seq_length, ttt_step)
+                else self._get_ttt_attention_mask(
+                    b,
+                    seq_length,
+                    ttt_step,
+                    device=eagle_input_hiddens.device,
+                    dtype=eagle_input_hiddens.dtype,
+                )
             )
             # Under CP the dense mask is unused and fatal (plain tensor vs DTensor scores);
             # causal masking comes from is_causal and TTT masking from the ring-attention patch.
@@ -791,20 +809,31 @@ class HFEagleModel(EagleModel):
             eagle_output_hiddens = eagle_output_hiddens.roll(1, 1)
 
             if self.eagle_mix_hidden_states:
-                batch_size, seq_len_s, _ = eagle_input_hiddens.shape
-                num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
+                if self.eagle_mix_hidden_states_mode == "uniform_layer_sample":
+                    assert aligned_hidden_states_history is not None
+                    aligned_hidden_states_history.append(eagle_output_hiddens)
+                    eagle_input_hiddens = self._sample_uniform_hidden_state_history(
+                        aligned_hidden_states_history
+                    )
+                elif self.eagle_mix_hidden_states_mode == "sparse_replace":
+                    batch_size, seq_len_s, _ = eagle_input_hiddens.shape
+                    num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
 
-                # Randomly select positions for each batch to replace
-                rand_indices = torch.rand(
-                    batch_size, seq_len_s, device=eagle_input_hiddens.device
-                ).argsort(dim=1)[:, :num_to_replace]
+                    # Randomly select positions for each batch to replace
+                    rand_indices = torch.rand(
+                        batch_size, seq_len_s, device=eagle_input_hiddens.device
+                    ).argsort(dim=1)[:, :num_to_replace]
 
-                # Clone to avoid inplace modification that breaks autograd
-                eagle_input_hiddens = eagle_input_hiddens.clone()
-                batch_indices = torch.arange(batch_size)[:, None]
-                eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
-                    batch_indices, rand_indices
-                ]
+                    # Clone to avoid inplace modification that breaks autograd
+                    eagle_input_hiddens = eagle_input_hiddens.clone()
+                    batch_indices = torch.arange(batch_size)[:, None]
+                    eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
+                        batch_indices, rand_indices
+                    ]
+                else:
+                    raise ValueError(
+                        f"Unsupported eagle_mix_hidden_states_mode: {self.eagle_mix_hidden_states_mode}"
+                    )
             else:
                 eagle_input_hiddens = eagle_output_hiddens
 
@@ -907,7 +936,8 @@ class HFEagleModel(EagleModel):
         else:
             eagle_input_hidden_states = base_model_hidden_states
 
-        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph.
+        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph. Capture is
+        # off for now (see _activate_torch_compile); this keeps re-enabling it safe.
         self.eagle_module._maybe_init_rope(device=eagle_input_hidden_states.device)
 
         draft_tokens = []

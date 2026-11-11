@@ -16,6 +16,9 @@
 """Unit tests for sparse attention checkpoint config helpers."""
 
 import types
+import warnings
+
+import pytest
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config import (
@@ -131,6 +134,58 @@ class TestLoadFromCheckpointMetadata:
             "backend": "triton",
             "enable": True,
         }
+
+    @pytest.mark.parametrize(
+        ("phase", "target", "with_validation"),
+        [
+            ("prefill", 0.5, True),
+            ("prefill", 0.51, True),
+            ("decode", 0.6, True),
+            ("decode", 0.6, False),
+        ],
+    )
+    def test_warns_only_when_checkpoint_target_differs_from_validation(
+        self, phase, target, with_validation
+    ):
+        group = {
+            "algorithm": "skip_softmax",
+            "threshold_scale_factor": {phase: {"a": 2.0, "b": 3.0}},
+            "target_sparsity": {phase: target},
+        }
+        if with_validation:
+            group["validation"] = {"target_sparsity": {phase: 0.5}, "tolerance": 0.02}
+        hf_config = types.SimpleNamespace(
+            sparse_attention_config={"config_groups": {"group_0": group}}
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg, _ = load_from_checkpoint_metadata(hf_config)
+        assert len(caught) == int(with_validation and target != 0.5)
+        if caught:
+            assert (
+                f"Skip-softmax {phase} target {target} differs from the validated target 0.5"
+                in str(caught[0].message)
+            )
+        layer_cfg = match_sparse_config("model.layers.0.self_attn", cfg)
+        assert layer_cfg["target_sparse_ratio"][phase] == target
+        assert layer_cfg["threshold_scale_factor"] == group["threshold_scale_factor"]
+
+    @pytest.mark.parametrize("targets", [None, [], 0.5, "prefill"])
+    def test_malformed_validation_targets_warn_without_breaking_checkpoint(self, targets):
+        group = {
+            "algorithm": "skip_softmax",
+            "threshold_scale_factor": {"prefill": {"a": 2.0, "b": 3.0}},
+            "target_sparsity": {"prefill": 0.5},
+            "validation": {"target_sparsity": targets},
+        }
+        hf_config = types.SimpleNamespace(
+            sparse_attention_config={"config_groups": {"group_0": group}}
+        )
+        with pytest.warns(UserWarning, match="Ignoring malformed skip-softmax validation"):
+            cfg, _ = load_from_checkpoint_metadata(hf_config)
+        layer_cfg = match_sparse_config("model.layers.0.self_attn", cfg)
+        assert layer_cfg["target_sparse_ratio"] == {"prefill": 0.5, "decode": 0.5}
+        assert layer_cfg["threshold_scale_factor"] == group["threshold_scale_factor"]
 
     def test_maps_sparse_softmax_to_dynamic_config(self):
         """Test that checkpoint N:M sparse-softmax metadata restores layer params."""

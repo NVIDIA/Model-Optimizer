@@ -55,6 +55,7 @@ from safetensors import safe_open
 )
 def test_unified_hf_export_and_check_safetensors(
     tmp_path,
+    calib_jsonl,
     qformat,
     expected_suffix,
     fuse_input_scale,
@@ -103,11 +104,15 @@ def test_unified_hf_export_and_check_safetensors(
         pyt_ckpt_path=tiny_model_dir,
         qformat=qformat,
         export_path=output_dir,
-        dataset="cnn_dailymail",
+        dataset=calib_jsonl,
         # This test only checks the exported safetensors structure (not accuracy), so a
         # small calibration set is enough. Avoids the 1024-sample default on a toy model.
         calib_size=64,
+        # One batch holds the whole set, so hf_ptq does not probe for the largest batch.
+        batch_size=64,
     )
+    # The generate() previews before and after quantization do not affect the export.
+    cmd_parts.append("--skip_generate")
 
     # Run the command
     # current transformers T5 model seem to be incompatible with multiple GPUs

@@ -13,23 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP8 Linear weights and inputs in the Qwen visual branch. Patch embedding
-# and vision-attention operands remain in high precision.
+# Keep vision blocks in high precision: vLLM's FP8 GEMM flattens the 3D
+# attention inputs expected by the vision encoder. Merger Linears use 2D inputs.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:
   fp8: configs/numerics/fp8
 ---
-  - quantizer_name: '*visual.*weight_quantizer'
+  - quantizer_name: '*visual.*merger*.weight_quantizer'
     parent_class: 'nn.Linear'
     cfg:
       $import: fp8
-  - quantizer_name: '*visual.*input_quantizer'
+  - quantizer_name: '*visual.*merger*.input_quantizer'
     parent_class: 'nn.Linear'
     cfg:
       $import: fp8
-  - quantizer_name: '*visual.*patch_embed*'
-    enable: false
   # Keep this defense-in-depth rule last when the snippet follows a KV-cache unit.
   - quantizer_name: '*visual.*_bmm_quantizer'
     enable: false

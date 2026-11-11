@@ -144,6 +144,9 @@ class SGLANGModel(Model):
         output_dict["token_times"] = timing
         return output_dict
 
+    def stop(self):
+        self.model.shutdown()
+
     def get_serving_config(self):
         """Dump the engine_kwargs dict supplied to sgl.Engine()."""
         try:
