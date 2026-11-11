@@ -15,11 +15,11 @@
 
 import argparse
 import hashlib
+import importlib
 import logging
 import os
 import time
 
-import llm_calibration
 import numpy as np
 import torch
 from datasets import load_dataset
@@ -29,6 +29,10 @@ from transformers import AutoConfig, AutoTokenizer
 
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
 from modelopt.onnx.quantization.ort_utils import create_input_shapes_profile
+
+llm_calibration = importlib.import_module(
+    ".llm_calibration" if __package__ else "llm_calibration", package=__package__
+)
 
 logging.getLogger().setLevel(logging.INFO)
 

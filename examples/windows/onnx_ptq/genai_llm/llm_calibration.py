@@ -15,9 +15,11 @@
 
 """Calibration inputs and shape profiles for exported decoder-only and hybrid LLMs."""
 
+import hashlib
 import json
 import math
 import os
+import re
 import struct
 import tempfile
 import urllib.error
@@ -27,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import onnx
-from huggingface_hub import get_token, hf_hub_url
+from huggingface_hub import HfApi, get_token, hf_hub_url
 
 __all__ = [
     "calibration_feed",
@@ -234,15 +236,20 @@ def _read_range(opener, url, first, size, token):
 def embed_table(model_name, cache_file):
     """Load only the checkpoint's embedding tensor, caching float16 rows on disk.
 
-    Local safetensors checkpoints and Hugging Face Hub repositories are supported.
+    Local cache identities hash the embedding bytes; Hub identities pin an immutable commit.
     Hub weights are read with bounded byte ranges, never as an entire model shard.
     """
-    if os.path.isfile(cache_file):
-        return np.load(cache_file, mmap_mode="r", allow_pickle=False)
-
     local = Path(model_name).is_dir()
     opener = urllib.request.build_opener(_HubRedirectHandler)
     token = get_token()
+    revision = None
+    if not local:
+        api = HfApi()
+        if urllib.parse.urlsplit(api.endpoint).scheme != "https":
+            raise ValueError("Checkpoint downloads must use HTTPS")
+        revision = api.model_info(model_name, expand=["sha"], timeout=60, token=token).sha
+        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError("Expected an immutable Hub commit")
 
     def read(filename, first, size):
         # Shard names originate in the checkpoint index, not in trusted source code.
@@ -255,7 +262,7 @@ def embed_table(model_name, cache_file):
             if len(data) != size:
                 raise ValueError("Incomplete local checkpoint tensor")
             return data
-        url = hf_hub_url(model_name, filename)
+        url = hf_hub_url(model_name, filename, revision=revision)
         if urllib.parse.urlsplit(url).scheme != "https":
             raise ValueError("Checkpoint downloads must use HTTPS")
         return _read_range(opener, url, first, size, token)
@@ -266,7 +273,7 @@ def embed_table(model_name, cache_file):
             with (Path(model_name) / filename).open() as stream:
                 index = json.load(stream)
         else:
-            request = urllib.request.Request(hf_hub_url(model_name, filename))
+            request = urllib.request.Request(hf_hub_url(model_name, filename, revision=revision))
             if urllib.parse.urlsplit(request.full_url).scheme != "https":
                 raise ValueError("Checkpoint downloads must use HTTPS")
             if token:
@@ -286,7 +293,8 @@ def embed_table(model_name, cache_file):
     header_size = struct.unpack("<Q", read(shard, 0, 8))[0]
     if not 0 < header_size <= 100 * 1024 * 1024:
         raise ValueError("Invalid safetensors header size")
-    header = json.loads(read(shard, 8, header_size))
+    header_data = read(shard, 8, header_size)
+    header = json.loads(header_data)
     if name is None:
         names = [key for key in header if key.endswith("embed_tokens.weight")]
         if len(names) != 1:
@@ -309,7 +317,25 @@ def embed_table(model_name, cache_file):
     ):
         raise ValueError("Invalid embedding tensor byte offsets")
 
+    identity = {
+        "model": str(Path(model_name).resolve()) if local else model_name,
+        "revision": revision,
+        "name": name,
+        "tensor": tensor,
+    }
+    fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode())
+    chunk_size = 8 * 1024 * 1024
+    if local:
+        # Content, rather than timestamps, detects checkpoints copied or rewritten in place.
+        for offset in range(first, last, chunk_size):
+            fingerprint.update(
+                read(shard, 8 + header_size + offset, min(chunk_size, last - offset))
+            )
+    digest = fingerprint.hexdigest()
     cache_path = Path(cache_file)
+    cache_path = cache_path.with_name(f"{cache_path.stem}_{digest}{cache_path.suffix}")
+    if cache_path.is_file():
+        return np.load(cache_path, mmap_mode="r", allow_pickle=False)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     # Disk-backed output avoids full-size byte buffers and conversion copies for large vocabularies.
     with tempfile.NamedTemporaryFile(dir=cache_path.parent, suffix=".npy", delete=False) as stream:
@@ -320,9 +346,11 @@ def embed_table(model_name, cache_file):
             temporary, mode="w+", dtype=np.float16, shape=tuple(shape)
         )
         flat = mapped.reshape(-1)
-        chunk_size = 8 * 1024 * 1024
+        converted_fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode())
         for offset in range(first, last, chunk_size):
             raw = read(shard, 8 + header_size + offset, min(chunk_size, last - offset))
+            if local:
+                converted_fingerprint.update(raw)
             values = np.frombuffer(raw, dtype=source_dtype)
             if dtype == "BF16":
                 values = (values.astype(np.uint32) << 16).view(np.float32)
@@ -332,9 +360,19 @@ def embed_table(model_name, cache_file):
                 raise ValueError("Embedding values must be finite and representable in float16")
             start = (offset - first) // itemsize
             flat[start : start + len(values)] = values
+        if local and (
+            converted_fingerprint.hexdigest() != digest
+            or read(shard, 8, header_size) != header_data
+        ):
+            raise ValueError("Checkpoint changed while loading the embedding tensor")
         mapped.flush()
         flat = mapped = None
-        os.replace(temporary, cache_path)
+        try:
+            os.replace(temporary, cache_path)
+        except OSError:
+            # Another reader can already have the same immutable cache mapped on Windows.
+            if not cache_path.is_file():
+                raise
     finally:
         # Close memory maps before rename/unlink on Windows, including failed downloads.
         if mapped is not None:

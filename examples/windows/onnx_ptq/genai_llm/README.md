@@ -189,6 +189,12 @@ token configuration. Unknown inputs or symbolic dimensions are rejected rather
 than assigned guessed values. This path prepares text calibration, not image or
 video inputs.
 
+Embedding caches are bound to local tensor contents or an immutable Hub commit;
+changing weights at the same path or updating a Hub branch creates a new cache.
+Local cache validation reads the embedding bytes on each lookup without loading
+the full tensor into memory. Hub lookups require access to resolve the current
+commit and pin every download to that commit. Legacy unversioned caches are ignored.
+
 The download cache remains `C:\\tmp` on Windows and uses `~/.cache/modelopt` on
 Linux/WSL. Small ONNX constants remain inline when external weights are saved so
 that ONNX Runtime can use them during shape inference.
