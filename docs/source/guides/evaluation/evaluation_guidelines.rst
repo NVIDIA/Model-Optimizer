@@ -242,16 +242,21 @@ The candidate uses fewer tokens on average on SciCode and AA-Omniscience (p < 0.
 How can you evaluate faster?
 ----------------------------
 
+When reducing question coverage, choose a representative subset before inspecting results and use
+the same question IDs for both models. See :ref:`Data preparation <evaluation-data-preparation>`
+for how we selected the benchmark questions.
+
 .. _evaluation-prioritize-question-coverage:
 
 Prioritize question coverage over repetitions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Question-level analysis asks whether Candidate performs better on average on questions like those in
-the benchmark. It averages repetitions within each question and compares paired differences.
-Repetition-level (run-level) analysis asks whether Candidate performs better on average across
-repeated runs of the same fixed questions. It compares aggregate benchmark scores across
-repetitions.
+the benchmark. It averages repetitions within each question and compares paired differences; with
+enough independent questions, it can use one repetition. Repetition-level (run-level) analysis asks
+whether Candidate performs better on average across repeated runs of the same fixed questions.
+It compares aggregate benchmark scores across repetitions, so it needs multiple runs to estimate
+uncertainty.
 
 In this SciCode example, question-level analysis detects a lower Candidate cap-hit rate at p < 0.001
 after three repetitions; repetition-level analysis needs six, requiring twice as many responses.
@@ -263,20 +268,16 @@ in the reproducibility notes.
    :alt: One-sided p-values for fewer candidate cap hits across one to twenty repetitions on the same 294 SciCode subtasks. The paired subtask-permutation test reaches p below 0.001 at three repetitions, or 882 responses per model; the run-level Welch t-test reaches it at six repetitions, or 1,764 responses per model. Welch is unavailable with one repetition.
    :width: 640px
 
-For MMLU-Pro, we compared more questions evaluated once with fewer questions evaluated repeatedly,
-using 1,000 responses per model. Both approaches gave similarly stable estimates of the accuracy
-difference between models.
+For MMLU-Pro, we tested whether the same response budget was better spent on more questions or more
+repetitions. We used 1,000 responses per model, sampling within subjects. To calculate the overall
+accuracy difference, we averaged subject results in proportion to their size in the original
+1,000-question sample. Both allocations gave similarly stable estimates of the accuracy difference.
+Together with the SciCode comparison, this supports prioritizing question coverage, then adding
+repetitions when the available questions do not provide enough evidence.
 
 .. image:: images/allocation-accuracy-gap.svg
    :alt: At a fixed 1,000-response budget, the mean accuracy gap and observed variation remain similar across one to twenty repetitions.
    :width: 640px
-
-With enough independent questions, one repetition may provide sufficient evidence; see the
-:ref:`MMLU-Pro example in the next section <evaluation-collect-data>`. Repetition-level t-tests are not applicable with only one repetition. On a
-focused subset, question-level analysis uses differences across its questions, while
-repetition-level analysis needs repeated runs of that subset. The SciCode and MMLU-Pro comparisons
-support prioritizing question coverage, then adding repetitions when the available questions do not
-provide enough evidence.
 
 .. _evaluation-collect-data:
 
@@ -292,9 +293,10 @@ stopping rules or general sample-size prescriptions.
 
 **How many responses show fewer cap hits on SciCode?**
 
-Among the tested sizes, the p-value first fell below 0.05 at 588 responses, and below 0.001 at 882
-per model. The full 5,880 responses were unnecessary to establish evidence of fewer candidate cap
-hits at those thresholds.
+We first compare random subsets of 10–294 subtasks with one repetition, then add repetitions on all
+294 subtasks. Among the tested sizes, the p-value first fell below 0.05 at 588 responses, and below
+0.001 at 882 per model. The full 5,880 responses were unnecessary to establish evidence of fewer
+candidate cap hits at those thresholds.
 
 .. image:: images/scicode-cap-data-volume.svg
    :alt: SciCode cap-hit rate evidence excluding the 44 recovery-training subtasks: blue points increase coverage from ten to 294 subtasks with one repetition; green points add repetitions on all 294 subtasks, reaching 5,880 responses per model. Subsets of ten to 150 subtasks observe no cap hits and have no informative bootstrap interval. The lower panel shows permutation p-values.
@@ -302,9 +304,10 @@ hits at those thresholds.
 
 **How many responses rule out a 1 pp accuracy loss on MMLU-Pro?**
 
-To rule out a 1 pp accuracy loss for the candidate versus the baseline, the non-inferiority test
-first reached p < 0.05 at 750 responses, p < 0.01 at 3,000, and p < 0.001 at 12,000 per model among
-the tested sizes.
+We first compare subsets of 50–1,000 questions with one repetition, keeping approximately the same
+subject proportions, then add repetitions on all 1,000 questions. To rule out a 1 pp accuracy loss,
+the non-inferiority test first reached p < 0.05 with one repetition on 750 questions. It first reached
+p < 0.01 at 3,000 responses and p < 0.001 at 12,000 per model among the tested sizes.
 
 .. image:: images/mmlu-accuracy-data-volume.svg
    :alt: MMLU-Pro paired accuracy differences with t-based 95% confidence intervals. Blue points increase question coverage from 50 to 1,000 with one evaluation each; green points add repetitions on all 1,000 questions up to 20,000 responses per model. The lower panel shows one-sided non-inferiority p-values for a loss below 1 pp, with a dashed line at p = 0.05.

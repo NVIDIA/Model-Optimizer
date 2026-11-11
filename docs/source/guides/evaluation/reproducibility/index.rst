@@ -25,13 +25,22 @@ It also links to the `analysis record
 pinned to a fixed commit, with selected question/subtask IDs, evaluation settings, analysis scripts
 and seeds. Both sources require NVIDIA internal access.
 
-Evaluation setup
+.. _evaluation-data-preparation:
+
+Data preparation
 ----------------
 
-Baseline and Candidate answered the same benchmark questions with matched generation seeds.
+For representative evaluation, select seeded random subsets before inspecting results, stratifying
+by subject where appropriate. Freeze matching question IDs across models.
 
-We evaluate on 294 of 338 SciCode subtasks, excluding the 44 used for KTO recovery training. KTO
-used model-generated responses, not reference answers.
+- **MMLU-Pro:** we sample 1,000 of 12,032 test questions across all 14 subjects, in proportion to
+  each subject's size.
+- **SciCode:** the main results cover 294 of 338 subtasks, excluding the 44 used for KTO recovery
+  training. KTO used model-generated responses, not reference answers.
+- **Focused SciCode:** we use 11 held-out subtasks where Baseline previously showed reasoning loops
+  to check whether Candidate reduces those loops.
+
+Baseline and Candidate answered the same benchmark questions with matched generation seeds.
 
 +------------------------------+------------------------------+-------------+---------------------+
 | Benchmark                    | Questions or subtasks        | Repetitions | Responses per model |
@@ -46,6 +55,9 @@ used model-generated responses, not reference answers.
 +------------------------------+------------------------------+-------------+---------------------+
 | AA-Omniscience public v1     | 600 questions                | 10          | 6,000               |
 +------------------------------+------------------------------+-------------+---------------------+
+
+Evaluation setup
+----------------
 
 For benchmark evaluation, both models generated responses with temperature ``0.6``, top-p ``0.95``,
 a ``131072``-token completion cap, and a ``262144``-token context window.
@@ -63,12 +75,15 @@ guide’s four plots as CSV summaries:
 
 - **SciCode: question-level versus repetition-level analysis** — data used in the guide section
   :ref:`Prioritize question coverage over repetitions <evaluation-prioritize-question-coverage>`. CSV file: :download:`scicode-cap-analysis-unit.csv <scicode-cap-analysis-unit.csv>`.
-- **MMLU-Pro: fixed response budget** — data used in the guide section :ref:`Prioritize question coverage over repetitions <evaluation-prioritize-question-coverage>`. CSV
-  file: :download:`allocation-accuracy-gap.csv <allocation-accuracy-gap.csv>`.
-- **SciCode: cap-hit rates** — data used in the guide section :ref:`Collect as much evaluation data as you need <evaluation-collect-data>`. CSV file:
-  :download:`scicode-cap-data-volume.csv <scicode-cap-data-volume.csv>`.
-- **MMLU-Pro: accuracy regression** — data used in the guide section :ref:`Collect as much evaluation data as you need <evaluation-collect-data>`. CSV
-  file: :download:`mmlu-accuracy-data-volume.csv <mmlu-accuracy-data-volume.csv>`.
+- **MMLU-Pro: fixed response budget** — data used in the guide section
+  :ref:`Prioritize question coverage over repetitions <evaluation-prioritize-question-coverage>`.
+  CSV file: :download:`allocation-accuracy-gap.csv <allocation-accuracy-gap.csv>`.
+- **SciCode: cap-hit rates** — data used in the guide section
+  :ref:`Collect as much evaluation data as you need <evaluation-collect-data>`.
+  CSV file: :download:`scicode-cap-data-volume.csv <scicode-cap-data-volume.csv>`.
+- **MMLU-Pro: accuracy regression** — data used in the guide section
+  :ref:`Collect as much evaluation data as you need <evaluation-collect-data>`.
+  CSV file: :download:`mmlu-accuracy-data-volume.csv <mmlu-accuracy-data-volume.csv>`.
 
 Statistical methods
 -------------------
