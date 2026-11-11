@@ -83,7 +83,7 @@ from mlflow_utils import (
     record_checkpoint_provenance,
     resolve_mlflow_args,
 )
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.quantization as mtq
@@ -641,6 +641,27 @@ def _add_document_boundaries() -> None:
     GPTDataset.__getitem__ = getitem_with_boundaries
 
 
+def _load_batch_on_every_pp_stage() -> None:
+    """Give every pipeline stage the first stage's ``tokens`` and ``position_ids``.
+
+    Megatron-Bridge's ``get_batch`` loads ``position_ids`` only on the first stage (and MTP
+    stages), but models that use mRoPE need them on every stage, so later stages
+    otherwise fail on ``position_ids=None``. Later stages load only these two fields, not the
+    full batch.
+    """
+    from megatron.bridge.training import gpt_step
+
+    get_batch_from_iterator = gpt_step.get_batch_from_iterator
+
+    def _get_batch_from_iterator(*args, **kwargs):
+        kwargs["is_first_pp_stage"] = True
+        kwargs["include_full_batch_fields"] = False
+        return get_batch_from_iterator(*args, **kwargs)
+
+    gpt_step._middle_pp_stage_needs_batch = lambda cfg: True
+    gpt_step.get_batch_from_iterator = _get_batch_from_iterator
+
+
 class FakeQuantWeightCache(Callback):
     """Fake-quantize each student weight once per training step instead of once per micro-batch."""
 
@@ -794,6 +815,18 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             "VLM detected: distilling model.language_model only (vision tower / projector untouched). "
             "To export megatron non-quantized checkpoint, use export_distilled_megatron_to_hf.py"
         )
+    # HF configs of mRoPE models (e.g. Qwen-VL) carry ``mrope_section`` in their rope parameters,
+    # under ``text_config`` or at the top level (e.g. ERNIE-VL).
+    hf_config = AutoConfig.from_pretrained(
+        args.student_local_checkpoint_path, trust_remote_code=args.trust_remote_code
+    )
+    uses_mrope = any(
+        "mrope_section" in (getattr(config, key, None) or {})
+        for config in (getattr(hf_config, "text_config", None), hf_config)
+        for key in ("rope_parameters", "rope_scaling")
+    )
+    if args.pp_size > 1 and uses_mrope:
+        _load_batch_on_every_pp_stage()
     distill_provider = convert_to_distillation_provider(
         student_provider,
         teacher_provider,
