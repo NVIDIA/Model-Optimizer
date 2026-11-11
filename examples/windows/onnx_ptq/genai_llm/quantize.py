@@ -14,12 +14,13 @@
 # limitations under the License.
 
 import argparse
+import hashlib
 import logging
 import os
 import time
 
+import llm_calibration
 import numpy as np
-import onnx
 import torch
 from datasets import load_dataset
 from onnx import helper
@@ -66,16 +67,17 @@ def make_model_input(
         # print(f"\n--Quantize-Script-- adding past KV cache value\n")
         torch_dtype = torch.float32 if use_fp32 else torch.float16
         batch_size, sequence_length = input_ids.shape
-        max_sequence_length = config.max_position_embeddings
+        text_config = llm_calibration.text_config_of(config)
+        max_sequence_length = text_config.max_position_embeddings
         num_heads, head_size = (
-            config.num_key_value_heads,
-            config.hidden_size // config.num_attention_heads,
+            text_config.num_key_value_heads,
+            text_config.hidden_size // text_config.num_attention_heads,
         )
 
-        if hasattr(config, "head_dim") and config.head_dim is not None:
-            head_size = config.head_dim
+        if hasattr(text_config, "head_dim") and text_config.head_dim is not None:
+            head_size = text_config.head_dim
 
-        for i in range(config.num_hidden_layers):
+        for i in range(text_config.num_hidden_layers):
             past_key = torch.zeros(
                 batch_size,
                 num_heads,
@@ -303,7 +305,11 @@ def convert_opset_to_21_proto(model_proto):
 
 
 def main(args):
-    cache_dir = "C:\\tmp"
+    cache_dir = (
+        "C:\\tmp"
+        if os.name == "nt"
+        else os.path.join(os.path.expanduser("~"), ".cache", "modelopt")
+    )
 
     # device_id = 0
     # device = torch.device(f"cuda:{device_id}")
@@ -352,6 +358,9 @@ def main(args):
     if not os.path.exists(output_dir_path):
         os.makedirs(output_dir_path)
 
+    signature = llm_calibration.read_signature(args.onnx_path)
+    own_inputs = llm_calibration.needs_signature_inputs(signature)
+    own_calib = own_inputs and args.algo not in ["rtn", "rtn_dq"] and not args.use_random_calib
     calib_inputs = get_calib_inputs(
         args.dataset,
         args.model_name,
@@ -362,21 +371,39 @@ def main(args):
         device,
         args.use_fp32,
         args.use_buffer_share,
-        args.add_past_kv_inputs,
+        False if own_calib else args.add_past_kv_inputs,
         128,
-        args.add_position_ids,
+        False if own_calib else args.add_position_ids,
         args.trust_remote_code,
     )
+    if own_calib:
+        table = None
+        if any(name == "inputs_embeds" for name, _shape, _type in signature):
+            table = llm_calibration.embed_table(
+                args.model_name,
+                os.path.join(
+                    cache_dir,
+                    "embed_tokens_" + hashlib.sha256(args.model_name.encode()).hexdigest() + ".npy",
+                ),
+            )
+        calib_inputs = [
+            llm_calibration.calibration_feed(signature, d["input_ids"], d["attention_mask"], table)
+            for d in calib_inputs
+        ]
 
     input_shapes_profile_data = None
     if any(ep in ["NvTensorRtRtx", "trt"] for ep in args.calibration_eps) and (
         args.algo not in ["rtn", "rtn_dq"]
     ):
         # TRT EPs use min/opt/max profiles for dynamic model inputs.
-        input_shapes_profile_data = create_input_shapes_profile(
-            args.model_name,
-            args.calibration_eps,
-            trust_remote_code=args.trust_remote_code,
+        input_shapes_profile_data = (
+            llm_calibration.ep_profiles(signature, args.calibration_eps)
+            if own_inputs
+            else create_input_shapes_profile(
+                args.model_name,
+                args.calibration_eps,
+                trust_remote_code=args.trust_remote_code,
+            )
         )
     print(
         f"\n--Quantize-Script-- input_shapes_profile is None? - {input_shapes_profile_data is None}\n"
@@ -410,13 +437,7 @@ def main(args):
     quantized_onnx_model = convert_opset_to_21_proto(quantized_onnx_model)
 
     t = time.time()
-    onnx.save_model(
-        quantized_onnx_model,
-        args.output_path,
-        save_as_external_data=True,
-        location=os.path.basename(args.output_path) + "_data",
-        size_threshold=0,
-    )
+    llm_calibration.save_quantized_model(quantized_onnx_model, args.output_path)
     logging.info(f"Saving to {args.output_path} took {time.time() - t} seconds")
     print("\nDone\n")
 
