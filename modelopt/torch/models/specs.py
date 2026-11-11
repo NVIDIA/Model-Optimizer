@@ -1,0 +1,573 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Per-model descriptors and the registry indexing them by HF model type.
+
+``ModelSpec`` is the one global descriptor of a model: everything modelopt knows
+about a model type lives on a single instance, resolved by ``config.model_type``.
+It holds each concern as a separate, optional section object:
+
+- **topic sections** hold architecture facts shared across subsystems (``MoESpec``:
+  what a model's MoE blocks are);
+- **subsystem sections** hold one subsystem's per-model data (``ExportSpec``).
+
+A section is ``None`` when the model has nothing to say about it -- a dense model
+carries ``moe_spec=None`` rather than an empty ``MoESpec``, so "not an MoE model" and
+"an MoE model whose layout is not filled in yet" stay distinguishable.
+
+Sections hold per-model data plus trivial accessors over that data; subsystem logic
+never lives here. A model registers exactly one ``ModelSpec`` in its own ``specs.py``
+at import time; importing the package registers them all. Lookups return ``None`` (or
+an empty list) when nothing matches, so callers can fail loudly or fall back per their
+own policy.
+
+The registry lives here rather than beside these classes because it is not a separate
+concept: every lookup takes or returns a ``ModelSpec``, and it has to know how one is
+composed. Matching is by model-type and class-name strings only, so this module needs
+no torch import.
+"""
+
+import functools
+from dataclasses import dataclass, fields
+from typing import TYPE_CHECKING, Literal, get_args, get_type_hints
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
+
+    import torch.nn as nn
+
+__all__ = [
+    "EPSpec",
+    "ExportSpec",
+    "MoESpec",
+    "ModelSpec",
+    "PTQSpec",
+    "SpecSection",
+    "get_ptq_spec",
+    "get_spec",
+    "get_specs",
+    "hf_model_type",
+    "list_all_possible",
+    "match_class_names",
+    "match_moe_block",
+    "match_moe_model",
+    "register",
+]
+
+
+def match_class_names(module, names: tuple[str, ...]) -> bool:
+    """Return True if any of ``names`` equals a class name in ``module``'s MRO.
+
+    Case-insensitive exact-name comparison against every class in
+    ``type(module).__mro__``: dynamically generated quantized classes match through
+    their base class, and exact names avoid substring false positives.
+    """
+    mro_names = {cls.__name__.lower() for cls in type(module).__mro__}
+    return any(name.lower() in mro_names for name in names)
+
+
+@dataclass(kw_only=True)
+class SpecSection:
+    """Base class for the sections composing a ``ModelSpec``.
+
+    Marks a class as a section so ``_spec_sections`` can find ``ModelSpec``'s section
+    fields from its annotations. Without it the lookups would need a hand-maintained
+    list of section names, which would silently fall out of date the first time a
+    section was added and the list was not.
+    """
+
+
+@dataclass(kw_only=True)
+class MoESpec(SpecSection):
+    """Topic section: the model's MoE-block layout.
+
+    Describes what a model's MoE blocks *are* -- which class, what the expert
+    projections are called, how they are stored -- so any modelopt subsystem (export,
+    quantization, speculative decoding, ...) can read it instead of keeping its own
+    per-model MoE table.
+
+    One layout per model. ``block_names`` is a tuple, so a model whose MoE appears under
+    several class names is covered as long as they share a layout (``gpt_oss``'s
+    ``GptOssMLP``/``GptOssMoE``; Qwen3-Omni's Thinker and Talker blocks). No model in
+    transformers needs two *different* layouts today. If one ever does, this section
+    becomes a tuple on ``ModelSpec``; nothing here is shaped to prevent that.
+
+    A layout is a fact about the architecture. Whether modelopt's grouped export path
+    may use it is policy and lives in ``ExportSpec``; whether the experts are iterable
+    right now depends on the installed transformers and is read off the module.
+    """
+
+    block_names: tuple[str, ...] = ()
+    """The matching key -- MoE block class names, matched against the module's MRO
+    (case-insensitive exact names, not substrings; see ``match_class_names``)."""
+
+    expert_linear_names: tuple[str, ...] | None = None
+    """Expert linear projection names, e.g. ``("gate_proj", "down_proj", "up_proj")``.
+    For layouts modelopt rewrites into per-expert modules, these are the names on the
+    rewritten module."""
+
+    fused_expert_names: bool = False
+    """True when ``expert_linear_names`` name a fused container's own 3-D parameters
+    (``gate_up_proj``/``down_proj``) rather than per-expert sub-modules.
+
+    The same model type materializes both ways across transformers releases, so a
+    consumer must know which layout a naming describes: applied to the other one it is
+    wrong, not merely generic."""
+
+    gate_up_pair: tuple[str, str] | None = None
+    """The (gate, up) pair among ``expert_linear_names`` that serving engines fuse
+    into a single ``gate_up_proj``, e.g. ``("gate_proj", "up_proj")`` or
+    ``("w1", "w3")``. ``None`` for non-gated experts (NemotronH) and already-fused
+    layouts (GptOss)."""
+
+    @property
+    def gate_up_pairs(self) -> tuple[tuple[str, str], ...]:
+        """This layout's (gate, up) pair, as a tuple so it can join a global vocabulary."""
+        return () if self.gate_up_pair is None else (self.gate_up_pair,)
+
+    def matches(self, module) -> bool:
+        """Whether ``module``'s class is one this layout describes."""
+        return match_class_names(module, self.block_names)
+
+    def expert_linear_names_for(self, module, fused: bool | None = None) -> tuple[str, ...] | None:
+        """Resolve ``module``'s expert linear names, or None when this layout cannot.
+
+        The module's class is not consulted: a spec may provide naming without declaring
+        ``block_names`` at all, and with one layout per model there is nothing to
+        disambiguate.
+
+        ``fused`` is the layout the caller observed on the module. Passing it makes the
+        answer conditional on describing that same layout, so a spec that only describes
+        the per-expert form declines for a fused container rather than returning names
+        that do not apply there. ``None`` accepts either.
+        """
+        if self.expert_linear_names is None:
+            return None
+        if fused is not None and self.fused_expert_names != fused:
+            return None
+        return self.expert_linear_names
+
+
+@dataclass(kw_only=True)
+class EPSpec(SpecSection):
+    """Subsystem section: per-model data of the expert-parallel (DP=EP) PTQ path.
+
+    Calibrating a large MoE data-parallel with its experts sharded needs three things from
+    the model, and all three are facts about the architecture rather than about any run:
+    which modules are the routed experts and how they shard, which transformers release
+    first ships that information, and -- for a VLM -- which nested config carries it.
+
+    Most models need only the data below. A checkpoint whose modeling code it ships itself
+    may need actual code run against it before it can be loaded expert-parallel (patching a
+    remote-code class, decompressing packed experts); that is what ``prepare`` is for, and it
+    is deliberately the exception rather than the interface.
+    """
+
+    base_model_ep_plan: dict[str, str] | None = None
+    """The ``base_model_ep_plan`` transformers needs to shard this model's experts, applied
+    to the config when it does not already carry one.
+
+    Stock transformers ships a plan for some MoE models and not others; where it does, leave
+    this ``None`` and let the model's own plan win. Entries map a parameter glob to a
+    parallel style, e.g. ``{"layers.*.mlp.experts.gate_up_proj": "grouped_gemm"}``.
+
+    A router entry is not always wanted. DeepSeek-V3's router is logits-only and its MoE
+    block computes global top-k ids, so the experts already receive unmasked global ids --
+    which is exactly what the all-to-all dispatch needs, and adding a gate entry would
+    mask them."""
+
+    requires_transformers: str | None = None
+    """Earliest transformers release that supports THIS model expert-parallel. The expert-parallel
+    load's own floor holds for every model with an EP section; the later of the two applies.
+
+    Distinct from ``ModelSpec.min_transformers_version``, which is about the modeling code
+    matching the spec. A model can be fully modelled and still not be shardable: qwen3_moe is
+    modelled from 5.5, but its own ``base_model_ep_plan`` lands in 5.7."""
+
+    plan_config_attr: str | tuple[str, ...] | None = None
+    """The nested config attribute carrying the expert-parallel plan, for a VLM whose MoE is
+    its text sub-model: ``"text_config"`` or ``"llm_config"``, the two the expert-parallel load
+    reads a plan from, or both for a model whose configs spell it either way, the first one a
+    config has taking the plan. ``None`` means the root config.
+
+    The plan has to sit on whichever config describes the module tree the globs are written
+    against, so a plan on the wrong config silently matches nothing."""
+
+    prepare: "Callable[..., Any] | None" = None
+    """Escape hatch for a model that cannot be made expert-parallel by data alone.
+
+    Called as ``prepare(hf_config, ckpt_path=..., trust_remote_code=...)`` and returns the
+    config to load. Reserved for checkpoints carrying their own modeling code, where the work is
+    patching classes or installing on-the-fly weight decompression. Runs after the declarative
+    fields above have been applied, so a ``prepare`` that returns another config than the one it
+    was handed must carry over the ``base_model_ep_plan`` they attached.
+
+    It runs only once a plan is decided expert-parallel: on every rank, in the plan decision's
+    collective "model spec prepared" step, on a copy of the config as read, so a refusal there
+    raises on every rank; or, for an expert-parallel plan handed in, in the load, after the load's
+    own checks, the GPU refusal included. It may patch the model's code, which is why nothing else
+    runs it. It may run more than once in a process."""
+
+    make_buildable: "Callable[..., Any] | None" = None
+    """For a checkpoint carrying its own modeling code: what that code needs to import and build on
+    the installed transformers, so the plan decision can build the model before ``prepare`` runs.
+
+    Called as ``make_buildable(hf_config, ckpt_path=..., trust_remote_code=...)``, on every rank,
+    before the plan is decided, for every decision that builds the model, an EP degree of 1
+    included, whatever plan comes out. Only a multi-rank decision runs it: a single process, or a
+    plan handed in, decides nothing, and its load builds the checkpoint's code as
+    ``from_pretrained`` does, without it. It must be idempotent and change nothing the model
+    computes or loads: it may shim names transformers dropped, wrap the remote-code staging to reach
+    the modules the code imports, and adapt a method to the arguments transformers now passes it,
+    but patches no MoE or expert class, config, weight converter or weight-loading hook."""
+
+    prepare_refusal: "Callable[..., str | None] | None" = None
+    """Why ``prepare`` would refuse this checkpoint, or ``None``, found without changing anything.
+
+    Called as ``prepare_refusal(hf_config, ckpt_path=..., trust_remote_code=...)`` by the plan
+    decision, which runs no ``prepare`` before the plan is decided. An EP degree left to ``auto``
+    then plans the model without expert parallelism, with the decision's warning, rather than decide
+    expert parallelism ``prepare`` then refuses on every rank; one asked for meets the refusal from
+    ``prepare``."""
+
+    decompressed_formats: tuple[str, ...] = ()
+    """The checkpoint formats (a ``quantization_config``'s ``quant_method``) whose experts
+    ``prepare`` has decompress as they load, which the expert-parallel load then takes beside
+    unquantized checkpoints. The plan decision runs before ``prepare``, and reads this to count such
+    a checkpoint one the expert-parallel load takes."""
+
+    prepared_ep_plan: dict[str, str] | None = None
+    """The ``base_model_ep_plan`` ``prepare`` attaches, for a model whose plan only ``prepare``
+    supplies.
+
+    Deciding the plan attaches it with no ``prepare`` run, so the decision counts the routed experts
+    in the model the checkpoint's own code builds. A run that rules expert parallelism out finds
+    them the same way, to tell an expert-parallel MoE it would hold whole on every rank from a dense
+    model. ``prepare`` replaces the experts in place, so the plan names their containers there too."""
+
+    unsupported: str | None = None
+    """Why this model cannot be quantized expert-parallel yet, when its config would route it there.
+
+    Stock transformers ships a ``base_model_ep_plan`` for some MoEs the expert-parallel path
+    cannot handle, and the plan alone makes a model expert-parallel capable. Naming the reason
+    here refuses the run before any weight is loaded instead of failing deep in quantization."""
+
+
+@dataclass(kw_only=True)
+class ExportSpec(SpecSection):
+    """Subsystem section: per-model data of the unified HF export path.
+
+    Architecture facts (MoE block classes, expert naming) live in ``MoESpec``; this
+    section holds data consumed by the export algorithms only.
+    """
+
+    grouped_expert_export: bool = False
+    """Whether ``get_experts_list`` may group this model's experts for the AWQ /
+    NVFP4-SVDQuant resmoothing pass.
+
+    A statement about what modelopt has validated, not about the model: ``qwen3_5_moe``
+    is architecturally identical to ``qwen3_moe`` here and is still ``False``, because
+    the pre-registry code keyed off the root class name and ``"qwen3_5moeforcausallm"``
+    matched none of its qwen substrings. That is why it lives in the export section
+    rather than on ``MoESpec``, which holds only facts about the architecture.
+
+    Whether the experts are *actually* iterable is separate again, and read off the
+    module: a model listed here still exports fine when a newer transformers fuses its
+    experts, because there is then simply nothing to group."""
+
+    pqs_fuse_rules: tuple[tuple[tuple[str, ...], str, str], ...] = ()
+    """AWQ ``pre_quant_scale`` fusion rules, each a ``(module_class_substrings,
+    fuse_into, fuse_from)`` triple: for a module whose class name contains one of the
+    substrings, the pre_quant_scale on ``fuse_from`` is folded into ``fuse_into``
+    (e.g. attention ``o_proj`` -> ``v_proj``, MLP ``down_proj`` -> ``up_proj``).
+    A rule asserts mathematical equivalence for that model's modules, so it is
+    declared per model rather than applied generically."""
+
+    weight_plus_one_norm_names: tuple[str, ...] = ()
+    """Class names of norm layers whose stored weight is ``w - 1`` (the effective
+    scale is ``weight + 1``), e.g. Gemma's RMSNorm layouts and LayerNorm1P.
+    Matched against a norm module's MRO (case-insensitive exact names). Export
+    must account for the +1 when folding scales into the norm weight (AWQ
+    pre_quant_scale fusion). A structural fallback (``zero_centered_gamma``) stays
+    in the engine."""
+
+
+@dataclass(kw_only=True)
+class PTQSpec(SpecSection):
+    """Subsystem section: per-model facts the Hugging Face PTQ flow needs to load and preview a model.
+
+    Each field stands in for a check on the model's name that the flow would otherwise carry.
+    A reason string says why the model is special and turns the behavior on, and the flow reports
+    it when it acts: ``None`` is the flow's generic behavior. The cause is always in the model's
+    own code or size, never in the flow, which is why it is stated here and not there.
+    """
+
+    no_auto_device_map: str | None = None
+    """Why ``device_map="auto"`` cannot be used for the model, so the flow loads it whole and moves
+    it to the target device, unless the run itself asks for a sequential map."""
+
+    no_device_map: str | None = None
+    """Why no device map can be used for the model: the flow loads it whole and moves it to the
+    target device, whatever the run asks for."""
+
+    dtype_kwarg: Literal["dtype", "torch_dtype"] = "dtype"
+    """The keyword the model's loading code takes its precision by: ``dtype`` for transformers'
+    own classes, ``torch_dtype`` for a checkpoint whose own code was written for the old name."""
+
+    sequential_device_map: str | None = None
+    """Why a load on several GPUs uses ``device_map="sequential"`` and not the balanced ``"auto"``.
+
+    A single GPU keeps ``"auto"``: it cannot split what is tied, and a sequential map would only
+    cap its memory."""
+
+    vlm_wrapper: bool = False
+    """Whether the flow treats the model as a VLM wrapper: it calibrates with image-text data by
+    default, previews through the wrapper's own chat path rather than ``generate`` on token ids,
+    and puts the quantized language model back into the wrapper."""
+
+    generation_unsupported: str | None = None
+    """Why the flow generates no sample, neither before nor after quantization (the preview).
+
+    The samples are a sanity check on top of calibration, so a model that cannot generate them
+    still quantizes and exports. ``post_ptq_generation_unsupported`` skips only the second one."""
+
+    post_ptq_generation_unsupported: str | None = None
+    """Why the quantized model cannot generate the after-quantization sample though the original
+    could, so the flow keeps the first sample and skips the second."""
+
+    generate_includes_prompt: str | None = None
+    """Why ``generate()`` returns the prompt with the answer though the model is encoder-decoder,
+    so the preview decodes it the way a decoder-only model's is, slicing the prompt off."""
+
+    fsdp2_unsupported: str | None = None
+    """What about the model ``--use_fsdp2`` cannot calibrate, as the refusal lists it before
+    anything loads."""
+
+
+@dataclass(kw_only=True)
+class ModelSpec:
+    """The one global per-model descriptor, holding each section as an attribute.
+
+    Resolved by HF model type (see ``get_spec`` below); a model registers exactly one
+    instance, filling only the sections it customizes and leaving the rest ``None``.
+    Consumers must handle an absent section; ``match_moe_block`` and
+    ``list_all_possible`` already do for the lookups they cover.
+    """
+
+    model_type: str
+    """The HF model type this spec describes (``config.model_type``, e.g.
+    ``"qwen3_moe"``). Unique across the registry."""
+
+    min_transformers_version: str | None = None
+    """Earliest ``transformers`` release whose definitions match this spec, or ``None``
+    when the question does not apply (``modeling_source="remote_code"``).
+
+    Clamped below at the repo's minimum supported transformers (``tf_min`` in
+    ``noxfile.py``): a model that predates the floor records the floor, since nothing
+    older is ever installed or tested. A model added after the floor records its own
+    release, which is what lets the test suite tell an expected absence on an older
+    transformers apart from a spec that no longer matches reality."""
+
+    modeling_source: Literal["transformers", "remote_code"] = "transformers"
+    """Where the model's modeling code lives: shipped inside ``transformers``, or
+    carried by the checkpoint and loaded with ``trust_remote_code=True``.
+
+    A fact about the model, not about any one subsystem: it decides whether the classes
+    named in this spec can be imported at all, so ``model_type`` is a remote-code
+    spelling rather than a transformers one, and loading the model needs the flag."""
+
+    moe_spec: MoESpec | None = None
+    """The model's MoE architecture facts, or ``None`` for a dense model."""
+
+    export_spec: ExportSpec | None = None
+    """Per-model data of the unified HF export path, or ``None`` when export needs
+    nothing model-specific."""
+
+    ep_spec: EPSpec | None = None
+    """Per-model data of the expert-parallel PTQ path, or ``None`` when the model is dense
+    or needs nothing beyond what stock transformers already ships."""
+
+    ptq_spec: PTQSpec | None = None
+    """Per-model facts of the Hugging Face PTQ flow, or ``None`` when the flow's generic
+    behavior fits the model. Read it through :func:`get_ptq_spec`."""
+
+
+_SPECS: dict[str, ModelSpec] = {}
+
+
+def register(spec: ModelSpec) -> ModelSpec:
+    """Register a model spec and return it. One spec per model type."""
+    if spec.model_type in _SPECS:
+        raise ValueError(f"ModelSpec for model type {spec.model_type!r} already registered")
+    _SPECS[spec.model_type] = spec
+    return spec
+
+
+def get_spec(model_type: str) -> ModelSpec | None:
+    """Return the spec registered for ``model_type``, or ``None``."""
+    return _SPECS.get(model_type)
+
+
+def get_specs() -> list[ModelSpec]:
+    """Return all registered specs, in registration order."""
+    return list(_SPECS.values())
+
+
+def get_ptq_spec(model_type: str | None) -> PTQSpec:
+    """Return ``model_type``'s PTQ section, or an all-default one when it has none.
+
+    The default section is the flow's generic behavior, so the flow reads one answer for every
+    model, registered or not, instead of handling an absent spec and an absent section apart.
+    """
+    spec = get_spec(model_type) if model_type else None
+    return spec.ptq_spec if spec is not None and spec.ptq_spec is not None else PTQSpec()
+
+
+@functools.cache
+def _spec_sections() -> tuple[tuple[str, type], ...]:
+    """(field name, section class) for every section field on ``ModelSpec``.
+
+    Read off ``ModelSpec``'s own annotations rather than restated here, so adding a
+    section is a single edit. A section field is one whose declared type includes a
+    ``SpecSection`` subclass.
+    """
+    hints = get_type_hints(ModelSpec)
+    sections: list[tuple[str, type]] = []
+    for field in fields(ModelSpec):
+        annotation = hints.get(field.name)
+        for candidate in get_args(annotation) or (annotation,):
+            if isinstance(candidate, type) and issubclass(candidate, SpecSection):
+                sections.append((field.name, candidate))
+                break
+    return tuple(sections)
+
+
+@functools.cache
+def _spec_attr_names() -> frozenset[str]:
+    """All field and property names readable off a ``ModelSpec`` or one of its sections."""
+    names = {f.name for f in fields(ModelSpec)}
+    for _, section_type in _spec_sections():
+        names.update(f.name for f in fields(section_type))
+        for klass in section_type.__mro__:
+            names.update(name for name, attr in vars(klass).items() if isinstance(attr, property))
+    return frozenset(names)
+
+
+def _read_spec_attr(spec: ModelSpec, attr: str):
+    """Read ``attr`` off ``spec`` or whichever section declares it.
+
+    Returns ``None`` when the declaring section is absent on this model, which is how
+    a dense model contributes nothing to an MoE vocabulary. That is distinct from a
+    present-but-empty section, which contributes an empty tuple; both end up adding
+    no values.
+    """
+    if hasattr(spec, attr):
+        return getattr(spec, attr)
+    for section_name, _ in _spec_sections():
+        section = getattr(spec, section_name)
+        if section is not None and hasattr(section, attr):
+            return getattr(section, attr)
+    return None
+
+
+def list_all_possible(attr: str) -> tuple:
+    """List a spec attribute's values across all registered specs, deduplicated in order.
+
+    E.g. ``list_all_possible("gate_up_pairs")``. Looks the name up on ``ModelSpec``
+    and then on its sections, so callers name the field (``"pqs_fuse_rules"``) without
+    naming the section that holds it. Models whose declaring section is ``None``
+    contribute nothing.
+
+    The result is a global vocabulary: consumers match it against any model's modules,
+    so adding a value to one spec affects all models the consumer walks — prefer
+    ``get_spec(model_type)`` / ``match_moe_block`` wherever the owning model is
+    identifiable.
+
+    ``attr`` must name a tuple-valued attribute. Scalars (``model_type``) would be
+    iterated character by character, so they are rejected rather than silently
+    producing nonsense.
+    """
+    if attr not in _spec_attr_names():
+        raise ValueError(
+            f"{attr!r} is not a ModelSpec attribute; available: {sorted(_spec_attr_names())}"
+        )
+    values: list = []
+    for spec in get_specs():
+        value = _read_spec_attr(spec, attr)
+        if value is None:
+            # This model does not declare the section that holds ``attr``.
+            continue
+        if not isinstance(value, tuple):
+            raise ValueError(
+                f"list_all_possible({attr!r}) expects a tuple-valued attribute, got "
+                f"{type(value).__name__} on model type {spec.model_type!r}."
+            )
+        # Deduplicate by equality: items need not be hashable (MoESpec is not).
+        values.extend(item for item in value if item not in values)
+    return tuple(values)
+
+
+def hf_model_type(model) -> str | None:
+    """Return the root HF model type (``model.config.model_type``), or ``None``.
+
+    Accepts a model or a config object (duck-typed, no transformers import). This
+    is the key for ``get_spec`` / ``match_moe_block``.
+    """
+    config = getattr(model, "config", model)
+    model_type = getattr(config, "model_type", None)
+    return model_type if isinstance(model_type, str) else None
+
+
+def match_moe_block(module: "nn.Module", model_type: str | None = None) -> "MoESpec | None":
+    """Return the MoE layout for ``module``, resolved by model type.
+
+    ``model_type`` (the root ``model.config.model_type``) is a strict filter: only
+    that model's own spec is consulted, and an unregistered model type resolves to
+    ``None`` even if the module's class names coincide with another model's.
+    ``model_type=None`` searches all specs. A composite model whose MoE lives under
+    a sub-model type registers the root type too (see ``gemma4/specs.py``). Within the
+    spec, ``block_names`` matched against the module's MRO decides.
+    """
+    if model_type:
+        return _match_in_spec(get_spec(model_type), module)
+    for spec in get_specs():
+        layout = _match_in_spec(spec, module)
+        if layout is not None:
+            return layout
+    return None
+
+
+def match_moe_model(module: "nn.Module", model_type: str | None = None) -> ModelSpec | None:
+    """Return the spec whose MoE section matches ``module``, or None.
+
+    Same scoping as ``match_moe_block``, which returns only the layout; use this when a
+    consumer also needs the model's other sections, such as the export policy that says
+    whether its experts may be grouped.
+    """
+    if model_type:
+        spec = get_spec(model_type)
+        return spec if _match_in_spec(spec, module) is not None else None
+    for spec in get_specs():
+        if _match_in_spec(spec, module) is not None:
+            return spec
+    return None
+
+
+def _match_in_spec(spec: ModelSpec | None, module: "nn.Module") -> "MoESpec | None":
+    """Return one spec's MoE section if it describes ``module``; None otherwise."""
+    if spec is None or spec.moe_spec is None:
+        return None
+    return spec.moe_spec if spec.moe_spec.matches(module) else None

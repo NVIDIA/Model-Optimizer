@@ -26,7 +26,9 @@ __all__ = []
 
 def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs):
     """Patch for `cls.from_pretrained` method to restore ModelOpt state."""
-    with _patch_model_init_for_modelopt(cls, pretrained_model_name_or_path):
+    with _patch_model_init_for_modelopt(
+        cls, pretrained_model_name_or_path, subfolder=kwargs.get("subfolder") or ""
+    ):
         model = types.MethodType(cls._modelopt_cache["from_pretrained"].__func__, cls)(
             pretrained_model_name_or_path, *args, **kwargs
         )

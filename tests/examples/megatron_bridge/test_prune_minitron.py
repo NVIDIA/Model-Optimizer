@@ -16,7 +16,6 @@
 
 import pytest
 import torch
-from _test_utils.examples.megatron_bridge import qwen35_moe_bridge_supported
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import (
     create_tiny_deepseek_v3_dir,
@@ -48,6 +47,8 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
                 return_model=True,
                 num_nextn_predict_layers=1,
                 mtp_hybrid_override_pattern="*E",
+                # FlashAttention-4 (used by TE on sm_120) cannot compile the default head_dim=8
+                head_dim=64,
             ),
             {"n_shared_experts": 1},
             id="nemotron_h",
@@ -71,16 +72,20 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
         ),
     ],
 )
-def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_config):
+def test_prune_minitron(
+    tmp_path, num_gpus, create_teacher, expected_pruned_config, fake_hub_checkpoint
+):
+    """The teacher is passed as a Hub ID (see ``fake_hub_checkpoint``): it is pruned from its local
+    copy, and the HF output carries that copy's non-model files."""
     teacher_hf_path, teacher_model = create_teacher(tmp_path, num_gpus)
+    teacher_arg = fake_hub_checkpoint.serve(teacher_hf_path, "prune_minitron.py", nproc=num_gpus)
     teacher_params = sum(p.numel() for p in teacher_model.parameters())
     prune_target_params = int(teacher_params * 0.8)
 
     pruned_path = tmp_path / "pruned"
-    # TODO: Dont enable grouped GEMM for MoE models until nemo:26.08 container
     prune_command_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py", "--no_moe_grouped_gemm"],
-        hf_model_name_or_path=teacher_hf_path,
+        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
+        hf_model_name_or_path=teacher_arg,
         output_hf_path=pruned_path,
         pp_size=num_gpus,
         calib_dataset_name="cnn_dailymail",
@@ -96,6 +101,8 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_conf
     run_example_command(prune_command_parts, example_path="megatron_bridge")
 
     assert (pruned_path / "config.json").exists()
+    if fake_hub_checkpoint.active:
+        assert (pruned_path / fake_hub_checkpoint.marker).exists()
     pruned_model = AutoModelForCausalLM.from_pretrained(pruned_path)
     assert sum(p.numel() for p in pruned_model.parameters()) <= prune_target_params
     for field, expected in expected_pruned_config.items():
@@ -127,10 +134,6 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_conf
                 max_position_embeddings=1024,
             ),
             id="qwen3_5_moe_vl",
-            marks=pytest.mark.skipif(
-                not qwen35_moe_bridge_supported(),
-                reason="Qwen3.5-MoE needs Megatron-Bridge native MoE support (nemo:26.08+)",
-            ),
         ),
     ],
 )
@@ -143,9 +146,8 @@ def test_prune_minitron_vlm(tmp_path, num_gpus, create_teacher):
     prune_target_params = int(language_model_params * 0.7)
 
     pruned_model_path = tmp_path / "pruned"
-    # TODO: Dont enable grouped GEMM for MoE models until nemo:26.08 container
     prune_command_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py", "--no_moe_grouped_gemm"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
         hf_model_name_or_path=teacher_hf_path,
         output_hf_path=pruned_model_path,
         pp_size=num_gpus,

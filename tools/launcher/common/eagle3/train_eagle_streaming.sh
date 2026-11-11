@@ -95,6 +95,31 @@ fi
 pip install --no-cache-dir -e modules/Model-Optimizer/
 pip install --no-cache-dir -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
 pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
+
+# Role is needed here, not just at the dispatch below: provisioning runs on every
+# node, so an ungated override would also downgrade the serve replicas. Derived once
+# and reused by the dispatch.
+NNODES="${SLURM_NNODES:-1}"
+NODEID="${SLURM_NODEID:-0}"
+# Only multi-node has dedicated serve nodes. Single-node is co-located -- one env runs
+# both vllm serve and the trainer -- so there is nothing to gate there.
+if [ "$NNODES" -gt 1 ] && [ "$NODEID" -lt "${SERVE_NODES:-1}" ]; then
+    IS_SERVE_NODE=1
+fi
+
+# Some trust_remote_code models pin an older transformers (e.g. MiniMax-M2.7
+# needs 4.57.x whose modeling code is incompatible with the 5.x that the
+# requirements pull in). Must run AFTER the requirements install to win.
+#
+# Skipped on dedicated serve nodes: they run `vllm serve` from the container's own
+# environment, and recent vLLM rejects transformers v4 at import. Downgrading there
+# would kill every serve replica before the trainer ever receives a hidden state.
+if [ -n "${OVERRIDE_TRANSFORMERS:-}" ] && [ -z "${IS_SERVE_NODE:-}" ]; then
+    pip install --no-cache-dir "transformers==${OVERRIDE_TRANSFORMERS}"
+elif [ -n "${OVERRIDE_TRANSFORMERS:-}" ]; then
+    echo "Serve node ${NODEID}: skipping OVERRIDE_TRANSFORMERS=${OVERRIDE_TRANSFORMERS} (vllm serve needs the container's transformers)."
+fi
+
 export PATH=$PATH:/workspace/.local/bin
 
 ###################################################################################################
@@ -250,8 +275,8 @@ run_trainer_and_export() {
 }
 
 # Topology dispatch (see header): branch on $SLURM_NNODES / $SLURM_NODEID.
-NNODES="${SLURM_NNODES:-1}"
-NODEID="${SLURM_NODEID:-0}"
+# NNODES/NODEID were derived above, before provisioning, so the transformers
+# override could be role-gated.
 
 # Need >=1 trainer node: with SERVE_NODES >= NNODES every node takes the serve branch,
 # so nobody publishes the rendezvous/DONE_FILE and serve nodes block forever.

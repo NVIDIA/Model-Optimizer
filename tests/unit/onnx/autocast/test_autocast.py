@@ -19,14 +19,17 @@ from pathlib import Path
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
+import onnxruntime as ort
 import pytest
 from _test_utils.onnx.lib_test_models import build_conv_isinf_model, build_conv_resize_model
 
+import modelopt.onnx.autocast.graphsanitizer as graphsanitizer
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast import convert_to_mixed_precision
 from modelopt.onnx.autocast.__main__ import get_parser, main
 from modelopt.onnx.autocast.convert import convert_to_f16
+from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 from modelopt.onnx.autocast.logging_config import configure_logging
 
 configure_logging("DEBUG")
@@ -88,6 +91,49 @@ def temp_output_path(tmp_path):
 def test_invalid_model_path():
     with pytest.raises(FileNotFoundError):
         convert_to_mixed_precision(onnx_path="nonexistent.onnx")
+
+
+def test_convert_contrib_op_without_tensorrt(tmp_path, monkeypatch):
+    x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 4])
+    y = onnx.helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [1, 4])
+    bias = onnx.numpy_helper.from_array(np.ones(4, dtype=np.float32), name="bias")
+    node = onnx.helper.make_node("BiasGelu", ["X", "bias"], ["Y"], domain="com.microsoft")
+    graph = onnx.helper.make_graph([node], "contrib_graph", [x], [y], [bias])
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[
+            onnx.helper.make_opsetid("", 21),
+            onnx.helper.make_opsetid("com.microsoft", 1),
+        ],
+        ir_version=10,
+    )
+    model_path = tmp_path / "contrib.onnx"
+    onnx.save(model, model_path)
+    providers = ["cpu"]
+    monkeypatch.setattr(graphsanitizer, "TRT_PYTHON_AVAILABLE", False)
+
+    converted = convert_to_mixed_precision(str(model_path), providers=providers, keep_io_types=True)
+
+    assert providers == ["cpu"]
+    assert (
+        next(n for n in converted.graph.node if n.op_type == "BiasGelu").domain == "com.microsoft"
+    )
+    assert all(opset.domain != "trt.plugins" for opset in converted.opset_import)
+    onnx.checker.check_model(converted)
+
+    inputs = {"X": np.array([[-2.0, -0.5, 0.5, 2.0]], dtype=np.float32)}
+    original_session = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    converted_session = ort.InferenceSession(
+        converted.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    np.testing.assert_allclose(
+        converted_session.run(None, inputs)[0],
+        original_session.run(None, inputs)[0],
+        rtol=2e-3,
+        atol=2e-3,
+    )
 
 
 def test_setup_mappings(simple_model):
@@ -153,6 +199,42 @@ def test_convert_simple_model(temp_model_path, temp_output_path, keep_io_types):
     onnx.checker.check_model(loaded_model)
 
 
+def test_convert_external_data_sanitizes_once_and_materializes_initializers(
+    tmp_path, simple_model, monkeypatch
+):
+    model_path = tmp_path / "external_model.onnx"
+    onnx.save_model(
+        simple_model,
+        model_path,
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="external_model.data",
+        size_threshold=0,
+    )
+
+    sanitize_calls = []
+    original_sanitize = GraphSanitizer.sanitize
+
+    def record_sanitize(sanitizer):
+        initializer = sanitizer.model.graph.initializer[0]
+        sanitize_calls.append(
+            (sanitizer.onnx_path, initializer.data_location, bool(initializer.raw_data))
+        )
+        return original_sanitize(sanitizer)
+
+    monkeypatch.setattr(GraphSanitizer, "sanitize", record_sanitize)
+
+    converted_model = convert_to_mixed_precision(onnx_path=str(model_path), data_max=np.inf)
+
+    assert sanitize_calls == [(str(model_path.resolve()), onnx.TensorProto.EXTERNAL, False)]
+    for initializer in converted_model.graph.initializer:
+        assert initializer.data_location != onnx.TensorProto.EXTERNAL
+        assert not initializer.external_data
+        assert initializer.raw_data
+        assert initializer.data_type == onnx.TensorProto.FLOAT16
+    onnx.checker.check_model(converted_model)
+
+
 def assert_input_precision(nodes, dtype="float16"):
     for node in nodes:
         for inp in node.inputs:
@@ -199,11 +281,6 @@ def test_conv_resize_conversion(tmp_path):
     # Convert the model
     converted_model = convert_to_mixed_precision(onnx_path=onnx_path)
 
-    # Output model should be produced in the same tmp_path
-    output_onnx_path = onnx_path.replace(".onnx", ".fp16.onnx")
-    onnx.save(converted_model, output_onnx_path)
-
-    # Load the output model
     graph = gs.import_onnx(converted_model)
 
     # Check that Resize is correctly converted:
@@ -213,6 +290,7 @@ def test_conv_resize_conversion(tmp_path):
     assert all(inp.dtype == np.float16 for inp in resize_node.inputs[0:2]), (
         "Resize data and ROI inputs should be FP16"
     )
+    assert resize_node.inputs[1].name != resize_node.inputs[2].name
 
 
 @pytest.mark.parametrize("target_opset", [13, 17, 19, 21])

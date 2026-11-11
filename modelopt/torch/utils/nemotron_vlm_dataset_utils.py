@@ -67,6 +67,19 @@ def extract_first_image_from_messages(messages: Any) -> Any:
     return None
 
 
+def subset_sample_targets(num_samples: int, subsets: list[str]) -> dict[str, int]:
+    """Split ``num_samples`` across ``subsets`` so the targets sum to it exactly.
+
+    Truncating division loses the remainder (1023 for 1024 over 3 subsets), and the strided
+    data-parallel sharder then leaves the trailing rank short, deadlocking calibration. Subsets
+    beyond the remainder get 0 when ``num_samples < len(subsets)``, keeping the sum exact.
+    """
+    if not subsets:
+        return {}
+    base, extra = divmod(num_samples, len(subsets))
+    return {subset: base + (1 if i < extra else 0) for i, subset in enumerate(subsets)}
+
+
 class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
     """Join Nemotron VLM `media/shard_*.tar` (images-only) with `<subset>/<subset>.jsonl` (messages)."""
 
@@ -119,11 +132,11 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
                 shard_list = shard_list[: max(0, self.max_shards)]
             shards_by_subset[subset] = shard_list
 
-        # Roughly split sample budget across subsets.
-        per_subset_target = max(1, self.num_samples // max(1, len(self.subsets)))
+        subset_targets = subset_sample_targets(self.num_samples, self.subsets)
         yielded_total = 0
 
         for subset in self.subsets:
+            per_subset_target = subset_targets[subset]
             if yielded_total >= self.num_samples:
                 break
 

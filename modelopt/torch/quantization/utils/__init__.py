@@ -19,6 +19,7 @@
 from .core_utils import *
 from .layerwise_calib import LayerActivationCollector
 from .shared_input import *
+from .weight_cache import *
 
 __all__ = [
     "EXPORT_MODE",
@@ -26,9 +27,13 @@ __all__ = [
     "SHARED_PATTERNS_ACROSS_EXPERTS",
     "SharedQuantState",
     "SharedWeightGlobalAmaxState",
+    "WeightCacheStats",
     "convert_quantization_axis_to_reduce_axis",
+    "disable_weight_cache",
+    "enable_weight_cache",
     "export_torch_mode",
     "find_shared_input_groups",
+    "invalidate_weight_cache",
     "is_quantized",
     "is_quantized_column_parallel_linear",
     "is_quantized_linear",
@@ -42,4 +47,5 @@ __all__ = [
     "representative_weight_quantizer",
     "update_quant_cfg_with_kv_cache_quant",
     "weight_attr_names",
+    "weight_cache_scope",
 ]

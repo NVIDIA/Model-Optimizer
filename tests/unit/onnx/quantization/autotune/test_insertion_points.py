@@ -48,7 +48,7 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
     resolve_region_io_insertion_points,
     skip_invalid_insertion_points,
 )
-from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
+from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
 
 INSERTION_POINT_CASES = [
     pytest.param(

@@ -15,6 +15,7 @@
 
 # Composed PTQ recipe for NVFP4 W4A4 model quantization with KV quantizers disabled and GPTQ calibration.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -22,7 +23,6 @@ imports:
   nvfp4: configs/numerics/nvfp4
 
 metadata:
-  recipe_type: ptq
   description: >-
     Applies NVFP4 W4A4 with static weight scales, dynamic inputs, KV quantizers disabled, and GPTQ
     layerwise calibration.
@@ -31,7 +31,9 @@ quantize:
     method: gptq
     layerwise:
       enable: true
-      checkpoint_dir: output/layerwise_ckpts/
+      # Resume checkpointing is opt-in: _CheckpointState rejects multi-process jobs, so a
+      # default here would break every multi-GPU run. Uncomment for single-process runs.
+      # checkpoint_dir: output/layerwise_ckpts/
   quant_cfg:
     - $import: base_disable_all
     - quantizer_name: '*weight_quantizer'

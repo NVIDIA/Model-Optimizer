@@ -46,16 +46,8 @@ import sys
 
 import torch
 from megatron.bridge import AutoBridge
-from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
-
-try:  # nemo:26.08+
-    from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
-
-    # MambaModelProvider subclasses HybridModelProvider on nemo:26.08+, so the tuple covers both.
-    _HYBRID_PROVIDER_TYPES: tuple[type, ...] = (MambaModelProvider, HybridModelProvider)
-except ImportError:  # nemo:26.06 and earlier
-    _HYBRID_PROVIDER_TYPES = (MambaModelProvider,)
-
+from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
+from mlflow_utils import NON_PARAMS, add_mlflow_args, mlflow_run, resolve_mlflow_args
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -66,7 +58,7 @@ from transformers import (
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.export import copy_hf_ckpt_remote_code
+from modelopt.torch.export import copy_non_model_files, ensure_local_checkpoint
 from modelopt.torch.nas.plugins.megatron_model_stats import parse_main_layer_chars
 from modelopt.torch.utils import (
     get_supported_datasets,
@@ -75,7 +67,8 @@ from modelopt.torch.utils import (
     print_rank_0,
     warn_rank_0,
 )
-from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
+from modelopt.torch.utils.mlflow import Tool, masked_args
+from modelopt.torch.utils.plugins.mbridge import get_language_model, load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import (
     get_megatron_calibration_forward_loop,
     get_megatron_vlm_calibration_forward_loop,
@@ -94,6 +87,36 @@ DEFAULT_VLM_CALIB_DATASET = "nemotron_vlm_dataset_v2"
 
 # HF config field names that enable MTP
 _MTP_HF_CONFIG_FIELDS = ("num_nextn_predict_layers", "mtp_num_hidden_layers", "mtp_num_layers")
+
+
+def _prune_variant(args: argparse.Namespace) -> str:
+    """What this pruning run was asked for. The targets can be combined, so the first one set
+    names the experiment and the params carry the rest."""
+    for flag in ("prune_target_params", "prune_target_active_params", "prune_target_memory_mb"):
+        value = getattr(args, flag, None)
+        if value is not None:
+            return f"{flag.removeprefix('prune_target_')}-{value}"
+    return "export_config"
+
+
+PRUNE = Tool(
+    name="megatron_bridge_prune",
+    tracks=(
+        "Track this run on an MLflow server, uploading the command and the run log -- which "
+        "carries the pruning decisions and the score gate -- and writing .experiment.json "
+        "into the checkpoint it saves."
+    ),
+    variant_help="the pruning target, or export_config",
+    variant=_prune_variant,
+    model=lambda args: args.hf_model_name_or_path,
+    # Exactly one: the parser makes the two output flags a required exclusive group.
+    checkpoint=lambda args: args.output_megatron_path or args.output_hf_path,
+    # Known only after the search, so main() stashes it on args.
+    metrics=lambda args: (
+        {} if getattr(args, "prune_score", None) is None else {"prune_score": args.prune_score}
+    ),
+    non_params=NON_PARAMS,
+)
 
 
 def _hf_config_has_mtp(hf_cfg) -> bool:
@@ -308,6 +331,8 @@ def get_args() -> argparse.Namespace:
         ),
     )
 
+    add_mlflow_args(parser, PRUNE)
+
     args = parser.parse_args()
 
     # Validate pruning target arguments
@@ -354,7 +379,13 @@ def get_args() -> argparse.Namespace:
     if args.inference_batch_size is None:
         args.inference_batch_size = args.calib_batch_size
 
-    print_args(args)
+    resolve_mlflow_args(args, parser, PRUNE)
+
+    print_args(masked_args(args))
+
+    # Flipped by main() once a checkpoint is on disk; a run that only scores candidates
+    # writes none, and then there is nothing for a provenance pointer to claim.
+    args.checkpoint_exported = False
 
     return args
 
@@ -407,8 +438,15 @@ def main(args: argparse.Namespace):
         warn_rank_0(f"\nPruned model already exists at {args.output_hf_path}. Exiting...")
         return
 
+    # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
+    # checkpoint in local_checkpoint_path, since exporters read the source's files from local disk
+    # only; hub_model_id is the Hub ID, or None for a local path.
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
+        args.hf_model_name_or_path
+    )
+
     bridge, provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
-        hf_model_name_or_path=args.hf_model_name_or_path,
+        hf_model_name_or_path=args.local_checkpoint_path,
         trust_remote_code=args.trust_remote_code,
         provider_overrides={
             "tensor_model_parallel_size": 1,  # Tensor parallelism is not supported
@@ -439,8 +477,7 @@ def main(args: argparse.Namespace):
 
     # For VLMs (e.g. Qwen3-VL), only the language model is pruned; the vision tower is left intact.
     # hidden_size is shared with the vision->LM projector, so it is skipped
-    language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
-    is_vlm = language_model is not unwrapped_model
+    language_model, is_vlm = get_language_model(unwrapped_model)
     if is_vlm:
         warn_rank_0(
             "VLM detected: pruning model.language_model only; all non-language-model components "
@@ -480,7 +517,7 @@ def main(args: argparse.Namespace):
     # the full VLM forward over image-text pairs.
     if use_image_calib:
         processor = AutoProcessor.from_pretrained(
-            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
+            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
         )
         forward_loop = get_megatron_vlm_calibration_forward_loop(
             unwrapped_model,  # full VLM (vision encoder + projector + language model)
@@ -588,12 +625,15 @@ def main(args: argparse.Namespace):
         dummy_input=None,
         config=pruning_config,
     )
+    # Stashed here rather than after the saves: a run that dies exporting still reports the
+    # number the GPU hours bought. Absent for --prune_export_config, which scores nothing.
+    args.prune_score = pruning_scores.get("best", {}).get("score")
     # Remove unnecessary modelopt_state since ckpt is homogeneous
     if mto.ModeloptStateManager.has_state_for_mode_type("prune", model=language_model):
         mto.ModeloptStateManager.remove_state(language_model)
     if is_vlm:
         _log_vlm_param_breakdown(unwrapped_model, language_model, "after pruning")
-    if isinstance(provider, _HYBRID_PROVIDER_TYPES):
+    if isinstance(provider, HybridModelProvider):
         hybrid_key = (
             "hybrid_override_pattern"
             if hasattr(unwrapped_model, "hybrid_override_pattern")
@@ -610,9 +650,11 @@ def main(args: argparse.Namespace):
         bridge.save_megatron_model(
             model,
             args.output_megatron_path,
-            hf_tokenizer_path=args.hf_model_name_or_path,
+            # Recorded in the checkpoint's config: the Hub ID stays valid on other hosts.
+            hf_tokenizer_path=args.hub_model_id or args.local_checkpoint_path,
             hf_tokenizer_kwargs=tokenizer_kwargs,
         )
+        args.checkpoint_exported = True
         print_rank_0(
             f"Saved pruned model to {args.output_megatron_path} in Megatron checkpoint format"
         )
@@ -696,7 +738,7 @@ def main(args: argparse.Namespace):
                 )
         # Only older remote-code configs need this; native configs carry the cadence in layer_types.
         if (
-            isinstance(provider, _HYBRID_PROVIDER_TYPES)
+            isinstance(provider, HybridModelProvider)
             and not hasattr(text_cfg, "layer_types")
             and hasattr(text_cfg, "hybrid_override_pattern")
         ):
@@ -712,39 +754,15 @@ def main(args: argparse.Namespace):
 
         # Config-only bridge (hf_keys=None) keeps the embedding task when transformers' saved key
         # differs from the bridge mapping (NemotronH's backbone.embedding vs ...embeddings).
-        exported_config_only = False
-        if (
-            hasattr(AutoBridge, "from_hf_config")
-            and isinstance(provider, _HYBRID_PROVIDER_TYPES)
-            and not is_vlm
-        ):
+        if isinstance(provider, HybridModelProvider) and not is_vlm:
             pruned_bridge = AutoBridge.from_hf_config(hf_cfg)
             # save_hf_pretrained reads trust_remote_code off the bridge to fetch source artifacts;
             # from_hf_config can't infer it since AutoConfig consumes the kwarg.
             pruned_bridge.trust_remote_code = args.trust_remote_code
-            try:
-                pruned_bridge.save_hf_pretrained(
-                    model, args.output_hf_path, source_path=args.hf_model_name_or_path
-                )
-                exported_config_only = True
-            except ValueError as e:
-                # nemo:26.06+ exposes from_hf_config but rejects config-only save_hf_pretrained;
-                # fall back to the dummy-model path below.
-                if "requires a pretrained HuggingFace model" not in str(e):
-                    raise
-                warn_rank_0(f"Config-only HF export unsupported ({e}); using dummy-model export.")
-
-        if not exported_config_only:
-            if (
-                not hasattr(AutoBridge, "from_hf_config")
-                and isinstance(provider, _HYBRID_PROVIDER_TYPES)
-                and not is_vlm
-            ):
-                warn_rank_0(
-                    "Megatron-Bridge lacks config-only HF export; falling back to the dummy-model "
-                    "path, which cannot round-trip a pruned native NemotronH config. Use "
-                    "transformers<5 or a newer Megatron-Bridge if the save fails."
-                )
+            pruned_bridge.save_hf_pretrained(
+                model, args.output_hf_path, source_path=args.local_checkpoint_path
+            )
+        else:
             dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
             dummy_model_cls.from_config(
                 hf_cfg, trust_remote_code=args.trust_remote_code
@@ -754,7 +772,10 @@ def main(args: argparse.Namespace):
             )
             pruned_bridge.save_hf_weights(model, args.output_hf_path)
 
-        copy_hf_ckpt_remote_code(args.hf_model_name_or_path, args.output_hf_path)
+        # Every rank gets here (save_hf_weights is collective); one writer is enough.
+        if dist.is_master():
+            copy_non_model_files(args.local_checkpoint_path, args.output_hf_path)
+        args.checkpoint_exported = True
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
 
     # Accuracy gate: exit non-zero if pruned model's score is below the bound
@@ -776,7 +797,10 @@ if __name__ == "__main__":
     dist.setup()
     args = get_args()
     try:
-        main(args)
+        # Entered inside the try: opening the run is fatal by design, and the peers of a rank
+        # that exits without dist.abort() stay blocked on the first collective.
+        with mlflow_run(args, PRUNE):
+            main(args)
     except BaseException:
         dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:

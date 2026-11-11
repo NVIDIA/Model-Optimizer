@@ -380,7 +380,9 @@ Reusable snippets are stored under ``modelopt_recipes/configs/``:
 Metadata section
 ================
 
-Every recipe must contain a ``metadata`` mapping with at least a ``recipe_type`` field:
+Every recipe contains a ``metadata`` mapping.  ``recipe_type`` is optional and
+**deprecated** -- a recipe may instead declare its kind with a ``# modelopt-schema:``
+comment, or inherit it from the recipe it delegates to; see `Declaring a recipe's kind`_:
 
 .. list-table::
    :header-rows: 1
@@ -390,7 +392,7 @@ Every recipe must contain a ``metadata`` mapping with at least a ``recipe_type``
      - Required
      - Description
    * - ``recipe_type``
-     - Yes
+     - No
      - The optimization category.  Determines which configuration sections are
        expected (e.g., ``"ptq"`` expects a ``quantize`` section).  See
        :class:`~modelopt.recipe.config.RecipeType` for supported values.
@@ -403,7 +405,7 @@ Type-specific configuration sections
 =====================================
 
 Each recipe type defines its own configuration section.  The section name and
-schema depend on the ``recipe_type`` value in the metadata.
+schema depend on the recipe's kind, however it is declared.
 
 PTQ (``recipe_type: ptq``)
 --------------------------
@@ -516,14 +518,34 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
    * - ``general/ptq/nvfp4_weight_only-kv_fp8_cast``
      - NVFP4 W4A16 weight-only, FP8 KV cache with constant amax
 
+See `modelopt_recipes/ptq.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/ptq.md>`_
+for the full list and for guidance on choosing between them.
+
 Model-specific recipes
 ----------------------
 
-Model-specific recipes are tuned for a particular Hugging Face ``model_type``
-(or a specific released model) and live under
-``huggingface/<model_type>/[<specific_model>/]<task>/``. See
-`modelopt_recipes/huggingface/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/huggingface/README.md>`_
-for the layout convention and recipe-lookup order.
+Model-specific recipes come in two tiers: architecture recipes keyed by a
+Hugging Face ``model_type`` under ``model_type/<model_type>/<task>/``, and
+checkpoint entries keyed by a model-hub path under
+``models/<org>/<model_id>/<task>/``. See
+`modelopt_recipes/model_type/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/model_type/README.md>`_
+and
+`modelopt_recipes/models/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/models/README.md>`_
+for the layout conventions and recipe-lookup order.
+
+A checkpoint entry comes in two forms. A **mirror** carries its own body, because the
+release uses a per-layer scheme no portable recipe expresses. An **alias** has no body of
+its own: a general or architecture recipe already produces that scheme, so the entry
+imports that recipe wholesale and exists to make it findable from the checkpoint's hub
+path. See `modelopt_recipes/ptq.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/ptq.md>`_
+for what each checkpoint entry does.
+
+.. note::
+
+   ``model_type/`` was previously named ``huggingface/``. Old
+   ``huggingface/<model_type>/...`` recipe paths still resolve for backward
+   compatibility, but ``model_type/`` is the canonical location — prefer it in
+   new ``--recipe`` flags and ``load_recipe`` calls.
 
 .. list-table::
    :header-rows: 1
@@ -531,11 +553,49 @@ for the layout convention and recipe-lookup order.
 
    * - Recipe path
      - Description
-   * - ``huggingface/step3p5/Step3.5-Flash/ptq/nvfp4-mlp-only``
+   * - ``models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only``
      - NVFP4 MLP-only for Step 3.5 Flash MoE model
-   * - ``huggingface/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``
+   * - ``model_type/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``
      - MXFP8 language-model base with MSE-calibrated NVFP4 routed experts for MiniMax-M3
 
+
+Delegating to another recipe
+----------------------------
+
+A recipe can hand its whole body to another recipe with a top-level ``$import`` and keep
+only its own ``metadata``.  Keys given alongside the ``$import`` override the imported
+ones, so the body -- ``quantize``, its algorithm and every ``quant_cfg`` entry -- is
+inherited unchanged:
+
+.. code-block:: yaml
+
+   imports:
+     base: general/ptq/nvfp4_default-kv_fp8_cast
+
+   $import: base
+   metadata:
+     description: What this checkpoint uses the base recipe for.
+
+.. _Declaring a recipe's kind:
+
+Note the missing ``recipe_type``.  A recipe states its kind in whichever of these it
+likes, and the loader takes the first that answers: a ``# modelopt-schema:`` comment
+naming its schema class, ``metadata.recipe_type``, or -- as here -- the recipe it
+delegates to.  ``metadata.recipe_type`` is **deprecated**: it is still read and still
+honoured, so no existing recipe needs changing, but new recipes should declare their
+schema instead.  A directory-format recipe's ``metadata.yml`` can declare a schema
+comment too, the same way; delegation is the one source that does not apply to it,
+since a directory recipe has no top-level ``$import`` to inherit a kind from.
+
+Stating more than one is allowed, but they must agree, and that extends across the
+import: a recipe and the recipe it delegates to must be the same kind, since the import
+takes over the whole body.  A PTQ recipe importing an EAGLE one is rejected as a kind
+mismatch rather than left to fail on whatever the spliced sections do to the schema.
+
+What *is* required: a recipe that another file imports must carry the schema comment,
+since ``$import`` resolution needs it to validate the imported payload.  A recipe nothing
+imports needs no comment at all.  This is how the checkpoint aliases under ``models/``
+name the recipe behind a release without duplicating its body.
 
 Loading recipes
 ===============
@@ -545,7 +605,7 @@ Python API
 
 Use :func:`~modelopt.recipe.load_recipe` to load a recipe.  The path is resolved
 against the built-in library first, then the filesystem.  The returned object's
-type depends on the ``recipe_type`` in the metadata:
+type depends on the recipe's kind, however it is declared:
 
 .. code-block:: python
 
@@ -686,8 +746,12 @@ The ``modelopt_recipes/`` package is organized as follows:
    |       +-- nvfp4_omlp_only-kv_fp8_cast.yaml
    |       +-- nvfp4_omlp_only-kv_fp8.yaml
    |       +-- nvfp4_weight_only-kv_fp8_cast.yaml
-   +-- huggingface/                # Model-specific recipes
-   |   +-- <model_type>/           # see modelopt_recipes/huggingface/README.md
+   +-- model_type/                # Architecture-specific recipes (by model_type)
+   |   +-- <model_type>/           # see modelopt_recipes/model_type/README.md
+   |       +-- <task>/
+   |           +-- <recipe>.yaml
+   +-- models/                     # Checkpoint-specific recipes (by model-hub path)
+   |   +-- <org>/<model_id>/       # see modelopt_recipes/models/README.md
    |       +-- <task>/
    |           +-- <recipe>.yaml
    +-- configs/                    # Reusable config snippets (imported via $import)

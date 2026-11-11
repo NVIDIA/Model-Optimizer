@@ -23,7 +23,6 @@ imports:
   fp8: configs/ptq/presets/model/fp8
 
 metadata:
-  recipe_type: auto_quantize
   description: Mixed W4A8 AWQ-beta + FP8 per-layer search at 6.0 effective bits.
 
 auto_quantize:
@@ -38,7 +37,7 @@ auto_quantize:
   score_size: 128
 
   # Base (model-agnostic) non-quantizable layers, spliced from the shared unit. Arch-specific
-  # models use a recipe under huggingface/<model>/auto_quantize/ that appends to this set.
+  # models use a recipe under model_type/<model>/auto_quantize/ that appends to this set.
   disabled_layers:
     - $import: base_disabled_layers
 

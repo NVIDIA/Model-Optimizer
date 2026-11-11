@@ -270,9 +270,9 @@ def save_dummy_dataset(dataset_path: Path | str):
         },
     ]
 
-    # Prepare train and val splits with sample repeated, 2500 samples are for
-    # 128 samples with block-size 8192 and LLama3 tokenizer
-    data = [{"conversation": sample}] * 2500
+    # Prepare train and val splits with the sample repeated. With the tiny tokenizer a sample is
+    # 1424 tokens, so 400 samples give 278 blocks of 2048 tokens; the pruning scores read at most 100.
+    data = [{"conversation": sample}] * 400
 
     # For train-val splits
     data_dict = DatasetDict({"train": Dataset.from_list(data), "valid": Dataset.from_list(data)})

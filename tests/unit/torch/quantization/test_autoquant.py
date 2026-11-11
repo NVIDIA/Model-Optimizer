@@ -15,16 +15,18 @@
 
 import copy
 import io
+import warnings
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.model_quant as model_quant
+from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     _get_module_weight_numel,
@@ -36,6 +38,7 @@ from modelopt.torch.quantization.algorithms import (
     QuantRecipe,
     QuantRecipeHparam,
     _AutoQuantizeBaseSearcher,
+    _AutoQuantizeGradientScoringSession,
     _module_search_space_signature,
     estimate_quant_compression,
 )
@@ -96,6 +99,47 @@ class _AutoQuantMoeModel(torch.nn.Module):
 
     def get_input(self):
         return torch.randn(1, 4, 32)
+
+
+class _ScoredMoeExpert(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate_proj = torch.nn.Linear(8, 8)
+        self.up_proj = torch.nn.Linear(8, 8)
+        self.down_proj = torch.nn.Linear(8, 8)
+
+    def forward(self, x):
+        return self.down_proj(self.gate_proj(x) + self.up_proj(x))
+
+
+class _ScoredMoeMlp(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.experts = torch.nn.ModuleList([_ScoredMoeExpert(), _ScoredMoeExpert()])
+
+    def forward(self, x):
+        output = torch.zeros_like(x)
+        for expert in self.experts:
+            output = output + expert(x)
+        return output
+
+
+class _ScoredMoeLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = _ScoredMoeMlp()
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
+class _ScoredMoeModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([_ScoredMoeLayer()])
+
+    def forward(self, x):
+        return self.layers[0](x)
 
 
 @pytest.mark.parametrize(
@@ -533,16 +577,22 @@ def test_auto_quantize_fixed_ptq_baseline_requires_explicit_search_spaces():
         )
 
 
-@pytest.mark.parametrize("formats", ["FP8_DEFAULT_CFG", mtq.FP8_DEFAULT_CFG, ()])
-def test_auto_quantize_rejects_non_list_global_formats(formats):
-    with pytest.raises(TypeError, match="`quantization_formats` must be a list"):
+@pytest.mark.parametrize("formats", ["FP8_DEFAULT_CFG", mtq.FP8_DEFAULT_CFG])
+def test_auto_quantize_rejects_non_sequence_global_formats(formats):
+    with pytest.raises(TypeError, match="`quantization_formats` must be a sequence"):
         mtq.auto_quantize(TransformerBlock(), quantization_formats=formats)
 
 
-@pytest.mark.parametrize("formats", [[], [None]])
+@pytest.mark.parametrize("formats", [[], [None], ()])
 def test_auto_quantize_rejects_empty_global_formats(formats):
     with pytest.raises(ValueError, match="`quantization_formats` must"):
         mtq.auto_quantize(TransformerBlock(), quantization_formats=formats)
+
+
+def test_process_quantization_formats_preserves_explicit_tuple_name():
+    assert model_quant._process_quantization_formats(
+        [(mtq.FP8_DEFAULT_CFG, "named_fp8")], "CUSTOM"
+    ) == [(mtq.FP8_DEFAULT_CFG, "named_fp8")]
 
 
 @pytest.mark.parametrize("formats", ["FP8_DEFAULT_CFG", mtq.FP8_DEFAULT_CFG, ()])
@@ -575,6 +625,29 @@ def test_auto_quantize_rejects_empty_module_formats(formats):
                 }
             ],
         )
+
+
+def test_gradient_search_config_none_score_func_does_not_warn():
+    """An explicitly empty score_func must not emit the ignored-value warning."""
+    searcher = AutoQuantizeGradientSearcher()
+
+    def forward_backward_step(model, data):
+        pass
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = searcher.sanitize_search_config(
+            {
+                "score_func": None,
+                "data_loader": [object()],
+                "forward_step": lambda model, data: None,
+                "forward_backward_step": forward_backward_step,
+            }
+        )
+
+    assert not any("`score_func` is ignored" in str(warning.message) for warning in caught)
+    assert "score_func" not in config
+    assert config["forward_backward_step"] is forward_backward_step
 
 
 def test_auto_quantize_fixed_module_isolated_from_unrelated_calibration(monkeypatch):
@@ -720,23 +793,34 @@ INT8_CUSTOM_QUANT_TEST_CFG = {
 }
 
 
+_BLOCKWISE_INT8 = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG]
+_AWQ_SMOOTHQUANT = [mtq.INT4_AWQ_CFG, mtq.INT8_SMOOTHQUANT_CFG]
+_AWQ_CUSTOM = [mtq.INT4_AWQ_CFG, INT8_CUSTOM_QUANT_TEST_CFG]
+_SMOOTHQUANT_ONLY = [mtq.INT8_SMOOTHQUANT_CFG]
+_NONE_SMOOTHQUANT = [None, mtq.INT8_SMOOTHQUANT_CFG]
+# `algorithm: []` calibrates nothing and so adds no mode for the search to drop.
+_BLOCKWISE_UNCALIBRATED_INT8 = [
+    mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+    {**mtq.INT8_DEFAULT_CFG, "algorithm": []},
+]
+
+
+# A covering set rather than the full model x formats x method product: every model, format
+# list and method appears at least once, and the methods only differ in how candidates are scored.
 @pytest.mark.parametrize(
-    "model_cls",
-    [SimpleConv, SimpleConvLinear, SimpleLinear, TransformerBlock],
-)
-@pytest.mark.parametrize(
-    ("search_formats", "min_bits", "search_bits"),
+    ("model_cls", "search_formats", "min_bits", "search_bits", "method"),
     [
-        ([mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG], 4.0, 6.0),
-        ([mtq.INT4_AWQ_CFG, mtq.INT8_SMOOTHQUANT_CFG], 4.0, 6.0),
-        ([mtq.INT4_AWQ_CFG, INT8_CUSTOM_QUANT_TEST_CFG], 4.0, 6.0),
-        ([mtq.INT8_SMOOTHQUANT_CFG], 8.0, 11.0),
-        ([None, mtq.INT8_SMOOTHQUANT_CFG], 8.0, 11.0),
+        (SimpleConv, _BLOCKWISE_INT8, 4.0, 6.0, "gradient"),
+        (SimpleConvLinear, _AWQ_SMOOTHQUANT, 4.0, 6.0, "gradient"),
+        (TransformerBlock, _NONE_SMOOTHQUANT, 8.0, 11.0, "gradient"),
+        (SimpleLinear, _AWQ_CUSTOM, 4.0, 6.0, "kl_div"),
+        (TransformerBlock, _SMOOTHQUANT_ONLY, 8.0, 11.0, "kl_div"),
+        (SimpleConvLinear, _BLOCKWISE_INT8, 4.0, 6.0, "kl_div"),
+        (SimpleConv, _AWQ_SMOOTHQUANT, 4.0, 6.0, "aumann_shapley"),
+        (SimpleLinear, _NONE_SMOOTHQUANT, 8.0, 11.0, "aumann_shapley"),
+        (TransformerBlock, _AWQ_CUSTOM, 4.0, 6.0, "aumann_shapley"),
+        (SimpleLinear, _BLOCKWISE_UNCALIBRATED_INT8, 4.0, 6.0, "gradient"),
     ],
-)
-@pytest.mark.parametrize(
-    "method",
-    ["gradient", "kl_div"],
 )
 def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method):
     model = model_cls()
@@ -782,6 +866,106 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
     output_ref = best_model(input)
     output_test = new_model(input)
     assert torch.allclose(output_ref, output_test)
+
+
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, method):
+    source = TransformerBlock()
+    data = [source.get_input() for _ in range(2)]
+    formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG]
+
+    def search(checkpoint, format_shard=None, model=None, calib_steps=2, score_steps=2):
+        return mtq.auto_quantize(
+            copy.deepcopy(source) if model is None else model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=formats,
+            # o_proj holds FP8, so its calibrated input scale shapes the mlp's scores.
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*o_proj*"],
+                    "quantization_formats": [mtq.FP8_DEFAULT_CFG],
+                    "allow_no_quant": False,
+                }
+            ],
+            data_loader=data,
+            forward_step=lambda model, batch: model(batch),
+            loss_func=(lambda output, batch: output.sum()) if method == "gradient" else None,
+            num_calib_steps=calib_steps,
+            num_score_steps=score_steps,
+            checkpoint=str(checkpoint),
+            format_shard=format_shard,
+            method=method,
+        )
+
+    _, expected = search(tmp_path / "full.pth")
+    # A refused shard count hands the model back, so shard 0 then runs on that same model.
+    model = copy.deepcopy(source)
+    with pytest.raises(ValueError, match="format_shard count"):
+        search(tmp_path / "refused.pth", (0, 99), model=model)
+    shards = [tmp_path / f"shard{i}.pth" for i in range(2)]
+    for i, shard in enumerate(shards):
+        _, state = search(shard, (i, 2), model=model if i == 0 else None)
+        assert not state["best"]["recipe"]
+    # Each searched format is calibrated by one shard, o_proj's held FP8 by both.
+    calibrated = [set(safe_load(shard)["quantizer_states"]) for shard in shards]
+    assert len(calibrated[0] & calibrated[1]) == 1 and len(calibrated[0] | calibrated[1]) == 3
+
+    # Scores sum over batches, so a shard scored over fewer is refused.
+    fewer = tmp_path / "fewer_steps.pth"
+    search(fewer, (1, 2), score_steps=1)
+    with pytest.raises(ValueError, match="num_score_steps"):
+        model_quant.merge_auto_quantize_checkpoints([shards[0], fewer], str(tmp_path / "x.pth"))
+    # So are shards that recorded no counts, as earlier versions saved them.
+    unlabeled = [tmp_path / f"unlabeled{i}.pth" for i in range(2)]
+    for shard, path in zip(shards, unlabeled):
+        state = safe_load(shard)
+        del state["num_calib_steps"], state["num_score_steps"]
+        safe_save(state, path)
+    with pytest.raises(ValueError, match="num_calib_steps"):
+        model_quant.merge_auto_quantize_checkpoints(unlabeled, str(tmp_path / "y.pth"))
+    # A shard resumes its calibration and scores only under the counts that produced them.
+    interrupted = safe_load(shards[0])
+    interrupted["candidate_stats"] = {}  # as saved between calibration and scoring
+    safe_save(interrupted, tmp_path / "interrupted.pth")
+    with pytest.raises(ValueError, match="num_calib_steps"):
+        search(tmp_path / "interrupted.pth", (0, 2), calib_steps=1)
+    with pytest.raises(ValueError, match="num_score_steps"):
+        search(shards[0], (0, 2), score_steps=1)
+    resumed = search(tmp_path / "interrupted.pth", (0, 2))[1]["candidate_stats"]
+    for name, stats in safe_load(shards[0])["candidate_stats"].items():
+        assert resumed[name]["raw_scores"] == stats["raw_scores"]
+
+    merged = tmp_path / "merged.pth"
+    merge_states = model_quant.merge_auto_quantize_shards
+
+    def merge_racing_a_writer(states):  # another writer creates it after the existence check
+        merged.write_bytes(b"theirs")
+        return merge_states(states)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(model_quant, "merge_auto_quantize_shards", merge_racing_a_writer)
+        with pytest.raises(FileExistsError):
+            model_quant.merge_auto_quantize_checkpoints(shards, str(merged))
+    assert merged.read_bytes() == b"theirs"  # neither overwritten nor removed
+    merged.unlink()
+
+    def disk_full(obj, f):  # writes part of the checkpoint, then fails
+        f.write(b"partial")
+        raise OSError("No space left on device")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(model_quant, "safe_save", disk_full)
+        with pytest.raises(OSError, match="No space"):
+            model_quant.merge_auto_quantize_checkpoints(shards, str(merged))
+    assert not merged.exists()  # so the merge can be retried
+    model_quant.merge_auto_quantize_checkpoints(list(reversed(shards)), str(merged))
+    with pytest.raises(ValueError, match="format shard"):
+        search(shards[0])
+    _, state = search(merged, score_steps=1)  # unsharded, the counts may change to re-solve
+
+    for name, stats in expected["candidate_stats"].items():
+        assert state["candidate_stats"][name]["raw_scores"] == pytest.approx(stats["raw_scores"])
+    assert state["best"]["recipe"] == expected["best"]["recipe"]
 
 
 def test_auto_quantize_disable_layers():
@@ -871,6 +1055,8 @@ def test_pqs_folding(config):
 
 def _test_data_parallel_auto_quantize(rank, size):
     model = SimpleLinear()
+    # Each rank its own batches: only the data-parallel score sync makes their scores agree.
+    torch.manual_seed(rank)
 
     model, search_history = mtq.auto_quantize(
         model,
@@ -900,9 +1086,312 @@ def _test_data_parallel_auto_quantize(rank, size):
     assert search_history["best"]["is_satisfied"]
 
 
-def test_data_parallel_auto_quantize(skip_on_windows):
-    # 2 ranks fully exercise the cross-rank sync the test asserts; more just adds spawn overhead.
-    spawn_multiprocess_job(2, _test_data_parallel_auto_quantize, backend="gloo")
+def test_data_parallel_auto_quantize(cpu_dist_workers):
+    cpu_dist_workers.run(_test_data_parallel_auto_quantize)
+
+
+def _test_data_parallel_moe_score_module(rank, size):
+    torch.manual_seed(1234)
+    model = _ScoredMoeModel()
+    data_loader = [torch.randn(2, 3, 8) for _ in range(2)]
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        model, search_history = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 12.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=data_loader,
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.square().mean(),
+            num_calib_steps=2,
+            num_score_steps=2,
+        )
+
+    hparam = model.layers[0].mlp.experts[0].gate_proj.get_hparam("quant_recipe")
+    assert hparam.score_modules == [model.layers[0].mlp]
+    assert isinstance(model.layers[0].mlp._hparams_for_scoring, list)
+
+    fallback_warnings = [
+        str(warning.message)
+        for warning in caught_warnings
+        if "no parallel_state is set for score module" in str(warning.message)
+    ]
+    assert len(fallback_warnings) == len(model.layers[0].mlp._hparams_for_scoring)
+    assert all(str(type(model.layers[0].mlp)) in message for message in fallback_warnings)
+    assert all("first quantized child" in message for message in fallback_warnings)
+
+    recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
+    local_score = sum(hparam._importance_dict[recipe][m] for m in hparam.score_modules)
+    candidate = next(
+        candidate
+        for candidate in search_history["candidate_stats"].values()
+        if "layers.0.mlp.experts.0.gate_proj" in candidate["module_names"]
+    )
+    recipe_idx = candidate["formats"].index(recipe)
+    torch.testing.assert_close(
+        local_score * size,
+        torch.tensor(
+            candidate["scores"][recipe_idx],
+            device=local_score.device,
+            dtype=local_score.dtype,
+        ),
+    )
+
+    scores = {
+        name: candidate["scores"] for name, candidate in search_history["candidate_stats"].items()
+    }
+    rank_zero_scores = DistributedProcessGroup.get_dist_syncd_obj(
+        scores if rank == 0 else None,
+        DistributedProcessGroup(None),
+        lambda values: values[0],
+    )
+    assert scores == rank_zero_scores
+
+
+def test_data_parallel_moe_score_module(cpu_dist_workers):
+    cpu_dist_workers.run(_test_data_parallel_moe_score_module)
+
+
+def test_score_hparam_registration_preserves_order():
+    quant_modules = [
+        mtq.quantize(torch.nn.Linear(4, 4), mtq.INT8_DEFAULT_CFG),
+        mtq.quantize(torch.nn.Linear(4, 4), mtq.INT8_DEFAULT_CFG),
+    ]
+    score_module = torch.nn.Identity()
+    recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
+
+    first = QuantRecipeHparam(
+        [recipe],
+        quant_modules=[quant_modules[0], quant_modules[1], quant_modules[0]],
+        score_modules=[score_module, score_module],
+    )
+    second = QuantRecipeHparam(
+        [recipe],
+        quant_modules=[quant_modules[1]],
+        score_modules=[score_module],
+    )
+
+    assert first.quant_modules == quant_modules
+    assert first.score_modules == [score_module]
+    assert score_module._hparams_for_scoring == [first, second]
+
+
+def test_gradient_scoring_tracks_reused_module_invocations():
+    """Each autograd use of a shared score module retains its own replay difference."""
+    no_quant_recipe = QuantRecipe(quant_cfg=None)
+    quant_recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
+
+    class TestHparam:
+        is_configurable = True
+        choices = scored_choices = [no_quant_recipe, quant_recipe]
+        active = no_quant_recipe
+
+    class ScoreModule(torch.nn.Module):
+        def forward(self, x):
+            scale = 1.0 if hparam.active == no_quant_recipe else 2.0
+            return scale * x
+
+    class ReusedScoreModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.shared = ScoreModule()
+
+        def forward(self, x):
+            first = self.shared(x)
+            second = self.shared(3.0 * x)
+            # This use does not participate in autograd.
+            self.shared(5.0 * x.detach())
+            # This output requires grad but is intentionally unused by the loss.
+            self.shared(7.0 * x)
+            return first.sum() + 2.0 * second.sum()
+
+    model = ReusedScoreModule()
+    score_module = model.shared
+    hparam = TestHparam()
+    hparam._importance_dict = {recipe: {score_module: None} for recipe in hparam.choices}
+    score_module._hparams_for_scoring = [hparam]
+    inputs = torch.tensor([[1.0, 2.0]], requires_grad=True)
+
+    hparam._importance_dict[quant_recipe][score_module] = None
+    delayed_session = _AutoQuantizeGradientScoringSession(model, [score_module], lambda *_: True)
+    with delayed_session:
+        delayed_loss = model(inputs)
+        assert delayed_session._output_grad_hook_handles
+
+    assert not delayed_session._output_grad_hook_handles
+    delayed_loss.backward()
+    assert hparam._importance_dict[quant_recipe][score_module] is None
+
+    with _AutoQuantizeGradientScoringSession(model, [score_module], lambda *_: True):
+        model(inputs).backward()
+
+    # First use: sum(x**2) = 5. Second use: sum((2 * 3x)**2) = 180.
+    importance = hparam._importance_dict[quant_recipe][score_module]
+    torch.testing.assert_close(
+        importance,
+        torch.tensor(185.0, device=importance.device),
+        rtol=0,
+        atol=1e-6,
+    )
+
+
+def test_gradient_scoring_restores_model_after_failure():
+    model = SimpleLinear()
+    patched_modules = []
+
+    def fail_during_scoring(model, data):
+        model(data)
+        patched_modules.extend(
+            module
+            for module in model.modules()
+            if getattr(module.forward, "__name__", None) == "patched_forward"
+        )
+        raise RuntimeError("stop after scoring forward")
+
+    with pytest.raises(RuntimeError, match="stop after scoring forward"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 12.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            forward_backward_step=fail_during_scoring,
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+    assert patched_modules
+    assert all(
+        getattr(module.forward, "__name__", None) != "patched_forward" for module in patched_modules
+    )
+    assert all("forward" not in module.__dict__ for module in patched_modules)
+    assert all(param.requires_grad for param in model.parameters())
+    for module in model.modules():
+        for hparam in getattr(module, "_hparams_for_scoring", []):
+            assert hparam.active == hparam.original
+
+
+@pytest.mark.parametrize("cudnn_enabled", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+def test_backward_scoring_session_preserves_sdpa_backends(cudnn_enabled, fail):
+    original = torch.backends.cuda.cudnn_sdp_enabled()
+    others = (
+        torch.backends.cuda.flash_sdp_enabled(),
+        torch.backends.cuda.mem_efficient_sdp_enabled(),
+        torch.backends.cuda.math_sdp_enabled(),
+    )
+    try:
+        torch.backends.cuda.enable_cudnn_sdp(cudnn_enabled)
+        with (
+            pytest.raises(RuntimeError, match="scoring failed") if fail else nullcontext(),
+            _AutoQuantizeGradientScoringSession(torch.nn.Identity(), [], lambda *_: False),
+        ):
+            assert torch.backends.cuda.cudnn_sdp_enabled() == cudnn_enabled
+            assert others == (
+                torch.backends.cuda.flash_sdp_enabled(),
+                torch.backends.cuda.mem_efficient_sdp_enabled(),
+                torch.backends.cuda.math_sdp_enabled(),
+            )
+            if fail:
+                raise RuntimeError("scoring failed")
+    finally:
+        restored = torch.backends.cuda.cudnn_sdp_enabled()
+        torch.backends.cuda.enable_cudnn_sdp(original)
+    assert restored == cudnn_enabled
+
+
+@pytest.mark.parametrize("bad_gradient", [float("nan"), float("inf"), -float("inf")])
+def test_auto_quantize_fails_fast_on_nonfinite_gradients(bad_gradient):
+    model = SimpleLinear()
+    original_cudnn = torch.backends.cuda.cudnn_sdp_enabled()
+
+    def loss_func(output, _data):
+        output.register_hook(lambda grad: torch.full_like(grad, bad_gradient))
+        return output.sum()
+
+    with pytest.raises(RuntimeError, match="Non-finite output gradients in module") as exc_info:
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 12.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=loss_func,
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+    assert "torch.backends.cuda.enable_cudnn_sdp(False)" in str(exc_info.value)
+    assert torch.backends.cuda.cudnn_sdp_enabled() == original_cudnn
+    assert model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS  # a scoring failure hands back folding
+    assert any(
+        f"module '{name}'" in str(exc_info.value)
+        for name, module in model.named_modules()
+        if getattr(module, "_hparams_for_scoring", [])
+    )
+    for name, module in model.named_modules():
+        for hparam in getattr(module, "_hparams_for_scoring", []):
+            assert "forward" not in module.__dict__
+            assert hparam.active == hparam.original
+            for recipe in hparam.choices:
+                importance = hparam._importance_dict[recipe][module]
+                if f"module '{name}'" in str(exc_info.value):
+                    assert importance is None
+                else:
+                    assert importance is None or torch.isfinite(importance).all()
+
+
+def test_backward_scoring_session_restores_partial_setup():
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4))
+    score_module = model[0]
+    score_module._hparams_for_scoring = []
+    score_module.weight.requires_grad = False
+    original_requires_grad = {name: param.requires_grad for name, param in model.named_parameters()}
+
+    def fail_on_second_parameter(name, _model):
+        if name.endswith("bias"):
+            raise RuntimeError("stop during scoring setup")
+        return True
+
+    session = _AutoQuantizeGradientScoringSession(
+        model,
+        [score_module],
+        fail_on_second_parameter,
+    )
+    with pytest.raises(RuntimeError, match="stop during scoring setup"), session:
+        pytest.fail("scoring setup should not complete")
+
+    assert "forward" not in score_module.__dict__
+    assert {
+        name: param.requires_grad for name, param in model.named_parameters()
+    } == original_requires_grad
+
+
+@pytest.mark.parametrize("instance_override", [False, True])
+def test_gradient_scoring_restores_forward_attribute_layout(instance_override):
+    module = torch.nn.Identity()
+    module._hparams_for_scoring = []
+
+    def original_forward(x):
+        return x + 1
+
+    original_override = original_forward
+    if instance_override:
+        module.forward = original_override
+
+    session = _AutoQuantizeGradientScoringSession(
+        module,
+        [module],
+        lambda _name, _model: False,
+    )
+    with pytest.raises(RuntimeError, match="stop during scoring"), session:
+        assert module.__dict__["forward"] is not original_override
+        raise RuntimeError("stop during scoring")
+
+    if instance_override:
+        assert module.__dict__["forward"] is original_override
+    else:
+        assert "forward" not in module.__dict__
 
 
 def test_auto_quantize_budget_uses_no_quant_candidate_cost(monkeypatch):
@@ -1085,7 +1574,7 @@ def test_estimate_quant_compression_per_entry_effective_bits():
         )
 
 
-@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+@pytest.mark.parametrize("method", ["gradient", "kl_div", "aumann_shapley"])
 def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     """Test that checkpoint can be used to resume an interrupted search."""
     model = SimpleLinear()

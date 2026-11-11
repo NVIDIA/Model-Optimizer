@@ -1,5 +1,3 @@
 kernels>=0.9.0,<0.13
-trackio<0.21
-# transformers>=5.3 avoids CVE-2026-4372 (RCE via the `kernels` Hub download path, which this example installs)
-transformers>=5.3
-trl>=1.0
+trackio>=0.41
+trl>=1.0,<1.15

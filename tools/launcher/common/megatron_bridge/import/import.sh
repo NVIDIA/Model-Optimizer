@@ -15,13 +15,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Megatron-Bridge HF -> Megatron checkpoint import.
-# Assumes nvcr.io/nvidia/nemo:26.04+ container (megatron-bridge preinstalled at /opt/Megatron-Bridge).
+# Megatron-Bridge HF -> Megatron checkpoint import on the distributed GPU backend.
+# Assumes nvcr.io/nvidia/nemo:26.08+ container (megatron-bridge preinstalled at /opt/Megatron-Bridge).
 #
 # Required env: HF_MODEL_ID  (e.g. nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16)
 # Optional env:
-#   OUTPUT_DIR  Parent dir for the MCore checkpoint (default: cwd).
-#   TORCH_DTYPE Model dtype for HF load (default: bfloat16).
+#   OUTPUT_DIR     Parent dir for the MCore checkpoint (default: cwd).
+#   TORCH_DTYPE    Model dtype for HF load (default: bfloat16).
+#   GPUS_PER_NODE  GPUs to convert on (default: every GPU on the node).
+#   TP / PP / EP   Import parallelism (default: 1 each; large MoE models need EP > 1 to fit).
 #
 # Writes MCore checkpoint to ${OUTPUT_DIR}/<basename(HF_MODEL_ID)>-MCore
 
@@ -36,10 +38,24 @@ OUTPUT_DIR="${OUTPUT_DIR:-$(pwd)}"
 MODEL_NAME="$(basename "${HF_MODEL_ID}")"
 MEGATRON_PATH="${OUTPUT_DIR}/${MODEL_NAME}-MCore"
 TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
+if [[ -z "${GPUS_PER_NODE}" ]]; then
+    # `wc -l` swallows a failing nvidia-smi, so check the count rather than relying on `set -e`.
+    GPUS_PER_NODE="$(nvidia-smi -L | wc -l)"
+    if [[ "${GPUS_PER_NODE}" -lt 1 ]]; then
+        echo "[ERROR] No GPU detected; set GPUS_PER_NODE explicitly" >&2
+        exit 1
+    fi
+fi
 
 mkdir -p "${OUTPUT_DIR}"
 
-exec python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py import \
+exec bash /opt/Megatron-Bridge/scripts/conversion/convert.sh import \
+    --executor local \
+    --device gpu \
+    --gpus-per-node "${GPUS_PER_NODE}" \
     --hf-model "${HF_MODEL_ID}" \
     --megatron-path "${MEGATRON_PATH}" \
-    --torch-dtype "${TORCH_DTYPE}"
+    --torch-dtype "${TORCH_DTYPE}" \
+    --tp "${TP:-1}" \
+    --pp "${PP:-1}" \
+    --ep "${EP:-1}"

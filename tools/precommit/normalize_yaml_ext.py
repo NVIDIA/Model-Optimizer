@@ -20,8 +20,6 @@ Standardizes YAML file extensions to ``.yaml`` for consistency.  When a
 with code 1 so the user can re-stage and commit.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 from pathlib import Path

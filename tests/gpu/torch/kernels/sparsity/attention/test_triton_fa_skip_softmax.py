@@ -20,7 +20,7 @@ import torch
 from conftest import make_varlen_meta
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-import modelopt.torch.sparsity.attention_sparsity as mtsa
+import modelopt.torch.sparsity as mts
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 from modelopt.torch.sparsity.attention_sparsity.methods.flash_skip_softmax import FlashSkipSoftmax
 
@@ -217,17 +217,26 @@ class TestSkipSoftmaxVsPytorchRef:
         locs = torch.arange(batch, device="cuda", dtype=torch.int32) * seq_len
         lens = torch.full((batch,), seq_len, device="cuda", dtype=torch.int32)
 
-        triton_out = attention(
-            q_flat,
-            k_flat,
-            v_flat,
-            locs,
-            lens,
-            seq_len,
-            is_causal=True,
-            softmax_scale=scale,
-            skip_softmax_threshold=threshold,
-        )
+        try:
+            triton_out = attention(
+                q_flat,
+                k_flat,
+                v_flat,
+                locs,
+                lens,
+                seq_len,
+                is_causal=True,
+                softmax_scale=scale,
+                skip_softmax_threshold=threshold,
+            )
+        except RuntimeError as err:
+            if "shared memory" in str(err):
+                # Active skip requires the fixed 128x128 calibration tile; fp32
+                # inputs cannot compile it on ~100KB-shared-memory GPUs and the
+                # configuration is rejected by design. fp32 is kept here for a
+                # tight reference comparison on GPUs that support it.
+                pytest.skip("fp32 skip tile exceeds this GPU's shared memory")
+            raise
         triton_out_4d = triton_out.view(batch, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)
 
         # Both outputs should be close — same algorithm, different implementations.
@@ -237,10 +246,10 @@ class TestSkipSoftmaxVsPytorchRef:
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
 class TestSkipSoftmaxHFIntegration:
-    """HF integration for skip-softmax via mtsa.sparsify()."""
+    """HF integration for skip-softmax via mts.sparsify()."""
 
     def test_skip_softmax_via_sparsify(self, tiny_llama_dir):
-        """mtsa.sparsify() with triton_skip_softmax produces finite logits."""
+        """mts.sparsify() with triton_skip_softmax produces finite logits."""
         tok = AutoTokenizer.from_pretrained(tiny_llama_dir)
         if tok.pad_token_id is None:
             tok.pad_token_id = tok.eos_token_id
@@ -258,18 +267,21 @@ class TestSkipSoftmaxHFIntegration:
             logits_dense = model_dense(input_ids=ids).logits
         del model_dense
 
-        # Skip-softmax via mtsa.sparsify()
+        # Skip-softmax via mts.sparsify()
         model_skip = AutoModelForCausalLM.from_pretrained(
             tiny_llama_dir,
             torch_dtype=torch.bfloat16,
             device_map="cuda",
         )
-        mtsa.sparsify(model_skip, mtsa.SKIP_SOFTMAX_TRITON_DEFAULT)
+        mts.sparsify(model_skip, mts.SKIP_SOFTMAX_TRITON_DEFAULT)
         model_skip.eval()
         with torch.no_grad():
             logits_skip = model_skip(input_ids=ids).logits
 
         assert not torch.isnan(logits_skip).any(), "NaN in skip-softmax logits"
         assert not torch.isinf(logits_skip).any(), "Inf in skip-softmax logits"
-        # On short sequences (64 tokens), no tiles are skipped — output should match dense
-        torch.testing.assert_close(logits_skip, logits_dense, rtol=1e-3, atol=1e-3)
+        # On short sequences (64 tokens), no tiles are skipped — output should match
+        # dense up to bf16 accumulation-order noise: active skip launches run on the
+        # fixed 128x128 calibration tile, so their summation order differs from the
+        # HF dense reference (and from the autotuned dense Triton tile).
+        torch.testing.assert_close(logits_skip, logits_dense, rtol=1e-2, atol=8e-3)

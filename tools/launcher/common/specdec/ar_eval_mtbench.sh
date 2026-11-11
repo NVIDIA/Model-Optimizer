@@ -42,7 +42,7 @@ done
 MODEL_PATH=""
 if [ -n "$CKPT_DIR" ]; then
     # Find latest checkpoint subdir
-    LAST_CKPT=$(ls -d ${CKPT_DIR}/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1)
+    LAST_CKPT=$(latest_checkpoint "${CKPT_DIR}" checkpoint-)
     if [ -f "${CKPT_DIR}/model.safetensors" ]; then
         MODEL_PATH="${CKPT_DIR}"
     elif [ -n "$LAST_CKPT" ]; then

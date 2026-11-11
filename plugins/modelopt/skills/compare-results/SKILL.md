@@ -38,8 +38,8 @@ change is being measured, typically a further quantized version of the baseline.
    credible comparable reference exists, label the baseline externally
    unverified rather than claiming the check passed, then continue using the
    validated measured baseline.
-7. Compute exact deltas outside the chat context when there are multiple tasks
-   or repeated runs.
+7. Follow [Assess results](references/assess-results.md) to compute deltas and
+   uncertainty; mark unavailable uncertainty explicitly.
 8. Report comparability, external baseline sanity, and quantized-feasibility
    verdicts before interpreting the delta as model quality. If the user did not
    provide an acceptance threshold, report feasibility as inconclusive instead
@@ -54,8 +54,8 @@ the validated runs are comparable:
 2. Task name, benchmark version, dataset split, container, harness, and task
    fragment match.
 3. Generation settings match, including temperature, top_p, top_k, max tokens,
-   stop strings, chat-template kwargs, reasoning mode/budget, and task-specific
-   overrides.
+   stop strings, repetition detection, chat-template kwargs, reasoning
+   mode/budget, and task-specific overrides.
 4. Reasoning traces are enabled, disabled, parsed, stripped, or ignored
    consistently between runs.
 5. The number of evaluated and scored samples/repeats matches for each task and
@@ -63,17 +63,22 @@ the validated runs are comparable:
 6. Judge-backed or simulator-backed tasks use the same judge/user model,
    endpoint class, prompt, and scoring config.
 7. The same accuracy metric and score field is used for both runs.
-8. **Baseline precision matches the gate.** A `<1pp vs BF16` gate requires a true
+8. Timeout policies, effective limits, and failure scoring/exclusions match.
+   Apply **Timeout and Output-Limit Accounting** in the evaluation skill's
+   `references/run-validation.md` to both runs; matching limits alone cannot
+   rule out serving-speed effects on scores.
+9. **Baseline precision matches the gate.** A `<1pp vs BF16` gate requires a true
    full-precision (BF16) baseline. Many models ship *natively quantized* (e.g.
    INT4 `W4A16` or block-wise FP8) with no BF16 release — a quant-to-quant
    comparison against the released precision (e.g. INT4 vs NVFP4, as for
-   Kimi-K2.6) is still a valid result; just compare like-for-like, **state which
-   precision the baseline is**, and apply the gate relative to that baseline
-   rather than to an assumed BF16.
+   Kimi-K2.6) is still a valid result. **State which precision the baseline is**
+   and apply only an acceptance criterion explicitly defined for that precision.
+   If the requested gate is relative to BF16 and no BF16 baseline is available,
+   report that gate as inconclusive; do not reinterpret it as an FP8/INT4 gate.
 
-For SciCode, keep `num_repeats: 1` to limit sandbox workload. If variance is a
-concern, run multiple independent matched baseline/candidate pairs instead of
-increasing repeats within one run.
+For SciCode, keep `num_repeats: 1` and require **at least 8 runs per side**, comparing
+the two means — see the evaluation skill's `recipes/tasks/aa/scicode.md`. Fewer
+than 8 valid runs on a side is `INDETERMINATE`, not a delta.
 
 If any item differs, either rerun with matched settings or label the result as
 not an apples-to-apples quantization comparison.
@@ -88,13 +93,20 @@ must be reported.
 Include:
 
 - Baseline and candidate identifiers.
-- Per-task metric path, baseline score, candidate score, delta, and stderr if
-  available.
+- Per-task metric path, baseline and candidate scores with SEs, signed loss
+  (`Candidate - Baseline` for accuracy; negative is worse), confidence intervals
+  and method, sample/run counts, and an Assessment column.
+  Mark unavailable uncertainty explicitly; keep the assessment concise, not a
+  statistics tutorial.
 - Per-task external reference score, source URL, known protocol differences,
   percentage-point difference, and sanity status (`verified`, `failed`, or
   `externally unverified`).
 - Comparability status for prompt/template, generation settings, sample counts,
   reasoning handling, judge/simulator setup, and score field.
+- Per-task timeout and output-limit counts/rates for both runs, explicit
+  denominators, telemetry coverage, effective limits, and unresolved effects on
+  the score. Unknown accounting or unresolved infrastructure effects prevent an
+  `acceptable` quantization-feasibility verdict.
 - Comparability verdict: comparable, not comparable, or inconclusive.
 - Quantization feasibility verdict: acceptable, not acceptable, or inconclusive.
   Never report `acceptable` when external baseline sanity failed. An externally

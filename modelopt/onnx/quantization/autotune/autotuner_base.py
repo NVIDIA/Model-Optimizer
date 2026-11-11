@@ -28,7 +28,9 @@ import dataclasses
 import functools
 import os
 import random
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import overload
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -51,7 +53,8 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
     get_autotuner_quantizable_ops,
 )
 from modelopt.onnx.quantization.autotune.region_pattern import RegionPattern
-from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
+from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
+from modelopt.onnx.utils import export_onnx, save_onnx
 
 _MUTATION_SPECS = [
     ("node_inputs", "node input points", lambda p: (p.node_index, p.input_index)),
@@ -103,7 +106,7 @@ class QDQAutotunerBase:
         if isinstance(model, onnx.ModelProto):
             self.onnx_model = model
         elif isinstance(model, gs.Graph):
-            self.onnx_model = gs.export_onnx(model)
+            self.onnx_model = export_onnx(model)
         else:
             raise TypeError(f"Expected onnx.ModelProto or gs.Graph, got {type(model)}")
 
@@ -528,7 +531,10 @@ class QDQAutotunerBase:
                     quantized_node_indices.add(producer_idx)
 
         nodes_to_quantize = [graph.nodes[i].name for i in quantized_node_indices]
-        op_types_to_quantize = list(get_autotuner_quantizable_ops())
+        op_types_to_quantize = get_autotuner_quantizable_ops()
+        if self.config.default_quant_type == "fp8":
+            op_types_to_quantize &= {"Conv", "Gemm", "MatMul", "Add"}
+        op_types_to_quantize = list(op_types_to_quantize)
 
         # Inputs of quantized nodes NOT covered by Q/DQ (only non-constant producer inputs)
         no_quantize_inputs: list[tuple[gs.Node, gs.Node, str]] = []
@@ -556,10 +562,32 @@ class QDQAutotunerBase:
             list(op_types_needing_output_quant),
         )
 
+    @overload
+    def export_onnx(
+        self,
+        output_path: str,
+        insert_qdq: bool = True,
+        best: bool = False,
+        model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
+    ) -> None: ...
+
+    @overload
+    def export_onnx(
+        self,
+        output_path: None = None,
+        insert_qdq: bool = True,
+        best: bool = False,
+        model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
+    ) -> bytes: ...
+
     @_requires_init
     def export_onnx(
-        self, output_path: str | None = None, insert_qdq: bool = True, best: bool = False
-    ) -> bytes:
+        self,
+        output_path: str | None = None,
+        insert_qdq: bool = True,
+        best: bool = False,
+        model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
+    ) -> bytes | None:
         """Export ONNX model with Q/DQ nodes inserted according to tested schemes.
 
         This method creates a modified version of the model by:
@@ -577,7 +605,8 @@ class QDQAutotunerBase:
                        (useful for baseline measurements)
 
         Returns:
-            bytes: Serialized ONNX model as bytes
+            Serialized bytes when output_path is None; otherwise None.
+            The bytes-only profiling route remains subject to protobuf size limits.
 
         Raises:
             AutotunerNotInitializedError: If initialize() hasn't been called
@@ -606,9 +635,10 @@ class QDQAutotunerBase:
             self.config,
             insert_qdq=insert_qdq and bool(resolved_insertion_points),
             needs_fp8_conversion=needs_fp8_conversion,
+            model_transform=model_transform,
         )
 
-        model_bytes = model.SerializeToString()
+        model_bytes = None
         quant_type_str = "baseline"
         output_dest = ""
 
@@ -616,8 +646,10 @@ class QDQAutotunerBase:
             quant_type_str = f"{original_quant_type.upper()}" if needs_fp8_conversion else "INT8"
 
         if output_path is not None:
-            onnx.save(model, output_path)
+            save_onnx(model, output_path, save_as_external_data=True)
             output_dest = f" → {output_path}"
+        else:
+            model_bytes = model.SerializeToString()
 
         logger.info(
             f"Exported {quant_type_str} model with {unique_tensors} Q/DQ pairs {output_dest}"
@@ -666,7 +698,7 @@ class QDQAutotunerBase:
 
         scheme.latency_ms = latency_ms
         scheme.error = not success
-        scheme.profile_timestamp = datetime.now(timezone.utc).isoformat()
+        scheme.profile_timestamp = datetime.now(UTC).isoformat()
         display_index = scheme_index + 1
 
         if not success:
@@ -728,7 +760,7 @@ class QDQAutotunerBase:
             "patterns": [pattern_schemes.to_dict() for pattern_schemes in self.profiled_patterns],
         }
 
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             yaml.dump(state, f, default_flow_style=False, sort_keys=False)
 
         num_patterns = len(self.profiled_patterns)
@@ -766,7 +798,7 @@ class QDQAutotunerBase:
             AutotunerNotInitializedError: If initialize() hasn't been called
             FileNotFoundError: If the input_path doesn't exist
         """
-        with open(input_path) as f:
+        with open(input_path, encoding="utf-8") as f:
             state = yaml.safe_load(f)
 
         if state.get("baseline_latency_ms") is not None:
@@ -798,7 +830,7 @@ class QDQAutotunerBase:
                             f"Skipped empty pattern {pattern_schemes.pattern_signature[:16]}..."
                         )
 
-                except (KeyError, TypeError, ValueError) as exc:  # noqa: PERF203
+                except (KeyError, TypeError, ValueError) as exc:
                     logger.warning("Failed to load pattern: %s", exc)
                     continue
 

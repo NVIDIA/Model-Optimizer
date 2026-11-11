@@ -15,10 +15,13 @@
 
 """API for sparsification algorithms.
 
-This module provides access to both weight sparsity and attention sparsity algorithms.
-For backward compatibility, weight sparsity APIs are re-exported at the module level.
+This module provides access to both weight sparsity and attention sparsity algorithms through
+:meth:`sparsify <modelopt.torch.sparsity.sparsification.sparsify>`.
 """
+
+from . import attention_sparsity
+from .attention_sparsity.config import *
+from .sparsification import *
 
 # Import weight sparsity for backward compatibility
 from .weight_sparsity import mode, module, plugins
-from .weight_sparsity.sparsification import *

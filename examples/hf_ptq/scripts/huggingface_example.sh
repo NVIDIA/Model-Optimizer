@@ -296,7 +296,7 @@ if [[ $TASKS =~ "lm_eval" ]]; then
     # explicitly; the engine's max_seq_len is max_input_len + max_output_len.
     python lm_eval_trtllm.py \
         --model trtllm \
-        --model_args "model=$SAVE_PATH,tokenizer=$MODEL_ABS_PATH,tensor_parallel_size=$LM_EVAL_TP,max_batch_size=$BUILD_MAX_BATCH_SIZE,max_gen_toks=$BUILD_MAX_OUTPUT_LEN,max_input_len=$BUILD_MAX_INPUT_LEN,max_output_len=$BUILD_MAX_OUTPUT_LEN" \
+        --model_args "model=$SAVE_PATH,tokenizer=$MODEL_ABS_PATH,tensor_parallel_size=$LM_EVAL_TP,max_batch_size=$BUILD_MAX_BATCH_SIZE,max_gen_toks=$BUILD_MAX_OUTPUT_LEN,max_input_len=$BUILD_MAX_INPUT_LEN,max_output_len=$BUILD_MAX_OUTPUT_LEN,kv_cache_free_gpu_memory_fraction=$KV_CACHE_FREE_GPU_MEMORY_FRACTION" \
         --tasks $LM_EVAL_TASKS \
         --batch_size $BUILD_MAX_BATCH_SIZE $lm_eval_flags | tee $LM_EVAL_RESULT
 
@@ -318,9 +318,20 @@ if [[ $TASKS =~ "mmlu" ]]; then
     fi
     if [[ ! -d "$MMLU_DATA_PATH" ]] || [[ ! $(ls -A $MMLU_DATA_PATH) ]]; then
         echo "Preparing the MMLU test data"
-        wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -O /tmp/mmlu.tar
+        MMLU_TAR="$(mktemp "${TMPDIR:-/tmp}/mmlu.XXXXXX")" || exit 1
+        trap 'rm -f "$MMLU_TAR"' EXIT
+        # Revision-pinned HuggingFace mirror of the Berkeley tarball, which is unreachable. Bound
+        # the retries, which otherwise outlast the callers' timeouts, and resume rather than refetch.
+        wget --connect-timeout=20 --read-timeout=60 --tries=3 -c \
+            https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/data.tar \
+            -O "$MMLU_TAR" || {
+            echo "[ERROR] Could not download the MMLU test data. Set MMLU_DATA_PATH to a local copy."
+            exit 1
+        }
         mkdir -p data
-        tar -xf /tmp/mmlu.tar -C data && mv data/data $MMLU_DATA_PATH
+        tar -xf "$MMLU_TAR" -C data && mv data/data $MMLU_DATA_PATH
+        rm -f "$MMLU_TAR"  # 166MB; do not hold it for the rest of the eval
+        trap - EXIT
     fi
 
     mmlu_flags=""

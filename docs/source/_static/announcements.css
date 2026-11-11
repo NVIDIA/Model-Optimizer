@@ -1,4 +1,4 @@
-/* Scoped announcement styles for the Sphinx RTD theme. */
+/* Scoped announcement styles using Shibuya's light and dark color tokens. */
 
 #announcements > h1,
 #announcements > p,
@@ -13,11 +13,11 @@
 }
 
 .announcement-toolbar {
-  border: 1px solid #d6d8dc;
+  border: 1px solid var(--sy-c-border);
   border-radius: 4px;
   margin: 1.5rem 0;
   padding: 1rem;
-  background: #f8f9fb;
+  background: var(--sy-c-background);
 }
 
 .announcement-search-label {
@@ -30,8 +30,10 @@
   box-sizing: border-box;
   width: 100%;
   padding: 0.55rem 0.65rem;
-  border: 1px solid #b8bdc6;
+  border: 1px solid var(--sy-c-border);
   border-radius: 4px;
+  background: var(--sy-c-background);
+  color: var(--sy-c-text);
   font-size: 1rem;
 }
 
@@ -43,11 +45,11 @@
 }
 
 .announcement-tag {
-  border: 1px solid #9aa1ad;
+  border: 1px solid var(--sy-c-border);
   border-radius: 999px;
   padding: 0.28rem 0.65rem;
-  background: #fff;
-  color: #2f343d;
+  background: var(--sy-c-background);
+  color: var(--sy-c-text);
   cursor: pointer;
   font-size: 0.86rem;
 }
@@ -67,7 +69,7 @@
 }
 
 .announcement-card {
-  border-bottom: 1px solid #d6d8dc;
+  border-bottom: 1px solid var(--sy-c-border);
   padding: 0 0 1rem;
 }
 
@@ -86,7 +88,7 @@
 }
 
 .announcement-card-meta {
-  color: #6b7280;
+  color: var(--sy-c-light);
   font-size: 0.85rem;
 }
 
@@ -97,9 +99,9 @@
 }
 
 .announcement-card-tags span {
-  border: 1px solid #d6d8dc;
+  border: 1px solid var(--sy-c-border);
   border-radius: 999px;
-  color: #4b5563;
+  color: var(--sy-c-light);
   font-size: 0.78rem;
   padding: 0.15rem 0.45rem;
 }
@@ -119,10 +121,10 @@
 }
 
 .announcement-page-button {
-  border: 1px solid #9aa1ad;
+  border: 1px solid var(--sy-c-border);
   border-radius: 4px;
-  background: #fff;
-  color: #2f343d;
+  background: var(--sy-c-background);
+  color: var(--sy-c-text);
   cursor: pointer;
   padding: 0.35rem 0.7rem;
 }
@@ -133,10 +135,72 @@
 }
 
 .announcement-page-status {
-  color: #4b5563;
+  color: var(--sy-c-light);
   font-size: 0.9rem;
 }
 
 .toctree-wrapper.compound:empty {
   display: none;
+}
+
+/* Numbered equations: Sphinx's default `float: right` on the equation number
+   cannot share a line with MathJax's full-width display block, so the number
+   lands above the equation. Anchor it to the right of the equation instead. */
+div.math {
+  position: relative;
+}
+
+div.math span.eqno {
+  float: none;
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Display equations: shibuya gives `.yue .math-wrapper` a 2rem margin top and
+   bottom, and MathJax adds its own margin on the container inside it. The
+   wrapper sets `overflow-x: auto`, so none of it collapses with the
+   neighbouring paragraph margins and the gap around every equation ends up
+   oversized. Drop the MathJax margin and set the spacing on the wrapper. */
+.yue .math-wrapper {
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+}
+
+.yue .math-wrapper mjx-container[display="true"] {
+  margin: 0;
+}
+
+.yue strong.local-hessian-result {
+  color: #76b900;
+  font-size: 1.15em;
+  font-weight: 900;
+}
+
+.table-header-note {
+  font-size: 0.75em;
+  font-weight: 400;
+}
+
+.table-note {
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--sy-c-light);
+}
+
+/* A `.table-note` right after a table is that table's caption, so pull it up
+   against the table. Shibuya gives `.table-wrapper` a 2rem bottom margin; this
+   margin collapses with the note's own, so the negative value here nets out to
+   a small gap. The `.yue .table-wrapper +` prefix is needed to outrank the
+   theme's paragraph spacing, and keeps figure captions on default spacing. */
+.yue .table-wrapper + p.table-note {
+  margin-top: -1.75rem;
+}
+
+.table-note strong,
+.table-note code,
+.table-note .math,
+.table-note mjx-container {
+  font-size: inherit !important;
 }

@@ -101,10 +101,24 @@ def _export_value_info_proto(tensor: gs.Variable, do_type_check: bool) -> onnx.V
         )
 
     if tensor.dtype is not None:
-        dtype = getattr(
-            tensor, "explicit_dtype", onnx.helper.np_dtype_to_tensor_dtype(np.dtype(tensor.dtype))
-        )
-        onnx_tensor = onnx.helper.make_tensor_value_info(tensor.name, dtype, tensor.shape)
+        dtype = getattr(tensor, "explicit_dtype", None)
+        if dtype is None:
+            dtype = tensor.dtype
+        if isinstance(dtype, (int, np.integer)):
+            dtype = int(dtype)
+            if dtype not in onnx.TensorProto.DataType.values():
+                raise ValueError(f"Unknown ONNX tensor dtype for {tensor.name}: {dtype}")
+        else:
+            dtype = onnx.helper.np_dtype_to_tensor_dtype(np.dtype(dtype))
+        value_type = onnx.helper.make_tensor_type_proto(dtype, tensor.shape)
+        variable_type = getattr(tensor, "type", "tensor_type")
+        if variable_type == "sequence_type":
+            value_type = onnx.helper.make_sequence_type_proto(value_type)
+        elif variable_type == "optional_type":
+            value_type = onnx.helper.make_optional_type_proto(value_type)
+        elif variable_type != "tensor_type":
+            raise ValueError(f"Unsupported variable type for {tensor.name}: {variable_type}")
+        onnx_tensor = onnx.helper.make_value_info(tensor.name, value_type)
     else:
         onnx_tensor = onnx.helper.make_empty_tensor_value_info(tensor.name)
     return onnx_tensor

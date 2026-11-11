@@ -99,6 +99,10 @@ def test_forward_uses_minimal_shared_autotune_configs():
     ]
 
     assert triton_fa._attn_fwd.keys == ["N_CTX", "HEAD_DIM", "Q_IS_FP32", "P_QDQ", "V_QDQ"]
+    assert {(config.num_stages, config.num_warps) for config in triton_fa._SKIP_SERVE_CONFIGS} == {
+        (stages, warps) for stages in (1, 2, 3) for warps in (4, 8)
+    }
+    assert triton_fa._attn_fwd_skip_serve.keys == ["N_CTX", "HEAD_DIM", "Q_IS_FP32", "IS_PAGED"]
 
 
 @pytest.mark.parametrize(
@@ -139,21 +143,7 @@ def test_forward_routes_every_mode_to_single_autotuner(
     assert kernel.kwargs["V_QDQ"] == expected_v_qdq
 
 
-@pytest.mark.parametrize(
-    ("attention_kwargs", "expected_block_m"),
-    [
-        ({"skip_softmax_threshold": 0.1, "measure_sparsity": True}, 128),
-        (
-            {
-                "p_qdq": "nvfp4",
-                "skip_softmax_threshold": 0.1,
-                "measure_sparsity": True,
-            },
-            16,
-        ),
-    ],
-)
-def test_forward_measurement_uses_one_fixed_launch(monkeypatch, attention_kwargs, expected_block_m):
+def test_forward_measurement_uses_one_fixed_launch(monkeypatch):
     """Counter measurement bypasses autotuning to avoid repeated atomic updates."""
     pytest.importorskip("triton")
 
@@ -161,6 +151,87 @@ def test_forward_measurement_uses_one_fixed_launch(monkeypatch, attention_kwargs
 
     kernel = _ForbiddenKernel()
     kernel.fn = _CapturingKernel()
+    monkeypatch.setattr(triton_fa, "_attn_fwd", kernel)
+    monkeypatch.setattr(triton_fa, "_attn_fwd_skip_serve", _ForbiddenKernel())
+    monkeypatch.setattr(triton_fa.torch.cuda, "device", lambda _device: nullcontext())
+    monkeypatch.setattr(triton_fa, "_load_sparsity_helpers", lambda: None)
+    monkeypatch.setattr(triton_fa, "_load_qdq_helpers", lambda: None)
+
+    seq_len = 129
+    q = torch.empty(seq_len, 2, 16)
+    k = torch.empty(seq_len, 1, 16)
+    v = torch.empty_like(k)
+    starts = torch.tensor([0], dtype=torch.int32)
+    lengths = torch.tensor([seq_len], dtype=torch.int32)
+
+    triton_fa.attention(
+        q, k, v, starts, lengths, seq_len, skip_softmax_threshold=0.1, measure_sparsity=True
+    )
+
+    assert kernel.fn.launch_count == 1
+    assert kernel.fn.kwargs["BLOCK_M"] == 128
+    assert kernel.fn.kwargs["BLOCK_N"] == 128
+    assert kernel.fn.kwargs["num_stages"] == 1
+    assert kernel.fn.kwargs["num_warps"] == 4
+
+
+@pytest.mark.parametrize(
+    ("q_len", "kv_len", "expected_block_m"),
+    [(129, 129, 128), (1, 256, 16)],
+)
+def test_forward_skip_serving_keeps_kv_tile_and_uses_phase_q_tile(
+    monkeypatch, q_len, kv_len, expected_block_m
+):
+    """Serving keeps BLOCK_N=128 while decode avoids padded 128-row Q work."""
+    pytest.importorskip("triton")
+
+    from modelopt.torch.kernels.common.attention import triton_fa
+
+    kernel = _ForbiddenKernel()
+    kernel.fn = _ForbiddenKernel()
+    serving_kernel = _CapturingKernel()
+    monkeypatch.setattr(triton_fa, "_attn_fwd", kernel)
+    monkeypatch.setattr(triton_fa, "_attn_fwd_skip_serve", serving_kernel)
+    monkeypatch.setattr(triton_fa.torch.cuda, "device", lambda _device: nullcontext())
+    monkeypatch.setattr(triton_fa, "_load_sparsity_helpers", lambda: None)
+    monkeypatch.setattr(triton_fa, "_load_qdq_helpers", lambda: None)
+
+    q = torch.empty(q_len, 2, 16)
+    k = torch.empty(kv_len, 1, 16)
+    v = torch.empty_like(k)
+    starts = torch.tensor([0], dtype=torch.int32)
+    lengths = torch.tensor([q_len], dtype=torch.int32)
+    kv_lengths = torch.tensor([kv_len], dtype=torch.int32)
+
+    triton_fa.attention(
+        q,
+        k,
+        v,
+        starts,
+        lengths,
+        q_len,
+        b_start_loc_k=starts,
+        b_seq_len_k=kv_lengths,
+        max_input_len_k=kv_len,
+        skip_softmax_threshold=0.1,
+    )
+
+    assert serving_kernel.kwargs["BLOCK_M"] == expected_block_m
+    assert serving_kernel.kwargs["BLOCK_N"] == 128
+
+
+@pytest.mark.parametrize(
+    "qdq_kwargs",
+    [{"p_qdq": "nvfp4"}, {"p_qdq": "fp8"}, {"v_qdq": "nvfp4", "v_qdq_amax": 1.0}],
+)
+def test_forward_rejects_skip_softmax_with_qdq(monkeypatch, qdq_kwargs):
+    """Active skip-softmax rejects P/V QDQ before any kernel launch."""
+    pytest.importorskip("triton")
+
+    from modelopt.torch.kernels.common.attention import triton_fa
+
+    kernel = _ForbiddenKernel()
+    kernel.fn = _ForbiddenKernel()
     monkeypatch.setattr(triton_fa, "_attn_fwd", kernel)
     monkeypatch.setattr(triton_fa.torch.cuda, "device", lambda _device: nullcontext())
     monkeypatch.setattr(triton_fa, "_load_sparsity_helpers", lambda: None)
@@ -173,10 +244,7 @@ def test_forward_measurement_uses_one_fixed_launch(monkeypatch, attention_kwargs
     starts = torch.tensor([0], dtype=torch.int32)
     lengths = torch.tensor([seq_len], dtype=torch.int32)
 
-    triton_fa.attention(q, k, v, starts, lengths, seq_len, **attention_kwargs)
-
-    assert kernel.fn.launch_count == 1
-    assert kernel.fn.kwargs["BLOCK_M"] == expected_block_m
-    assert kernel.fn.kwargs["BLOCK_N"] == 128
-    assert kernel.fn.kwargs["num_stages"] == 1
-    assert kernel.fn.kwargs["num_warps"] == 4
+    with pytest.raises(ValueError, match="cannot be combined with attention quantization"):
+        triton_fa.attention(
+            q, k, v, starts, lengths, seq_len, skip_softmax_threshold=0.1, **qdq_kwargs
+        )

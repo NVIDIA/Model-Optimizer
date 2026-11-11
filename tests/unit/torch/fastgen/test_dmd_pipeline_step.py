@@ -23,8 +23,6 @@ loss math, gradient isolation between phases, an optimizer update, and a
 checkpoint round-trip.
 """
 
-from __future__ import annotations
-
 import copy
 
 import torch

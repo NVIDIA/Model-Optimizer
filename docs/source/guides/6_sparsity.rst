@@ -6,8 +6,8 @@ Introduction
 ============
 
 ModelOpt's Sparsity module (:mod:`modelopt.torch.sparsity <modelopt.torch.sparsity>`) enables
-you to sparsify the weights of your model. This can be useful for reducing the memory footprint of
-your model and can also be used to speed up inference.
+you to sparsify the weights and the attention of your model. This can be useful for reducing the
+memory footprint of your model and can also be used to speed up inference.
 
 
 Follow the steps described below to obtain a model with sparse weights using ModelOpt's Sparsity
@@ -69,6 +69,25 @@ Example usage:
     ``sparsegpt``. `sparse_magnitude` does not require `data_loader` as it uses magnitude-based
     method for thresholding.
 
+Sparse attention
+----------------
+
+Given a sparse attention config instead of a mode, the same API applies sparse attention, e.g.,
+skip-softmax with a fixed threshold (``mts.SKIP_SOFTMAX_DEFAULT``) or with a threshold calibrated
+on generated RULER data (``mts.SKIP_SOFTMAX_CALIB``):
+
+.. code-block:: python
+
+    model = mts.sparsify(model, mts.SKIP_SOFTMAX_CALIB)
+
+    # Weight and attention sparsity can be combined in one call
+    model = mts.sparsify(
+        model, [("sparsegpt", {}), ("sparse_attention", mts.SKIP_SOFTMAX_DEFAULT)], config=sparsity_config
+    )
+
+See the `attention sparsity example <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity/attention_sparsity>`_
+for all methods and options.
+
 
 Save and restore the sparse model
 ---------------------------------
@@ -107,7 +126,8 @@ To restore the saved sparse model you can use
     :meth:`mts.export() <modelopt.torch.sparsity.sparsification.export>` will export the sparse
     model to a plain pytorch model. The sparse masks will be applied to model weights and all the
     sparse metadata will be removed. After exporting, sparsity will no longer be enforced during
-    subsequent fine-tuning. If you want to continue fine-tuning, do not export the model.
+    subsequent fine-tuning. If you want to continue fine-tuning, do not export the model. Sparse
+    attention needs no export and stays applied.
 
 .. note::
 

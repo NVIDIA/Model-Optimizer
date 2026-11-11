@@ -13,10 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest.mock import Mock
+
 import numpy as np
+import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
+import modelopt.onnx.autocast.graphsanitizer as graphsanitizer
 from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 
 
@@ -407,3 +411,78 @@ def test_convert_fp64_no_changes_needed():
     assert sanitizer._convert_fp64_initializers() is False
     assert sanitizer._convert_fp64_io_types() is False
     assert sanitizer._convert_fp64_nodes() is False
+
+
+def test_sanitize_large_external_initializer_metadata():
+    external_data_bytes = onnx.checker.MAXIMUM_PROTOBUF + 2048
+    initializer = TensorProto(
+        name="weight",
+        data_type=TensorProto.FLOAT,
+        dims=[external_data_bytes // 4],
+        data_location=TensorProto.EXTERNAL,
+    )
+    for key, value in (
+        ("location", "weight.bin"),
+        ("offset", "0"),
+        ("length", str(external_data_bytes)),
+    ):
+        initializer.external_data.add(key=key, value=value)
+
+    output = helper.make_tensor_value_info("output", TensorProto.FLOAT, initializer.dims)
+    identity = helper.make_node("Identity", [initializer.name], [output.name])
+    graph = helper.make_graph(
+        [identity], "large_external_initializer", [], [output], initializer=[initializer]
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)])
+    model.ir_version = 10
+    assert model.ByteSize() < 1024
+
+    sanitizer = GraphSanitizer(model, min_opset=22)
+    sanitizer.sanitize()
+
+    initializer = sanitizer.model.graph.initializer[0]
+    assert initializer.data_location == TensorProto.EXTERNAL
+    assert not initializer.raw_data
+    assert {entry.key: entry.value for entry in initializer.external_data} == {
+        "location": "weight.bin",
+        "offset": "0",
+        "length": str(external_data_bytes),
+    }
+    assert [node.op_type for node in sanitizer.model.graph.node] == ["Identity"]
+
+
+@pytest.mark.parametrize("is_trt_plugin", [False, True])
+@pytest.mark.parametrize("node_name", ["custom", ""])
+def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch, is_trt_plugin, node_name):
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
+    standard_name = "standard" if node_name else ""
+    standard_node = helper.make_node("Relu", [x.name], ["standard_out"], name=standard_name)
+    custom_node = helper.make_node("CustomOp", ["standard_out"], [y.name], name=node_name)
+    graph = helper.make_graph([standard_node, custom_node], "custom_graph", [x], [y])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)])
+    model_path = tmp_path / "custom.onnx"
+    tensor_info = {"Y": {"dtype": TensorProto.FLOAT, "shape": [1]}}
+    layer_name = node_name or "node_of_Y"
+    plugin_layers = [standard_name or "node_of_standard_out"]
+    if is_trt_plugin:
+        plugin_layers.append(layer_name)
+    get_custom_layers = Mock(return_value=(plugin_layers, tensor_info))
+    infer_types_shapes = Mock(return_value=model)
+
+    monkeypatch.setattr(graphsanitizer, "TRT_PYTHON_AVAILABLE", True)
+    set_trt_plugin_domain = Mock(return_value=model)
+    monkeypatch.setattr(graphsanitizer, "set_trt_plugin_domain", set_trt_plugin_domain)
+    monkeypatch.setattr(graphsanitizer, "get_custom_layers", get_custom_layers)
+    monkeypatch.setattr(graphsanitizer, "infer_types_shapes_tensorrt", infer_types_shapes)
+
+    sanitizer = GraphSanitizer(model, min_opset=22, onnx_path=str(model_path))
+    sanitizer.find_custom_nodes()
+
+    get_custom_layers.assert_called_once_with(str(model_path.resolve()), [])
+    infer_types_shapes.assert_called_once_with(model, [], all_tensor_info=tensor_info)
+    assert sanitizer.trt_plugin_ops == ({"CustomOp"} if is_trt_plugin else set())
+    if is_trt_plugin:
+        set_trt_plugin_domain.assert_called_once_with(model, {"CustomOp"})
+    else:
+        set_trt_plugin_domain.assert_not_called()

@@ -17,19 +17,21 @@
 
 import copy
 import fnmatch
+import functools
 import gc
 import types
 import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Sequence
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from typing import Any
 
 import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
 from tqdm import tqdm
 
 from modelopt.torch.opt.conversion import ModeloptStateManager
@@ -50,8 +52,10 @@ from ._auto_quantize_cost import (
     get_auto_quantize_cost_model,
     normalize_auto_quantize_constraints,
 )
-from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
+from .config import LayerwiseConfig, QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
+from .ggml import GGML_FORMAT_REGISTRY
+from .ggml.common import PIN_OVERRIDES_WEIGHT
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
 
@@ -125,12 +129,176 @@ def _make_fresh_quantizer_for_attr(module: nn.Module, attr_name: str) -> nn.Modu
     return TensorQuantizer()
 
 
+# Calibration methods that overwrite the weights they quantize. AutoQuantize calibrates every
+# candidate from the same source weights, so such a candidate must keep its result in quantizer
+# state (a GGML pinned payload) and the source is restored before the next candidate.
+_WEIGHT_REWRITING_METHODS = frozenset({"gptq", "imatrix"})
+# All a weight-rewriting candidate may also run: GPTQ and imatrix pin codes for the weight itself,
+# so a method that transforms it first (AWQ or SmoothQuant scales, SVDQuant) would leave the
+# selected model holding a different weight than scoring measured.
+_REWRITE_COMPATIBLE_METHODS = _WEIGHT_REWRITING_METHODS | {None, "max"}
+
+
+def _algorithm_entries(algorithm) -> list[dict]:
+    """Each calibration step of ``algorithm`` as a dict of its method and options."""
+    if isinstance(algorithm, list | tuple):
+        return [entry for a in algorithm for entry in _algorithm_entries(a)]
+    if hasattr(algorithm, "model_dump"):
+        algorithm = algorithm.model_dump()
+    return [algorithm if isinstance(algorithm, dict) else {"method": algorithm}]
+
+
+def _algorithm_methods(algorithm) -> set:
+    return {entry.get("method") for entry in _algorithm_entries(algorithm)}
+
+
+def _rewrites_weights(recipe: "QuantRecipe") -> bool:
+    return bool(_algorithm_methods(recipe.config.algorithm) & _WEIGHT_REWRITING_METHODS)
+
+
+def _refuse_layerwise_dirs(recipe: "QuantRecipe", search_rewrites_weights: bool) -> None:
+    """Refuse layerwise directories whose contents would outlive the candidate's calibration."""
+    for entry in _algorithm_entries(recipe.config.algorithm):
+        # A dict, or a LayerwiseConfig a dict algorithm keeps as given.
+        layerwise = LayerwiseConfig.model_validate(entry.get("layerwise") or {})
+        if not layerwise.enable:
+            continue
+        # The export replaces each calibrated layer's weights with packed ones, which scoring and
+        # the other candidates' calibrations would then run. An empty path exports here.
+        if layerwise.export_dir is not None:
+            raise NotImplementedError(
+                f"AutoQuantize candidate {recipe} sets layerwise.export_dir, whose export would "
+                "leave the model in export form before scoring. Drop export_dir and export the "
+                "searched model afterwards."
+            )
+        # A resume that restores the layers' weights loads them into new Parameters, which the
+        # source-weight restore after a rewriting candidate's calibration does not reach.
+        if search_rewrites_weights and layerwise.checkpoint_dir and layerwise.calib_mutates_weights:
+            raise NotImplementedError(
+                f"AutoQuantize candidate {recipe} sets a layerwise checkpoint_dir whose resume "
+                "restores the layers' weights, which would replace the weights this search "
+                "restores after rewriting them. Drop checkpoint_dir, or set "
+                "calib_mutates_weights=False on a calibration that leaves weights alone; the "
+                "AutoQuantize checkpoint resumes the search."
+            )
+
+
+def _storage_span(tensor: torch.Tensor):
+    """``tensor``'s storage and the bytes of it ``tensor`` spans; None if it holds no data here."""
+    if tensor.is_meta or isinstance(tensor, DTensor) or tensor.numel() == 0:
+        return None
+    start = tensor.storage_offset() * tensor.element_size()
+    last = sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()))
+    storage = (tensor.device, tensor.untyped_storage().data_ptr())
+    return storage, start, start + (last + 1) * tensor.element_size()
+
+
 def _iter_tensor_quantizers(module: nn.Module):
     if isinstance(module, TensorQuantizer):
         yield module
     elif isinstance(module, nn.ModuleList | SequentialQuantizer):
         for child in module:
             yield from _iter_tensor_quantizers(child)
+
+
+def _rewritten_weight(recipe: "QuantRecipe", name: str, module: nn.Module, attr: str, quantizer):
+    """The parameter ``recipe``'s calibration rewrites through ``module.<attr>``, or None.
+
+    Refuses a rewrite the quantizer cannot hold: one that is not a single GGML quantizer, or one
+    that rotates the weight.
+    """
+    enabled = [q for q in _iter_tensor_quantizers(quantizer) if q.is_enabled]
+    if "weight_quantizer" not in attr or not enabled:
+        return None
+    # GPTQ and imatrix are not GGML-specific, but a GGML pin is the only quantizer state that keeps
+    # the codes a calibration chose once the source weight is restored for the next candidate.
+    if any(isinstance(m, SequentialQuantizer) for m in quantizer.modules()) or any(
+        q.backend != "ggml" for q in enabled
+    ):
+        raise ValueError(
+            f"AutoQuantize candidate {recipe} calibrates with "
+            f"{sorted(_algorithm_methods(recipe.config.algorithm))}, which rewrites {name}'s "
+            f"weights, but its {attr} is not a single GGML quantizer that keeps the rewritten "
+            "codes. Search this format with a calibration that leaves weights unchanged."
+        )
+    # GPTQ rewrites every weight it quantizes; imatrix alone only those its backend's encoder takes
+    # (GGML's skips Q8_0). A fused projection is one parameter, and imatrix rewrites the slice of
+    # every expert it encodes, even when other experts use another format.
+    if "gptq" not in _algorithm_methods(recipe.config.algorithm) and not any(
+        map(model_calib._imatrix_encodes, enabled)
+    ):
+        return None
+    # GPTQ and the imatrix encoder pin codes for the weight itself, which a rotating quantizer
+    # would replace with its rotation's.
+    if any(q.rotate_is_enabled for q in enabled):
+        raise NotImplementedError(
+            f"AutoQuantize candidate {recipe} rewrites {name}'s weights, but its {attr} rotates "
+            "them before quantizing, which the codes its calibration pins do not account for. "
+            "Search this format without rotation or with a calibration that leaves weights "
+            "unchanged."
+        )
+    # Only the weight this quantizer covers: "weight_quantizer" -> "weight", a fused module's
+    # "gate_up_proj_weight_quantizers" -> "gate_up_proj".
+    weight_name = (
+        _get_replay_quantizer_attr(attr).removesuffix("weight_quantizer").rstrip("_") or "weight"
+    )
+    param = getattr(module, weight_name, None)
+    if not isinstance(param, nn.Parameter):
+        raise NotImplementedError(
+            f"{name}'s {attr} does not quantize a single weight parameter, which candidate "
+            f"{recipe} would rewrite."
+        )
+    return param
+
+
+def _check_restorable(model: nn.Module, params: dict) -> None:
+    """Refuse a rewritten weight that a CPU copy of it cannot restore, exactly and alone.
+
+    ``params`` maps each weight to its group's name. Such a weight must be materialized and
+    unsharded, stored as a float the GGML decoder writes, and hold storage no other parameter
+    shares.
+    """
+    uses = defaultdict(int)
+    spans = defaultdict(list)  # storage -> (parameter, first byte, end byte) of each parameter
+    for _, param in model.named_parameters(remove_duplicate=False):
+        uses[param] += 1
+        if uses[param] == 1 and (span := _storage_span(param)) is not None:
+            spans[span[0]].append((param, *span[1:]))
+    for param, name in params.items():
+        if param.is_meta or isinstance(param, DTensor):
+            raise NotImplementedError(
+                f"Weight-rewriting AutoQuantize candidates need materialized, unsharded "
+                f"weights; {name}'s are on the meta device (offloaded) or a DTensor (FSDP2)."
+            )
+        # GPTQ and imatrix encode the stored values and the selected codes decode into their
+        # dtype, so a packed or scaled weight (a native FP8 checkpoint's) is refused.
+        if param.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+            raise NotImplementedError(
+                f"Weight-rewriting AutoQuantize candidates need weights stored unscaled in a "
+                f"16-bit or wider float; {name}'s are {param.dtype}. Dequantize the model "
+                "first, or search it with a calibration that leaves weights unchanged."
+            )
+        span = _storage_span(param)
+        if uses[param] > 1 or (
+            span is not None
+            and any(
+                other is not param and first < span[2] and span[1] < end
+                for other, first, end in spans[span[0]]
+            )
+        ):
+            raise NotImplementedError(
+                f"{name}'s weight shares its storage with another parameter (tied weights, or "
+                "a view of them), which a weight-rewriting AutoQuantize candidate would change "
+                "too. Exclude it from the search or search it with a calibration that leaves "
+                "weights unchanged."
+            )
+
+
+def _full_pin(quantizer, weight: torch.Tensor) -> torch.Tensor | None:
+    """The codes ``quantizer``'s GGML format pinned for all of ``weight``, if it pinned any."""
+    num_bits = getattr(quantizer, "num_bits", None)
+    ggml_format = GGML_FORMAT_REGISTRY.get(num_bits) if isinstance(num_bits, str) else None
+    return None if ggml_format is None else ggml_format.full_pin(quantizer, weight)
 
 
 def _tensor_quantizer_format_signature(quantizer: TensorQuantizer) -> tuple:
@@ -268,6 +436,12 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
     return estimate_quant_compression_for_quantizer(cfgs) if cfgs else 1.0
 
 
+@functools.cache
+def _no_quant_signature() -> str:
+    """Return the canonical signature used to identify the no-quant recipe."""
+    return QuantRecipe(quant_cfg=None).checkpoint_signature
+
+
 class QuantRecipe(CustomHPType):
     """A subclass of QuantizeConfig enabling auto_quantize specific configurations.
 
@@ -308,6 +482,11 @@ class QuantRecipe(CustomHPType):
         """Return the canonical identity used for ordering and checkpoint validation."""
         return getattr(self, "_config_signature", self.config.model_dump_json())
 
+    @property
+    def is_no_quant(self) -> bool:
+        """Whether this recipe leaves the module unquantized."""
+        return self.checkpoint_signature == _no_quant_signature()
+
     @staticmethod
     def get_auto_name_for_config(quant_cfg: str | dict[str, Any] | None) -> str | None:
         """Get a name for the quantization configuration."""
@@ -332,8 +511,10 @@ class QuantRecipe(CustomHPType):
         return self._str_repr
 
     def __lt__(self, other: "QuantRecipe"):
-        return (self.compression, self.checkpoint_signature) < (
+        # Callers treat the last choice as the unquantized end of the format ladder.
+        return (self.compression, self.is_no_quant, self.checkpoint_signature) < (
             other.compression,
+            other.is_no_quant,
             other.checkpoint_signature,
         )
 
@@ -412,9 +593,13 @@ class QuantRecipeHparam(Hparam):
         self.cost_weight = cost_weight
         self.allow_no_quant = allow_no_quant
         self.is_fixed = fixed_recipe is not None
+        # A format shard scores only its own formats; None scores every choice.
+        self._scored_recipes: set | None = None
 
-        self.quant_modules = list(set(quant_modules or []))
-        self.score_modules = list(set(score_modules or self.quant_modules))
+        # Module hashes depend on object identity, so sets can produce different orders per rank.
+        self.quant_modules = list(dict.fromkeys(quant_modules or []))
+        self.score_modules = list(dict.fromkeys(score_modules or self.quant_modules))
+        self._warned_parallel_state_fallbacks: set[nn.Module] = set()
 
         fixed_quantizers = (
             {
@@ -467,11 +652,11 @@ class QuantRecipeHparam(Hparam):
             quant_recipe: dict.fromkeys(self.score_modules) for quant_recipe in self.choices
         }
 
-        # Attach this hparam to each score_module's set of hparams it scores
+        # Registration order follows the rank-stable runtime-group construction order.
         for score_module in self.score_modules:
             if not hasattr(score_module, "_hparams_for_scoring"):
-                score_module._hparams_for_scoring = set()
-            score_module._hparams_for_scoring.add(self)
+                score_module._hparams_for_scoring = []
+            score_module._hparams_for_scoring.append(self)
 
     @property
     def active(self) -> HPType:
@@ -496,6 +681,14 @@ class QuantRecipeHparam(Hparam):
             for quantizer_attr_name, quantizer in quantizer_choices.items():
                 setattr(nn_module, quantizer_attr_name, quantizer)
 
+    def _iter_quantizer_choices(self, recipe: QuantRecipe | None = None):
+        """Yield ``(module, attr, quantizer)`` of ``recipe``'s quantizers, or every recipe's."""
+        for choice, modules in self._all_quantizer_choices.items():
+            if recipe in (None, choice):
+                for module, quantizers in modules.items():
+                    for attr, quantizer in quantizers.items():
+                        yield module, attr, quantizer
+
     def set_calibration_recipe(self, recipe: QuantRecipe) -> None:
         """Enable ``recipe`` for this calibration pass or isolate the group."""
         calibration_recipe = recipe if recipe in self.choices else QuantRecipe(quant_cfg=None)
@@ -506,6 +699,16 @@ class QuantRecipeHparam(Hparam):
         active = self.active
         assert isinstance(active, QuantRecipe)
         self._apply_quantizer_choice(active)
+
+    @property
+    def scored_choices(self) -> list[QuantRecipe]:
+        """Choices whose sensitivity this process scores."""
+        recipes: list[QuantRecipe] = []
+        for recipe in self.choices:
+            assert isinstance(recipe, QuantRecipe)
+            if self._scored_recipes is None or recipe in self._scored_recipes:
+                recipes.append(recipe)
+        return recipes
 
     @property
     def solver_choices(self) -> list[QuantRecipe]:
@@ -532,6 +735,31 @@ class QuantRecipeHparam(Hparam):
                 continue
 
             parallel_state = getattr(score_module, "parallel_state", None)
+            if parallel_state is None:
+                # TODO: Prefer parallel_state owned by the score module; this temporary fallback
+                # inherits the first quantized child's state and assumes all grouped quant modules
+                # share the same parallel groups.
+                parallel_state_source = next(
+                    (
+                        (module, state)
+                        for module in self.quant_modules
+                        if (state := getattr(module, "parallel_state", None)) is not None
+                    ),
+                    None,
+                )
+                if parallel_state_source is not None:
+                    quant_module, parallel_state = parallel_state_source
+                    if (
+                        torch.distributed.is_initialized()
+                        and score_module not in self._warned_parallel_state_fallbacks
+                    ):
+                        warnings.warn(
+                            "Distributed training is initialized but no parallel_state is set for "
+                            f"score module {type(score_module)}. Using parallel_state from its first "
+                            f"quantized child {type(quant_module)}. All grouped quant modules must "
+                            "share the same parallel groups."
+                        )
+                        self._warned_parallel_state_fallbacks.add(score_module)
 
             if parallel_state is None:
                 total_score += importance.cpu().item()
@@ -632,10 +860,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     # certain modules to share the same format. Sensitivity scores are computed from perturbations
     # at score modules. See AutoQuantizeGradientSearcher for detailed documentation.
 
-    candidate_stats: dict[str, dict[str, list[float]]]
+    candidate_stats: dict[str, dict[str, Any]]
     best: dict[str, Any]
     quantizer_states: dict
     method_name: str | None = None
+    method_config_keys: frozenset[str] = frozenset()
+    # Hands back the unconverted model for a failure before calibration; ``auto_quantize`` sets it
+    # and ``before_search`` drops it once the checks before calibration pass.
+    restore_unconverted: Callable[[], None] | None = None
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
@@ -646,7 +878,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         r"^(.*?\.mlp\.experts\.local_experts)\.\d+\.(linear_fc1|linear_fc2)$",
         r"^(.*?)\.(gate_proj|up_proj)$",  # gate_proj, up_proj for llama like models
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
-        r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
         # Qwen3.5/3.6 hybrid linear_attn: vLLM fuses (in_proj_qkv, in_proj_z)
         # into ``in_proj_qkvz`` and (in_proj_a, in_proj_b) into ``in_proj_ba`` and
         # requires fused shards to share quant_algo. Two callables (not one
@@ -675,6 +906,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_model": COST_MODEL_WEIGHT,
             "cost": {},
             "active_moe_expert_ratio": None,
+            "format_shard": None,
         }
 
     @property
@@ -694,6 +926,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "disabled_layers": None,
             "candidate_stats": defaultdict(dict),
             "quantizer_states": {},
+            "format_shard": None,
+            "num_calib_steps": None,
+            "num_score_steps": None,
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
 
@@ -707,10 +942,25 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         assert config["forward_step"] is not None, (
             "`forward_step` must be provided for `auto_quantize`."
         )
+        if config["format_shard"] is not None:
+            index, count = config["format_shard"]
+            if not (isinstance(index, int) and isinstance(count, int) and 0 <= index < count):
+                raise ValueError("format_shard must be (index, count) with 0 <= index < count.")
+            if self.method_name not in ("gradient", "kl_div"):
+                raise ValueError("format_shard supports method='gradient' or 'kl_div'.")
+            if config["checkpoint"] is None:
+                raise ValueError("format_shard needs a checkpoint to save the shard's scores.")
+            config["format_shard"] = (index, count)
         return config
 
+    def validate_search_input(self, constraints, config) -> None:
+        """Validate method-specific inputs before quantizing the model."""
+
     def load_search_checkpoint(self) -> bool:
-        return super().load_search_checkpoint(strict=False)
+        loaded = super().load_search_checkpoint(strict=False)
+        # safe_save stores the defaultdict as a dict, which scoring after a resume fills by name.
+        self.candidate_stats = defaultdict(dict, self.candidate_stats)
+        return loaded
 
     @staticmethod
     def _is_auto_quantize_module(module):
@@ -1056,21 +1306,19 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if not isinstance(hparam, QuantRecipeHparam):
                 continue
 
-            formats, scores, costs = [], [], []
-            prev_score = float("inf")
+            formats, raw_scores, scores, costs = [], [], [], []
+            scored = set(hparam.scored_choices)
             for recipe in hparam.solver_choices:
                 formats.append(recipe)
-
-                score = hparam.get_score(recipe)
-                cost = hparam.get_cost(recipe)
-
-                score = min(score, prev_score)  # TODO: Should we get rid of this?
-                scores.append(score)
-                costs.append(cost)
-                prev_score = score
+                # A format shard leaves other shards' formats unscored; their merge fills them.
+                unscored = recipe not in scored and not recipe.is_no_quant
+                raw_scores.append(None if unscored else hparam.get_score(recipe))
+                costs.append(hparam.get_cost(recipe))
+            scores = _monotone_scores(raw_scores)
 
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
+            self.candidate_stats[name]["raw_scores"] = raw_scores
             self.candidate_stats[name]["costs"] = costs
             self.candidate_stats[name]["module_names"] = hparam.quant_module_names
             self.candidate_stats[name]["quantizer_attrs"] = hparam.quant_module_replay_attrs
@@ -1088,6 +1336,111 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             total=num_iters,
         ):
             func(self.model, data)
+
+    def _other_shards_recipes(self, quant_recipe_hparams, search_recipes) -> set:
+        """The searched formats this format shard leaves to the others; none without sharding.
+
+        Formats are dealt round-robin in canonical (compression, then config) order, each
+        calibrated and scored by its own shard. Every shard calibrates the formats groups hold
+        fixed, since those shape the reference the other groups are scored against.
+        """
+        if self.format_shard is None:
+            return set()
+        index, count = self.format_shard
+        configurable = [hparam for hparam in quant_recipe_hparams if hparam.is_configurable]
+        searched = [
+            recipe
+            for recipe in search_recipes
+            if not recipe.is_no_quant and any(recipe in hparam.choices for hparam in configurable)
+        ]
+        if count > len(searched):
+            raise ValueError(
+                f"format_shard count {count} exceeds {len(searched)} searched formats."
+            )
+        owned = set(searched[index::count])
+        for hparam in configurable:
+            hparam._scored_recipes = owned
+        held = {
+            recipe
+            for hparam in quant_recipe_hparams
+            if not hparam.is_configurable
+            for recipe in hparam.choices
+        }
+        return set(searched) - owned - held
+
+    def _snapshot_source_weights(self, quant_recipe_hparams, search_recipes):
+        """CPU copies of the weights candidates' calibrations will rewrite, or None if none will.
+
+        Refuses, before any calibration, a candidate that also transforms the weight it rewrites,
+        one whose quantizers cannot hold the rewrite (``_rewritten_weight``), and one whose weight
+        the copy cannot restore (``_check_restorable``).
+        """
+        params = {}
+        for recipe in filter(_rewrites_weights, search_recipes):
+            methods = _algorithm_methods(recipe.config.algorithm)
+            if unsupported := methods - _REWRITE_COMPATIBLE_METHODS:
+                raise NotImplementedError(
+                    f"AutoQuantize candidate {recipe} rewrites weights with "
+                    f"{sorted(methods & _WEIGHT_REWRITING_METHODS)}, whose codes are for the "
+                    f"weight itself, but also calibrates with {sorted(unsupported)}, which would "
+                    "quantize a transformed weight. Combine GPTQ or imatrix only with max."
+                )
+            for hparam in quant_recipe_hparams:
+                for module, attr, quantizer in hparam._iter_quantizer_choices(recipe):
+                    param = _rewritten_weight(recipe, hparam.name, module, attr, quantizer)
+                    if param is not None:
+                        params[param] = hparam.name
+        if not params:
+            return None
+        _check_restorable(self.model, params)
+        return {param: param.detach().to("cpu", copy=True) for param in params}
+
+    @staticmethod
+    def _restore_source_weights(source_weights):
+        with torch.no_grad():
+            for param, source in (source_weights or {}).items():
+                param.copy_(source)
+
+    @staticmethod
+    def _replay_pinned_codes(quant_recipe_hparams):
+        """Make the active candidate replay the codes its calibration pinned, over any weight.
+
+        A weight the calibration left alone holds no pin, such as one imatrix skips for an
+        unweighted format like Q8_0; it keeps quantizing the source weight, as the selected model
+        will.
+        """
+        for hparam in quant_recipe_hparams:
+            for module in hparam.quant_modules:
+                for weight, quantizer in module.iter_weights_for_calibration():
+                    if quantizer.is_enabled and _full_pin(quantizer, weight) is not None:
+                        setattr(quantizer, PIN_OVERRIDES_WEIGHT, True)
+
+    def _write_selected_codes_to_weights(self):
+        """Leave each selected weight-rewriting candidate's weights as its codes decode, as GPTQ does."""
+
+        def replays(quantizer):
+            return getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
+
+        with torch.no_grad():
+            for _, hparam in named_hparams(self.model, unique=True):
+                if not isinstance(hparam, QuantRecipeHparam):
+                    continue
+                for module in hparam.quant_modules:
+                    # Quantizers first: a fused-experts weight slice is a gather under FSDP2.
+                    if not any(map(replays, module.iter_weight_quantizers_for_calibration())):
+                        continue
+                    for weight, quantizer in module.iter_weights_for_calibration():
+                        if replays(quantizer):
+                            weight.copy_(
+                                GGML_FORMAT_REGISTRY[quantizer.num_bits].decode_pinned(
+                                    quantizer, weight
+                                )
+                            )
+                # Including the candidates not selected, which would otherwise replay their codes
+                # over the selected weights if made active again.
+                for _, _, quantizer in hparam._iter_quantizer_choices():
+                    for q in filter(replays, _iter_tensor_quantizers(quantizer)):
+                        setattr(q, PIN_OVERRIDES_WEIGHT, False)
 
     def before_search(self):
         """Prepare the model for search by calibrating the quantizers  and collecting ``AutoQuantize`` score."""
@@ -1244,12 +1597,43 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.resolved_search_setup_signature = resolved_search_setup_signature
         self._verify_resolved_constraint(quant_recipe_hparams)
 
+        format_shard = self.config["format_shard"]
+        restored_format_shard = self.format_shard
+        if restored_format_shard is not None:
+            restored_format_shard = tuple(restored_format_shard)
+        if has_restored_calibration_or_scores and restored_format_shard != format_shard:
+            raise ValueError(
+                f"Checkpoint holds format shard {restored_format_shard}, not {format_shard}. "
+                "Combine shard checkpoints with merge_auto_quantize_checkpoints() first."
+            )
+        self.format_shard = format_shard
+        # Scores sum over the batches, so restored calibration and scores keep the step counts they
+        # were computed with, which a shard's merge compares; a shard refuses to reuse them under
+        # other counts. An unsharded search reuses them as before, e.g. to re-solve a budget.
+        reused = {
+            "num_calib_steps": bool(self.quantizer_states),
+            "num_score_steps": bool(self.candidate_stats),
+        }
+        for key, is_reused in reused.items():
+            if not is_reused:
+                setattr(self, key, self.config[key])
+            elif format_shard is not None and getattr(self, key) != self.config[key]:
+                raise ValueError(
+                    f"This shard's checkpoint was computed with {key}={getattr(self, key)}, not "
+                    f"{self.config[key]}; resume it with the same counts or a new checkpoint."
+                )
+        other_shards_recipes = self._other_shards_recipes(quant_recipe_hparams, search_recipes)
+        calibration_recipes = [r for r in search_recipes if r not in other_shards_recipes]
+
+        source_weights = self._snapshot_source_weights(quant_recipe_hparams, calibration_recipes)
+        # Free the weights conversion replaced before calibration and scoring.
+        self.restore_unconverted = None
         QuantRecipe.disable_folding_pqs_to_weights()
 
         # Iterate over the search recipes and calibrate the quantizers for each recipe
         calibrated_new = False
         try:
-            for recipe in search_recipes:
+            for recipe in calibration_recipes:
                 if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
                     continue
 
@@ -1263,6 +1647,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                         self.model, QuantizeConfig(), {"quantizer_state": saved["metadata"]}
                     )
                     set_quantizer_state_dict(self.model, saved["state_dict"])
+                    if _rewrites_weights(recipe):
+                        self._replay_pinned_codes(quant_recipe_hparams)
                     if self.config["verbose"]:
                         print_rank_0(f"AutoQuantize: Restored calibration for {recipe}")
                     continue
@@ -1281,15 +1667,22 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                         desc=f"Calibrating for {recipe}",
                     )
 
-                calibrate(
-                    self.model,
-                    algorithm=recipe.config.algorithm,
-                    forward_loop=forward_loop,
-                )
-                # Calibrate adds a new mode to the model. Since auto_quantize mixes the quantization recipes
-                # across layers, lets not save this new mode in the modelopt state.
-                # TODO: This is a hack. We need to create a mode for auto_quantize to handle this in a clean way.
-                ModeloptStateManager(self.model).state_dict().pop()
+                num_modes = len(ModeloptStateManager(self.model).state_dict())
+                try:
+                    calibrate(
+                        self.model,
+                        algorithm=recipe.config.algorithm,
+                        forward_loop=forward_loop,
+                    )
+                finally:
+                    # Calibrate adds a mode per algorithm (none for `algorithm: []`), also those
+                    # an algorithm list completes before one fails. Since auto_quantize mixes the
+                    # quantization recipes across layers, lets not save them in the modelopt state.
+                    # TODO: This is a hack. We need to create a mode for auto_quantize to handle this in a clean way.
+                    del ModeloptStateManager(self.model).state_dict()[num_modes:]
+                if _rewrites_weights(recipe):
+                    self._replay_pinned_codes(quant_recipe_hparams)
+                    self._restore_source_weights(source_weights)
                 metadata: dict = {}
                 # config is unused by update_quantize_metadata
                 update_quantize_metadata(self.model, QuantizeConfig(), metadata)
@@ -1298,9 +1691,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     "state_dict": get_quantizer_state_dict(self.model),
                 }
                 calibrated_new = True
+        except BaseException:
+            # The failing candidate may have rewritten weights before it failed.
+            self._restore_source_weights(source_weights)
+            raise
         finally:
             for hparam in quant_recipe_hparams:
                 hparam.restore_active_quantizers()
+        # Host memory the size of the rewritten weights; scoring does not read it.
+        del source_weights
 
         if calibrated_new:
             self.save_search_checkpoint(verbose=self.config["verbose"])
@@ -1358,6 +1757,46 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             return [0.99, 0.90, None]
         return [None, 0.99, 0.90]
 
+    def _run_linear_program_search(self, max_weight_size, verbose=False):
+        """Select recipes with the standard AutoQuantize linear program."""
+        for lower_bound in self._get_search_lower_bounds():
+            constraints, constraint_name = self._get_constraints_for_search(
+                max_weight_size, lower_bound
+            )
+            lps = LPS(
+                name="AutoQuantize",
+                constraints=constraints,
+                constraints_to_candidate_costs={
+                    constraint_name: [
+                        candidate_stat["costs"] for candidate_stat in self.candidate_stats.values()
+                    ]
+                },
+                candidate_scores=[
+                    candidate_stat["scores"] for candidate_stat in self.candidate_stats.values()
+                ],
+                objective_type="minimize",
+                verbose=verbose,
+            )
+            selections, self.status = lps()
+            if self.status == "Optimal":
+                break
+
+        is_satisfied = self.status == "Optimal"
+        if not is_satisfied:
+            warnings.warn(
+                "AutoQuantize FAILED to find a solution! The searched model might not meet all constraints. "
+            )
+
+        best_recipes = {}
+        for name, selected_idx in zip(self.candidate_stats, selections, strict=True):
+            best_recipes[name] = {
+                "format": self.candidate_stats[name]["formats"][selected_idx],
+                "costs": self.candidate_stats[name]["costs"][selected_idx],
+                "scores": self.candidate_stats[name]["scores"][selected_idx],
+            }
+
+        return best_recipes, is_satisfied
+
     @abstractmethod
     def run_search_with_stats(self, max_weight_size, verbose=False):
         """Run the search with stats to get the best recipe and whether the constraints are satisfied."""
@@ -1365,6 +1804,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     def run_search(self):
         """Search for the best per-layer quantization configuration and return the best model and configuration."""
         verbose = self.config["verbose"]
+        if self.format_shard is not None:
+            if verbose:
+                print_rank_0(
+                    f"AutoQuantize: format shard {self.format_shard} scored; merge the shard "
+                    "checkpoints with merge_auto_quantize_checkpoints() to solve."
+                )
+            return
         assert "effective_bits" in self.constraints and (
             set(self.constraints) <= AUTO_QUANTIZE_CONSTRAINT_KEYS
         ), (
@@ -1426,7 +1872,81 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.best["constraints"] = {"effective_bits": effective_bits_from_search}
         self.best["score"] = best_scores
 
+        self._write_selected_codes_to_weights()
         QuantRecipe.fold_pqs_to_weights(self.model)
+
+
+def _monotone_scores(raw_scores):
+    """Scores never increasing with compression; formats left unscored (None) stay None."""
+    scores, prev_score = [], float("inf")
+    for score in raw_scores:
+        if score is not None:
+            score = min(score, prev_score)  # TODO: Should we get rid of this?
+            prev_score = score
+        scores.append(score)
+    return scores
+
+
+_SHARD_INVARIANT_STATE = (
+    "method",
+    "cost_model",
+    "cost",
+    "active_moe_expert_ratio",
+    "quantization_formats_signature",
+    "fixed_quantization_config_signature",
+    "module_search_space_signature",
+    "resolved_search_setup_signature",
+    "num_calib_steps",
+    "num_score_steps",
+)
+
+
+def merge_auto_quantize_shards(shard_states: Sequence[dict]) -> dict:
+    """Combine the states of every format shard of one search into an unsharded search state."""
+    ids = [tuple(state.get("format_shard") or ()) for state in shard_states]
+    if sorted(ids) != [(index, len(ids)) for index in range(len(ids))]:
+        raise ValueError(
+            f"Merge needs one checkpoint per format shard (0..count-1, count), got {ids}."
+        )
+    shards = [state for _, state in sorted(zip(ids, shard_states), key=lambda pair: pair[0])]
+    for key in ("num_calib_steps", "num_score_steps"):
+        # Unrecorded counts would compare equal across shards whose scores scale differently.
+        if any(state.get(key) is None for state in shards):
+            raise ValueError(
+                f"Every format shard must record {key}; rerun shards saved without it."
+            )
+    # Copy the containers the merge fills, not the calibrated tensors (GGML codes) they hold.
+    merged = {
+        **shards[0],
+        "quantizer_states": dict(shards[0]["quantizer_states"]),
+        "candidate_stats": copy.deepcopy(shards[0]["candidate_stats"]),
+    }
+    for state in shards[1:]:
+        for key in _SHARD_INVARIANT_STATE:
+            if state.get(key) != merged.get(key):
+                raise ValueError(f"Format shards were run with different search setups ({key}).")
+        if state["candidate_stats"].keys() != merged["candidate_stats"].keys():
+            raise ValueError("Format shards were run with different quantization groups.")
+        merged["quantizer_states"].update(state["quantizer_states"])
+        for name, stats in state["candidate_stats"].items():
+            target = merged["candidate_stats"][name]
+            if [str(f) for f in stats["formats"]] != [str(f) for f in target["formats"]]:
+                raise ValueError(f"Format shards list different formats for {name}.")
+            for i, score in enumerate(stats["raw_scores"]):
+                current = target["raw_scores"][i]
+                if score is None or current == score:
+                    continue
+                # Every shard scores BF16 and fixed groups alike (0); a sharded format only once.
+                if current is not None:
+                    raise ValueError(f"Two format shards scored {target['formats'][i]} for {name}.")
+                target["raw_scores"][i] = score
+    for name, stats in merged["candidate_stats"].items():
+        if any(score is None for score in stats["raw_scores"]):
+            raise ValueError(f"No format shard scored every format of {name}.")
+        stats["scores"] = _monotone_scores(stats["raw_scores"])
+    merged["format_shard"] = None
+    merged["best"] = {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False}
+    return merged
 
 
 def _get_auto_quantize_score(grad_output, output_diff):
@@ -1434,11 +1954,265 @@ def _get_auto_quantize_score(grad_output, output_diff):
     return x.clamp(-1e10, 1e10).square().sum()
 
 
-def _add_auto_quantize_score(grad_output, output_diff, score_tensor):
-    score_tensor += _get_auto_quantize_score(grad_output, output_diff)
+class _AutoQuantizeBackwardScoringSession(ABC):
+    """Manage temporary model state used by activation-backward scoring."""
+
+    def __init__(
+        self,
+        model: nn.Module,
+        score_modules: Sequence[nn.Module],
+        is_param_grad_enabled: Callable,
+        verbose: bool = False,
+    ) -> None:
+        self.model = model
+        self.score_modules = tuple(score_modules)
+        self.is_param_grad_enabled = is_param_grad_enabled
+        self.verbose = verbose
+        self._stack = ExitStack()
+        self._original_forwards: dict[nn.Module, Callable] = {}
+        self._output_grad_hook_handles: set[Any] = set()
+        self._grad_accumulators: list[Any] = []
+
+    def __enter__(self):
+        """Install scoring hooks and parameter settings."""
+        try:
+            hparams = list(
+                dict.fromkeys(
+                    hparam
+                    for module in self.score_modules
+                    for hparam in module._hparams_for_scoring
+                )
+            )
+            for hparam in hparams:
+                self._stack.callback(setattr, hparam, "active", hparam.active)
+
+            def patched_forward(module, *args, **kwargs):
+                return self.forward(module, *args, **kwargs)
+
+            for module in self.score_modules:
+                original_forward = module.forward
+                self._original_forwards[module] = original_forward
+                had_instance_forward = "forward" in module.__dict__
+                instance_forward = module.__dict__.get("forward")
+                module.forward = types.MethodType(patched_forward, module)
+                if had_instance_forward:
+                    self._stack.callback(setattr, module, "forward", instance_forward)
+                else:
+                    self._stack.callback(module.__dict__.pop, "forward", None)
+
+            for name, param in self.model.named_parameters():
+                requires_grad = param.requires_grad
+                enable_grad = self.is_param_grad_enabled(name, self.model)
+                param.requires_grad = enable_grad
+                self._stack.callback(setattr, param, "requires_grad", requires_grad)
+                if not enable_grad:
+                    continue
+                if self.verbose:
+                    print_rank_0(f"AutoQuantize: Enabling gradient for param {name}.")
+                accumulator, hook = create_param_grad_clear_hook(param)
+                self._grad_accumulators.append(accumulator)
+                self._stack.callback(hook.remove)
+        except Exception:
+            self._stack.close()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        """Restore all model state changed for scoring."""
+        self._clear_output_grad_hooks()
+        self._stack.close()
+        self._original_forwards.clear()
+        self._grad_accumulators.clear()
+
+    def original_forward(self, module: nn.Module) -> Callable:
+        """Return the forward method saved before scoring."""
+        return self._original_forwards[module]
+
+    def _clear_output_grad_hooks(self) -> None:
+        """Remove output hooks whose backward pass has not run."""
+        for handle in self._output_grad_hook_handles:
+            handle.remove()
+        self._output_grad_hook_handles.clear()
+
+    def _register_output_grad_hook(self, output: torch.Tensor, hook: Callable) -> None:
+        """Attach an invocation-specific output-gradient hook for this session."""
+
+        def run_once(grad):
+            try:
+                return hook(grad)
+            finally:
+                handle.remove()
+                self._output_grad_hook_handles.discard(handle)
+
+        handle = output.register_hook(run_once)
+        self._output_grad_hook_handles.add(handle)
+
+    @abstractmethod
+    def forward(self, module: nn.Module, *args, **kwargs):
+        """Run a score module forward pass and collect method-specific state."""
 
 
-class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
+class _AutoQuantizeCandidateReplayScoringSession(_AutoQuantizeBackwardScoringSession):
+    """Share baseline execution, candidate replay, and score accumulation."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.no_quant = QuantRecipe(quant_cfg=None)
+
+    def _run_unquantized(self, module: nn.Module, *args, **kwargs):
+        """Run a score module with each configurable group unquantized."""
+        for hparam in module._hparams_for_scoring:
+            if hparam.is_configurable:
+                hparam.active = self.no_quant
+        output = self.original_forward(module)(*args, **kwargs)
+        base = output[0] if isinstance(output, tuple) else output
+        return output, base
+
+    def _replay_candidates(self, module: nn.Module, base, candidate_recipes, *args, **kwargs):
+        """Measure output differences for the requested candidates."""
+        output_diffs = {}
+        with torch.no_grad():
+            for hparam in module._hparams_for_scoring:
+                if not hparam.is_configurable:
+                    continue
+                recipe_diffs = {}
+                for recipe in candidate_recipes(hparam):
+                    if recipe == self.no_quant:
+                        continue
+                    hparam.active = recipe
+                    try:
+                        replay = self.original_forward(module)(*args, **kwargs)
+                    finally:
+                        hparam.active = self.no_quant
+                    replay = replay[0] if isinstance(replay, tuple) else replay
+                    recipe_diffs[recipe] = (replay - base).detach()
+                if recipe_diffs:
+                    output_diffs[hparam] = recipe_diffs
+        return output_diffs
+
+    def _accumulate_candidate_scores(self, module, output_diffs, grad_output) -> None:
+        """Apply the method's score functional to replayed output differences."""
+        if grad_output is None:
+            return
+        if not torch.isfinite(grad_output).all():
+            module_name = next(
+                name for name, child in self.model.named_modules() if child is module
+            )
+            raise RuntimeError(
+                f"AutoQuantize: Non-finite output gradients in module '{module_name or '<root>'}'. "
+                "Cannot compute reliable sensitivity scores. Check the model, data, and loss. "
+                "cuDNN SDPA backward on fully masked attention rows is one possible cause; "
+                "try torch.backends.cuda.enable_cudnn_sdp(False) before rerunning auto_quantize."
+            )
+        with torch.no_grad():
+            for hparam, recipe_diffs in output_diffs.items():
+                for recipe, output_diff in recipe_diffs.items():
+                    contribution = self._score_contribution(grad_output, output_diff)
+                    current = hparam._importance_dict[recipe][module]
+                    hparam._importance_dict[recipe][module] = (
+                        contribution if current is None else current + contribution
+                    )
+
+    def _register_candidate_score_hook(self, module, output, output_diffs) -> None:
+        """Bind replayed candidate differences to one output invocation."""
+        self._register_output_grad_hook(
+            output,
+            lambda grad_output: self._accumulate_candidate_scores(
+                module, output_diffs, grad_output
+            ),
+        )
+
+    @abstractmethod
+    def _score_contribution(self, grad_output, output_diff):
+        """Return this method's score contribution for one replayed candidate."""
+
+
+class _AutoQuantizeGradientScoringSession(_AutoQuantizeCandidateReplayScoringSession):
+    """Collect gradient-based scores while candidate recipes are replayed."""
+
+    def forward(self, module: nn.Module, *args, **kwargs):
+        """Run the reference forward and cache each recipe's output perturbation."""
+        output, base = self._run_unquantized(module, *args, **kwargs)
+
+        # Checkpointed modules recompute with gradients enabled during backward.
+        if not torch.is_grad_enabled() or not base.requires_grad:
+            return output
+
+        output_diffs = self._replay_candidates(
+            module, base, lambda hparam: hparam.scored_choices, *args, **kwargs
+        )
+        self._register_candidate_score_hook(module, base, output_diffs)
+        return output
+
+    def _score_contribution(self, grad_output, output_diff):
+        return _get_auto_quantize_score(grad_output, output_diff)
+
+
+class _AutoQuantizeBackwardScoringSearcher(_AutoQuantizeBaseSearcher):
+    """Share orchestration used by activation-backward scoring methods."""
+
+    score_module_rules = [
+        # Score MoE projections together at their enclosing MLP or mixer output.
+        r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
+        r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",
+        r"^(.*?)\.(\d+\.(w1|w2|w3))$",
+    ]
+
+    _custom_support: list[tuple[Callable, Callable, Callable]] = []
+
+    @classmethod
+    def register_custom_support(
+        cls,
+        is_supported_checker: Callable,
+        grad_ckpt_context: Callable,
+        is_param_grad_enabled: Callable,
+    ) -> None:
+        """Register optional hooks for memory-efficient backward scoring.
+
+        `is_supported_checker` selects models that use these hooks.
+        `grad_ckpt_context` enables their gradient-checkpointing context, and
+        `is_param_grad_enabled` selects the minimum parameters needed to propagate
+        activation gradients.
+        """
+        cls._custom_support.append((is_supported_checker, grad_ckpt_context, is_param_grad_enabled))
+
+    def _configurable_score_modules(self) -> list[nn.Module]:
+        return [
+            module
+            for module in self.model.modules()
+            if hasattr(module, "_hparams_for_scoring")
+            and any(hparam.is_configurable for hparam in module._hparams_for_scoring)
+        ]
+
+    @abstractmethod
+    def _estimate_auto_quantize_scores(self, is_param_grad_enabled: Callable) -> None:
+        """Estimate scores while activation gradients are enabled."""
+
+    def estimate_sensitivity_scores(self) -> None:
+        """Run backward scoring with the first matching model-specific support hook."""
+        self.model.eval()
+
+        def default_is_param_grad_enabled(_name, _model):
+            return True
+
+        grad_checkpointing_context = None
+        is_param_grad_enabled = default_is_param_grad_enabled
+        for is_supported, context_candidate, grad_candidate in self._custom_support:
+            if is_supported(self.model):
+                grad_checkpointing_context = context_candidate
+                is_param_grad_enabled = grad_candidate
+                break
+
+        context = (
+            grad_checkpointing_context(self.model)
+            if grad_checkpointing_context is not None
+            else nullcontext()
+        )
+        with context:
+            self._estimate_auto_quantize_scores(is_param_grad_enabled)
+
+
+class AutoQuantizeGradientSearcher(_AutoQuantizeBackwardScoringSearcher):
     """A searcher for AutoQuantize algorithm that uses gradient based score estimation.
 
     In AutoQuantize, we search for the best per-layer quantization configuration that minimizes the sum of per-layer
@@ -1472,17 +2246,6 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
 
     method_name = "gradient"
 
-    score_module_rules = [
-        # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
-        r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
-        r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
-        r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
-        r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
-    ]
-
-    # See `register_custom_support` for details
-    _custom_support: list[tuple[Callable, Callable, Callable]] = []
-
     @property
     def default_search_config(self):
         """Get the default config for the searcher."""
@@ -1500,7 +2263,8 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
         """Sanitize the search config dict."""
         config = config or {}
         if "score_func" in config:
-            warnings.warn("`score_func` is ignored for gradient based `auto_quantize`.")
+            if config["score_func"] is not None:
+                warnings.warn("`score_func` is ignored for gradient based `auto_quantize`.")
             config.pop("score_func")
         config = super().sanitize_search_config(config)
         if config["forward_backward_step"] is None:
@@ -1510,30 +2274,6 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
             config["forward_backward_step"] = self._get_default_forward_backward_step()
 
         return config
-
-    @classmethod
-    def register_custom_support(
-        cls,
-        is_supported_checker: Callable,
-        grad_ckpt_context: Callable,
-        is_param_grad_enabled: Callable,
-    ) -> None:
-        """(Optional) Register custom support for `AutoQuantize` score estimation.
-
-        This custom support is used to enable memory/compute efficient backward gradient propagation. This involves:
-
-        - `grad_ckpt_context`: backward pass with gradient checkpointing enabled
-        - `is_param_grad_enabled`: AutoQuantize only needs activation gradients to be computed (not weight
-          gradients). `is_param_grad_enabled` is used to select which parameters should have gradients enabled,
-          limiting gradient computation to only what's needed for activation gradients. For LLMs, to trigger all
-          activation gradient computation, just enabling the embedding layer weight gradient is sufficient. This will
-          enable gradient computation for all the activation gradients downstream.
-
-        If the `is_supported_checker(model)` returns True, the `grad_ckpt_context(model)` will be
-        used to enable gradient checkpointing and `is_param_grad_enabled(pname, model)`
-        will be used to select which parameters have gradients enabled to minimize gradient computation.
-        """
-        cls._custom_support.append((is_supported_checker, grad_ckpt_context, is_param_grad_enabled))
 
     def _get_default_forward_backward_step(self):
         def forward_backward_step(model, data):
@@ -1552,142 +2292,34 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
 
     @torch.enable_grad()
     def _estimate_auto_quantize_scores(self, is_param_grad_enabled):
-        # TODO: remove the no-quant recipe
-        def auto_quantize_score_estimate_forward(module, input, *args, **kwargs):
-            for hparam in module._hparams_for_scoring:
-                if hparam.is_configurable:
-                    hparam.active = QuantRecipe(quant_cfg=None)
+        score_modules = self._configurable_score_modules()
+        with _AutoQuantizeGradientScoringSession(
+            self.model,
+            score_modules,
+            is_param_grad_enabled,
+            verbose=self.config.get("verbose", False),
+        ) as scoring_session:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                report_memory("AutoQuantize: starting score estimation, ")
 
-            output = module._forward_original(input, *args, **kwargs)
+            def score_step(model, data):
+                try:
+                    return self.config["forward_backward_step"](model, data)
+                finally:
+                    scoring_session._clear_output_grad_hooks()
 
-            # If gradient checkpointing is enabled, gradient will not be enabled in the global forward pass.
-            # With gradient checkpointing, gradients are computed in the local forward pass during backward pass
-
-            # Lets compute the output_diff and save it in memory only if gradient is enabled to be memory efficient
-            if not torch.is_grad_enabled():
-                return output
-
-            module.output_diff_dict = {hparam: {} for hparam in module._hparams_for_scoring}
-            with torch.no_grad():
-                for hparam in module._hparams_for_scoring:
-                    if not hparam.is_configurable:
-                        continue
-                    for recipe in hparam.choices:
-                        if recipe == QuantRecipe(quant_cfg=None):
-                            continue
-                        hparam.active = recipe
-                        output_diff = module._forward_original(input, *args, **kwargs)
-
-                        if isinstance(output_diff, tuple):
-                            output_diff = output_diff[0] - output[0]
-                        else:
-                            output_diff -= output
-                        module.output_diff_dict[hparam][recipe] = output_diff.detach()
-
-                    # Disable the configurable hparam now that we have computed the diff
-                    hparam.active = QuantRecipe(quant_cfg=None)
-
-            return output
-
-        def backward_hook(module, grad_input, grad_output):
-            for hparam, output_diff_dict in module.output_diff_dict.items():
-                for recipe, output_diff in output_diff_dict.items():
-                    if hparam._importance_dict[recipe][module] is None:
-                        hparam._importance_dict[recipe][module] = _get_auto_quantize_score(
-                            grad_output[0], output_diff
-                        )
-                    else:
-                        _add_auto_quantize_score(
-                            grad_output[0], output_diff, hparam._importance_dict[recipe][module]
-                        )
-
-        def setup_params_for_score_estimation(name, param, params_metadata, enable_grad=True):
-            # Let us delete the gradient as soon as they are computed to save memory
-            params_metadata[name] = {"requires_grad": param.requires_grad}
-            param.requires_grad = enable_grad
-            if not enable_grad:
-                return
-            if self.config.get("verbose", False):
-                print_rank_0(f"AutoQuantize: Enabling gradient for param {name}.")
-            accum_grad, handle = create_param_grad_clear_hook(param)
-            params_metadata[name]["accum_grad"] = accum_grad  # We need to keep the accum_grad alive
-            params_metadata[name]["handle"] = handle
-
-        def setup_module_for_score_estimation(module):
-            module._forward_original = module.forward
-            module.forward = types.MethodType(auto_quantize_score_estimate_forward, module)
-            module._backward_hook_handle = module.register_full_backward_hook(backward_hook)
-
-        def cleanup_module_after_score_estimation(module):
-            module.forward = module._forward_original
-            del module._forward_original
-
-            module._backward_hook_handle.remove()
-
-        def cleanup_params_after_score_estimation(name, param, params_metadata):
-            param.requires_grad = params_metadata[name]["requires_grad"]
-            handle = params_metadata[name].get("handle", None)
-            if handle is not None:
-                handle.remove()
-
-        score_modules = set()
-        for name, module in self.model.named_modules():
-            if (
-                hasattr(module, "_hparams_for_scoring")
-                and any(hparam.is_configurable for hparam in module._hparams_for_scoring)
-                and module not in score_modules
-            ):
-                # Monkey patch the forward methods to cache (Q(Y) - Y)
-                setup_module_for_score_estimation(module)
-                score_modules.add(module)
-
-        params_metadata = {}
-        for name, param in self.model.named_parameters():
-            setup_params_for_score_estimation(
-                name, param, params_metadata, is_param_grad_enabled(name, self.model)
+            self._run_func(
+                score_step,
+                num_iters=self.config["num_score_steps"],
+                desc="Estimating auto_quantize scores",
             )
 
+            if torch.cuda.is_available():
+                report_memory("AutoQuantize: After score estimation")
+
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-            report_memory("AutoQuantize: starting score estimation, ")
-
-        self._run_func(
-            self.config["forward_backward_step"],
-            num_iters=self.config["num_score_steps"],
-            desc="Estimating auto_quantize scores",
-        )
-
-        if torch.cuda.is_available():
-            report_memory("AutoQuantize: After score estimation")
-
-        for module in score_modules:
-            cleanup_module_after_score_estimation(module)
-
-        for name, param in self.model.named_parameters():
-            cleanup_params_after_score_estimation(name, param, params_metadata)
-
-        # Delete the params_metadata
-        del params_metadata
-        gc.collect()
-
-    def estimate_sensitivity_scores(self) -> None:
-        """Estimate sensitivity scores using hessian approximation."""
-        self.model.eval()
-
-        def _default_is_param_grad_enabled(pname, model):
-            return True
-
-        grad_checkpointing_ctxt = None
-        is_param_grad_enabled = _default_is_param_grad_enabled
-        for is_supported_checker, ctxt_candidate, grad_enabled_candidate in self._custom_support:
-            if is_supported_checker(self.model):
-                grad_checkpointing_ctxt = ctxt_candidate
-                is_param_grad_enabled = grad_enabled_candidate
-                break
-
-        with grad_checkpointing_ctxt(self.model) if grad_checkpointing_ctxt else nullcontext():
-            self._estimate_auto_quantize_scores(is_param_grad_enabled)
 
     def run_search_with_stats(self, max_weight_size, verbose=False):
         """Linear Programming Solve for gradient based auto_quantize.
@@ -1695,52 +2327,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
         AutoQuantize uses Linear Programming Solver to find the optimal quantization configuration which
         minimizes the sum of per-layer auto_quantize scores while meeting the specified constraint.
         """
-        # TODO: Do this only for rank 0 in the respective pipeline group
-
-        for lower_bound in self._get_search_lower_bounds():
-            # The LP solver for auto_quantize sometimes fails to find a solution if a lower bound is not
-            # specified. I dont know why this happens.
-            # As a workaround, lets specify a lower bound for the weight compression if previous
-            # search without lower bound fails.
-            constraints, constraint_name = self._get_constraints_for_search(
-                max_weight_size, lower_bound
-            )
-
-            lps = LPS(
-                name="AutoQuantize",
-                constraints=constraints,
-                constraints_to_candidate_costs={
-                    constraint_name: [
-                        candidate_stat["costs"] for candidate_stat in self.candidate_stats.values()
-                    ]
-                },
-                candidate_scores=[
-                    candidate_stat["scores"] for candidate_stat in self.candidate_stats.values()
-                ],
-                objective_type="minimize",
-                verbose=verbose,
-            )
-            selections, self.status = lps()
-            if self.status == "Optimal":
-                break
-
-        if self.status != "Optimal":
-            warnings.warn(
-                "AutoQuantize FAILED to find a solution! The searched model might not meet all constraints. "
-            )
-            is_satisfied = False
-        else:
-            is_satisfied = True
-
-        best_recipes = {}
-        for name, selected_idx in zip(self.candidate_stats.keys(), selections):
-            best_recipes[name] = {
-                "format": self.candidate_stats[name]["formats"][selected_idx],
-                "costs": self.candidate_stats[name]["costs"][selected_idx],
-                "scores": self.candidate_stats[name]["scores"][selected_idx],
-            }
-
-        return best_recipes, is_satisfied
+        return self._run_linear_program_search(max_weight_size, verbose)
 
 
 @torch.compile(dynamic=True)
@@ -1843,7 +2430,7 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
             ):
                 if not isinstance(hparam, QuantRecipeHparam):
                     continue
-                for recipe in hparam.choices:
+                for recipe in hparam.scored_choices:
                     if recipe == QuantRecipe(quant_cfg=None):
                         continue
                     hparam.active = recipe
@@ -1945,6 +2532,12 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
 
 # Backward compatibility alias (defaults to gradient-based searcher)
 AutoQuantizeSearcher = AutoQuantizeGradientSearcher
+
+# Registry of AutoQuantize scoring methods. Optional methods register on import.
+AUTO_QUANTIZE_SEARCHERS: dict[str, type[_AutoQuantizeBaseSearcher]] = {
+    AutoQuantizeGradientSearcher.method_name: AutoQuantizeGradientSearcher,
+    AutoQuantizeKLDivSearcher.method_name: AutoQuantizeKLDivSearcher,
+}
 
 
 def _as_list(value) -> list:
@@ -2078,15 +2671,12 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
     max_weight_size = total_weight_size * compression
     method = search_state["method"]
 
-    if method == "gradient":
-        searcher = AutoQuantizeGradientSearcher()
-    elif method == "kl_div":
-        searcher = AutoQuantizeKLDivSearcher()
-    else:
+    if method not in AUTO_QUANTIZE_SEARCHERS:
         raise ValueError(
-            f"Unknown autoquant search method: {method!r}. Expected 'gradient' or 'kl_div'."
+            f"Unknown autoquant search method: {method!r}. "
+            f"Expected one of {sorted(AUTO_QUANTIZE_SEARCHERS)}."
         )
-
+    searcher = AUTO_QUANTIZE_SEARCHERS[method]()
     searcher.candidate_stats = candidate_stats
     searcher.cost_model = search_state.get("cost_model", COST_MODEL_WEIGHT)
     searcher.cost = search_state.get("cost", {})
@@ -2103,8 +2693,10 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
         "cost": searcher.cost,
         "active_moe_expert_ratio": searcher.active_moe_expert_ratio,
     }
+    for key in searcher.default_state_dict:
+        if key in search_state and not hasattr(searcher, key):
+            setattr(searcher, key, search_state[key])
     best_recipe_info, _ = searcher.run_search_with_stats(max_weight_size, verbose=verbose)
-
     best_recipe = {name: info["format"] for name, info in best_recipe_info.items()}
     if verbose:
         total_cost = sum(info["costs"] for info in best_recipe_info.values())
@@ -2135,3 +2727,8 @@ def _match_quantizer_cfg(quant_cfg, quantizer_attr):
             matched_enable = enable
 
     return matched, matched_enable
+
+
+# Late import avoids a circular dependency: the Aumann-Shapley searcher builds on the
+# AutoQuantize classes above and registers itself in AUTO_QUANTIZE_SEARCHERS on import.
+from . import _auto_quantize_shapley as _auto_quantize_shapley  # noqa: E402

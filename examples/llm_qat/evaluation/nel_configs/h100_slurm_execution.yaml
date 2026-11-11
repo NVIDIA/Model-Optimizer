@@ -1,0 +1,23 @@
+# Shared single-GPU Slurm execution settings for H100 evaluation.
+# NEL mounts the server checkpoint automatically; pass the evaluator mount with -o.
+execution:
+  hostname: ${oc.env:NEL_SLURM_HOST}
+  username: ${oc.env:SLURM_USER}
+  account: ${oc.env:NEL_SLURM_ACCOUNT}
+  partition: ${oc.env:NEL_SLURM_PARTITION}
+  output_dir: ${oc.env:NEL_OUTPUT_DIR}
+  num_nodes: 1
+  ntasks_per_node: 1
+  gres: gpu:1
+  walltime: 04:00:00
+  sbatch_extra_flags:
+    exclusive: false
+    mem: 64G
+  mounts:
+    mount_home: false
+    deployment: {}
+    # NEL 0.2.6 validates this field as a dictionary before resolving oc.create,
+    # so the expression deriving the mount from MODEL_CHECKPOINT was rejected.
+    # The README therefore supplies a concrete mapping via the CLI instead:
+    # -o "++execution.mounts.evaluation={$MODEL_CHECKPOINT: /checkpoint}"
+    evaluation: {}

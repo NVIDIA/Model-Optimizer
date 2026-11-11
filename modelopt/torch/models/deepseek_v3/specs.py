@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""DeepSeek-V3 specs (HF model type ``deepseek_v3``).
+
+Covers the transformers-native V3 family (V3, R1, V3.1). The remote-code
+``DeepseekMoE`` block of DeepSeek-MoE is a separate spec under ``deepseek``.
+"""
+
+from ..deepseek.specs import GENERATION_UNSUPPORTED
+from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, PTQSpec, register
+
+__all__: list[str] = []
+
+# The plan for transformers releases that ship none for deepseek_v3 (before 5.13). From 5.13 its own
+# plan wins (an existing plan always does, see apply_distributed_support): the same experts, plus an
+# ep_router entry for the gate, which the load swaps for torch_a2a_router (global ids, unmasked). No
+# gate entry here on purpose: the router is logits-only and the MoE block computes GLOBAL top-k ids,
+# so the experts already receive unmasked global ids -- what the all-to-all dispatch wants.
+BASE_MODEL_EP_PLAN = {
+    "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+    "layers.*.mlp.experts.down_proj": "grouped_gemm",
+    "layers.*.mlp.experts": "moe_tp_experts",
+}
+
+# DeepseekV3MoE is invisible to the generic MoE detection: its class name does not end
+# in "SparseMoeBlock" and it calls its router ``gate``, so neither the name test nor the
+# structural router+experts test in is_moe matches. block_names below is what puts it on
+# the MoE path at all.
+#
+# The naming recorded here is for an nn.ModuleList of DeepseekV3MLP experts (remote code and
+# transformers 4.x). transformers 5.x uses a fused, 3-D DeepseekV3Experts holding
+# gate_up_proj/down_proj, which resolves through the structural first-projection check in
+# get_expert_linear_names and never consults this naming -- the same split as Mixtral.
+register(
+    ModelSpec(
+        model_type="deepseek_v3",
+        min_transformers_version="5.5",
+        export_spec=ExportSpec(grouped_expert_export=True),
+        ep_spec=EPSpec(base_model_ep_plan=BASE_MODEL_EP_PLAN),
+        ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),
+        moe_spec=MoESpec(
+            block_names=("DeepseekV3MoE",),
+            expert_linear_names=("gate_proj", "down_proj", "up_proj"),
+            gate_up_pair=("gate_proj", "up_proj"),
+        ),
+    )
+)

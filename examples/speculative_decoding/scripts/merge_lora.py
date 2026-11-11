@@ -31,7 +31,13 @@ import argparse
 from pathlib import Path
 
 from safetensors.torch import load_file
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
+
+from modelopt.torch.speculative.utils import (
+    CONFIG_OVERRIDES_HELP,
+    load_vlm_or_llm,
+    parse_config_overrides,
+)
 
 
 def parse_args():
@@ -61,11 +67,18 @@ def parse_args():
         action="store_true",
         help="Allow loading models that define custom code on the HF Hub. Off by default.",
     )
+    parser.add_argument(
+        "--config_overrides",
+        type=str,
+        default=None,
+        help=CONFIG_OVERRIDES_HELP,
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    config_overrides = parse_config_overrides(args.config_overrides)
     lora_dir = Path(args.exported_lora_dir)
 
     # Verify exported files exist (standard peft naming)
@@ -81,13 +94,21 @@ def main():
     print(f"Loaded {len(lora_sd)} LoRA tensors from {lora_dir}")
     print(f"  Sample keys: {list(lora_sd.keys())[:4]}")
 
-    # Load the original base model
+    # Load the original base model.
+    #
+    # Use load_vlm_or_llm rather than AutoModelForCausalLM directly: it falls back to
+    # AutoModelForCausalLM for plain LLMs (same dtype/device_map, so unchanged behavior), but also
+    # handles VLMs and registers/loads architectures the Auto* maps don't cover. Cosmos3 is the
+    # motivating case -- the transformers-cosmos3 plugin registers only the `cosmos3_omni` config,
+    # never a model under Auto*, so AutoModelForCausalLM raises KeyError('cosmos3_omni') no matter
+    # what is imported.
     print(f"Loading base model from {args.base_model_path}...")
-    model = AutoModelForCausalLM.from_pretrained(
+    model = load_vlm_or_llm(
         args.base_model_path,
-        torch_dtype="auto",
+        dtype="auto",
         device_map="cpu",
         trust_remote_code=args.trust_remote_code,
+        config_overrides=config_overrides,
     )
     tokenizer = AutoTokenizer.from_pretrained(
         args.base_model_path, trust_remote_code=args.trust_remote_code
@@ -135,9 +156,18 @@ def main():
     # Since LoRA only changes weights — not architecture — the original config is correct.
     import shutil
 
+    # ...but only when the loaded config still matches the base's. With --config_overrides the
+    # weights were built from corrected dims, so copying the uncorrected base config back would
+    # leave config.json disagreeing with model.safetensors and force every downstream reader to
+    # re-supply the same overrides.
     base_config = Path(args.base_model_path) / "config.json"
     output_config = Path(args.output_path) / "config.json"
-    if base_config.exists():
+    if config_overrides:
+        print(
+            "  Keeping the saved config.json (config_overrides were applied, so the original "
+            "base config would not match the merged weights)"
+        )
+    elif base_config.exists():
         shutil.copy2(str(base_config), str(output_config))
         print(f"  Restored original config.json from {base_config}")
 

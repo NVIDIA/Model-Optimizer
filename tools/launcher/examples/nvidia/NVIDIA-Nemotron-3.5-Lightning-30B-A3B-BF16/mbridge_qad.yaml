@@ -43,7 +43,7 @@ pipeline:
       --max_sequence_length 256_000
     slurm_config:
       _factory_: "slurm_factory"
-      container: nvcr.io/nvidia/nemo:26.06
+      container: nvcr.io/nvidia/nemo:26.08
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 1
       # One process (the tokenizer is single-process), but a full node: clusters
@@ -65,7 +65,7 @@ pipeline:
       --tp_size 1
       --pp_size 1
       --ep_size 1
-      --recipe huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6
+      --recipe models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6
       --calib_batch_size 1
       --calib_num_samples 1000
       --seq_length 32768
@@ -73,7 +73,7 @@ pipeline:
       --export_megatron_path <<global_vars.output_dir>>-ptq
     slurm_config: &sc
       _factory_: "slurm_factory"
-      container: nvcr.io/nvidia/nemo:26.06
+      container: nvcr.io/nvidia/nemo:26.08
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 1
       ntasks_per_node: 4

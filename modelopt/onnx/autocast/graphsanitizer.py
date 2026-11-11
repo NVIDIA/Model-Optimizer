@@ -15,6 +15,8 @@
 
 """Graph sanitization and optimization for ONNX models."""
 
+import os
+
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
@@ -24,8 +26,14 @@ from onnx import helper, numpy_helper
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast.logging_config import logger
-from modelopt.onnx.quantization.graph_utils import cast_custom_ops
-from modelopt.onnx.trt_utils import interpret_trt_plugins_precision_flag
+from modelopt.onnx.quantization.graph_rewrites import cast_custom_ops
+from modelopt.onnx.trt_utils import (
+    TRT_PYTHON_AVAILABLE,
+    get_custom_layers,
+    infer_types_shapes_tensorrt,
+    interpret_trt_plugins_precision_flag,
+    set_trt_plugin_domain,
+)
 
 
 class GraphSanitizer:
@@ -36,8 +44,9 @@ class GraphSanitizer:
         model: onnx.ModelProto,
         min_opset: int = 13,
         max_ir_version: int | None = None,
-        trt_plugins: list[str] | None = [],
-        trt_plugins_precision: list[str] | None = [],
+        trt_plugins: list[str] | None = None,
+        trt_plugins_precision: list[str] | None = None,
+        onnx_path: str | None = None,
     ) -> None:
         """Initialize GraphSanitizer.
 
@@ -46,15 +55,19 @@ class GraphSanitizer:
             min_opset: minimum opset version to use
             max_ir_version: maximum IR version supported by ORT
             trt_plugins: list of TensorRT plugin library paths in .so format (compiled shared library).
+            onnx_path: path to the source ONNX model, used to resolve external data.
         """
         self.model = model
         self.min_opset = min_opset
         self.max_ir_version = max_ir_version
         self.standard_ops = {schema.name for schema in onnx.defs.get_all_schemas()}
         self.custom_ops = None
+        self.trt_plugin_ops: set[str] = set()
         self.custom_ops_low_precision_nodes = []
-        self.trt_plugins = trt_plugins
+        self.trt_plugins = [] if trt_plugins is None else trt_plugins
         self.trt_plugins_precision = trt_plugins_precision or []
+        self.onnx_path = os.path.abspath(onnx_path) if onnx_path is not None else None
+        self.external_data_dir = os.path.dirname(self.onnx_path) if self.onnx_path else ""
 
     def sanitize(self) -> None:
         """Sanitize the model graph.
@@ -117,14 +130,34 @@ class GraphSanitizer:
         self.custom_ops = {
             node.op_type for node in self.model.graph.node if node.op_type not in self.standard_ops
         }
+        self.trt_plugin_ops = set()
         if self.custom_ops:
-            from modelopt.onnx.trt_utils import infer_types_shapes_tensorrt, set_trt_plugin_domain
+            if not TRT_PYTHON_AVAILABLE:
+                logger.warning(
+                    "TensorRT Python bindings are unavailable; skipping custom-layer introspection."
+                )
+                return
+
+            custom_layers, all_tensor_info = get_custom_layers(
+                self.onnx_path or self.model, self.trt_plugins
+            )
+            custom_layer_names = set(custom_layers)
+            self.trt_plugin_ops = {
+                node.op_type
+                for node in self.model.graph.node
+                if node.op_type in self.custom_ops
+                and (node.name or (f"node_of_{node.output[0]}" if node.output else ""))
+                in custom_layer_names
+            }
 
             # Set TensorRT plugin domain info in the graph for ORT compatibility
-            self.model = set_trt_plugin_domain(self.model, self.custom_ops)
+            if self.trt_plugin_ops:
+                self.model = set_trt_plugin_domain(self.model, self.trt_plugin_ops)
 
             # Infer types and shapes in the graph for ORT compatibility
-            self.model = infer_types_shapes_tensorrt(self.model, self.trt_plugins)
+            self.model = infer_types_shapes_tensorrt(
+                self.model, self.trt_plugins, all_tensor_info=all_tensor_info
+            )
 
     def remove_disconnected_outputs(self) -> None:
         """Remove disconnected outputs from the model."""
@@ -501,7 +534,7 @@ class GraphSanitizer:
         """Get value from an initializer by name."""
         for init in self.model.graph.initializer:
             if init.name == name:
-                value = numpy_helper.to_array(init)
+                value = numpy_helper.to_array(init, base_dir=self.external_data_dir)
                 return value if return_array else value.item()
         return None
 
@@ -516,7 +549,7 @@ class GraphSanitizer:
         for initializer in self.model.graph.initializer:
             if initializer.data_type == onnx.TensorProto.DOUBLE:
                 # Convert the data to FP32
-                fp64_data = numpy_helper.to_array(initializer)
+                fp64_data = numpy_helper.to_array(initializer, base_dir=self.external_data_dir)
                 fp32_data = fp64_data.astype(np.float32)
 
                 # Create new initializer with FP32 data
@@ -575,7 +608,7 @@ class GraphSanitizer:
                 for attr in node.attribute:
                     if attr.name == "value" and attr.t.data_type == onnx.TensorProto.DOUBLE:
                         # Convert the tensor value to FP32
-                        fp64_data = numpy_helper.to_array(attr.t)
+                        fp64_data = numpy_helper.to_array(attr.t, base_dir=self.external_data_dir)
                         fp32_data = fp64_data.astype(np.float32)
                         new_tensor = numpy_helper.from_array(fp32_data)
                         attr.t.CopyFrom(new_tensor)
@@ -588,7 +621,7 @@ class GraphSanitizer:
         """Use GraphSurgeon to cleanup unused nodes, tensors and initializers."""
         gs_graph = gs.import_onnx(self.model)
         gs_graph.cleanup()
-        self.model = gs.export_onnx(gs_graph)
+        self.model = onnx_utils.export_onnx(gs_graph)
 
     def replace_custom_domain_nodes(self):
         """Replace custom domain nodes with standard ONNX nodes."""

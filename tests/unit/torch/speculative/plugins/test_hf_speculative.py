@@ -26,10 +26,12 @@ from transformers import AutoModelForCausalLM
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import EAGLE3_DEFAULT_CFG
+from modelopt.torch.speculative.plugins.hf_eagle import HFEagleModel
 
 
 @pytest.mark.parametrize("eagle_config", [EAGLE3_DEFAULT_CFG])
-def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config):
+@pytest.mark.parametrize("mix_mode", [None, "sparse_replace", "uniform_layer_sample"])
+def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config, mix_mode):
     model_ref = get_tiny_llama(num_hidden_layers=8)
 
     config = deepcopy(eagle_config["config"])
@@ -46,6 +48,9 @@ def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config):
     )
     # torch.compile(max-autotune) is a GPU optimization; on CPU it only adds compile time.
     config["eagle_use_torch_compile"] = False
+    config["eagle_mix_hidden_states"] = mix_mode is not None
+    if mix_mode is not None:
+        config["eagle_mix_hidden_states_mode"] = mix_mode
 
     mtsp.convert(model_ref, mode=[("eagle", config)])
     assert isinstance(model_ref, mtsp.plugins.HFEagleModel)
@@ -60,7 +65,12 @@ def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config):
 
 @pytest.mark.parametrize("eagle_config", [EAGLE3_DEFAULT_CFG])
 @pytest.mark.parametrize("eagle_ttt_steps", [1, 2])
-def test_eagle_mix_hidden_states_backward(eagle_config, eagle_ttt_steps):
+@pytest.mark.parametrize(
+    "eagle_mix_hidden_states_mode", ["sparse_replace", "uniform_layer_sample", "unknown"]
+)
+def test_eagle_mix_hidden_states_backward(
+    eagle_config, eagle_ttt_steps, eagle_mix_hidden_states_mode
+):
     """Regression test for GitHub issue #1088.
 
     Verifies that the EAGLE training forward+backward pass does not crash with
@@ -77,6 +87,11 @@ def test_eagle_mix_hidden_states_backward(eagle_config, eagle_ttt_steps):
         }
     )
     config["eagle_mix_hidden_states"] = True
+    config["eagle_mix_hidden_states_mode"] = (
+        "sparse_replace"
+        if eagle_mix_hidden_states_mode == "unknown"
+        else eagle_mix_hidden_states_mode
+    )
     config["eagle_ttt_steps"] = eagle_ttt_steps
     config["eagle_use_torch_compile"] = False
 
@@ -86,9 +101,42 @@ def test_eagle_mix_hidden_states_backward(eagle_config, eagle_ttt_steps):
     input_ids = torch.randint(0, model.config.vocab_size, (2, 16))
     labels = input_ids.clone()
 
+    if eagle_mix_hidden_states_mode == "unknown":
+        # Module attributes can be reassigned after the config has been validated.
+        model.eagle_mix_hidden_states_mode = "unknown"
+        with pytest.raises(ValueError):
+            model(input_ids=input_ids, labels=labels)
+        return
+
     outputs = model(input_ids=input_ids, labels=labels)
     assert outputs.loss is not None
     outputs.loss.backward()
 
     eagle_grads = [p.grad for p in model.eagle_module.parameters() if p.grad is not None]
     assert len(eagle_grads) > 0, "Expected gradients to flow to eagle_module"
+
+
+@pytest.mark.parametrize("shape", [(2, 7, 4), (7, 2, 4)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("num_candidates", [1, 4])
+def test_eagle_uniform_layer_sample_matches_stacked_history(shape, dtype, num_candidates):
+    """Sampling preserves the original outputs, gradients, and RNG consumption in both layouts."""
+    hidden_states_history = [
+        torch.randn(shape, dtype=dtype, requires_grad=True) for _ in range(num_candidates)
+    ]
+    rng_state = torch.get_rng_state()
+    stacked = torch.stack(hidden_states_history)
+    selected_candidates = torch.randint(num_candidates, (1, *shape[:2], 1))
+    expected = stacked.gather(0, selected_candidates.expand(1, *shape)).squeeze(0)
+    expected_rng_state = torch.get_rng_state()
+
+    torch.set_rng_state(rng_state)
+    mixed = HFEagleModel._sample_uniform_hidden_state_history(hidden_states_history)
+    assert torch.equal(torch.get_rng_state(), expected_rng_state)
+    torch.testing.assert_close(mixed, expected, rtol=0, atol=0)
+
+    grad = torch.randn_like(mixed)
+    expected_grads = torch.autograd.grad(expected, hidden_states_history, grad)
+    actual_grads = torch.autograd.grad(mixed, hidden_states_history, grad)
+    for actual, reference in zip(actual_grads, expected_grads):
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)

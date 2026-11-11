@@ -88,6 +88,9 @@ def _quantize_model_with_dataset(
         net = lm
 
     if auto_quantize_bits is not None:
+        # A bare string would otherwise be iterated character by character below.
+        if isinstance(quant_cfg, str):
+            quant_cfg = quant_cfg.split(",")
         quant_cfg_for_search = [
             getattr(mtq, quant_fmt) for quant_fmt in quant_cfg if quant_fmt != "NONE"
         ]

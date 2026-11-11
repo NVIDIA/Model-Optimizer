@@ -3,20 +3,21 @@
 When evaluating a quantized checkpoint, prioritize benchmarks that are sensitive
 to precision loss. The Artificial Analysis (AA) Index v2 suite under
 `recipes/tasks/aa/` is the default set for quantized-checkpoint validation.
-**GDPVal** (`recipes/tasks/gym/gdpval.md`) is also part of the AA suite, but a
-different harness (NeMo Gym) — it runs as a **separate standalone config**, never
-merged into the `aa/` multi-task list.
+
+**GDPVal is no longer supported by this skill.** It is an AA-suite member, so the
+set below is the AA suite *minus* GDPVal: use it for relative baseline-vs-candidate
+comparison and report per-task scores, not an aggregate index number matched against
+a published AA Index.
 
 **Scope rule:**
 
 - **Default quant validation** (when the user just says "evaluate this
-  quantized checkpoint"): use the AA suite — the `aa/` tasks **plus a standalone
-  GDPVal config** — plus the three always-include benchmarks at
-  `recipes/tasks/*.md` (MMLU-Pro, AIME 2025, LiveCodeBench).
+  quantized checkpoint"): use the AA suite — the `aa/` tasks — plus the three
+  always-include benchmarks at `recipes/tasks/*.md` (MMLU-Pro, AIME 2025,
+  LiveCodeBench).
 - **Explicit AA request** ("AA" / "Artificial Analysis" / "AA Index v2"):
-  use the `aa/` tasks **and** a companion standalone GDPVal config. Do not add
-  the three always-include tasks unless the user asks. See the callout at the
-  bottom of this file.
+  use the `aa/` tasks. Do not add the three always-include tasks unless the user
+  asks. See the callout at the bottom of this file.
 
 ## Available task recipes
 
@@ -33,7 +34,6 @@ merged into the `aa/` multi-task list.
 | `tasks/aa/mmmu_pro.md` | MMMU-Pro | Multimodal reasoning | VLM-only; usually Low/Medium when only the LLM is quantized (vision encoder/adapter typically stay BF16) |
 | `tasks/aa/tau2_bench_telecom.md` | Tau2-Bench Telecom | Agentic tool use (user-simulator + judge) | Medium-high — tool-call JSON is brittle, but user-sim + judge variance often dominates the signal |
 | `tasks/aa/omniscience.md` | AA-Omniscience | Knowledge reliability (`ns_omniscience`, nemo-skills, `num_repeats: 10`) — correct vs hallucinate vs abstain on obscure facts, judge-scored | Medium — measures the hallucination/abstention balance; aggressive precision loss can erode factual recall and shift the omni-index |
-| `tasks/gym/gdpval.md` | GDPVal (`nemo_gym` Stirrup agent, **standalone config**) | Agentic office/PDF deliverables in an Apptainer code-exec sandbox, pairwise/rubric judge | High — long-horizon agentic reasoning + code + judge; precision loss compounds across many turns. **Heaviest task**: multi-hour, often multi-node, needs the SIF sandbox + judge. Runs as its own config, never in the `aa/` list |
 | `tasks/gym/mrcr.md` | MRCR (`nemo_gym` simple agent, **standalone config**, **not AA**) | Long-context co-reference retrieval up to 1M tokens; deterministic prefix-gated `SequenceMatcher` grading, stratified by needle count | Very high — the longest-context task available here; KV-cache and attention quant error accumulate over the full window. No judge, so the signal is clean. Opt-in: only when the user asks for MRCR or long-context coverage |
 
 ## Recommended sets by use case
@@ -42,17 +42,16 @@ merged into the `aa/` multi-task list.
 |----------|-----------|
 | Quick sanity check | GPQA |
 | Standard quant validation (text LLM) | GPQA, SciCode, LCR |
-| AA / Artificial Analysis suite (text LLM) | All `tasks/aa/` text tasks: GPQA, HLE, LCR, SciCode, IFBench, Tau2-Bench Telecom, AA-Omniscience — **plus GDPVal** (`tasks/gym/gdpval.md`, a separate standalone config) |
-| AA / Artificial Analysis suite (multimodal) | AA text suite (incl. GDPVal) + MMMU-Pro |
+| AA / Artificial Analysis suite (text LLM) | All `tasks/aa/` text tasks: GPQA, HLE, LCR, SciCode, IFBench, Tau2-Bench Telecom, AA-Omniscience (GDPVal is an AA member but unsupported here) |
+| AA / Artificial Analysis suite (multimodal) | AA text suite + MMMU-Pro |
 | Code-focused model | LiveCodeBench, SciCode |
 | Reasoning model | AIME 2025, GPQA, HLE |
 
 > If the user asks for "AA" or "Artificial Analysis", generate the
-> `recipes/tasks/aa/` tasks **plus a companion standalone GDPVal config**
-> (`recipes/tasks/gym/gdpval.md`) — GDPVal is part of the AA suite but a
-> different harness, so it's its own config, never in the `aa/` `tasks` list. Do
-> not silently add MMLU-Pro, AIME 2025, or LiveCodeBench — they live at
-> `recipes/tasks/*.md` and are a separate always-include set.
+> `recipes/tasks/aa/` tasks as one multi-task config. Do not silently add
+> MMLU-Pro, AIME 2025, or LiveCodeBench — they live at `recipes/tasks/*.md` and
+> are a separate always-include set. Say up front that GDPVal, an AA member, is
+> not covered.
 
 ## Notes for quantized-checkpoint runs
 
@@ -63,8 +62,9 @@ merged into the `aa/` multi-task list.
   do **not** lower them for quant comparisons, or noise will mask real
   regressions. The field name differs by harness: `n_samples` for simple-evals
   (AIME `64`) and tau2-bench (Tau2 `8`); `num_repeats` for nemo-skills
-  (AA-LCR/GPQA `16`, AA-Omniscience `10`, LiveCodeBench/SciCode `8`, IFBench `5`,
-  MMLU-Pro `1`).
+  (AA-LCR/GPQA `16`, AA-Omniscience `10`, LiveCodeBench `8`, IFBench `5`,
+  MMLU-Pro `1`). **SciCode is the exception** — `num_repeats: 1` x 8+ separate
+  submissions, averaged (`tasks/aa/scicode.md`).
 - **Judge / user-simulator endpoints** are required by AA-LCR, HLE AA,
   AA-Omniscience, and Tau2-Bench Telecom. Keep the judge and (for Tau2)
   user-simulator models fixed across baseline and quantized runs for
@@ -81,13 +81,10 @@ merged into the `aa/` multi-task list.
   it onto an uncalibrated checkpoint applies KV quantization it was never
   calibrated for. Report the 2/4/8 needle strata — precision
   loss hits the 8-needle stratum while the aggregate still looks flat.
-- **GDPVal** is part of the AA suite but the heaviest task and a separate
-  harness: it runs as its **own standalone `gym` config** (never in the `aa/`
-  `tasks` list), needs the Apptainer SIF sandbox + judge, and is multi-hour /
-  often multi-node. Generate it alongside the `aa/` config; see
-  `recipes/tasks/gym/gdpval.md` + `references/gym-gdpval.md`. Thinking mode is
-  mandatory (non-thinking loses ~86% of pairwise judgements). `num_repeats` is **1** —
-  the value both current goldens use, already set by the template; do not raise it.
+- **GDPVal** is an AA-suite member this skill no longer supports. Keep it out of
+  the set, and when the comparison is framed against a published AA Index, say the
+  agentic-deliverables dimension is missing rather than presenting the remaining
+  tasks as the full suite.
 
 ## How to use
 

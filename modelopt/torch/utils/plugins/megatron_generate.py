@@ -107,6 +107,15 @@ def _assert_mamba_within_int32_indexing(model: MegatronModule, batch_size: int, 
         )
 
 
+def _masks_causally_itself(model: MegatronModule) -> bool:
+    """Whether the model's attention applies causal masking internally and rejects an explicit mask.
+
+    DeepSeek-V4 hybrid attention (``CompressedSparseAttention``) raises on any ``attention_mask``;
+    Megatron training runs it with ``attention_mask=None``.
+    """
+    return getattr(model.config, "experimental_attention_variant", None) == "dsv4_hybrid"
+
+
 def get_current_memory_info():
     """Get current memory usage."""
     remaining_mem, total_mem = torch.cuda.mem_get_info()
@@ -182,8 +191,9 @@ def megatron_prefill(
     cp_size = mpu.get_context_parallel_world_size()
 
     # Under CP a local triu mask would be wrong for the per-rank zigzag chunks; pass None and let
-    # the CP-aware causal attention build it. Without CP the causal mask must be supplied explicitly.
-    if cp_size > 1:
+    # the CP-aware causal attention build it. DeepSeek-V4 hybrid attention masks causally itself.
+    # Otherwise the causal mask must be supplied explicitly.
+    if cp_size > 1 or _masks_causally_itself(model):
         attention_mask = None
     else:
         attention_mask = (
@@ -250,6 +260,11 @@ def megatron_prefill(
     # Some VLM wrappers (e.g. Gemma3VLModel) return ``(logits, loss_mask)`` rather than a bare tensor.
     if isinstance(output, (tuple, list)):
         output = output[0]
+
+    # Layerwise calibration ends the forward early at the layer being captured (PP=1 only: with
+    # PP>1 the other stages would still wait on this one).
+    if output is None and skip_return_logits and not is_pp:
+        return None
 
     # For PP non-last stages, forward activations to the next stage and return early.
     if is_pp and not pp_last:
@@ -378,8 +393,9 @@ def megatron_generate(
 
         # ModelOpt transformer_spec uses arbitrary attention mask type by default; compute causal
         # mask for prefill. During decode, attn_mask_type is overridden to "no_mask" by
-        # SelfAttention.forward() when inference_context is provided.
-        if seq_len > 1:
+        # SelfAttention.forward() when inference_context is provided. DeepSeek-V4 hybrid attention
+        # masks causally itself and rejects an explicit mask.
+        if seq_len > 1 and not _masks_causally_itself(model):
             attention_mask = (
                 torch.triu(torch.ones((batch_size, seq_len, seq_len), device=device), diagonal=1)
                 .bool()
@@ -394,10 +410,12 @@ def megatron_generate(
             .expand(batch_size, -1)
         )
 
-        # Check if this is a VLM model (vision inputs only passed at step 0 / prefill)
-        _has_pixel_values = step == 0 and pixel_values is not None
-        _has_image_grid_thw = step == 0 and image_grid_thw is not None
-        _has_image_sizes = step == 0 and image_sizes is not None
+        # VLM vision inputs: KV-cache decoding consumes them in the prefill step only, but without
+        # a cache every step recomputes the full prefix and must replay them to stay grounded.
+        _replay_vision_inputs = step == 0 or inference_context is None
+        _has_pixel_values = _replay_vision_inputs and pixel_values is not None
+        _has_image_grid_thw = _replay_vision_inputs and image_grid_thw is not None
+        _has_image_sizes = _replay_vision_inputs and image_sizes is not None
         has_vision_inputs = _has_pixel_values or _has_image_grid_thw or _has_image_sizes
 
         # For PP, receive activations from the previous stage before calling forward.

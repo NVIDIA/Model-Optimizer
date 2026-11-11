@@ -317,3 +317,6 @@ def build_concat_hp(inputs: list[TracedHp]):
     concat_hp._importance_estimators = None
 
     return concat_hp
+
+
+torch.serialization.add_safe_globals([ConcatTracedHp])

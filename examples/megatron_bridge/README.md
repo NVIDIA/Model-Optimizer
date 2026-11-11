@@ -15,12 +15,14 @@ This directory contains examples of using Model Optimizer with the [NeMo Megatro
 
 </div>
 
+This README is the getting-started guide, with each workflow shown on small models (mostly Qwen3-8B).
+
 > [!TIP]
-> Checkout the [Nemotron-3-Nano-30B-A3B pruning + distillation (with data blend prep) + quantization tutorial](tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) for a complete end-to-end workflow using Megatron-Bridge!
+> For complete end-to-end workflows on larger models, see the [tutorials](tutorials/README.md): [Nemotron-3-Nano-30B-A3B](tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) pruning + distillation + quantization, [Qwen3.6-35B-A3B](tutorials/Qwen3.6-35B-A3B/README.md) W4A4 NVFP4 + QAD, and [NVIDIA Nemotron 3.5 Super VL](tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/README.md) W4A4 + QAD.
 
 ## Pre-Requisites
 
-Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.06`) which has all the dependencies installed.
+Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.10`) which has all the dependencies installed.
 
 To get the ModelOpt examples scripts, mount your Model-Optimizer repo to the container as follows:
 
@@ -30,7 +32,7 @@ if [ ! -d "${MODELOPT_DIR}" ]; then
   git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
 fi
 
-export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.06
+export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.10
 docker run \
   --gpus all \
   --shm-size=16GB \
@@ -44,21 +46,49 @@ docker run \
   ${DOCKER_IMAGE} bash
 ```
 
+> [!NOTE]
+> The `nemo:26.10.00` container's Transformer Engine has no sm_120 kernels (RTX PRO 6000 fails with `no kernel image is available for execution on the device`). CI works around it by copying the same-version PyPI `libtransformer_engine.so` over the container's, see [`te-all-gpu-archs`](../../.github/actions/te-all-gpu-archs/action.yml). The `nemo:26.10.01` patch release is expected to fix it.
+
+Some features (e.g. [`--vllm_fakequant_export`](#evaluating-a-qad-checkpoint-in-vllm-with-fake-quantization), `--fake_quant_weight_cache` and GLM-5.3-Flash support) need a newer Megatron-Bridge than the one in `nvcr.io/nvidia/nemo:26.10`. Until `nemo:26.12` ships it, check out Megatron-Bridge at the commit ModelOpt's CI tests against, together with its Megatron-LM submodule:
+
+```bash
+export MBRIDGE_DIR=${PWD}/Megatron-Bridge
+git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git ${MBRIDGE_DIR}
+git -C ${MBRIDGE_DIR} checkout 24b6adc89f5429e55863abc4cee56173eb5eff1a
+git -C ${MBRIDGE_DIR} submodule update --init 3rdparty/Megatron-LM
+```
+
+and add these mounts to the `docker run` command above:
+
+```bash
+  -v ${MBRIDGE_DIR}/src/megatron/bridge:/opt/Megatron-Bridge/src/megatron/bridge \
+  -v ${MBRIDGE_DIR}/3rdparty/Megatron-LM/megatron:/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron \
+```
+
 > [!WARNING]
 > Use `python -m pip` instead of `pip` to avoid conflicts with the system-wide installed packages in the NeMo containers. You may also refer to this [doc](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docker/common/README.md#installing-packages-inside-the-container) on how to correctly install packages in the NeMo containers without breaking existing torch installation.
-
-> [!NOTE]
-> **Working with MoE Vision-Language Models (e.g. Qwen3.5-VL-MoE)?** The `nemo:26.06` container's Megatron-Bridge lacks the MoE expert weight mappings these models need (dense VLMs such as Gemma3-VL and Qwen3-VL work as-is). Until the `nemo:26.08` container is released, mount the latest [Megatron-Bridge `main`](https://github.com/NVIDIA-NeMo/Megatron-Bridge) source over the pre-installed copy by adding this to the `docker run` command above:
->
-> ```bash
-> -v ${MEGATRON_BRIDGE_SRC_DIR}:/opt/Megatron-Bridge
-> ```
 
 You also need to login with your HuggingFace token to download gated datasets / models.
 Note that the default dataset for pruning and quantization is [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), which is gated.
 
 ```bash
 hf auth login --token <your token>
+```
+
+### Importing a HuggingFace Checkpoint (optional)
+
+The scripts below take a HuggingFace checkpoint directly, but if you want a Megatron distributed
+checkpoint (e.g. to reuse across runs), convert it with Megatron-Bridge's conversion script — use
+`--tp` / `--pp` / `--ep` to shard a model that does not fit on one GPU (`--ep` for MoE models), or
+`--device cpu` to convert in a single process without GPUs:
+
+```bash
+bash /opt/Megatron-Bridge/scripts/conversion/convert.sh import \
+    --executor local \
+    --device gpu \
+    --gpus-per-node 8 \
+    --hf-model Qwen/Qwen3-8B \
+    --megatron-path /tmp/Qwen3-8B-megatron
 ```
 
 ## Post-Training Quantization
@@ -111,7 +141,29 @@ For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automati
 - A **text** dataset runs text-only calibration of the language model (vision tower idle).
 
 > [!NOTE]
-> HuggingFace unified export (`export_quantized_megatron_to_hf.py`) of a quantized VLM is not yet supported; the quantized VLM is saved in Megatron checkpoint format only.
+> HuggingFace unified export (`export_quantized_megatron_to_hf.py`) of a quantized VLM covers **Qwen3-VL** and **Qwen3.5-VL**. Other VLMs such as Gemma3-VL are saved in Megatron checkpoint format only.
+
+### Tracking runs with MLflow
+
+Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to record a run on an MLflow server. Every script here that writes a checkpoint takes the flag — [`prune_minitron.py`](#pruning), `quantize.py`, [`distill.py`](#distillation), `export_quantized_megatron_to_hf.py` and `export_distilled_megatron_to_hf.py` — and they share one experiment-name convention, so a pruning, a quantization, the distillation that refines its checkpoint and the export that deploys it can be found together. (One gap remains: `distill.py --hf_export_path` writes its HuggingFace checkpoint from rank 0, which is not the rank that owns that run, so it carries no pointer.)
+
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --recipe general/ptq/nvfp4_default-kv_fp8 \
+    --tp_size 2 \
+    --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
+    --mlflow https://<your-mlflow-server>/
+```
+
+The run opens *before* the model loads, so a bad URI fails in seconds rather than after a full calibration. Only the master rank uploads: the invocation, every argument as a searchable param, the resolved recipe, that rank's log and the quantizer summary — plus `.experiment.json` written into `--export_megatron_path` once the checkpoint is saved, so a checkpoint on disk names the run that produced it. A failed run is still recorded, with its traceback.
+
+`--mlflow_experiment` defaults to `$USER/<script>/<model basename>-<variant>` — the variant being the pruning target for `prune_minitron.py`, the recipe name for `quantize.py`, the student checkpoint for `distill.py`, and the Megatron checkpoint for the export — and `--mlflow_run_name` to the UTC start time. Authentication uses MLflow's own environment variables. See the [`hf_ptq` README](../hf_ptq/README.md#tracking-runs-with-mlflow) for the full artifact list and the `$MLFLOW_TRACKING_URI` semantics.
+
+`distill.py` — whether it is distilling a pruned BF16 student or running [QAD](#quantization-aware-distillation-qad) from a quantized one — works differently under the hood. It is a training loop, and Megatron-Bridge logs to MLflow from inside it, so the run is opened here and Megatron-Bridge joins it: you get the invocation, every argument and a run log, plus the per-iteration training metrics and the full resolved config that only Megatron-Bridge can see, alongside the existing `--wandb_project` and TensorBoard logging. Two differences worth knowing:
+
+- Uploading checkpoints as MLflow artifacts is **off** by default here, where Megatron-Bridge turns it on: a distilled checkpoint is tens to hundreds of GB and would be pushed over HTTP on every save. Pass `--mlflow_log_checkpoints` to opt in.
+- The run is opened on the last rank, because that is the rank Megatron-Bridge looks at for one to join. The uploaded `logs/distill.log` is therefore that rank's output; `print_rank_0` lines, which is most of what the script itself prints, stay on rank 0 and do not reach it.
 
 ## Distillation
 
@@ -141,6 +193,28 @@ automatically when the tokenizer prepends one at inference, so do not add it you
 token is appended after the response. A record longer than `--seq_length` is truncated from the
 **start** of `"input"`, which drops any system prompt or opening role marker baked in there, so
 pre-filter or pre-truncate the corpus if that matters.
+
+To distill on **chat data** instead, pass `--sft --sft_hf_dataset <spec>`, where `<spec>` is a
+local `<file>.jsonl` of `{"messages": [{"role": ..., "content": ...}, ...]}` records or a Hugging
+Face Hub dataset `<hub_id>[:<split>]` (split defaults to `train`, and may be a slice such as
+`train[:1000]`). Each conversation is rendered with the model's own chat template, and
+`--sft_loss_mode` picks the trained tokens: every assistant turn (`assistant`, the default), only
+the last one (`last_turn`), or the whole conversation (`full`). With `--eval_iters > 0`, also pass
+`--sft_hf_validation` in the same format. This path needs a Megatron-Bridge with
+`DirectHFSFTDatasetConfig`.
+
+Megatron-Bridge pads every conversation to `--seq_length` when `--ep_size` > 1, so for MoE models
+add `--sft_in_batch_packing --mbs 2 --moe_aux_loss_coeff 0`: each micro-batch packs two
+conversations into one unpadded THD sequence, and the MoE load-balancing loss, which would also
+run over padding, is dropped. Order the rows as pairs that fit together with the chat-blend
+`pack_max_tokens` option ([Dataset Preparation README](../dataset/MEGATRON_DATA_PREP.md#chat-jsonl-blends-for-assistant-only-loss)).
+Megatron-Bridge holds every row in host memory on each rank, so keep `train.jsonl` to the rows
+the run needs.
+
+With pre-tokenized data, `--document_boundaries` (`--mbs 1`, `--cp_size 1`) restricts attention to
+each EOD-separated document of a window instead of the whole window. Tokenize the data with
+`--append_eod`: the student tokenizer's EOS marks each document's end. Chat-template data has no
+EOD between conversations, so distill.py rejects it.
 
 Teacher and student must share a tokenizer — distillation scores the teacher on the student's
 token ids, and the KD losses compare the two models' logits elementwise over the vocab dimension.
@@ -292,7 +366,127 @@ torchrun --nproc_per_node 8 distill.py \
     --output_dir /output/qwen3_8b_nvfp4_qad
 ```
 
+With pipeline parallelism, the last stage also runs the teacher and student output layers and the KD loss, and
+stage `k` holds `pp_size - k` micro-batches of activations in flight. An even layer split with uniform full
+recompute therefore leaves the other stages idle while they wait for the last one. Balance the pipeline by giving the
+last stage fewer layers, and recompute fewer layers on later stages, which have memory to spare. For example, for
+Qwen3-8B (36 layers) on 4 pipeline stages, this places 10/10/10/6 layers:
+
+```bash
+    --pp_size 4 \
+    --num_layers_in_first_pipeline_stage 10 --num_layers_in_last_pipeline_stage 6 \
+    --recompute_granularity full --recompute_method block \
+    --recompute_num_layers_per_stage 7 5 2 2
+```
+
+The split applies to both student and teacher, so it must be valid for each. The best values depend on the model,
+sequence length, and GPU memory: measure per-stage time and memory over a few iterations before choosing them.
+
+Each micro-batch forward, and each activation recomputation, fake-quantizes all student weights again, although they
+only change at the optimizer step. `--fake_quant_weight_cache` fake-quantizes each weight once per step and reuses it.
+This keeps an extra BF16 copy of the student's quantized weights on every GPU. The step is bit-identical to an
+uncached one. It needs a straight-through weight gradient (`pass_through_bwd`, the default). The more micro-batches
+per step, and the more expensive the weight format, the more it saves. It needs a [newer Megatron-Bridge](#pre-requisites) than `nemo:26.10`.
+
+A frozen MTP head (`--freeze_mtp`, or by default with `--kd_loss_alpha 1.0` and the MTP head left out of quantization)
+still runs at every training micro-batch, in the student and in the teacher: its layers and an extra pass through the
+output layer. `--skip_frozen_mtp` skips it in training. Evaluation still runs it, and its weights are saved and exported
+unchanged. The KD loss is unchanged. The gradients lose only what the MTP layers add through MoE auxiliary losses, and
+the MTP loss and acceptance-rate metrics are no longer logged, so check MTP acceptance after export. The logged
+TFLOP/s still counts the MTP head and the MoE load-balancing loss reads slightly lower, so compare step times instead.
+It supports GPTModel-based models such as Qwen3.5 / Qwen3.6 with `--pp_size 1`.
+
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
+
+#### Evaluating a QAD checkpoint in vLLM with fake quantization
+
+To evaluate a format vLLM has no kernels for (e.g. NVFP4 on Hopper, GGML IQ2, or a custom research format), export with `--vllm_fakequant_export`. The weight quantizers are folded into BF16 weights and Megatron-Bridge saves the model at any TP / EP / PP, VLMs included. The enabled activation and KV-cache quantizers go to `quantizer_state.pth` (ranges) and `quant_recipe.yaml` (settings), both under HF names:
+
+```bash
+torchrun --nproc_per_node 8 export_quantized_megatron_to_hf.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --megatron_path /output/qwen3_8b_nvfp4_qad/checkpoints \
+    --tp_size 8 \
+    --vllm_fakequant_export \
+    --export_unified_hf_path /tmp/Qwen3-8B-NVFP4-QAD-vllm-fq
+```
+
+Serve the export with [vllm_serve_fakequant.py](../vllm_serve/vllm_serve_fakequant.py), which loads both sidecars automatically, then run your evaluations against the server:
+
+```bash
+python ../vllm_serve/vllm_serve_fakequant.py /tmp/Qwen3-8B-NVFP4-QAD-vllm-fq -tp 8 --port 8000
+```
+
+Weight-only formats leave no quantizer enabled after folding, so no sidecars are written and stock `vllm serve` loads the export as a plain BF16 checkpoint. This mode needs a Megatron-Bridge that writes the quantizer sidecars; see [Pre-Requisites](#pre-requisites).
+
+### Full-rank routed-expert QAD
+
+Use an adapter-free, fake-quantized student with uncompressed floating weights.
+The standard distillation command accepts `--trainable_params` (alias `--trainable_parameter_patterns`); for
+DeepSeek-V4-Flash with SequentialMLP experts, append:
+
+```bash
+--no_moe_grouped_gemm \
+--trainable_params \
+  '*.local_experts.*.linear_fc1.weight' \
+  '*.local_experts.*.linear_fc2.weight'
+```
+
+Every pattern must match each local model chunk; stages without matches are unsupported.
+Only selected parameters in the distilled student train; the teacher stays frozen.
+For VLMs, names are relative to `language_model`; vision/projector settings are untouched.
+Quantizers and activation gradients remain enabled; unsupported activation stacks are rejected.
+
+Reuse the selection and `--student_megatron_path` with ModelOpt state on native resume;
+selection fails if that state has not been restored before wrapping. Native checkpointing
+restores FP32 masters, Adam state, and training counters afterward.
+Use Bridge/Core versions with HybridModel support.
+
+### Student latent-weight initialization
+
+By default, the student keeps its checkpoint's floating latent weights. Add
+`--qdq_student_weight` to initialize trainable weights from the restored quantizers' Q→DQ
+output. This is format-independent and supports mixed quantization.
+
+Use an uncompressed, adapter-free student checkpoint. GPTQ, if desired, runs during PTQ;
+initialization reuses its saved state. Native resumes skip initialization. With a fresh output
+directory, the flag rejects trained sources identified by Bridge metadata or a nonzero Megatron
+iteration path. Omit the flag to retain trained latents; use the original output directory for an optimizer resume.
+Dynamic quantizers and BF16 inverse transforms can change forward values after initialization.
+The observed loss-spike benefit is specific to the IQ2 experiments; other formats are not established.
+
+### LoRA QAD
+
+Add `--lora_rank` to PTQ to train low-rank weight updates with the usual QAD flow:
+
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-0.6B \
+    --recipe general/ptq/nvfp4_default-kv_fp8 \
+    --tp_size 2 --lora_rank 8 --lora_alpha 16 \
+    --export_megatron_path /output/qwen3_06b_nvfp4_lora
+```
+
+PTQ calibrates the quantizers before adding the adapters. The backbone is frozen; `A` starts
+random and `B` starts at zero. Each linear layer quantizes `W + (alpha / rank) B @ A` before
+its matrix multiplication. The default targets are `linear_qkv`, `linear_proj`, `linear_fc1`,
+and `linear_fc2`; select other module-name globs with `--lora_target_modules`.
+
+Run `distill.py` with this checkpoint as `--student_megatron_path`, just as for regular QAD.
+ModelOpt reconstructs the quantizers and factors before DDP and optimizer setup, then loads
+the distributed checkpoint tensors. Resuming the output directory also restores the optimizer.
+
+`export_quantized_megatron_to_hf.py` merges the factors into the backbone before exporting a
+standalone quantized checkpoint. Deployment does not require a LoRA adapter. The Python APIs
+are `modelopt.torch.quantization.enable_quant_lora` and `merge_quant_lora`.
+
+Supported targets are fake-quantized dense PyTorch and Megatron/Transformer Engine linear
+layers, including tensor-parallel row/column and fused layer-normalization linear layers.
+Grouped MoE experts, shared target weights, and compressed quantized weights are unsupported.
+Merge adapters with `merge_quant_lora` before using weight-folding APIs. Full activation
+recomputation is supported without unfreezing the backbone. The backbone remains
+in floating point and the implementation forms dense weight updates, so memory savings come
+primarily from the smaller optimizer state rather than compressed backbone storage.
 
 ### Slurm Usage
 

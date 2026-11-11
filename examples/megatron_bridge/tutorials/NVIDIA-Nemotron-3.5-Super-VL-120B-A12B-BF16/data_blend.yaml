@@ -1,0 +1,68 @@
+# Weighted text-only chat blend for this tutorial's QAD, distilled on assistant tokens only
+# (`distill.py --sft --sft_hf_dataset ... --sft_loss_mode assistant`). Prepare it with
+# `python -m modelopt.torch.utils.plugins.prepare_megatron_data_blend --config data_blend.yaml`;
+# see examples/dataset/MEGATRON_DATA_PREP.md. Set `output_dir` first.
+
+output_dir: /path/to/qad_blend
+output_format: chat_jsonl
+# 600 iterations x 64 conversations read the 35,800-row training split about once.
+target_samples: 36_800
+# Take the first usable rows of each split in order, then mix them with `seed`.
+shuffle: false
+seed: 1234
+sources:
+  - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
+    config: Nemotron-SFT-Code
+    split: train
+    content_field: text
+    weight: 5
+  - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
+    config: Nemotron-SFT-General
+    split: train
+    content_field: text
+    weight: 20
+  - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
+    config: Nemotron-SFT-MATH
+    split: train
+    content_field: text
+    weight: 5
+  - hf_dataset: nvidia/Nemotron-Math-v2
+    config: default
+    split: high_part00
+    content_field: messages
+    weight: 10
+  - hf_dataset: nvidia/Nemotron-SFT-Math-v3
+    config: default
+    split: train
+    content_field: messages
+    weight: 17
+  - hf_dataset: nvidia/Nemotron-Competitive-Programming-v1
+    config: default
+    split: competitive_coding_python_part00
+    content_field: messages
+    weight: 15
+  - hf_dataset: nvidia/Nemotron-Competitive-Programming-v1
+    config: default
+    split: competitive_coding_cpp_part00
+    content_field: messages
+    weight: 5
+  - hf_dataset: nvidia/Nemotron-Post-Training-Dataset-v1
+    config: default
+    split: stem
+    content_field: messages
+    weight: 8
+  - hf_dataset: nvidia/Nemotron-Science-v1
+    config: default
+    split: MCQ
+    content_field: messages
+    weight: 3
+  - hf_dataset: nvidia/Nemotron-Science-v1
+    config: default
+    split: RQA
+    content_field: messages
+    weight: 2
+  - hf_dataset: nvidia/Nemotron-SFT-Instruction-Following-Chat-v2
+    config: default
+    split: reasoning_off
+    content_field: messages
+    weight: 2

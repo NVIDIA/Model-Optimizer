@@ -16,6 +16,7 @@
 import asyncio
 import time
 
+from ..utils import shutdown_engine
 from .base import Model
 
 try:
@@ -26,6 +27,19 @@ try:
 except ImportError:
     print("vllm is not installed.")
     vllm = None
+
+
+# Forwarded from ``--runtime_params`` ``engine_args.<key>``; extend as needed.
+PASSTHROUGH_ENGINE_ARGS = (
+    "mamba_backend",
+    "mamba_ssm_cache_dtype",
+    "mamba_cache_mode",
+    "mamba_cache_philox_rounds",
+    "enable_mamba_cache_stochastic_rounding",
+)
+
+# Bounds the engine-manager shutdown in stop(), so a stuck EngineCore cannot hold the job.
+ENGINE_SHUTDOWN_TIMEOUT_S = 60
 
 
 class VLLMModel(Model):
@@ -114,6 +128,13 @@ class VLLMModel(Model):
                 "model": kwargs.get("draft_model_dir"),
                 "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 8),
             }
+        elif kwargs.get("speculative_algorithm") == "DSPARK":
+            specdec = {
+                "method": "dspark",
+                "model": kwargs.get("draft_model_dir"),
+                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 7),
+                "draft_sample_method": kwargs.get("draft_sample_method", "greedy"),
+            }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
 
@@ -133,8 +154,9 @@ class VLLMModel(Model):
             max_num_seqs=max_concurrent_requests * num_speculative_tokens,
             skip_tokenizer_init=False,
             async_scheduling=kwargs.get("async_scheduling", True),
-            enforce_eager=False,
+            enforce_eager=kwargs.get("enforce_eager", False),
             max_model_len=kwargs.get("max_model_len"),
+            **{key: kwargs[key] for key in PASSTHROUGH_ENGINE_ARGS if kwargs.get(key) is not None},
         )
         self.engine_args = engine_args
         self.model = AsyncLLM.from_engine_args(engine_args)
@@ -218,9 +240,8 @@ class VLLMModel(Model):
             pass
         return cfg
 
-    def stop(self):  # pragma: no cover
+    def stop(self):
         try:
-            self.loop.run_until_complete(self.model.shutdown())
+            shutdown_engine(self.model, loop=self.loop, timeout=ENGINE_SHUTDOWN_TIMEOUT_S)
+        finally:
             self.loop.close()
-        except Exception:
-            pass

@@ -20,12 +20,12 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
+from diffusers.models.attention import AttentionModuleMixin
 from diffusers.models.attention_processor import Attention, AttnProcessor
 from diffusers.models.lora import LoRACompatibleConv, LoRACompatibleLinear
 from diffusers.utils import load_image
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.plugins.diffusion.diffusers import AttentionModuleMixin
 
 USE_PEFT = True
 try:
@@ -64,11 +64,8 @@ def check_conv_and_mha(backbone, if_fp4, quantize_mha):
                 ):
                     if hasattr(module, attr):
                         getattr(module, attr).disable()
-                setattr(module, "_disable_fp8_mha", True)
 
                 print(f"Disabled Attention layer quantization for layer {name}")
-            else:
-                setattr(module, "_disable_fp8_mha", False)
 
 
 def filter_func_ltx_video(name: str) -> bool:
@@ -94,11 +91,10 @@ def filter_func_ltx2_vae(name: str) -> bool:
 
 
 def filter_func_wan_vae(name: str) -> bool:
-    """Filter for Wan 2.2 VAE: keeps only conv1/conv2 in resnet blocks."""
+    """Filter for Wan 2.2 VAE: keeps only conv1/conv2 in decoder resnet blocks."""
+    # Text-to-video calibration never runs the encoder, so its convs would export uncalibrated.
     keep = re.compile(
-        r".*(down_blocks\.\d+\.(?:resnets\.\d+\.)?conv[12]"
-        r"|mid_block\.resnets\.\d+\.conv[12]"
-        r"|up_blocks\.\d+\.resnets\.\d+\.conv[12])(?:\.|$)"
+        r".*decoder\.(?:mid_block\.resnets\.\d+|up_blocks\.\d+\.resnets\.\d+)\.conv[12](?:\.|$)"
     )
     return not keep.match(name)
 

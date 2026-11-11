@@ -23,6 +23,7 @@ reduced precision on the rest of the nodes. AutoCast automatically injects cast 
 nodes.
 """
 
+import os
 from copy import deepcopy
 
 import numpy as np
@@ -32,7 +33,11 @@ import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 from modelopt.onnx.autocast.logging_config import logger
-from modelopt.onnx.autocast.nodeclassifier import NodeClassifier, NodeRuleBase
+from modelopt.onnx.autocast.nodeclassifier import (
+    DisabledNodeNameRegexRule,
+    NodeClassifier,
+    NodeRuleBase,
+)
 from modelopt.onnx.autocast.precisionconverter import PrecisionConverter
 from modelopt.onnx.autocast.referencerunner import ReferenceRunner
 from modelopt.onnx.utils import get_min_opset_for_precisions, get_qdq_precisions
@@ -70,9 +75,9 @@ def convert_to_mixed_precision(
     calibration_data: str | None = None,
     custom_rule: NodeRuleBase | None = None,
     init_conversion_max_bytes: int | None = None,
-    providers: list[str] = ["cpu"],
-    trt_plugins: list[str] = [],
-    trt_plugins_precision: list[str] = [],
+    providers: list[str] | None = None,
+    trt_plugins: list[str] | None = None,
+    trt_plugins_precision: list[str] | None = None,
     max_depth_of_reduction: int | None = None,
     opset: int | None = None,
     use_standalone_type_inference: bool = False,
@@ -107,8 +112,11 @@ def convert_to_mixed_precision(
     Returns:
         onnx.ModelProto: The converted mixed precision model.
     """
+    providers = ["cpu"] if providers is None else list(providers)
+    trt_plugins = [] if trt_plugins is None else trt_plugins
+    trt_plugins_precision = [] if trt_plugins_precision is None else trt_plugins_precision
     # Load and process model
-    model = onnx.load(onnx_path, load_external_data=True)
+    model = onnx.load(onnx_path, load_external_data=False)
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
     original_network_io_metadata = _capture_network_io_metadata(model, keep_io_types)
 
@@ -146,6 +154,7 @@ def convert_to_mixed_precision(
         trt_plugins=trt_plugins,
         trt_plugins_precision=trt_plugins_precision,
         max_ir_version=LATEST_IR_VERSION_SUPPORTED_BY_ORT,
+        onnx_path=onnx_path,
     )
     graph_sanitizer.sanitize()
     model = graph_sanitizer.model
@@ -154,10 +163,13 @@ def convert_to_mixed_precision(
     # as an exception (triggering infer_types' standalone type-inference fallback) instead of
     # silently leaving tensors untyped, which would break later type lookups.
     model = onnx_utils.infer_types(model, use_standalone_type_inference, strict_mode=True)
+    onnx.external_data_helper.load_external_data_for_model(
+        model, os.path.dirname(os.path.abspath(onnx_path))
+    )
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
-    # Automatically add 'trt' to list of providers if custom ops are detected
-    if "trt" not in providers and graph_sanitizer.custom_ops:
+    # Only confirmed TensorRT plugins require the TensorRT execution provider.
+    if "trt" not in providers and graph_sanitizer.trt_plugin_ops:
         providers.insert(0, "trt")
 
     # Initialize classifiers and converters
@@ -187,6 +199,7 @@ def convert_to_mixed_precision(
         custom_ops=graph_sanitizer.custom_ops,
         use_standalone_type_inference=use_standalone_type_inference,
         original_network_io_metadata=original_network_io_metadata,
+        sanitize_model=False,
     )
 
     # Obtain reference data
@@ -221,6 +234,7 @@ def convert_to_f16(
     trt_plugins: list[str] | None = [],
     use_standalone_type_inference: bool = False,
     opset: int | None = None,
+    nodes_to_exclude: list[str] | None = None,
 ) -> onnx.ModelProto:
     """Convert model to mixed precision, using PrecisionConverter.
 
@@ -240,6 +254,7 @@ def convert_to_f16(
                (22 for bf16, 19 for fp16) and Q/DQ node requirements. The opset may be automatically
                increased if Q/DQ nodes in the model require a higher version (e.g., FP8 requires 19,
                INT4 requires 21, NVFP4 requires 23).
+        nodes_to_exclude: List of regex patterns to match node names that should remain in FP32.
     """
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
     original_network_io_metadata = _capture_network_io_metadata(model, keep_io_types)
@@ -303,9 +318,15 @@ def convert_to_f16(
         use_standalone_type_inference=use_standalone_type_inference,
         original_network_io_metadata=original_network_io_metadata,
     )
-    high_precision_nodes = [node.name for node in model.graph.node if node.op_type in op_block_list]
+    node_name_rule = DisabledNodeNameRegexRule(nodes_to_exclude or [])
+    high_precision_nodes = [
+        node.name
+        for node in model.graph.node
+        if node.op_type in op_block_list or node_name_rule.check(node)
+    ]
+    high_precision_node_set = set(high_precision_nodes)
     low_precision_nodes = [
-        node.name for node in model.graph.node if node.op_type not in op_block_list
+        node.name for node in model.graph.node if node.name not in high_precision_node_set
     ]
     model_mod = precision_converter.convert(high_precision_nodes, low_precision_nodes)
     return model_mod
