@@ -21,6 +21,13 @@ with BF16 activations (W4A16), rather than native NVFP4 activation computation.
 The default `auto` lets vLLM select a supported kernel on other hardware.
 Inspect the saved server logs for the actual selected implementation.
 
+The comparison explicitly sets `--kv-cache-dtype bfloat16` for both arms so
+checkpoint metadata cannot select a different KV precision. For a bounded cold
+start, set `flashinfer_autotune=off` to disable FlashInfer autotuning in both
+servers. This changes kernel tuning and can affect performance; compare only
+curves with matching tuning settings. The default `auto` preserves vLLM's
+choice. Recipes record both KV precision and the tuning setting.
+
 For startup failures in TorchInductor, `compilation_mode=none` passes
 `-cc.mode=0` to both servers, disabling `torch.compile`. vLLM can also disable
 CUDA graphs when the selected graph mode requires compilation; inspect the

@@ -7,6 +7,7 @@ parameters:
   samples: 64
   candidate_linear_backend: auto
   compilation_mode: default
+  flashinfer_autotune: auto
   allocated_gpus: 1
 inputs:
   /inputs/baseline:
@@ -30,6 +31,7 @@ tasks:
       --baseline-ref "$BASELINE_REF" --candidate-ref "$CANDIDATE_REF"
       --samples "$ACCURACY_SAMPLES" --candidate-linear-backend "$CANDIDATE_LINEAR_BACKEND"
       --compilation-mode "$COMPILATION_MODE"
+      --flashinfer-autotune "$FLASHINFER_AUTOTUNE"
       --allocated-gpus "$ALLOCATED_GPUS"
     environment:
       BASELINE_REF: ${parameters.baseline}
@@ -37,6 +39,7 @@ tasks:
       ACCURACY_SAMPLES: ${parameters.samples}
       CANDIDATE_LINEAR_BACKEND: ${parameters.candidate_linear_backend}
       COMPILATION_MODE: ${parameters.compilation_mode}
+      FLASHINFER_AUTOTUNE: ${parameters.flashinfer_autotune}
       ALLOCATED_GPUS: ${parameters.allocated_gpus}
     resources:
       nodes: 1

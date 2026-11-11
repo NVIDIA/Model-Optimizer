@@ -339,7 +339,7 @@ def evaluate(args, client_python, workspace):
             "--dtype",
             "bfloat16",
             "--kv-cache-dtype",
-            "auto",
+            "bfloat16",
             "--max-model-len",
             "40960",
             "--max-num-seqs",
@@ -354,6 +354,8 @@ def evaluate(args, client_python, workspace):
             server += ["--linear-backend", args.candidate_linear_backend]
         if args.compilation_mode == "none":
             server += ["-cc.mode=0"]
+        if args.flashinfer_autotune == "off":
+            server += ["--kernel-config", '{"enable_flashinfer_autotune":false}']
         save(
             arm / "recipe.json",
             {
@@ -365,6 +367,8 @@ def evaluate(args, client_python, workspace):
                 "temperature": 0,
                 "candidate_linear_backend": args.candidate_linear_backend,
                 "compilation_mode": args.compilation_mode,
+                "kv_cache_dtype": "bfloat16",
+                "flashinfer_autotune": args.flashinfer_autotune,
             },
         )
         (arm / "server-command.txt").write_text(shlex.join(server) + "\n")
@@ -409,6 +413,7 @@ def main():
     parser.add_argument("--client-python", type=Path)
     parser.add_argument("--candidate-linear-backend", choices=("auto", "marlin"), default="auto")
     parser.add_argument("--compilation-mode", choices=("default", "none"), default="default")
+    parser.add_argument("--flashinfer-autotune", choices=("auto", "off"), default="auto")
     parser.add_argument("--samples", type=int, default=64)
     parser.add_argument("--allocated-gpus", type=int, default=1)
     parser.add_argument("--concurrency", type=int, nargs="+", default=[1, 4, 8])
