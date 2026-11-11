@@ -45,6 +45,7 @@ from transformers import AutoConfig, DeepseekV3Config, LlamaConfig
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.models import get_spec
+from modelopt.torch.utils import dataset_utils
 from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
 from modelopt.torch.utils.moe import _EP_MIN_TRANSFORMERS, register_torch_a2a
 from modelopt.torch.utils.plugins import model_load_utils
@@ -591,6 +592,7 @@ def test_distributed_calibration_gives_each_rank_its_own_shard(hf_ptq, monkeypat
         batch_size=1,
         calib_size=[8],
         calib_seq=16,
+        calib_pack=False,
     )
     tokenizer = get_tiny_tokenizer()
 
@@ -608,6 +610,36 @@ def test_distributed_calibration_gives_each_rank_its_own_shard(hf_ptq, monkeypat
     assert len(shards[0]) == len(shards[1]) == 4
     assert sorted(shards[0] + shards[1]) == list(range(8))
     assert calib_loader(world_size=1) is loader
+
+
+def test_calib_pack_fills_every_row_with_calib_seq_tokens(hf_ptq, monkeypatch):
+    """--calib_pack joins the documents into rows of --calib_seq real tokens, where each short
+    document would otherwise take a padded row of its own."""
+    monkeypatch.setattr(
+        dataset_utils,
+        "get_dataset_samples",
+        lambda name, num_samples, **_: [f"w{i}" for i in range(num_samples)],
+    )
+    args = SimpleNamespace(
+        specdec_offline_dataset=None,
+        calib_with_images=False,
+        dataset=["cnn_dailymail"],
+        batch_size=4,
+        calib_size=[4],
+        calib_seq=16,
+        calib_pack=True,
+        dist_state=_dist_state(1),
+    )
+    model = torch.nn.Linear(2, 2)
+    set_distribution_plan(model, DistributionPlan(1))
+
+    loader, _ = hf_ptq.make_calib_dataloader(
+        args, model, None, get_tiny_tokenizer(), torch.device("cpu"), "llama"
+    )
+    (batch,) = loader
+
+    assert batch["attention_mask"].shape == (4, 16)
+    assert batch["attention_mask"].all()
 
 
 @pytest.mark.parametrize(

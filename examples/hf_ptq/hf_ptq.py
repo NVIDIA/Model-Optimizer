@@ -295,6 +295,10 @@ def make_calib_dataloader(
         )
     ) is not None:
         # The model type brings its own calibration data (speech features, not token ids).
+        if args.calib_pack:
+            raise ValueError(
+                f"--calib_pack packs calibration text; a {model_type} model calibrates on its own data."
+            )
         calib_dataloader, preview_input_text = provided
     else:
         assert tokenizer is not None and isinstance(
@@ -311,6 +315,7 @@ def make_calib_dataloader(
             max_sample_length=args.calib_seq,
             device=device,
             include_labels=include_labels,
+            pack=args.calib_pack,
         )
     if world_size > 1 and calib_dataloader is not None and not args.calib_with_images:
         calib_dataloader = _shard_calib_dataloader(
@@ -559,6 +564,7 @@ def sparsity_main(
         num_samples=args.calib_size,
         max_sample_length=args.calib_seq,
         device=device,
+        pack=args.calib_pack,
     )
     full_model = mts.sparsify(
         full_model,
@@ -1293,6 +1299,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=512,
     )
+    parser.add_argument(
+        "--calib_pack",
+        action="store_true",
+        help=(
+            "Pack the calibration text into rows of exactly --calib_seq tokens, the documents joined "
+            "by the EOS token and split across rows, instead of one padded document per row. Only the "
+            "last row can then hold padding, if the text runs out."
+        ),
+    )
     parser.add_argument("--export_path", default="exported_model")
     parser.add_argument(
         "--dataset",
@@ -1533,6 +1548,12 @@ def parse_args() -> argparse.Namespace:
 
     if args.calib_seq <= 0:
         parser.error("--calib_seq must be positive.")
+
+    if args.calib_pack and (args.calib_with_images or args.specdec_offline_dataset is not None):
+        parser.error(
+            "--calib_pack packs calibration text; it does not apply to --calib_with_images or "
+            "--specdec_offline_dataset."
+        )
 
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")
