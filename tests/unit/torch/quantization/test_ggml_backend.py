@@ -88,7 +88,7 @@ def test_ggml_backend_via_quantize(num_bits, dtype, record_property):
     torch.testing.assert_close(model.weight, expected_weight, rtol=0, atol=0)
     # Unpinned formats search scales/codes again: the next forward applies QDQ a second time.
     codec = GGML_FORMAT_REGISTRY[num_bits]
-    packed, shape = codec.quantize(expected_weight)
+    packed, shape = codec.plain_quantize(expected_weight)
     effective_weight = codec.dequantize(packed, shape, dtype=dtype)
     after = model(inputs)
     torch.testing.assert_close(

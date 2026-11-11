@@ -542,10 +542,10 @@ def test_pin_is_ignored_once_the_quantizer_changes_format(restore):
     mtq.set_quantizer_by_cfg(model, _iq_config(None, "iq2_xxs")["quant_cfg"])
 
     weight = model.weight.detach()
-    expected = IQ2_XXS.dequantize(*IQ2_XXS.quantize(weight), dtype=torch.float32)
+    expected = IQ2_XXS.dequantize(*IQ2_XXS.plain_quantize(weight), dtype=torch.float32)
     torch.testing.assert_close(model(inputs), inputs @ expected.T)
     assert torch.equal(
-        IQ2_XXS.pack(model.weight, model.weight_quantizer), IQ2_XXS.quantize(weight)[0]
+        IQ2_XXS.pack(model.weight, model.weight_quantizer), IQ2_XXS.plain_quantize(weight)[0]
     )
 
 

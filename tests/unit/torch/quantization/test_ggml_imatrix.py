@@ -63,17 +63,19 @@ def _inputs(rows=1024, columns=512):
     return torch.randn(rows, columns, generator=generator) * scale
 
 
+def _floored(second_moments):
+    return second_moments.clamp_min(1e-4 * second_moments.mean())
+
+
 def _importance(second_moments):
-    return second_moments.clamp_min(1e-4 * second_moments.mean()).sqrt()
+    return _floored(second_moments).sqrt()
 
 
 def _record_importance(monkeypatch):
     calls = []
 
     def recording_quantize(weight, **kwargs):
-        # Forwards re-encode under the pinned scales; only calibration's own encodes count.
-        if "scales" not in kwargs:
-            calls.append(kwargs.get("importance"))
+        calls.append(kwargs.get("importance"))
         return IQ2_XXS.quantize(weight, **kwargs)
 
     monkeypatch.setitem(
@@ -109,14 +111,37 @@ def test_pins_the_codes_it_chose(algorithm):
     mtq.quantize(plain, _config("max"), forward_loop=lambda m: m(inputs))
 
     decoded = _decoded(model.weight_quantizer, model.weight.shape)
-    # IQ2_XXS keeps the pinned scales, so the weight stays as it was and encodes to the pin again.
-    assert torch.equal(model.weight.detach(), original)
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
 
     def output_error(weight):
         return ((weight - original) @ inputs.T).square().sum()
 
     assert output_error(decoded) < output_error(plain.weight_quantizer(plain.weight))
+
+
+def test_imatrix_matches_each_blocks_energy_and_keeps_a_weight_encoding_to_its_codes():
+    # The stored scales are rescaled after the search; the weight is scaled alike, so a block QAD
+    # changes is searched again from the codes calibration picked rather than shrunk by a rescan.
+    torch.manual_seed(0)
+    model = nn.Linear(512, 16, bias=False)
+    original = model.weight.detach().clone()
+    inputs = _inputs()
+    mtq.quantize(model, _config(IMATRIX), forward_loop=lambda m: m(inputs))
+    quantizer = model.weight_quantizer
+    pinned = pinned_packed_weight(quantizer, "iq2_xxs")
+
+    second_moments = _floored(inputs.square().mean(dim=0)).reshape(2, 256)
+    decoded = _decoded(quantizer, original.shape).reshape(16, 2, 256)
+    energy = (second_moments * decoded.square()).sum(-1)
+    target = (second_moments * original.reshape(16, 2, 256).square()).sum(-1)
+    torch.testing.assert_close(energy, target, rtol=2e-3, atol=0)
+
+    rescanned, _ = IQ2_XXS.quantize(
+        model.weight.detach(),
+        scales=IQ2_XXS.payload_scales(pinned.reshape(-1, IQ2_XXS.block_bytes)),
+        importance=pinned_importance(quantizer, "iq2_xxs"),
+    )
+    assert torch.equal(rescanned, pinned)
 
 
 @ENCODERS
@@ -196,9 +221,8 @@ def test_a_module_calibration_never_reached_gets_the_plain_search(algorithm):
     inputs = _inputs()
     mtq.quantize(model, _config(algorithm), forward_loop=lambda m: m["used"](inputs))
 
-    packed, shape = IQ2_XXS.quantize(original)
+    packed, shape = IQ2_XXS.plain_quantize(original)
     plain = IQ2_XXS.dequantize(packed, shape, dtype=torch.float32)
-    assert torch.equal(model["unused"].weight, original)
     assert torch.equal(_decoded(model["unused"].weight_quantizer, original.shape), plain)
 
 
@@ -238,8 +262,8 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
             ),
             (experts.down_proj, original.experts.down_proj, experts.down_proj_weight_quantizers),
         ):
-            assert pinned_packed_weight(quantizers[idx], "iq2_xxs") is not None
-            assert torch.equal(weight[idx], original_weight[idx])
+            pinned = pinned_packed_weight(quantizers[idx], "iq2_xxs")
+            assert torch.equal(IQ2_XXS.pack(weight[idx].detach().clone(), quantizers[idx]), pinned)
 
 
 def test_hf_export_writes_each_fused_expert_s_pinned_rows(moe):
