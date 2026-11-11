@@ -16,11 +16,16 @@
 """Utility functions for getting samples and forward loop function for different datasets."""
 
 import copy
+import functools
+import hashlib
 import json
 import os
+import queue
 import random
+import tempfile
+import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -30,7 +35,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from .distributed import all_reduce, recorded_distribution_plan
+from .distributed import all_reduce, broadcast_from, recorded_distribution_plan
 from .logging import print_rank_0, warn_rank_0
 
 if TYPE_CHECKING:
@@ -347,6 +352,7 @@ __all__ = [
     "get_max_batch_size",
     "get_supported_datasets",
     "prepare_messages_for_chat_template",
+    "shared_sample_reader",
 ]
 
 
@@ -394,6 +400,45 @@ def get_jsonl_text_samples(jsonl_path: str, num_samples: int, key: str = "text")
 def _normalize_splits(split: str | list[str]) -> list[str]:
     """Ensure split is always a list."""
     return [split] if isinstance(split, str) else list(split)
+
+
+def _stall_guarded(open_stream: Callable[[], Iterable[Any]], stall_timeout: float) -> Iterator[Any]:
+    """Yield ``open_stream()``'s items; raise ``TimeoutError`` after ``stall_timeout`` s without one.
+
+    The stream is read in a daemon thread, not timed by a signal: a signal reaches only the main
+    thread, and not while it is blocked in a network read in C. A stalled read is abandoned, as
+    nothing can interrupt it.
+    """
+    items: queue.SimpleQueue = queue.SimpleQueue()
+    stop = threading.Event()
+    end = object()
+
+    def read():
+        try:
+            for item in open_stream():
+                items.put((item, None))
+                if stop.is_set():
+                    return
+            items.put((end, None))
+        except BaseException as e:  # the consumer raises it, in its own thread
+            items.put((end, e))
+
+    threading.Thread(target=read, name="modelopt-dataset-read", daemon=True).start()
+    try:
+        while True:
+            try:
+                item, error = items.get(timeout=stall_timeout)
+            except queue.Empty:
+                raise TimeoutError(
+                    f"The dataset yielded no sample for {stall_timeout:g} s; its stream is stalled."
+                ) from None
+            if item is end:
+                if error is not None:
+                    raise error
+                return
+            yield item
+    finally:
+        stop.set()
 
 
 def _auto_preprocess_sample(
@@ -456,6 +501,7 @@ def get_dataset_samples(
     apply_chat_template: bool = False,
     tokenizer: "PreTrainedTokenizerBase | None" = None,
     split: str | list[str] | None = None,
+    stall_timeout: float | None = None,
 ) -> list[str]:
     """Load a portion of a dataset with the dataset name and a given size.
 
@@ -487,6 +533,9 @@ def get_dataset_samples(
         split: Override the split(s) to load.  Accepts a single split name or a list.
             If ``None``, uses the splits defined in ``SUPPORTED_DATASET_CONFIG`` for
             registered datasets, or ``["train"]`` for unregistered datasets.
+        stall_timeout: If set, raise ``TimeoutError`` when the dataset yields no sample for this
+            many seconds, e.g. a stream stuck in a network read. A slow stream that keeps yielding
+            is not cut. The stuck read cannot be interrupted, so it is left to a daemon thread.
 
     Returns:
         Samples: The list of samples.
@@ -638,7 +687,12 @@ def get_dataset_samples(
             # Skip zero-quota splits: starting a streamed split fetches its first record batch.
             if n == 0:
                 continue
-            for i, sample in enumerate(_load_split(split_name)):
+            stream = (
+                _load_split(split_name)
+                if stall_timeout is None
+                else _stall_guarded(functools.partial(_load_split, split_name), stall_timeout)
+            )
+            for i, sample in enumerate(stream):
                 if i >= n:
                     break
                 text = _preprocess(sample)
@@ -664,6 +718,130 @@ def get_dataset_samples(
             f"({type(e).__name__}); fell back to legacy text-field reader."
         )
         return fallback_samples
+
+
+# Most characters of text one broadcast of shared_sample_reader carries: under NCCL every rank stages
+# the bytes on its GPU, beside the model.
+_SHARED_SAMPLES_CHARS = 1 << 26
+
+
+def shared_sample_reader(
+    cache_dir: str | os.PathLike | None = None, stall_timeout: float | None = None
+) -> Callable[..., list[str]]:
+    """A ``sample_reader`` for :func:`get_dataset_dataloader` that reads each source on rank 0 alone.
+
+    Every rank gets rank 0's samples through
+    :func:`~modelopt.torch.utils.distributed.broadcast_from`, so a distributed run reads its
+    calibration data once instead of once per rank, and every rank tokenizes the same text. If rank
+    0's read fails, every rank raises. The reader is collective: every rank must build its loader
+    with it, at the same point. In a single process it reads as :func:`get_dataset_samples` does.
+
+    Args:
+        cache_dir: A directory where rank 0 keeps the samples of a registered dataset (a
+            ``SUPPORTED_DATASET_CONFIG`` entry read without a chat template), keyed by the dataset,
+            its config, the number of samples and the split. A later read loads them from there
+            instead of the source, so the samples stay the same even if the source changes. Other
+            sources are always read: a local file is cheap to read, and other datasets may be
+            rendered with the tokenizer's chat template. A cache that cannot be read or written is
+            skipped with a warning. ``None`` keeps no cache.
+        stall_timeout: Seconds rank 0 waits for a source's next sample before the read fails (see
+            :func:`get_dataset_samples`). ``None`` waits indefinitely.
+    """
+
+    def read(dataset_name: str, num_samples: int, **kwargs) -> list[str]:
+        samples: list[str] = []  # rank 0's read, which the other ranks receive part by part
+
+        def read_on_rank_0() -> list[tuple[int, int]]:
+            samples.extend(
+                _read_cached_samples(dataset_name, num_samples, cache_dir, stall_timeout, kwargs)
+            )
+            return _parts(samples)
+
+        def part(start: int, end: int) -> list[str]:
+            return samples[start:end]
+
+        label = f"calibration samples of {dataset_name!r}"
+        parts = broadcast_from(label, read_on_rank_0)
+        received: list[str] = []
+        for index, (start, end) in enumerate(parts, 1):
+            received += broadcast_from(
+                f"{label}, part {index} of {len(parts)}", functools.partial(part, start, end)
+            )
+        return received
+
+    return read
+
+
+def _parts(samples: list[str]) -> list[tuple[int, int]]:
+    """``(start, end)`` runs of ``samples`` of at most ``_SHARED_SAMPLES_CHARS`` characters each.
+
+    A longer sample is a run of its own.
+    """
+    bounds: list[tuple[int, int]] = []
+    start = chars = 0
+    for index, sample in enumerate(samples):
+        if chars and chars + len(sample) > _SHARED_SAMPLES_CHARS:
+            bounds.append((start, index))
+            start, chars = index, 0
+        chars += len(sample)
+    if start < len(samples):
+        bounds.append((start, len(samples)))
+    return bounds
+
+
+def _read_cached_samples(
+    dataset_name: str,
+    num_samples: int,
+    cache_dir: str | os.PathLike | None,
+    stall_timeout: float | None,
+    kwargs: dict[str, Any],
+) -> list[str]:
+    """:func:`get_dataset_samples`, through ``cache_dir`` for a registered dataset's plain text."""
+    path = None
+    if (
+        cache_dir is not None
+        and dataset_name in SUPPORTED_DATASET_CONFIG
+        and not kwargs.get("apply_chat_template")
+    ):
+        entry = SUPPORTED_DATASET_CONFIG[dataset_name]
+        # Where the samples come from, not how they are preprocessed: a function has no stable key.
+        key = json.dumps(
+            [dataset_name, entry["config"], entry.get("data_files"), kwargs.get("split")],
+            sort_keys=True,
+            default=str,
+        )
+        digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+        path = Path(cache_dir) / f"{dataset_name}-{num_samples}-{digest}.jsonl"
+        if path.is_file():
+            try:
+                samples = get_jsonl_text_samples(str(path), num_samples)
+            except (OSError, ValueError) as e:
+                warn_rank_0(f"Reading the cached samples {path} failed ({e}); reading the source.")
+            else:
+                print_rank_0(f"Read {len(samples)} samples of {dataset_name} from {path}")
+                return samples
+    start = time.time()
+    samples = get_dataset_samples(dataset_name, num_samples, stall_timeout=stall_timeout, **kwargs)
+    print_rank_0(f"Read {len(samples)} samples of {dataset_name} in {time.time() - start:.1f} s")
+    if path is not None:
+        try:
+            _write_jsonl(path, samples)
+        except OSError as e:
+            warn_rank_0(f"Caching the samples at {path} failed ({e}); the run goes on without it.")
+    return samples
+
+
+def _write_jsonl(path: Path, samples: list[str]) -> None:
+    """Write ``samples`` to ``path`` as ``{"text": ...}`` lines, replacing it at once when done."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with open(fd, "w", encoding="utf-8") as f:
+            f.writelines(json.dumps({"text": sample}) + "\n" for sample in samples)
+        # A reader, in this run or another one sharing the directory, never sees a partial file.
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 class _CustomDataset(torch.utils.data.Dataset):
@@ -754,6 +932,7 @@ def get_dataset_dataloader(
     pack: bool = False,
     distributed: bool = False,
     sampler_kwargs: dict | None = None,
+    sample_reader: Callable[..., list[str]] | None = None,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
@@ -787,6 +966,9 @@ def get_dataset_dataloader(
             (e.g. for data-parallel calibration). ``sampler_kwargs`` supplies ``num_replicas``
             and ``rank``.
         sampler_kwargs: Keyword args for the ``DistributedSampler`` when ``distributed=True``.
+        sample_reader: Reads one source's raw text samples, called as :func:`get_dataset_samples`
+            (the default) is, once per source after combos expand, in order. For a distributed run,
+            :func:`shared_sample_reader` reads each source on one rank for all of them.
 
     Returns:
         An instance of dataloader.
@@ -843,9 +1025,10 @@ def get_dataset_dataloader(
     # - pack=True:  oversample 16x per source to ensure enough raw docs to fill all rows,
     #               since each row greedily packs multiple docs.
     sample_multiplier = 16 if pack else 1
+    read_samples = sample_reader or get_dataset_samples
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
-        samples = get_dataset_samples(
+        samples = read_samples(
             ds_name,
             num_sample * sample_multiplier,
             apply_chat_template=apply_chat_template,
