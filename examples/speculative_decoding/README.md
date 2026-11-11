@@ -166,7 +166,7 @@ from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
 FakeBaseModel.export_source_slice("/models/base-snapshot", "/models/trainer-base")
 ```
 
-Use `/models/trainer-base` for the trainer's `model.model_name_or_path`; the teacher still uses the complete snapshot. The slice retains the original config, tokenizer and custom code, including nested text-model configs and tied embeddings. It is a training input, not a checkpoint for serving the base model. For a trusted snapshot that requires custom code, pass `trust_remote_code=True` explicitly.
+Use `/models/trainer-base` for the trainer's `model.model_name_or_path`; the teacher still uses the complete snapshot. The slice retains the original config, tokenizer and custom code, including nested text-model configs and tied embeddings. It is a training input, not a checkpoint for serving the base model. For a trusted snapshot that requires custom code, pass `trust_remote_code=True` to the exporter and separately set `model.trust_remote_code=true` for the trainer.
 
 Streaming recipes must keep `data.streaming_model_name` set to the teacher's served model name.
 

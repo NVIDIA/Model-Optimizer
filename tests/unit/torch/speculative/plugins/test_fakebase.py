@@ -38,6 +38,12 @@ _HIDDEN_SIZE = 16
 _VOCAB_SIZE = 32
 
 
+class BinaryVocabTokenizer(transformers.BertTokenizer):
+    """A registered tokenizer whose declared vocabulary has a weight-like extension."""
+
+    vocab_files_names = {"vocab_file": "assets/vocab.bin"}
+
+
 @pytest.fixture
 def fake_config(monkeypatch):
     """Monkeypatch AutoConfig.from_pretrained to return a minimal fake config."""
@@ -117,9 +123,21 @@ def test_fakebase_missing_lm_head_without_tying_raises(tmp_path, fake_config):
 
 
 @pytest.mark.parametrize(
-    "layout", ["flat", "tied", "text_config", "llm_config", "unknown_norm", "hub_cache"]
+    "layout",
+    [
+        "flat",
+        "tied",
+        "text_config",
+        "llm_config",
+        "unknown_norm",
+        "hub_cache",
+        "binary_tokenizer",
+        "remote_tokenizer",
+        "optional_remote_tokenizer",
+        "legacy_remote_tokenizer",
+    ],
 )
-def test_export_source_slice_preserves_source_and_loader_parity(tmp_path, layout):
+def test_export_source_slice_preserves_source_and_loader_parity(tmp_path, monkeypatch, layout):
     source, destination = tmp_path / "source", tmp_path / "slice"
     if layout == "hub_cache":
         source = tmp_path / "models--org--model" / "snapshots" / "revision"
@@ -199,6 +217,43 @@ def test_export_source_slice_preserves_source_and_loader_parity(tmp_path, layout
     )
     tokenizer = get_tiny_tokenizer()
     tokenizer.save_pretrained(source)
+    binary_tokenizer = layout in (
+        "binary_tokenizer",
+        "remote_tokenizer",
+        "optional_remote_tokenizer",
+        "legacy_remote_tokenizer",
+    )
+    trusted_tokenizer = layout in ("remote_tokenizer", "legacy_remote_tokenizer")
+    if binary_tokenizer:
+        (source / "tokenizer.json").unlink()
+        (source / "assets").mkdir()
+        (source / "assets/vocab.bin").write_text("[UNK]\n[CLS]\n[SEP]\n[PAD]\n[MASK]\nhello\n")
+        metadata = {"tokenizer_class": "BinaryVocabTokenizer"}
+        if trusted_tokenizer:
+            (source / "tokenization_binary.py").write_text(
+                "from transformers import BertTokenizer\n"
+                "class BinaryVocabTokenizer(BertTokenizer):\n"
+                "    vocab_files_names = {'vocab_file': 'assets/vocab.bin'}\n"
+            )
+            mapping = ["tokenization_binary.BinaryVocabTokenizer", None]
+            metadata["auto_map"] = (
+                mapping if layout == "legacy_remote_tokenizer" else {"AutoTokenizer": mapping}
+            )
+        else:
+            monkeypatch.setattr(
+                transformers, "BinaryVocabTokenizer", BinaryVocabTokenizer, raising=False
+            )
+            if layout == "optional_remote_tokenizer":
+                (source / "tokenization_unused.py").write_text(
+                    "raise AssertionError('optional remote tokenizer code executed')\n"
+                )
+                metadata["auto_map"] = {
+                    "AutoTokenizer": ["tokenization_unused.UnusedTokenizer", None]
+                }
+        (source / "tokenizer_config.json").write_text(json.dumps(metadata))
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            source, trust_remote_code=trusted_tokenizer, local_files_only=True
+        )
     (source / "modeling_custom.py").write_text(
         "# Custom model code remains part of the snapshot.\n"
     )
@@ -212,7 +267,7 @@ def test_export_source_slice_preserves_source_and_loader_parity(tmp_path, layout
 
     assert (
         FakeBaseModel.export_source_slice(
-            source, destination, trust_remote_code=layout == "llm_config"
+            source, destination, trust_remote_code=layout == "llm_config" or trusted_tokenizer
         )
         == destination
     )
@@ -228,9 +283,13 @@ def test_export_source_slice_preserves_source_and_loader_parity(tmp_path, layout
     assert list(destination.glob("*.safetensors")) == [destination / "model.safetensors"]
     for path in source.glob("*.py"):
         assert (destination / path.name).read_bytes() == path.read_bytes()
-    assert transformers.AutoTokenizer.from_pretrained(destination).encode(
-        "Hello"
-    ) == tokenizer.encode("Hello")
+    if binary_tokenizer:
+        assert (destination / "assets/vocab.bin").read_bytes() == (
+            source / "assets/vocab.bin"
+        ).read_bytes()
+    assert transformers.AutoTokenizer.from_pretrained(
+        destination, trust_remote_code=trusted_tokenizer, local_files_only=True
+    ).encode("Hello") == tokenizer.encode("Hello")
     original = FakeBaseModel.from_source(str(source), trust_remote_code=layout == "llm_config")
     restored = FakeBaseModel.from_source(str(destination), trust_remote_code=layout == "llm_config")
     for key, weight in original.state_dict().items():
@@ -250,6 +309,11 @@ def test_export_source_slice_preserves_source_and_loader_parity(tmp_path, layout
         "escaping_index",
         "escaping_single",
         "sidecar_copy",
+        "tokenizer_missing",
+        "tokenizer_untrusted",
+        "tokenizer_escape",
+        "tokenizer_model_collision",
+        "tokenizer_alternate_weights",
     ],
 )
 def test_export_source_slice_rejects_invalid_source(
@@ -265,7 +329,36 @@ def test_export_source_slice_rejects_invalid_source(
     if invalid == "shape":
         tensors["embed_tokens.weight"] = torch.zeros(1, _HIDDEN_SIZE)
     safetensors.torch.save_file(tensors, shard)
-    if invalid == "sidecar_copy":
+    if invalid.startswith("tokenizer_"):
+        monkeypatch.setattr(
+            transformers, "BinaryVocabTokenizer", BinaryVocabTokenizer, raising=False
+        )
+        metadata = {"tokenizer_class": "BinaryVocabTokenizer"}
+        if invalid == "tokenizer_untrusted":
+            metadata["tokenizer_class"] = "UnregisteredRemoteTokenizer"
+            metadata["auto_map"] = {
+                "AutoTokenizer": ["tokenization_binary.BinaryVocabTokenizer", None]
+            }
+            (fake_checkpoint / "tokenization_binary.py").write_text(
+                "raise AssertionError('untrusted tokenizer code executed')\n"
+            )
+        elif invalid == "tokenizer_escape":
+            outside = tmp_path.parent / f"{tmp_path.name}-vocab.bin"
+            outside.write_text("private vocabulary")
+            (fake_checkpoint / "assets").mkdir()
+            (fake_checkpoint / "assets/vocab.bin").symlink_to(outside)
+        elif invalid == "tokenizer_model_collision":
+            monkeypatch.setattr(
+                BinaryVocabTokenizer, "vocab_files_names", {"vocab_file": shard.name}
+            )
+        elif invalid == "tokenizer_alternate_weights":
+            weights = fake_checkpoint / "original/pytorch_model.bin"
+            weights.parent.mkdir()
+            weights.write_bytes(b"alternate full model weights")
+            (fake_checkpoint / "assets").mkdir()
+            (fake_checkpoint / "assets/vocab.bin").symlink_to(weights)
+        (fake_checkpoint / "tokenizer_config.json").write_text(json.dumps(metadata))
+    elif invalid == "sidecar_copy":
         (fake_checkpoint / "tokenizer.json").write_text("{}")
         copy2 = shutil.copy2
 
@@ -295,7 +388,7 @@ def test_export_source_slice_rejects_invalid_source(
                 name = "../" + outside.name if invalid == "parent_shard" else str(outside)
                 index["weight_map"] = dict.fromkeys(tensors, name)
                 index_path.write_text(json.dumps(index))
-    if invalid not in ("shape", "sidecar_copy"):
+    if invalid not in ("shape", "sidecar_copy") and not invalid.startswith("tokenizer_"):
         # Loading retains compatibility with user-created views of externally cached weights.
         model = FakeBaseModel.from_source(str(fake_checkpoint))
         torch.testing.assert_close(model.embed_tokens.weight, tensors["embed_tokens.weight"])

@@ -35,6 +35,8 @@ from transformers import (
     PretrainedConfig,
     PreTrainedModel,
 )
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
+from transformers.models.auto.tokenization_auto import tokenizer_class_from_name
 
 from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -281,13 +283,33 @@ class FakeBaseModel(PreTrainedModel):
         config = cls._config_from_source(str(source), trust_remote_code)
         weights = cls._source_weights(str(source), config, validate_local_paths=True)
         config_path = resolve_checkpoint_file(source, "config.json", max_bytes=None)
+        tokenizer_files = cls._source_tokenizer_files(source, trust_remote_code)
+        model_files = {
+            (source / name).resolve()
+            for name in set(cls._load_index(str(source), validate_local_paths=True).values())
+        }
+        # Alternate full weights can coexist with the safetensors selected by the loader.
+        model_files.update(
+            path.resolve()
+            for pattern in (
+                "pytorch_model*.bin",
+                "tf_model.h5",
+                "flax_model.msgpack",
+                "consolidated*.safetensors",
+                "consolidated*.pth",
+                "adapter_model.*",
+            )
+            for path in source.rglob(pattern)
+        )
+        if model_files.intersection((source / name).resolve() for name in tokenizer_files):
+            raise ValueError("Tokenizer assets must not refer to model weight files")
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix=".base-slice-", dir=destination.parent
         ) as temporary:
             output = Path(temporary) / "slice"
             output.mkdir()
-            copy_non_model_files(source, output, strict=True)
+            copy_non_model_files(source, output, strict=True, tokenizer_files=tokenizer_files)
             shutil.copy2(config_path, output / "config.json")
             save_file(
                 dict(weights.values()),
@@ -297,6 +319,24 @@ class FakeBaseModel(PreTrainedModel):
             shutil.copymode(source, output)
             output.rename(destination)
         return destination
+
+    @staticmethod
+    def _source_tokenizer_files(source: Path, trust_remote_code: bool) -> tuple[str, ...]:
+        """Read declared tokenizer filenames without loading tokenizer data."""
+        if not (source / "tokenizer_config.json").exists():
+            return ()
+        config_path = resolve_checkpoint_file(source, "tokenizer_config.json")
+        metadata = json.loads(config_path.read_text())
+        auto_map = metadata.get("auto_map", {})
+        custom = auto_map if isinstance(auto_map, (tuple, list)) else auto_map.get("AutoTokenizer")
+        tokenizer_class = tokenizer_class_from_name(metadata.get("tokenizer_class") or "")
+        if custom and trust_remote_code:
+            tokenizer_class = get_class_from_dynamic_module(
+                custom[1] or custom[0], str(source), local_files_only=True
+            )
+        elif custom and tokenizer_class is None:
+            raise ValueError("Custom tokenizer code requires trust_remote_code=True")
+        return tuple(tokenizer_class.vocab_files_names.values()) if tokenizer_class else ()
 
     @staticmethod
     def _find_weight_key(weight_map: dict, paths: list[str], label: str) -> str:

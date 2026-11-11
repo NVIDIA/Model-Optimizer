@@ -949,7 +949,11 @@ def ensure_local_checkpoint(
 
 
 def copy_non_model_files(
-    source: str | os.PathLike, export_dir: str | os.PathLike, *, strict: bool = False
+    source: str | os.PathLike,
+    export_dir: str | os.PathLike,
+    *,
+    strict: bool = False,
+    tokenizer_files: Iterable[str] = (),
 ) -> list[str]:
     """Copy the source checkpoint's non-model files into an export, verbatim.
 
@@ -973,6 +977,8 @@ def copy_non_model_files(
             :func:`ensure_local_checkpoint`.
         export_dir: Export directory; created if missing.
         strict: Raise instead of warning when a source file is invalid or cannot be copied.
+        tokenizer_files: Declared tokenizer assets exempt from the weight filename filter.
+            Exempt files must exist and pass the same containment checks as other sidecars.
 
     Returns:
         The copied paths, relative to the checkpoint root and ``/``-separated on every platform.
@@ -985,6 +991,15 @@ def copy_non_model_files(
         )
     export_dir = Path(export_dir)
     source_root, export_root = source_dir.resolve(), export_dir.resolve()
+    tokenizer_assets = {
+        Path(name)
+        for name in tokenizer_files
+        if _matches_any_pattern(Path(name).name, _WEIGHT_FILE_PATTERNS)
+    }
+    for rel in tokenizer_assets:
+        if rel.is_absolute() or ".." in rel.parts:
+            raise ValueError("Tokenizer asset paths must be relative without '..'")
+        resolve_checkpoint_file(source_dir, rel, max_bytes=None)
     copied = []
     for src in sorted(source_dir.rglob("*")):
         rel = src.relative_to(source_dir)
@@ -993,7 +1008,10 @@ def copy_non_model_files(
             or (source_root / rel).is_relative_to(export_root)
             or any(part.startswith(".") for part in rel.parts[:-1])
             or (len(rel.parts) == 1 and rel.name in _EXPORT_OWNED_FILES)
-            or _matches_any_pattern(rel.name, _WEIGHT_FILE_PATTERNS)
+            or (
+                rel not in tokenizer_assets
+                and _matches_any_pattern(rel.name, _WEIGHT_FILE_PATTERNS)
+            )
         ):
             continue
         dst = export_dir / rel
