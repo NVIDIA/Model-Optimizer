@@ -27,6 +27,7 @@ Model Optimizer is also integrated with [NVIDIA Megatron-Bridge](https://github.
 
 ## Latest News
 
+- [2026/11/12] [BLOG: Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX](https://nvidia.github.io/Model-Optimizer/announcements/20261112-qwen38-27b-external-drafts-lpx.html): Three ModelOpt-trained external drafts for Qwen3.8-27B; at unbounded draft length the 4B accepts 59% more tokens per step than the model's MTP head.
 - [2026/10/28] [BLOG: GLM-5.3-Flash at 2-3 Bits per Expert Weight: IQ2_S PTQ Recipes and QAD](https://nvidia.github.io/Model-Optimizer/announcements/20261028-glm53-flash-iq2.html): IQ2_S experts with NVFP4 down projections match the FP8 checkpoint without training, at less than half its size; QAD recovers long-context accuracy on the all-IQ2_S model.
 - [2026/10/15] [NVIDIA Nemotron 3.5 Super VL 120B-A12B NVFP4 checkpoint](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4): Quantized with Model Optimizer using post-training quantization (PTQ) and quantization-aware distillation (QAD). For details, see the Quantization section (Section 4) of the [technical report](https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3.5-Super-and-Lightning-Technical-Report.pdf).
 - [2026/10/08] [BLOG: AutoQuant KV: Automatic Mixed-Precision KV Cache Quantization](https://nvidia.github.io/Model-Optimizer/announcements/20261008-autoquant-kv.html): Per-layer KV format search, GEMM composition, and a Qwen3-8B accuracy case study.

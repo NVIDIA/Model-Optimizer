@@ -31,6 +31,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-11-12" data-title="Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX" data-summary="Three ModelOpt-trained external drafts for Qwen3.8-27B: at unbounded draft length on Groq 3 LPX, the 4B accepts 59% more tokens per step than the model's MTP head and the 0.8B 6% more." data-tags="speculative-decoding external-draft groq-lpx qwen3.8 distillation">
+       <div class="announcement-card-meta">November 12, 2026 &middot; Peter Hicks et al.</div>
+       <h2><a href="announcements/20261112-qwen38-27b-external-drafts-lpx.html">Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX</a></h2>
+       <p>Three ModelOpt-trained external drafts for Qwen3.8-27B: at unbounded draft length on Groq 3 LPX, the 4B accepts 59% more tokens per step than the model's MTP head and the 0.8B 6% more.</p>
+       <div class="announcement-card-tags"><span>speculative-decoding</span><span>external-draft</span><span>groq-lpx</span><span>qwen3.8</span><span>distillation</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-10-28" data-title="GLM-5.3-Flash at 2-3 Bits per Expert Weight: IQ2_S PTQ Recipes and QAD" data-summary="IQ2_S routed experts with layerwise GPTQ on GLM-5.3-Flash: NVFP4 down projections reach FP8 accuracy without training, and QAD recovers AA-LCR and cuts runaway generations." data-tags="quantization ggml nvfp4 qad megatron-bridge">
        <div class="announcement-card-meta">October 28, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/20261028-glm53-flash-iq2.html">GLM-5.3-Flash at 2-3 Bits per Expert Weight: IQ2_S PTQ Recipes and QAD</a></h2>
