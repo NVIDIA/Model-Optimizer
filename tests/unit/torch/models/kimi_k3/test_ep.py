@@ -95,10 +95,15 @@ def _config(**overrides):
         "routed_expert_hidden_size": 6,
         "moe_intermediate_size": 5,
         "hidden_act": "silu",
-        "situ_beta": 1.5,
-        "situ_linear_beta": 0.25,
+        "activation_situ_beta": 1.5,
+        "activation_situ_linear_beta": 0.25,
         "latent_moe_use_norm": True,
         "num_shared_experts": 1,
+        "num_expert_group": 1,
+        "topk_group": 1,
+        "moe_renormalize": True,
+        "routed_scaling_factor": 2.5,
+        "rms_norm_eps": 1e-6,
         "_experts_implementation": "eager",
     }
     return SimpleNamespace(**{**fields, **overrides})
@@ -201,43 +206,68 @@ def test_the_eager_loop_sums_a_tokens_results_in_the_routing_weights_dtype():
     assert torch.equal(got, want)
 
 
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {},
-        {
-            "latent_moe_use_norm": False,
-            "routed_expert_hidden_size": None,
-            "num_shared_experts": None,
-        },
-        {"hidden_act": "situ"},
-    ],
-    ids=["latent-norm-shared", "plain", "situ"],
-)
-def test_the_patched_block_reproduces_the_remote_per_expert_forward(overrides):
-    """Swapping the per-expert ModuleList for the fused module keeps the block's output: the latent
-    projections, the latent norm and the shared experts stay around the fused call, and w1 / w3 /
-    w2 are the gate rows, the up rows and the down of the fused params. A ``situ`` model hands the
-    full [gate; up] row to the remote ``SituAndMul``. A block built before the patch, as a model
-    loaded earlier in the process holds, keeps its per-expert experts and its own forward."""
+# The checkpoint's MoE block in the variants its config can select (a reviewer's check of the
+# patched block against the shipped code ran the same seven).
+_MOE_VARIANTS = {
+    "latent-norm-situ": {},
+    "latent-no-norm": {"latent_moe_use_norm": False},
+    "no-latent": {"routed_expert_hidden_size": None},
+    "grouped-routing": {"num_expert_group": 4, "topk_group": 2},
+    "no-shared-experts": {"num_shared_experts": None},
+    "silu-no-renorm": {"hidden_act": "silu", "moe_renormalize": False},
+    "situ-no-linear-beta": {"activation_situ_linear_beta": None},
+}
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("overrides", list(_MOE_VARIANTS.values()), ids=list(_MOE_VARIANTS))
+def test_the_patched_block_reproduces_the_remote_per_expert_forward(overrides, dtype):
+    """Swapping the per-expert ModuleList for the fused module keeps the output of a block that
+    computes what the checkpoint's computes: the latent projections, the latent RMSNorm and the
+    shared experts stay around the fused call, w1 / w3 / w2 are the gate rows, the up rows and the
+    down of the fused params, the router's picks and scaled weights reach the fused experts as they
+    are, and a ``situ`` model hands the full [gate; up] row to the remote ``SituAndMul``. A block
+    built before the patch, as a model loaded earlier in the process holds, keeps its per-expert
+    experts and its own forward."""
     remote = remote_module()
-    config = _config(**overrides)
+    config = _config(
+        **{
+            "num_experts": 16,
+            "num_experts_per_token": 4,
+            "hidden_size": 64,
+            "routed_expert_hidden_size": 48,
+            "moe_intermediate_size": 32,
+            "hidden_act": "situ",
+            "activation_situ_beta": 4.0,
+            "activation_situ_linear_beta": 25.0,
+            "num_shared_experts": 2,
+            **overrides,
+        }
+    )
     reference = remote.KimiSparseMoeBlock(config)
-    _randomize(reference)
-    gen = torch.Generator().manual_seed(1)
-    hidden_states = torch.randn(2, 3, config.hidden_size, generator=gen)
+    gen = torch.Generator().manual_seed(0)
+    with torch.no_grad():
+        for param in reference.parameters():
+            param.copy_(torch.randn(param.shape, generator=gen) * 0.5 / param.shape[-1] ** 0.5)
+        bias = reference.gate.e_score_correction_bias
+        bias.copy_(0.05 * torch.randn(bias.shape, generator=gen))
+        if (norm := getattr(reference, "routed_expert_norm", None)) is not None:
+            norm.weight.copy_(0.5 + torch.rand(norm.weight.shape, generator=gen))
+    reference.to(dtype)
+    hidden_states = torch.randn(3, 11, config.hidden_size, generator=gen).to(dtype)
     with torch.no_grad():
         expected = reference(hidden_states)
 
     kimi_k3._patch_kimi_moe_block(remote)
     with torch.no_grad():
-        torch.testing.assert_close(reference(hidden_states), expected)
+        torch.testing.assert_close(reference(hidden_states), expected, rtol=0, atol=0)
     block = remote.KimiSparseMoeBlock(config)
     assert not isinstance(block.experts, nn.ModuleList)
     dense = {k: v for k, v in reference.state_dict().items() if not k.startswith("experts.")}
     result = block.load_state_dict(dense, strict=False)
     assert sorted(result.missing_keys) == ["experts.down_proj", "experts.gate_up_proj"]
     assert not result.unexpected_keys
+    block.to(dtype)
     with torch.no_grad():
         gate_up = [torch.cat([m.w1.weight, m.w3.weight]) for m in reference.experts]
         block.experts.gate_up_proj.copy_(torch.stack(gate_up))
