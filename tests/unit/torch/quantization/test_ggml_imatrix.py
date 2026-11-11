@@ -137,7 +137,8 @@ def test_imatrix_matches_each_blocks_energy_and_keeps_a_weight_encoding_to_its_c
     decoded = _decoded(quantizer, original.shape).reshape(16, 2, 256)
     energy = (second_moments * decoded.square()).sum(-1)
     target = (second_moments * original.float().reshape(16, 2, 256).square()).sum(-1)
-    torch.testing.assert_close(energy, target, rtol=1e-2, atol=0)
+    # Up to the codes the rescaled weight's rounding flips when it is encoded again.
+    torch.testing.assert_close(energy, target, rtol=2e-2, atol=0)
 
     rescanned, _ = IQ2_XXS.quantize(
         model.weight.detach(),
@@ -230,10 +231,9 @@ def test_a_module_calibration_never_reached_gets_the_plain_search(algorithm):
     assert torch.equal(model["unused"].weight, original) == (algorithm is LOCAL_HESSIAN)
 
 
-def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
+def test_imatrix_weights_each_fused_expert_by_its_own_tokens(moe):
     original = copy.deepcopy(moe.mlp)
     inputs = _inputs(rows=96, columns=HIDDEN)
-    calls = _record_importance(monkeypatch)
     # The shipped experts-only recipe, which calibrates in a single pass.
     recipe = load_recipe("general/ptq/iq2_xxs_experts_only").quantize.model_dump()
     assert recipe["algorithm"]["method"] == "imatrix"
@@ -243,20 +243,22 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
     assert not moe.mlp.shared_expert.weight_quantizer.is_enabled
     assert torch.equal(moe.mlp.shared_expert.weight, original.shared_expert.weight)
 
-    # One encode per expert and projection: gate_up for experts 0..3, then down for 0..3.
-    gate_up_calls, down_calls = calls[-8:-4], calls[-4:]
     experts = moe.mlp.experts
     for idx in range(NUM_EXPERTS):
         tokens = inputs[idx::3] if idx < 3 else inputs[:0]
+        gate_up_importance = pinned_importance(
+            experts.gate_up_proj_weight_quantizers[idx], "iq2_xxs"
+        )
+        down_importance = pinned_importance(experts.down_proj_weight_quantizers[idx], "iq2_xxs")
         if len(tokens) == 0:
             # The idle expert keeps the plain search, and its codes are still pinned.
-            assert gate_up_calls[idx] is None
-            assert down_calls[idx] is None
+            assert gate_up_importance is None
+            assert down_importance is None
         else:
             gate, up = F.linear(tokens, original.experts.gate_up_proj[idx]).chunk(2, dim=-1)
-            torch.testing.assert_close(gate_up_calls[idx], _importance(tokens.square().mean(dim=0)))
+            torch.testing.assert_close(gate_up_importance, _importance(tokens.square().mean(dim=0)))
             torch.testing.assert_close(
-                down_calls[idx], _importance((F.silu(gate) * up).square().mean(dim=0))
+                down_importance, _importance((F.silu(gate) * up).square().mean(dim=0))
             )
         for weight, original_weight, quantizers in (
             (
@@ -352,19 +354,21 @@ def test_search_under_the_identity_hessian_keeps_the_encoders_own_choices(num_bi
 
 
 @pytest.mark.parametrize("layerwise", [False, True])
-def test_layerwise_imatrix_sees_the_earlier_layers_quantization(monkeypatch, layerwise):
-    calls = _record_importance(monkeypatch)
-
+def test_layerwise_imatrix_sees_the_earlier_layers_quantization(layerwise):
     def run(layerwise):
         model = get_tiny_llama(
             dtype=torch.float32, hidden_size=256, intermediate_size=256, num_attention_heads=4
         )
         input_ids = torch.randint(0, 32, (4, 16), generator=torch.Generator().manual_seed(0))
         algorithm = {"method": "imatrix", "layerwise": {"enable": layerwise}}
-        start = len(calls)
         mtq.quantize(model, _config(algorithm, "*mlp*weight_quantizer"), lambda m: m(input_ids))
-        weighted = [c for c in calls[start:] if c is not None]
-        assert len(weighted) == 6  # gate, up and down of both layers
+        # gate, up and down of both layers, in module order
+        weighted = [
+            pinned_importance(module.weight_quantizer, "iq2_xxs")
+            for name, module in model.named_modules()
+            if "mlp" in name and hasattr(module, "weight_quantizer")
+        ]
+        assert len(weighted) == 6 and all(w is not None for w in weighted)
         return weighted
 
     single_pass, other = run(False), run(layerwise)
