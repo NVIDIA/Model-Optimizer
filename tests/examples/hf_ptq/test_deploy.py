@@ -113,6 +113,40 @@ def cleanup_after_test():
             tensor_parallel_size=8,
             mini_sm=100,
         ),
+        # DeepSeek-V4.1-Flash-1017 stores its Engram lookup tables as MXFP4 and serves them
+        # through DeepSeek-V4.1's sparse MLA, so each backend needs the settings its model card
+        # records; the generic defaults cannot load it. One entry per backend, because the two
+        # take different arguments. TP and the arguments below are the card's validated
+        # configurations, which ran on four GB300 GPUs. vLLM needs a build carrying
+        # vllm-project/vllm#61530 and SGLang one carrying sgl-project/sglang#47935.
+        *ModelDeployerList(
+            model_id="nvidia/DeepSeek-V4.1-Flash-1017-NVFP4",
+            backend=("vllm",),
+            tensor_parallel_size=4,
+            mini_sm=100,
+            engine_kwargs={
+                "tokenizer_mode": "deepseek_v41",
+                "attention_config": {
+                    "backend": "FLASHINFER_MLA_SPARSE_DSV41",
+                    "indexer_kv_dtype": "mxfp4",
+                    "indexer_sparse_logits": True,
+                },
+                # The Engram tables are about 97 GiB; the card keeps them in host memory.
+                "engram_config": {"cpu_offload": True},
+            },
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/DeepSeek-V4.1-Flash-1017-NVFP4",
+            backend=("sglang",),
+            tensor_parallel_size=4,
+            mini_sm=100,
+            engine_kwargs={
+                "kv_cache_dtype": "fp8_e4m3",
+                "dsv4_attn_backend": "flashmla",
+                "mem_fraction_static": 0.9,
+                "engram_config": {"placement": "cpu", "replication": "none", "lookup": "auto"},
+            },
+        ),
     ],
     ids=idfn,
 )
