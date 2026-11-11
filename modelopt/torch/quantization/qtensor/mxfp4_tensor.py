@@ -127,9 +127,9 @@ class MXFP4QTensor(BaseQuantizedTensor):
 
         # Unfuse the uint8 values back to uint4
         x_unfused = unfuse_uint8_to_uint4(self._quantized_data)
-        # quantize() crops the packed data down to the unpadded shape; re-pad it to a
-        # block_size multiple here so it lines up with the per-block e8m0_scale below,
-        # which was computed over the padded shape.
+        # quantize() keeps the packed data at the padded width already, so this is a
+        # no-op in that case; kept defensively for any other caller that constructs
+        # this class directly from possibly-unpadded packed data.
         x_unfused = reduce_block_padding(x_unfused, block_sizes={-1: block_size})
         # Extract sign and magnitude
         sign = 1 - 2 * ((x_unfused & 0b1000) >> 3).to(
