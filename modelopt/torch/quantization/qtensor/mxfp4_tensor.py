@@ -85,10 +85,13 @@ class MXFP4QTensor(BaseQuantizedTensor):
 
         input = (blocked / torch.exp2(e8m0_scale)).view(padded_shape)
         input_q = cast_fp4(input)
+        # keep the packed tensor at the padded (block-aligned) width, matching
+        # NVFP4QTensor: dequantize() re-pads before unpacking and trims the final
+        # dequantized float output down to the true shape, so the packed storage
+        # doesn't need cropping -- and shard_cast_utils' quantize_mxfp4_to_nvfp4*
+        # helpers assume exactly num_blocks * 16 packed bytes per row, which a
+        # crop to the unpadded size would violate for non-block-divisible shapes.
         input_q = fuse_uint4_to_uint8(input_q)
-        # crop the packed (2:1) last dim back down to the unpadded size; contiguous()
-        # since the slice is a strided view and downstream export writes raw storage
-        input_q = input_q[..., : -(-original_shape[-1] // 2)].contiguous()
         e8m0_scale = (e8m0_scale + 127).to(torch.uint8)
         return cls(original_shape, original_dtype, input_q), e8m0_scale
 

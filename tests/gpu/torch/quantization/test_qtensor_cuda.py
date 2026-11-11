@@ -1011,10 +1011,15 @@ class TestMXFP4Padding:
         qtensor, e8m0_scale = MXFP4QTensor.quantize(test_tensor, block_size=32)
 
         assert qtensor._quantized_data.shape[:-1] == test_tensor.shape[:-1]
-        # the crop after padding must not leave a strided view: export writes raw
-        # storage, so a non-contiguous packed tensor would serialize with gaps
-        # between rows for any multi-row shape
+        # the packed tensor must not be cropped to a strided view: export writes
+        # raw storage, so a non-contiguous packed tensor would serialize with
+        # gaps between rows for any multi-row shape
         assert qtensor._quantized_data.is_contiguous()
+        # shard_cast_utils' quantize_mxfp4_to_nvfp4*/dequantize_mxfp4_to_bf16
+        # assume exactly num_blocks * 16 packed bytes per row -- a crop to the
+        # unpadded size would violate this for non-block-divisible shapes
+        num_blocks = -(-input_shape[-1] // 32)
+        assert qtensor._quantized_data.shape[-1] == num_blocks * 16
 
         dequant_tensor = qtensor.dequantize(scale=e8m0_scale, block_sizes={-1: 32})
 
