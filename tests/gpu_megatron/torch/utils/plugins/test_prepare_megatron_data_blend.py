@@ -176,8 +176,12 @@ def test_to_chat_handles_all_row_shapes():
     msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
     assert blend_module._to_chat({"messages": msgs}, "messages") == {"messages": msgs}
     assert blend_module._to_chat({"messages": []}, "messages") is None
-    # Nothing would be trained under assistant-only loss.
+    assert blend_module._to_chat({"messages": "hello"}, "messages") is None
+    # Nothing would be trained under assistant-only loss; loss_mode full trains the user turn.
     assert blend_module._to_chat({"messages": msgs[:1]}, "messages") is None
+    assert blend_module._to_chat({"messages": msgs[:1]}, "messages", loss_mode="full") == {
+        "messages": msgs[:1]
+    }
     # Tool definitions and a top-level system prompt reach the chat path.
     tools = [{"type": "function", "function": {"name": "add"}}]
     row = {"messages": msgs, "tools": tools, "system": "Be brief.", "id": 7}
@@ -203,6 +207,7 @@ def test_to_chat_handles_all_row_shapes():
         "messages": [{"role": "assistant", "content": "def f(): pass"}]
     }
     assert blend_module._to_chat({"text": ""}, "text") is None
+    assert blend_module._to_chat({"text": ["x"]}, "text") is None
     # Markers that parse to no turns: dropped, never trained as assistant text.
     assert blend_module._to_chat({"text": "<extra_id_0>\nraw body\n"}, "text") is None
     # A role without a mapping would cut its turn out of the middle: the whole row is dropped.
@@ -223,18 +228,36 @@ def test_to_chat_handles_all_row_shapes():
         assert blend_module._to_chat({"text": text}, "text") is None, text
 
 
-def test_take_chat_rows_skips_non_text_rows_and_fails_without_enough(tmp_path: Path, monkeypatch):
+def test_take_chat_rows_skips_non_text_rows_and_fails_without_enough(
+    tmp_path: Path, monkeypatch, capsys
+):
     source = _source("a")
     # Media is rejected inside message content and as a top-level key the conversion drops.
     rows = [_chat(0), _image_chat(1), {**_chat(9), "images": ["a.png"]}, _chat(2), _chat(3)]
     monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(rows))
-    got = blend_module._take_chat_rows(source, tmp_path, 3, False, 0, "native")
+    got = blend_module._take_chat_rows(source, tmp_path, 3, False, 0, "native", "assistant")
     assert [c["messages"][0]["content"] for c in got] == ["q0", "q2", "q3"]
 
     images = [_image_chat(i) for i in range(200)]
     monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(images))
     with pytest.raises(RuntimeError, match=r"only 0/2 usable rows \(gave up after 121 rejected"):
-        blend_module._take_chat_rows(source, tmp_path, 2, False, 0, "native")
+        blend_module._take_chat_rows(source, tmp_path, 2, False, 0, "native", "assistant")
+
+    # Unconvertible rows are skipped, but only the first few are warned about.
+    bad = [{"messages": ["hello"]} for _ in range(20)]
+    monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter([*bad, _chat(0)]))
+    capsys.readouterr()
+    assert (
+        len(blend_module._take_chat_rows(source, tmp_path, 1, False, 0, "native", "assistant")) == 1
+    )
+    out = capsys.readouterr().out
+    assert out.count("cannot be converted") == 5
+    assert "1 rows (20 rejected, 20 unconvertible)" in out
+    # A config error is not a bad row: it fails before any row is skipped.
+    monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(bad))
+    no_field = {k: v for k, v in source.items() if k != "content_field"}
+    with pytest.raises(KeyError, match="content_field"):
+        blend_module._take_chat_rows(no_field, tmp_path, 1, False, 0, "native", "assistant")
 
 
 def test_chat_blend_splits_weighted_rows(tmp_path: Path, chat_blend, monkeypatch):
@@ -281,8 +304,9 @@ def test_chat_blend_reuses_and_rebuilds_cached_parts(tmp_path: Path, chat_blend)
         ({}, {"shuffle": True}),
         ({"shuffle": True, "seed": 0}, {"shuffle": True, "seed": 1}),
         ({}, {"reasoning_content": "inline"}),
+        ({}, {"loss_mode": "full"}),
     ],
-    ids=["split", "files", "shuffle", "seed", "reasoning_content"],
+    ids=["split", "files", "shuffle", "seed", "reasoning_content", "loss_mode"],
 )
 def test_chat_blend_reselects_after_a_selection_change(chat_blend, first, second):
     write_config, calls = chat_blend
@@ -302,7 +326,11 @@ def test_chat_blend_reselects_after_a_selection_change(chat_blend, first, second
         ({"sources": [_source("a", weight=-1)]}, "nonnegative"),
         ({"sources": [_source("a", weight=0)]}, "not all zero"),
         ({"sources": [_source("a", weight=float("inf"))]}, "finite"),
-        ({"tokenizer": "x"}, "does not use"),
+        ({"tokenizer": "x"}, "both tokenizer and max_length"),
+        ({"max_length": 64}, "both tokenizer and max_length"),
+        ({"pack_max_tokens": 64}, "pack_max_tokens needs tokenizer and max_length"),
+        ({"tokenizer": "x", "max_length": 0}, "max_length must be a positive integer"),
+        ({"tokenizer": "x", "max_length": 64, "loss_mode": "last"}, "loss_mode must be"),
         ({"target_tokens": 1000}, "does not use"),
         ({"reasoning_content": "drop"}, "reasoning_content must be one of"),
         # A row with both columns must not silently be read from ``text``.
@@ -357,8 +385,10 @@ def test_write_jsonl_is_atomic(tmp_path: Path):
 def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
     plain, packed = tmp_path / "a.jsonl", tmp_path / "b.jsonl.gz"
     lines = [json.dumps(_chat(i)) for i in range(20)]
-    # A malformed record is skipped with a warning, as in the tokenizing reader.
-    plain.write_text("\n".join([*lines[:10], '{"messages": [', *lines[10:]]) + "\n", "utf-8")
+    # Malformed records, unparseable or unconvertible, are skipped with a warning as in the
+    # tokenizing reader.
+    bad = ['{"messages": [', '{"messages": ["hello"]}']
+    plain.write_text("\n".join([*lines[:10], *bad, *lines[10:]]) + "\n", "utf-8")
     with gzip.open(packed, "wt", encoding="utf-8") as f:
         f.writelines(json.dumps(_chat(i)) + "\n" for i in range(20, 40))
     paths = {"data/a.jsonl": str(plain), "data/b.jsonl.gz": str(packed)}
@@ -379,3 +409,47 @@ def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
     assert sorted(r["messages"][0]["content"] for r in rows) == sorted(f"q{i}" for i in range(40))
     # The part is named after its first file.
     assert len(list((out / "parts").glob("org--a_a_*.jsonl"))) == 1
+
+
+def test_chat_blend_drops_untrainable_rows_and_pairs_the_rest(
+    tiny_tokenizer_path: str, tmp_path: Path, chat_blend, monkeypatch
+):
+    def iter_rows(source, output_dir, shuffle, seed):
+        # Prompts of 0..99 words; past max_length the truncation leaves no assistant token.
+        yield from (
+            {
+                "messages": [
+                    {"role": "user", "content": "w " * i},
+                    {"role": "assistant", "content": "a"},
+                ]
+            }
+            for i in range(100)
+        )
+
+    monkeypatch.setattr(blend_module, "_iter_rows", iter_rows)
+    write_config, _ = chat_blend
+    config = {"tokenizer": tiny_tokenizer_path, "max_length": 64, "num_workers": 1}
+    sizes = blend_module.prepare_chat_data_blend(write_config(**config))
+    out = tmp_path / "blend"
+    blend_module._init_sft_tokenizer(tiny_tokenizer_path, 64, "assistant")
+    rows = _read_jsonl(out / "train.jsonl") + _read_jsonl(out / "validation.jsonl")
+    assert 40 < len(rows) < 100  # the 50 + 50 selected rows, minus the long prompts
+    assert all(blend_module._sft_length(row) for row in rows)
+    # A setup error would drop every row, so it is raised instead.
+    monkeypatch.setitem(blend_module._SFT_TOKENIZER, "loss_mode", "unknown")
+    with pytest.raises(ValueError, match="loss_mode"):
+        blend_module._sft_length(rows[0])
+
+    # A cap of 2 * max_length fits any two rows, so only an odd row per split is left out.
+    paired = blend_module.prepare_chat_data_blend(write_config(**config, pack_max_tokens=128))
+    assert paired == {split: n - n % 2 for split, n in sizes.items()}
+
+
+def test_pair_rows_pairs_long_with_short_under_the_cap():
+    lengths = {"a": 10, "b": 60, "c": 30, "d": 50, "e": 95, "f": 20}
+    rows = blend_module._pair_rows(list(lengths), list(lengths.values()), cap=80, seed=0)
+    # e fits with no row and c is left without a partner; rows (2k, 2k + 1) are a pack.
+    assert {frozenset(rows[k : k + 2]) for k in range(0, len(rows), 2)} == {
+        frozenset("ab"),
+        frozenset("df"),
+    }

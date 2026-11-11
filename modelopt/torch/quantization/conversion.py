@@ -22,7 +22,6 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any, cast
 
-import torch
 import torch.nn as nn
 
 from modelopt.torch.opt.conversion import ApplyModeError, ModelLikeModule, ModeloptStateManager
@@ -47,7 +46,7 @@ from .nn import (
     TensorQuantizer,
 )
 from .utils import is_quantized, is_quantized_linear
-from .utils.shared_input import SharedWeightGlobalAmaxState
+from .utils.shared_input import DOWN_PROJ_PATTERNS, SharedWeightGlobalAmaxState
 
 __all__ = [
     "preserve_quantizer_attributes_context",
@@ -117,11 +116,17 @@ def _restore_shared_quant_state_aliases(
     """Rebuild shared-state ties before checkpoint tensor values are loaded."""
     if not metadata.get("shared_quant_states"):
         return
-    # max / mse / local_hessian all carry ``shared_states`` (via _SharedStatesConfig) and use
-    # the same grouping; resolve the patterns that were in effect at save and rebuild the ties.
-    patterns = SharedWeightGlobalAmaxState.resolve_patterns(
-        shared_states=getattr(config, "shared_states", None)
-    )
+    patterns = metadata.get("shared_quant_patterns")
+    if patterns is None:
+        # Saved before the patterns were recorded, when the MLA down projections were not grouped:
+        # tying them now would load both members' ranges into one buffer.
+        patterns = [
+            pattern
+            for pattern in SharedWeightGlobalAmaxState.resolve_patterns(
+                shared_states=getattr(config, "shared_states", None)
+            )
+            if pattern not in DOWN_PROJ_PATTERNS
+        ]
     SharedWeightGlobalAmaxState.restore(model, patterns=patterns)
 
 
@@ -197,36 +202,25 @@ def create_and_replace_residue_linear_on_the_fly(model, names):
 
 
 def update_residue_metadata(model, config, metadata):
-    """Record physical weight shapes independently of salient channel buffers."""
+    """Record residue module names; native quantizer state carries the indices."""
     update_quantize_metadata(model, config, metadata)
     metadata["residue_modules"] = {
-        name: {
-            "in_features": module.in_features,
-            "original_in_features": getattr(module, "_original_in_features", None),
-        }
+        name: {"shared_input_group": getattr(module, "_residue_group", ())}
         for name, module in model.named_modules()
         if isinstance(module, ResidueQuantLinear)
     }
 
 
 def restore_residue_model(model, config, metadata):
-    """Restore residue architecture and physical dimensions before loading tensor data."""
+    """Restore residue linears with their original weight dimensions."""
     states = metadata["residue_modules"]
+    if any(state.get("original_in_features") is not None for state in states.values()):
+        raise NotImplementedError(
+            "Materialized residue checkpoints are unsupported; use an unextended QDQ checkpoint."
+        )
     create_and_replace_residue_linear_on_the_fly(model, states)
     for name, state in states.items():
-        module = model.get_submodule(name)
-        original = state["original_in_features"]
-        if original is not None:
-            module._original_in_features = original
-            module.in_features = state["in_features"]
-            module.weight = nn.Parameter(
-                torch.empty(
-                    (module.out_features, module.in_features),
-                    device=module.weight.device,
-                    dtype=module.weight.dtype,
-                ),
-                requires_grad=module.weight.requires_grad,
-            )
+        model.get_submodule(name)._residue_group = tuple(state.get("shared_input_group", ()))
     return restore_quantizer_state(model, config, metadata)
 
 
@@ -259,8 +253,12 @@ def update_quantize_metadata(
     metadata["quantizer_state"] = quantizer_state(model)
     if shared_state_metadata := SharedWeightGlobalAmaxState.metadata(model):
         metadata["shared_quant_states"] = shared_state_metadata
+        # Record the patterns calibration grouped with, so restore ties the same groups; ``config``
+        # need not be the calibration algorithm's (e.g. LoRA and AutoQuantize pass a default one).
+        metadata["shared_quant_patterns"] = SharedWeightGlobalAmaxState.grouping_patterns(model)
     else:
         metadata.pop("shared_quant_states", None)
+        metadata.pop("shared_quant_patterns", None)
 
 
 def _linear_attention_modules(model):

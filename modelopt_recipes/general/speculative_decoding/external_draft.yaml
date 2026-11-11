@@ -29,15 +29,8 @@ data:
   # base lm_head at train time and requires a TVD objective (tvd, tvd_deploy or tvd_ce).
   #
   # The first run over a dump builds a memmapped cache beside the shards, which takes
-  # hours on a large corpus. Under torchrun only rank 0 builds it and the others wait,
-  # so build it once in a single process first:
-  #   python -c "from modelopt.torch.speculative.external.sparse_data import \
-  #       SparsePolicyDataset as D, discover_shards as F; \
-  #       D(F('DUMP'), max_length=12288, cache_dir=None)"
-  # Use discover_shards and the same cache_dir training will use: a cache keyed on a
-  # different shard list is ignored, and torchrun rebuilds it from scratch. A ragged
-  # third-party dump also needs top_k=<its top-k> here, since the cache width is
-  # otherwise inferred from the first record and there is no recipe field for it.
+  # hours on a large corpus. Build it once before torchrun: see
+  # examples/speculative_decoding/doc/external_draft.md#teacher-policy-data
   sparse_data_path:
   # Where that cache lives. Defaults to a .sparse_cache beside the shards, which fails
   # on a read-only dump and makes concurrent runs over the same shards contend.

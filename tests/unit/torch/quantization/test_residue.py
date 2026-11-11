@@ -29,7 +29,9 @@ from modelopt.torch.export.unified_export_hf import (
     _export_transformers_checkpoint,
     export_hf_checkpoint,
 )
-from modelopt.torch.quantization.nn import ResidueQuantLinear
+from modelopt.torch.quantization.algorithms import QuantRecipe, QuantRecipeHparam
+from modelopt.torch.quantization.conversion import restore_residue_model
+from modelopt.torch.quantization.nn import ResidueQuantLinear, TensorQuantizer
 
 
 def _config(fmt="NVFP4", **algorithm):
@@ -53,8 +55,8 @@ def test_equal_batch_weighting(fmt):
         lambda m: m(torch.cat([first, second])),
     )
     assert isinstance(split, ResidueQuantLinear)
-    assert torch.equal(split.input_quantizer.salient_indices, torch.arange(0, 64, 8))
-    assert torch.equal(joined.input_quantizer.salient_indices, torch.arange(1, 64, 8))
+    assert torch.equal(split.input_quantizer._salient_indices, torch.arange(0, 64, 8))
+    assert torch.equal(joined.input_quantizer._salient_indices, torch.arange(1, 64, 8))
     assert split.weight.shape == (8, 64)
 
 
@@ -66,21 +68,20 @@ def test_partial_selection_block(ratio):
         lambda m: m(torch.tensor([[1.0, 2, 3, 4, 5]])),
     )
     expected = {0.0: [], 0.01: [], 0.25: [3, 4], 1.0: [0, 1, 2, 3, 4]}[ratio]
-    assert model.input_quantizer.salient_indices.tolist() == expected
+    assert model.input_quantizer._salient_indices.tolist() == expected
 
 
 @pytest.mark.parametrize("fmt", ["NVFP4", "MXFP4"])
-@pytest.mark.parametrize("materialized", [False, True])
 @pytest.mark.parametrize("ratio", [0.0, 0.25, 1.0])
-def test_standard_checkpoint_roundtrip(tmp_path, fmt, materialized, ratio):
+def test_standard_checkpoint_roundtrip(tmp_path, fmt, ratio):
     x = torch.randn(2, 64)
     model = mtq.quantize(nn.Linear(64, 3), _config(fmt, residue_ratio=ratio), lambda m: m(x))
-    if materialized:
-        model.materialize_residue_weight()
     checkpoint = tmp_path / "residue.pt"
     mto.save(model, checkpoint)
     restored = mto.restore(nn.Linear(64, 3), checkpoint)
     assert isinstance(restored, ResidueQuantLinear)
+    assert type(restored.input_quantizer) is TensorQuantizer
+    assert type(restored.weight_quantizer) is TensorQuantizer
     assert restored.in_features == model.in_features
     assert restored.weight.shape == model.weight.shape
     assert restored.state_dict().keys() == model.state_dict().keys()
@@ -96,6 +97,11 @@ def test_failed_calibration_restores_state(failure):
     cfg = _config()
     cfg["algorithm"] = None
     mtq.quantize(model, cfg)
+    quantizers = [q for q in model.modules() if isinstance(q, TensorQuantizer)]
+    for q in quantizers:
+        q._calibrator.collect(torch.ones(2, 64))
+    observer_amax = [q._calibrator._calib_amax.clone() for q in quantizers]
+    model[0].output_quantizer.register_buffer("_bias_value", torch.tensor(2.0))
     original_classes = [type(m) for m in model]
     original_state = {k: v.clone() for k, v in model.state_dict().items()}
     flags = [
@@ -105,6 +111,7 @@ def test_failed_calibration_restores_state(failure):
     ]
 
     def fail(m):
+        model[0].output_quantizer._bias_value.fill_(9.0)
         if failure == "empty":
             return
         m(torch.full((2, 64), float("nan")) if failure == "nonfinite" else torch.ones(2, 64))
@@ -114,6 +121,9 @@ def test_failed_calibration_restores_state(failure):
     with pytest.raises((RuntimeError, ValueError, AssertionError)):
         mtq.calibrate(model, {"method": "residue_max"}, fail)
     assert [type(m) for m in model] == original_classes
+    for q, expected in zip(quantizers, observer_amax):
+        assert torch.equal(q._calibrator._calib_amax, expected)
+    assert all(not m._forward_pre_hooks for m in model)
     for key, value in original_state.items():
         assert torch.equal(model.state_dict()[key], value)
     assert model.state_dict().keys() == original_state.keys()
@@ -129,6 +139,40 @@ def test_failed_calibration_restores_state(failure):
     assert all(isinstance(m, ResidueQuantLinear) for m in model)
 
 
+def test_materialized_checkpoint_rejected_before_conversion():
+    model = nn.Linear(64, 8)
+    parameter = model.weight
+    metadata = {"residue_modules": {"": {"original_in_features": 64, "in_features": 80}}}
+    with pytest.raises(NotImplementedError, match="Materialized"):
+        restore_residue_model(model, {}, metadata)
+    assert type(model) is nn.Linear
+    assert model.weight is parameter
+    assert model.in_features == 64
+
+
+@pytest.mark.parametrize("keyword_input", [False, True])
+def test_collection_preserves_forward(keyword_input):
+    model = nn.Linear(64, 8)
+    cfg = _config(residue_ratio=0.125)
+    cfg["algorithm"] = None
+    mtq.quantize(model, cfg)
+    original_forward = model.forward
+    inputs = torch.arange(1, 65).float().repeat(3, 1).t()
+    inputs = inputs.contiguous().t()
+    assert not inputs.is_contiguous()
+    expected = torch.nn.functional.linear(inputs, model.weight, model.bias)
+
+    def collect(m):
+        assert m.forward == original_forward
+        output = m(input=inputs) if keyword_input else m(inputs)
+        torch.testing.assert_close(output, expected)
+
+    mtq.calibrate(model, {"method": "residue_max", "residue_ratio": 0.125}, collect)
+    assert model.input_quantizer._salient_indices.tolist() == list(range(7, 64, 8))
+    assert not model._forward_pre_hooks
+    assert "forward" not in model.__dict__
+
+
 def test_recalibration_preserves_awq_state():
     model = mtq.quantize(nn.Linear(64, 8), _config(), lambda m: m(torch.ones(2, 64)))
     model.input_quantizer.pre_quant_scale = torch.linspace(0.5, 2, 64)
@@ -140,7 +184,7 @@ def test_recalibration_preserves_awq_state():
     }
     inputs = torch.arange(1, 65).float().unsqueeze(0)
     mtq.calibrate(model, {"method": "residue_max", "residue_ratio": 0.125}, lambda m: m(inputs))
-    assert model.input_quantizer.salient_indices.tolist() == list(range(7, 64, 8))
+    assert model.input_quantizer._salient_indices.tolist() == list(range(7, 64, 8))
     for key, value in before.items():
         assert torch.equal(model.state_dict()[key], value), key
 
@@ -177,19 +221,16 @@ def test_fold_and_compress_rejected_without_mutation():
 
 
 @pytest.mark.parametrize("fmt", ["NVFP4", "MXFP4"])
-@pytest.mark.parametrize("materialized", [False, True])
 @pytest.mark.parametrize("exporter", [export_hf_checkpoint, _export_transformers_checkpoint])
-def test_deployment_export_rejected_without_mutation(tmp_path, fmt, materialized, exporter):
+def test_unaligned_deployment_export_rejected_without_mutation(tmp_path, fmt, exporter):
     model = mtq.quantize(
         nn.Sequential(nn.Linear(64, 8)), _config(fmt), lambda m: m(torch.ones(2, 64))
     )
-    if materialized:
-        model[0].materialize_residue_weight()
     before = deepcopy(model.state_dict())
     attributes = set(model.__dict__)
     parameter = model[0].weight
     export_dir = tmp_path / "export"
-    with pytest.raises(NotImplementedError, match=r"Residue.*export"):
+    with pytest.raises(ValueError, match="input width divisible by 128"):
         exporter(model, dtype=torch.float32, export_dir=export_dir)
     assert not export_dir.exists()
     assert set(model.__dict__) == attributes
@@ -239,3 +280,35 @@ def test_registration_is_opt_in_and_excluded_layers_survive_restore(tmp_path):
     ordinary = mtq.quantize(nn.Linear(64, 8), mtq.INT8_DEFAULT_CFG, lambda m: m(torch.ones(2, 64)))
     assert not isinstance(ordinary, ResidueQuantLinear)
     assert type(ordinary.input_quantizer) is mtq.nn.TensorQuantizer
+
+
+def test_residue_indices_follow_native_quantizer_candidates():
+    inputs = torch.randn(2, 64)
+    cfg = _config("MXFP4")
+    cfg["algorithm"] = None
+    model = mtq.quantize(nn.Linear(64, 3), cfg)
+    residue = QuantRecipe(_config("MXFP4"), name="residue")
+    plain = QuantRecipe(None)
+    hparam = QuantRecipeHparam(choices=[plain, residue], quant_modules=[model])
+    hparam.set_calibration_recipe(residue)
+    quantizers = (model.input_quantizer, model.weight_quantizer)
+    mtq.calibrate(model, {"method": "residue_max"}, lambda m: m(inputs))
+    assert (model.input_quantizer, model.weight_quantizer) == quantizers
+    assert all(type(q) is TensorQuantizer for q in quantizers)
+    indices = model.input_quantizer._salient_indices.clone()
+    # Native FP4 QDQ requires CUDA; exercise candidate state switching on CPU.
+    model.input_quantizer.disable()
+    model.weight_quantizer.disable()
+    residue_output = model(inputs)
+    hparam.active = plain
+    assert not hasattr(model.input_quantizer, "_salient_indices")
+    torch.testing.assert_close(
+        model(inputs), torch.nn.functional.linear(inputs, model.weight, model.bias)
+    )
+    hparam.active = residue
+    assert torch.equal(model.input_quantizer._salient_indices, indices)
+    torch.testing.assert_close(model(inputs), residue_output)
+    # Reject accidentally pairing a residue input with a plain weight quantizer.
+    model.weight_quantizer = TensorQuantizer()
+    with pytest.raises(RuntimeError, match="Mixed residue/plain"):
+        model(inputs)

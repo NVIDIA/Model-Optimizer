@@ -426,7 +426,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         ):
             raise ValueError(
                 "Only blockwise dynamic quantization is supported with quantization "
-                "formats E{num_bis[0]}M{num_bits[1]}."
+                f"formats E{num_bits[0]}M{num_bits[1]}."
             )
         return self
 
@@ -999,7 +999,26 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     )
 
 
-class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
+class _HessianInputDtypeConfig(ModeloptBaseConfig):
+    """The ``hessian_input_dtype`` knob, shared by GPTQ and local-Hessian calibration."""
+
+    hessian_input_dtype: Literal["float32", "bfloat16"] = ModeloptField(
+        default="float32",
+        title="Dtype the Hessian GEMM reads the activations in.",
+        description="""The Hessian is accumulated and stored in float32 either way. ``float32``
+        copies each batch of activations to float32 for the GEMM. ``bfloat16`` feeds them to a
+        tensor-core GEMM in bfloat16 that accumulates in float32: for bfloat16 activations it
+        forms the same products and only rounds the sums differently. At 32K tokens per batch
+        that is up to about 3e-5 of the Hessian's diagonal for GPTQ's full Hessian and 1.5e-4
+        for local Hessian's 16-column blocks, and the GEMM is 6-16x faster. It needs CUDA GEMMs
+        that take ``out_dtype``; without them the Hessian falls back to float32 with a
+        warning.""",
+    )
+
+
+class LocalHessianCalibConfig(
+    _SharedStatesConfig, _HessianInputDtypeConfig, QuantizeAlgorithmConfig
+):
     """Configuration for local Hessian-weighted MSE calibration.
 
     This algorithm uses activation information to optimize per-block scales for weight
@@ -1010,6 +1029,11 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     - ``dw = weight - quantized_weight`` (weight reconstruction error per block)
     - ``H = X @ X.T`` is the local Hessian computed from input activations X
 
+    GGML IQ weights have no amax to search. Instead, each 256-weight block's local scales (and, for
+    IQ1_S, deltas) are picked by this loss over the block's 256 x 256 Hessian, while their
+    codebook search keeps imatrix's weighting. The weight is left unchanged and its codes are pinned
+    to the quantizer, as with imatrix, which this replaces; ``block_size`` and the amax-search
+    options do not apply to them. Until QAD changes a block, it keeps the codes this search picked.
     """
 
     _mutates_weights: ClassVar[bool] = False
@@ -1067,6 +1091,15 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         description="If True, module's local Hessian metadata will be kept as a module attribute.",
     )
 
+    perc_damp: float = ModeloptField(
+        default=0.3,
+        ge=0.0,
+        title="Hessian damping for GGML IQ weights.",
+        description="GGML IQ weights pick their local scales by ``H + perc_damp * mean(diag(H)) * I``. "
+        "Undamped, the full Hessian overfits the calibration data at these bit widths, as GPTQ's "
+        "does. Unused by the amax search of other formats.",
+    )
+
 
 class SmoothQuantCalibConfig(QuantizeAlgorithmConfig):
     """The config for ``smoothquant`` algorithm (SmoothQuant).
@@ -1105,6 +1138,15 @@ class AWQLiteCalibConfig(QuantizeAlgorithmConfig):
         le=1.0,
         title="Step size for the searching alpha.",
         description="The alpha will be searched from 0 to 1 with the step size specified.",
+    )
+
+    use_weight_scale: bool = ModeloptField(
+        default=True,
+        title="Include weight statistics in AWQ scale search.",
+        description=(
+            "If True, search scales proportional to activation_scale**alpha / "
+            "weight_scale**(1-alpha). If False, use activation_scale**alpha as in the AWQ paper."
+        ),
     )
 
     debug: bool | None = ModeloptField(
@@ -1191,6 +1233,14 @@ class ResidueMaxCalibConfig(QuantizeAlgorithmConfig):
         description="Mean absolute activation per batch, or NVFP4 error times weight-column norm.",
     )
 
+    shared_input_patterns: list[str] | None = ModeloptField(
+        default=None,
+        description=(
+            "Regex groups sharing residue indices; None uses native shared-input patterns, "
+            "[] disables grouping."
+        ),
+    )
+
 
 class SVDQuantConfig(QuantizeAlgorithmConfig):
     """The config for SVDQuant.
@@ -1222,7 +1272,7 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
     )
 
 
-class GPTQCalibConfig(QuantizeAlgorithmConfig):
+class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.
 
     GPTQ minimizes the layer-wise quantization error by using second-order (Hessian) information
@@ -1262,6 +1312,15 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         (the GGML IQ1 and IQ2 formats) weight it by the square root of the Hessian diagonal,
         llama.cpp's imatrix statistic. Other formats ignore it.""",
     )
+    local_hessian_scales: bool = ModeloptField(
+        default=False,
+        title="Pick each block's local scales by the GPTQ-compensated block Hessian.",
+        description="""When True, formats with per-group choices (the GGML IQ1 and IQ2 local
+        scales) pick them, block by block, by the layer-output error GPTQ incurs for that block
+        once the later columns compensate -- as ``local_hessian`` does with the plain block
+        Hessian -- instead of by the (importance-weighted) squared error. Other formats ignore
+        it.""",
+    )
 
 
 class ImatrixCalibConfig(QuantizeAlgorithmConfig):
@@ -1270,9 +1329,9 @@ class ImatrixCalibConfig(QuantizeAlgorithmConfig):
     Encodes each weight once, its codebook search weighted by the square root of its inputs'
     per-column second moment ``E[x_j^2]`` -- llama.cpp's importance matrix. Covers the GGML formats
     with a weighted search,
-    on dense linears and on each expert of HF fused-MoE experts, which GPTQ does not reach. A
-    weight that already holds final codes, such as GPTQ's, is left alone, so
-    ``[{method: gptq}, {method: imatrix}]`` runs GPTQ where it applies and imatrix on the rest.
+    on dense linears and on each expert of HF fused-MoE experts. A weight that already holds final
+    codes, such as GPTQ's, is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ
+    where it applies and imatrix on any weight it leaves.
     By default the statistics come from a single forward pass, as llama.cpp collects them; with
     ``layerwise`` enabled, each layer's are collected after the earlier layers are quantized.
     """

@@ -61,11 +61,18 @@ from ..unified_export_hf import (
 )
 
 __all__ = [
+    "QUANTIZER_RECIPE_FORMAT",
+    "QUANTIZER_RECIPE_VERSION",
     "export_hf_vllm_fq_checkpoint",
     "infer_quantizer_prefix_remap",
     "is_weight_quantizer_state_key",
     "merge_amax_tensors_for_group",
 ]
+
+# Header of a versioned exported quantizer recipe (``quant_recipe.yaml``); its ``quantizers`` map HF
+# quantizer names to properties-only ModelOpt quantizer states.
+QUANTIZER_RECIPE_FORMAT = "modelopt_quantizer_recipe"
+QUANTIZER_RECIPE_VERSION = 1
 
 # Matches ``…weight_quantizer``, ``…weight_quantizer.0``, ``…w13_weight_quantizer.0``,
 # and the plural fused-experts form ``…weight_quantizers.0`` (per-expert ModuleList).

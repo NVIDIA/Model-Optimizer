@@ -28,8 +28,6 @@ because both implementations route through fp64 intermediates with the same
 operation order.
 """
 
-from __future__ import annotations
-
 import pytest
 import torch
 import torch.nn.functional as F

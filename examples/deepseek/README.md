@@ -26,7 +26,7 @@ export HF_FP4_PATH={path_to_save_the_final_FP4_checkpoint}
 ### DeepSeek V3 R1 V3.1
 
 ```bash
-# download the FP8 checkpoint from Hugginface. This is an example of DeepSeek-R1
+# download the FP8 checkpoint from Hugging Face. This is an example of DeepSeek-R1
 huggingface-cli download deepseek-ai/DeepSeek-R1 --local-dir $HF_FP8_CKPT
 
 # clone DeepSeek-V3 (base model of R1) Github repository for FP8 inference,
@@ -36,7 +36,7 @@ git clone https://github.com/deepseek-ai/DeepSeek-V3.git && cd DeepSeek-V3 && gi
 ### [Experimental] DeepSeek V3.2
 
 ```bash
-# download the FP8 checkpoint from Hugginface.
+# download the FP8 checkpoint from Hugging Face.
 huggingface-cli download deepseek-ai/DeepSeek-V3.2-Exp --local-dir $HF_FP8_CKPT
 
 # clone DeepSeek-V3.2 Github repository for FP8 inference,

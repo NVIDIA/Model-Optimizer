@@ -40,16 +40,7 @@ def test_worker_context_falls_back_to_spawn_without_forkserver(monkeypatch):
     _prestart_forkserver()
 
 
-# Depends on the external HF datasets-server, which intermittently returns 5xx
-# (e.g. 503) on the /splits lookup. Allow-fail the transient outage while keeping
-# real assertion failures visible (raises=RuntimeError only, strict=False so a
-# normal pass doesn't xpass-fail). download_hf_dataset_as_jsonl already retries.
-@pytest.mark.xfail(
-    raises=RuntimeError,
-    strict=False,
-    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
-)
-def test_megatron_preprocess_data_with_jsonl_path(tmp_path):
+def test_megatron_preprocess_data_with_jsonl_path(tmp_path, tiny_tokenizer_path):
     input_jsonl = tmp_path / "minipile.jsonl"
     input_jsonl.write_text(
         "".join(json.dumps({"text": f"Sample document {index}."}) + "\n" for index in range(4)),
@@ -67,7 +58,7 @@ def test_megatron_preprocess_data_with_jsonl_path(tmp_path):
     prefixes = megatron_preprocess_data(
         jsonl_paths=input_jsonl,
         output_dir=tmp_path,
-        tokenizer_name_or_path="gpt2",
+        tokenizer_name_or_path=tiny_tokenizer_path,
         json_keys=["text"],
         workers=1,
     )
@@ -81,7 +72,7 @@ def test_megatron_preprocess_data_with_jsonl_path(tmp_path):
     assert Path(prefixes[0] + ".idx").stat().st_size > 0, "Index file should not be empty"
 
 
-def test_megatron_preprocess_data_jsonl_stops_at_max_tokens(tmp_path):
+def test_megatron_preprocess_data_jsonl_stops_at_max_tokens(tmp_path, tiny_tokenizer_path):
     input_path = tmp_path / "data.jsonl"
     input_path.write_text(
         "".join(json.dumps({"text": f"Document {index} " * 100}) + "\n" for index in range(10)),
@@ -91,7 +82,7 @@ def test_megatron_preprocess_data_jsonl_stops_at_max_tokens(tmp_path):
     common_args = {
         "jsonl_paths": input_path,
         "output_dir": tmp_path,
-        "tokenizer_name_or_path": "gpt2",
+        "tokenizer_name_or_path": tiny_tokenizer_path,
         "json_keys": "text",
         "workers": 2,
     }
@@ -109,19 +100,13 @@ def test_megatron_preprocess_data_jsonl_stops_at_max_tokens(tmp_path):
     assert limited_size < full_size
 
 
-# Allow-fail transient HF datasets-server 5xx (see the /splits note above).
-@pytest.mark.xfail(
-    raises=RuntimeError,
-    strict=False,
-    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
-)
-def test_megatron_preprocess_data_hf_split_stops_at_max_tokens(tmp_path):
+def test_megatron_preprocess_data_hf_split_stops_at_max_tokens(tmp_path, tiny_tokenizer_path):
     common_args = {
         "hf_dataset": "nanotron/minipile_100_samples",
         "hf_split": "train",
         "hf_max_samples_per_split": 100,
         "hf_streaming": True,
-        "tokenizer_name_or_path": "gpt2",
+        "tokenizer_name_or_path": tiny_tokenizer_path,
         "json_keys": "text",
         "workers": 2,
     }
@@ -141,13 +126,9 @@ def test_megatron_preprocess_data_hf_split_stops_at_max_tokens(tmp_path):
     assert limited_size < full_size
 
 
-# Allow-fail transient HF datasets-server 5xx (see the /splits note above).
-@pytest.mark.xfail(
-    raises=RuntimeError,
-    strict=False,
-    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
-)
-def test_megatron_preprocess_data_hf_split_resume_uses_cached_token_count(tmp_path):
+def test_megatron_preprocess_data_hf_split_resume_uses_cached_token_count(
+    tmp_path, tiny_tokenizer_path
+):
     args = {
         "hf_dataset": "nanotron/minipile_100_samples",
         "hf_split": "train",
@@ -155,7 +136,7 @@ def test_megatron_preprocess_data_hf_split_resume_uses_cached_token_count(tmp_pa
         "hf_streaming": True,
         "max_tokens": 100,
         "output_dir": tmp_path,
-        "tokenizer_name_or_path": "gpt2",
+        "tokenizer_name_or_path": tiny_tokenizer_path,
         "json_keys": "text",
         "max_sequence_length": 16,
         "workers": 2,
@@ -168,12 +149,6 @@ def test_megatron_preprocess_data_hf_split_resume_uses_cached_token_count(tmp_pa
     assert set(tmp_path.iterdir()) == cached_files
 
 
-# Allow-fail transient HF datasets-server 5xx (see the /splits note above).
-@pytest.mark.xfail(
-    raises=RuntimeError,
-    strict=False,
-    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
-)
 @pytest.mark.parametrize(
     ("hf_dataset", "hf_split", "json_keys"),
     [
@@ -253,7 +228,7 @@ def test_megatron_preprocess_data_reasoning_content(tmp_path):
     )
 
 
-def test_megatron_preprocess_data_with_gzip_input(tmp_path):
+def test_megatron_preprocess_data_with_gzip_input(tmp_path, tiny_tokenizer_path):
     gz_path = tmp_path / "data.jsonl.gz"
     with gzip.open(gz_path, "wt", encoding="utf-8") as f:
         for i in range(10):
@@ -262,7 +237,7 @@ def test_megatron_preprocess_data_with_gzip_input(tmp_path):
     prefixes = megatron_preprocess_data(
         jsonl_paths=gz_path,
         output_dir=tmp_path,
-        tokenizer_name_or_path="gpt2",
+        tokenizer_name_or_path=tiny_tokenizer_path,
         json_keys=["text"],
         workers=1,
         strip_newlines=True,
@@ -318,13 +293,7 @@ def test_megatron_preprocess_data_tool_calls_arguments_normalized(tmp_path):
     )
 
 
-# Allow-fail transient HF datasets-server 5xx (see the /splits note above).
-@pytest.mark.xfail(
-    raises=RuntimeError,
-    strict=False,
-    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
-)
-def test_megatron_preprocess_data_hf_streaming_warning(tmp_path):
+def test_megatron_preprocess_data_hf_streaming_warning(tmp_path, tiny_tokenizer_path):
     # hf_streaming without hf_max_samples_per_split should warn and fall back to non-streaming
     with pytest.warns(UserWarning, match="hf_streaming"):
         megatron_preprocess_data(
@@ -332,7 +301,7 @@ def test_megatron_preprocess_data_hf_streaming_warning(tmp_path):
             hf_split="train",
             hf_streaming=True,
             output_dir=tmp_path,
-            tokenizer_name_or_path="gpt2",
+            tokenizer_name_or_path=tiny_tokenizer_path,
             json_keys=["text"],
             workers=1,
         )

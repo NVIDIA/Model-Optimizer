@@ -21,6 +21,7 @@ from unittest import mock
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quantize_common import (
     INT4_AWQ_CLIP_CFG,
@@ -30,6 +31,8 @@ from _test_utils.torch.quantization.quantize_common import (
     save_restore_test,
 )
 from pydantic import ValidationError
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -42,6 +45,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     register_quant_backend,
     unregister_quant_backend,
 )
+from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.utils.distributed import ParallelState
 
 # A test config with double-quant (using `SequentialQuantizers`)
@@ -628,6 +632,63 @@ def test_skip_weight_quant_check_env_var_bypasses_the_guard():
         mtq.quantize(model, config, lambda m: m(m.get_input()))
 
 
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "MODELOPT_SKIP_WEIGHT_QUANT_CHECK",
+        "MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP",
+        "MODELOPT_NVFP4_TRITON_SWEEP",
+    ],
+)
+def test_a_malformed_variable_refuses_before_the_model_changes(monkeypatch, variable):
+    """Quantizing reads it once the model has begun to change, so the entry points parse it first."""
+    model = SimpleLinear()
+    forward_loop = lambda m: m(m.get_input())  # noqa: E731
+    monkeypatch.setenv(variable, "enabled")
+    with pytest.raises(ValueError, match=variable):
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+    with pytest.raises(ValueError, match=variable):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=[SimpleLinear.get_input()],
+            forward_step=lambda m, batch: m(batch),
+            loss_func=lambda output, batch: output.sum(),
+        )
+    assert not is_quantized(model)
+
+    monkeypatch.delenv(variable)
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+    quantized = repr(model)
+    monkeypatch.setenv(variable, "enabled")
+    with pytest.raises(ValueError, match=variable):
+        # A config that would disable every quantizer.
+        mtq.quantize(model, {"quant_cfg": [{"quantizer_name": "*", "enable": False}]}, forward_loop)
+    with pytest.raises(ValueError, match=variable):
+        mtq.calibrate(model, "max", forward_loop)
+    assert repr(model) == quantized
+
+
+def _malformed_variable_on_one_rank_job(rank, size):
+    model = SimpleLinear()
+    malformed = {"MODELOPT_SKIP_WEIGHT_QUANT_CHECK": "enabled"} if rank == 1 else {}
+    # Rank 1 raises its own error; rank 0 one naming it.
+    error = ValueError if rank == 1 else RuntimeError
+    with (
+        bounded_collectives(),
+        mock.patch.dict(os.environ, malformed),
+        pytest.raises(error, match="MODELOPT_SKIP_WEIGHT_QUANT_CHECK='enabled'"),
+    ):
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(m.get_input()))
+    assert not is_quantized(model)
+
+
+def test_a_malformed_variable_on_one_rank_refuses_on_every_rank(cpu_dist_workers):
+    """A rank refusing alone would leave the other waiting for it in calibration."""
+    cpu_dist_workers.run(_malformed_variable_on_one_rank_job)
+
+
 class _ToyIndexer(torch.nn.Module):
     """Stands in for a framework's sparse-attention indexer (vLLM ``Indexer``, MCore ``CSAIndexer``)."""
 
@@ -727,6 +788,36 @@ def _test_indexer_check_covers_all_ranks(rank, size):
 
 def test_indexer_k_check_covers_all_ranks(cpu_dist_workers):
     cpu_dist_workers.run(_test_indexer_check_covers_all_ranks)
+
+
+def _awq_on_a_sharded_fsdp2_model_job(rank, size):
+    model = SimpleLinear()
+    fully_shard(model, mesh=init_device_mesh("cpu", (size,)))
+    forward_loop = lambda m: m(m.get_input())  # noqa: E731
+    with bounded_collectives():
+        for config in (mtq.W4A8_AWQ_BETA_CFG, INT4_AWQ_FULL_CFG):  # awq_lite, awq_full
+            with pytest.raises(NotImplementedError, match=f"FSDP2 model sharded over {size} ranks"):
+                mtq.quantize(model, config, forward_loop)
+        # AutoQuantize checks every candidate before it calibrates the first one.
+        with pytest.raises(NotImplementedError, match="AutoQuantize candidate 'W4A8_AWQ_BETA_CFG'"):
+            mtq.auto_quantize(
+                model,
+                constraints={"effective_bits": 6.0},
+                quantization_formats=[mtq.FP8_DEFAULT_CFG, mtq.W4A8_AWQ_BETA_CFG],
+                data_loader=[SimpleLinear.get_input()],
+                forward_step=lambda m, batch: m(batch),
+                loss_func=lambda output, batch: output.sum(),
+            )
+        assert not is_quantized(model)
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+        with pytest.raises(NotImplementedError, match="awq_lite"):
+            mtq.calibrate(model, "awq_lite", forward_loop)
+
+
+def test_awq_on_a_sharded_fsdp2_model_is_refused(cpu_dist_workers):
+    """Each rank would fold its own AWQ scale into its shard: every rank refuses alike, before the
+    model changes, through ``mtq.quantize``, ``mtq.auto_quantize`` and ``mtq.calibrate``."""
+    cpu_dist_workers.run(_awq_on_a_sharded_fsdp2_model_job)
 
 
 @pytest.mark.parametrize(
@@ -873,3 +964,50 @@ def test_legacy_dict_format_end_to_end():
                 # but weight/input quantizers are re-enabled by subsequent entries.
                 # output_quantizer is NOT re-enabled so it stays disabled.
                 assert not module.is_enabled
+
+
+@pytest.mark.parametrize("config", ["INT8_DEFAULT_CFG", "W4A8_AWQ_BETA_CFG"])
+@pytest.mark.parametrize("model_mode", ["train", "eval"])
+def test_quantize_keeps_the_training_mode_of_each_module(model_mode, config):
+    # A model can hold a submodule in eval mode, for example a frozen encoder.
+    model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Sequential(torch.nn.Linear(8, 8)))
+    model.train(model_mode == "train")
+    model[1].eval()
+    modes_during_calibration = []
+
+    def forward_loop(m):
+        modes_during_calibration.extend(module.training for module in m.modules())
+        m(torch.randn(2, 8))
+
+    mtq.quantize(model, getattr(mtq, config), forward_loop)
+    assert not any(modes_during_calibration)
+    # Every module, the inserted quantizers included, is back in its own mode or its parent's.
+    assert all(module.training == (model_mode == "train") for module in model[0].modules())
+    assert model.training == (model_mode == "train")
+    assert not any(module.training for module in model[1].modules())
+
+
+def test_quantize_restores_training_modes_through_train():
+    # Modules can do work in train(), such as dropping a cache, so the mode is put back through it.
+    class Tracked(torch.nn.Sequential):
+        def train(self, mode=True):
+            self.last_mode = mode
+            return super().train(mode)
+
+    model = torch.nn.Sequential(Tracked(torch.nn.Linear(8, 8)), Tracked(torch.nn.Linear(8, 8)))
+    model.train()
+    model[1].eval()
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 8)))
+    assert model[0].last_mode is True and model[0].training
+    assert model[1].last_mode is False and not model[1].training
+
+
+def test_calibrate_gives_quantizer_containers_the_mode_of_their_module():
+    # Some plugins keep quantizers in a plain container created during conversion, in training mode.
+    model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Sequential(torch.nn.Linear(8, 8)))
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 8)))
+    model.eval()
+    model[1][0].quantizers = torch.nn.ModuleList([TensorQuantizer()])
+    assert model[1][0].quantizers.training
+    mtq.calibrate(model, "max", lambda m: m(torch.randn(2, 8)))
+    assert not any(module.training for module in model.modules())

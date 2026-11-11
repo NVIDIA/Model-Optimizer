@@ -389,7 +389,11 @@ class ExportManager:
                 self.logger.info(f"Merging base safetensors from {merged_path} for LTX2 export")
                 kwargs["merged_base_safetensor_path"] = merged_path
         if model_config:
-            for key in ("enable_swizzle_layout", "enable_layerwise_quant_metadata"):
+            for key in (
+                "enable_swizzle_layout",
+                "enable_layerwise_quant_metadata",
+                "export_attention_quantizers",
+            ):
                 val = model_config.extra_params.get(key)
                 if val is not None:
                     normalized = str(val).strip().lower()
@@ -548,7 +552,16 @@ def create_argument_parser() -> argparse.ArgumentParser:
     calib_group = parser.add_argument_group("Calibration Configuration")
     calib_group.add_argument("--batch-size", type=int, default=2, help="Batch size for calibration")
     calib_group.add_argument(
-        "--calib-size", type=int, default=128, help="Total number of calibration samples"
+        "--calib-size",
+        "--calib-samples",
+        dest="calib_size",
+        type=int,
+        default=128,
+        help=(
+            "Number of calibration samples/prompts to run (not denoising steps). "
+            "Total prompts used ~ ceil(calib_size / batch_size) * batch_size. "
+            "Alias: --calib-samples. For denoising steps, use --n-steps."
+        ),
     )
     calib_group.add_argument("--n-steps", type=int, default=30, help="Number of denoising steps")
     calib_group.add_argument(

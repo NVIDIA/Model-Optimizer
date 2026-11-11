@@ -19,41 +19,13 @@ import os
 import signal
 import subprocess
 import threading
-import time
-import traceback
 import warnings
 from pathlib import Path
 
 from _test_utils.torch.distributed.utils import get_free_port
+from _test_utils.transient_errors import TransientError, find_transient_marker
 
 MODELOPT_ROOT = Path(__file__).parents[3]
-
-# Substrings that identify a *transient* HuggingFace Hub / dataset access failure
-_HF_TRANSIENT_MARKERS = (
-    "HfHubHTTPError",
-    "Too Many Requests",
-    "500 Server Error",
-    "502 Bad Gateway",
-    "503 Server Error",
-    "504 Server Error",
-    "Bad Gateway",
-    "Service Unavailable",
-    "Gateway Time-out",
-    "ConnectionError",
-    "ReadTimeout",
-    "ConnectTimeout",
-    "Max retries exceeded",
-    "NewConnectionError",
-    "Connection reset by peer",
-    "Connection aborted",
-    "Consistency check failed",  # partial / interrupted HF download
-    "couldn't connect to 'https://huggingface.co'",
-    "Couldn't reach",  # datasets: "Couldn't reach <repo> on the Hub"
-    "Temporary failure in name resolution",  # transient DNS
-    "Name or service not known",  # transient DNS
-)
-_HF_MAX_RETRIES = 1
-_HF_RETRY_DELAY_S = 10
 
 
 def extend_cmd_parts(cmd_parts: list[str], **kwargs):
@@ -72,7 +44,7 @@ _KILLED_PIPE_TIMEOUT_S = 5
 
 
 def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str]:
-    """Run a command, streaming and capturing combined stdout/stderr to catch transient HF errors.
+    """Run a command, streaming and capturing combined stdout/stderr to catch transient errors.
 
     Drained by a reader thread rather than ``subprocess.run``, which waits for EOF: a descendant
     outliving the command keeps the pipe open, hanging the read and discarding every log line.
@@ -148,15 +120,23 @@ def set_in_process_runner(runner) -> None:
     _in_process_runner = runner
 
 
+def _exception_chain_text(exc: BaseException | None) -> str:
+    """``Type: message`` of ``exc`` and of each exception it was raised from or while handling."""
+    lines, seen = [], set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        lines.append(f"{type(exc).__name__}: {exc}")
+        exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+    return "\n".join(lines)
+
+
 def run_example_command(
     cmd_parts: list[str],
     example_path: str,
     setup_free_port: bool = False,
     env: dict[str, str] | None = None,
-    hf_max_retries: int = _HF_MAX_RETRIES,
-    hf_retry_delay_s: int = _HF_RETRY_DELAY_S,
-) -> str | None:
-    """Run an example command, retrying transient HuggingFace access errors."""
+) -> str:
+    """Run an example command, raising ``TransientError`` on a transient failure so the test reruns."""
     print(f"[{example_path}] Running command: {cmd_parts}")
     in_process = _in_process_runner if env is None else None
     if _in_process_runner is not None and env is not None:
@@ -166,45 +146,34 @@ def run_example_command(
     env = os.environ.copy() if env is None else env
     cwd = MODELOPT_ROOT / "examples" / example_path
 
-    for attempt in range(hf_max_retries + 1):
-        if setup_free_port:
-            # Subprocess steps only: an in-process runner picks its own free port, since env is a
-            # copy it never sees.
-            env["MASTER_PORT"] = str(get_free_port())  # fresh port per attempt
-        if in_process is not None:
-            # Inside the loop so in-process steps get the same transient-HuggingFace retries;
-            # these tests do hit the Hub (e.g. calib_dataset_name="cnn_dailymail").
-            try:
-                result = in_process(cmd_parts, example_path)
-            except Exception as e:
-                # Re-raise unless it looks transient, so a real failure keeps its traceback
-                # instead of being flattened into CalledProcessError.
-                # format_exc() walks __cause__/__context__: most markers are exception type
-                # names that only ever appear in a formatted traceback, never in str(e) -- a Hub
-                # ConnectionError typically surfaces wrapped in a DatasetGenerationError. The
-                # runner also attaches what the step printed, for launcher-level failures.
-                captured = getattr(e, "captured_output", "")
-                text = f"{traceback.format_exc()}\n{captured}"
-                if attempt == hf_max_retries or not any(
-                    marker in text for marker in _HF_TRANSIENT_MARKERS
-                ):
-                    raise
-                returncode, output = 1, text
-            else:
-                assert result is not None, "an in-process runner must return output, not fall back"
-                return result
-        else:
-            returncode, output = _run_capturing(cmd_parts, cwd, env)
-        if returncode == 0:
-            return output
-        transient = any(marker in output for marker in _HF_TRANSIENT_MARKERS)
-        if not transient or attempt == hf_max_retries:
-            raise subprocess.CalledProcessError(returncode, cmd_parts, output=output)
-        warnings.warn(
-            f"[{example_path}] transient HuggingFace access error; retrying in "
-            f"{hf_retry_delay_s}s (attempt {attempt + 1}/{hf_max_retries})"
-        )
-        time.sleep(hf_retry_delay_s)
+    if in_process is not None:
+        try:
+            result = in_process(cmd_parts, example_path)
+        except Exception as e:
+            # Match the messages of the exception chain (a Hub ConnectionError typically surfaces
+            # wrapped in a DatasetGenerationError) and what the step printed, for launcher-level
+            # failures. Not a formatted traceback: its source lines can contain a marker.
+            marker = find_transient_marker(
+                f"{_exception_chain_text(e)}\n{getattr(e, 'captured_output', '')}"
+            )
+            if marker is None:
+                raise  # a real failure keeps its own traceback
+            raise TransientError(f"[{example_path}] transient error: {marker!r}") from e
+        assert result is not None, "an in-process runner must return output, not fall back"
+        return result
+
+    if setup_free_port:
+        # Subprocess steps only: an in-process runner picks its own free port, since env is a
+        # copy it never sees.
+        env["MASTER_PORT"] = str(get_free_port())
+    returncode, output = _run_capturing(cmd_parts, cwd, env)
+    if returncode == 0:
+        return output
+    error = subprocess.CalledProcessError(returncode, cmd_parts, output=output)
+    marker = find_transient_marker(output)
+    if marker is None:
+        raise error
+    raise TransientError(f"[{example_path}] transient error: {marker!r}") from error
 
 
 def run_hf_ptq_command(*, model: str, quant: str | None = None, vlm: bool = False, **kwargs):

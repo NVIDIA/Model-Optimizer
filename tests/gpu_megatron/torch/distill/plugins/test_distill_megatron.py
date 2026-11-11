@@ -17,6 +17,7 @@ import dataclasses
 import warnings
 from functools import partial
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -25,15 +26,17 @@ import torch.nn.functional as F
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import run_mcore_inference_with_dummy_input
 from _test_utils.torch.misc import set_seed
+from megatron.core import parallel_state
 
 import modelopt.torch.distill as mtd
+import modelopt.torch.distill.plugins.megatron as megatron_plugin
 from modelopt.torch.distill.plugins.megatron import (
     DistillationConfig,
     LogitsAndIntermediatesLossBalancer,
     LogitsKLLoss,
     TopKLogitsKLLoss,
     TopLogitsKLLoss,
-    _mtp_excluded_from_quantization,
+    _has_quantized_backbone_with_unquantized_mtp,
     adjust_distillation_model_for_mcore,
     setup_distillation_config,
 )
@@ -234,10 +237,11 @@ def _test_topk_logits_kl_loss(kd_kwargs, rank, size):
     loss["kd_loss"].backward()
 
 
-def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size):
+def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, skip_frozen_mtp, rank, size):
     """Test that skip_lm_loss only zeroes the main LM head, unless MTP is left out of quantization.
 
-    ``freeze_mtp`` zeroes the MTP loss and freezes the MTP head regardless.
+    An explicit ``freeze_mtp`` overrides that: ``True`` zeroes the MTP loss and freezes the MTP head,
+    ``False`` keeps both. ``skip_frozen_mtp`` skips a frozen MTP head in training forwards only.
     """
     set_seed(SEED)
 
@@ -281,13 +285,15 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
         mtp_num_layers=mtp_num_layers,
     ).cuda()
     if quantized:
-        # A quantized body with the MTP head left out of quantization.
+        # Quantization-state fixture: a quantized body with the MTP head left out of quantization.
         student_model.decoder.weight_quantizer = TensorQuantizer()
 
     distill_cfg = setup_distillation_config(
         # kd_loss_alpha == 1.0 skips the LM loss; any alpha < 1 keeps it.
         config_or_path=DistillationConfig(
-            kd_loss_alpha=1.0 if skip_lm_loss else 0.5, freeze_mtp=freeze_mtp
+            kd_loss_alpha=1.0 if skip_lm_loss else 0.5,
+            freeze_mtp=freeze_mtp,
+            skip_frozen_mtp=skip_frozen_mtp,
         ),
         student_cfg=student_model.config,
         teacher_cfg=teacher_model.config,
@@ -298,10 +304,27 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
         "loss_balancer": distill_cfg.loss_balancer,
     }
     distillation_model = mtd.convert(student_model, mode=[("kd_loss", kd_config)])
+    # An untrained MTP head is frozen so DDP doesn't wait for its grads.
+    mtp_skipped = (quantized and skip_lm_loss) if freeze_mtp is None else freeze_mtp
+    if skip_frozen_mtp and not mtp_skipped:
+        with pytest.raises(ValueError):
+            adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+        return
+    if skip_frozen_mtp:
+        # Also refused, leaving the model as it was: a micro-batch quantile-balancing router in the
+        # MTP head (its bias would be reset), and a KD loss on the MTP head (it never runs).
+        mtp_layer = distillation_model.mtp.layers[0]
+        mtp_layer.qb_beta_accum = torch.zeros(1)
+        with pytest.raises(ValueError):
+            adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+        del mtp_layer.qb_beta_accum
+        mtp_pair = ("mtp.layers.0", "mtp.layers.0")
+        distill_cfg.criterion[mtp_pair] = distill_cfg.criterion[tuple(distill_cfg.logit_layers)]
+        with pytest.raises(ValueError):
+            adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+        del distill_cfg.criterion[mtp_pair]
     adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
 
-    # An untrained MTP head is frozen so DDP doesn't wait for its grads.
-    mtp_skipped = freeze_mtp or (quantized and skip_lm_loss)
     with distillation_model.hide_teacher_model():
         mtp_params = [p for n, p in distillation_model.named_parameters() if "mtp" in n.split(".")]
     assert mtp_params
@@ -317,6 +340,11 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
         return loss
 
     distillation_model.compute_language_model_loss = _recording_loss
+    mtp_calls = []
+    distillation_model.mtp.register_forward_hook(lambda *_: mtp_calls.append("student"))
+    distillation_model.teacher_model.mtp.register_forward_hook(
+        lambda *_: mtp_calls.append("teacher")
+    )
 
     distillation_model.train()
     prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
@@ -333,18 +361,25 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
 
     distillation_model(prompt_tokens, position_ids, attention_mask, labels=labels)
 
-    # Expect mtp_num_layers + 1 total calls: first mtp_num_layers are MTP heads,
-    # the last one is the main LM head.
-    assert len(recorded_losses) == mtp_num_layers + 1, (
-        f"Expected {mtp_num_layers + 1} loss calls, got {len(recorded_losses)}"
+    # Expect one call per MTP head that runs, then one for the main LM head.
+    num_mtp_heads = 0 if skip_frozen_mtp else mtp_num_layers
+    assert mtp_calls == ([] if skip_frozen_mtp else ["teacher", "student"])
+    assert len(recorded_losses) == num_mtp_heads + 1, (
+        f"Expected {num_mtp_heads + 1} loss calls, got {len(recorded_losses)}"
     )
     for i, loss in enumerate(recorded_losses[:-1]):
         assert loss.any() != mtp_skipped, f"MTP head {i} loss should be zero iff MTP is skipped"
     assert recorded_losses[-1].any() != skip_lm_loss, "Main LM head loss is zero iff skip_lm_loss"
+    if skip_frozen_mtp:  # evaluation still runs both MTP heads
+        distillation_model.eval()
+        distillation_model(prompt_tokens, position_ids, attention_mask, labels=labels)
+        assert mtp_calls == ["teacher", "student"]
 
 
-def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
-    """With the MTP head quantized too, only ``freeze_mtp`` keeps it out of a training step."""
+def _test_freeze_mtp_training_step(
+    mtp_quantized, freeze_mtp, kd_loss_alpha, skip_frozen_mtp, rank, size
+):
+    """Through a training step, the MTP head is frozen exactly when ``freeze_mtp`` resolves to it."""
     set_seed(SEED)
 
     vocab_size = 32
@@ -365,13 +400,17 @@ def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
     }
     teacher_model = get_mcore_gpt_model(initialize_megatron=True, **model_kwargs).cuda()
     student_model = get_mcore_gpt_model(initialize_megatron=False, **model_kwargs).cuda()
-    # A recipe that quantizes the MTP head as well as the body.
+    # Quantization-state fixtures: a quantized body, with or without a quantized MTP head.
     student_model.decoder.weight_quantizer = TensorQuantizer()
-    student_model.mtp.weight_quantizer = TensorQuantizer()
-    assert not _mtp_excluded_from_quantization(student_model)
+    if mtp_quantized:
+        student_model.mtp.weight_quantizer = TensorQuantizer()
+    assert _has_quantized_backbone_with_unquantized_mtp(student_model) != mtp_quantized
+    frozen = (kd_loss_alpha == 1.0 and not mtp_quantized) if freeze_mtp is None else freeze_mtp
 
     distill_cfg = setup_distillation_config(
-        config_or_path=DistillationConfig(kd_loss_alpha=kd_loss_alpha, freeze_mtp=freeze_mtp),
+        config_or_path=DistillationConfig(
+            kd_loss_alpha=kd_loss_alpha, freeze_mtp=freeze_mtp, skip_frozen_mtp=skip_frozen_mtp
+        ),
         student_cfg=student_model.config,
         teacher_cfg=teacher_model.config,
     )
@@ -386,7 +425,7 @@ def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
         adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
     if rank == 0:
         frozen_msg = [w for w in caught if "MTP head is frozen" in str(w.message)]
-        assert bool(frozen_msg) == freeze_mtp
+        assert bool(frozen_msg) == frozen
 
     with distillation_model.hide_teacher_model():
         named_params = dict(distillation_model.named_parameters())
@@ -425,8 +464,8 @@ def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
     assert any(p.grad is not None and p.grad.any() for p in body_params.values())
     # The MTP head trains unless frozen; frozen, it gets no gradient and the step leaves it as is.
     mtp_trained = any(p.grad is not None and p.grad.any() for p in mtp_params.values())
-    assert mtp_trained != freeze_mtp
-    if freeze_mtp:
+    assert mtp_trained != frozen
+    if frozen:
         assert all(torch.equal(p, mtp_before[n]) for n, p in mtp_params.items())
 
 
@@ -465,26 +504,107 @@ def test_topk_logits_kl_loss_numerics_full_vocab_matches_dense():
     assert torch.allclose(dense, topk, atol=1e-6)
 
 
-def test_topk_logits_kl_loss_numerics_ghost_token_reference():
-    """Top-K + ghost token matches a hand-written reference on the K+1 bucketed distributions."""
-    cfg = SimpleNamespace(tensor_model_parallel_size=1)
-    student, teacher = _make_loss_inputs()
+def _test_topk_logits_kl_loss_numerics_ghost_token_reference(
+    top_p, reverse, temperature, rank, size
+):
+    parallel_state.initialize_model_parallel(tensor_model_parallel_size=size)
+    cfg = SimpleNamespace(tensor_model_parallel_size=size)
+    device = torch.device("cuda", rank)
+    # Equal vocab shards (torch.chunk is uneven when size does not divide the vocab)
+    student, teacher = _make_loss_inputs(vocab=16 * size)
+    student = student.detach().to(device).requires_grad_()
+    teacher = teacher.to(device)
+    student_shard = student.chunk(size, dim=-1)[rank].detach().contiguous().requires_grad_()
+    teacher_shard = teacher.chunk(size, dim=-1)[rank].contiguous()
     k = 4
-    loss = TopLogitsKLLoss(cfg, top_k=k)(student, teacher)[0]
+    # Chunks of 2 rows, so the loss's chunked full-vocab passes take several chunks.
+    with patch.object(megatron_plugin, "_TOP_LOGITS_CHUNK_NUMEL", 2 * student_shard.size(-1)):
+        loss_fn = TopLogitsKLLoss(
+            cfg, top_k=k, top_p=top_p, reverse=reverse, temperature=temperature
+        )
+        loss = loss_fn(student_shard, teacher_shard)[0]
+        loss.mean().backward()
 
-    q_full = F.log_softmax(teacher, dim=-1)
-    p_full = F.log_softmax(student, dim=-1)
+    q_full = F.log_softmax(teacher / temperature, dim=-1)
+    p_full = F.log_softmax(student / temperature, dim=-1)
     _, idx = torch.topk(teacher, k, dim=-1)
     q_k, p_k = q_full.gather(-1, idx), p_full.gather(-1, idx)
-    q_rest = torch.log1p(-q_k.exp().sum(-1, keepdim=True))
-    p_rest = torch.log1p(-p_k.exp().sum(-1, keepdim=True))
+    keep = torch.ones_like(q_k, dtype=torch.bool)
+    if top_p is not None:
+        q_probs = q_k.exp()
+        keep = (q_probs.cumsum(-1) - q_probs) < top_p
+        assert not keep.all(), "test inputs should produce some truncation"
+    q_rest = torch.log1p(-(q_k.exp() * keep).sum(-1, keepdim=True))
+    p_rest = torch.log1p(-(p_k.exp() * keep).sum(-1, keepdim=True))
     q = torch.cat([q_k, q_rest], -1)
     p = torch.cat([p_k, p_rest], -1)
-    ref = (q.exp() * (q - p)).sum(-1).transpose(0, 1)
-    assert torch.allclose(loss, ref, atol=1e-6)
+    keep = torch.cat([keep, torch.ones_like(keep[..., :1])], -1)
     # Sanity: total mass within the K+1 buckets is 1 for both distributions.
-    assert torch.allclose(q.exp().sum(-1), torch.ones_like(q[..., 0]), atol=1e-5)
-    assert torch.allclose(p.exp().sum(-1), torch.ones_like(p[..., 0]), atol=1e-5)
+    assert torch.allclose((q.exp() * keep).sum(-1), torch.ones_like(q[..., 0]), atol=1e-5)
+    assert torch.allclose((p.exp() * keep).sum(-1), torch.ones_like(p[..., 0]), atol=1e-5)
+    if reverse:
+        p, q = q, p
+    ref = (keep * q.exp() * (q - p)).sum(-1).transpose(0, 1)
+    torch.testing.assert_close(loss, ref, atol=1e-6, rtol=1e-5)
+    ref.mean().backward()
+    torch.testing.assert_close(
+        student_shard.grad, student.grad.chunk(size, dim=-1)[rank], atol=1e-6, rtol=1e-5
+    )
+
+
+@pytest.mark.parametrize(
+    ("top_p", "reverse", "temperature"),
+    [(None, False, 1.0), (0.5, False, 2.0), (0.5, True, 1.0)],
+)
+def test_topk_logits_kl_loss_numerics_ghost_token_reference(
+    dist_workers_size_2, top_p, reverse, temperature
+):
+    """TP loss and gradients match a full-vocab reference on the K+1 bucketed distributions."""
+    dist_workers_size_2.run(
+        partial(
+            _test_topk_logits_kl_loss_numerics_ghost_token_reference, top_p, reverse, temperature
+        )
+    )
+
+
+def test_topk_logits_kl_loss_memory():
+    """Forward and backward add about one gradient the size of the logits, not fp32 copies of them."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    student = torch.randn(1024, 2, 32768, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    teacher = torch.randn_like(student, requires_grad=False)
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    with patch.object(megatron_plugin, "_TOP_LOGITS_CHUNK_NUMEL", 64 * student.size(-1)):
+        TopLogitsKLLoss(cfg, top_k=64)(student, teacher)[0].sum().backward()
+    assert torch.cuda.max_memory_allocated() - base < 1.5 * student.nbytes
+
+
+def test_topk_logits_kl_loss_offset_invariant():
+    """A common logit offset far larger than the logits changes neither the loss nor the gradient."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    torch.manual_seed(SEED)
+    # Multiples of 1/8 below 16 stay exact in fp32 after adding 2**20.
+    student = torch.randint(-64, 64, (4, 3, 16)) / 8
+    teacher = torch.randint(-64, 64, (4, 3, 16)) / 8
+    results = []
+    for offset in (0.0, 2.0**20):
+        shifted = (student + offset).requires_grad_()
+        loss = TopLogitsKLLoss(cfg, top_k=4)(shifted, teacher + offset)[0]
+        loss.sum().backward()
+        results.append((loss.detach(), shifted.grad))
+    torch.testing.assert_close(results[1], results[0])
+
+
+@pytest.mark.parametrize("shape", [(0, 3, 16), (4, 0, 16)])
+def test_topk_logits_kl_loss_empty_inputs(shape):
+    """Empty batch or sequence inputs give an empty loss and gradient."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    student = torch.randn(shape, requires_grad=True)
+    loss = TopLogitsKLLoss(cfg, top_k=4)(student, torch.randn(shape))[0]
+    loss.sum().backward()
+    assert loss.shape == (shape[1], shape[0])
+    assert student.grad.shape == shape
 
 
 @pytest.mark.parametrize("temperature", [0.5, 2.0, 3.7])
@@ -553,28 +673,56 @@ def test_distillation_config_top_p_validation():
 
 
 @pytest.mark.parametrize(
-    ("quantized", "skip_lm_loss", "freeze_mtp"),
+    ("quantized", "skip_lm_loss", "freeze_mtp", "skip_frozen_mtp"),
     [
-        (False, True, False),
-        (True, True, False),
-        (True, False, False),
-        (False, True, True),
-        (False, False, True),
+        (False, True, None, False),
+        (True, True, None, False),
+        (True, False, None, False),
+        (False, True, True, False),
+        (False, False, True, False),
+        (True, True, False, False),  # explicit False overrides the automatic freeze
+        (True, True, None, True),  # skip_frozen_mtp skips the automatically frozen MTP head
+        (False, False, True, True),  # its single LM-loss call is the main head's
+        (False, True, None, True),  # refused: the MTP head keeps training
     ],
 )
-def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss, freeze_mtp):
+def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss, freeze_mtp, skip_frozen_mtp):
     """Test that skip_lm_loss only zeroes the main LM head, unless MTP is left out of quantization."""
-    dist_workers.run(partial(_test_skip_lm_loss_with_mtp, quantized, skip_lm_loss, freeze_mtp))
+    dist_workers.run(
+        partial(_test_skip_lm_loss_with_mtp, quantized, skip_lm_loss, freeze_mtp, skip_frozen_mtp)
+    )
 
 
-@pytest.mark.parametrize(("freeze_mtp", "kd_loss_alpha"), [(True, 1.0), (True, 0.5), (False, 1.0)])
-def test_freeze_mtp_with_quantized_mtp(dist_workers, freeze_mtp, kd_loss_alpha):
-    """With the MTP head quantized too, only ``freeze_mtp`` keeps it out of a training step."""
-    dist_workers.run(partial(_test_freeze_mtp_with_quantized_mtp, freeze_mtp, kd_loss_alpha))
+@pytest.mark.parametrize(
+    ("mtp_quantized", "freeze_mtp", "kd_loss_alpha", "skip_frozen_mtp"),
+    [
+        (True, None, 1.0, False),  # automatic: a quantized MTP head keeps training
+        (False, None, 1.0, False),  # automatic: an unquantized MTP head is frozen
+        (False, False, 1.0, False),  # explicit False overrides the automatic freeze
+        (True, True, 1.0, False),
+        (True, True, 0.5, False),
+        (False, True, 0.5, False),
+        (True, False, 1.0, False),
+        (False, None, 1.0, True),  # skipping the frozen MTP head still trains the rest
+    ],
+)
+def test_freeze_mtp_training_step(
+    dist_workers, mtp_quantized, freeze_mtp, kd_loss_alpha, skip_frozen_mtp
+):
+    """Through a training step, the MTP head is frozen exactly when ``freeze_mtp`` resolves to it."""
+    dist_workers.run(
+        partial(
+            _test_freeze_mtp_training_step,
+            mtp_quantized,
+            freeze_mtp,
+            kd_loss_alpha,
+            skip_frozen_mtp,
+        )
+    )
 
 
-def test_mtp_excluded_from_quantization():
-    """MTP loss is skipped only when the model is quantized and MTP is left out of it."""
+def test_has_quantized_backbone_with_unquantized_mtp():
+    """True only for a model with MTP and enabled quantizers, none of them inside MTP."""
 
     def _quantizer(enabled: bool) -> TensorQuantizer:
         quantizer = TensorQuantizer()
@@ -592,18 +740,20 @@ def test_mtp_excluded_from_quantization():
             model.mtp.weight_quantizer = _quantizer(mtp_quant)
         return model
 
-    # Plain distillation (e.g. pruning recovery) still trains the MTP head.
-    assert not _mtp_excluded_from_quantization(
+    # Nothing quantized.
+    assert not _has_quantized_backbone_with_unquantized_mtp(
         _model(with_mtp=True, body_quant=False, mtp_quant=False)
     )
-    # QAD with MTP excluded from the recipe: no quantization error to recover there.
-    assert _mtp_excluded_from_quantization(_model(with_mtp=True, body_quant=True, mtp_quant=False))
-    # QAD with a quantized MTP head: keep its loss.
-    assert not _mtp_excluded_from_quantization(
+    # Quantized backbone, MTP left out of quantization.
+    assert _has_quantized_backbone_with_unquantized_mtp(
+        _model(with_mtp=True, body_quant=True, mtp_quant=False)
+    )
+    # MTP quantized too.
+    assert not _has_quantized_backbone_with_unquantized_mtp(
         _model(with_mtp=True, body_quant=True, mtp_quant=True)
     )
     # No MTP at all.
-    assert not _mtp_excluded_from_quantization(
+    assert not _has_quantized_backbone_with_unquantized_mtp(
         _model(with_mtp=False, body_quant=True, mtp_quant=False)
     )
 

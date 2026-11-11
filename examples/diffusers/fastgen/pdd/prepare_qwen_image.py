@@ -15,8 +15,6 @@
 
 """Prepare a standard Diffusers Qwen-Image artifact with PDD output heads."""
 
-from __future__ import annotations
-
 import argparse
 import os
 import sys

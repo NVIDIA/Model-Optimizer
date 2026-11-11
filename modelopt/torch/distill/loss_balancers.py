@@ -66,7 +66,7 @@ class DistillationLossBalancer(nn.Module, metaclass=abc.ABCMeta):
                 ``{"student_loss": torch.tensor(...), "MSELoss_0": torch.tensor(...), "MSELoss_1": torch.tensor(...)}``.
 
         Returns:
-            The total loss after balancing student and kd loss loss components.
+            The total loss after balancing student and kd loss components.
         """
         raise NotImplementedError
 
@@ -116,7 +116,7 @@ class StaticLossBalancer(DistillationLossBalancer):
             loss: The loss dict to aggregate.
 
         Returns:
-            The total loss after balancing student and kd loss loss components.
+            The total loss after balancing student and kd loss components.
         """
         kd_loss_dict = loss.copy()
 

@@ -14,8 +14,8 @@
 # limitations under the License.
 
 # QuantizeConfig preset for IQ2_XXS weight-only quantization of MoE routed experts only, calibrated
-# with imatrix. GPTQ does not reach fused MoE experts, so imatrix weights each expert's search by the
-# inputs routed to it.
+# with imatrix, which weights each expert's search by the inputs routed to it, collected in a
+# single forward pass.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

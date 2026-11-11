@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.opt as mto
-import modelopt.torch.sparsity.attention_sparsity as sparse_attn
+import modelopt.torch.sparsity as mts
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
 
@@ -141,7 +141,7 @@ def sparsify_model_and_forward(model, config, calib_data):
             model(batch)
 
     # Apply sparse attention
-    model = sparse_attn.sparsify(model, config, forward_loop=forward_loop)
+    model = mts.sparsify(model, config, forward_loop=forward_loop)
 
     # Verify sparse attention modules were inserted
     assert any(isinstance(m, SparseAttentionModule) for m in model.modules()), (

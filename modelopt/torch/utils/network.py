@@ -58,6 +58,7 @@ __all__ = [
     "model_to",
     "param_num_from_forward",
     "remove_bn",
+    "restore_training_modes",
     "run_forward_loop",
     "set_submodule",
     "standardize_constructor_args",
@@ -290,7 +291,7 @@ def standardize_named_model_args(
 
     Returns: A tuple (args_normalized, args_with_default) where
         args_normalized is a dictionary of ordered model args where the key represents a unique
-            serialized string based on the the argument's name in the function signature and the
+            serialized string based on the argument's name in the function signature and the
             value contains the actual argument,
         args_with_default is a set indicating whether the argument was retrieved from the default
             value in the function signature of the model's ``forward()`` method or whether the
@@ -474,6 +475,22 @@ def unwrap_model(
     return model
 
 
+def restore_training_modes(model: nn.Module, training_modes: dict[nn.Module, bool]) -> None:
+    """Give each module back its mode from ``training_modes``; one not in it takes its parent's mode.
+
+    ``model.train()`` runs first, so every module's ``train()`` is called; then the modules whose own
+    mode differs get it back, parents first, because ``train()`` also sets every module below.
+    """
+    model.train(training_modes[model])
+    stack = [(child, model.training) for child in model.children()]
+    while stack:
+        module, parent_mode = stack.pop()
+        mode = training_modes.get(module, parent_mode)
+        if module.training != mode:
+            module.train(mode)
+        stack.extend((child, mode) for child in module.children())
+
+
 def zero_grad(model: nn.Module) -> None:
     """Set any gradients in the model's parameters to None."""
     for p in model.parameters():
@@ -533,7 +550,7 @@ def run_forward_loop(
     Args:
         model: The model with which we run forward.
         data_loader: An iterator with data samples.
-        max_iters: Number of batches to run; by default it is infiinite or until ``data_loader``
+        max_iters: Number of batches to run; by default it is infinite or until ``data_loader``
             is exhausted.
         collect_func: A ``Callable`` that takes a batch of data from the ``data_loader``
               as input and returns the input to ``model.forward()`` such that the return value
@@ -598,7 +615,7 @@ def create_param_grad_clear_hook(param):
     """Create a hook to clear gradients for a parameter.
 
     The hook will be fired after the gradient is accumulated for the parameter.
-    Important: For this to work, ``accum_grad`` should be kept alive as longs as this utility is needed.
+    Important: For this to work, ``accum_grad`` should be kept alive as long as this utility is needed.
     """
     # For methods such as AutoQuantize, involving backward -
     # We want to clear parameter gradients as soon as they are computed to save memory

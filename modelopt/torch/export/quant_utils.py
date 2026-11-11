@@ -19,6 +19,7 @@ import fnmatch
 import logging
 from collections import defaultdict
 from collections.abc import Generator
+from itertools import chain
 from typing import Any
 from warnings import warn
 
@@ -41,6 +42,7 @@ from modelopt.torch.quantization.qtensor import (
     NVFP4QTensor,
     QTensorWrapper,
 )
+from modelopt.torch.quantization.qtensor.base_qtensor import _refuse_dtensor
 from modelopt.torch.quantization.utils import (
     quantizer_attr_names,
     representative_weight_quantizer,
@@ -75,6 +77,7 @@ from .quant_format import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_MXFP4,
     QUANTIZATION_W4A16_NVFP4,
+    STATIC_INPUT_SCALE_FORMATS,
 )
 
 logger = logging.getLogger(__name__)
@@ -299,13 +302,18 @@ def get_kv_cache_bias(kv_module: nn.Module) -> list[torch.Tensor]:
 
 
 def get_kv_cache_scaling_factor(
-    self_attention_module: nn.Module, clamp_fp8_scales: bool = True
+    self_attention_module: nn.Module,
+    clamp_fp8_scales: bool = True,
+    *,
+    resolve_constant_amax: bool = False,
 ) -> list[torch.Tensor | None]:
     """Get the K and V BMM scaling factors for the self attention module.
 
     Args:
         self_attention_module: The self attention module to get the K and V BMM scaling factors from.
         clamp_fp8_scales: Whether to clamp FP8 KV cache scaling factors to at least 1.0.
+        resolve_constant_amax: Resolve fixed forward ranges for functional capture. Defaults to
+            False to preserve legacy exporters' omission of stateless scales.
 
     Returns:
         The K and V BMM scaling factors.
@@ -315,10 +323,35 @@ def get_kv_cache_scaling_factor(
     ):
         return [None, None]
 
-    scaling_factors = [
-        get_scaling_factor(getattr(self_attention_module, quantizer))
-        for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer")
-    ]
+    # Both FP8 and NVFP4 cache scales are amax / 448, as the HF exporter writes them and
+    # vLLM / TensorRT-LLM read them.
+    scaling_factors = []
+    quantizers = [self_attention_module.k_bmm_quantizer, self_attention_module.v_bmm_quantizer]
+    reference = None
+    if resolve_constant_amax:
+        reference = next(
+            (
+                quantizer.amax
+                for quantizer in quantizers
+                if quantizer.is_enabled
+                and not quantizer._use_constant_amax
+                and quantizer.amax is not None
+            ),
+            None,
+        )
+        if reference is None:
+            reference = next(
+                chain(self_attention_module.parameters(), self_attention_module.buffers()),
+                torch.empty(0),
+            )
+    for quantizer in quantizers:
+        if not quantizer.is_enabled:
+            amax = None
+        elif resolve_constant_amax and quantizer._use_constant_amax and not quantizer.is_mx_format:
+            amax = quantizer._get_amax(reference).reshape(1)
+        else:
+            amax = quantizer.export_amax()
+        scaling_factors.append(None if amax is None else amax.float() / 448.0)
 
     # For FP8, we recommend default KV-cache scaling factor to be 1. The
     # asymmetric format applies this only to K; V remains NVFP4.
@@ -335,7 +368,9 @@ def get_kv_cache_scaling_factor(
         factor = scaling_factors[i]
         if factor is None:
             continue
-        if _has_large_fp8_scale(factor):
+        if not (
+            resolve_constant_amax and quantizers[i]._use_constant_amax
+        ) and _has_large_fp8_scale(factor):
             warn(
                 "Warning: Large KV activation detected. "
                 "Quantized KV cache may lead to higher accuracy drop."
@@ -683,12 +718,14 @@ def process_layer_quant_config(layer_config_dict):
     exclude_modules = []
 
     for k, v in layer_config_dict.items():
-        if "awq_block_size" in k:
+        if "awq_block_size" in k or k.endswith(".pre_quant_scale"):
             continue
 
         # Get layer name for constructing quantized_layers dictionary under per_layer_config
         prefix = ".".join(k.rsplit(".", 1)[:-1])
         awq_key = prefix + ".awq_block_size"
+        # Only promise the tensor for layers that have one (see ``_has_pre_quant_scale``).
+        has_pre_quant_scale = layer_config_dict.get(prefix + ".pre_quant_scale", True)
 
         # Get the corresponding AWQ block size
         block_size_value = layer_config_dict.get(awq_key, 0)
@@ -707,14 +744,14 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "W4A16_AWQ",
                 "group_size": block_size_value,
                 "has_zero_point": False,
-                "pre_quant_scale": True,
+                "pre_quant_scale": has_pre_quant_scale,
             }
         elif v == "w4a8_awq":
             layer_config = {
                 "quant_algo": "W4A8_AWQ",
                 "group_size": block_size_value,
                 "has_zero_point": False,
-                "pre_quant_scale": True,
+                "pre_quant_scale": has_pre_quant_scale,
             }
         elif v == "int8_wo":
             layer_config = {"quant_algo": "W8A16"}
@@ -823,6 +860,7 @@ def _validate_int4_block_size(in_dim, block_size):
 
 def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
     """Packs the INT4 weights into uint8 tensor."""
+    _refuse_dtensor(weight, "INT4 packing")
     out_dim = weight.shape[-2]
     assert out_dim % 2 == 0, f"Cannot pack weight. Out dimension {out_dim} is not an even number."
     in_dim = weight.shape[-1]
@@ -846,7 +884,7 @@ def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
         # Pack two 4-bit values (val0,val1) into a single byte:
         val0 = transpose[..., 0] & 0x0F
         val1 = transpose[..., 1] & 0x0F
-        packed_byte = val0 | (val1 << 4)
+        packed_byte = val0 | torch.bitwise_left_shift(val1, 4)
 
         # Transpose back to the shape (experts, out_dim // 2, in_dim)
         return packed_byte.permute(0, 2, 1).contiguous().view(torch.uint8)
@@ -859,7 +897,7 @@ def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
         # Pack two 4-bit values into one byte
         val0 = reshaped[..., 0] & 0x0F
         val1 = reshaped[..., 1] & 0x0F
-        packed_byte = val0 | (val1 << 4)
+        packed_byte = val0 | torch.bitwise_left_shift(val1, 4)
 
         # Return shape (out_dim // 2, in_dim)
         return packed_byte.T.contiguous().view(torch.uint8)
@@ -897,6 +935,10 @@ def to_quantized_weight(
             # Clear GPU cache to avoid pontential GPU OOM issues for large models.
             clear_cuda_cache()
             return (weight / weights_scaling_factor.unsqueeze(-1)).to(torch.float8_e4m3fn)
+        # A 0-d scale would not promote a bf16 weight, so the division would round in bf16 instead of
+        # float32 like fake quantization. A 1-d scale promotes in-kernel, without a float32 copy.
+        if weights_scaling_factor.dim() == 0:
+            weights_scaling_factor = weights_scaling_factor.reshape(1)
         return (weight / weights_scaling_factor).to(torch.float8_e4m3fn)
 
     if quantization in [QUANTIZATION_INT8_SQ, QUANTIZATION_INT8_WO]:
@@ -1014,6 +1056,8 @@ _BASE_SKIP_KEYS: tuple[str, ...] = (
     "weight_shape",
     # The GGML payload GPTQ pins to a weight quantizer; the exported weight already holds it.
     "_ggml_pinned_",
+    # The importance that payload's search used, which only re-encoding during QAD needs.
+    "_ggml_importance_",
 )
 
 
@@ -1706,7 +1750,7 @@ def _get_carried_over_module_names(model: nn.Module) -> list[str]:
 
     Prefers ``_modelopt_carried_over_names``, which the export records once it knows what it
     actually wrote -- carried tensors plus the off-index weight files copied verbatim. Those files
-    are never ``unexpected_keys``, so the unplaced list alone would miss GLM-4.7's
+    are never among the unplaced source keys, so the unplaced list alone would miss GLM-4.7's
     ``mtp.safetensors`` and leave its tensors in the export with nothing in ``exclude_modules``.
 
     A state-dict key is ``<module path>.<parameter name>``, so the owning module is the key with
@@ -1757,9 +1801,60 @@ def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
     return router_names
 
 
+def _get_uncalibrated_static_input_module_names(model: nn.Module) -> list[str]:
+    """Return the names of modules whose static input quantizer has no calibrated amax.
+
+    Their format declares an ``input_scale`` in the checkpoint, which export can only take from
+    calibration, so a module the calibration forward never ran would be exported without it.
+    """
+    module_names = []
+    for name, module in model.named_modules():
+        for weight_name in weight_attr_names(module):
+            input_quantizer = getattr(
+                module, quantizer_attr_names(weight_name).input_quantizer, None
+            )
+            if (
+                isinstance(input_quantizer, TensorQuantizer)
+                and input_quantizer.is_enabled
+                and not (input_quantizer._dynamic or input_quantizer.is_mx_format)
+                and not input_quantizer._use_constant_amax
+                and input_quantizer.amax is None
+                and _get_quantization_from_quantizers(
+                    module, representative_weight_quantizer(module, weight_name), input_quantizer
+                )
+                in STATIC_INPUT_SCALE_FORMATS
+            ):
+                module_names.append(name)
+                break
+    return module_names
+
+
+def _has_pre_quant_scale(module: nn.Module, weight_names: list[str]) -> bool:
+    """Whether the export writes a ``pre_quant_scale`` for ``module``.
+
+    AWQ leaves it on every input quantizer of the module, or fuses it into a sibling and marks the
+    module (loaders accept the missing tensor there). Without AWQ (max calibration) there is none,
+    even though the INT4 label is ``*_AWQ``. Fused experts never get one: AWQ skips them and
+    ``_export_fused_experts`` does not write the scale even if an input quantizer held one.
+    """
+    if any(hasattr(module, f"{wn}_weight_quantizers") for wn in weight_names):
+        return False
+    return getattr(module, "fused_with_prequant", False) or (
+        bool(weight_names)
+        and all(
+            hasattr(
+                getattr(module, quantizer_attr_names(wn).input_quantizer, None), "_pre_quant_scale"
+            )
+            for wn in weight_names
+        )
+    )
+
+
 def get_quant_config(
     model: nn.Module,
     is_modelopt_qlora: bool = False,
+    *,
+    include_kv_cache: bool = True,
 ) -> dict[str, Any]:
     """Generate quantization config for a model.
 
@@ -1769,6 +1864,8 @@ def get_quant_config(
     Args:
         model: The PyTorch model to make config for.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
+        include_kv_cache: Infer KV-cache metadata from attention quantizers. Disable
+            for diffusion models, whose attention quantizers do not represent a cache.
 
     Returns:
         Dictionary containing the quantization configuration
@@ -1869,6 +1966,11 @@ def get_quant_config(
             # Construct per layer config dictionary
             layer_config_dict[name + ".quantization"] = quantization_format
             layer_config_dict[name + ".awq_block_size"] = block_size
+            if quantization_format in (
+                QUANTIZATION_INT4_AWQ,
+                QUANTIZATION_W4A8_AWQ,
+            ) and not _has_pre_quant_scale(module, weight_names):
+                layer_config_dict[name + ".pre_quant_scale"] = False
 
         # Find kv cache quant format
         is_language_model_module = (
@@ -1885,7 +1987,7 @@ def get_quant_config(
             for quantizer in (k_quantizer, v_quantizer, output_quantizer)
             if is_kv_boundary and quantizer is not None and quantizer.is_enabled
         ]
-        if enabled_kv_quantizers and is_language_model_module:
+        if include_kv_cache and enabled_kv_quantizers and is_language_model_module:
             module_kv_quant = get_kv_cache_dtype(module)
             if module_kv_quant != QUANTIZATION_NONE:
                 kv_cache_formats.add(module_kv_quant)

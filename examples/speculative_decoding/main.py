@@ -59,6 +59,7 @@ from modelopt.recipe.config import (
 )
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.speculative.config import ExternalDraftConfig
+from modelopt.torch.speculative.external.vocab_swap import swap_draft_vocabulary
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
 from modelopt.torch.speculative.plugins.hf_external import SPARSE_CAPABLE_LOSSES
@@ -128,6 +129,10 @@ def init_distributed_env(training_args: transformers.TrainingArguments) -> None:
     """
     if training_args.cp_size < 1:
         raise ValueError(f"cp_size must be >= 1, got {training_args.cp_size}.")
+    if training_args.cp_size > 1 or training_args.full_determinism:
+        # Every rank of a CP group loads the same batches, so all must take them in sampler
+        # order; a fully deterministic run must not depend on which worker finishes first.
+        training_args.dataloader_in_order = True
     world_size = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count() or 1))
     if training_args.dp_shard_size is None:
         training_args.dp_shard_size = world_size // training_args.cp_size
@@ -232,12 +237,38 @@ def setup_external_draft(
             trust_remote_code=recipe.model.trust_remote_code,
         )
     external_cfg: dict = recipe.external.model_dump()
-    # The draft's own tokenizer; the base's is used only for its lm_head.
+    # The draft's own tokenizer, needed before conversion if its vocabulary has to be
+    # re-indexed onto the base's.
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         recipe.draft_model_name_or_path,
         model_max_length=training_args.training_seq_len,
         trust_remote_code=recipe.model.trust_remote_code,
     )
+    if base_tokenizer is None:
+        base_tokenizer = transformers.AutoTokenizer.from_pretrained(
+            recipe.model.model_name_or_path,
+            model_max_length=training_args.training_seq_len,
+            trust_remote_code=recipe.model.trust_remote_code,
+        )
+    # Gate on the flag, not on a size difference: different tokenizers are routinely padded
+    # to the same width. Must precede convert so the saved ModelOpt state describes the
+    # post-swap architecture.
+    if external_cfg["external_vocab_swap"]:
+        # The checkpoint's saved config says whether its rows are already base-indexed;
+        # swapping those again would scramble them while every check below still passes.
+        saved = dict(modelopt_state(draft)["modelopt_state_dict"]).get("external")
+        if saved is not None and saved["config"].get("external_vocab_swap"):
+            print_rank_0("[external] draft is already swapped; keeping its embeddings as saved")
+        else:
+            stats = swap_draft_vocabulary(draft, tokenizer, base_tokenizer, base_vocab_size)
+            print_rank_0(
+                f"[external] vocabulary swapped onto the base: "
+                f"{stats['matched']}/{stats['total']} rows carried over, "
+                f"{stats['frequent_coverage']:.1%} of the first 50k ids"
+            )
+        # The draft's rows are indexed by the base vocabulary from here on, so train and
+        # validate it against the base tokenizer.
+        tokenizer = base_tokenizer
     # Sparse data carries only the teacher's truncated policy. Objectives that need full
     # teacher logits would silently train against a zero-padded distribution, so gate on
     # the list the plugin exports.
@@ -270,11 +301,6 @@ def setup_external_draft(
     # with no acceptance. Equal sizes are not enough -- different tokenizers are
     # routinely padded to the same width -- so also check that the two agree on the ids.
     draft.validate_against_base(base_vocab_size)
-    if base_tokenizer is None:
-        base_tokenizer = transformers.AutoTokenizer.from_pretrained(
-            recipe.model.model_name_or_path,
-            trust_remote_code=recipe.model.trust_remote_code,
-        )
     draft.validate_tokenizer_against_base(tokenizer, base_tokenizer)
     # The norm is not always at base_model.model.norm -- FakeBaseModel keeps it at .norm
     # -- so search the same paths the other offline modes use. It stays optional;
@@ -527,7 +553,8 @@ def train():
     # Leave training_args.ignore_data_skip at its default (False). The dataset is
     # map-style, so HF Trainer's resume skips consumed indices at the batch-sampler
     # level (accelerate.skip_first_batches) without re-fetching them, landing at the
-    # exact data position. Setting it True would restart the data order from the top.
+    # saved data position (to within the batches in flight when dataloader_in_order is
+    # off). Setting it True would restart the data order from the top.
 
     # Tell the draft model the CP degree so it skips the dense eagle mask under CP.
     model.eagle_cp_size = training_args.cp_size

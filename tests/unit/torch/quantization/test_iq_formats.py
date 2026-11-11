@@ -52,6 +52,9 @@ NAMES = sorted(FORMATS)
 DISPATCHED = sorted(IQ_FORMAT_REGISTRY)
 # IQ1 grids are ternary; IQ2 grids hold the magnitudes 8, 25 and 43.
 TERNARY = {"iq1_s", "iq1_m"}
+# Weights sharing one sub-block scale: the formats with an extra 0.19-0.25 bits per weight spend
+# them on scales twice as fine.
+INT8_GROUP_SIZES = {"iq1_s": 32, "iq1_m": 16, "iq2_xxs": 32, "iq2_xs": 16, "iq2_s": 16}
 # name -> (largest representable magnitude, scale anchor at peak-to-RMS 1, 4, 8 and 16), where the
 # anchor is d * native max / amax. IQ1_S is flat; IQ1_M rises with peak-to-RMS and the IQ2 formats
 # fall with it, each clamped at both ends. Written out rather than read from the modules, so a
@@ -295,6 +298,24 @@ def test_decoder_matches_llama_cpp_on_captured_blocks(name):
     assert np.array_equal(decoded.numpy(), expected_values(name))
 
 
+@pytest.mark.parametrize("name", NAMES)
+def test_int8_view_matches_llama_cpp_on_captured_blocks(name):
+    """Integer levels times their group's step are llama.cpp's decoding, exactly."""
+    record = IQ_FORMAT_REGISTRY[name]
+    blocks = torch.from_numpy(packed_blocks(name))
+    count, group_size = blocks.shape[0], INT8_GROUP_SIZES[name]
+
+    levels, steps = record.decode_int8(blocks.reshape(count, 1, -1), torch.tensor([count, 256]))
+
+    assert record.int8_group_size == group_size
+    assert levels.dtype == torch.int8
+    assert set(levels.abs().unique().tolist()) <= (
+        {8, 25, 43} if name not in TERNARY else {1, 7, 9}
+    )
+    decoded = levels.float().reshape(count, -1, group_size) * steps.unsqueeze(-1)
+    assert np.array_equal(decoded.reshape(count, 256).numpy(), expected_values(name))
+
+
 def test_every_format_has_conformance_vectors():
     """A new format must arrive with blocks captured from a real llama.cpp checkpoint."""
     assert sorted(formats()) == NAMES
@@ -367,3 +388,26 @@ def test_rejects_invalid_importance(name, importance, match):
 
     with pytest.raises(ValueError, match=match):
         quantize(torch.randn(4, 512), importance=importance)
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_fixed_choices_take_each_group_from_that_choices_encoding(name):
+    """A fixed choice decodes as the encoding giving every group that choice; the search's own pick
+    is the choice of least squared error."""
+    fmt = IQ_FORMAT_REGISTRY[name]
+    groups, size = fmt.choice_groups, 256 // fmt.choice_groups
+    weight = torch.randn(4, 512, generator=torch.Generator().manual_seed(0))
+    shape = (4, 2, groups)
+
+    def decode(**kwargs):
+        packed, logical = fmt.quantize(weight, **kwargs)
+        return fmt.dequantize(packed, logical, dtype=torch.float32).reshape(*shape, size)
+
+    each = torch.stack([decode(choices=torch.full(shape, c)) for c in range(fmt.num_choices)])
+    fixed = torch.randint(0, fmt.num_choices, shape, generator=torch.Generator().manual_seed(1))
+    searched = (each - weight.reshape(*shape, size)).square().sum(-1).argmin(0)
+    for picks, kwargs in [(fixed, {"choices": fixed}), (searched, {})]:
+        expected = each.gather(0, picks[None, ..., None].expand(1, *shape, size))[0]
+        assert torch.equal(decode(**kwargs), expected)
+    with pytest.raises(ValueError, match="choices must lie in"):
+        fmt.quantize(weight, choices=torch.full(shape, fmt.num_choices))

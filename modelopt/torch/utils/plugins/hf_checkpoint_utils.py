@@ -403,20 +403,20 @@ def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
 # both how we find them and how we move them, so it is worth keeping straight:
 #
 #   1. UNPLACED weights. The loader opened the file and read the tensor, but the model had no
-#      parameter for it, so transformers reports it in ``unexpected_keys`` -- an MTP head the
-#      recipe did not quantize is the common case. Moved as TENSORS: located in whichever shard
-#      holds them and merged into the exporter's ``extra_state_dict``.
+#      parameter for it -- an MTP head the recipe did not quantize is the common case. Recorded
+#      once at load time by ``record_unplaced_source_keys``. Moved as TENSORS: located in whichever
+#      shard holds them and merged into the exporter's ``extra_state_dict``.
 #      Found by: ``read_unplaced_weights`` / ``carryable_unplaced_keys`` / ``locate_source_keys``.
 #
-#   2. OFF-INDEX weight files. The index never names the file, so the loader never opened it and
-#      never had the chance to call anything unexpected -- GLM-4.7 keeps its MTP head in a
-#      standalone ``mtp.safetensors`` exactly this way. Moved as FILES: copied byte for byte, so
-#      no host memory is spent re-serialising tensors the export does not otherwise touch.
+#   2. OFF-INDEX weight files. The index never names the file, so the loader never opened it --
+#      GLM-4.7 keeps its MTP head in a standalone ``mtp.safetensors`` exactly this way. Moved as
+#      FILES: copied byte for byte, so no host memory is spent re-serialising tensors the export
+#      does not otherwise touch.
 #      Found by: ``off_index_safetensors_files`` / ``off_index_tensor_names``.
 #
 # The index is what separates them, and it is NOT an inventory of the checkpoint: a tensor missing
 # from ``weight_map`` but sitting in a shard the index names for other tensors is set 1, not set 2.
-# See ``record_unplaced_source_keys`` for the loading behaviour this rests on.
+# See ``checkpoint_tensor_files``, which lists every tensor of set 1's files.
 #
 # Both sets must reach ``quantization_config.ignore``, or a deployment framework reads the
 # top-level ``quant_algo`` and tries to load an original-precision weight as a quantized one
@@ -476,12 +476,12 @@ def off_index_safetensors_files(src: "str | os.PathLike | None") -> list[str]:
     Transformers reads the shards named in ``model.safetensors.index.json`` -- or the single
     ``model.safetensors`` when there is no index -- and nothing else. A checkpoint may ship more:
     GLM-4.7 keeps its MTP head in a standalone ``mtp.safetensors``. Those tensors are never loaded,
-    never quantized, and never reported as ``unexpected_keys`` (the loader did not see them to call
-    them unexpected), so they are not "the unquantized source weights" the export must avoid
-    re-emitting -- they are untouched weight files the export carries over as they are. See
-    :func:`~modelopt.torch.utils.plugins.model_load_utils.record_unplaced_source_keys` for why
-    "never opened" is a property of the FILE rather than of the individual tensor: a tensor the
-    index omits from a file it DOES open is reported, and is carried rather than copied.
+    never quantized, and never among the unplaced source keys (the load never saw them), so they
+    are not "the unquantized source weights" the export must avoid re-emitting -- they are
+    untouched weight files the export carries over as they are. See :func:`checkpoint_tensor_files`
+    for why "never opened" is a property of the FILE rather than of the individual tensor: a tensor
+    the index omits from a file the loader DOES open is listed there, and is carried rather than
+    copied.
 
     Files named like a main weight shard are excluded whatever the index says. An index that is
     empty, partial or malformed would otherwise make the source weights look off-index, and
@@ -593,6 +593,28 @@ def indexed_weight_map(ckpt: "str | Path") -> dict[str, str]:
     return {}
 
 
+def checkpoint_tensor_files(ckpt: "str | Path") -> dict[str, str]:
+    """``tensor name -> file`` for every tensor in the weight files the loader opens.
+
+    The loader opens the files the index names, or the single ``model.safetensors``, and sees every
+    tensor in them -- including any the index omits, such as an MTP head stored inside a main
+    shard. So this is :func:`indexed_weight_map` plus, from the header of each file it names, the
+    tensors it left out. Reads headers only, never tensor data.
+
+    Files the index never names are not included: the loader never opens them, and
+    :func:`copy_off_index_safetensors` copies them into the export whole.
+    """
+    weight_map = indexed_weight_map(ckpt)
+    if not (Path(ckpt) / "model.safetensors.index.json").exists():
+        return weight_map  # The single file's header already listed all of it.
+    tensor_files = dict(weight_map)
+    for file_name in sorted(set(weight_map.values())):
+        with safe_open(str(Path(ckpt) / file_name), framework="pt") as f:
+            for name in f.keys():  # noqa: SIM118 - safe_open is not iterable
+                tensor_files.setdefault(name, file_name)
+    return tensor_files
+
+
 def read_safetensors_subset(
     ckpt_path: "str | Path",
     weight_map: dict,
@@ -626,9 +648,9 @@ def read_safetensors_subset(
 def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
     """Map each key to the safetensors file holding it, for keys the index may not list.
 
-    ``model.safetensors.index.json`` is not a complete inventory of the checkpoint. Transformers
-    enumerates the CONTENTS of each shard it opens, so it reports a tensor the index omits -- an
-    MTP head stored inside a main shard is exactly that case, and it reaches
+    ``model.safetensors.index.json`` is not a complete inventory of the checkpoint. The loader sees
+    the CONTENTS of each shard it opens, including a tensor the index omits -- an MTP head stored
+    inside a main shard is exactly that case, and :func:`checkpoint_tensor_files` lists it among the
     ``_modelopt_unplaced_source_keys`` like any other unplaced key. Resolving purely through
     ``weight_map`` then finds no shard for it and drops it silently, which is the failure the
     carry-over exists to prevent.
@@ -667,7 +689,7 @@ def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
 
     if remaining:
         warnings.warn(
-            f"{len(remaining)} checkpoint key(s) the loader reported are in no safetensors file "
+            f"{len(remaining)} unplaced checkpoint key(s) are in no safetensors file "
             f"of {ckpt} (e.g. {min(remaining)}); they cannot be carried into the export."
         )
     return located
@@ -736,7 +758,16 @@ def copy_non_safetensor_files_from_ckpt(
 
     Returns:
         File names copied into ``dst``.
+
+    .. deprecated::
+        Use :func:`copy_non_model_files`, which also skips non-safetensors weights, keeps files the
+        export already wrote, and copies subdirectories.
     """
+    warnings.warn(
+        "copy_non_safetensor_files_from_ckpt is deprecated; use copy_non_model_files.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if not os.path.isdir(src):
         raise ValueError(f"Invalid source path: {src}. It should be a directory.")
     exclude_files = set(exclude_files or ())
@@ -760,28 +791,32 @@ def copy_non_safetensor_files_from_ckpt(
     return copied_files
 
 
-def _snapshot_download(hub_model_id: str) -> str:
+def _snapshot_download(hub_model_id: str, local_files_only: bool = False, **hub_kwargs) -> str:
     """``snapshot_download``, but warn when it unexpectedly falls back to the cache.
 
     ``snapshot_download`` silently returns whatever snapshot is cached when the Hub cannot be
     reached; ask the Hub first so that case is visible. A missing repo or revision still raises.
-    With ``HF_HUB_OFFLINE`` set the cache is the user's choice, so it is used without a warning.
+    With ``HF_HUB_OFFLINE`` set, or ``local_files_only``, the cache is the user's choice, so the Hub
+    is not asked and the cache is used without a warning. ``hub_kwargs`` (``revision``, ``token``,
+    ``cache_dir``) go to every Hub call that takes them.
     """
-    if _is_hf_hub_offline():
+    offline = _is_hf_hub_offline()
+    if offline or local_files_only:
         try:
-            return snapshot_download(hub_model_id, local_files_only=True)
+            return snapshot_download(hub_model_id, local_files_only=True, **hub_kwargs)
         except LocalEntryNotFoundError as error:
-            raise RuntimeError(
-                f"HF_HUB_OFFLINE is set and {hub_model_id!r} is not in the local cache."
-            ) from error
+            why = "HF_HUB_OFFLINE is set" if offline else "local_files_only=True"
+            raise RuntimeError(f"{why} and {hub_model_id!r} is not in the local cache.") from error
     try:
-        HfApi().repo_info(hub_model_id)
+        HfApi().repo_info(hub_model_id, **{k: v for k, v in hub_kwargs.items() if k != "cache_dir"})
     except (RepositoryNotFoundError, RevisionNotFoundError):
         raise
     except Exception as error:  # offline, unreachable, or refused: only the cache is left
         hub_error = f"{type(error).__name__}: {error}"
         try:
-            local_checkpoint_path = snapshot_download(hub_model_id, local_files_only=True)
+            local_checkpoint_path = snapshot_download(
+                hub_model_id, local_files_only=True, **hub_kwargs
+            )
         except LocalEntryNotFoundError:
             raise RuntimeError(
                 f"Could not reach the Hugging Face Hub for {hub_model_id!r} ({hub_error}), and it "
@@ -793,10 +828,12 @@ def _snapshot_download(hub_model_id: str) -> str:
             "from_pretrained did not need."
         )
         return local_checkpoint_path
-    return snapshot_download(hub_model_id)
+    return snapshot_download(hub_model_id, **hub_kwargs)
 
 
-def _make_local(model_name_or_path: str | os.PathLike) -> tuple[str | None, str]:
+def _make_local(
+    model_name_or_path: str | os.PathLike, local_files_only: bool = False, **hub_kwargs
+) -> tuple[str | None, str]:
     """``(hub_model_id, local_checkpoint_path)`` on this rank alone.
 
     See :func:`ensure_local_checkpoint`.
@@ -805,7 +842,7 @@ def _make_local(model_name_or_path: str | os.PathLike) -> tuple[str | None, str]
         return None, str(model_name_or_path)
     hub_model_id = str(model_name_or_path)
     try:
-        return hub_model_id, _snapshot_download(hub_model_id)
+        return hub_model_id, _snapshot_download(hub_model_id, local_files_only, **hub_kwargs)
     except GatedRepoError:
         raise
     except (HFValidationError, RepositoryNotFoundError) as error:
@@ -819,6 +856,11 @@ def _make_local(model_name_or_path: str | os.PathLike) -> tuple[str | None, str]
 def ensure_local_checkpoint(
     model_name_or_path: str | os.PathLike,
     group: "torch.distributed.ProcessGroup | None" = None,
+    *,
+    revision: str | None = None,
+    token: str | bool | None = None,
+    cache_dir: str | os.PathLike | None = None,
+    local_files_only: bool = False,
 ) -> tuple[str | None, str]:
     """Ensure the whole checkpoint is on local storage.
 
@@ -834,7 +876,8 @@ def ensure_local_checkpoint(
     Exporters read the source checkpoint only from local disk (see :func:`copy_non_model_files`),
     so call this before loading a Hub model that will be exported.
 
-    With ``HF_HUB_OFFLINE`` set, the cached snapshot is used as it is. With the Hub unexpectedly
+    With ``HF_HUB_OFFLINE`` set, or ``local_files_only``, the cached snapshot is used as it is,
+    without asking the Hub, and one that is not cached raises. With the Hub unexpectedly
     unreachable it is too, but with a warning: nothing can tell whether it is complete, and one
     filled by an earlier ``from_pretrained`` holds only the files loading needed, so non-model files
     may be missing. A path that is neither a local directory nor a model ID the Hub can access (a
@@ -850,14 +893,26 @@ def ensure_local_checkpoint(
         group: Process group sharing the download. Its timeout must outlast the download, since
             the other ranks wait in it. ``None`` means every rank of the default group, waiting on
             a temporary gloo group whose timeout does.
+        revision: For a Hub model ID, the revision (branch, tag or commit) to fetch; its default
+            branch if ``None``.
+        token: For a Hub model ID, the token to fetch it with; the logged-in one if ``None``.
+        cache_dir: For a Hub model ID, the Hugging Face cache to fetch it into; the default one if
+            ``None``.
+        local_files_only: For a Hub model ID, use only its cached snapshot, as with
+            ``HF_HUB_OFFLINE``: no Hub call is made.
 
     Returns:
         ``(hub_model_id, local_checkpoint_path)``.
     """
+    hub_kwargs = {
+        k: v
+        for k, v in {"revision": revision, "token": token, "cache_dir": cache_dir}.items()
+        if v is not None
+    }
     if group is None and not (
         torch.distributed.is_available() and torch.distributed.is_initialized()
     ):
-        return _make_local(model_name_or_path)
+        return _make_local(model_name_or_path, local_files_only, **hub_kwargs)
 
     # Rank 0 decides even for a local path: ranks that each checked for themselves could disagree
     # (a directory on one node's local disk) and part of them would wait here forever. Without a
@@ -872,7 +927,7 @@ def ensure_local_checkpoint(
         result: list[tuple[str | None, str | None, str | None]] = [(None, None, None)]
         if torch.distributed.get_rank(group) == 0:
             try:
-                result = [(*_make_local(model_name_or_path), None)]
+                result = [(*_make_local(model_name_or_path, local_files_only, **hub_kwargs), None)]
             except Exception as error:
                 result = [(None, None, f"{type(error).__name__}: {error}")]
         torch.distributed.broadcast_object_list(result, group=group, group_src=0)

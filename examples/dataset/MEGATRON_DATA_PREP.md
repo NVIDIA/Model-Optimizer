@@ -221,6 +221,24 @@ rows, or runs out of them stops the run. Each source's selection is cached under
 the settings that choose its rows, so an interrupted run resumes and a changed configuration selects afresh.
 Nothing prunes `parts`; delete it once `train.jsonl` is written to reclaim the space.
 
+To feed `distill.py --sft_in_batch_packing`, also count tokens the way Megatron-Bridge trains them:
+
+```yaml
+tokenizer: Qwen/Qwen3.6-35B-A3B  # The student's tokenizer.
+max_length: 32768       # distill.py --seq_length; longer conversations are truncated.
+loss_mode: assistant    # Optional; as distill.py --sft_loss_mode.
+pack_max_tokens: 33280  # Optional; order each split as pairs of at most this many tokens.
+num_workers: 48         # Optional; tokenizer processes (default: all CPUs).
+```
+
+With `tokenizer` and `max_length`, a conversation with no trained token left after truncation is
+dropped, since Megatron-Bridge fails on it during training. `pack_max_tokens` pairs long
+conversations with short ones and writes each split pair by pair, so `--mbs 2` packs every pair
+into one micro-batch; a conversation that fits with no other is dropped. With `--cp_size` > 1,
+Megatron-Bridge pads each conversation to a multiple of `2 * cp_size`, so a pair can exceed the cap
+by under `2 * cp_size` tokens per conversation. Tokenizing runs on the CPU: ~0.4 s per
+conversation per process for GLM-5.3-Flash on Nemotron-Cascade-2 (4.4K tokens on average).
+
 ## `reasoning_content` for Post-Training v3 Datasets
 
 v3 datasets include a `reasoning_content` field in assistant messages (chain-of-thought separate from

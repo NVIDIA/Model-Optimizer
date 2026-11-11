@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Module implementing ``fasnas`` pruning algorithm for search."""
+"""Module implementing ``fastnas`` pruning algorithm for search."""
 
 import warnings
 from collections.abc import Callable

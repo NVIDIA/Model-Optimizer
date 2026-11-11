@@ -15,16 +15,14 @@
 
 """ModelOpt's pydantic BaseModel for recipes."""
 
-from __future__ import annotations
-
 import warnings
-from enum import Enum
-from typing import Any, ClassVar, Literal
+from enum import StrEnum
+from typing import Any, ClassVar, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
-from modelopt.torch.quantization.config import QuantizeConfig  # noqa: TC001
+from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.speculative.config import (
     DFlashConfig,
     EagleConfig,
@@ -55,7 +53,7 @@ __all__ = [
 ]
 
 
-class RecipeType(str, Enum):
+class RecipeType(StrEnum):
     """List of recipe types. See ``RECIPE_TYPE_TO_CLASS`` at the bottom for the schema mapping."""
 
     PTQ = "ptq"
@@ -490,12 +488,12 @@ class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
     )
 
     @model_validator(mode="after")
-    def _derive_eagle_offline(self) -> ModelOptEagleRecipe:
+    def _derive_eagle_offline(self) -> Self:
         self.eagle.eagle_offline = self.data.mode != "online"
         return self
 
     @model_validator(mode="after")
-    def _warn_rope_vs_training_seq_len(self) -> ModelOptEagleRecipe:
+    def _warn_rope_vs_training_seq_len(self) -> Self:
         orig_max_pos = self.eagle.eagle_export_rope_scaling.get("original_max_position_embeddings")
         if orig_max_pos is not None and orig_max_pos != self.training.training_seq_len:
             warnings.warn(
@@ -521,7 +519,7 @@ class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
     )
 
     @model_validator(mode="after")
-    def _derive_dflash_offline(self) -> ModelOptDFlashRecipe:
+    def _derive_dflash_offline(self) -> Self:
         # offline (dumped .pt) and streaming (hidden states via NIXL RDMA from a vLLM
         # serve) both feed pre-computed base hidden states to the DFlash module, so
         # both set dflash_offline. Only fully-online training runs the base model.

@@ -34,7 +34,7 @@ class LayerwiseDistillationModel(DistillationModel):
     """Meta-model wrapper to support layerwise-enabled knowledge-distillation learning.
 
     The LayerwiseDistillationModel is a subclass of the DistillationModel that injects teacher inputs
-    into the corresponding student layers. This accomodates the case where the student model is the
+    into the corresponding student layers. This accommodates the case where the student model is the
     teacher with specific submodules replaced, which now need to be trained to mimic the original
     submodule in the teacher.
     """

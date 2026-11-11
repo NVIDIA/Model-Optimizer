@@ -15,6 +15,8 @@
 
 import pytest
 import torch
+from _test_utils.fs_utils import assert_unmodified_tree
+from _test_utils.torch.calib_data import write_calib_jsonl
 from _test_utils.torch.distributed.utils import (
     DistributedWorkerPool,
     default_worker_teardown,
@@ -41,3 +43,15 @@ def dist_workers(_dist_pools):
             world_size=world_size, backend="nccl", teardown_fn=default_worker_teardown
         ),
     )
+
+
+@pytest.fixture(scope="session")
+def calib_jsonl(tmp_path_factory):
+    """Local calibration texts for tests that only need some text, not a particular Hub dataset.
+
+    Shared by the whole session: a test that writes into its directory fails at teardown.
+    """
+    calib_dir = tmp_path_factory.mktemp("calib")
+    path = write_calib_jsonl(calib_dir / "calib.jsonl")
+    with assert_unmodified_tree(calib_dir):
+        yield path
