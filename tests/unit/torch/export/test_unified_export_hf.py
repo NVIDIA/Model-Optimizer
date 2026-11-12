@@ -1434,5 +1434,24 @@ def test_an_export_the_serving_engines_cannot_load_is_refused_before_writing(tmp
 
 
 @pytest.mark.parametrize("model_type", [None, "llama"])
-def test_a_model_whose_spec_names_no_such_module_is_not_refused(model_type):
-    assert_serving_unquantized(_with_a_quantized_latent_up_proj(model_type))
+def test_a_model_whose_spec_names_no_such_module_is_not_refused(tmp_path, monkeypatch, model_type):
+    model = _with_a_quantized_latent_up_proj(model_type)
+    assert_serving_unquantized(model)
+
+    # A sharded export of it skips the check's collective. Stopped at the rank query that follows it.
+    class StoppedError(Exception):
+        pass
+
+    labels = []
+
+    def all_reduce(label, fn, combine):  # a single process's, recording what it is asked for
+        labels.append(label)
+        return combine([fn()])
+
+    monkeypatch.setattr(unified_export_hf, "all_reduce", all_reduce)
+    monkeypatch.setattr(torch.distributed, "get_rank", mock.Mock(side_effect=StoppedError))
+    set_distribution_plan(model, DistributionPlan(2, ep_size=2))
+    with pytest.raises(StoppedError):
+        export_hf_checkpoint(model, export_dir=tmp_path / "export")
+    assert "fused expert quantization" in labels
+    assert "serving-unquantized modules" not in labels

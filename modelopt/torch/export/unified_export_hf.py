@@ -36,7 +36,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt import env
-from modelopt.torch.models import hf_model_type, is_moe
+from modelopt.torch.models import get_serving_unquantized, hf_model_type, is_moe
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     copy_off_index_safetensors,
@@ -2179,14 +2179,14 @@ def export_hf_checkpoint(
     # Either form of sharding, including the hybrid where both hold: a model can be FSDP2-dense AND
     # expert-parallel, so these are tracked separately rather than as an either/or.
     _sharded_export = _ep_sharded or _fsdp2_sharded
-    # Before anything is folded or written, so a refusal leaves no partial checkpoint. Every rank of
-    # a sharded export is here, so they refuse together.
-    if _sharded_export:
+    # Before anything is folded or written, so a refusal leaves no partial checkpoint. The ranks of a
+    # sharded export share the model type, so they all refuse together or all skip the collective.
+    if not _sharded_export:
+        assert_serving_unquantized(model)
+    elif get_serving_unquantized(hf_model_type(model)):
         all_reduce(
             "serving-unquantized modules", lambda: assert_serving_unquantized(model), lambda _: None
         )
-    else:
-        assert_serving_unquantized(model)
     # A sharded export reads and hands over the carried weights on rank 0 alone, since both sharded
     # writers take extra_state_dict from that one sender: on any other rank, reading them (889
     # tensors on GLM-5.3-Flash, its MTP layer) would be host memory spent for nothing. This gates
