@@ -6,10 +6,10 @@ description: >-
   recipe and generate a PTQ checkpoint." Guides the multi-candidate loop:
   choose compute-vs-memory success metrics, select ModelOpt recipe baselines,
   design AutoQuant/manual recipe deltas, interpret sensitivity, and decide next
-  candidates. Do NOT use for a single known PTQ recipe run (use ptq), serving
-  (use deployment), creating/running evals (use evaluation or launching-evals),
-  monitoring jobs (use monitor), MLflow browsing (use accessing-mlflow), or
-  comparing completed baseline-vs-candidate scores only (use compare-results).
+  candidates. Do NOT use for a single known PTQ recipe run (use modelopt-ptq), serving
+  (use modelopt-deployment), creating/running evals (use modelopt-evaluation or modelopt-launching-evals),
+  monitoring jobs (use modelopt-monitor), MLflow browsing (use modelopt-accessing-mlflow), or
+  comparing completed baseline-vs-candidate scores only (use modelopt-compare-results).
 ---
 
 # Quant Recipe Search

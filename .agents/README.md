@@ -46,6 +46,9 @@ Repository discovery shares files through the supported agent paths:
 
 ## Old-name compatibility
 
+Bare names are deprecated, retained temporarily for backward compatibility, and
+will be removed in ModelOpt 0.50.0. Use `modelopt-*` names now.
+
 All 15 workflows use `modelopt-<name>`. Each old name has a minimal `SKILL.md`
 that asks the agent to read its canonical sibling; these are agent-level
 forwarders, not native aliases. Supporting paths are symlinked to canonical files.

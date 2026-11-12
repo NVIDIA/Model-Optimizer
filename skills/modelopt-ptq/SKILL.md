@@ -6,7 +6,7 @@ description: >-
   quantization", "INT4 AWQ", "quantize LLM", "quantize MoE", "quantize VLM",
   or needs to produce a quantized HuggingFace checkpoint from a pretrained
   model using ModelOpt. Do NOT use for multi-candidate recipe
-  exploration or optimization (use quant-recipe-search).
+  exploration or optimization (use modelopt-quant-recipe-search).
 ---
 
 # ModelOpt Post-Training Quantization

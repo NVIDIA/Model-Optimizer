@@ -1,6 +1,6 @@
 ---
 name: modelopt-deployment
-description: Serve a quantized or unquantized LLM checkpoint as an OpenAI-compatible API endpoint using vLLM, SGLang, or TRT-LLM. Use when user says "deploy model", "serve model", "start vLLM server", "launch SGLang", "TRT-LLM deploy", "AutoDeploy", "benchmark throughput", "serve checkpoint", or needs an inference endpoint from a HuggingFace or ModelOpt-quantized checkpoint. Do NOT use for quantizing models (use ptq) or evaluating accuracy (use evaluation).
+description: Serve a quantized or unquantized LLM checkpoint as an OpenAI-compatible API endpoint using vLLM, SGLang, or TRT-LLM. Use when user says "deploy model", "serve model", "start vLLM server", "launch SGLang", "TRT-LLM deploy", "AutoDeploy", "benchmark throughput", "serve checkpoint", or needs an inference endpoint from a HuggingFace or ModelOpt-quantized checkpoint. Do NOT use for quantizing models (use modelopt-ptq) or evaluating accuracy (use modelopt-evaluation).
 license: Apache-2.0
 ---
 
