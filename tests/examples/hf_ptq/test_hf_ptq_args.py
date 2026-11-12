@@ -576,13 +576,15 @@ def test_calib_seq_must_be_positive(monkeypatch):
 
 
 def test_a_run_dumps_its_ranks_stacks_while_it_runs(monkeypatch, tmp_path):
-    """MODELOPT_DUMP_TRACEBACK_EVERY_SEC dumps the rank's stacks to its own file during the run, and
-    the dumps stop when the run ends."""
+    """MODELOPT_DUMP_TRACEBACK_EVERY_SEC dumps the rank's stacks to its own file during the run, after
+    the dumps of an earlier run, and the dumps stop when the run ends."""
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setenv("MODELOPT_DUMP_TRACEBACK_EVERY_SEC", "0.05")
     monkeypatch.setenv("MODELOPT_DUMP_TRACEBACK_DIR", str(tmp_path / "dumps"))
     monkeypatch.setenv("RANK", "3")
     dump = tmp_path / "dumps" / "traceback.rank3.txt"
+    dump.parent.mkdir()
+    dump.write_text("the stacks of a run that hung\n")
 
     with hf_ptq._dump_tracebacks():
         time.sleep(0.3)
@@ -592,9 +594,22 @@ def test_a_run_dumps_its_ranks_stacks_while_it_runs(monkeypatch, tmp_path):
         time.sleep(0.2)
         next_file.flush()
 
+    assert dump.read_text().startswith("the stacks of a run that hung\n")
     assert "test_a_run_dumps_its_ranks_stacks_while_it_runs" in dump.read_text()
     assert dump.stat().st_size == size
     assert (tmp_path / "next.txt").read_text() == ""
+
+
+@pytest.mark.parametrize("every", ["soon", "-1", "nan", "inf"])
+def test_a_dump_period_that_is_not_a_number_of_seconds_is_refused(monkeypatch, every):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setenv("MODELOPT_DUMP_TRACEBACK_EVERY_SEC", every)
+
+    with (
+        pytest.raises(ValueError, match="MODELOPT_DUMP_TRACEBACK_EVERY_SEC"),
+        hf_ptq._dump_tracebacks(),
+    ):
+        pass
 
 
 @pytest.mark.filterwarnings("ignore:.*fork:DeprecationWarning")

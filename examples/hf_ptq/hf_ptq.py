@@ -16,6 +16,7 @@
 import argparse
 import contextlib
 import faulthandler
+import math
 import os
 import random
 import signal
@@ -1608,9 +1609,12 @@ def _dump_tracebacks():
     try:
         seconds = float(every)
     except ValueError:
+        seconds = math.nan
+    if not 0 <= seconds < math.inf:
         raise ValueError(
-            f"MODELOPT_DUMP_TRACEBACK_EVERY_SEC={every!r} is not a number of seconds."
-        ) from None
+            f"MODELOPT_DUMP_TRACEBACK_EVERY_SEC={every!r} is not a number of seconds (0 turns the "
+            "periodic dumps off)."
+        )
     stderr = 2  # the process's own: sys.stderr may be a stand-in without a file descriptor
     faulthandler.register(signal.SIGTERM, file=stderr, all_threads=True, chain=True)
     if not faulthandler.is_enabled():
@@ -1621,7 +1625,9 @@ def _dump_tracebacks():
         path = os.path.join(directory, f"traceback.rank{os.environ.get('RANK', '0')}.txt")
         try:
             os.makedirs(directory, exist_ok=True)
-            periodic = open(path, "w", buffering=1)
+            # Appended: a rerun keeps the dumps of the run it may have been started to debug.
+            periodic = open(path, "a", buffering=1)
+            print(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')}, process {os.getpid()}", file=periodic)
         except OSError as e:
             warnings.warn(f"Not dumping stacks every {seconds:g} s: cannot write {path} ({e}).")
         else:
