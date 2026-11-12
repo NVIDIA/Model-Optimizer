@@ -21,7 +21,7 @@ import inspect
 import os
 import sys
 import warnings
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from typing import Any, cast
@@ -32,6 +32,7 @@ from torch.distributed.fsdp import FSDPModule
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
+from modelopt import env
 from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
@@ -42,7 +43,7 @@ from modelopt.torch.quantization.conversion import (
     set_quantizer_attributes_partial,
     set_quantizer_by_cfg,
 )
-from modelopt.torch.utils import atomic_print, restore_training_modes
+from modelopt.torch.utils import atomic_print, restore_training_modes, safe_load, safe_save
 
 from . import model_calib
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
@@ -52,6 +53,7 @@ from .algorithms import (
     _algorithm_methods,
     _refuse_layerwise_dirs,
     _rewrites_weights,
+    merge_auto_quantize_shards,
 )
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
@@ -62,10 +64,13 @@ from .kv_cache_auto_quant import (
     get_kv_cache_auto_quantize_config,
 )
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
+from .lora import has_quant_lora
 from .mode import QuantizeModeRegistry, _rank_local_calibrations, get_modelike_from_algo_cfg
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
-from .utils import is_quantized
+from .qtensor import QTensorWrapper
+from .utils import is_quantized, weight_attr_names
 from .utils.core_utils import _get_fsdp2_mesh
+from .utils.weight_cache import _suspend_weight_cache
 
 __all__ = [
     "auto_quantize",
@@ -75,6 +80,8 @@ __all__ = [
     "enable_quantizer",
     "fold_weight",
     "get_auto_quantize_config",
+    "initialize_qdq_weights",
+    "merge_auto_quantize_checkpoints",
     "postprocess_amax",
     "print_quant_summary",
     "quantize",
@@ -187,6 +194,28 @@ def _refuse_awq_on_a_sharded_fsdp2_model(
         )
 
 
+def _refuse_a_malformed_variable() -> None:
+    """Parse the ``MODELOPT_*`` variables quantizing reads, which raises on a malformed one.
+
+    Their readers (the weight check, module conversion, calibration) run once the model has begun
+    to change, so the entry points call this before they change it. In a distributed run each rank
+    parses its own environment, and every rank raises if one fails: a rank raising alone would
+    leave the others waiting for it in calibration.
+    """
+
+    def parse() -> None:
+        env.skip_weight_quant_check()
+        env.tegrouped_compile_weight_loop()
+        env.nvfp4_triton_sweep()
+
+    # all_reduce refuses a distributed launch with no process group, where each rank quantizes on
+    # its own.
+    if dist.is_distributed_run():
+        dist.all_reduce("its MODELOPT_* variables", parse, combine=lambda _: None)
+    else:
+        parse()
+
+
 # TODO: Descriptors for the supported algorithms
 def calibrate(
     model: nn.Module,
@@ -218,6 +247,7 @@ def calibrate(
     """
     _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
     _refuse_unsupported_distributed_calibration(model, algorithm)
+    _refuse_a_malformed_variable()
     if forward_loop is not None:
         # get the number of arguments of forward_loop
         num_args = len(inspect.signature(forward_loop).parameters)
@@ -323,9 +353,6 @@ def postprocess_amax(model: nn.Module, key: str, post_process_fn) -> nn.Module:
     return model
 
 
-_SKIP_WEIGHT_QUANT_CHECK_ENV = "MODELOPT_SKIP_WEIGHT_QUANT_CHECK"
-
-
 def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
     """Raise when a config asks for weight quantization but no weight quantizer is enabled.
 
@@ -350,7 +377,7 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     pattern's *final* entry, since entries apply in order and the last one for a pattern
     wins — before looking at the model at all.
     """
-    if os.environ.get(_SKIP_WEIGHT_QUANT_CHECK_ENV) == "1":
+    if env.skip_weight_quant_check():
         return
 
     # Later entries override earlier ones, so only each pattern's final state states intent.
@@ -396,7 +423,7 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
         "Under pipeline parallelism, a rank whose local stage genuinely has none of the "
         "targeted modules (e.g. a pure-attention stage under an experts-only recipe) hits "
         "this too, while other ranks proceed into calibration -- a collective hang, not "
-        f"just a wrong per-rank verdict. Set {_SKIP_WEIGHT_QUANT_CHECK_ENV}=1 to bypass this "
+        "just a wrong per-rank verdict. Set MODELOPT_SKIP_WEIGHT_QUANT_CHECK=1 to bypass this "
         "check in that situation -- note this is process-global, so it silences the check "
         "on every rank, not only the one with the legitimately empty stage."
     )
@@ -577,6 +604,7 @@ def quantize(
     quantize_config = QuantizeConfig(**dict(config))
     _refuse_awq_on_a_sharded_fsdp2_model(model, config.get("algorithm"))
     _refuse_unsupported_distributed_calibration(model, config.get("algorithm"))
+    _refuse_a_malformed_variable()
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
@@ -828,6 +856,7 @@ def auto_quantize(
     checkpoint: str | None = None,
     module_search_spaces: list[dict[str, Any]] | None = None,
     fixed_quantization_config: dict[str, Any] | str | None = None,
+    format_shard: tuple[int, int] | None = None,
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
@@ -1023,6 +1052,14 @@ def auto_quantize(
             active while searched modules are scored, is calibrated only with its own algorithm,
             and remains part of the effective-bits numerator and denominator. This is one
             integrated AutoQuantize operation, not staged PTQ followed by AutoQuantize.
+        format_shard: Optional ``(index, count)`` to calibrate and score only every ``count``-th
+            searched format starting at ``index`` (in canonical compression order), so the
+            formats can run in ``count`` parallel processes on the same model, data and
+            arguments; formats a group holds fixed are calibrated by every shard. Each shard
+            saves its scores to ``checkpoint`` without solving; combine the shard checkpoints
+            with :func:`merge_auto_quantize_checkpoints` and pass the result as ``checkpoint``
+            to solve. Scores are per (group, format), so the merged search is the unsharded
+            one. Gradient and KL-divergence methods only.
 
     Returns: A tuple (model, state_dict) where ``model`` is the searched and quantized model and
         ``state_dict`` contains the history and detailed stats of the search procedure.
@@ -1082,9 +1119,12 @@ def auto_quantize(
             "that quantization replaces and distributed_forward_loop restores. Quantize it with "
             "mtq.quantize through distributed_forward_loop, or AutoQuantize in a single process."
         )
+    _refuse_a_malformed_variable()
 
     method_name, method_config = _parse_auto_quantize_method(method)
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
+    if is_kv_search and format_shard is not None:
+        raise ValueError("format_shard is not supported for KV-cache AutoQuantize.")
     if is_kv_search:
         assert constraints is not None
         assert quantization_formats is not None
@@ -1230,6 +1270,7 @@ def auto_quantize(
         "disabled_layers": disabled_layers,
         "verbose": verbose,
         "checkpoint": checkpoint,
+        "format_shard": format_shard,
     }
     if method_config:
         # Only the selected method's declared options are accepted; core inputs (loaders,
@@ -1250,11 +1291,12 @@ def auto_quantize(
     searcher.validate_search_input(search_constraints, search_config)
 
     # A weight-rewriting candidate's refusals need the converted quantizers to tell which weights it
-    # rewrites. A failure before any candidate calibrates then hands back the unconverted modules,
-    # so the caller can retry on the same model, which a converted model would refuse. The saved
-    # modules hold every weight conversion replaces (HF Conv1D's), so other searches save none and
-    # the searcher drops them once those checks pass.
-    if rewrites_weights:
+    # rewrites, as does a format shard's check of its count against the searched formats. A failure
+    # before any candidate calibrates then hands back the unconverted modules, so the caller can
+    # retry on the same model, which a converted model would refuse. The saved modules hold every
+    # weight conversion replaces (HF Conv1D's), so other searches save none and the searcher drops
+    # them once those checks pass.
+    if rewrites_weights or format_shard is not None:
         searcher.restore_unconverted = _save_module_attributes(model)
     # Calibration turns pre-quant-scale folding off for the whole process. Hand back the policy
     # found here on every exit, also after a failure while scoring, so later calibrations fold.
@@ -1280,6 +1322,37 @@ def auto_quantize(
         model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = folding_pqs_to_weights
 
     return model, searcher.state_dict()
+
+
+def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint: str) -> None:
+    """Combine the checkpoints of every ``format_shard`` of one search into one checkpoint.
+
+    Pass ``checkpoint`` to :func:`auto_quantize` with the shards' other arguments (and no
+    ``format_shard``) to restore every format's calibration and scores and solve. The shard files
+    are memory-mapped on the CPU, so any host can merge them, and the restore moves each
+    calibration onto the model's devices. Under distributed scoring, merge each rank's files
+    separately. Shards that recorded different search setups (formats, groups, method, cost, or
+    calibration and scoring step counts) are refused; running every shard on the same weights
+    and batches is up to the caller.
+
+    Args:
+        shard_checkpoints: The checkpoint file of each shard ``0..count-1``, in any order.
+        checkpoint: Output file; must not exist.
+    """
+    if os.path.exists(checkpoint):
+        raise FileExistsError(f"{checkpoint} exists; merge into a new checkpoint file.")
+    merged = merge_auto_quantize_shards(
+        [safe_load(path, map_location="cpu", mmap=True) for path in shard_checkpoints]
+    )
+    os.makedirs(os.path.dirname(checkpoint) or ".", exist_ok=True)
+    # Created exclusively: a file that appeared since the check is refused, not overwritten.
+    f = open(checkpoint, "xb")
+    try:
+        with f:
+            safe_save(merged, f)
+    except BaseException:
+        os.unlink(checkpoint)  # only this call's partial file, so the merge can be retried
+        raise
 
 
 def get_auto_quantize_config(search_state, constraints=None, verbose=False):
@@ -1362,6 +1435,113 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             module.fold_weight(keep_attrs)
+
+
+@torch.no_grad()
+def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) -> nn.Module:
+    """Initialize floating latent weights from their configured fake-quantized values.
+
+    Call once after calibration/restoration, before distributed wrapping and optimizer
+    construction. Quantizers, calibration buffers, parameter objects and dtypes are retained.
+    Pre-scales and rotations are inverted before storing values, so subsequent forwards
+    continue to apply those transforms exactly once. This is initialization, not folding:
+    quantizers remain enabled. Uses already-restored calibration state without rerunning
+    calibration or GPTQ. Never call on a resumed training checkpoint. Dynamic scales/code
+    searches and low-precision inverse transforms can change the subsequent effective weight;
+    this API does not guarantee bitwise-identical forwards.
+
+    Args:
+        model: Calibrated fake-quantized model with uncompressed floating weights.
+        trainable_only: Initialize only weights whose ``requires_grad`` is true.
+    """
+    if not is_quantized(model):
+        raise ValueError("Weight initialization requires a calibrated fake-quantized model.")
+    if has_quant_lora(model):
+        raise ValueError("Weight initialization requires an adapter-free student.")
+    if any(isinstance(module, FSDPModule) for module in model.modules()):
+        raise ValueError("Initialize quantized weights before FSDP wrapping.")
+    seen = {}
+    storage_ranges = {}
+    for module in model.modules():
+        uses = (
+            list(module.iter_weights_for_calibration()) if isinstance(module, QuantModule) else []
+        )
+        parameters = list(module.named_parameters(recurse=False, remove_duplicate=False))
+        parameter_uses = Counter(id(parameter) for _, parameter in parameters)
+        weight_names = set(weight_attr_names(module)) if isinstance(module, QuantModule) else set()
+        weight_ids = {id(weight) for weight, _ in uses}
+        # Fused views are represented by their weight attributes; grouped weights by identity.
+        uses.extend(
+            (parameter, None)
+            for name, parameter in parameters
+            if name not in weight_names
+            and (id(parameter) not in weight_ids or parameter_uses[id(parameter)] > 1)
+        )
+        validated = False
+        for weight, quantizer in uses:
+            members = (
+                module._initialization_members(quantizer) if isinstance(module, QuantModule) else ()
+            )
+            selected = isinstance(module, QuantModule) and module._is_selected_for_initialization(
+                weight, quantizer, trainable_only
+            )
+            if selected and not validated:
+                module._validate_fold_weight()
+                validated = True
+            if (
+                isinstance(weight, QTensorWrapper)
+                or not weight.is_floating_point()
+                or weight.is_meta
+            ):
+                if selected:
+                    raise ValueError(
+                        "Weight initialization requires materialized floating weights."
+                    )
+                continue
+            for member in members if selected else []:
+                if not member.fake_quant or member._if_calib:
+                    raise ValueError(
+                        "Restore calibrated fake quantizers before weight initialization."
+                    )
+                scale = member.pre_quant_scale
+                if scale is not None and (
+                    scale.is_meta or not bool((torch.isfinite(scale) & (scale != 0)).all())
+                ):
+                    raise ValueError("Weight pre-quantization scales must be finite and nonzero.")
+                if scale is not None:
+                    local = weight.to_local() if hasattr(weight, "to_local") else weight
+                    try:
+                        if torch.broadcast_shapes(local.shape, scale.shape) != local.shape:
+                            raise ValueError("Pre-scale broadcasting changes the weight shape.")
+                    except RuntimeError as error:
+                        raise ValueError("Pre-scale must broadcast to the weight shape.") from error
+            if weight.numel():
+                key = QuantModule._weight_initialization_key(weight)
+                quantizer = quantizer if selected else None
+                if key in seen and seen[key] is not quantizer:
+                    raise ValueError("A shared weight has incompatible initialization uses.")
+                if key not in seen:
+                    device, pointer, offset, shape, stride, _ = key
+                    start = offset * weight.element_size()
+                    end = (
+                        offset + sum((size - 1) * step for size, step in zip(shape, stride)) + 1
+                    ) * weight.element_size()
+                    spans = storage_ranges.setdefault((device, pointer), [])
+                    if any(
+                        start < high and low < end and (selected or other is not None)
+                        for low, high, other in spans
+                    ):
+                        raise ValueError(
+                            "Overlapping weight views cannot be initialized separately."
+                        )
+                    spans.append((start, end, quantizer))
+                seen[key] = quantizer
+    with _suspend_weight_cache(model), preserve_quantizer_attributes_context(model):
+        initialized = set()
+        for module in model.modules():
+            if isinstance(module, QuantModule):
+                module._initialize_qdq_weights(trainable_only, initialized)
+    return model
 
 
 @contextmanager

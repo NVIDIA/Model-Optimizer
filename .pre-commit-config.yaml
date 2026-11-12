@@ -73,7 +73,7 @@ repos:
         name: sync .claude/skills/ symlinks from plugin skills
         entry: bash tools/precommit/sync_claude_skills.sh
         language: system
-        files: ^plugins/modelopt/skills/
+        files: ^skills/
         pass_filenames: false
 
       - id: check-launcher-yaml
@@ -81,6 +81,12 @@ repos:
         entry: uv run --frozen --extra dev python tools/precommit/check_launcher_yaml.py
         language: system
         files: ^(tools/launcher/examples/.*\.yaml|tools/precommit/check_launcher_yaml\.py)$
+
+      - id: check-env-knobs
+        name: read MODELOPT_* environment variables only through modelopt/env.py
+        entry: python3 tools/precommit/check_env_knobs.py
+        language: system
+        files: ^(modelopt|examples)/.*\.py$
 
   # Apache 2.0 header in python and shell files, below any third-party header (see CONTRIBUTING.md).
   # It keeps the id and alias of the Lucas-C hook it replaces, so `pre-commit run` and `SKIP` still match.

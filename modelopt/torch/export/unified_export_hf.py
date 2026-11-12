@@ -19,7 +19,6 @@ import contextlib
 import copy
 import importlib
 import json
-import os
 import re
 import tempfile
 import traceback
@@ -36,6 +35,7 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from modelopt import env
 from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
@@ -2085,17 +2085,8 @@ def _write_base_config(model: nn.Module, export_dir: Path) -> None:
 
 
 def _no_gather_export_asked() -> bool:
-    """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export.
-
-    ``nogather`` picks it; unset, empty or ``streaming`` keeps the default streaming path. Any other
-    value raises: a misspelled one would otherwise quietly take the path it was set to avoid.
-    """
-    value = os.environ.get("MODELOPT_FSDP2_EXPORT") or "streaming"
-    if value not in ("nogather", "streaming"):
-        raise ValueError(
-            f"MODELOPT_FSDP2_EXPORT={value!r}: expected 'nogather', or 'streaming', the default."
-        )
-    return value == "nogather"
+    """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export."""
+    return env.fsdp2_export() == "nogather"
 
 
 def export_hf_checkpoint(
