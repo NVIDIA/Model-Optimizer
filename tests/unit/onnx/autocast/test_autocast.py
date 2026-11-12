@@ -231,7 +231,7 @@ def test_convert_external_data_sanitizes_once_and_materializes_initializers(
 
     monkeypatch.setattr(GraphSanitizer, "sanitize", record_sanitize)
 
-    converted_model = convert_to_mixed_precision(onnx_path=str(model_path), calibrate_per_node=True)
+    converted_model = convert_to_mixed_precision(onnx_path=str(model_path), data_max=np.inf)
 
     assert sanitize_calls == [(str(model_path.resolve()), onnx.TensorProto.EXTERNAL, False)]
     for initializer in converted_model.graph.initializer:
@@ -239,6 +239,26 @@ def test_convert_external_data_sanitizes_once_and_materializes_initializers(
         assert not initializer.external_data
         assert initializer.raw_data
         assert initializer.data_type == onnx.TensorProto.FLOAT16
+    onnx.checker.check_model(converted_model)
+
+
+def test_convert_external_data_with_per_node_calibration(tmp_path, simple_model):
+    model_path = tmp_path / "external_model.onnx"
+    onnx.save_model(
+        simple_model,
+        model_path,
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="external_model.data",
+        size_threshold=0,
+    )
+
+    converted_model = convert_to_mixed_precision(onnx_path=str(model_path), calibrate_per_node=True)
+
+    assert all(
+        initializer.data_location != onnx.TensorProto.EXTERNAL
+        for initializer in converted_model.graph.initializer
+    )
     onnx.checker.check_model(converted_model)
 
 
