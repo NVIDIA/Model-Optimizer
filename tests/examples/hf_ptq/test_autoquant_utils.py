@@ -24,6 +24,7 @@ import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
 from transformers import WhisperConfig, WhisperForConditionalGeneration
 
+import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
@@ -479,13 +480,27 @@ def test_autoquant_searches_nothing_the_serving_engines_build_unquantized(
 
     monkeypatch.setattr(autoquant_utils.mtq, "auto_quantize", fake_auto_quantize)
     model = torch.nn.Module()
+    model.layers = torch.nn.ModuleList([torch.nn.Module()])
+    moe = model.layers[0].block_sparse_moe = torch.nn.Module()
+    moe.experts = torch.nn.ModuleList([torch.nn.Linear(16, 16)])
+    moe.routed_expert_down_proj = torch.nn.Linear(16, 16)
     model.config = SimpleNamespace(model_type=model_type)
 
     autoquant_utils.auto_quantize(args, model, [], aq)
 
     assert captured["disabled_layers"][: len(aq.disabled_layers)] == aq.disabled_layers
-    kept_out = captured["disabled_layers"][len(aq.disabled_layers) :]
-    assert ("*.block_sparse_moe.routed_expert_down_proj" in kept_out) is (model_type == "kimi_k3")
+    # Replaying the search turns disabled_layers into quantizer entries over a fixed config.
+    search_state = {
+        "best": {"recipe": {}},
+        "candidate_stats": {},
+        "disabled_layers": captured["disabled_layers"],
+        "fixed_quantization_config": mtq.FP8_DEFAULT_CFG,
+    }
+    with pytest.warns(UserWarning, match="algorithm='max'"):
+        replayed = mtq.get_auto_quantize_config(search_state)
+    mtq.quantize(model, replayed, forward_loop=None)
+    assert moe.experts[0].weight_quantizer.is_enabled
+    assert moe.routed_expert_down_proj.weight_quantizer.is_enabled is (model_type != "kimi_k3")
 
 
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(autoquant_utils):

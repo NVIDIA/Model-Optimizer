@@ -203,11 +203,15 @@ def auto_quantize(
             len(calib_dataloader), max(inputs["score_size"] // score_batch_size, 1)
         ),
         "verbose": True,
-        # Kept out of the search: the model's serving engines build them unquantized.
+        # Kept out of the search: the model's serving engines build them unquantized. The ``*`` also
+        # matches their quantizers, which get_auto_quantize_config disables by these same patterns.
         "disabled_layers": [
             *inputs["disabled_layers"],
-            *get_serving_unquantized(
-                hf_model_type(full_model if full_model is not None else language_model)
+            *(
+                f"{pattern}*"
+                for pattern in get_serving_unquantized(
+                    hf_model_type(full_model if full_model is not None else language_model)
+                )
             ),
         ],
         "method": inputs["method"],
