@@ -130,7 +130,7 @@ Do not collapse the search to one dimension such as numeric format only. Read
      evaluate the candidate against the same BF16 baseline and acceptance
      criteria as every other recipe.
    - If the checkpoint is valid but serving fails due to runtime support, do not
-     reject the recipe immediately. Delegate to `modelopt-deployment` / `debug` for small
+     reject the recipe immediately. Delegate to `modelopt-deployment` / `modelopt-debug` for small
      patches or flags, then rerun a pipe-clean check.
 
 ## Iteration Loop

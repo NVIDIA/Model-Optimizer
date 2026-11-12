@@ -169,7 +169,7 @@ Search by module family, but respect modules fused by the target runtime.
 - If a checkpoint is valid but deployment fails due to missing support, classify
   it as checkpoint-quality, recipe/runtime compatibility, or deployment
   implementation. For deployment implementation, try small patches or flags via
-  `modelopt-deployment` / `debug` before rejecting the recipe.
+  `modelopt-deployment` / `modelopt-debug` before rejecting the recipe.
 
 ## Iteration Loop
 

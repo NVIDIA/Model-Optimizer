@@ -222,7 +222,7 @@ jobs:
         # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
         run: |
           pip install pytest
-          python -m pytest skills/ -o addopts="" -p no:cacheprovider -v
+          python -m pytest skills/modelopt-*/tests --confcutdir=skills -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}

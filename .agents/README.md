@@ -22,9 +22,9 @@ and holds shared configuration.
 .codex-plugin/mcp.json      # Codex plugin MCP configuration
 .claude/agents/             # canonical Claude subagent definitions
 
-skills/                     # canonical skill content
+skills/                     # workflows and compatibility entrypoints
 ├── common/                 # shared support
-└── <skill-name>/SKILL.md    # catalog workflows use modelopt-<name>
+└── <skill-name>/SKILL.md    # canonical workflows use modelopt-<name>
 ```
 
 ## How each agent finds these
@@ -43,6 +43,24 @@ Repository discovery shares files through the supported agent paths:
   `claude --plugin-dir .`; nested MCP files are not auto-discovered.
 - **Codex** discovers project roles directly under `.codex/agents/`. Codex
   plugins cannot currently install custom roles.
+
+## Old-name compatibility
+
+All 15 workflows use `modelopt-<name>`. Each old name has a minimal `SKILL.md`
+that asks the agent to read its canonical sibling; these are agent-level
+forwarders, not native aliases. Supporting paths are symlinked to canonical files.
+`common` remains shared support, not a workflow.
+
+Checkout discovery and the root plugin expose both names. A stub installed alone
+cannot work: its sibling canonical directory must be included. Publish only
+canonical skills in the standalone catalog; do not publish stubs independently.
+Installers that skip symlinks (observed with Codex 0.162.1) omit old supporting
+paths; forwarding still works through the real canonical directories.
+
+Descriptions identify compatibility names but overlap with canonical descriptions,
+so automatic selection may choose either. Old names can collide with other skills;
+prefer `modelopt-*` (or `modelopt:modelopt-*` when the client adds the plugin namespace).
+Do not load both the checkout and plugin copy when avoiding duplicate discovery.
 
 ## Editing rules
 
