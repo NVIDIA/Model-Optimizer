@@ -73,7 +73,6 @@ def convert_to_mixed_precision(
     init_max: float = DEFAULT_INIT_MAX,
     keep_io_types: bool = False,
     calibration_data: str | None = None,
-    calibrate_per_node: bool = False,
     custom_rule: NodeRuleBase | None = None,
     init_conversion_max_bytes: int | None = None,
     providers: list[str] | None = None,
@@ -82,6 +81,7 @@ def convert_to_mixed_precision(
     max_depth_of_reduction: int | None = None,
     opset: int | None = None,
     use_standalone_type_inference: bool = False,
+    calibrate_per_node: bool = False,
 ) -> onnx.ModelProto:
     """Convert model to mixed precision.
 
@@ -96,7 +96,6 @@ def convert_to_mixed_precision(
         init_max: Maximum absolute value for initializers.
         keep_io_types: Whether to preserve input/output types.
         calibration_data: Path to input data file for reference runner.
-        calibrate_per_node: Whether to run calibration node by node to reduce peak memory.
         custom_rule: Optional custom rule for node classification (inherits from NodeRuleBase).
         init_conversion_max_bytes: Maximum size in bytes for initializer conversion. Larger initializers will be cast at
                                    runtime.
@@ -110,6 +109,7 @@ def convert_to_mixed_precision(
         use_standalone_type_inference: If True, use standalone type inference implementation instead of ONNX's
                                   infer_shapes. This is a workaround (WAR) when only type inference is
                                   needed without shape inference. Default: False.
+        calibrate_per_node: Whether to run calibration node by node to reduce peak memory.
 
     Returns:
         onnx.ModelProto: The converted mixed precision model.

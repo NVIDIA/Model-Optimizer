@@ -269,15 +269,14 @@ class ReferenceRunner:
     def _make_single_node_model(
         self,
         node: onnx.NodeProto,
+        dependency_names: list[str],
         value_info_map: dict[str, onnx.ValueInfoProto],
         initializer_map: dict[str, onnx.TensorProto],
     ) -> onnx.ModelProto:
         """Build a runnable model containing one node from the reference graph."""
         model_inputs = []
         model_initializers = []
-        for input_name in node.input:
-            if not input_name:
-                continue
+        for input_name in dependency_names:
             if input_name in initializer_map:
                 model_initializers.append(initializer_map[input_name])
             elif input_name in value_info_map:
@@ -312,6 +311,44 @@ class ReferenceRunner:
         )
         return model
 
+    @classmethod
+    def _get_graph_captured_inputs(cls, graph: onnx.GraphProto) -> list[str]:
+        """Return tensors referenced by a subgraph but defined in an outer scope."""
+        defined_names = {
+            *(value.name for value in graph.input),
+            *(initializer.name for initializer in graph.initializer),
+            *(output for node in graph.node for output in node.output if output),
+        }
+        referenced_names = []
+        for node in graph.node:
+            referenced_names.extend(name for name in node.input if name)
+            referenced_names.extend(cls._get_node_captured_inputs(node))
+        return list(dict.fromkeys(name for name in referenced_names if name not in defined_names))
+
+    @classmethod
+    def _get_node_captured_inputs(cls, node: onnx.NodeProto) -> list[str]:
+        """Return outer-scope tensors captured by graph attributes on a node."""
+        captured_inputs = []
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.GRAPH:
+                captured_inputs.extend(cls._get_graph_captured_inputs(attribute.g))
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                for graph in attribute.graphs:
+                    captured_inputs.extend(cls._get_graph_captured_inputs(graph))
+        return list(dict.fromkeys(captured_inputs))
+
+    @classmethod
+    def _get_node_dependencies(cls, node: onnx.NodeProto) -> list[str]:
+        """Return explicit and control-flow-captured inputs required by a node."""
+        return list(
+            dict.fromkeys(
+                [
+                    *(name for name in node.input if name),
+                    *cls._get_node_captured_inputs(node),
+                ]
+            )
+        )
+
     @staticmethod
     def _update_tensor_stats(
         stats: OrderedDict[str, TensorStats], name: str, value: np.ndarray
@@ -325,7 +362,7 @@ class ReferenceRunner:
             absmax=max(previous.absmax, batch_absmax) if previous else batch_absmax,
             min_val=min(previous.min_val, batch_min) if previous else batch_min,
             max_val=max(previous.max_val, batch_max) if previous else batch_max,
-            shape=value.shape,
+            shape=previous.shape if previous else value.shape,
         )
 
     def _run_per_node(self, inputs=None) -> OrderedDict[str, TensorStats]:
@@ -341,11 +378,14 @@ class ReferenceRunner:
         initializer_map = {
             initializer.name: initializer for initializer in self.model.graph.initializer
         }
+        node_dependencies = [
+            (node, self._get_node_dependencies(node)) for node in self.model.graph.node
+        ]
         consumer_counts = Counter(
             input_name
-            for node in self.model.graph.node
-            for input_name in node.input
-            if input_name and input_name not in initializer_map
+            for _, dependency_names in node_dependencies
+            for input_name in dependency_names
+            if input_name not in initializer_map
         )
         stats = OrderedDict()
         data_loader = self._load_inputs(inputs)
@@ -369,12 +409,12 @@ class ReferenceRunner:
         for input_data in data_loader:
             live_values = dict(input_data)
             remaining_consumers = consumer_counts.copy()
-            for name, value in live_values.items():
-                self._update_tensor_stats(stats, name, value)
+            for name in live_values:
+                self._update_tensor_stats(stats, name, live_values[name])
 
-            for node in self.model.graph.node:
+            for node, dependency_names in node_dependencies:
                 runtime_input_names = [
-                    name for name in node.input if name and name not in initializer_map
+                    name for name in dependency_names if name not in initializer_map
                 ]
                 missing_inputs = [name for name in runtime_input_names if name not in live_values]
                 if missing_inputs:
@@ -383,7 +423,7 @@ class ReferenceRunner:
                     )
                 feed_dict = {name: live_values[name] for name in runtime_input_names}
                 single_node_model = self._make_single_node_model(
-                    node, value_info_map, initializer_map
+                    node, dependency_names, value_info_map, initializer_map
                 )
                 runners, model_temp_dir = self._get_ort_runner(lambda: single_node_model)
                 try:
@@ -392,16 +432,21 @@ class ReferenceRunner:
                 finally:
                     if model_temp_dir is not None:
                         model_temp_dir.cleanup()
+                    runners.clear()
 
                 for input_name in runtime_input_names:
                     remaining_consumers[input_name] -= 1
                     if remaining_consumers[input_name] == 0:
                         live_values.pop(input_name)
+                feed_dict.clear()
 
-                for output_name, value in output_dict.items():
-                    self._update_tensor_stats(stats, output_name, value)
+                output_value = None
+                for output_name in tuple(output_dict):
+                    output_value = output_dict.pop(output_name)
+                    self._update_tensor_stats(stats, output_name, output_value)
                     if remaining_consumers[output_name] > 0:
-                        live_values[output_name] = value
+                        live_values[output_name] = output_value
+                output_value = None
 
         return stats
 
@@ -416,10 +461,12 @@ class ReferenceRunner:
                 - None: Random inputs will be generated
                 - str: Path to JSON file, NPZ file, or directory containing NPZ files
                 - dict/OrderedDict: Single batch of input data
+            calibrate_per_node: Run each node separately and return compact statistics to reduce
+                peak calibration memory.
 
         Returns:
-            OrderedDict: Combined input and output data. For single batch, returns raw arrays.
-                For multiple batches, returns TensorStats objects with aggregated statistics.
+            OrderedDict: Combined input and output data. Per-node mode and multi-batch normal mode
+                return TensorStats objects; single-batch normal mode returns raw arrays.
         """
         import onnxruntime as ort
         from polygraphy import constants
