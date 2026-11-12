@@ -948,6 +948,23 @@ class TensorQuantizer(nn.Module):
                 getattr(self, "_onnx_quantizer_type", None),
                 self._pass_through_bwd,
             )
+        elif self.is_nvfp4_static:
+            # Static NVFP4 fake quant uses two-level scaling (per-block FP8 scales
+            # plus a global scale), so route to the same implementation used by
+            # StaticBlockScaleQuantizer instead of the per-tensor FP8 path below.
+            # A quantizer reaches this base implementation when it has not been
+            # promoted, e.g. training flows that skip calibration finalize.
+            # global_amax=None derives the global scale from the per-block amax,
+            # matching the fallback used when promoting the quantizer.
+            outputs = static_blockwise_fp4_fake_quant(
+                inputs,
+                amax,
+                None,
+                True,
+                fp8_max_for_normalization(self),
+                inputs.dtype,
+                self._pass_through_bwd,
+            )
         elif isinstance(self._num_bits, tuple):
             # Float-point quantization, e.g., FP8
             E, M = self._num_bits  # noqa: N806
