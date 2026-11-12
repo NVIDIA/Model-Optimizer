@@ -178,8 +178,14 @@ class QuantModule(DynamicModule):
             if key in initialized:
                 continue
             local = weight.to_local() if hasattr(weight, "to_local") else weight
-            decoded = quantizer(local).detach().clone()
             members = self._initialization_members(quantizer)
+            for member in members:
+                member._qdq_initialization_shape = tuple(local.shape)
+            try:
+                decoded = quantizer(local).detach().clone()
+            finally:
+                for member in members:
+                    del member._qdq_initialization_shape
             # Return from the quantizer's transformed coordinates to the latent weight domain.
             for member in reversed(members):
                 if member.rotate_is_enabled and not member.rotate_back_is_enabled:

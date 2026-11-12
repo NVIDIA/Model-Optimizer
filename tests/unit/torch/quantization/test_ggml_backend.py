@@ -15,12 +15,14 @@
 
 import dataclasses
 import importlib
+import io
 import re
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.ggml as ggml
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
@@ -86,22 +88,60 @@ def test_ggml_backend_via_quantize(num_bits, dtype, record_property):
     mtq.initialize_qdq_weights(model)
     assert model.weight is parameter and model.weight_quantizer.is_enabled
     torch.testing.assert_close(model.weight, expected_weight, rtol=0, atol=0)
-    # Unpinned formats search scales/codes again: the next forward applies QDQ a second time.
     codec = GGML_FORMAT_REGISTRY[num_bits]
-    packed, shape = codec.quantize(expected_weight)
-    effective_weight = codec.dequantize(packed, shape, dtype=dtype)
+    payloads = [
+        value
+        for name, value in model.weight_quantizer.named_buffers()
+        if name.endswith("_qdq_initialization")
+    ]
     after = model(inputs)
+    torch.testing.assert_close(after, output, rtol=0, atol=0)
     torch.testing.assert_close(
-        after, torch.nn.functional.linear(inputs, effective_weight), rtol=0, atol=0
+        model.weight_quantizer(model.weight), expected_weight, rtol=0, atol=0
     )
-    relative_error = (after.float() - output.float()).norm() / output.float().norm()
-    record_property("initialization_forward_relative_l2", relative_error.item())
-    if num_bits == "q8_0":
-        torch.testing.assert_close(after, output, rtol=0, atol=0)
-    elif num_bits == "iq2_xxs":
-        assert not torch.equal(after, output)
-    for name, value in model.weight_quantizer.named_buffers():
-        torch.testing.assert_close(value, buffers[name], rtol=0, atol=0)
+    for payload in payloads:
+        assert payload.shape == (2, 256 // codec.block_size, codec.block_bytes)
+        assert payload.dtype == torch.uint8
+    record_property("initialization_forward_relative_l2", 0.0)
+    for name, value in buffers.items():
+        torch.testing.assert_close(
+            dict(model.weight_quantizer.named_buffers())[name], value, rtol=0, atol=0
+        )
+
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+    model.weight.grad = torch.ones_like(model.weight)
+    optimizer.step()
+    torch.testing.assert_close(model(inputs), output, rtol=0, atol=0)
+
+    checkpoint = io.BytesIO()
+    mto.save(model, checkpoint)
+    checkpoint.seek(0)
+    restored = mto.restore(torch.nn.Linear(256, 2, bias=False, dtype=dtype), checkpoint)
+    torch.testing.assert_close(restored(inputs), output, rtol=0, atol=0)
+    # A same-valued copy invalidates the cache but must not retire initialization state.
+    with torch.no_grad():
+        restored.weight.copy_(restored.weight.detach().clone())
+    torch.testing.assert_close(restored(inputs), output, rtol=0, atol=0)
+
+    # Shared-buffer optimizer writes need not increment the parameter's version counter.
+    with torch.no_grad():
+        model.weight.data.add_(0.125)
+    optimizer.step()
+    packed, shape = codec.quantize(model.weight)
+    expected_after_update = codec.dequantize(packed, shape, dtype=dtype)
+    torch.testing.assert_close(
+        model.weight_quantizer(model.weight), expected_after_update, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        model(inputs), torch.nn.functional.linear(inputs, expected_after_update), rtol=0, atol=0
+    )
+    assert not any(
+        name.endswith("_qdq_initialization") for name, _ in model.weight_quantizer.named_buffers()
+    )
+    model.weight.grad = None
+    model(inputs).float().square().mean().backward()
+    assert model.weight.grad is not None and torch.isfinite(model.weight.grad).all()
+    assert torch.count_nonzero(model.weight.grad) > 0
 
 
 def test_ggml_backend_rejects_unknown_format():
@@ -327,3 +367,31 @@ def test_format_fake_quant_rejects_another_formats_quantizer(num_bits):
         GGML_FORMAT_REGISTRY[num_bits].fake_quant(
             torch.ones(1, block_size), SimpleNamespace(num_bits=other)
         )
+
+
+@pytest.mark.parametrize("sharing", ["shared", "sequential"])
+def test_ggml_initialization_refuses_ambiguous_ptq_quantizers_before_writing(sharing):
+    model = torch.nn.Sequential(torch.nn.Linear(256, 256), torch.nn.Linear(256, 2))
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "backend": "ggml"},
+                "enable": True,
+            },
+        ],
+        "algorithm": "max",
+    }
+    if sharing == "sequential":
+        config["quant_cfg"][1]["cfg"] = [
+            {"num_bits": name, "backend": "ggml"} for name in ["iq2_xxs", "q8_0"]
+        ]
+    mtq.quantize(model, config, lambda m: m(torch.randn(2, 256)))
+    if sharing == "shared":
+        model[1].weight_quantizer = model[0].weight_quantizer
+    before = [m.weight.detach().clone() for m in model]
+    with pytest.raises(ValueError):
+        mtq.initialize_qdq_weights(model)
+    for m, expected in zip(model, before):
+        torch.testing.assert_close(m.weight, expected, rtol=0, atol=0)

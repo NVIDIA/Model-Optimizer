@@ -1446,8 +1446,9 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
     Pre-scales and rotations are inverted before storing values, so subsequent forwards
     continue to apply those transforms exactly once. This is initialization, not folding:
     quantizers remain enabled. Uses already-restored calibration state without rerunning
-    calibration or GPTQ. Never call on a resumed training checkpoint. Dynamic scales/code
-    searches and low-precision inverse transforms can change the subsequent effective weight;
+    calibration or GPTQ. Never call on a resumed training checkpoint. Unpinned GGML PTQ keeps its
+    initialization payload until the weight changes, then resumes its ordinary scale/code search.
+    Other dynamic quantizers and low-precision inverse transforms can change the effective weight;
     this API does not guarantee bitwise-identical forwards.
 
     Args:
@@ -1460,8 +1461,12 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
         raise ValueError("Weight initialization requires an adapter-free student.")
     if any(isinstance(module, FSDPModule) for module in model.modules()):
         raise ValueError("Initialize quantized weights before FSDP wrapping.")
+    # Deferred: GGML backend registration imports the quantization API.
+    from .ggml.common import pinned_packed_weight
+
     seen = {}
     storage_ranges = {}
+    initialization_owners = {}
     for module in model.modules():
         uses = (
             list(module.iter_weights_for_calibration()) if isinstance(module, QuantModule) else []
@@ -1499,6 +1504,20 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
                     )
                 continue
             for member in members if selected else []:
+                if (
+                    member.backend == "ggml"
+                    and pinned_packed_weight(member, member.num_bits) is None
+                ):
+                    if len(members) != 1:
+                        raise ValueError(
+                            "GGML PTQ initialization needs a single quantizer per weight."
+                        )
+                    owner = QuantModule._weight_initialization_key(weight)
+                    if member in initialization_owners and initialization_owners[member] != owner:
+                        raise ValueError(
+                            "GGML PTQ initialization needs a separate quantizer for each weight."
+                        )
+                    initialization_owners[member] = owner
                 if not member.fake_quant or member._if_calib:
                     raise ValueError(
                         "Restore calibrated fake quantizers before weight initialization."

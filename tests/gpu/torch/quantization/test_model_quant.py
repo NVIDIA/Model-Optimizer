@@ -23,6 +23,7 @@ import torch
 from torch import nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.utils import enable_weight_cache, weight_cache_scope
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -37,23 +38,35 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is r
         mtq.MXFP8_DEFAULT_CFG,
         mtq.W4A8_NVFP4_FP8_CFG,
         mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
-        pytest.param(
-            {
-                "quant_cfg": [
-                    {"quantizer_name": "*", "enable": False},
-                    {
-                        "quantizer_name": "*weight_quantizer",
-                        "cfg": {"num_bits": "iq2_xxs", "backend": "ggml"},
-                        "enable": True,
+        *[
+            pytest.param(
+                {
+                    "quant_cfg": [
+                        {"quantizer_name": "*", "enable": False},
+                        {
+                            "quantizer_name": "*weight_quantizer",
+                            "cfg": {"num_bits": name, "backend": "ggml"},
+                            "enable": True,
+                        },
+                    ],
+                    "algorithm": "max"
+                    if algorithm == "ptq"
+                    else {
+                        "method": "gptq",
+                        "block_size": 256,
+                        "perc_damp": 0.3,
+                        "importance_weighted": True,
                     },
-                ],
-                "algorithm": "max",
-            },
-            id="iq2_xxs",
-        ),
+                },
+                id=f"{name}-{algorithm}",
+            )
+            for name in GGML_FORMAT_REGISTRY
+            for algorithm in ["ptq", "gptq"]
+        ],
     ],
 )
 def test_initialize_cuda_weight_formats(config, record_property):
+    torch.manual_seed(0)
     model = nn.Linear(256, 256, bias=False).to(device="cuda", dtype=torch.bfloat16)
     inputs = torch.randn(2, 256, device="cuda", dtype=torch.bfloat16)
     mtq.quantize(model, copy.deepcopy(config), lambda m: m(inputs))
@@ -75,8 +88,13 @@ def test_initialize_cuda_weight_formats(config, record_property):
         output_after.float() - output_before.float()
     ).norm() / output_before.float().norm()
     record_property("initialization_forward_relative_l2", relative_error.item())
-    for name, value in model.named_buffers():
-        torch.testing.assert_close(value, buffers[name], rtol=0, atol=0)
+    effective_after = model.weight_quantizer(model.weight).detach()
+    record_property("effective_weight_changed_elements", (effective_after != expected).sum().item())
+    if getattr(model.weight_quantizer, "backend", None) == "ggml":
+        torch.testing.assert_close(effective_after, expected, rtol=0, atol=0)
+        torch.testing.assert_close(output_after, output_before, rtol=0, atol=0)
+    for name, value in buffers.items():
+        torch.testing.assert_close(dict(model.named_buffers())[name], value, rtol=0, atol=0)
     model(inputs).float().square().mean().backward()
     assert model.weight.grad is not None and torch.isfinite(model.weight.grad).all()
 
@@ -97,11 +115,27 @@ def test_initialize_bf16_transformed_weights():
 
 
 @pytest.mark.parametrize("cache_enabled", [False, True])
-def test_initialize_weight_memory_and_time(record_property, capsys, cache_enabled):
+@pytest.mark.parametrize("num_bits", ["nvfp4", "iq2_xxs"])
+def test_initialize_weight_memory_and_time(record_property, capsys, cache_enabled, num_bits):
     model = nn.Sequential(*(nn.Linear(4096, 4096, bias=False) for _ in range(4)))
     model = model.to(device="cuda", dtype=torch.bfloat16)
     inputs = torch.randn(2, 4096, device="cuda", dtype=torch.bfloat16)
-    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(inputs))
+    config = (
+        mtq.NVFP4_DEFAULT_CFG
+        if num_bits == "nvfp4"
+        else {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": num_bits, "backend": "ggml"},
+                    "enable": True,
+                },
+            ],
+            "algorithm": "max",
+        }
+    )
+    mtq.quantize(model, config, lambda m: m(inputs))
     if cache_enabled:
         enable_weight_cache(model)
     torch.cuda.synchronize()
@@ -118,9 +152,15 @@ def test_initialize_weight_memory_and_time(record_property, capsys, cache_enable
     assert extra_peak_bytes < sum(p.numel() * p.element_size() for p in model.parameters())
     record_property("initialization_ms", elapsed_ms)
     record_property("initialization_extra_peak_bytes", extra_peak_bytes)
+    packed_bytes = sum(
+        buffer.numel() * buffer.element_size()
+        for name, buffer in model.named_buffers()
+        if name.endswith("_qdq_initialization")
+    )
+    record_property("retained_initialization_payload_bytes", packed_bytes)
     with capsys.disabled():
         print(
             f"QDQ initialization: device={torch.cuda.get_device_name()}, "
-            f"format=NVFP4, dtype=BF16, weights=4x4096x4096, cache_enabled={cache_enabled}, "
+            f"format={num_bits}, dtype=BF16, weights=4x4096x4096, cache_enabled={cache_enabled}, "
             f"elapsed_ms={elapsed_ms:.3f}, extra_peak_allocated_bytes={extra_peak_bytes}"
         )
