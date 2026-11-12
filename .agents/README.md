@@ -32,7 +32,7 @@ skills/                     # workflows and compatibility entrypoints
 Repository discovery shares files through the supported agent paths:
 
 - **Claude Code** only auto-discovers skills under `.claude/skills/`, so
-  `.claude/skills/` holds relative symlinks into `.agents/skills/`.
+  `.claude/skills/` holds relative symlinks directly into root `skills/`.
 - **Repository agents** use `.agents/skills`, a relative symlink to root `skills/`.
 - **Both marketplaces** select the repository root as the plugin source.
   The root manifests load the real `skills/` directory, without installer symlinks.
