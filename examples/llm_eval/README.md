@@ -4,64 +4,32 @@ This folder includes popular 3rd-party LLM benchmarks for LLM accuracy evaluatio
 
 The following instructions show how to evaluate the Model Optimizer quantized LLM with the benchmarks, including the TensorRT-LLM deployment.
 
-## Offline vLLM KL evaluation
+## PyTorch KL evaluation prototype
 
-`kl_eval.py` compares an unquantized BF16 reference with an exported ModelOpt quantized checkpoint using offline Python vLLM. Supply Hugging Face model IDs or local checkpoint directories with matching token-ID mappings and output vocabularies. The evaluator loads both checkpoints directly and performs no calibration or checkpoint export.
-
-Install vLLM, PyTorch, Transformers, NumPy, and Datasets in a CUDA environment supported by the checkpoints. The vLLM release must support `SamplingParams(flat_logprobs=True, prompt_logprobs=-1)` and raw full-vocabulary log-probabilities.
+`kl_eval.py` compares an unquantized BF16 base model with a separately calibrated fake-quant copy. Supply a model and a fixed PTQ recipe; calibration reuses the `hf_ptq.py` workflow and stops before checkpoint export. Install ModelOpt and the [hf_ptq requirements](../hf_ptq/requirements.txt) as described in the [hf_ptq setup](../hf_ptq/README.md).
 
 Run from the repository root:
 
 ```sh
 python examples/llm_eval/kl_eval.py \
     --model Qwen/Qwen3.8-27B \
-    --quantized_model nvidia/Qwen3.8-27B-NVFP4 \
+    --recipe general/ptq/nvfp4_default-kv_fp8_cast \
     --output kl_results.json
 ```
 
-This checkpoint pair has been validated with vLLM 0.31.0 on four GB300 GPUs using `--tensor_parallel_size 4` and the default evaluation settings. An identical-BF16-checkpoint control with one example and 16 generated tokens returned zero for both KL metrics.
+This is a usage example, not a validated model/recipe result. The recipe includes NVFP4 weights and activations with FP8 KV-cache cast quantization. Other built-in PTQ recipe names or YAML paths can be supplied through `--recipe`.
 
 - Evaluation uses 100 non-overlapping, 128-token windows from the tokenized WikiText-2-raw-v1 test split, selected with seed 0. Text is joined with blank lines and encoded without a chat template or added special tokens.
 - The BF16 model greedily generates up to 512 tokens per prompt, stopping at EOS. Both models then receive the identical prompt and continuation. Only the generated-token predictions, including EOS, contribute to the score.
-- Full-vocabulary KL is `KL(BF16 || quantized)` over all vocabulary tokens. Conditional top-k KL selects the BF16 model's top 128 token IDs at each position and separately normalizes both models over those same IDs. It excludes tail mass and is not an approximation with an `OTHER` bucket.
-- Scoring uses raw FP32 log-probabilities and computes KL in chunks of 32 positions. Each reported mean first averages positions within an example, then averages the example scores equally. Units are nats. Missing vocabulary entries or non-finite scores raise an error.
-- The JSON contains only the overall `full_vocab_kl` and `conditional_topk_kl` means by default. Add `--detailed_results` to save a report with `summary`, per-example scores and token counts, prompt/continuation token IDs, and resolved checkpoint, runtime, and evaluation settings.
+- Full-vocabulary KL is `KL(BF16 || fake-quant)` over all vocabulary tokens. Conditional top-k KL selects the BF16 model's top 128 token IDs at each position and separately normalizes both models over those same IDs. It excludes tail mass and is not an approximation with an `OTHER` bucket.
+- Log-softmax and KL use FP32, in chunks of 32 positions. Each reported mean first averages positions within an example, then averages the example scores equally. Units are nats. Non-finite scores raise an error rather than being dropped.
+- The JSON contains only the overall `full_vocab_kl` and `conditional_topk_kl` means by default. Add `--detailed_results` to save a report with `summary`, per-example scores and token counts, prompt/continuation token IDs, and resolved recipe and run settings. Logits are held for one example at a time and are not saved.
 
-The reference and quantized model run in two sequential processes, reusing the same GPUs. The reference pass saves temporary FP32 distributions; the quantized pass scores the saved continuations and deletes each distribution after use. Scratch storage is approximately `num_examples * max_new_tokens * vocab_size * 4` bytes, plus file and token metadata, with less needed when generation stops early. For the Qwen checkpoint above with 248,320 vocabulary entries and default evaluation settings, budget about 47.4 GiB. Use `--temp_dir` to select an existing scratch directory; temporary files are removed when the evaluator exits. Full-vocabulary vLLM outputs also require host and GPU memory for one example at a time.
+Override evaluation settings with `--num_examples`, `--prompt_tokens`, `--max_new_tokens`, `--top_k`, and `--seed`. Calibration is separate from WikiText evaluation and inherits `hf_ptq.py` defaults: the CNN/DailyMail + Nemotron mixture, 1,024 samples, maximum length 512, and automatic batch sizing. Override those with `--dataset`, `--calib_size`, `--calib_seq`, and `--batch_size`; these flags affect calibration only. Evaluation processes one prompt at a time.
 
-Override evaluation settings with `--num_examples`, `--prompt_tokens`, `--max_new_tokens`, `--top_k`, and `--seed`. Launch one evaluator process and use `--tensor_parallel_size` to distribute each model across GPUs. `--gpu_memory_utilization` defaults to 0.8. Pin checkpoint revisions with `--revision` and `--quantized_revision`; `--trust_remote_code` is opt-in.
+The default [Nemotron calibration dataset](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) is gated. Authenticate with a Hugging Face account that has access before running; if using an isolated `HF_HOME`, make the token available through `HF_TOKEN_PATH`.
 
-The reference uses BF16; the quantized checkpoint's KV-cache configuration is followed by default (`--kv_cache_dtype auto`). Override the candidate cache dtype with `--kv_cache_dtype`. Resolved model, quantization, and KV-cache settings are printed and included in detailed results. Scoring teacher-forces the complete sequence through prefill, so it does not establish equivalence to incremental decoding. The metric definitions match the earlier PyTorch prototype; vLLM execution and the exported checkpoint can change generated continuations and measured values.
-
-### Frozen-bank stability studies
-
-`kl_study.py` adds resumable, per-position scoring for user-supplied JSONL banks. Each record needs a unique string `id` and complete `prompt_ids`; `source`, corpus-block identifiers and other provenance can be retained as additional fields. Freeze reference continuations once, then reuse the resulting `generated_ids` for every candidate. EOS IDs are derived from reference checkpoint metadata; an explicit override must include the complete reference EOS set.
-
-```sh
-python examples/llm_eval/kl_study.py freeze \
-    --input prompts.jsonl --output frozen.jsonl --model ./bf16 \
-    --work_dir runs/generation --context_limit 16384 --max_new_tokens 8192 \
-    --runner_sha256 REVIEWED_RUNNER_SHA256 --evaluator_commit EVALUATOR_COMMIT_SHA
-
-python examples/llm_eval/kl_study.py score \
-    --input frozen.jsonl --output candidate.json \
-    --model ./bf16 --quantized_model ./export \
-    --work_dir runs/candidate --context_limit 16384 --max_new_tokens 8192 \
-    --runner_sha256 REVIEWED_RUNNER_SHA256 --evaluator_commit EVALUATOR_COMMIT_SHA \
-    --top_ks 32 64 128 256 512 1024 2048
-```
-
-Choose a context limit supported by both checkpoints. Prompts remain complete; generation stops at EOS or the smaller of the token cap and available context, with context-limited examples flagged. Scoring includes the EOS prediction and excludes padding and post-EOS positions.
-
-This experimental path intercepts a private vLLM V1 callback. It requires the exact reviewed model-runner source SHA-256 and callback signature, and rejects other runners or pipeline parallelism. Qualify the installed runtime with `--audit` on a bank of at most 256 total tokens per example that crosses a 64-row projection tile and a prefill boundary before a large run. The audit compares against ordinary full-vocabulary prompt and output scores from the same forward pass, including the final prediction; candidate KL also has independent float64 CPU checks at the first, middle and last positions. The offline `validate` phase checks frozen-input structure without loading models; `score --dry_run` additionally checks checkpoint hashes and resume provenance.
-
-Reference probability ties prefer lower token IDs, keeping each conditional head independent of other requested k values and consistent across CPU and CUDA.
-
-Reference and candidate engines remain resident on disjoint GPU groups (`--reference_devices 0,1` and `--candidate_devices 2,3` by default). Each group determines its tensor-parallel size. Both use BF16 KV caches by default; override candidate `--kv_cache_dtype` when needed. The reference distribution buffer holds only one example, requiring at most `max_new_tokens * vocab_size * 4` bytes of scratch space. GPU vocabulary buffers cover at most 64 positions; dense audits are restricted to short controls.
-
-The report retains each position's full KL, conditional KL for every requested k, and reference head probability mass. For a generation-length sweep, average the first `min(length, generated_tokens)` positions within each prompt, then average prompt means equally. Prompt-count sweeps and source-balanced paired resampling can use these scalars without new inference. Conditional KL discards tail mass and need not approach full KL monotonically; retained mass and candidate-rank reversals should accompany top-k convergence claims.
-
-Checkpoint bytes, evaluator code, inputs and settings bind the work directory. Declare the exact 40-digit evaluator Git commit with `--evaluator_commit` and add `--evaluator_dirty` for edits relative to that commit; source-file hashes are retained independently. Completed example files are written atomically and reused only with matching identities; changed provenance raises an error. Keep a separate work directory per candidate, input bank or configuration, and preserve the manifest and runtime files alongside results. The existing `kl_eval.py` CLI and `mean_kl` result keys remain available; the exported `token_kl` API supplies the per-position multi-k metrics.
+Run in one process with sufficient GPU memory for **two model copies**, calibration workspace, and one example's logits. The existing hf_ptq loader can place models across visible GPUs; `--gpu_max_mem_percentage` controls its budget. The initial prototype requires an unquantized BF16 checkpoint with text-only causal generation and calibration. AutoQuantize, layerwise export recipes, and distributed evaluation are excluded. `--trust_remote_code` is opt-in, and `--attn_implementation` is forwarded to the hf_ptq loader.
 
 ## NeMo Evaluator
 

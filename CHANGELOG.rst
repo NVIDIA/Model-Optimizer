@@ -8,7 +8,7 @@ Changelog
 
 *Quantization*
 
-- Add offline vLLM KL evaluation for exported checkpoints against BF16 references, with full-vocabulary and conditional top-k metrics. Frozen JSONL banks support resumable, bounded per-position scoring for dataset, top-k and workload stability studies.
+- Add a PyTorch KL evaluation example comparing a BF16 base model with a calibrated fake-quant copy on shared greedy continuations, with full-vocabulary and conditional top-k metrics.
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
 - The functional quantized-weight export API now exports the KV cache: ``capture_kv_cache_export_state`` returns an attention module's ``k_scale`` / ``v_scale``, and ``build_hf_quantization_config`` takes the KV-cache formats from ``get_kv_cache_export_spec``.
 - Add ``use_weight_scale=False`` to ``awq_lite`` and ``awq_full`` calibration for activation-only AWQ scale search. Existing weight-and-activation scaling remains the default.

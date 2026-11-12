@@ -1032,6 +1032,8 @@ def quantize_main(
     processor: ProcessorMixin | None,
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
+    *,
+    export: bool = True,
 ):
     # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
     recipe = None
@@ -1052,6 +1054,8 @@ def quantize_main(
         aq_config = None
 
     layerwise_cfgs = recipe_layerwise_blocks(recipe)
+    if not export and any(cfg.get("export_dir") is not None for cfg in layerwise_cfgs):
+        raise ValueError("Layerwise export cannot retain a live fake-quant model.")
     is_layerwise = any(cfg.get("enable", False) for cfg in layerwise_cfgs)
 
     # The value is a placeholder, replaced with --export_path below; presence is the switch.
@@ -1241,6 +1245,9 @@ def quantize_main(
         # checkpoint directory main() downloaded.
         apply_cast_mxfp4_to_nvfp4(language_model, args.local_checkpoint_path)
 
+    if not export:
+        return full_model
+
     post_quantize(
         args,
         full_model,
@@ -1257,7 +1264,7 @@ def quantize_main(
     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--pyt_ckpt_path",
@@ -1542,7 +1549,7 @@ def parse_args() -> argparse.Namespace:
 
     add_mlflow_args(parser, HF_PTQ)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     # Flipped by export_quantized once a checkpoint is actually on disk. The MLflow pointer
     # is gated on it rather than on --export_path existing, which proves nothing.
     args.checkpoint_exported = False

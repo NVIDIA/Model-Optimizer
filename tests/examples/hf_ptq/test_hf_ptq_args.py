@@ -1143,3 +1143,32 @@ def test_tensorrt_llm_export_copies_non_model_files_from_the_local_copy(monkeypa
     hf_ptq.export_quantized(args, model, model, "llama")
 
     assert copies == [(str(tmp_path / "local"), str(tmp_path / "export"))]
+
+
+def test_calibration_retains_live_model_without_export(monkeypatch, tmp_path):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    export_path = tmp_path / "export"
+    args = hf_ptq.parse_args(
+        [
+            "--model",
+            "local-model",
+            "--qformat",
+            "int8",
+            "--batch_size",
+            "1",
+            "--skip_generate",
+            "--export_path",
+            str(export_path),
+        ]
+    )
+    model = get_tiny_qwen3(num_hidden_layers=1)
+    batch = {"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}
+    # Replace the external calibration dataset with one offline batch; run real PTQ.
+    monkeypatch.setattr(hf_ptq, "make_calib_dataloader", lambda *_a, **_kw: ([batch], None))
+    result = hf_ptq.quantize_main(
+        args, model, model, "qwen3", False, None, None, torch.device("cpu"), export=False
+    )
+    assert result is model
+    assert hf_ptq.is_quantized(result)
+    assert result.model.layers[0].mlp.down_proj.input_quantizer.amax is not None
+    assert not export_path.exists()
