@@ -16,8 +16,17 @@
 import ast
 import importlib
 import inspect
+import json
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+from _test_utils.torch.transformers_models import get_tiny_qwen3
+from transformers import AutoModelForCausalLM
+
+import modelopt.torch.quantization as mtq
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 
@@ -56,3 +65,81 @@ def test_export_quantized_does_not_use_inference_mode(monkeypatch):
 
     assert "torch.inference_mode" not in contexts
     assert "torch.no_grad" in contexts
+
+
+@pytest.mark.parametrize(("num_bits", "gptq"), [(8, False), ("iq2_xxs", False), ("iq2_xxs", True)])
+def test_output_qdq_weight_hf_roundtrip(monkeypatch, tmp_path, num_bits, gptq):
+    """PTQ writes restorable QDQ weights; the first QAD forward and no-op update retain them."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    model = get_tiny_qwen3(
+        num_hidden_layers=1,
+        hidden_size=256,
+        intermediate_size=256,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+    ).eval()
+    source = tmp_path / "source"
+    model.save_pretrained(source, state_dict={**model.state_dict(), "mtp.weight": torch.ones(2, 2)})
+    model._modelopt_source_checkpoint = str(source)
+    model._modelopt_unplaced_source_keys = ["mtp.weight"]
+    inputs = torch.arange(8).reshape(1, -1)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "enable": True,
+                "cfg": {
+                    "num_bits": num_bits,
+                    **(
+                        {"backend": "ggml", "block_sizes": {-1: 256}}
+                        if isinstance(num_bits, str)
+                        else {"axis": 0}
+                    ),
+                },
+            },
+        ],
+        "algorithm": {"method": "gptq", "block_size": 256, "perc_damp": 0.3} if gptq else "max",
+    }
+    mtq.quantize(model, config, lambda m: m(inputs))
+    expected = {
+        name: layer.weight_quantizer(layer.weight).detach().clone()
+        for name, layer in model.named_modules()
+        if hasattr(layer, "weight_quantizer")
+    }
+    assert any(
+        not torch.equal(dict(model.named_modules())[name].weight, weight)
+        for name, weight in expected.items()
+    )
+    before = model(inputs).logits.detach()
+    buffers = {
+        name: tensor.clone()
+        for name, tensor in model.named_buffers()
+        if ".weight_quantizer." in name
+    }
+    args = SimpleNamespace(
+        output_qdq_weight=True,
+        export_path=tmp_path / "qdq",
+        local_checkpoint_path=source,
+        dist_state=SimpleNamespace(is_main=True),
+    )
+    hf_ptq.export_quantized(args, model, model, "qwen3")
+    assert args.checkpoint_exported and (args.export_path / "modelopt_state.pth").is_file()
+    index = json.loads((args.export_path / "model.safetensors.index.json").read_text())
+    assert "mtp.weight" in index["weight_map"]
+    restored = AutoModelForCausalLM.from_pretrained(args.export_path).eval()
+    for name, weight in expected.items():
+        layer = dict(restored.named_modules())[name]
+        torch.testing.assert_close(layer.weight, weight, rtol=0, atol=0)
+        assert layer.weight_quantizer.is_enabled
+    for name, tensor in buffers.items():
+        actual = dict(restored.named_buffers())[name]
+        assert actual.dtype == tensor.dtype
+        torch.testing.assert_close(actual, tensor, rtol=0, atol=0)
+    torch.testing.assert_close(restored(inputs).logits, before, rtol=0, atol=0)
+    optimizer = torch.optim.SGD(restored.parameters(), lr=0)
+    for parameter in restored.parameters():
+        parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    torch.testing.assert_close(restored(inputs).logits, before, rtol=0, atol=0)

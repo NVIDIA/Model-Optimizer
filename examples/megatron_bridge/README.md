@@ -442,21 +442,33 @@ selection fails if that state has not been restored before wrapping. Native chec
 restores FP32 masters, Adam state, and training counters afterward.
 Use Bridge/Core versions with HybridModel support.
 
-### Student latent-weight initialization
+### QDQ weights from PTQ
 
-By default, the student keeps its checkpoint's floating latent weights. Add
-`--qdq_student_weight` to initialize trainable weights from the restored quantizers' Q→DQ
-output. This is format-independent and supports mixed quantization.
+Prepare QDQ-initialized weights during PTQ, before QAD starts:
 
-Use an uncompressed, adapter-free student checkpoint. GPTQ, if desired, runs during PTQ;
-initialization reuses its saved state. Native resumes skip initialization. With a fresh output
-directory, the flag rejects trained sources identified by Bridge metadata or a nonzero Megatron
-iteration path. Omit the flag to retain trained latents; use the original output directory for an optimizer resume.
-Unpinned GGML PTQ retains its initial packed values while the weight is unchanged, including zero-LR updates.
-After a weight change, PTQ resumes its ordinary scale/code search; GPTQ keeps its calibrated state.
-GGML PTQ initialization requires one quantizer per weight; shared and sequential GGML PTQ quantizers are rejected before writeback.
-Other dynamic quantizers and BF16 inverse transforms can change forward values after initialization.
-The observed loss-spike benefit is specific to the IQ2 experiments; other formats are not established.
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --recipe general/ptq/fp8_default-kv_fp8 \
+    --tp_size 2 --output_qdq_weight \
+    --export_megatron_path /output/qwen3_qdq
+```
+
+`--output_qdq_weight` saves floating Q→DQ weights with quantizers and calibration state
+retained. It requires uncompressed, adapter-free weights. Pass the checkpoint to
+`distill.py --student_megatron_path /output/qwen3_qdq`; training and native resume load
+its weights unchanged. The former training flag `--qdq_student_weight` is removed.
+PTQ initializes all enabled quantized weights, independent of later trainable-parameter selection.
+
+Unpinned GGML PTQ reuses its initial packed payload while weights remain unchanged, including
+zero-LR updates. The first actual change resumes ordinary PTQ scale/code search. GPTQ retains
+its original super-block scales and FP32 importance buffers. Shared or sequential unpinned
+GGML quantizers are rejected. Other dynamic quantizers and BF16 inverse transforms can still
+change effective weights; exact forward equality is not guaranteed for every format.
+
+For a custom PTQ pipeline, call `mtq.initialize_qdq_weights(model)` after calibration or
+restoration, before saving an uncompressed checkpoint. Do not call it in the training loop
+or on a resumed training checkpoint.
 
 ### LoRA QAD
 
