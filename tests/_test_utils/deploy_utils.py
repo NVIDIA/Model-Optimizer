@@ -244,10 +244,12 @@ class ModelDeployer:
             tensor_parallel_size: Tensor parallel size for distributed inference
             mini_sm: Minimum SM (Streaming Multiprocessor) requirement for the model
             attn_backend: is for TRT LLM deployment
-            engine_kwargs: extra keyword arguments for this backend's engine constructor,
-                overriding the defaults below. For a checkpoint whose model card asks for
-                settings the defaults do not cover, pass them here rather than special-casing
-                the model id.
+            engine_kwargs: extra keyword arguments for the engine constructor on the ordinary
+                vLLM and SGLang paths, overriding the defaults there. For a checkpoint whose model
+                card asks for settings the defaults do not cover, pass them here rather than
+                special-casing the model id. The other backends and paths refuse them instead of
+                ignoring them, and tensor parallelism is set only by tensor_parallel_size, the
+                value run() checks the GPU count against.
         """
         self.backend = backend
         self.model_id = model_id
@@ -257,6 +259,21 @@ class ModelDeployer:
         self.base_model = base_model
         self.eagle3_one_model = eagle3_one_model
         self.engine_kwargs = dict(engine_kwargs or {})
+        if self.engine_kwargs and backend not in ("vllm", "sglang"):
+            raise ValueError(f"engine_kwargs is applied only by vllm and sglang, not {backend!r}")
+        tp_keys = sorted({"tensor_parallel_size", "tp_size"} & self.engine_kwargs.keys())
+        if tp_keys:
+            raise ValueError(
+                f"Set tensor_parallel_size instead of {tp_keys} in engine_kwargs: "
+                "run() checks the GPU count against tensor_parallel_size."
+            )
+
+    def _refuse_engine_kwargs(self, path: str) -> None:
+        """Fail rather than deploy without the settings a caller asked for."""
+        if self.engine_kwargs:
+            raise ValueError(
+                f"engine_kwargs is not applied on {path}: {sorted(self.engine_kwargs)}"
+            )
 
     def run(self):
         """Run the deployment based on the specified backend."""
@@ -316,7 +333,6 @@ class ModelDeployer:
             "attn_backend": self.attn_backend,
             "trust_remote_code": True,
             "max_batch_size": 8,
-            **self.engine_kwargs,
         }
 
         if "eagle" in self.model_id.lower():
@@ -378,6 +394,7 @@ class ModelDeployer:
         from vllm import LLM, SamplingParams
 
         if "eagle" in self.model_id.lower():
+            self._refuse_engine_kwargs("the vLLM EAGLE path")
             llm = LLM(
                 model=self.base_model,
                 speculative_config={
@@ -436,6 +453,7 @@ class ModelDeployer:
         if "fp4" in self.model_id.lower():
             quantization_method = "modelopt_fp4"
         if "eagle" in self.model_id.lower():
+            self._refuse_engine_kwargs("the SGLang EAGLE path")
             eagle_kwargs = {
                 "model_path": self.base_model,
                 "speculative_algorithm": "EAGLE3",
@@ -461,6 +479,7 @@ class ModelDeployer:
             "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
             "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
         ):
+            self._refuse_engine_kwargs("the SGLang Nemotron path")
             llm = sgl.Engine(
                 model_path=self.model_id,
                 quantization=quantization_method,

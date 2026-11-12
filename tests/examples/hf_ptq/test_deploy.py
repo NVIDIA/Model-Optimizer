@@ -119,12 +119,16 @@ def cleanup_after_test():
         # take different arguments. TP and the arguments below are the card's validated
         # configurations, which ran on four GB300 GPUs. vLLM needs a build carrying
         # vllm-project/vllm#61530 and SGLang one carrying sgl-project/sglang#47935.
+        # Neither card command names a quantization method: each engine reads the checkpoint's
+        # mixed FP8 + NVFP4 layout from its quantization_config, which the deployer's default
+        # modelopt_fp4 would override, so quantization is reset to None.
         *ModelDeployerList(
             model_id="nvidia/DeepSeek-V4.1-Flash-1017-NVFP4",
             backend=("vllm",),
             tensor_parallel_size=4,
             mini_sm=100,
             engine_kwargs={
+                "quantization": None,
                 "tokenizer_mode": "deepseek_v41",
                 "attention_config": {
                     "backend": "FLASHINFER_MLA_SPARSE_DSV41",
@@ -141,6 +145,7 @@ def cleanup_after_test():
             tensor_parallel_size=4,
             mini_sm=100,
             engine_kwargs={
+                "quantization": None,
                 "kv_cache_dtype": "fp8_e4m3",
                 "dsv4_attn_backend": "flashmla",
                 "mem_fraction_static": 0.9,
