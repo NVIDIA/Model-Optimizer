@@ -27,6 +27,7 @@ from _test_utils.torch.transformers_models import get_tiny_qwen3
 from transformers import AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.ggml.common import pinned_importance, pinned_packed_weight
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 
@@ -100,9 +101,24 @@ def test_output_qdq_weight_hf_roundtrip(monkeypatch, tmp_path, num_bits, gptq):
                 },
             },
         ],
-        "algorithm": {"method": "gptq", "block_size": 256, "perc_damp": 0.3} if gptq else "max",
+        "algorithm": {
+            "method": "gptq",
+            "block_size": 256,
+            "perc_damp": 0.3,
+            "importance_weighted": True,
+        }
+        if gptq
+        else "max",
     }
     mtq.quantize(model, config, lambda m: m(inputs))
+    if gptq:
+        # Embeddings are fake-quantized, but GPTQ only calibrates supported linear layers.
+        assert pinned_packed_weight(model.model.embed_tokens.weight_quantizer, num_bits) is None
+        linears = [layer for layer in model.modules() if isinstance(layer, torch.nn.Linear)]
+        assert linears
+        for layer in linears:
+            assert pinned_packed_weight(layer.weight_quantizer, num_bits) is not None
+            assert pinned_importance(layer.weight_quantizer, num_bits).dtype == torch.float32
     expected = {
         name: layer.weight_quantizer(layer.weight).detach().clone()
         for name, layer in model.named_modules()

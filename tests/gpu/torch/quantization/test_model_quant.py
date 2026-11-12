@@ -23,21 +23,39 @@ import torch
 from torch import nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.extensions import (
+    get_cuda_ext,
+    get_cuda_ext_fp8,
+    get_cuda_ext_ggml,
+    get_cuda_ext_mx,
+)
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.utils import enable_weight_cache, weight_cache_scope
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
 
+@pytest.fixture(scope="module", autouse=True)
+def compiled_quantization_extensions():
+    # Cold JIT builds belong in setup, outside the numerical tests' call-only timeout.
+    for loader in (get_cuda_ext, get_cuda_ext_fp8, get_cuda_ext_mx, get_cuda_ext_ggml):
+        assert loader(raise_if_failed=True) is not None
+
+
 @pytest.mark.parametrize(
     "config",
     [
-        mtq.NVFP4_DEFAULT_CFG,
-        mtq.MXFP4_DEFAULT_CFG,
-        mtq.MXFP6_DEFAULT_CFG,
-        mtq.MXFP8_DEFAULT_CFG,
-        mtq.W4A8_NVFP4_FP8_CFG,
-        mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
+        pytest.param(mtq.INT8_WEIGHT_ONLY_CFG, id="int8"),
+        pytest.param(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, id="int4_blockwise"),
+        pytest.param(mtq.FP8_DEFAULT_CFG, id="fp8"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, id="nvfp4"),
+        pytest.param(mtq.MXFP4_DEFAULT_CFG, id="mxfp4"),
+        pytest.param(mtq.MXFP6_DEFAULT_CFG, id="mxfp6"),
+        pytest.param(mtq.MXFP8_DEFAULT_CFG, id="mxfp8"),
+        pytest.param(mtq.MXINT8_DEFAULT_CFG, id="mxint8"),
+        pytest.param(mtq.W4A8_MXFP4_FP8_CFG, id="w4a8_mxfp4_fp8"),
+        pytest.param(mtq.W4A8_NVFP4_FP8_CFG, id="w4a8_nvfp4_fp8"),
+        pytest.param(mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, id="fp8_2d_blockwise"),
         *[
             pytest.param(
                 {
