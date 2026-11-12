@@ -176,6 +176,7 @@ _FORMAT_ALGO = {"fp8_pb": "FP8_PB_WO", "mxfp8": "MXFP8"}
 _FP8_MAX = 448.0
 _FP8_PB_BLOCK = 128
 _NVFP4_BLOCK = 16  # NVFP4 block size (elements)
+_NVFP4_BLOCK_SIZES = {-1: _NVFP4_BLOCK, "type": "dynamic", "scale_bits": (4, 3)}
 
 _PUBLISHED_RECIPE = "models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention"
 _EXPERT_WEIGHT_QUANTIZER = "*block_sparse_moe.experts.*weight_quantizer"
@@ -230,11 +231,13 @@ def _conversion_settings_from_quantize_config(quantize: dict[str, Any]) -> dict[
         raise ValueError("recipe must disable all quantizers by default")
 
     expert_weight, expert_input = _expert_cfgs(quant_cfg)
-    if (
-        expert_weight.get("num_bits") != (2, 1)
-        or expert_weight.get("block_sizes", {}).get(-1) != _NVFP4_BLOCK
-        or _nondefault_numerics(expert_weight)
-        or _nondefault_numerics(expert_input, "constant_amax")
+    # The cast writes E2M1 weights with E4M3 block scales, and input_scale assumes
+    # the same layout for the inputs, so both must be exactly block-16 NVFP4.
+    if any(
+        cfg.get("num_bits") != (2, 1) or cfg.get("block_sizes") != _NVFP4_BLOCK_SIZES
+        for cfg in (expert_weight, expert_input)
+    ) or (
+        _nondefault_numerics(expert_weight) or _nondefault_numerics(expert_input, "constant_amax")
     ):
         raise ValueError("recipe routed experts must use plain block-16 NVFP4")
 
