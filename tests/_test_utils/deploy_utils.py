@@ -234,6 +234,7 @@ class ModelDeployer:
         base_model: str = "",
         eagle3_one_model: bool = True,
         engine_kwargs: dict | None = None,
+        sm_family: int | None = None,
     ):
         """
         Initialize the ModelDeployer.
@@ -250,6 +251,8 @@ class ModelDeployer:
                 special-casing the model id. The other backends and paths refuse them instead of
                 ignoring them, and tensor parallelism is set only by tensor_parallel_size, the
                 value run() checks the GPU count against.
+            sm_family: if set, skip unless the GPU belongs to this SM family (100 for SM100 to
+                SM103), for a backend path that checks the family rather than a minimum SM
         """
         self.backend = backend
         self.model_id = model_id
@@ -259,6 +262,7 @@ class ModelDeployer:
         self.base_model = base_model
         self.eagle3_one_model = eagle3_one_model
         self.engine_kwargs = dict(engine_kwargs or {})
+        self.sm_family = sm_family
         if self.engine_kwargs and backend not in ("vllm", "sglang"):
             raise ValueError(f"engine_kwargs is applied only by vllm and sglang, not {backend!r}")
         tp_keys = sorted({"tensor_parallel_size", "tp_size"} & self.engine_kwargs.keys())
@@ -285,6 +289,11 @@ class ModelDeployer:
             self.mini_sm % 10,
         ):
             pytest.skip(reason=f"Requires sm{self.mini_sm} or higher")
+            return
+        if self.sm_family is not None and (
+            torch.cuda.get_device_capability()[0] != self.sm_family // 10
+        ):
+            pytest.skip(reason=f"Requires an sm{self.sm_family // 10}x GPU")
             return
 
         if torch.cuda.device_count() < self.tensor_parallel_size:

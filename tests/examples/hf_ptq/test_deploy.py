@@ -127,6 +127,8 @@ def cleanup_after_test():
             backend=("vllm",),
             tensor_parallel_size=4,
             mini_sm=100,
+            # vLLM runs the forced indexer_sparse_logits path only on the SM100 family.
+            sm_family=100,
             engine_kwargs={
                 "quantization": None,
                 "tokenizer_mode": "deepseek_v41",
