@@ -2727,13 +2727,13 @@ def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
 
     Each :func:`_fsdp2_wrap_modules` block is wrapped whole: ``fully_shard`` swaps a wrapped module's
     class, and quantization and export recognize attention and linear modules by class, so those stay
-    plain inside the block. The routed experts (EP-sharded) and params off the model's dtype are left
-    out; the root (embeddings, LM head, final norm) is not wrapped and stays replicated.
+    plain inside the block. The routed experts (EP-sharded) and params off the dense part's dtype are
+    left out; the root (embeddings, LM head, final norm) is not wrapped and stays replicated.
     """
-    # The experts are EP-sharded already; a block ignores the ones it does not hold.
-    ignored_params = _off_dtype_params(model)
-    for em in expert_modules:
-        ignored_params.update(em.parameters(recurse=True))
+    # The experts are EP-sharded already; a block ignores the ones it does not hold. Nor do they
+    # decide the dense part's dtype: kept packed, they are integers that can outnumber it.
+    expert_params = {p for em in expert_modules for p in em.parameters(recurse=True)}
+    ignored_params = _off_dtype_params(model, skip=expert_params) | expert_params
     ignored_param_ids = {id(p) for p in ignored_params}  # id-based: Tensor.__eq__ is elementwise
 
     # Only the outermost blocks: a model listing a container and its blocks (Kimi's MoonViT) would
@@ -2785,9 +2785,9 @@ def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
         # materialize the whole dense part on every rank, which the plan shards it to avoid.
         raise RuntimeError(
             f"Sharding the dense part found {len(wrap_modules)} block(s) but no dense parameter to "
-            "shard in any of them (each is a routed expert's, already sharded, or off the model's "
-            "dominant dtype), so every rank would hold the whole dense part. Replicate the dense "
-            "part instead (MODELOPT_FSDP_SIZE=1)."
+            "shard in any of them (each is a routed expert's, already sharded, or off the dense "
+            "part's dominant dtype), so every rank would hold the whole dense part. Replicate the "
+            "dense part instead (MODELOPT_FSDP_SIZE=1)."
         )
     return n
 
