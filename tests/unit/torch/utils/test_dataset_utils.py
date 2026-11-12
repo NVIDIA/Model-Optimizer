@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import functools
+import itertools
 import json
 import threading
 import time
@@ -1034,15 +1035,19 @@ def test_one_rank_reads_the_calibration_text_for_all(cpu_dist_workers, tmp_path)
     cpu_dist_workers.run(_shared_reader_job, cache_dir=str(tmp_path))
 
 
-@pytest.mark.parametrize("stalls", [False, True], ids=["slow", "stalled"])
-def test_a_stall_timeout_fails_a_stalled_stream_but_not_a_slow_one(monkeypatch, stalls):
-    """``stall_timeout`` bounds the wait for each sample, not the whole read."""
+@pytest.mark.parametrize(
+    ("stall_at", "stalls"),
+    [(None, False), (2, True), (8, False)],
+    ids=["slow", "stalled", "stalled-after-the-last-sample-asked-for"],
+)
+def test_a_stall_timeout_fails_a_stalled_stream_but_not_a_slow_one(monkeypatch, stall_at, stalls):
+    """``stall_timeout`` bounds the wait for each sample asked for, not the whole read."""
     datasets = pytest.importorskip("datasets")
     stalled = threading.Event()
 
     def load_dataset(**_kwargs):
         for i in range(10):
-            if stalls and i == 2:
+            if i == stall_at:
                 stalled.wait(10)  # resumes, failing the test, if nothing times the read out
             time.sleep(0.05)
             yield {"article": f"document {i}"}
@@ -1054,9 +1059,33 @@ def test_a_stall_timeout_fails_a_stalled_stream_but_not_a_slow_one(monkeypatch, 
             with pytest.raises(TimeoutError):
                 read()
         else:
-            assert len(read()) == 8  # 0.45 s in all
+            assert len(read()) == 8  # 0.4 s in all
     finally:
         stalled.set()  # ends the abandoned read
+
+
+def test_a_stall_guarded_read_stays_close_to_its_consumer(monkeypatch):
+    """The read thread buffers a bounded number of samples ahead of a slower consumer, rather than
+    the stream."""
+    datasets = pytest.importorskip("datasets")
+    read = []
+
+    def load_dataset(**_kwargs):
+        for i in itertools.count():
+            read.append(i)
+            yield {"article": f"document {i}"}
+
+    def preprocess(sample):
+        time.sleep(0.005)
+        return sample["article"]
+
+    monkeypatch.setattr(datasets, "load_dataset", load_dataset)
+    monkeypatch.setitem(
+        dataset_utils.SUPPORTED_DATASET_CONFIG["cnn_dailymail"], "preprocess", preprocess
+    )
+
+    assert len(get_dataset_samples("cnn_dailymail", 10, stall_timeout=5)) == 10
+    assert len(read) <= 10 + dataset_utils._STALL_GUARD_READ_AHEAD + 2
 
 
 @pytest.mark.parametrize(
@@ -1087,6 +1116,24 @@ def test_the_sample_cache_keeps_only_a_registered_datasets_plain_text(
 
     assert first == second == [f"{dataset_name} 0", f"{dataset_name} 1"]
     assert len(reads) == (1 if cached else 2)
+
+
+def test_a_damaged_cache_entry_is_read_from_the_source_again(monkeypatch, tmp_path):
+    reads = []
+
+    def source(name, num_samples, **_kwargs):
+        reads.append(name)
+        return [f"{name} {i}" for i in range(num_samples)]
+
+    monkeypatch.setattr(dataset_utils, "get_dataset_samples", source)
+    read = shared_sample_reader(cache_dir=tmp_path)
+    read("cnn_dailymail", 2)
+    (entry,) = tmp_path.glob("*.jsonl")
+    entry.write_text('{"text": null}\n{"text": "kept"}\n')
+
+    with pytest.warns(UserWarning):
+        assert read("cnn_dailymail", 2) == ["cnn_dailymail 0", "cnn_dailymail 1"]
+    assert len(reads) == 2
 
 
 def test_a_cache_that_cannot_be_written_only_warns(monkeypatch, tmp_path):

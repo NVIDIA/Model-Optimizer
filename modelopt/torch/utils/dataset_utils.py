@@ -18,6 +18,7 @@
 import copy
 import functools
 import hashlib
+import itertools
 import json
 import os
 import queue
@@ -402,6 +403,10 @@ def _normalize_splits(split: str | list[str]) -> list[str]:
     return [split] if isinstance(split, str) else list(split)
 
 
+# Items _stall_guarded reads ahead of its consumer.
+_STALL_GUARD_READ_AHEAD = 256
+
+
 def _stall_guarded(open_stream: Callable[[], Iterable[Any]], stall_timeout: float) -> Iterator[Any]:
     """Yield ``open_stream()``'s items; raise ``TimeoutError`` after ``stall_timeout`` s without one.
 
@@ -409,19 +414,28 @@ def _stall_guarded(open_stream: Callable[[], Iterable[Any]], stall_timeout: floa
     thread, and not while it is blocked in a network read in C. A stalled read is abandoned, as
     nothing can interrupt it.
     """
-    items: queue.SimpleQueue = queue.SimpleQueue()
+    items: queue.Queue = queue.Queue(maxsize=_STALL_GUARD_READ_AHEAD)
     stop = threading.Event()
     end = object()
+
+    def put(entry) -> bool:
+        """Hand ``entry`` to the consumer, waiting for room; False once the consumer stopped."""
+        while not stop.is_set():
+            try:
+                items.put(entry, timeout=0.1)
+                return True
+            except queue.Full:
+                pass
+        return False
 
     def read():
         try:
             for item in open_stream():
-                items.put((item, None))
-                if stop.is_set():
+                if not put((item, None)):
                     return
-            items.put((end, None))
+            put((end, None))
         except BaseException as e:  # the consumer raises it, in its own thread
-            items.put((end, e))
+            put((end, e))
 
     threading.Thread(target=read, name="modelopt-dataset-read", daemon=True).start()
     try:
@@ -692,9 +706,8 @@ def get_dataset_samples(
                 if stall_timeout is None
                 else _stall_guarded(functools.partial(_load_split, split_name), stall_timeout)
             )
-            for i, sample in enumerate(stream):
-                if i >= n:
-                    break
+            # Exactly n: asking for one more would wait on a stream that may end or stall there.
+            for sample in itertools.islice(stream, n):
                 text = _preprocess(sample)
                 if text:
                     samples.append(text)
@@ -814,9 +827,16 @@ def _read_cached_samples(
         path = Path(cache_dir) / f"{dataset_name}-{num_samples}-{digest}.jsonl"
         if path.is_file():
             try:
-                samples = get_jsonl_text_samples(str(path), num_samples)
-            except (OSError, ValueError) as e:
-                warn_rank_0(f"Reading the cached samples {path} failed ({e}); reading the source.")
+                with open(path, encoding="utf-8") as f:
+                    samples = [
+                        json.loads(line)["text"] for line in itertools.islice(f, num_samples)
+                    ]
+                if not all(isinstance(sample, str) for sample in samples):
+                    raise TypeError("a cached sample is not a string")
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                warn_rank_0(
+                    f"Reading the cached samples {path} failed ({e!r}); reading the source."
+                )
             else:
                 print_rank_0(f"Read {len(samples)} samples of {dataset_name} from {path}")
                 return samples

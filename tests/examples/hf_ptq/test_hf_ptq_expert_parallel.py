@@ -642,6 +642,16 @@ def test_calibration_text_is_cached_for_the_next_run(hf_ptq, monkeypatch, tmp_pa
     assert reads == ["cnn_dailymail"]
 
 
+@pytest.mark.parametrize("timeout", ["soon", "-1", "nan", "inf"])
+def test_a_calibration_read_timeout_that_is_not_a_number_of_seconds_is_refused(
+    hf_ptq, monkeypatch, timeout
+):
+    monkeypatch.setenv("MODELOPT_CALIB_DATA_PREPARE_TIMEOUT", timeout)
+
+    with pytest.raises(ValueError, match="MODELOPT_CALIB_DATA_PREPARE_TIMEOUT"):
+        hf_ptq._calib_sample_reader(2)
+
+
 @pytest.mark.parametrize(
     "plan",
     [DistributionPlan(2), DistributionPlan(2, ep_size=2), DistributionPlan(2, dense="fsdp")],

@@ -15,6 +15,7 @@
 
 import argparse
 import contextlib
+import math
 import os
 import random
 import time
@@ -239,9 +240,12 @@ def _calib_sample_reader(world_size: int):
     try:
         seconds = float(timeout)
     except ValueError:
+        seconds = math.nan
+    if not 0 <= seconds < math.inf:
         raise ValueError(
-            f"MODELOPT_CALIB_DATA_PREPARE_TIMEOUT={timeout!r} is not a number of seconds."
-        ) from None
+            f"MODELOPT_CALIB_DATA_PREPARE_TIMEOUT={timeout!r} is not a number of seconds (0 waits "
+            "indefinitely)."
+        )
     return shared_sample_reader(
         cache_dir=os.environ.get("MODELOPT_CALIB_CACHE_DIR") or None,
         stall_timeout=seconds if world_size > 1 and seconds > 0 else None,
