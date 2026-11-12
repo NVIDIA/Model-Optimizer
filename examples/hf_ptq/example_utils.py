@@ -44,7 +44,7 @@ from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.trtllm.enc_dec import is_trtllm_enc_dec_export
-from modelopt.torch.models import get_ptq_spec, hf_model_type
+from modelopt.torch.models import get_ptq_spec, get_serving_unquantized, hf_model_type
 from modelopt.torch.models.hf import (
     checkpoint_has_mtp,
     forward_calibration_batch,
@@ -991,6 +991,11 @@ def _prepare_quant_cfg(
     args: argparse.Namespace, quant_cfg: dict[str, Any], full_model: torch.nn.Module
 ) -> dict[str, Any]:
     """Apply shared checkpoint-local adjustments to a PTQ configuration."""
+    # Appended last, as the default-disabled unit is, so no recipe entry turns them back on.
+    if kept := get_serving_unquantized(hf_model_type(full_model)):
+        print(f"Keeping {list(kept)} unquantized: the model's serving engines build them so.")
+        disabled = [{"quantizer_name": f"{pattern}.*", "enable": False} for pattern in kept]
+        quant_cfg = {**quant_cfg, "quant_cfg": [*quant_cfg["quant_cfg"], *disabled]}
     # Resolve the real export directory before resolve_checkpoint_dir hashes the config; otherwise
     # distinct --export_path values containing the placeholder would share one checkpoint path.
     if args.layerwise_export:

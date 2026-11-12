@@ -459,6 +459,35 @@ def test_autoquant_label_free_recipe_calls_mtq(
     assert captured["constraints"]["effective_bits"] == 5.4
 
 
+@pytest.mark.parametrize("model_type", ["kimi_k3", None])
+def test_autoquant_searches_nothing_the_serving_engines_build_unquantized(
+    autoquant_utils, monkeypatch, model_type
+):
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=False,
+        batch_size=1,
+        kv_cache_qformat="none",
+    )
+    aq = _validated_autoquant_config(auto_quantize_method="kl_div")
+    captured = {}
+
+    def fake_auto_quantize(model, **kwargs):
+        captured.update(kwargs)
+        return model, {}
+
+    monkeypatch.setattr(autoquant_utils.mtq, "auto_quantize", fake_auto_quantize)
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(model_type=model_type)
+
+    autoquant_utils.auto_quantize(args, model, [], aq)
+
+    assert captured["disabled_layers"][: len(aq.disabled_layers)] == aq.disabled_layers
+    kept_out = captured["disabled_layers"][len(aq.disabled_layers) :]
+    assert ("*.block_sparse_moe.routed_expert_down_proj" in kept_out) is (model_type == "kimi_k3")
+
+
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(autoquant_utils):
     """Top-level cost_excluded_layers maps to the mtq constraints.cost.excluded_module_name_patterns
     key (distinct from disabled_layers), so a cost-exclusion recipe matches the nested mtq dict."""

@@ -57,6 +57,7 @@ __all__ = [
     "PTQSpec",
     "SpecSection",
     "get_ptq_spec",
+    "get_serving_unquantized",
     "get_spec",
     "get_specs",
     "hf_model_type",
@@ -398,6 +399,14 @@ class ModelSpec:
     named in this spec can be imported at all, so ``model_type`` is a remote-code
     spelling rather than a transformers one, and loading the model needs the flag."""
 
+    serving_unquantized: tuple[str, ...] = ()
+    """``fnmatch`` patterns of the module names the model's serving engines build in the original
+    precision whatever the checkpoint holds, so a checkpoint that quantizes one does not load.
+
+    A fact about the deployed model, not about any one flow: ``hf_ptq`` keeps these modules
+    unquantized after any recipe, and the unified HF export refuses a model that quantizes one,
+    before it writes anything. Patterns match from any root, so begin each with ``*``."""
+
     moe_spec: MoESpec | None = None
     """The model's MoE architecture facts, or ``None`` for a dense model."""
 
@@ -443,6 +452,12 @@ def get_ptq_spec(model_type: str | None) -> PTQSpec:
     """
     spec = get_spec(model_type) if model_type else None
     return spec.ptq_spec if spec is not None and spec.ptq_spec is not None else PTQSpec()
+
+
+def get_serving_unquantized(model_type: str | None) -> tuple[str, ...]:
+    """Return ``model_type``'s ``serving_unquantized`` patterns, or ``()`` when it has none."""
+    spec = get_spec(model_type) if model_type else None
+    return spec.serving_unquantized if spec is not None else ()
 
 
 @functools.cache

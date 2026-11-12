@@ -27,7 +27,12 @@ import torch
 import torch.nn as nn
 
 from modelopt import __version__
-from modelopt.torch.models import get_spec, list_all_possible
+from modelopt.torch.models import (
+    get_serving_unquantized,
+    get_spec,
+    hf_model_type,
+    list_all_possible,
+)
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
@@ -1848,6 +1853,31 @@ def _has_pre_quant_scale(module: nn.Module, weight_names: list[str]) -> bool:
             for wn in weight_names
         )
     )
+
+
+def assert_serving_unquantized(model: nn.Module) -> None:
+    """Refuse a model that quantizes a module its serving engines build unquantized.
+
+    The model's spec names those modules (``ModelSpec.serving_unquantized``): a checkpoint that
+    holds one quantized does not load. Reads only module names and quantizer states, which every
+    rank of a sharded model holds alike.
+    """
+    model_type = hf_model_type(model)
+    patterns = get_serving_unquantized(model_type)
+    if not patterns:
+        return
+    quantized = [
+        name
+        for name, module in model.named_modules()
+        if any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+        and get_quantization_format(module) != QUANTIZATION_NONE
+    ]
+    if quantized:
+        raise ValueError(
+            f"{model_type}'s serving engines build these modules unquantized, so a checkpoint "
+            f"quantizing them would not load: {quantized[:3]} ({len(quantized)} in all). Disable "
+            f"the quantizers matching {list(patterns)}; hf_ptq does so after any recipe."
+        )
 
 
 def get_quant_config(
