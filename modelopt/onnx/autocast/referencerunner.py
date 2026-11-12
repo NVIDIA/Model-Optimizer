@@ -29,7 +29,7 @@ import io
 import os
 import sys
 import tempfile
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 
 import numpy as np
@@ -266,7 +266,146 @@ class ReferenceRunner:
 
         return aggregated
 
-    def run(self, inputs=None):
+    def _make_single_node_model(
+        self,
+        node: onnx.NodeProto,
+        value_info_map: dict[str, onnx.ValueInfoProto],
+        initializer_map: dict[str, onnx.TensorProto],
+    ) -> onnx.ModelProto:
+        """Build a runnable model containing one node from the reference graph."""
+        model_inputs = []
+        model_initializers = []
+        for input_name in node.input:
+            if not input_name:
+                continue
+            if input_name in initializer_map:
+                model_initializers.append(initializer_map[input_name])
+            elif input_name in value_info_map:
+                model_inputs.append(value_info_map[input_name])
+            else:
+                raise ValueError(
+                    f"Tensor {input_name!r} required by node {node.name!r} has no type metadata."
+                )
+
+        model_outputs = []
+        for output_name in node.output:
+            if not output_name:
+                continue
+            if output_name not in value_info_map:
+                raise ValueError(
+                    f"Tensor {output_name!r} produced by node {node.name!r} has no type metadata."
+                )
+            model_outputs.append(value_info_map[output_name])
+
+        graph = onnx.helper.make_graph(
+            [node],
+            f"{self.model.graph.name}_{node.name}",
+            model_inputs,
+            model_outputs,
+            model_initializers,
+        )
+        model = onnx.helper.make_model(
+            graph,
+            opset_imports=self.model.opset_import,
+            functions=self.model.functions,
+            ir_version=self.model.ir_version,
+        )
+        return model
+
+    @staticmethod
+    def _update_tensor_stats(
+        stats: OrderedDict[str, TensorStats], name: str, value: np.ndarray
+    ) -> None:
+        """Update compact tensor statistics with one calibration batch."""
+        batch_absmax = np.max(np.abs(value)) if value.size else 0
+        batch_min = np.min(value) if value.size else 0
+        batch_max = np.max(value) if value.size else 0
+        previous = stats.get(name)
+        stats[name] = TensorStats(
+            absmax=max(previous.absmax, batch_absmax) if previous else batch_absmax,
+            min_val=min(previous.min_val, batch_min) if previous else batch_min,
+            max_val=max(previous.max_val, batch_max) if previous else batch_max,
+            shape=value.shape,
+        )
+
+    def _run_per_node(self, inputs=None) -> OrderedDict[str, TensorStats]:
+        """Run each graph node separately and retain only live activation tensors."""
+        value_info_map = {
+            value_info.name: value_info
+            for value_info in [
+                *self.model.graph.input,
+                *self.model.graph.output,
+                *self.model.graph.value_info,
+            ]
+        }
+        initializer_map = {
+            initializer.name: initializer for initializer in self.model.graph.initializer
+        }
+        consumer_counts = Counter(
+            input_name
+            for node in self.model.graph.node
+            for input_name in node.input
+            if input_name and input_name not in initializer_map
+        )
+        stats = OrderedDict()
+        data_loader = self._load_inputs(inputs)
+        if inputs is None:
+            from polygraphy.common import TensorMetadata
+
+            input_metadata = TensorMetadata()
+            for model_input in self.model.graph.input:
+                tensor_type = model_input.type.tensor_type
+                shape = tuple(
+                    dimension.dim_value if dimension.dim_value > 0 else None
+                    for dimension in tensor_type.shape.dim
+                )
+                input_metadata.add(
+                    model_input.name,
+                    np.dtype(onnx.helper.tensor_dtype_to_np_dtype(tensor_type.elem_type)),
+                    shape,
+                )
+            data_loader.input_metadata = input_metadata
+
+        for input_data in data_loader:
+            live_values = dict(input_data)
+            remaining_consumers = consumer_counts.copy()
+            for name, value in live_values.items():
+                self._update_tensor_stats(stats, name, value)
+
+            for node in self.model.graph.node:
+                runtime_input_names = [
+                    name for name in node.input if name and name not in initializer_map
+                ]
+                missing_inputs = [name for name in runtime_input_names if name not in live_values]
+                if missing_inputs:
+                    raise ValueError(
+                        f"Node {node.name!r} is missing runtime inputs {missing_inputs!r}."
+                    )
+                feed_dict = {name: live_values[name] for name in runtime_input_names}
+                single_node_model = self._make_single_node_model(
+                    node, value_info_map, initializer_map
+                )
+                runners, model_temp_dir = self._get_ort_runner(lambda: single_node_model)
+                try:
+                    with runners[0] as runner:
+                        output_dict = runner.infer(feed_dict)
+                finally:
+                    if model_temp_dir is not None:
+                        model_temp_dir.cleanup()
+
+                for input_name in runtime_input_names:
+                    remaining_consumers[input_name] -= 1
+                    if remaining_consumers[input_name] == 0:
+                        live_values.pop(input_name)
+
+                for output_name, value in output_dict.items():
+                    self._update_tensor_stats(stats, output_name, value)
+                    if remaining_consumers[output_name] > 0:
+                        live_values[output_name] = value
+
+        return stats
+
+    def run(self, inputs=None, calibrate_per_node: bool = False):
         """Run FP32 inference with provided or random inputs.
 
         When multiple batches of input data are provided, inference is run for each batch
@@ -290,6 +429,8 @@ class ReferenceRunner:
         logger.info("Running ONNX Runtime to obtain reference outputs (this may take a while)...")
         # Set ONNX Runtime log level to ERROR to suppress warnings
         ort.set_default_logger_severity(3)
+        if calibrate_per_node:
+            return self._run_per_node(inputs)
 
         model_copy = copy.deepcopy(self.model)
         # Clear stale type metadata to prevent type check failures in ORT
