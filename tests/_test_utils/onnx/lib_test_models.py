@@ -21,46 +21,6 @@ import torchvision
 from onnx import helper
 
 
-def build_if_outer_scope_model(input_shape=(2, 4)):
-    """Build an If model whose branches capture an input from the outer graph."""
-    x = helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, input_shape)
-    condition = helper.make_tensor_value_info("condition", onnx.TensorProto.BOOL, [])
-    y = helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, input_shape)
-
-    def make_branch(name):
-        output = helper.make_tensor_value_info(
-            f"{name}_output", onnx.TensorProto.FLOAT, input_shape
-        )
-        graph = helper.make_graph(
-            [helper.make_node("Identity", ["X"], [output.name], name=f"{name}_identity")],
-            name,
-            [],
-            [output],
-        )
-        graph.value_info.append(
-            helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, input_shape)
-        )
-        return graph
-
-    if_node = helper.make_node(
-        "If",
-        ["condition"],
-        ["Y"],
-        name="if_node",
-        then_branch=make_branch("then_branch"),
-        else_branch=make_branch("else_branch"),
-    )
-    graph = helper.make_graph([if_node], "model_with_outer_scope", [x, condition], [y])
-    model = helper.make_model(
-        graph,
-        producer_name="model_with_outer_scope",
-        opset_imports=[helper.make_opsetid("", 20)],
-        ir_version=10,
-    )
-    onnx.checker.check_model(model)
-    return onnx.shape_inference.infer_shapes(model)
-
-
 class UNet(nn.Module):
     def __init__(self, in_channels=1, out_channels=1):
         super().__init__()
@@ -1416,4 +1376,44 @@ def build_concat_with_constant_input_model(constant_input=True):
     ]
     graph = helper.make_graph(nodes, "concat_with_constant_input", inputs, [out], initializers)
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    return onnx.shape_inference.infer_shapes(model)
+
+
+def build_if_outer_scope_model(input_shape=(2, 4)):
+    """Build an If model whose branches capture an input from the outer graph."""
+    x = helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, input_shape)
+    condition = helper.make_tensor_value_info("condition", onnx.TensorProto.BOOL, [])
+    y = helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, input_shape)
+
+    def make_branch(name):
+        output = helper.make_tensor_value_info(
+            f"{name}_output", onnx.TensorProto.FLOAT, input_shape
+        )
+        graph = helper.make_graph(
+            [helper.make_node("Identity", ["X"], [output.name], name=f"{name}_identity")],
+            name,
+            [],
+            [output],
+        )
+        graph.value_info.append(
+            helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, input_shape)
+        )
+        return graph
+
+    if_node = helper.make_node(
+        "If",
+        ["condition"],
+        ["Y"],
+        name="if_node",
+        then_branch=make_branch("then_branch"),
+        else_branch=make_branch("else_branch"),
+    )
+    graph = helper.make_graph([if_node], "model_with_outer_scope", [x, condition], [y])
+    model = helper.make_model(
+        graph,
+        producer_name="model_with_outer_scope",
+        opset_imports=[helper.make_opsetid("", 20)],
+        ir_version=10,
+    )
+    onnx.checker.check_model(model)
     return onnx.shape_inference.infer_shapes(model)
