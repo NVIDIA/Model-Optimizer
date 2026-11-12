@@ -287,6 +287,7 @@ def test_real_quantize_linear(
     tmp_path,
     monkeypatch,
 ):
+    """Load a tiny Llama under init_quantized_weights() and check the model it builds."""
     tiny_llama_dir = create_tiny_llama_dir(tmp_path, tie_word_embeddings=tie_word_embeddings)
     if "code_revision" in load_kwargs:
         # No Hub: its cache holds the code repo, at the pinned commit only.
