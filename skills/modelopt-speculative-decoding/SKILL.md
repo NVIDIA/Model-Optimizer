@@ -14,6 +14,11 @@ user_invocable: true
 
 # Speculative Decoding Draft-Model Training
 
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
+
 Everything needed to take a target model from "no draft head" to "validated
 acceptance rate" lives in this directory. Work through the stages below in order
 for a new model; jump straight to a stage when you already know which one you need.

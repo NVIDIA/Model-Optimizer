@@ -6,6 +6,11 @@ license: Apache-2.0
 
 # Deployment Skill
 
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
+
 Serve a model checkpoint as an OpenAI-compatible inference endpoint. Supports vLLM, SGLang, and TRT-LLM (including AutoDeploy).
 
 ## Quick Start

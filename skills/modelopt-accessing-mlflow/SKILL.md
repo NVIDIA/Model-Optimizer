@@ -11,6 +11,11 @@ license: Apache-2.0
 
 # Accessing MLflow
 
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
+
 ## MCP Server
 
 [mlflow-mcp](https://github.com/kkruglik/mlflow-mcp) gives agents direct access to MLflow — query runs, compare metrics, browse artifacts, all through natural language.

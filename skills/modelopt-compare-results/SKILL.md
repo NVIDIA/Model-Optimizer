@@ -6,6 +6,11 @@ license: Apache-2.0
 
 # Compare Results
 
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
+
 Use this to plan and complete a baseline-vs-candidate comparison. The baseline
 is the reference checkpoint, and the candidate is the checkpoint whose accuracy
 change is being measured, typically a further quantized version of the baseline.

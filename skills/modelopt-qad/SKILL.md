@@ -11,6 +11,11 @@ description: >-
 
 # ModelOpt Quantization-Aware Distillation
 
+Locate a ModelOpt checkout (clone `https://github.com/NVIDIA/Model-Optimizer.git`
+into the workspace if absent) and set `MODELOPT_ROOT` to its absolute path.
+Read `$MODELOPT_ROOT/skills/common/skill-loading.md` before
+resolving shared files or companion skills, including standalone catalog installs.
+
 QAD is expensive. Run it only when the user explicitly authorizes QAD for the
 target model or run, with a loop or GPU-hour budget; ask for the budget when it
 is missing. A Day-0, PTQ, evaluation, comparison, or recipe-search request
@@ -27,6 +32,8 @@ benchmarks and their context-length needs. Stop if the PTQ gap to BF16 is
 already below 1%.
 
 ## Follow the supported workflow
+
+Resolve `docs/` and `examples/` paths below from `$MODELOPT_ROOT`.
 
 Read `docs/source/guides/quantization_aware_training_and_distillation.rst`
 for QAD background and framework selection.

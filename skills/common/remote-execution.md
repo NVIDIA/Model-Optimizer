@@ -46,7 +46,7 @@ See `.agents/clusters.yaml.example` for a fully annotated example with multiple 
 ## 2. Connect and Establish Persistent Session
 
 ```bash
-source "$SKILL_DIR/remote_exec.sh"
+source "$MODELOPT_SKILLS/common/remote_exec.sh"
 remote_load_cluster <cluster_name>    # or omit name to use default_cluster
 remote_check_ssh                      # validates connectivity + starts persistent session
 ```
