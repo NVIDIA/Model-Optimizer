@@ -452,7 +452,10 @@ Use an uncompressed, adapter-free student checkpoint. GPTQ, if desired, runs dur
 initialization reuses its saved state. Native resumes skip initialization. With a fresh output
 directory, the flag rejects trained sources identified by Bridge metadata or a nonzero Megatron
 iteration path. Omit the flag to retain trained latents; use the original output directory for an optimizer resume.
-Dynamic quantizers and BF16 inverse transforms can change forward values after initialization.
+Unpinned GGML PTQ retains its initial packed values while the weight is unchanged, including zero-LR updates.
+After a weight change, PTQ resumes its ordinary scale/code search; GPTQ keeps its calibrated state.
+GGML PTQ initialization requires one quantizer per weight; shared and sequential GGML PTQ quantizers are rejected before writeback.
+Other dynamic quantizers and BF16 inverse transforms can change forward values after initialization.
 The observed loss-spike benefit is specific to the IQ2 experiments; other formats are not established.
 
 ### LoRA QAD

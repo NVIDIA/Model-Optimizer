@@ -273,6 +273,8 @@ def drop_search_scales(quantizer) -> None:
     if isinstance(num_bits, str) and hasattr(quantizer, _search_scales_name(num_bits)):
         delattr(quantizer, _search_scales_name(num_bits))
         quantizer._quantizer_cache = None
+def _initialization_name(format_name: str) -> str:
+    return f"{PINNED_PAYLOAD_PREFIX}{format_name}_qdq_initialization"
 
 
 def _source_name(format_name: str) -> str:
@@ -332,6 +334,7 @@ def fake_quantize_with_cache(
     quantizer,
     *,
     format_name: str,
+    block_size: int,
     block_chunk_size: int,
     decode_chunk_size: int,
     quantize: Callable[..., tuple[torch.Tensor, torch.Tensor]],
@@ -359,6 +362,15 @@ def fake_quantize_with_cache(
             _track_trainable(quantizer._quantizer_cache, base)
         else:
             quantizer._quantizer_cache = None
+
+    initialization_shape = getattr(quantizer, "_qdq_initialization_shape", None)
+    if initialization_shape is not None and pinned_packed_weight(quantizer, format_name) is None:
+        quantizer._set_buffer(
+            _initialization_name(format_name),
+            packed_weights.reshape(
+                *initialization_shape[:-1], initialization_shape[-1] // block_size, -1
+            ),
+        )
 
     # Sized separately from the encode chunk: packing happens once per weight and is bounded
     # by its search temporaries, while this runs on every forward and is bounded by launches.
@@ -495,6 +507,7 @@ class GGMLFormat:
             inputs,
             quantizer,
             format_name=self.name,
+            block_size=self.block_size,
             block_chunk_size=(
                 self.block_chunk_size if block_chunk_size is None else block_chunk_size
             ),
@@ -536,6 +549,22 @@ class GGMLFormat:
         """``quantize(weight)``, under the pinned scales or as the pinned rows ``weight`` decodes."""
         shape = torch.tensor(weight.shape, dtype=torch.int64)
         kwargs = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
+        initial_name = _initialization_name(self.name)
+        initial = getattr(quantizer, initial_name, None)
+        if initial is not None:
+            initial = initial.to(weight.device)
+            initial_shape = (*initial.shape[:-2], initial.shape[-2] * self.block_size)
+            if math.prod(initial_shape) == weight.numel():
+                decoded = self.dequantize(
+                    initial.reshape(-1, self.block_bytes),
+                    torch.tensor(initial_shape, dtype=torch.int64),
+                    dtype=weight.dtype,
+                )
+                if torch.equal(weight.reshape(initial_shape), decoded):
+                    return initial.reshape(*weight.shape[:-1], -1, self.block_bytes), shape
+            # A no-op optimizer step may invalidate the cache without changing the weight.
+            # Only a value change retires this payload; ordinary PTQ then predicts new scales.
+            delattr(quantizer, initial_name)
         pinned = pinned_packed_weight(quantizer, self.name)
         keeps_scales = pinned is not None and self.payload_scales is not None
         # Unless the pin stands in for the weight (PIN_OVERRIDES_WEIGHT): AutoQuantize then keeps
