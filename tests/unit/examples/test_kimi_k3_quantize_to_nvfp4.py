@@ -43,6 +43,7 @@ _SPEC.loader.exec_module(k3_cast)
 
 _K31_PRO_RECIPE = "models/moonshotai/Kimi-K3.1-Pro/ptq/nvfp4_experts-mxfp8_shared-mxfp8_kda"
 _KDA_PROJ = ("q_proj", "k_proj", "v_proj", "g_proj", "b_proj", "f_a_proj", "f_b_proj", "o_proj")
+_NVFP4 = {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}
 _MXFP8 = {"num_bits": (4, 3), "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}}
 _MLA_PROJ = ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "g_proj", "o_proj")
 
@@ -124,6 +125,20 @@ def test_k31_pro_recipe_scopes_mxfp8_to_kda_layers_and_shared_experts():
         (
             {"quantizer_name": "*.layers.1.block_sparse_moe.experts.*", "enable": False},
             "every routed expert alike",
+        ),
+        (
+            {
+                "quantizer_name": "*block_sparse_moe.experts.*weight_quantizer",
+                "cfg": {"num_bits": (2, 1), "block_sizes": {**_NVFP4, "scale_bits": (8, 0)}},
+            },
+            "plain block-16 NVFP4",
+        ),
+        (
+            {
+                "quantizer_name": "*block_sparse_moe.experts.*input_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 448.0},
+            },
+            "plain block-16 NVFP4",
         ),
         (
             {"quantizer_name": "*.layers.1.self_attn.b_proj*", "enable": False},
