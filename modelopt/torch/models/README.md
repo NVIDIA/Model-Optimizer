@@ -67,10 +67,13 @@ transformers, which `import modelopt.torch.models` must not.
 
 A `modeling_ptq.py` registers on import — static classes via `QuantModuleRegistry.register`,
 imported from transformers at module scope; remote-code classes via a callback added to
-`CUSTOM_MODEL_PLUGINS` — and exports nothing (`__all__ = []`). Every package still has
-a `specs.py`, even when its spec only records `model_type` and where the modeling code comes
-from. A family revision that shares another type's PTQ code (`step3p7` uses `step3p5`'s) still
-gets a `modeling_ptq.py` that imports the shared one, so loading it by model type works.
+`CUSTOM_MODEL_PLUGINS`; a KV-cache wrapper for attention outside transformers' attention
+interface (T5's) by appending it to the plugin's `_QUANT_ATTENTION_WRAPPERS`, which tries it
+after the interface wrapper and before the AST-based fallback — and exports nothing
+(`__all__ = []`). Every package still has a `specs.py`, even when its spec only records
+`model_type` and where the modeling code comes from. A family revision that shares another
+type's PTQ code (`step3p7` uses `step3p5`'s) still gets a `modeling_ptq.py` that imports the
+shared one, so loading it by model type works.
 
 ## Sections
 
