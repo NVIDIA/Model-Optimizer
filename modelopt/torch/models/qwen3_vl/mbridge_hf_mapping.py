@@ -26,7 +26,7 @@ from modelopt.torch.export.plugins.mcore_custom import (
     with_language_model_prefix,
 )
 
-from ..qwen3.mcore import qwen3_causal_lm_export, qwen3_causal_lm_import
+from ..qwen3.mbridge_hf_mapping import qwen3_causal_lm_export, qwen3_causal_lm_import
 
 __all__: list[str] = []
 

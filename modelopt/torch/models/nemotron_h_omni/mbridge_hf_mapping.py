@@ -25,7 +25,7 @@ from modelopt.torch.export.plugins.mcore_custom import (
     with_language_model_prefix,
 )
 
-from ..nemotron_h.mcore import nemotron_h_causal_lm_export
+from ..nemotron_h.mbridge_hf_mapping import nemotron_h_causal_lm_export
 
 __all__: list[str] = []
 

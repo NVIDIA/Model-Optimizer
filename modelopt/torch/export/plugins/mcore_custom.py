@@ -296,7 +296,7 @@ def with_language_model_prefix(
     return result
 
 
-# Per Hugging Face architecture, filled in by each model's ``mcore.py`` under
+# Per Hugging Face architecture, filled in by each model's ``mbridge_hf_mapping.py`` under
 # ``modelopt/torch/models/<model_type>/`` (imported by ``mcore_common``).
 all_mcore_hf_export_mapping: dict[str, Any] = {}
 all_mcore_hf_import_mapping: dict[str, Any] = {}

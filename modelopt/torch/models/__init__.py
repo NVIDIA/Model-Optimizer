@@ -28,8 +28,9 @@ The per-model file is named for what it holds, not for who reads it: a model's s
 general model data, and export is only its first consumer.
 
 A package may also hold ``modeling_ptq.py``, the model-specific PTQ wrappers. It is not imported
-here; the HF quantization plugin imports it (see ``README.md``). Likewise ``mcore.py``, the model's
-Megatron-Core mapping tables, is imported by ``modelopt.torch.export.plugins.mcore_common``.
+here; the HF quantization plugin imports it (see ``README.md``). Likewise
+``mbridge_hf_mapping.py``, the model's Megatron-Core mapping tables, is imported by
+``modelopt.torch.export.plugins.mcore_common``.
 """
 
 from .moe import is_moe

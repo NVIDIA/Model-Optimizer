@@ -13,19 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Custom mapping from Qwen3-MoE Hugging Face models to Megatron Core models.
+"""Custom mapping from DeepSeek-V2 Hugging Face models to Megatron Core models.
 
-Reuses the dense Qwen3 rules.
+Reuses the DeepSeek-V3 rules.
 """
 
 from modelopt.torch.export.plugins.mcore_custom import register_mcore_hf_mapping
 
-from ..qwen3.mcore import qwen3_causal_lm_export, qwen3_causal_lm_import
+from ..deepseek_v3.mbridge_hf_mapping import deepseek_causal_lm_export, deepseek_causal_lm_import
 
 __all__: list[str] = []
 
 register_mcore_hf_mapping(
-    "Qwen3MoeForCausalLM",
-    export_mapping=qwen3_causal_lm_export,
-    import_mapping=qwen3_causal_lm_import,
+    "DeepseekV2ForCausalLM",
+    export_mapping=deepseek_causal_lm_export,
+    import_mapping=deepseek_causal_lm_import,
 )
