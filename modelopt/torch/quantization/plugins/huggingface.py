@@ -378,7 +378,8 @@ class _QuantAttention(QuantModule):
 # The KV-cache wrappers register_hf_attentions_on_the_fly tries on each attention class, in order:
 # the first whose is_compatible_attention accepts the class gets it, and a class none accepts falls
 # back to the AST-based quantized class. A model whose attention needs a wrapper of its own (T5's)
-# appends it from its modeling_ptq.
+# appends it from its modeling_ptq. Each entry must define the staticmethod
+# is_compatible_attention(attention_type) -> bool, which QuantModule does not declare.
 _QUANT_ATTENTION_WRAPPERS: list[type[QuantModule]] = [_QuantAttention]
 
 
