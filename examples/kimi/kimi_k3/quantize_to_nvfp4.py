@@ -121,6 +121,7 @@ from modelopt.torch.export.shard_cast_utils import (
     validate_paths,
 )
 from modelopt.torch.export.shard_cast_utils import log as _log
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.qtensor import FP8QTensor, MXFP8QTensor
 from modelopt.torch.quantization.utils.numeric_utils import E2M1_MAX, E4M3_MAX
 
@@ -179,6 +180,25 @@ _NVFP4_BLOCK = 16  # NVFP4 block size (elements)
 _PUBLISHED_RECIPE = "models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention"
 _EXPERT_WEIGHT_QUANTIZER = "*block_sparse_moe.experts.*weight_quantizer"
 _EXPERT_INPUT_QUANTIZER = "*block_sparse_moe.experts.*input_quantizer"
+# Quantizer attributes that change the numerics. The converter reproduces only
+# their defaults, so e.g. a rotated or per-channel MXFP8 entry is rejected.
+_DEFAULT_NUMERICS = {
+    k: v
+    for k, v in QuantizerAttributeConfig().model_dump().items()
+    if k
+    in (
+        "axis",
+        "unsigned",
+        "narrow_range",
+        "type",
+        "bias",
+        "rotate",
+        "backend",
+        "backend_extra_args",
+        "use_constant_amax",
+        "constant_amax",
+    )
+}
 
 
 def _conversion_settings_from_recipe(recipe_path: str) -> dict[str, Any]:
@@ -200,12 +220,6 @@ def _conversion_settings_from_quantize_config(quantize: dict[str, Any]) -> dict[
         raise ValueError("recipe must use the calibration-free max algorithm")
 
     quant_cfg = quantize["quant_cfg"]
-    by_name = {
-        entry["quantizer_name"]: entry
-        for entry in quant_cfg
-        if isinstance(entry, dict) and "quantizer_name" in entry
-    }
-
     if not any(
         entry.get("quantizer_name") == "*"
         and entry.get("parent_class") is None
@@ -215,17 +229,14 @@ def _conversion_settings_from_quantize_config(quantize: dict[str, Any]) -> dict[
     ):
         raise ValueError("recipe must disable all quantizers by default")
 
-    try:
-        expert_weight = by_name[_EXPERT_WEIGHT_QUANTIZER]["cfg"]
-        expert_input = by_name[_EXPERT_INPUT_QUANTIZER]["cfg"]
-    except KeyError as exc:
-        raise ValueError("recipe must configure Kimi-K3 routed experts") from exc
-
+    expert_weight, expert_input = _expert_cfgs(quant_cfg)
     if (
         expert_weight.get("num_bits") != (2, 1)
         or expert_weight.get("block_sizes", {}).get(-1) != _NVFP4_BLOCK
+        or _nondefault_numerics(expert_weight)
+        or _nondefault_numerics(expert_input, "constant_amax")
     ):
-        raise ValueError("recipe routed-expert weights must use block-16 NVFP4")
+        raise ValueError("recipe routed experts must use plain block-16 NVFP4")
 
     constant_amax = expert_input.get("constant_amax")
     if constant_amax is None:
@@ -244,32 +255,64 @@ def _conversion_settings_from_quantize_config(quantize: dict[str, Any]) -> dict[
     }
 
 
-def _resolve_quantizer(
-    quant_cfg: list[Any], name: str, matched: set[int] | None = None
-) -> dict[str, Any] | None:
-    """Final config of one quantizer, or None when disabled.
+def _expert_cfgs(quant_cfg: list[Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The routed-expert weight and input configs the converter applies to every expert."""
+    by_name = {
+        entry["quantizer_name"]: entry
+        for entry in quant_cfg
+        if isinstance(entry, dict) and "quantizer_name" in entry
+    }
+    weight = by_name.get(_EXPERT_WEIGHT_QUANTIZER, {}).get("cfg")
+    inputs = by_name.get(_EXPERT_INPUT_QUANTIZER, {}).get("cfg")
+    if not (isinstance(weight, dict) and isinstance(inputs, dict)):
+        raise ValueError("recipe must configure Kimi-K3 routed experts")
+    return weight, inputs
+
+
+def _nondefault_numerics(cfg: dict[str, Any], *allowed: str) -> list[str]:
+    return [k for k, v in _DEFAULT_NUMERICS.items() if k not in allowed and cfg.get(k, v) != v]
+
+
+def _resolve_quantizers(
+    quant_cfg: list[Any], names: list[str], matched: set[int]
+) -> dict[str, dict[str, Any] | None]:
+    """Final config of each quantizer, or None when disabled.
 
     Mirrors ModelOpt: entries apply in list order and later ones win; ``enable``
     alone only toggles, ``cfg`` without ``enable`` enables. Indices of the
     entries that matched are added to ``matched``.
     """
-    enabled, cfg = False, None
+    state: dict[str, tuple[bool, Any]] = dict.fromkeys(names, (False, None))
     for i, entry in enumerate(quant_cfg):
         if not isinstance(entry, dict) or entry.get("parent_class") is not None:
             continue
-        if not fnmatch.fnmatch(name, entry["quantizer_name"]):
-            continue
-        if matched is not None:
+        pattern = entry["quantizer_name"]
+        # A match contains every literal piece of the pattern. Filtering on those
+        # with substring tests first keeps the ~500k routed-expert quantizers
+        # to about a second instead of 20 s of fnmatch.
+        hits = list(state)
+        if "[" not in pattern:
+            for literal in filter(None, re.split(r"[*?]", pattern)):
+                hits = [name for name in hits if literal in name]
+        hits = fnmatch.filter(hits, pattern)
+        if hits:
             matched.add(i)
-        if entry.get("cfg") is not None:
-            cfg = entry["cfg"]
-        enabled = entry.get("enable", True)
-    return cfg if enabled else None
+        for name in hits:
+            cfg = entry["cfg"] if entry.get("cfg") is not None else state[name][1]
+            state[name] = (entry.get("enable", True), cfg)
+    # ModelOpt enables a never-configured quantizer with default attributes,
+    # which no supported format has, so that resolves to {} and is rejected.
+    return {
+        name: (cfg if cfg is not None else {}) if enabled else None
+        for name, (enabled, cfg) in state.items()
+    }
 
 
 def _quantizer_format(cfg: dict[str, Any] | None) -> str | None:
     if cfg is None:
         return None
+    if not isinstance(cfg, dict) or _nondefault_numerics(cfg):
+        return "unsupported"
     if cfg.get("num_bits") == (4, 3) and cfg.get("block_sizes") == {-1: 128, -2: 128}:
         return "fp8_pb"
     if cfg.get("num_bits") == (4, 3) and cfg.get("block_sizes") == {
@@ -291,12 +334,30 @@ def _recipe_module_formats(quant_cfg: list[Any], weight_keys) -> dict[str, str]:
     formats: dict[str, str] = {}
     candidates: list[str] = []
     matched: set[int] = set()
-    for key in weight_keys:
-        if not key.endswith(".weight"):
-            continue
-        base = key[: -len(".weight")]
-        weight = _resolve_quantizer(quant_cfg, base + ".weight_quantizer", matched)
-        inputs = _resolve_quantizer(quant_cfg, base + ".input_quantizer", matched)
+    experts = [m.group("base") for key in weight_keys if (m := _EXPERT_PACKED_RE.match(key))]
+    linears = [key[: -len(".weight")] for key in weight_keys if key.endswith(".weight")]
+    resolved = _resolve_quantizers(
+        quant_cfg,
+        [
+            f"{base}.{q}"
+            for base in experts + linears
+            for q in ("weight_quantizer", "input_quantizer")
+        ],
+        matched,
+    )
+    # Every routed expert is cast with the same settings, so a later entry
+    # that changes or disables some of them cannot be written.
+    expert_cfgs = _expert_cfgs(quant_cfg)
+    for base in experts:
+        if (
+            resolved[base + ".weight_quantizer"],
+            resolved[base + ".input_quantizer"],
+        ) != expert_cfgs:
+            raise ValueError(f"recipe must quantize every routed expert alike: {base}")
+    for base in linears:
+        key = base + ".weight"
+        weight = resolved[base + ".weight_quantizer"]
+        inputs = resolved[base + ".input_quantizer"]
         attn = _ATTN_WEIGHT_RE.match(key)
         proj = attn.group("proj") if attn else None
         shared = _SHARED_WEIGHT_RE.match(key) is not None
@@ -867,7 +928,9 @@ def _write_json_atomic(path: Path, value: Any) -> None:
     os.replace(tmp, path)
 
 
-def _conversion_fingerprint(args: argparse.Namespace, shards: list[Path]) -> dict[str, Any]:
+def _conversion_fingerprint(
+    args: argparse.Namespace, shards: list[Path], module_formats: dict[str, str] | None
+) -> dict[str, Any]:
     """Return the settings that must match across every conversion rank."""
     return {
         "source_ckpt": str(args.source_ckpt.resolve()),
@@ -879,6 +942,7 @@ def _conversion_fingerprint(args: argparse.Namespace, shards: list[Path]) -> dic
         "attn_fp8_pb": args.attn_fp8_pb,
         "input_scale": args.input_scale,
         "recipe": args.recipe,
+        "module_formats": module_formats,
     }
 
 
@@ -1113,7 +1177,7 @@ def main():
         skip_dir_names=_SKIP_SUBDIR_NAMES | _SKIP_TOP_LEVEL,
         skip_file=lambda path: path.suffix == ".safetensors",
     )
-    fingerprint = _conversion_fingerprint(args, shards)
+    fingerprint = _conversion_fingerprint(args, shards, module_formats)
 
     marker_dir = args.output_ckpt / ".kimi_k3_conversion"
     ready_path = marker_dir / "ready.json"
@@ -1268,7 +1332,7 @@ def main():
         module_formats=converted_formats,
     )
     if converted_formats is not None:
-        counts = Counter(_FORMAT_ALGO[f] for f in converted_formats.values())
+        counts = Counter(_FORMAT_ALGO[converted_formats[m]] for m in attn_modules)
         attention_algo = "+".join(sorted(counts)) or "BF16"
     else:
         attention_algo = (
