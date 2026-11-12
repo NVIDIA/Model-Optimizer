@@ -182,8 +182,8 @@ class QuantModule(DynamicModule):
         """Validate that weight folding is supported before any module is modified."""
         if is_packed(self):
             raise ValueError(
-                f"{type(self).__name__}'s experts are stored packed in MXFP4, which cannot hold "
-                "folded weights; decompress them first (unpack_experts)."
+                f"{type(self).__name__}'s experts are stored packed, which cannot hold folded "
+                "weights; decompress them first (unpack_experts)."
             )
 
     def fold_weight(self, keep_attrs: bool = False):
