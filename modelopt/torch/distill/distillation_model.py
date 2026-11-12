@@ -239,7 +239,16 @@ class DistillationModel(DynamicModule):
                 # Special case for pipeline parallelism when it's desired to run student and teacher separately.
                 return teacher_output
 
-        student_output = super().forward(*args, **kwargs)
+        # Hide the teacher and loss modules from the student's forward: a student that runs its
+        # children, such as nn.Sequential, would otherwise call them as student layers.
+        modules = self._modules
+        self._modules = {
+            k: v for k, v in modules.items() if k not in ("_teacher_model", "_loss_modules")
+        }
+        try:
+            student_output = super().forward(*args, **kwargs)
+        finally:
+            self._modules = modules
 
         return student_output
 
