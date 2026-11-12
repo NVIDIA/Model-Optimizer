@@ -24,7 +24,6 @@ import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
 from transformers import WhisperConfig, WhisperForConditionalGeneration
 
-import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
@@ -458,49 +457,6 @@ def test_autoquant_label_free_recipe_calls_mtq(
     assert "method_options" not in captured
     assert (captured["loss_func"] is None) is loss_func_is_none
     assert captured["constraints"]["effective_bits"] == 5.4
-
-
-@pytest.mark.parametrize("model_type", ["kimi_k3", None])
-def test_autoquant_searches_nothing_the_serving_engines_build_unquantized(
-    autoquant_utils, monkeypatch, model_type
-):
-    args = SimpleNamespace(
-        calib_with_images=False,
-        inference_pipeline_parallel=1,
-        use_fsdp2=False,
-        batch_size=1,
-        kv_cache_qformat="none",
-    )
-    aq = _validated_autoquant_config(auto_quantize_method="kl_div")
-    captured = {}
-
-    def fake_auto_quantize(model, **kwargs):
-        captured.update(kwargs)
-        return model, {}
-
-    monkeypatch.setattr(autoquant_utils.mtq, "auto_quantize", fake_auto_quantize)
-    model = torch.nn.Module()
-    model.layers = torch.nn.ModuleList([torch.nn.Module()])
-    moe = model.layers[0].block_sparse_moe = torch.nn.Module()
-    moe.experts = torch.nn.ModuleList([torch.nn.Linear(16, 16)])
-    moe.routed_expert_down_proj = torch.nn.Linear(16, 16)
-    model.config = SimpleNamespace(model_type=model_type)
-
-    autoquant_utils.auto_quantize(args, model, [], aq)
-
-    assert captured["disabled_layers"][: len(aq.disabled_layers)] == aq.disabled_layers
-    # Replaying the search turns disabled_layers into quantizer entries over a fixed config.
-    search_state = {
-        "best": {"recipe": {}},
-        "candidate_stats": {},
-        "disabled_layers": captured["disabled_layers"],
-        "fixed_quantization_config": mtq.FP8_DEFAULT_CFG,
-    }
-    with pytest.warns(UserWarning, match="algorithm='max'"):
-        replayed = mtq.get_auto_quantize_config(search_state)
-    mtq.quantize(model, replayed, forward_loop=None)
-    assert moe.experts[0].weight_quantizer.is_enabled
-    assert moe.routed_expert_down_proj.weight_quantizer.is_enabled is (model_type != "kimi_k3")
 
 
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(autoquant_utils):

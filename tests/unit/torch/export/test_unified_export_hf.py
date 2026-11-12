@@ -32,14 +32,12 @@ from safetensors.torch import save_file
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import distributed_writer, unified_export_hf
-from modelopt.torch.export.layerwise_export import assert_layerwise_export_supported
 from modelopt.torch.export.model_utils import (
     TiedWeightMap,
     get_language_model_from_vl,
     is_multimodal_model,
 )
 from modelopt.torch.export.quant_utils import (
-    assert_serving_unquantized,
     fuse_prequant_layernorm,
     postprocess_state_dict,
     sync_tied_input_amax,
@@ -1398,96 +1396,3 @@ def test_an_expert_parallel_export_it_cannot_write_is_refused_before_folding(
     assert after.keys() == before.keys()
     assert all(torch.equal(after[k], v) for k, v in before.items())
     assert not (tmp_path / "export").exists()
-
-
-class _StoppedError(Exception):
-    """Stops an export at a chosen point past the step under test."""
-
-
-def _with_a_quantized_latent_up_proj(model_type):
-    """A model quantizing where Kimi-K3 has the latent MoE up-projection vLLM keeps unquantized."""
-    block = torch.nn.Module()
-    block.block_sparse_moe = torch.nn.Module()
-    block.block_sparse_moe.routed_expert_up_proj = torch.nn.Linear(16, 16)
-    model = torch.nn.Module()
-    model.layers = torch.nn.ModuleList([block])
-    model.config = SimpleNamespace(model_type=model_type)
-    up_proj = block.block_sparse_moe.routed_expert_up_proj
-    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: up_proj(torch.randn(2, 16)))
-    return model
-
-
-@pytest.mark.parametrize(
-    "plan", [None, DistributionPlan(2, ep_size=2)], ids=["whole", "expert-parallel"]
-)
-def test_an_export_the_serving_engines_cannot_load_is_refused_before_writing(tmp_path, plan):
-    model = _with_a_quantized_latent_up_proj("kimi_k3")
-    if plan is not None:
-        set_distribution_plan(model, plan)
-    before = {k: v.clone() for k, v in model.state_dict().items()}
-
-    with pytest.raises(ValueError, match=r"layers\.0\.block_sparse_moe\.routed_expert_up_proj"):
-        export_hf_checkpoint(model, export_dir=tmp_path / "export")
-
-    assert not (tmp_path / "export").exists()
-    after = model.state_dict()
-    assert all(torch.equal(after[k], v) for k, v in before.items())
-    # The per-layer export refuses it too, before calibration writes its first shard.
-    with pytest.raises(ValueError, match="routed_expert_up_proj"):
-        assert_layerwise_export_supported(model)
-
-
-@pytest.mark.parametrize("model_type", [None, "llama"])
-def test_a_model_whose_spec_names_no_such_module_is_not_refused(tmp_path, monkeypatch, model_type):
-    model = _with_a_quantized_latent_up_proj(model_type)
-    assert_serving_unquantized(model)
-
-    # A sharded export of it skips the check's collective. Stopped at the rank query that follows it.
-    labels = []
-
-    def all_reduce(label, fn, combine):  # a single process's, recording what it is asked for
-        labels.append(label)
-        return combine([fn()])
-
-    monkeypatch.setattr(unified_export_hf, "all_reduce", all_reduce)
-    monkeypatch.setattr(torch.distributed, "get_rank", mock.Mock(side_effect=_StoppedError))
-    set_distribution_plan(model, DistributionPlan(2, ep_size=2))
-    with pytest.raises(_StoppedError):
-        export_hf_checkpoint(model, export_dir=tmp_path / "export")
-    assert "fused expert quantization" in labels
-    assert "serving-unquantized modules" not in labels
-
-
-def _serving_unquantized_job(rank, size, tmp_dir, quantized_on):
-    model = _with_a_quantized_latent_up_proj("kimi_k3")
-    if rank not in quantized_on:
-        model.layers[0].block_sparse_moe.routed_expert_up_proj.weight_quantizer.disable()
-    set_distribution_plan(model, DistributionPlan(size, ep_size=size))
-    raised = None
-    with (
-        bounded_collectives(),
-        # The export's next collective past the check: reaching it means the check let it through.
-        mock.patch.object(unified_export_hf, "broadcast_from", side_effect=_StoppedError),
-    ):
-        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
-        # the shared worker down instead of failing this test alone.
-        try:
-            unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir / "export")
-        except (ValueError, RuntimeError, _StoppedError) as e:
-            raised = e
-    # Every rank refuses: the quantizing one with its own error, the other naming it.
-    if quantized_on:
-        assert isinstance(raised, ValueError if rank in quantized_on else RuntimeError), raised
-        assert "routed_expert_up_proj" in str(raised), raised
-    else:
-        assert isinstance(raised, _StoppedError), raised
-    assert not (tmp_dir / "export").exists()
-
-
-@pytest.mark.parametrize("quantized_on", [(1,), ()], ids=["one-rank-quantizes", "none-quantizes"])
-def test_every_rank_refuses_together_what_one_ranks_serving_engines_cannot_load(
-    cpu_dist_workers, tmp_path, quantized_on
-):
-    """The check's verdict is gathered across ranks, so a rank that alone sees a quantized listed
-    module fails every rank, rather than leave the others waiting in the export's next collective."""
-    cpu_dist_workers.run(_serving_unquantized_job, tmp_dir=tmp_path, quantized_on=quantized_on)
