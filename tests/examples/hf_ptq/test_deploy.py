@@ -152,6 +152,15 @@ def cleanup_after_test():
                 "engram_config": {"placement": "cpu", "replication": "none", "lookup": "auto"},
             },
         ),
+        # DeepSeek-V4-Pro-0813 has the same mixed FP8 + NVFP4 quantization_config, and its card's
+        # commands name no quantization method either, so only quantization is reset.
+        *ModelDeployerList(
+            model_id="nvidia/DeepSeek-V4-Pro-0813-NVFP4",
+            backend=("vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+            engine_kwargs={"quantization": None},
+        ),
     ],
     ids=idfn,
 )
