@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
+from modelopt.torch.models import get_serving_unquantized, hf_model_type
 from modelopt.torch.opt.searcher import is_directory_checkpoint
 from modelopt.torch.quantization.algorithms import AUTO_QUANTIZE_SEARCHERS
 from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
@@ -211,7 +212,13 @@ def auto_quantize(
             len(calib_dataloader), max(inputs["score_size"] // score_batch_size, 1)
         ),
         "verbose": True,
-        "disabled_layers": inputs["disabled_layers"],
+        # Kept out of the search: the model's serving engines build them unquantized.
+        "disabled_layers": [
+            *inputs["disabled_layers"],
+            *get_serving_unquantized(
+                hf_model_type(full_model if full_model is not None else language_model)
+            ),
+        ],
         "method": inputs["method"],
         "checkpoint": checkpoint,
     }

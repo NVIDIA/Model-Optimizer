@@ -142,6 +142,7 @@ from .quant_format import (
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
     _get_uncalibrated_static_input_module_names,
+    assert_serving_unquantized,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -2178,6 +2179,14 @@ def export_hf_checkpoint(
     # Either form of sharding, including the hybrid where both hold: a model can be FSDP2-dense AND
     # expert-parallel, so these are tracked separately rather than as an either/or.
     _sharded_export = _ep_sharded or _fsdp2_sharded
+    # Before anything is folded or written, so a refusal leaves no partial checkpoint. Every rank of
+    # a sharded export is here, so they refuse together.
+    if _sharded_export:
+        all_reduce(
+            "serving-unquantized modules", lambda: assert_serving_unquantized(model), lambda _: None
+        )
+    else:
+        assert_serving_unquantized(model)
     # A sharded export reads and hands over the carried weights on rank 0 alone, since both sharded
     # writers take extra_state_dict from that one sender: on any other rank, reading them (889
     # tensors on GLM-5.3-Flash, its MTP layer) would be host memory spent for nothing. This gates

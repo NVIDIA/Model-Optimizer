@@ -32,12 +32,14 @@ from safetensors.torch import save_file
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import distributed_writer, unified_export_hf
+from modelopt.torch.export.layerwise_export import assert_layerwise_export_supported
 from modelopt.torch.export.model_utils import (
     TiedWeightMap,
     get_language_model_from_vl,
     is_multimodal_model,
 )
 from modelopt.torch.export.quant_utils import (
+    assert_serving_unquantized,
     fuse_prequant_layernorm,
     postprocess_state_dict,
     sync_tied_input_amax,
@@ -1396,3 +1398,41 @@ def test_an_expert_parallel_export_it_cannot_write_is_refused_before_folding(
     assert after.keys() == before.keys()
     assert all(torch.equal(after[k], v) for k, v in before.items())
     assert not (tmp_path / "export").exists()
+
+
+def _with_a_quantized_latent_up_proj(model_type):
+    """A model quantizing where Kimi-K3 has the latent MoE up-projection vLLM keeps unquantized."""
+    block = torch.nn.Module()
+    block.block_sparse_moe = torch.nn.Module()
+    block.block_sparse_moe.routed_expert_up_proj = torch.nn.Linear(16, 16)
+    model = torch.nn.Module()
+    model.layers = torch.nn.ModuleList([block])
+    model.config = SimpleNamespace(model_type=model_type)
+    up_proj = block.block_sparse_moe.routed_expert_up_proj
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: up_proj(torch.randn(2, 16)))
+    return model
+
+
+@pytest.mark.parametrize(
+    "plan", [None, DistributionPlan(2, ep_size=2)], ids=["whole", "expert-parallel"]
+)
+def test_an_export_the_serving_engines_cannot_load_is_refused_before_writing(tmp_path, plan):
+    model = _with_a_quantized_latent_up_proj("kimi_k3")
+    if plan is not None:
+        set_distribution_plan(model, plan)
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+
+    with pytest.raises(ValueError, match=r"layers\.0\.block_sparse_moe\.routed_expert_up_proj"):
+        export_hf_checkpoint(model, export_dir=tmp_path / "export")
+
+    assert not (tmp_path / "export").exists()
+    after = model.state_dict()
+    assert all(torch.equal(after[k], v) for k, v in before.items())
+    # The per-layer export refuses it too, before calibration writes its first shard.
+    with pytest.raises(ValueError, match="routed_expert_up_proj"):
+        assert_layerwise_export_supported(model)
+
+
+@pytest.mark.parametrize("model_type", [None, "llama"])
+def test_a_model_whose_spec_names_no_such_module_is_not_refused(model_type):
+    assert_serving_unquantized(_with_a_quantized_latent_up_proj(model_type))
