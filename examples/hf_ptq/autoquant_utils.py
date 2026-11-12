@@ -20,6 +20,7 @@ import copy
 import os
 import warnings
 from fnmatch import fnmatch
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -439,10 +440,22 @@ def _check_auto_quantize_shard_args(
         )
     if args.auto_quantize_format_shard is not None and args.auto_quantize_merge_shards:
         parser.error("A format shard cannot also merge shards.")
+    if (args.auto_quantize_format_shard is not None or args.auto_quantize_merge_shards) and (
+        args.use_fsdp2 or dist.is_distributed_launch()
+    ):
+        parser.error(
+            "--auto_quantize_format_shard and --auto_quantize_merge_shards run each shard as one "
+            "process; launch them without torchrun and --use_fsdp2."
+        )
     if args.auto_quantize_format_shard is not None and args.batch_size == 0:
         # A probed batch size follows each shard's free memory; the merge needs equal step counts.
         parser.error(
             "--auto_quantize_format_shard needs an explicit --batch_size, the same in every shard."
+        )
+    if args.auto_quantize_format_shard is not None:
+        # A directory for all shards, so they can share one launch command.
+        args.auto_quantize_checkpoint = _search_checkpoint_file(
+            args.auto_quantize_checkpoint, f"shard{args.auto_quantize_format_shard[0]}.pth"
         )
 
 
@@ -483,7 +496,10 @@ def _auto_quantize_finalize_config(
     checkpoint = _search_checkpoint_file(args.auto_quantize_checkpoint)
     if merge_shards and not os.path.exists(checkpoint):
         mtq.merge_auto_quantize_checkpoints(
-            [_search_checkpoint_file(path) for path in merge_shards.split(",")], checkpoint
+            sorted(str(path) for path in Path(merge_shards).glob("shard*.pth"))
+            if os.path.isdir(merge_shards)
+            else [_search_checkpoint_file(path) for path in merge_shards.split(",")],
+            checkpoint,
         )
     if not finalize or format_shard is not None:
         return None
@@ -557,14 +573,14 @@ def _kv_cache_entries(kv_cache_quant_cfg: dict) -> list[Any]:
     return [e for e in copy.deepcopy(kv_cache_quant_cfg["quant_cfg"]) if e["quantizer_name"] != "*"]
 
 
-def _search_checkpoint_file(checkpoint: str) -> str:
-    """The file a one-process search keeps at ``checkpoint``: a directory's ``rank0.pth``.
+def _search_checkpoint_file(checkpoint: str, name: str = "rank0.pth") -> str:
+    """The file a one-process search keeps at ``checkpoint``: ``name`` in a directory.
 
     An existing file is read as is, even without an extension, as the searcher's load does.
     """
     if os.path.isfile(checkpoint) or not is_directory_checkpoint(checkpoint):
         return checkpoint
-    return os.path.join(checkpoint, "rank0.pth")
+    return os.path.join(checkpoint, name)
 
 
 def _scored_auto_quantize_state(checkpoint: str) -> dict | None:

@@ -1496,7 +1496,10 @@ def parse_args() -> argparse.Namespace:
         help=(
             "INDEX/COUNT: calibrate and score only this shard of the searched formats and save "
             "it to --auto_quantize_checkpoint, without solving or exporting. Run every shard "
-            "0..COUNT-1 (e.g. one per GPU), then merge with --auto_quantize_merge_shards."
+            "0..COUNT-1 (e.g. one per GPU), then merge with --auto_quantize_merge_shards. COUNT "
+            "may exceed the number of formats: the shards dealt a format split its layer groups. "
+            "Given a directory --auto_quantize_checkpoint, a shard saves shard<INDEX>.pth in it. "
+            "See slurm/multinode_autoquant_ptq.slurm."
         ),
     )
     parser.add_argument(
@@ -1504,9 +1507,9 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Comma-separated format-shard checkpoints to merge into --auto_quantize_checkpoint "
-            "(if it does not exist yet) before the search, which then restores every format's "
-            "calibration and scores instead of computing them."
+            "Comma-separated format-shard checkpoints, or a directory of shard*.pth files, to "
+            "merge into --auto_quantize_checkpoint (if it does not exist yet) before the search, "
+            "which then restores every format's calibration and scores instead of computing them."
         ),
     )
     parser.add_argument(

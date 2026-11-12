@@ -614,21 +614,29 @@ Changing only `effective_bits` finalizes the same scores at another budget; the 
 cost model come from the checkpoint, so change those with a new one. From Python,
 `mtq.get_auto_quantize_config(search_state, constraints, algorithm=...)` returns the finalized config.
 
-Gradient and `kl_div` searches can also score their formats in parallel processes, at most one
-*format shard* per searched format. Give every shard the same explicit `--batch_size` and its own
-checkpoint, then merge them into a new checkpoint. The merge run solves and exports like the
+Gradient and `kl_div` searches can also score their formats in parallel processes, *format
+shards*. Start every shard `i` of `n` with `--auto_quantize_format_shard i/n`, the same explicit
+`--batch_size` and a shared directory as `--auto_quantize_checkpoint`, where each saves
+`shard<i>.pth`; then merge them into a new checkpoint. The merge run solves and exports like the
 unsharded search, or finalizes if the recipe sets `finalize_algorithm`:
 
 ```bash
-RECIPE=general/auto_quantize/nvfp4_fp8_at_5p4bits  # searches two formats
-for i in 0 1; do  # one shard per GPU
+RECIPE=general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits
+for i in 0 1 2 3; do  # one shard per GPU
   CUDA_VISIBLE_DEVICES=$i python hf_ptq.py --pyt_ckpt_path $HF_PATH --recipe $RECIPE --batch_size 4 \
-    --auto_quantize_checkpoint /path/to/shard$i.pth --auto_quantize_format_shard $i/2 &
+    --auto_quantize_checkpoint /path/to/shards/ --auto_quantize_format_shard $i/4 &
 done; wait
-python hf_ptq.py --pyt_ckpt_path $HF_PATH --recipe $RECIPE \
-  --auto_quantize_merge_shards /path/to/shard0.pth,/path/to/shard1.pth \
+python hf_ptq.py --pyt_ckpt_path $HF_PATH --recipe $RECIPE --auto_quantize_merge_shards /path/to/shards \
   --auto_quantize_checkpoint /path/to/merged.pth --export_path /path/to/export
 ```
+
+With more shards than searched formats, the shards dealt a format split its layer groups. A
+`kl_div` search, which runs a forward per scored candidate, then keeps getting shorter with more GPUs
+until a shard's calibration dominates; every gradient shard still runs the full forward and backward
+pass. A multiple of the number of dealt formats (the searched ones, plus BF16 under a `kl_div`
+`context`) balances best. Use a new shard directory whenever `n` changes.
+[`slurm/multinode_autoquant_ptq.slurm`](slurm/multinode_autoquant_ptq.slurm) runs the shards across
+nodes, one per GPU or one per several GPUs for a model that needs them.
 
 Both need `--auto_quantize_checkpoint` and a weight search for `constraints.effective_bits` without
 a KV-cache search, in a single `hf_ptq.py` process: not under `torchrun` or with `--use_fsdp2`.
