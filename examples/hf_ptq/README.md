@@ -660,7 +660,7 @@ Vision-language checkpoints keep their conditional-generation architecture and v
 
 > *Set `MODELOPT_FSDP2_EXPORT=nogather` to move each tensor once, to the one rank that writes it, instead of all-gathering each FSDP2 unit on every rank as the default export does. Fused MoE experts then stay sharded, and a conversion mapping that splits or merges tensors, which the default export refuses, is reversed as a single-process export reverses it. It does not overwrite a checkpoint already in the export directory.*
 
-> *`hf_ptq.py` prints every thread's Python stack to stderr when it receives SIGTERM (`scancel`, a Slurm time limit, `torchrun` stopping the ranks after one failed) or crashes in native code. To see where a hung run waits while it still runs, set `MODELOPT_DUMP_TRACEBACK_EVERY_SEC=<n>`: every n seconds each rank appends its stacks to `traceback.rank<RANK>.txt` in `MODELOPT_DUMP_TRACEBACK_DIR` (default: the working directory).*
+> *`hf_ptq.py` prints every thread's Python stack to stderr when it receives SIGTERM or crashes in native code. `torchrun` sends SIGTERM to the other ranks after one fails; `scancel` and a Slurm time limit reach the ranks only if the launch passes the signal on, which a shell pipeline around `torchrun` may not. To see where a hung run waits while it still runs, set `MODELOPT_DUMP_TRACEBACK_EVERY_SEC=<n>`: every n seconds each rank appends its stacks to `traceback.rank<RANK>.txt` in `MODELOPT_DUMP_TRACEBACK_DIR` (default: the working directory).*
 
 ## Expert-Parallel Post-Training Quantization for MoE Models
 

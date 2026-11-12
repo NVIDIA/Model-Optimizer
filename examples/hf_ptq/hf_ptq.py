@@ -1597,8 +1597,9 @@ def parse_args() -> argparse.Namespace:
 def _dump_tracebacks():
     """Print every thread's Python stack where a stuck or crashed rank would leave none.
 
-    On SIGTERM (``scancel``, a Slurm time limit, torchrun stopping the ranks after one failed) and on
-    a crash in native code, the stacks go to stderr; SIGTERM then still ends the process.
+    On SIGTERM (torchrun stopping the ranks after one failed; Slurm's ``scancel`` or time limit if the
+    launch passes the signal on to the ranks, which a shell pipeline around torchrun may not) and on a
+    crash in native code, the stacks go to stderr; SIGTERM then still ends the process.
     ``MODELOPT_DUMP_TRACEBACK_EVERY_SEC=<n>`` also appends each rank's stacks to
     ``<MODELOPT_DUMP_TRACEBACK_DIR>/traceback.rank<RANK>.txt`` every n seconds, readable while a run
     hangs: the stack that repeats is where it waits.
