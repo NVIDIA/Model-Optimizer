@@ -181,7 +181,7 @@ def test_export_repacks_a_weight_changed_since_fake_quant(num_bits):
     linear.weight_quantizer(linear.weight)
     with torch.no_grad():
         linear.weight.mul_(-1)
-    expected, _ = GGML_FORMAT_REGISTRY[num_bits].quantize(linear.weight.detach().clone())
+    expected, _ = GGML_FORMAT_REGISTRY[num_bits].plain_quantize(linear.weight.detach().clone())
 
     _export_quantized_weight(linear, torch.bfloat16)
 

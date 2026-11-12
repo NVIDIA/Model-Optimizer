@@ -15,6 +15,7 @@
 
 """Shared validation for GGML-compatible block quantizers."""
 
+import itertools
 import math
 import weakref
 from collections.abc import Callable
@@ -336,6 +337,26 @@ def fake_quantize_with_cache(
 
 
 @dataclass(frozen=True)
+class ScaleFit:
+    """How a format's super-block scale follows from the values it encodes.
+
+    Each ``group``-value sub-block is fit in weighted least squares by one scale times three
+    ``levels`` -- magnitudes for IQ2, signed values once per delta sign (one level triple each) for
+    IQ1 -- and the super-block scale is the largest fitted scale over ``top``, the largest local
+    multiplier, so the local scales span every sub-block without an empirical anchor.
+    """
+
+    group: int
+    top: int
+    levels: tuple[tuple[float, float, float], ...]
+
+    @property
+    def signed(self) -> bool:
+        """Whether the levels fit signed values rather than magnitudes."""
+        return min(min(levels) for levels in self.levels) < 0
+
+
+@dataclass(frozen=True)
 class GGMLFormat:
     """Everything backend dispatch and export need to know about one GGML format.
 
@@ -369,6 +390,14 @@ class GGMLFormat:
     # Reads the FP16 super-block scale of each ``[blocks, block_bytes]`` payload row, for formats
     # whose ``quantize`` takes them as ``scales``; see :func:`pin_packed_weight`.
     payload_scales: Callable[[torch.Tensor], torch.Tensor] | None = None
+    # How :func:`quantize_energy_matched` derives each block's super-block scale, and writes one
+    # back into ``[blocks, block_bytes]`` payload rows.
+    scale_fit: ScaleFit | None = None
+    replace_payload_scales: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
+
+    def __post_init__(self):
+        if (self.scale_fit is None) != (self.replace_payload_scales is None):
+            raise ValueError(f"{self.name}: scale_fit needs replace_payload_scales, and vice versa")
 
     @property
     def effective_bits(self) -> float:
@@ -502,7 +531,20 @@ class GGMLFormat:
                 f"{tuple(weight.shape)} rows that are neither the pinned weight nor rows of its "
                 "decoding; see pin_current_codes."
             )
-        return self.quantize(weight, **kwargs)
+        return self.plain_quantize(weight, **kwargs)
+
+    def plain_quantize(
+        self, weight: torch.Tensor, *, block_chunk_size: int | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode a weight no calibration chose codes for, as its forwards and export do.
+
+        Formats with a :attr:`scale_fit` take :func:`quantize_energy_matched`, unweighted.
+        """
+        kwargs = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
+        if self.scale_fit is None:
+            return self.quantize(weight, **kwargs)
+        packed, shape, _ = quantize_energy_matched(self, weight, **kwargs)
+        return packed, shape
 
     def pin_current_codes(
         self, weight: torch.Tensor, quantizer, dtype: torch.dtype | None = None
@@ -599,9 +641,176 @@ class GGMLFormat:
         )
 
 
+def quantize_energy_matched(
+    ggml_format: GGMLFormat,
+    weight: torch.Tensor,
+    second_moments: torch.Tensor | None = None,
+    *,
+    block_chunk_size: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Encode ``weight`` at derived super-block scales, then match each block's output energy.
+
+    ``second_moments`` is the floored per-input-column ``E[x_j^2]``, uniform when ``None``. Each
+    block's scale comes from its sub-blocks' least-squares fits (:class:`ScaleFit`) and the format's
+    search picks the codes and local scales at it, both weighted by the root of ``second_moments``
+    as GPTQ's search is: the raw statistic is heavy-tailed. The stored scale is then rescaled so the
+    block decodes with the original's output energy, ``sum_j v_j q_j^2 = sum_j v_j w_j^2`` under
+    ``v = second_moments``. A least-squares search shrinks each block's output by its error; a gain
+    of one instead overshoots, adding the error's energy on top. Matching the energy lands between
+    the two and needs no per-format constant.
+
+    Returns:
+        The payload, the logical shape, and each block's stored scale over the scale its codes were
+        searched at, ``[*weight.shape[:-1], weight.shape[-1] // 256]``.
+    """
+    fit, replace = ggml_format.scale_fit, ggml_format.replace_payload_scales
+    if fit is None or replace is None:
+        raise ValueError(f"{ggml_format.name.upper()} has no super-block scale to derive")
+    validate_weight(weight, ggml_format.name.upper(), block_size=ggml_format.block_size)
+    blocks = weight.detach().reshape(-1, GGML_BLOCK_SIZE)
+    columns = importance_blocks(second_moments, weight, ggml_format.name.upper())
+    importance = None if second_moments is None else second_moments.sqrt()
+    scales = torch.cat(
+        [
+            _derived_scales(blocks[start : start + _FIT_BLOCKS_PER_CHUNK], columns, start, fit)
+            for start in range(0, len(blocks), _FIT_BLOCKS_PER_CHUNK)
+        ]
+    )
+    kwargs = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
+    packed, shape = ggml_format.quantize(weight, scales=scales, importance=importance, **kwargs)
+    rows = packed.reshape(-1, ggml_format.block_bytes)
+    chunk = ggml_format.decode_chunk_size
+    factors = torch.cat(
+        [
+            _energy_factors(ggml_format, blocks, rows, columns, start, start + chunk)
+            for start in range(0, len(blocks), chunk)
+        ]
+    )
+    stored = (scales.float() * factors).clamp(max=65504.0).to(torch.float16)
+    packed = replace(rows, stored).reshape(packed.shape)
+    ratio = torch.where(scales > 0, stored.float() / scales.float().clamp_min(1e-30), 1.0)
+    return packed, shape, ratio.reshape(*weight.shape[:-1], -1)
+
+
+def pin_energy_matched(
+    ggml_format: GGMLFormat, quantizer, weight: torch.Tensor, second_moments: torch.Tensor | None
+) -> torch.Tensor:
+    """Pin the :func:`quantize_energy_matched` codes of ``weight``; return the weight to keep.
+
+    The kept weight is ``weight`` unrounded, as GPTQ leaves it, but scaled in place per block like
+    its stored scale. The search is scale-equivariant, so under the stored scales the kept weight
+    encodes to the codes picked for ``weight``, up to its rounding; the pin is what it does encode
+    to, so QAD's re-encodes start from exactly the pinned codes.
+    """
+    payload_scales = ggml_format.payload_scales
+    if payload_scales is None:
+        raise ValueError(f"{ggml_format.name.upper()} does not keep its pinned scales")
+    extra_args = quantizer.backend_extra_args or {}
+    kwargs = {"block_chunk_size": extra_args.get("block_chunk_size", ggml_format.block_chunk_size)}
+    packed, _, ratio = quantize_energy_matched(ggml_format, weight, second_moments, **kwargs)
+    kept = weight if weight.is_contiguous() else weight.contiguous()
+    rows, ratio = kept.view(-1, GGML_BLOCK_SIZE), ratio.reshape(-1, 1)
+    compute_dtype = torch.promote_types(kept.dtype, torch.float32)
+    for start in range(0, len(rows), _RESCALE_BLOCKS_PER_CHUNK):
+        chunk = rows[start : start + _RESCALE_BLOCKS_PER_CHUNK]
+        chunk.copy_(chunk.to(compute_dtype) * ratio[start : start + len(chunk)])
+    importance = None if second_moments is None else second_moments.sqrt()
+    scales = payload_scales(packed.reshape(-1, ggml_format.block_bytes))
+    packed, _ = ggml_format.quantize(kept, scales=scales, importance=importance, **kwargs)
+    pin_packed_weight(quantizer, ggml_format.name, packed, importance)
+    return kept
+
+
+# Blocks rescaled at a time, bounding the float32 temporaries.
+_RESCALE_BLOCKS_PER_CHUNK = 65536
+# Blocks fitted at a time: a 32-value sub-block scores 561 splits, a 16-value one 153.
+_FIT_BLOCKS_PER_CHUNK = 1024
+
+
+def _derived_scales(
+    blocks: torch.Tensor, columns: torch.Tensor | None, start: int, fit: ScaleFit
+) -> torch.Tensor:
+    """The FP16 super-block scale of each block: its largest sub-block fit over ``fit.top``."""
+    x = narrow_to_float32(blocks)
+    # llama.cpp's element weights, which favour a block's large values over its small ones.
+    weights = (x.square().mean(dim=-1, keepdim=True) + x.square()).sqrt()
+    if columns is not None:
+        weights = weights * _block_rows(columns, start, start + len(x)).sqrt()
+    values = (x if fit.signed else x.abs()).reshape(len(x), -1, fit.group)
+    scale = _fit_sub_blocks(values, weights.reshape(values.shape), fit.levels)
+    return (scale.amax(dim=-1) / fit.top).clamp(max=65504.0).to(torch.float16)
+
+
+def _fit_sub_blocks(
+    values: torch.Tensor, weights: torch.Tensor, levels: tuple[tuple[float, float, float], ...]
+) -> torch.Tensor:
+    """Each sub-block's least-squares scale under its best split over its best level triple.
+
+    With a positive scale each value's level rises with it, so the best fit splits the sorted
+    values into three runs; every split is scored at once from prefix sums.
+    """
+    group = values.shape[-1]
+    sorted_values, order = values.sort(dim=-1)
+    sorted_weights = weights.gather(-1, order)
+    zero = sorted_values.new_zeros((*sorted_values.shape[:-1], 1))
+    cum_w = torch.cat([zero, sorted_weights.cumsum(dim=-1)], dim=-1)
+    cum_wx = torch.cat([zero, (sorted_weights * sorted_values).cumsum(dim=-1)], dim=-1)
+    first, second = torch.triu_indices(group + 1, group + 1, device=values.device)
+    bounds = (torch.zeros_like(first), first, second, torch.full_like(first, group))
+    runs = list(itertools.pairwise(bounds))
+    w_runs = [cum_w[..., high] - cum_w[..., low] for low, high in runs]
+    wx_runs = [cum_wx[..., high] - cum_wx[..., low] for low, high in runs]
+    best_score = best_scale = None
+    for triple in levels:
+        sum_qx = sum(level * wx for level, wx in zip(triple, wx_runs))
+        sum_qq = sum(level * level * w for level, w in zip(triple, w_runs))
+        score = torch.where(
+            (sum_qq > 0) & (sum_qx > 0), sum_qx.square() / sum_qq.clamp_min(1e-30), 0.0
+        )
+        score, best = score.max(dim=-1)
+        scale = sum_qx.gather(-1, best[..., None]) / sum_qq.gather(-1, best[..., None])
+        scale = torch.where(score > 0, scale.squeeze(-1), 0.0)
+        if best_score is None:
+            best_score, best_scale = score, scale
+        else:
+            better = score > best_score
+            best_score = torch.where(better, score, best_score)
+            best_scale = torch.where(better, scale, best_scale)
+    return best_scale
+
+
+def _energy_factors(
+    ggml_format: GGMLFormat,
+    blocks: torch.Tensor,
+    payload: torch.Tensor,
+    columns: torch.Tensor | None,
+    start: int,
+    stop: int,
+) -> torch.Tensor:
+    """For blocks ``start:stop``, the factor on the scale that gives each its original energy."""
+    x = narrow_to_float32(blocks[start:stop])
+    decoded = ggml_format.dequantize(
+        payload[start:stop],
+        torch.tensor(x.shape),
+        dtype=torch.float32,
+        block_chunk_size=ggml_format.decode_chunk_size,
+    ).reshape(x.shape)
+    weights = 1.0 if columns is None else _block_rows(columns, start, start + len(x))
+    target = (weights * x.square()).sum(dim=-1)
+    energy = (weights * decoded.square()).sum(dim=-1)
+    return torch.where(energy > 0, (target / energy.clamp_min(1e-30)).sqrt(), 1.0)
+
+
 def leading_fp16_scales(blocks: torch.Tensor) -> torch.Tensor:
     """The FP16 super-block scale in the first two bytes of each ``[blocks, block_bytes]`` row."""
     return blocks[:, :2].contiguous().view(torch.float16).reshape(-1)
+
+
+def with_leading_fp16_scales(blocks: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """``[blocks, block_bytes]`` rows with their leading FP16 super-block scales replaced."""
+    replaced = blocks.clone()
+    replaced[:, :2] = scales.to(torch.float16).contiguous().view(torch.uint8).reshape(-1, 2)
+    return replaced
 
 
 def super_block_scales(
@@ -777,8 +986,13 @@ def chunk_importance(
     """The importance of flattened blocks ``start:stop``, as ``[stop - start, 32, 8]``."""
     if blocks_importance is None:
         return None
+    return _block_rows(blocks_importance, start, stop).reshape(-1, GGML_BLOCK_SIZE // 8, 8)
+
+
+def _block_rows(blocks_importance: torch.Tensor, start: int, stop: int) -> torch.Tensor:
+    """The ``[stop - start, 256]`` per-column rows of flattened blocks ``start:stop``."""
     index = torch.arange(start, stop, device=blocks_importance.device) % len(blocks_importance)
-    return blocks_importance[index].reshape(-1, GGML_BLOCK_SIZE // 8, 8)
+    return blocks_importance[index]
 
 
 def iq2_tile_terms(

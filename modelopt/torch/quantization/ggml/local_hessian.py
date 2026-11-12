@@ -38,9 +38,10 @@ class GGMLLocalHessianEncoder(LocalHessianEncoder):
     per-group choice that search would take by that diagonal is instead picked by the full
     256-column block of the Hessian (:func:`~.choice_search.search_choices`), damped by
     ``perc_damp`` times its mean diagonal: undamped, the picks overfit the calibration inputs. A
-    weight no calibration input reached is encoded plainly. Like imatrix, the pinned payload marks
-    the weight as final, so a quantizer that already holds one, such as GPTQ's, is left alone, and
-    a format that keeps its pinned scales leaves the weight unchanged.
+    weight no calibration input reached gets the plain encode its forwards would give. Like
+    imatrix, the pinned payload marks the weight as final, so a quantizer that already holds one,
+    such as GPTQ's, is left alone; a format that keeps its pinned scales leaves the weight
+    unchanged.
     """
 
     block_size = GGML_BLOCK_SIZE
@@ -87,16 +88,19 @@ class GGMLLocalHessianEncoder(LocalHessianEncoder):
                     block_chunk_size,
                     decode_chunk_size,
                 )
-        packed, shape = ggml_format.quantize(
-            weight.contiguous(), block_chunk_size=block_chunk_size, **kwargs
-        )
-        # Pinned with the weight its choices were searched for, so that weight keeps these codes.
+        if "choices" in kwargs:
+            packed, shape = ggml_format.quantize(
+                weight.contiguous(), block_chunk_size=block_chunk_size, **kwargs
+            )
+        else:
+            # No calibration input reached the weight: the plain encode its forwards would give.
+            packed, shape = ggml_format.plain_quantize(
+                weight.contiguous(), block_chunk_size=block_chunk_size
+            )
+        # Pinned with the weight it was encoded from, which encoding again would not reproduce:
+        # the choices are searched, and the plain encode's scales are rescaled after its search.
         pin_packed_weight(
-            quantizer,
-            quantizer.num_bits,
-            packed,
-            kwargs.get("importance"),
-            source=weight if "choices" in kwargs else None,
+            quantizer, quantizer.num_bits, packed, kwargs.get("importance"), source=weight
         )
         if ggml_format.payload_scales is not None:
             return weight

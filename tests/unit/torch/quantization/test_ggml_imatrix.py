@@ -63,17 +63,19 @@ def _inputs(rows=1024, columns=512):
     return torch.randn(rows, columns, generator=generator) * scale
 
 
+def _floored(second_moments):
+    return second_moments.clamp_min(1e-4 * second_moments.mean())
+
+
 def _importance(second_moments):
-    return second_moments.clamp_min(1e-4 * second_moments.mean()).sqrt()
+    return _floored(second_moments).sqrt()
 
 
 def _record_importance(monkeypatch):
     calls = []
 
     def recording_quantize(weight, **kwargs):
-        # Forwards re-encode under the pinned scales; only calibration's own encodes count.
-        if "scales" not in kwargs:
-            calls.append(kwargs.get("importance"))
+        calls.append(kwargs.get("importance"))
         return IQ2_XXS.quantize(weight, **kwargs)
 
     monkeypatch.setitem(
@@ -109,14 +111,41 @@ def test_pins_the_codes_it_chose(algorithm):
     mtq.quantize(plain, _config("max"), forward_loop=lambda m: m(inputs))
 
     decoded = _decoded(model.weight_quantizer, model.weight.shape)
-    # IQ2_XXS keeps the pinned scales, so the weight stays as it was and encodes to the pin again.
-    assert torch.equal(model.weight.detach(), original)
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
+    # local_hessian leaves the weight as it was; imatrix scales it like its stored scales.
+    assert torch.equal(model.weight.detach(), original) == (algorithm is LOCAL_HESSIAN)
 
     def output_error(weight):
         return ((weight - original) @ inputs.T).square().sum()
 
     assert output_error(decoded) < output_error(plain.weight_quantizer(plain.weight))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float64])
+def test_imatrix_matches_each_blocks_energy_and_keeps_a_weight_encoding_to_its_codes(dtype):
+    # The stored scales are rescaled after the search and the weight is scaled alike, so the codes
+    # keep each block's energy and a block QAD changes is searched again from them.
+    torch.manual_seed(0)
+    model = nn.Linear(512, 16, bias=False, dtype=dtype)
+    original = model.weight.detach().clone()
+    inputs = _inputs().to(dtype)
+    mtq.quantize(model, _config(IMATRIX), forward_loop=lambda m: m(inputs))
+    quantizer = model.weight_quantizer
+    pinned = pinned_packed_weight(quantizer, "iq2_xxs")
+
+    second_moments = _floored(inputs.float().square().mean(dim=0)).reshape(2, 256)
+    decoded = _decoded(quantizer, original.shape).reshape(16, 2, 256)
+    energy = (second_moments * decoded.square()).sum(-1)
+    target = (second_moments * original.float().reshape(16, 2, 256).square()).sum(-1)
+    # Up to the codes the rescaled weight's rounding flips when it is encoded again.
+    torch.testing.assert_close(energy, target, rtol=2e-2, atol=0)
+
+    rescanned, _ = IQ2_XXS.quantize(
+        model.weight.detach(),
+        scales=IQ2_XXS.payload_scales(pinned.reshape(-1, IQ2_XXS.block_bytes)),
+        importance=pinned_importance(quantizer, "iq2_xxs"),
+    )
+    assert torch.equal(rescanned, pinned)
 
 
 @ENCODERS
@@ -196,16 +225,15 @@ def test_a_module_calibration_never_reached_gets_the_plain_search(algorithm):
     inputs = _inputs()
     mtq.quantize(model, _config(algorithm), forward_loop=lambda m: m["used"](inputs))
 
-    packed, shape = IQ2_XXS.quantize(original)
+    packed, shape = IQ2_XXS.plain_quantize(original)
     plain = IQ2_XXS.dequantize(packed, shape, dtype=torch.float32)
-    assert torch.equal(model["unused"].weight, original)
     assert torch.equal(_decoded(model["unused"].weight_quantizer, original.shape), plain)
+    assert torch.equal(model["unused"].weight, original) == (algorithm is LOCAL_HESSIAN)
 
 
-def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
+def test_imatrix_weights_each_fused_expert_by_its_own_tokens(moe):
     original = copy.deepcopy(moe.mlp)
     inputs = _inputs(rows=96, columns=HIDDEN)
-    calls = _record_importance(monkeypatch)
     # The shipped experts-only recipe, which calibrates in a single pass.
     recipe = load_recipe("general/ptq/iq2_xxs_experts_only").quantize.model_dump()
     assert recipe["algorithm"]["method"] == "imatrix"
@@ -215,20 +243,22 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
     assert not moe.mlp.shared_expert.weight_quantizer.is_enabled
     assert torch.equal(moe.mlp.shared_expert.weight, original.shared_expert.weight)
 
-    # One encode per expert and projection: gate_up for experts 0..3, then down for 0..3.
-    gate_up_calls, down_calls = calls[-8:-4], calls[-4:]
     experts = moe.mlp.experts
     for idx in range(NUM_EXPERTS):
         tokens = inputs[idx::3] if idx < 3 else inputs[:0]
+        gate_up_importance = pinned_importance(
+            experts.gate_up_proj_weight_quantizers[idx], "iq2_xxs"
+        )
+        down_importance = pinned_importance(experts.down_proj_weight_quantizers[idx], "iq2_xxs")
         if len(tokens) == 0:
             # The idle expert keeps the plain search, and its codes are still pinned.
-            assert gate_up_calls[idx] is None
-            assert down_calls[idx] is None
+            assert gate_up_importance is None
+            assert down_importance is None
         else:
             gate, up = F.linear(tokens, original.experts.gate_up_proj[idx]).chunk(2, dim=-1)
-            torch.testing.assert_close(gate_up_calls[idx], _importance(tokens.square().mean(dim=0)))
+            torch.testing.assert_close(gate_up_importance, _importance(tokens.square().mean(dim=0)))
             torch.testing.assert_close(
-                down_calls[idx], _importance((F.silu(gate) * up).square().mean(dim=0))
+                down_importance, _importance((F.silu(gate) * up).square().mean(dim=0))
             )
         for weight, original_weight, quantizers in (
             (
@@ -238,8 +268,8 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
             ),
             (experts.down_proj, original.experts.down_proj, experts.down_proj_weight_quantizers),
         ):
-            assert pinned_packed_weight(quantizers[idx], "iq2_xxs") is not None
-            assert torch.equal(weight[idx], original_weight[idx])
+            pinned = pinned_packed_weight(quantizers[idx], "iq2_xxs")
+            assert torch.equal(IQ2_XXS.pack(weight[idx].detach().clone(), quantizers[idx]), pinned)
 
 
 def test_hf_export_writes_each_fused_expert_s_pinned_rows(moe):
@@ -324,19 +354,21 @@ def test_search_under_the_identity_hessian_keeps_the_encoders_own_choices(num_bi
 
 
 @pytest.mark.parametrize("layerwise", [False, True])
-def test_layerwise_imatrix_sees_the_earlier_layers_quantization(monkeypatch, layerwise):
-    calls = _record_importance(monkeypatch)
-
+def test_layerwise_imatrix_sees_the_earlier_layers_quantization(layerwise):
     def run(layerwise):
         model = get_tiny_llama(
             dtype=torch.float32, hidden_size=256, intermediate_size=256, num_attention_heads=4
         )
         input_ids = torch.randint(0, 32, (4, 16), generator=torch.Generator().manual_seed(0))
         algorithm = {"method": "imatrix", "layerwise": {"enable": layerwise}}
-        start = len(calls)
         mtq.quantize(model, _config(algorithm, "*mlp*weight_quantizer"), lambda m: m(input_ids))
-        weighted = [c for c in calls[start:] if c is not None]
-        assert len(weighted) == 6  # gate, up and down of both layers
+        # gate, up and down of both layers, in module order
+        weighted = [
+            pinned_importance(module.weight_quantizer, "iq2_xxs")
+            for name, module in model.named_modules()
+            if "mlp" in name and hasattr(module, "weight_quantizer")
+        ]
+        assert len(weighted) == 6 and all(w is not None for w in weighted)
         return weighted
 
     single_pass, other = run(False), run(layerwise)

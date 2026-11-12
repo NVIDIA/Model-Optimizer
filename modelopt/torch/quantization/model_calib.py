@@ -2926,10 +2926,11 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
     ``E[x_j^2]`` over the inputs of every weight whose quantizer backend registered an imatrix
     encoder (see :func:`~modelopt.torch.quantization.utils.calib_utils.register_imatrix_encoder`)
     and accepts the quantizer. Each such weight is then encoded once, its search weighted by that
-    statistic, and replaced by its fake-quantized value. Dense quantized linears and HF fused-MoE
-    experts (one statistic per expert, over the tokens routed to it) are both covered. Encoders
-    skip a quantizer that already holds final codes, so ``[gptq, imatrix]`` runs GPTQ where it
-    applies and imatrix on any weight it leaves.
+    statistic, and replaced by the weight its encoder keeps: its fake-quantized value, or one that
+    encodes to the pinned codes, such as the GGML IQ formats' per-block rescaled weight. Dense
+    quantized linears and HF fused-MoE experts (one statistic per expert, over the tokens routed
+    to it) are both covered. Encoders skip a quantizer that already holds final codes, so
+    ``[gptq, imatrix]`` runs GPTQ where it applies and imatrix on any weight it leaves.
     """
     if forward_loop is None:
         warn_rank_0("imatrix: no forward_loop given; skipping imatrix calibration")
