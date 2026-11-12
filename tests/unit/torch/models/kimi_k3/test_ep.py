@@ -376,8 +376,12 @@ _CHECKPOINT_QUANTIZED = kimi_k3._checkpoint_quantized
 
 @pytest.fixture(autouse=True)
 def no_load_patched_for_good(monkeypatch):
-    """Each test starts in a process no expert-parallel Kimi-K3 load has patched, and leaves none."""
+    """Each test starts in a process no expert-parallel Kimi-K3 load has patched, and leaves none:
+    neither the record of the model types patched for every later load, nor the patches ``prepare``
+    keeps on the checkpoint's code transformers loads later (``_remote_code.keep_patched``)."""
     monkeypatch.setattr(moe, "_PATCHED_EVERY_LOAD", set())
+    monkeypatch.setattr(dmu, "get_class_in_module", dmu.get_class_in_module)
+    monkeypatch.setattr(_remote_code, "_KEPT_PATCHES", {})
 
 
 @pytest.fixture(autouse=True)
@@ -859,9 +863,7 @@ def test_prepare_s_patches_stay_on_the_code_loaded_through_another_path(monkeypa
     modules.mkdir()
     monkeypatch.setattr(dmu, "HF_MODULES_CACHE", str(modules))
     monkeypatch.syspath_prepend(str(modules))
-    monkeypatch.setattr(dmu, "get_class_in_module", dmu.get_class_in_module)
     monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
-    monkeypatch.setattr(_remote_code, "_KEPT_PATCHES", {})
     _restore(monkeypatch, hf_generic, "OutputRecorder")
     for name in [n for n in sys.modules if n.startswith("transformers_modules.")]:
         monkeypatch.delitem(sys.modules, name)
@@ -1037,14 +1039,22 @@ def test_the_build_step_installs_nothing_when_there_is_nothing_to_build(monkeypa
 def test_an_ep_degree_of_1_builds_kimi_k3s_own_code_to_decide(monkeypatch, tmp_path, dense, fsdp2):
     """With expert parallelism ruled out, deciding the plan still builds Kimi-K3's own code on the
     meta device, its ``tie_weights`` without the keyword arguments transformers' ``post_init``
-    passes: the build step runs all the same, and no ``prepare``. The decision reaches its outcome:
-    the 8 experts left whole on 4 ranks are refused, or the model is planned FSDP2-sharded."""
+    passes: the build step runs all the same, and no ``prepare``, so its MoE blocks keep their
+    per-expert experts. The decision reaches its outcome: the 8 experts left whole on 4 ranks are
+    refused, or the model is planned FSDP2-sharded."""
     _restore(monkeypatch, hf_generic, "OutputRecorder")
     monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
     monkeypatch.setattr(
         get_spec("kimi_k3").ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
     )
     monkeypatch.setattr(dist, "size", lambda group=None: 4)
+    built = []
+    build = model_load_utils.build_meta_causal_lm
+    monkeypatch.setattr(
+        model_load_utils,
+        "build_meta_causal_lm",
+        lambda *args, **kwargs: built.append(build(*args, **kwargs)) or built[-1],
+    )
     shutil.copy(kimi_k3_tiny_modeling.__file__, tmp_path / "modeling_kimi_k3.py")
     remote = "modeling_kimi_k3.KimiK3ForConditionalGeneration"
     auto_map = {"AutoConfig": "modeling_kimi_k3.KimiK3Config", "AutoModelForCausalLM": remote}
@@ -1085,6 +1095,9 @@ def test_an_ep_degree_of_1_builds_kimi_k3s_own_code_to_decide(monkeypatch, tmp_p
         for name in set(sys.modules) - loaded:
             if name.startswith("transformers_modules."):
                 del sys.modules[name]
+    blocks = [m for m in built[0].modules() if type(m).__name__ == "KimiSparseMoeBlock"]
+    assert blocks
+    assert all(isinstance(block.experts, nn.ModuleList) for block in blocks)
 
 
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks", "remote_checkpoint")
