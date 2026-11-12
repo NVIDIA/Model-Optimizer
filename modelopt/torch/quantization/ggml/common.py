@@ -26,6 +26,8 @@ from typing import NamedTuple
 import torch
 from torch.optim.optimizer import register_optimizer_step_post_hook
 
+from ..extensions import get_cuda_ext_ggml
+
 GGML_BLOCK_SIZE = 256
 _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
 # Columns hashed at a time, bounding _row_keys' int64 temporaries to this slice of the weight.
@@ -721,14 +723,7 @@ def quantize_energy_matched(
     blocks = weight.detach().reshape(-1, GGML_BLOCK_SIZE)
     columns = importance_blocks(second_moments, weight, ggml_format.name.upper())
     importance = None if second_moments is None else second_moments.sqrt()
-    scales = torch.cat(
-        [
-            _derived_scales(
-                ggml_format, blocks[start : start + _FIT_BLOCKS_PER_CHUNK], columns, start
-            )
-            for start in range(0, len(blocks), _FIT_BLOCKS_PER_CHUNK)
-        ]
-    )
+    scales = _derived_scales(ggml_format, blocks, columns)
     kwargs = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
     packed, shape = ggml_format.quantize(weight, scales=scales, importance=importance, **kwargs)
     rows = packed.reshape(-1, ggml_format.block_bytes)
@@ -768,16 +763,38 @@ _FIT_BLOCKS_PER_CHUNK = 1024
 
 
 def _derived_scales(
+    ggml_format: GGMLFormat, blocks: torch.Tensor, columns: torch.Tensor | None
+) -> torch.Tensor:
+    """Each ``[blocks, 256]`` row's FP16 super-block scale: its largest sub-block fit over ``top``."""
+    fit = ggml_format.scale_fit
+    assert fit is not None
+    if blocks.is_cuda and (extension := get_cuda_ext_ggml()) is not None:
+        group = ggml_format.block_size // ggml_format.choice_groups
+        levels = [level for triple in fit.levels for level in triple]
+        return extension.fit_scales(blocks, columns, group, fit.top, levels, not fit.signed)
+    return torch.cat(
+        [
+            _fit_chunk(ggml_format, blocks[start : start + _FIT_BLOCKS_PER_CHUNK], columns, start)
+            for start in range(0, len(blocks), _FIT_BLOCKS_PER_CHUNK)
+        ]
+    )
+
+
+def _fit_chunk(
     ggml_format: GGMLFormat, blocks: torch.Tensor, columns: torch.Tensor | None, start: int
 ) -> torch.Tensor:
-    """The FP16 super-block scale of each block: its largest sub-block fit over ``scale_fit.top``."""
+    """:func:`_derived_scales` of blocks ``start:start + len(blocks)`` in PyTorch.
+
+    The reference for the CUDA ``fit_scales``: every sum is taken in that kernel's order.
+    """
     fit = ggml_format.scale_fit
     assert fit is not None
     x = narrow_to_float32(blocks)
     to_unit, from_unit = _unit_powers_of_two(x)
     x = x * to_unit
+    squares = x.square()
     # llama.cpp's element weights, which favour a block's large values over its small ones.
-    weights = (x.square().mean(dim=-1, keepdim=True) + x.square()).sqrt()
+    weights = (_pairwise_sum(squares) / GGML_BLOCK_SIZE + squares).sqrt()
     if columns is not None:
         weights = weights * _block_rows(columns, start, start + len(x)).sqrt()
         # Scaled like the values, so a statistic near the float32 maximum cannot overflow the
@@ -786,7 +803,8 @@ def _derived_scales(
     group = ggml_format.block_size // ggml_format.choice_groups
     values = (x if fit.signed else x.abs()).reshape(len(x), -1, group)
     scale = _fit_sub_blocks(values, weights.reshape(values.shape), fit.levels)
-    scale = scale.amax(dim=-1) / fit.top * from_unit.squeeze(-1)
+    # Times the float32 reciprocal: what PyTorch's division by a scalar computes, said explicitly.
+    scale = scale.amax(dim=-1) * (1.0 / fit.top) * from_unit.squeeze(-1)
     return scale.clamp(max=65504.0).to(torch.float16)
 
 
@@ -799,11 +817,12 @@ def _fit_sub_blocks(
     values into three runs; every split is scored at once from prefix sums.
     """
     group = values.shape[-1]
-    sorted_values, order = values.sort(dim=-1)
+    # Adding zero makes -0 compare as +0, so a stable sort fixes the order of every tie.
+    sorted_values, order = (values + 0.0).sort(dim=-1, stable=True)
     sorted_weights = weights.gather(-1, order)
     zero = sorted_values.new_zeros((*sorted_values.shape[:-1], 1))
-    cum_w = torch.cat([zero, sorted_weights.cumsum(dim=-1)], dim=-1)
-    cum_wx = torch.cat([zero, (sorted_weights * sorted_values).cumsum(dim=-1)], dim=-1)
+    cum_w = torch.cat([zero, _inclusive_scan(sorted_weights)], dim=-1)
+    cum_wx = torch.cat([zero, _inclusive_scan(sorted_weights * sorted_values)], dim=-1)
     first, second = torch.triu_indices(group + 1, group + 1, device=values.device)
     bounds = (torch.zeros_like(first), first, second, torch.full_like(first, group))
     runs = list(itertools.pairwise(bounds))
@@ -837,6 +856,24 @@ def _unit_powers_of_two(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     k = (-torch.frexp(x.abs().amax(dim=-1, keepdim=True)).exponent).clamp(-126, 126)
     return ((k + 127) << 23).view(torch.float32), ((127 - k) << 23).view(torch.float32)
+
+
+def _pairwise_sum(values: torch.Tensor) -> torch.Tensor:
+    """Sum over the last (power-of-two) dimension, adjacent pairs first, keeping it as size 1."""
+    while values.shape[-1] > 1:
+        values = values.reshape(*values.shape[:-1], -1, 2).sum(dim=-1)
+    return values
+
+
+def _inclusive_scan(values: torch.Tensor) -> torch.Tensor:
+    """Running sums over the last dimension in log steps, as warp shuffles add them."""
+    shift = 1
+    while shift < values.shape[-1]:
+        values = torch.cat(
+            [values[..., :shift], values[..., shift:] + values[..., :-shift]], dim=-1
+        )
+        shift *= 2
+    return values
 
 
 def _energy_factors(
