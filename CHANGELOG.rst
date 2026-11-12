@@ -100,6 +100,7 @@ Changelog
 - ``modelopt.torch.export.copy_non_safetensor_files_from_ckpt`` is deprecated; use ``copy_non_model_files``.
 - ``modelopt.torch.sparsity.attention_sparsity.sparsify`` (``mtsa.sparsify``) is deprecated; use ``mts.sparsify(model, config, forward_loop=forward_loop)``.
 - PyTorch 2.10 support is deprecated and will be dropped in a future release.
+- ``dflash_architecture_config.shift_label`` is deprecated and will be removed in 0.50, since ``projector_type`` fixes the label alignment (DSpark and Domino predict the next token): remove it from DFlash-family configs. Until then a value matching ``projector_type`` is ignored with a warning and any other raises, as it never took effect; checkpoints saved with it still load.
 
 **Bug Fixes**
 
@@ -125,6 +126,7 @@ Changelog
 - Fix GPT-OSS draft training with pre-normalization teacher hidden states by enabling the target model's final normalization.
 - Fix vanilla DSpark exports to use the Qwen3 DSpark architecture, head names and configuration expected by vLLM. Re-export existing training checkpoints to use this format.
 - ``mtq.fold_weight`` now folds sequential weight quantizers (e.g. W4A8 INT4 + FP8 weights) into the weights; it used to leave them unfolded and enabled.
+- DSpark and Domino exports now write the ``shift_label``, ``markov_rank`` and other head fields they were trained with. Domino's HF AR validation (``pseudo_speculative_generate``) now raises instead of scoring the backbone one block position off; Domino acceptance cannot be measured until a runtime applies its correction head.
 - Fix ONNX quantization placing a per-tensor Q/DQ pair on a rank-0 (scalar) constant input, which TensorRT's ONNX parser rejects (``convertAxis`` asserts the quantization axis lies in ``[0, nbDims]`` but ``nbDims == 0``). Rank-0 constant operands are now kept unquantized in the int8, fp8, and autotune export paths; the existing single-element Mul/Div/Pad stripping stays gated under ``target_dla``.
 - Fix the diffusers skip-softmax HF export to emit the schema TensorRT-LLM VisualGen loads (``threshold_scale_factor.coefficients`` and a scalar ``target_sparsity``). Re-export checkpoints that failed to load.
 - Fix PTQ of native Transformers FP8 experts to apply source weight scales during calibration and export. Re-quantize affected checkpoints from the original FP8 source.

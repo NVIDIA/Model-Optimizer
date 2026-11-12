@@ -49,7 +49,6 @@ Everything in `dflash.md` applies. Domino adds:
 | `dflash.dflash_architecture_config.emb_dim` | 256 | GRU head embedding dim. **Required** |
 | `dflash.dflash_architecture_config.gru_hidden_dim` | 1024 | GRU hidden dim. **Required** |
 | `dflash.dflash_architecture_config.pure_draft_prefix_len` | 1 | Positions at block start kept as base logits only (no causal correction). Must be in `[0, block_size-1]` |
-| `dflash.dflash_architecture_config.shift_label` | true | Next-token alignment — **only `true` is supported** |
 | `dflash.dflash_lambda_base_start` | 1.0 | Curriculum start weight on the base loss |
 | `dflash.dflash_lambda_base_decay_ratio` | 1.0 | Fraction of training over which `lambda_base` decays to 0 |
 
@@ -87,10 +86,9 @@ export is the whole in-pipeline signal.
 
 ## Quality gate
 
-**Do not trust in-training AR for Domino.** The recipe pins `estimate_ar: false` and
-`ar_validate_steps: 0` deliberately: eval delegates to the DFlash backbone with the
-correction head not applied, so reported acceptance rates are backbone-only. The code
-logs this once as a warning — treat that warning as expected, not as a defect.
+**Domino has no acceptance evaluation yet.** `pseudo_speculative_generate` raises and no
+runtime applies the correction head, so keep the recipe's `ar_validate_steps: 0`. Eval
+loss and accuracy (`do_eval`, off in the recipe) exclude the head too.
 
 The training-regression gate from `dflash.md` applies and the Qwen3-8B example sets
 it: `MAX_FINAL_LOSS=5.0`, `MIN_FINAL_ACC=0.15`, checked by `check_regression.py`
@@ -107,9 +105,9 @@ failures (`seq_len` divisibility, offline eval, mask token, chat template) are i
 | Error pattern | Root cause | Fix |
 | --- | --- | --- |
 | `Domino (projector_type='domino') requires ['emb_dim', 'gru_hidden_dim'] in dflash_architecture_config` | GRU head dims missing | Set both in `dflash_architecture_config` |
-| `Domino currently supports shift_label=True (next-token alignment) only` | `shift_label=false` | Leave it at `true` |
+| `dflash_architecture_config.shift_label` deprecation warning, or `... contradicts the model` | `shift_label` in the config (the old recipe set it) | Remove it; Domino always trains next-token alignment |
 | `pure_draft_prefix_len must be in [0, N] (block_size=B), got X` | Prefix length >= block size | Lower it below `block_size` |
 | `DominoLambdaCallback: state.max_steps unset (<=0); lambda_base curriculum disabled` (warning) | `training.max_steps` not set | Set `training.max_steps`, else the curriculum never runs |
-| `Domino eval uses the DFlash backbone only ...` (warning) | Correction head not applied at eval | Expected — do not chase it; evaluate after export once the inference path lands |
+| `Domino acceptance cannot be measured until a runtime applies its correction head` | `ar_validate.py`, or `ar_validate_steps > 0` (training logs `AR validation not available.`) | Keep `ar_validate_steps: 0`; there is no Domino acceptance evaluation yet |
 | DDP error about unused parameters | `ddp_find_unused_parameters` turned off | Keep it `true` |
 | Draft trains but quality is poor | Draft dims left at `Qwen3Config` defaults instead of matching the base | Set the GQA/FFN dims explicitly |
