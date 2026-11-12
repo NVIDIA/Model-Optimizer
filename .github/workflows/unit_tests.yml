@@ -216,9 +216,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Run skill script and discovery unit tests
-        # These do not run evals/evals.json behavioral cases; SkillEvaluator does.
-        # Skill unit tests are stdlib-only and hermetic (no GPU/cluster/network),
+      - name: Run skill gate tests
+        # Skill gate tests are stdlib-only and hermetic (no GPU/cluster/network),
         # so they run in their own lightweight job rather than the main unit lane.
         # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
         run: |
