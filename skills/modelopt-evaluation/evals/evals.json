@@ -239,7 +239,8 @@
       "Overrides max_pattern_size to 1024 on ns_aa_lcr only, not 4096 and not on every task",
       "Requires a vLLM >= 0.17.0 deploy image, since older vLLM silently ignores the field",
       "Uses the identical setting for baseline and candidate and records it in the MLflow description and tags",
-      "Counts finish_reason repetition stops alongside length stops during run validation and reports them separately"
+      "On every ns_* task, requires the serving-container remap of finish_reason repetition to length with NEMO_EVALUATOR_TRUST_PRE_CMD=1, and confirms the canary logs show no literal_error",
+      "Counts repetition stops separately from length stops on non-ns_* tasks only; remapped ns_* hits are reported as length stops"
     ]
   }
 ]

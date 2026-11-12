@@ -75,6 +75,16 @@ Do not load both the checkout and plugin copy when avoiding duplicate discovery.
 - New skills go in `skills/<skill-name>/SKILL.md`.
 - Shared support files go in `skills/common/`.
 
+## Skill evaluation
+
+SkillEvaluator runs the behavioral cases in each skill's `evals/evals.json` for
+NVIDIA/skills publication; see the [public evaluation guide](https://github.com/NVIDIA/skills/blob/main/docs/evaluating-agent-skills.mdx).
+Keep these datasets as real files at the canonical path so standalone packages
+need no legacy paths. Old dataset paths are checkout compatibility links.
+
+`tests/test_*.py` files test bundled scripts and repository discovery, not the
+behavioral cases. Passing pytest does not mean SkillEvaluator ran or passed.
+
 ## Review baseline
 
 [Code review baseline](review-guidelines/code-review.md) is the shared rubric

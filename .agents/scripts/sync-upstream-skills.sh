@@ -140,6 +140,9 @@ for skill in launching-evals accessing-mlflow; do
     echo "== $skill =="
     rm -rf "${DEST_BASE:?}/modelopt-$skill"
     fetch_skill_recursive "$skill"
+    if [[ -f "$DEST_BASE/modelopt-$skill/evals/evals.json" ]]; then
+        ln -s evals/evals.json "$DEST_BASE/modelopt-$skill/tests.json"
+    fi
 
     case "$skill" in
         accessing-mlflow)
