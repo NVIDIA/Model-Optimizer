@@ -27,6 +27,7 @@ CONFIGS_DIR = Path(__file__).resolve().parents[3] / "modelopt_recipes" / "genera
 _LSQ_RECIPES = {
     "nvfp4_dual_lsq-mse_init-fp8_kv.yaml": (False, False),
     "nvfp4_lsq-mse_init-fp8_kv.yaml": (True, True),
+    "nvfp4_lsq-mse_init-fp8_kv-visual-linear.yaml": (True, True),
 }
 
 
