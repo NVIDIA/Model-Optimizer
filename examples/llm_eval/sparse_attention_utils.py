@@ -65,7 +65,9 @@ def sparsify_model(
             modified_sparse_cfg = {}
             for pattern, cfg in mtsa_cfg["sparse_cfg"].items():
                 modified_cfg = cfg.copy() if isinstance(cfg, dict) else cfg
-                if isinstance(modified_cfg, dict):
+                # Only layer configs (those with a "method") take a backend; the "calibration"
+                # entry is validated by CalibrationConfig, which rejects unknown keys.
+                if isinstance(modified_cfg, dict) and "method" in modified_cfg:
                     modified_cfg["backend"] = backend
                 modified_sparse_cfg[pattern] = modified_cfg
             mtsa_cfg = {"sparse_cfg": modified_sparse_cfg}
