@@ -219,9 +219,16 @@ def _checkpoint_tensors(directory):
     return tensors
 
 
-def _compressed_experts_load_on_their_own_ranks(rank, size, dense_dir, packed_dir, export_dir):
+def _compressed_experts_load_on_their_own_ranks(
+    rank, size, dense_dir, packed_dir, export_dir, dense
+):
     device = torch.device(f"cuda:{rank}")
-    plan = DistributionPlan(size, ep_size=size)
+    plan = DistributionPlan(size, ep_size=size, dense=dense)
+    calibrates = Version(transformers.__version__) >= Version("5.16")
+    # Exported with the dense part replicated: packed experts unpack alike either way, and the
+    # export of a sharded dense part is no part of keeping them packed.
+    exports = calibrates and dense == "replicate"
+    amaxes = {}
     problems = []
     # The decompressor's hooks are process-wide, and the workers outlive the job.
     hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
@@ -275,9 +282,8 @@ def _compressed_experts_load_on_their_own_ranks(rank, size, dense_dir, packed_di
                     error = (sharded - reference).abs().max().item()
                     problems.append(f"keep={keep}: logits differ by {error:.3g}")
 
-                if Version(transformers.__version__) >= Version("5.16"):
-                    # Calibrated through the re-planted torch_a2a forwards, as hf_ptq does, and
-                    # exported by the no-gather writer.
+                if calibrates:
+                    # Calibrated through the re-planted torch_a2a forwards, as hf_ptq does.
                     forward_loop = distributed_forward_loop(
                         model,
                         [{"input_ids": input_ids}],
@@ -285,6 +291,11 @@ def _compressed_experts_load_on_their_own_ranks(rank, size, dense_dir, packed_di
                         ep_mesh=expert_parallel_mesh(model),
                     )
                     mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
+                    amaxes[keep] = {
+                        name: quantizer.amax.clone()
+                        for name, quantizer in _calibrated_quantizers(model).items()
+                    }
+                if exports:
                     export_hf_checkpoint(
                         model, dtype=torch.bfloat16, export_dir=f"{export_dir}/{keep}"
                     )
@@ -292,7 +303,14 @@ def _compressed_experts_load_on_their_own_ranks(rank, size, dense_dir, packed_di
                 del model
                 torch.cuda.empty_cache()
 
-            if rank == 0 and Version(transformers.__version__) >= Version("5.16"):
+            if amaxes and (amaxes[True].keys() != amaxes[False].keys() or not amaxes[True]):
+                problems.append(f"calibrated {len(amaxes[True])} and {len(amaxes[False])} scales")
+            problems += [
+                f"{name}: its scale differs, packed or not"
+                for name, amax in amaxes.get(False, {}).items()
+                if name in amaxes[True] and not torch.equal(amax, amaxes[True][name])
+            ]
+            if rank == 0 and exports:
                 packed, decompressed = (
                     _checkpoint_tensors(f"{export_dir}/{k}") for k in (True, False)
                 )
@@ -324,15 +342,18 @@ def _compressed_experts_load_on_their_own_ranks(rank, size, dense_dir, packed_di
     assert not found, "\n".join(found[:20])
 
 
+@pytest.mark.parametrize("dense", ["replicate", "fsdp"])
 @pytest.mark.parametrize("compression", sorted(_COMPRESSIONS))
 def test_compressed_experts_load_expert_parallel_each_rank_decompressing_its_own(
-    need_2_gpus, dist_workers, tmp_path, compression
+    need_2_gpus, dist_workers, tmp_path, compression, dense
 ):
     """A checkpoint whose experts are compressed (INT4, MXFP4) loads expert-parallel through the
     on-the-fly decompressor, decompressed as they load or kept packed: each rank holds exactly the
     dense model's weights for its own experts, every stored tensor is placed, and the sharded model
-    matches the dense one loaded whole. Kept packed, each rank holds its experts' stored values and
-    scales alone, and the model calibrates and exports as the decompressed one does, byte for byte.
+    matches the dense one loaded whole, with the dense part replicated or FSDP2-sharded. Kept
+    packed, each rank holds its experts' stored values and scales alone, and the model calibrates
+    to the decompressed one's scales exactly, and, its dense part replicated, exports the same
+    checkpoint byte for byte.
     Each rank's checks are gathered before any rank fails, so a regression fails instead of
     hanging."""
     pytest.importorskip(
@@ -351,6 +372,7 @@ def test_compressed_experts_load_expert_parallel_each_rank_decompressing_its_own
         str(dense_dir),
         str(packed_dir),
         str(tmp_path / "export"),
+        dense,
     )
 
 
