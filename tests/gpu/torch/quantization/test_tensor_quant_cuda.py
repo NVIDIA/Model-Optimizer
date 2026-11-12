@@ -479,3 +479,18 @@ class Testfp4:
         x = x * (torch.randint(0, 2, x.shape, device="cuda") * 2 - 1)
         output = triton_kernel.fp4_fake_quant_block(x, torch.tensor(global_amax, device="cuda"))
         assert torch.equal(output, x)
+
+    @pytest.mark.skipif(not triton_kernel.IS_AVAILABLE, reason="triton kernel is not available")
+    def test_fp8_scale_boundary_without_cuda_ext(self, monkeypatch):
+        """FP8 block scales match with and without the CUDA extension at an E4M3 rounding tie."""
+        from modelopt.torch.kernels.quantization.gemm import fp4_kernel
+
+        global_amax = torch.tensor(5.553690433502197, device="cuda")
+        block_amax = torch.tensor([2.6776721477508545], device="cuda")
+
+        ref = fp4_kernel.compute_fp4_scales(block_amax, global_amax)
+        with monkeypatch.context() as m:
+            m.setattr(tensor_quant, "get_cuda_ext_fp8", lambda raise_if_failed=False: None)
+            fallback = fp4_kernel.compute_fp4_scales(block_amax, global_amax)
+
+        assert torch.equal(ref, fallback)
