@@ -73,6 +73,7 @@ def convert_to_mixed_precision(
     init_max: float = DEFAULT_INIT_MAX,
     keep_io_types: bool = False,
     calibration_data: str | None = None,
+    calibrate_per_node: bool = False,
     custom_rule: NodeRuleBase | None = None,
     init_conversion_max_bytes: int | None = None,
     providers: list[str] | None = None,
@@ -95,6 +96,7 @@ def convert_to_mixed_precision(
         init_max: Maximum absolute value for initializers.
         keep_io_types: Whether to preserve input/output types.
         calibration_data: Path to input data file for reference runner.
+        calibrate_per_node: Whether to run calibration node by node to reduce peak memory.
         custom_rule: Optional custom rule for node classification (inherits from NodeRuleBase).
         init_conversion_max_bytes: Maximum size in bytes for initializer conversion. Larger initializers will be cast at
                                    runtime.
@@ -206,7 +208,7 @@ def convert_to_mixed_precision(
     ref_outputs_dict = None
     if (data_max is not None and data_max != np.inf) or graph_sanitizer.custom_ops:
         ref_runner = ReferenceRunner(model, providers, trt_plugins)
-        ref_outputs_dict = ref_runner.run(calibration_data)
+        ref_outputs_dict = ref_runner.run(calibration_data, calibrate_per_node=calibrate_per_node)
 
     # Run conversion
     low_precision_nodes, high_precision_nodes = node_classifier.run(ref_outputs_dict)

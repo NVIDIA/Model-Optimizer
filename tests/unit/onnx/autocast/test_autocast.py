@@ -199,6 +199,13 @@ def test_convert_simple_model(temp_model_path, temp_output_path, keep_io_types):
     onnx.checker.check_model(loaded_model)
 
 
+def test_convert_with_per_node_calibration(temp_model_path):
+    converted_model = convert_to_mixed_precision(onnx_path=temp_model_path, calibrate_per_node=True)
+
+    assert isinstance(converted_model, onnx.ModelProto)
+    onnx.checker.check_model(converted_model)
+
+
 def test_convert_external_data_sanitizes_once_and_materializes_initializers(
     tmp_path, simple_model, monkeypatch
 ):
@@ -400,6 +407,16 @@ def test_opset_parser_argument():
     # Test parsing without opset (should be None)
     args = parser.parse_args(["--onnx_path", "test.onnx"])
     assert args.opset is None
+
+
+def test_calibrate_per_node_parser_argument():
+    parser = get_parser()
+
+    args = parser.parse_args(["--onnx_path", "test.onnx", "--calibrate_per_node"])
+    assert args.calibrate_per_node
+
+    args = parser.parse_args(["--onnx_path", "test.onnx"])
+    assert not args.calibrate_per_node
 
 
 @pytest.fixture
