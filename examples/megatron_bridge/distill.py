@@ -33,6 +33,7 @@ from megatron.bridge.models.distillation_provider import convert_to_distillation
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
+from megatron.bridge.training import gpt_step
 from megatron.bridge.training.callbacks import Callback
 from megatron.bridge.training.config import (
     CheckpointConfig,
@@ -83,7 +84,7 @@ from mlflow_utils import (
     record_checkpoint_provenance,
     resolve_mlflow_args,
 )
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.quantization as mtq
@@ -649,13 +650,21 @@ def _load_batch_on_every_pp_stage() -> None:
     otherwise fail on ``position_ids=None``. Later stages load only these two fields, not the
     full batch.
     """
-    from megatron.bridge.training import gpt_step
-
+    if not hasattr(gpt_step, "_middle_pp_stage_needs_batch") or (
+        "include_full_batch_fields"
+        not in inspect.signature(gpt_step.get_batch_from_iterator).parameters
+    ):
+        raise ValueError(
+            "Pipeline-parallel distillation of an mRoPE model needs a newer Megatron-Bridge; "
+            "see the README."
+        )
     get_batch_from_iterator = gpt_step.get_batch_from_iterator
 
     def _get_batch_from_iterator(*args, **kwargs):
-        kwargs["is_first_pp_stage"] = True
-        kwargs["include_full_batch_fields"] = False
+        # The first stage already loads ``tokens`` and ``position_ids``; leave its call unchanged.
+        if not kwargs.get("is_first_pp_stage"):
+            kwargs["is_first_pp_stage"] = True
+            kwargs["include_full_batch_fields"] = False
         return get_batch_from_iterator(*args, **kwargs)
 
     gpt_step._middle_pp_stage_needs_batch = lambda cfg: True
@@ -815,17 +824,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             "VLM detected: distilling model.language_model only (vision tower / projector untouched). "
             "To export megatron non-quantized checkpoint, use export_distilled_megatron_to_hf.py"
         )
-    # HF configs of mRoPE models (e.g. Qwen-VL) carry ``mrope_section`` in their rope parameters,
-    # under ``text_config`` or at the top level (e.g. ERNIE-VL).
-    hf_config = AutoConfig.from_pretrained(
-        args.student_local_checkpoint_path, trust_remote_code=args.trust_remote_code
-    )
-    uses_mrope = any(
-        "mrope_section" in (getattr(config, key, None) or {})
-        for config in (getattr(hf_config, "text_config", None), hf_config)
-        for key in ("rope_parameters", "rope_scaling")
-    )
-    if args.pp_size > 1 and uses_mrope:
+    if args.pp_size > 1 and getattr(student_provider, "position_embedding_type", None) == "mrope":
         _load_batch_on_every_pp_stage()
     distill_provider = convert_to_distillation_provider(
         student_provider,
