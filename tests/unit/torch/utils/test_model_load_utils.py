@@ -4640,13 +4640,21 @@ def test_a_layer_holding_only_experts_is_left_unwrapped(fsdp_mesh):
     assert not isinstance(bare, FSDPModule)
 
 
-def test_a_dense_part_left_with_nothing_to_shard_is_refused(fsdp_mesh):
-    """Experts outweighing the dense part in another dtype put every dense param off the model's
-    dominant dtype, out of the shard groups: no layer is left to shard, and the load would hold the
-    whole dense part on every rank."""
+def test_experts_outweighing_the_dense_part_in_another_dtype_leave_it_sharded(fsdp_mesh):
+    """The routed experts, out of the shard groups, do not decide the dense part's dtype: kept
+    packed, they are integers that can outnumber it, as MXFP4's uint8 do."""
     model = _MoeLM()
     for experts in model.experts():
         experts.to(torch.bfloat16)
+
+    assert _fsdp2_shard_dense(model, fsdp_mesh, model.experts()) == 2
+
+
+def test_a_dense_part_left_with_nothing_to_shard_is_refused(fsdp_mesh):
+    """With no layer left to shard, the load would hold the whole dense part on every rank."""
+    model = _MoeLM()
+    for layer in model.model.layers:
+        layer.self_attn = layer.mlp.gate = layer.input_layernorm = nn.Identity()
 
     with pytest.raises(RuntimeError, match="no dense parameter to shard"):
         _fsdp2_shard_dense(model, fsdp_mesh, model.experts())
