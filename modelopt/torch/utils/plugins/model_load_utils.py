@@ -499,6 +499,13 @@ def _read_local_shards(
             model.named_buffers(remove_duplicate=False),
         )
     )
+    # A buffer the model does not save (a rotary inv_freq) keeps the value the model computed, as
+    # from_pretrained leaves it, even where a checkpoint stores one under its name.
+    computed = {
+        f"{prefix}.{name}" if prefix else name
+        for prefix, module in model.named_modules()
+        for name in module._non_persistent_buffers_set
+    }
     with contextlib.ExitStack() as stack:
         opened: dict[str, Any] = {}
 
@@ -518,6 +525,8 @@ def _read_local_shards(
         for name, keys in sorted(
             sources.items(), key=lambda item: (tensor_files[item[1][0]], dot_natural_key(item[0]))
         ):
+            if name in computed:
+                continue
             tensor = tensors[name]
             local, start = _local_rows(tensor)
             if not local.numel():

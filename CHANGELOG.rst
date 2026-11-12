@@ -64,7 +64,7 @@ Changelog
 - Launcher pipelines can prepare declared assets through an optional provider before submission, mount resolved inputs read-only, and record their versions in experiment metadata.
 - The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
 - ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now loads a model distributed under ``torchrun``, with an MoE's routed experts sharded across the ranks, FSDP2-sharded or whole on every rank, by the plan ``resolve_distribution_plan`` decides or one passed as its new ``distribution`` argument.
-- The FSDP2 load (``parallel_load_and_prepare_fsdp2``, used by ``load_pretrained`` and ``hf_ptq.py --use_fsdp2``) now has each rank read only its own shards from the checkpoint, its rows of each weight and its experts of a fused-expert weight, instead of reading whole layers and broadcasting them to every rank. No rank holds a whole layer while loading, and the weights no longer cross the network.
+- The FSDP2 load (``parallel_load_and_prepare_fsdp2``, used by ``load_pretrained`` and ``hf_ptq.py --use_fsdp2``) now has each rank read only its own shards from the checkpoint, its rows of each weight and its experts of a fused-expert weight, instead of reading whole layers and broadcasting them to every rank. No rank holds a whole layer while loading, and no weights are sent between ranks.
 
 **Backward Breaking Changes**
 

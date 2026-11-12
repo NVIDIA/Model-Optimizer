@@ -427,6 +427,30 @@ def test_tied_lm_head_without_stored_tie_map_loads(tmp_path, gloo_group, monkeyp
     assert torch.equal(model.lm_head.weight.full_tensor(), ref.model.embed_tokens.weight)
 
 
+def test_a_stored_non_persistent_buffer_keeps_the_computed_value(tmp_path, gloo_group):
+    """A checkpoint storing a buffer the model does not save, a rotary inv_freq, does not replace
+    the value the model computed, as from_pretrained does not."""
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+    )
+    config.architectures = ["LlamaForCausalLM"]
+    config.dtype = torch.float32
+    ref = LlamaForCausalLM(config)
+    state = {k: v.clone() for k, v in ref.state_dict().items()}
+    state["model.rotary_emb.inv_freq"] = torch.full_like(ref.model.rotary_emb.inv_freq, 7.0)
+    save_file(state, str(tmp_path / "model.safetensors"), metadata={"format": "pt"})
+    (tmp_path / "config.json").write_text(json.dumps(config.to_dict()))
+
+    model = _fsdp2_load(tmp_path)
+
+    assert torch.equal(model.model.rotary_emb.inv_freq, ref.model.rotary_emb.inv_freq)
+
+
 def test_keep_in_fp32_tensors_load_in_fp32(tmp_path, gloo_group, monkeypatch):
     """A tensor the model keeps in fp32 loads as from_pretrained loads it, not rounded to bf16."""
     monkeypatch.setattr(LlamaPreTrainedModel, "_keep_in_fp32_modules_strict", ["input_layernorm"])
@@ -484,6 +508,9 @@ class _CountedReads:
         class _Rows:
             def __getitem__(self, rows):
                 return counted(part[rows])
+
+            def get_shape(self):
+                return part.get_shape()
 
         return _Rows()
 
