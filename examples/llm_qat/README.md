@@ -311,6 +311,8 @@ The cached dataset is stored under `.dataset_cache/tokenized/` by default (confi
 
 See [Qwen3-8B evaluation results](evaluation/README.md) for the teacher, PTQ, and PTQ → QAD comparison.
 
+An experimental [NeMo Gym evaluation](evaluation_nemogym/) is also available for MMLU-Pro. It is intended to replace the NEL evaluation workflow in the future.
+
 ## Native Fake-Quantized Evaluation
 
 ModelOpt quantized models can be saved and restored without exporting to a deployment platform. This is useful for fast evaluation with fake quantization using standard LLM benchmarks (MMLU, WikiText, etc.). See [HuggingFace checkpointing](https://nvidia.github.io/Model-Optimizer/guides/2_save_load.html#modelopt-save-restore-using-huggingface-checkpointing-apis) for details.
