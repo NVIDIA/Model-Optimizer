@@ -1441,8 +1441,9 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
 def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) -> nn.Module:
     """Initialize floating latent weights from their configured fake-quantized values.
 
-    Call once after calibration/restoration, before distributed wrapping and optimizer
-    construction. Quantizers, calibration buffers, parameter objects and dtypes are retained.
+    Call once in the PTQ pipeline after calibration/restoration and before saving an
+    uncompressed checkpoint for QAD. Quantizers, calibration buffers, parameter objects
+    and dtypes are retained.
     Pre-scales and rotations are inverted before storing values, so subsequent forwards
     continue to apply those transforms exactly once. This is initialization, not folding:
     quantizers remain enabled. Uses already-restored calibration state without rerunning
@@ -1458,7 +1459,7 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
     if not is_quantized(model):
         raise ValueError("Weight initialization requires a calibrated fake-quantized model.")
     if has_quant_lora(model):
-        raise ValueError("Weight initialization requires an adapter-free student.")
+        raise ValueError("Weight initialization requires an adapter-free model.")
     if any(isinstance(module, FSDPModule) for module in model.modules()):
         raise ValueError("Initialize quantized weights before FSDP wrapping.")
     # Deferred: GGML backend registration imports the quantization API.

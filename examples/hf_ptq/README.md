@@ -932,3 +932,21 @@ There are many quantization schemes supported in the example scripts:
 1. The W4A8 AWQ is an extension of the INT4 AWQ quantization that it also uses FP8 for activation for more speed up and acceleration.
 
 1. The [NVFP4](https://blogs.nvidia.com/blog/generative-ai-studio-ces-geforce-rtx-50-series/) is one of the new FP4 formats supported by NVIDIA Blackwell GPU and demonstrates good accuracy compared with other 4-bit alternatives. NVFP4 can be applied to both model weights as well as activations, providing the potential for both a significant increase in math throughput and reductions in memory footprint and memory bandwidth usage compared to the FP8 data format on Blackwell. For higher accuracy with NVFP4 PTQ, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only`. `nvfp4_mlp_only` restricts NVFP4 quantization to MLP (and MoE) layers only, leaving attention layers in higher precision. `nvfp4_experts_only` quantizes only expert layers (`*mlp.experts*` and `*block_sparse_moe*`), ideal for MoE models. `nvfp4_omlp_only` extends MLP-only by also quantizing the `o_proj` layer, providing a middle ground between full NVFP4 and MLP-only quantization.
+
+### Floating QDQ weights for QAD
+
+Use `hf_ptq.py --output_qdq_weight` to save an uncompressed HF checkpoint with QDQ weights
+and ModelOpt state, instead of a packed deployment checkpoint:
+
+```bash
+python hf_ptq.py --pyt_ckpt_path Qwen/Qwen3-8B \
+    --recipe general/ptq/fp8_default-kv_fp8 \
+    --output_qdq_weight --export_path /output/qwen3_qdq
+```
+
+Load the output with ModelOpt Hugging Face checkpointing enabled for QAD. Initialization is
+performed during PTQ, not at training startup or resume. GPTQ keeps its saved super-block
+scales and FP32 importance; unpinned GGML PTQ retains the initial payload until weights change.
+This option requires materialized, unsharded, adapter-free fake-quant weights; FSDP2,
+expert-parallel HF export, disk offload, low-memory loading and layerwise export are unsupported.
+The normal packed deployment export is unchanged when the flag is absent.
