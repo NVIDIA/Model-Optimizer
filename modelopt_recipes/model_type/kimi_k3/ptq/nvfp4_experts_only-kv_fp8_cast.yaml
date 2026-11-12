@@ -22,8 +22,9 @@
 # modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
+  experts_nvfp4: configs/ptq/units/experts_nvfp4
+  block_sparse_moe_nvfp4: configs/ptq/units/block_sparse_moe_nvfp4
   disabled_quantizers: model_type/kimi_k3/ptq/disabled_quantizers
-  nvfp4: configs/numerics/nvfp4
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
@@ -41,17 +42,7 @@ quantize:
     layerwise: {enable: false}
   quant_cfg:
     - $import: base_disable_all
-    - quantizer_name: '*.experts.*weight_quantizer'
-      cfg:
-        $import: nvfp4
-    - quantizer_name: '*.experts.*input_quantizer'
-      cfg:
-        $import: nvfp4
-    - quantizer_name: '*block_sparse_moe*weight_quantizer'
-      cfg:
-        $import: nvfp4
-    - quantizer_name: '*block_sparse_moe*input_quantizer'
-      cfg:
-        $import: nvfp4
+    - $import: experts_nvfp4
+    - $import: block_sparse_moe_nvfp4
     - $import: kv_fp8_cast
     - $import: disabled_quantizers
