@@ -17,10 +17,9 @@ import re
 import tomllib
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[5]
+_ROOT = Path(__file__).resolve().parents[3]
 _CODEX_AGENTS = _ROOT / ".codex" / "agents"
-_CLAUDE_AGENTS = _ROOT / "plugins" / "modelopt" / "agents"
-_CLAUDE_LINKS = _ROOT / ".claude" / "agents"
+_CLAUDE_AGENTS = _ROOT / ".claude" / "agents"
 _REFERENCED_DOC = re.compile(r"`((?:[\w-]+/SKILL|common/[\w-]+|references/[\w-]+)\.md)`")
 
 
@@ -49,7 +48,7 @@ def _assert_references_exist(instructions: str, source: Path) -> None:
             if reference.name == "SKILL.md":
                 skill_dir = reference.parent
 
-        for skills_root in (_ROOT / ".agents" / "skills", _ROOT / "plugins/modelopt/skills"):
+        for skills_root in (_ROOT / "skills", _ROOT / ".agents/skills"):
             target = skills_root / relative_target
             assert target.is_file(), f"{source} references missing file {target.relative_to(_ROOT)}"
 
@@ -71,8 +70,7 @@ def test_agent_definitions_are_synchronized():
         assert path.stem == name, f"{path} does not match agent name {name}"
         claude[name] = (path, instructions)
 
-    links = {path.stem: path for path in _CLAUDE_LINKS.glob("*.md")}
-    assert codex.keys() == claude.keys() == links.keys()
+    assert codex.keys() == claude.keys()
 
     for name, (codex_path, codex_instructions) in codex.items():
         claude_path, claude_instructions = claude[name]
@@ -81,6 +79,4 @@ def test_agent_definitions_are_synchronized():
         )
         _assert_references_exist(codex_instructions, codex_path)
 
-        link = links[name]
-        assert link.is_symlink(), f"{link} must be a symlink"
-        assert link.resolve() == claude_path.resolve(), f"{link} must target {claude_path}"
+        assert not claude_path.is_symlink(), f"{claude_path} must be canonical content"
