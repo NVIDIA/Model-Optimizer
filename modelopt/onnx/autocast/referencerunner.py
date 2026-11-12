@@ -186,7 +186,7 @@ class ReferenceRunner:
 
         return data_loader
 
-    def _get_ort_runner(self, model):
+    def _get_ort_runner(self, model, disable_cpu_mem_arena: bool = False):
         from polygraphy.backend.onnx import BytesFromOnnx
         from polygraphy.backend.onnxrt import OnnxrtRunner, SessionFromOnnx
 
@@ -204,12 +204,37 @@ class ReferenceRunner:
                 tmp_file_path = os.path.join(model_temp_dir.name, "model.onnx")
                 onnx_utils.save_onnx(modified_model, tmp_file_path, save_as_external_data=True)
                 logger.debug(f"Model with all outputs saved to {tmp_file_path}")
-                build_onnxrt_session = SessionFromOnnx(tmp_file_path, providers=self.providers)
+                model_bytes_or_path = tmp_file_path
             else:
                 # For models without external data, use the original BytesFromOnnx approach (no tmp files)
                 logger.debug("Model has no external data, using BytesFromOnnx approach")
-                serialize_onnx = BytesFromOnnx(modified_model)
-                build_onnxrt_session = SessionFromOnnx(serialize_onnx, providers=self.providers)
+                model_bytes_or_path = BytesFromOnnx(modified_model)
+
+            if disable_cpu_mem_arena:
+                import onnxruntime as ort
+
+                def build_onnxrt_session():
+                    model = (
+                        model_bytes_or_path()
+                        if callable(model_bytes_or_path)
+                        else model_bytes_or_path
+                    )
+                    options = ort.SessionOptions()
+                    options.enable_cpu_mem_arena = False
+                    try:
+                        process_cpu_count = len(os.sched_getaffinity(0))
+                    except AttributeError:
+                        process_cpu_count = 1
+                    options.intra_op_num_threads = process_cpu_count
+                    options.inter_op_num_threads = process_cpu_count
+                    return ort.InferenceSession(
+                        model, providers=self.providers, sess_options=options
+                    )
+
+            else:
+                build_onnxrt_session = SessionFromOnnx(
+                    model_bytes_or_path, providers=self.providers
+                )
             runners = [OnnxrtRunner(build_onnxrt_session)]
         except Exception:
             if model_temp_dir is not None:
@@ -425,7 +450,9 @@ class ReferenceRunner:
                 single_node_model = self._make_single_node_model(
                     node, dependency_names, value_info_map, initializer_map
                 )
-                runners, model_temp_dir = self._get_ort_runner(lambda: single_node_model)
+                runners, model_temp_dir = self._get_ort_runner(
+                    lambda: single_node_model, disable_cpu_mem_arena=True
+                )
                 try:
                     with runners[0] as runner:
                         output_dict = runner.infer(feed_dict)
