@@ -6,11 +6,11 @@
 #
 # Run via the isolated nel-next venv:
 #   "$SKILL_DIR/scripts/nel-next.sh" --setup-only
-#   set -a && source .env && set +a    # HF_TOKEN, AWS_*, NEL_NEXT_EVAL_IMAGE, HARBOR_*_ECR_REPOSITORY (from modelopttools:eval-config)
+#   set -a && source .env && set +a    # HF_TOKEN, AWS_*, NEL_NEXT_EVAL_IMAGE, HARBOR_*_ECR_REPOSITORY (user-provided; optional modelopttools:eval-config integration)
 #   "$SKILL_DIR/scripts/nel-next.sh" eval run "$SKILL_DIR/recipes/examples/example_eval_next.yaml" --dry-run
 #   ... --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2   # canary
 #   ... --submit                                                                                             # full
-# Internal harbor infra (eval_image + ECR) comes from .env via ${VAR}; all blocks
+# Harbor infrastructure (eval_image + ECR) comes from .env via ${VAR}; all blocks
 # validate against the pinned nel-next build (extra="forbid"). `???` = fill.
 
 services:
@@ -108,13 +108,14 @@ cluster:
 
 output:
   dir: ???                           # <lustre>/eval-output/<model>-<benchmark>
-  # MLflow export config (experiment/tags/description). SLURM does NOT auto-export —
+  # Optional MLflow export: remove export and export_config if no server is configured.
+  # SLURM does NOT auto-export —
   # push after the run finishes: `nel-next.sh mlflow-push -r <run_id> -c <this>.yaml`
   # (reads this block, stages the bundle off the cluster, exports with traces off).
   export: [mlflow]
   export_config:
     mlflow:
-      tracking_uri: ${MLFLOW_TRACKING_URI}   # from modelopttools:eval-config (canonical mlflow.frontier-evals host; NOT the -nemo-evaluator alias)
+      tracking_uri: ${MLFLOW_TRACKING_URI}   # your explicit tracking URI; remove export/export_config when unused
       experiment_name: ???           # <user>/<model>-<benchmark> (hardcode; ${USER}=root in-container)
       log_config_params: true
       copy_logs: true
