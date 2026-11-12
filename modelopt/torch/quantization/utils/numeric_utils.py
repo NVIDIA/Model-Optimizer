@@ -62,6 +62,16 @@ def _e2m1_magnitude_table(device: torch.device, dtype: torch.dtype = torch.float
 
 # Rows of 32 values dequantize_mxfp4 decodes at once, which bounds its float32 temporaries.
 _DEQUANT_ROWS = 1 << 18
+_E2M1_PAIRS_CACHE: dict = {}
+
+
+def _e2m1_pairs(device: torch.device) -> torch.Tensor:
+    """The two E2M1 values each byte packs, low nibble first: float32 ``(256, 2)`` on ``device``."""
+    pairs = _E2M1_PAIRS_CACHE.get(device)
+    if pairs is None:
+        byte = torch.arange(256, dtype=torch.uint8, device=device)
+        pairs = _E2M1_PAIRS_CACHE[device] = unpack_e2m1(byte.unsqueeze(-1))
+    return pairs
 
 
 def dequantize_mxfp4(
@@ -85,13 +95,17 @@ def dequantize_mxfp4(
             f"{tuple(e8m0_scales.shape)} {e8m0_scales.dtype}: expected one byte per two values "
             "and one per 32."
         )
-    packed = blocks.reshape(rows, 16)
+    packed = blocks.reshape(rows, 16).view(torch.uint8)
     scales = e8m0_scales.reshape(rows).view(torch.uint8)
+    pairs = _e2m1_pairs(blocks.device)
     out = torch.empty(rows, 32, dtype=dtype, device=blocks.device)
     for start in range(0, rows, _DEQUANT_ROWS):
-        values = unpack_e2m1(packed[start : start + _DEQUANT_ROWS])
-        exponent = scales[start : start + _DEQUANT_ROWS].int() - E8M0_BIAS
-        out[start : start + _DEQUANT_ROWS] = torch.ldexp(values, exponent.unsqueeze(-1))
+        chunk = slice(start, start + _DEQUANT_ROWS)
+        # Both values of each byte by one lookup. Scaled in float32 and cast in the copy: ldexp
+        # into a narrower out= scales otherwise, overflowing at the largest scale.
+        values = pairs.index_select(0, packed[chunk].flatten().int()).reshape(-1, 32)
+        exponent = scales[chunk].int() - E8M0_BIAS
+        out[chunk] = torch.ldexp(values, exponent.unsqueeze(-1))
     return out.reshape(*e8m0_scales.shape[:-1], 32 * e8m0_scales.shape[-1])
 
 
