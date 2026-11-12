@@ -36,8 +36,6 @@ from _test_utils.torch.transformers_models import (
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, GenerationMixin, LlamaConfig
 
-import modelopt.torch.quantization as mtq
-from modelopt.recipe import load_recipe
 from modelopt.torch.models import PTQSpec
 from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
@@ -264,25 +262,6 @@ def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at
 def test_build_quant_cfg_sets_moe_calib_experts_ratio_on_every_algorithm(algorithm, expected):
     quant_cfg = example_utils.build_quant_cfg({"quant_cfg": [], "algorithm": algorithm}, None, 0.5)
     assert quant_cfg["algorithm"] == expected
-
-
-@pytest.mark.parametrize("model_type", ["kimi_k3", "llama"])
-def test_a_general_recipe_leaves_what_the_serving_engines_build_unquantized(model_type):
-    """Kimi-K3's latent MoE projections sit in the block the experts-only recipe quantizes."""
-    moe = torch.nn.Module()
-    moe.experts = torch.nn.ModuleList([torch.nn.Linear(16, 16)])
-    moe.routed_expert_down_proj = torch.nn.Linear(16, 16)
-    model = torch.nn.Module()
-    model.layers = torch.nn.ModuleList([torch.nn.Module()])
-    model.layers[0].block_sparse_moe = moe
-    model.config = SimpleNamespace(model_type=model_type)
-    recipe = load_recipe("general/ptq/nvfp4_experts_only-kv_fp8_cast").quantize.model_dump()
-    args = SimpleNamespace(layerwise_export=False, cast_mxfp4_to_nvfp4=False)
-
-    mtq.quantize(model, example_utils._prepare_quant_cfg(args, recipe, model), forward_loop=None)
-
-    assert moe.experts[0].weight_quantizer.is_enabled
-    assert moe.routed_expert_down_proj.weight_quantizer.is_enabled is (model_type != "kimi_k3")
 
 
 @pytest.mark.parametrize("wrapped", [False, True], ids=["the-model", "a-model-around-it"])

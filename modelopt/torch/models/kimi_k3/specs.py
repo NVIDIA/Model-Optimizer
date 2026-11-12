@@ -35,16 +35,6 @@ register(
     ModelSpec(
         model_type=MODEL_TYPE,
         modeling_source="remote_code",
-        # vLLM builds these unquantized (vllm/models/kimi_k3/nvidia); the two latent MoE projections
-        # only up to the model card's image, as main quantizes them since vllm-project/vllm#57430.
-        serving_unquantized=(
-            "*.block_sparse_moe.routed_expert_down_proj",
-            "*.block_sparse_moe.routed_expert_up_proj",
-            "*.self_attention_res_proj",
-            "*.mlp_res_proj",
-            "*.output_attn_res_proj",
-            "*.self_attn.[qkv]_conv1d",
-        ),
         ep_spec=EPSpec(
             prepare=prepare,
             prepare_refusal=prepare_refusal,
