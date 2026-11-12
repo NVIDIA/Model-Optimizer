@@ -37,6 +37,7 @@ AutoCast can also be used programmatically through its Python API:
       init_max=65504,                       # threshold for initializers
       keep_io_types=False,                  # whether to preserve input/output types
       calibration_data=None,                # optional path to input data file
+      calibrate_per_node=False,             # run calibration node by node to reduce peak memory
       init_conversion_max_bytes=None,       # maximum size in bytes for initializer conversion
       providers=["cpu"],                    # list of Execution Providers for ONNX-Runtime backend
       trt_plugins=[],                       # list of TensorRT plugin library paths in .so format
@@ -134,6 +135,14 @@ Best Practices
    - Use ``--init_conversion_max_bytes`` to limit the size of initializers that will be converted at compile time.
    - Initializers larger than ``--init_conversion_max_bytes`` will be converted at runtime (using a cast operation).
 
+#. **Large Calibration Activations**
+
+   - Use ``--calibrate_per_node`` when retaining every intermediate activation during calibration exceeds available
+     memory.
+   - Per-node calibration executes and releases one node at a time while keeping only tensors still needed by
+     downstream nodes. It produces the same tensor range statistics but takes longer because it creates a separate
+     ONNX Runtime session for each node.
+
 #. **TensorRT custom op support**
 
    - Refer to :ref:`TensorRT Execution Provider requirements <ort_ep_requirements>`.
@@ -193,6 +202,12 @@ Bypass data magnitude check and keep specific node names in FP32:
 .. code-block:: bash
 
    python -m modelopt.onnx.autocast --onnx_path model.onnx --data_max inf --nodes_to_exclude ".*attn.*"
+
+Reduce peak calibration memory for a large model:
+
+.. code-block:: bash
+
+   python -m modelopt.onnx.autocast --onnx_path model.onnx --calibrate_per_node
 
 Limit depth of reduction for precision-sensitive operations:
 
