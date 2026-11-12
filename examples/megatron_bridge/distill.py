@@ -55,7 +55,9 @@ from megatron.bridge.training.post_training.distillation import ModelOptDistillC
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 from trainable_params import (
     configure_trainable_parameters,
+    freeze_router_bias_updates,
     initialize_student_weights,
+    keep_dense_optimizer_non_empty,
     should_initialize_student_weights,
 )
 
@@ -811,6 +813,12 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                     student = student.language_model
                 if args.trainable_params:
                     configure_trainable_parameters(student, args.trainable_params)
+                    held = freeze_router_bias_updates(student)
+                    kept = keep_dense_optimizer_non_empty(student)
+                    print_rank_0(
+                        f"--trainable_params: {held} router expert_bias updates held fixed"
+                        + (f"; kept {kept} trainable so checkpoint saving works." if kept else ".")
+                    )
                 initialize_student_weights(student, initialize_weights, checkpoint_dir)
             return model_chunks
 
