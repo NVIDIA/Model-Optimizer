@@ -118,9 +118,10 @@ def test_run_cleans_model_tempdir_when_input_loading_fails(monkeypatch, referenc
     model_temp_dir.cleanup.assert_called_once_with()
 
 
-def test_run_with_random_inputs(reference_runner):
+@pytest.mark.parametrize("calibrate_per_node", [False, True])
+def test_run_with_random_inputs(reference_runner, calibrate_per_node):
     """Test running inference with random inputs."""
-    results = reference_runner.run()
+    results = reference_runner.run(calibrate_per_node=calibrate_per_node)
     assert isinstance(results, OrderedDict)
     assert "Y1" in results
     assert "Y2" in results
@@ -189,6 +190,23 @@ def test_run_with_dict_inputs(reference_runner):
     assert "Y2" in results
     assert results["Y1"].shape == (1, 3)
     assert results["Y2"].shape == (1, 3)
+
+
+def test_per_node_run_matches_all_outputs(reference_runner):
+    inputs = {
+        "X1": np.array([[1.0, -2.0, 3.0]], dtype=np.float32),
+        "X2": np.array([[4.0, 5.0, -6.0]], dtype=np.float32),
+    }
+    expected = reference_runner.run(inputs)
+    actual = reference_runner.run(inputs, calibrate_per_node=True)
+
+    assert actual.keys() == expected.keys()
+    for name, expected_value in expected.items():
+        assert isinstance(actual[name], TensorStats)
+        np.testing.assert_allclose(actual[name].absmax, np.max(np.abs(expected_value)))
+        np.testing.assert_allclose(actual[name].min_val, np.min(expected_value))
+        np.testing.assert_allclose(actual[name].max_val, np.max(expected_value))
+        assert actual[name].shape == expected_value.shape
 
 
 def test_invalid_input_format(reference_runner):
@@ -304,7 +322,8 @@ def test_tensor_stats():
     assert abs(stats) == 10.5  # Test __abs__ method
 
 
-def test_run_with_multi_batch_npz_directory(reference_runner):
+@pytest.mark.parametrize("calibrate_per_node", [False, True])
+def test_run_with_multi_batch_npz_directory(reference_runner, calibrate_per_node):
     """Test running inference with directory containing multiple NPZ files."""
     # Create temporary directory with multiple NPZ files
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -330,7 +349,7 @@ def test_run_with_multi_batch_npz_directory(reference_runner):
         np.savez(os.path.join(temp_dir, "batch_003.npz"), **inputs3)
 
         # Run with directory path
-        results = reference_runner.run(temp_dir)
+        results = reference_runner.run(temp_dir, calibrate_per_node=calibrate_per_node)
 
         # Should return TensorStats objects for multi-batch
         assert isinstance(results, OrderedDict)
