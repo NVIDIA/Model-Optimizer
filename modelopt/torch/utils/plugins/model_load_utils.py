@@ -45,9 +45,9 @@ if TYPE_CHECKING:
 from safetensors.torch import safe_open
 from torch.distributed import device_mesh
 from torch.distributed.checkpoint import HuggingFaceStorageReader
-from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.fsdp import FSDPModule, fully_shard
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -61,6 +61,9 @@ from transformers import (
 )
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import (
+    Concatenate,
+    MergeModulelist,
+    Transpose,
     WeightConverter,
     build_glob_alternation,
     dot_natural_key,
@@ -77,7 +80,6 @@ from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ParallelState,
     barrier,
-    broadcast_state_dict,
     is_initialized,
     set_distribution_plan,
 )
@@ -108,7 +110,6 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     ensure_local_checkpoint,
     indexed_weight_map,
     off_index_safetensors_files,
-    read_safetensors_subset,
 )
 
 try:  # where newer transformers keeps it; older releases, under integrations (now a partial shim)
@@ -367,109 +368,173 @@ def build_meta_causal_lm(
     return model
 
 
-def _layers_for_rank(n_layers: int, world_size: int, r: int) -> list[int]:
-    return [i for i in range(n_layers) if i % world_size == r]
+def _group_sources_by_target(
+    ckpt_keys: "Iterable[str]", plans: list[dict], model_param_names: set[str]
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Map each checkpoint key to the parameter or buffer it loads into: ``(sources, unplaced)``.
 
-
-def _read_and_convert(
-    resolved_path: str, weight_map: dict, keyset: set[str], plan: dict | None
-) -> dict:
-    raw = read_safetensors_subset(resolved_path, weight_map, lambda k: k in keyset)
-    return _convert_keys(plan, raw) if plan else raw
-
-
-# One decoder layer's converted weights (param-name suffix -> tensor); the outer dict is keyed
-# by decoder-layer index.
-LayerStateDict = dict[str, torch.Tensor]
-OwnedLayerStateDicts = dict[int, LayerStateDict]
-
-
-def _read_owned_layers(
-    resolved_path: str,
-    weight_map: dict,
-    layer_sources: dict,
-    owned_layer_indices: list[int],
-    plan: dict | None,
-) -> OwnedLayerStateDicts:
-    """Read + convert this rank's owned decoder layers from disk (ranks read in parallel)."""
-    return {
-        layer_idx: _read_and_convert(resolved_path, weight_map, set(layer_sources[layer_idx]), plan)
-        for layer_idx in owned_layer_indices
-    }
-
-
-def _broadcast_load_group(
-    layer_indices: list[int],
-    source_rank: int,
-    current_rank: int,
-    owned_layer_state_dicts: OwnedLayerStateDicts,
-    decoder_layers: list[nn.Module],
-    layer_prefixes: list[str],
-    device: torch.device,
-    cpu_offload: bool,
-) -> None:
-    """Broadcast ``layer_indices`` from ``source_rank`` to all ranks and reshard into FSDP2 shards.
-
-    The owner assembles the group's full tensors; every rank receives them, reshards its local slice,
-    then frees the full copy (capping the transient GPU peak). The owner drops its read copy after.
+    ``sources[name]`` holds the keys ``name`` is read from, several for a fused weight, and
+    ``unplaced`` NAMES the keys whose target isn't in the model -- weights the built model has no
+    home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the export
+    can copy them through: PTQ never touches them, but the exported checkpoint is still expected to
+    contain them.
     """
-    group_state_dict: dict | None = None
-    if current_rank == source_rank:
-        group_state_dict = {}
-        for layer_idx in layer_indices:
-            group_state_dict.update(owned_layer_state_dicts[layer_idx])
-    broadcasted_state_dict = broadcast_state_dict(group_state_dict, src=source_rank, device=device)
-    for layer_idx in layer_indices:
-        prefix = layer_prefixes[layer_idx]
-        layer_state_dict = {
-            k[len(prefix) :]: v for k, v in broadcasted_state_dict.items() if k.startswith(prefix)
-        }
-        if cpu_offload:
-            layer_state_dict = {k: v.cpu() for k, v in layer_state_dict.items()}
-        set_model_state_dict(
-            decoder_layers[layer_idx],
-            layer_state_dict,
-            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False),
-        )
-        del layer_state_dict
-    del broadcasted_state_dict
-    if current_rank == source_rank:
-        for layer_idx in layer_indices:
-            del owned_layer_state_dicts[layer_idx]
-
-
-def _group_sources_by_layer(
-    ckpt_keys: "Iterable[str]",
-    plans: list[dict],
-    model_param_names: set[str],
-    layer_prefixes: list[str],
-) -> tuple[dict[int, list[str]], list[str], list[str], set[str]]:
-    """Bucket checkpoint keys by the decoder layer their converted target lives in.
-
-    Returns ``(layer_sources, non_layer_sources, unplaced, targets)``: ``layer_sources[i]`` holds
-    the keys targeting decoder layer ``i``, ``non_layer_sources`` holds root (embed/lm_head/norm)
-    keys, and ``unplaced`` NAMES the keys whose target isn't in the model -- weights the built model
-    has no home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the
-    export can copy them through: PTQ never touches them, but the exported checkpoint is still
-    expected to contain them. ``targets`` holds the parameter names some key loads into.
-    """
-    layer_sources: dict[int, list[str]] = {i: [] for i in range(len(layer_prefixes))}
-    non_layer_sources: list[str] = []
+    sources: dict[str, list[str]] = defaultdict(list)
     unplaced: list[str] = []
-    targets: set[str] = set()
     for ckpt_key in ckpt_keys:
         target = _target_param(plans, ckpt_key, model_param_names)
         if target is None:
             unplaced.append(ckpt_key)
-            continue
-        targets.add(target)
-        for i, prefix in enumerate(layer_prefixes):
-            if target.startswith(prefix):
-                layer_sources[i].append(ckpt_key)
-                break
         else:
-            non_layer_sources.append(ckpt_key)
-    return layer_sources, non_layer_sources, unplaced, targets
+            sources[target].append(ckpt_key)
+    return dict(sources), unplaced
+
+
+def _local_rows(tensor: torch.Tensor) -> tuple[torch.Tensor, int]:
+    """This rank's data of ``tensor``, and the global index of its first dim-0 row.
+
+    An FSDP2 shard is a block of rows: a ``DTensor`` sharded on dim 0 alone, whose last blocks are
+    smaller, or empty, when its rows do not divide over the ranks. Any other tensor is held whole.
+    """
+    if not isinstance(tensor, DTensor):
+        return tensor.data, 0
+    if not all(isinstance(p, Replicate) or p == Shard(0) for p in tensor.placements):
+        raise NotImplementedError(
+            f"The FSDP2 load reads a block of rows, which a tensor laid out as {tensor.placements} "
+            "is not."
+        )
+    _, offset = compute_local_shape_and_global_offset(
+        tensor.shape, tensor.device_mesh, tensor.placements
+    )
+    return tensor.to_local(), offset[0] if offset else 0
+
+
+def _dim0_reads(converter: WeightConverter) -> str | None:
+    """How a rank reads only its dim-0 shard of the weight ``converter`` builds, if it can.
+
+    ``"experts"``: the first op stacks one source tensor per expert along dim 0
+    (``MergeModulelist(0)``), so the shard's experts build the shard. ``"concat"``: the first op
+    concatenates the sources along dim 0 (``Concatenate(0)``), so the shard's rows are rows of the
+    sources they fall in. ``"rows"``: no op moves dim 0, so the shard's rows of each source build
+    it. In each, no later op may move dim 0. ``None``: an op moves dim 0 (a split, a transpose of
+    it), or counts a dim from the end, which can be dim 0, so the weight is built whole and the
+    shard cut from it.
+    """
+    ops = list(converter.operations)
+    how = "rows"
+    if ops and isinstance(ops[0], (MergeModulelist, Concatenate)) and ops[0].dim == 0:
+        how, ops = ("experts" if isinstance(ops[0], MergeModulelist) else "concat"), ops[1:]
+    for op in ops:
+        if isinstance(op, Concatenate) and op.dim > 0:
+            continue
+        # check_dims decides by the source's whole shape, which a block of rows does not have.
+        if isinstance(op, Transpose) and min(op.dim0, op.dim1) > 0 and not op.check_dims:
+            continue
+        return None
+    return how
+
+
+def _shard_sources(
+    plan: dict | None, keys: list[str], rows: slice | None, tensor: torch.Tensor, shape
+) -> tuple[dict[str, slice | None], bool]:
+    """What to read of the ``keys`` ``tensor`` is loaded from, to build its block ``rows``.
+
+    Returns ``(reads, cut)``: ``reads`` maps each key to read to its rows to read, ``None`` for all
+    of it, and ``cut`` says the reads build the whole weight, for the block to be cut from it
+    (:func:`_dim0_reads`). ``shape(key)`` is a key's shape as stored.
+    """
+    if plan is None or rows is None:  # nothing converted, or a 0-d tensor
+        return dict.fromkeys(keys, rows), False
+    patterns = {key: _resolve_target(plan, key)[1] for key in keys}
+    if set(patterns.values()) == {None}:
+        return dict.fromkeys(keys, rows), False
+    builders = [c for c in plan["converters"] if set(patterns.values()) <= set(c.source_patterns)]
+    how = _dim0_reads(builders[0]) if len(builders) == 1 else None
+    if how == "rows":
+        return dict.fromkeys(keys, rows), False
+    whole: dict[str, slice | None] = dict.fromkeys(keys, None)
+    if how is None:
+        return whole, True
+    # The keys in the order the conversion takes them: by source pattern, each in key order.
+    stacks = [
+        sorted((key for key in keys if patterns[key] == pattern), key=dot_natural_key)
+        for pattern in builders[0].source_patterns
+    ]
+    if how == "experts":
+        if any(len(stack) != tensor.shape[0] for stack in stacks):
+            return whole, True  # not one key per expert
+        return {key: None for stack in stacks for key in stack[rows]}, False
+    # Concatenated: each key holds the next rows of the weight. Every key is read, the ones the
+    # block misses as no rows, for the concatenation to find each source it takes.
+    reads: dict[str, slice | None] = {}
+    first = 0
+    for key in chain.from_iterable(stacks):
+        n = shape(key)[0]
+        start = min(max(rows.start - first, 0), n)
+        reads[key] = slice(start, max(start, min(rows.stop - first, n)))
+        first += n
+    return (reads, False) if first == tensor.shape[0] else (whole, True)
+
+
+def _read_local_shards(
+    model: nn.Module,
+    ckpt_dir: str,
+    tensor_files: dict[str, str],
+    sources: dict[str, list[str]],
+    plan: dict | None,
+) -> None:
+    """Fill this rank's part of each parameter and buffer of ``model`` that ``sources`` names.
+
+    A rank reads only what its part holds. Of a weight FSDP2 shards, that is its rows, read with
+    the call DCP's Hugging Face reader makes (``get_slice``). Of a fused weight, which the
+    conversion ``plan`` builds with transformers' own ops, that is the source rows its rows come
+    from, or its experts' tensors (:func:`_dim0_reads`). A tensor FSDP2 leaves whole (an off-dtype
+    parameter, a buffer) is read whole, as are the sources of a weight an op builds across dim 0,
+    which is then cut to the shard. No collective runs: the ranks read at once, and none holds
+    another's shard.
+    """
+    tensors = dict(
+        chain(
+            model.named_parameters(remove_duplicate=False),
+            model.named_buffers(remove_duplicate=False),
+        )
+    )
+    with contextlib.ExitStack() as stack:
+        opened: dict[str, Any] = {}
+
+        def stored(key: str) -> Any:
+            if (file := tensor_files[key]) not in opened:
+                path = os.path.join(ckpt_dir, file)
+                opened[file] = stack.enter_context(safe_open(path, framework="pt", device="cpu"))
+            return opened[file]
+
+        def read(key: str, rows: slice | None) -> torch.Tensor:
+            return stored(key).get_tensor(key) if rows is None else stored(key).get_slice(key)[rows]
+
+        def shape(key: str) -> list[int]:
+            return stored(key).get_slice(key).get_shape()
+
+        # File by file, so each file's reads come together.
+        for name, keys in sorted(
+            sources.items(), key=lambda item: (tensor_files[item[1][0]], dot_natural_key(item[0]))
+        ):
+            tensor = tensors[name]
+            local, start = _local_rows(tensor)
+            if not local.numel():
+                continue  # FSDP2 left this rank none of its rows
+            rows = slice(start, start + local.shape[0]) if local.dim() else None
+            reads, cut = _shard_sources(plan, keys, rows, tensor, shape)
+            state = {key: read(key, part) for key, part in reads.items()}
+            value = state[keys[0]] if plan is None else _convert_keys(plan, state)[name]
+            if cut:
+                value = value[rows]
+            if value.shape != local.shape:
+                raise RuntimeError(
+                    f"FSDP2 load: {name} reads from the checkpoint as {tuple(value.shape)}, but this "
+                    f"rank holds {tuple(local.shape)} of its {tuple(tensor.shape)}."
+                )
+            with torch.no_grad():
+                local.copy_(value)
 
 
 def _check_every_param_sourced(model: nn.Module, sourced_targets: set[str]) -> None:
@@ -583,7 +648,7 @@ _EXPERT_PARALLEL = "expert-parallel"
 _FSDP2 = "FSDP2"
 # What each sharded load takes besides the checkpoint. These loads build the model class and place
 # it themselves, so from_pretrained's own arguments (device_map, max_memory, ...) do not reach them.
-_FSDP2_ONLY = frozenset({"cpu_offload", "mp_policy", "broadcast_chunk_size"})
+_FSDP2_ONLY = frozenset({"cpu_offload", "mp_policy"})
 _SHARDED_LOAD_OPTIONS = {
     _EXPERT_PARALLEL: frozenset(
         {
@@ -597,9 +662,20 @@ _SHARDED_LOAD_OPTIONS = {
     _FSDP2: _FSDP2_ONLY | {"trust_remote_code", "attn_implementation", "hf_config"},
 }
 # The FSDP2-only values that ask nothing of any load but the FSDP2 one: its defaults, and None where
-# that leaves the option unset (a None broadcast_chunk_size asks for all of a source's layers). Any
-# other option asks nothing at None, from_pretrained's own default (device_map=None, say).
-_ASKS_NOTHING = {"cpu_offload": (False, None), "mp_policy": (None,), "broadcast_chunk_size": (8,)}
+# that leaves the option unset. Any other option asks nothing at None, from_pretrained's own default
+# (device_map=None, say).
+_ASKS_NOTHING = {"cpu_offload": (False, None), "mp_policy": (None,)}
+
+
+def _warn_broadcast_chunk_size(value) -> None:
+    """Say that ``broadcast_chunk_size`` does nothing now, unless it is at its old default, 8."""
+    if value != 8:
+        warnings.warn(
+            "broadcast_chunk_size is deprecated and has no effect: the FSDP2 load reads each "
+            "rank's own shards and broadcasts nothing. It will be removed in a future release.",
+            FutureWarning,
+            stacklevel=3,
+        )
 
 
 # The options only the expert-parallel load takes, which a whole-model load would hand on to
@@ -968,6 +1044,8 @@ def load_pretrained(
     for name in ("config", "variant", "hf_config"):
         if name in kwargs and kwargs[name] is None:
             del kwargs[name]
+    if "broadcast_chunk_size" in kwargs:  # deprecated: no load takes it
+        _warn_broadcast_chunk_size(kwargs.pop("broadcast_chunk_size"))
     # The config to load with, or, as from_pretrained also takes it, a path to read it from.
     config = kwargs.get("config")
     config = config if isinstance(config, (PretrainedConfig, str, os.PathLike)) else None
@@ -1546,28 +1624,32 @@ def parallel_load_and_prepare_fsdp2(
     hf_config=None,
     broadcast_chunk_size: int | None = 8,
 ) -> nn.Module:
-    """Load and FSDP2-shard a HuggingFace causal LM via parallel safetensors reads.
+    """Load and FSDP2-shard a HuggingFace causal LM, each rank reading only its own shards.
 
-    Round-robin assigns decoder layers to ranks; each rank reads only its owned
-    layers' weights from disk in parallel, then broadcasts to the others. Non-decoder
-    weights (embed, lm_head, norm) are read on rank 0 and broadcast.
+    The model is built on the meta device and FSDP2-sharded first. Each rank then reads from the
+    safetensors only what its shards hold: its rows of each weight, and of a fused-expert weight its
+    experts alone (:func:`_read_local_shards`). No rank holds a whole weight that FSDP2 shards,
+    nothing is broadcast, and the ranks read at once, the sharded weights once between them.
 
-    Requires an initialized ``torch.distributed`` process group (FSDP2's ``fully_shard``
-    and the per-layer broadcasts both need it). A 1-rank PG (e.g. ``torchrun
+    Requires an initialized ``torch.distributed`` process group (FSDP2's ``fully_shard`` needs it),
+    in which this process is ``rank`` of ``world_size``. A 1-rank PG (e.g. ``torchrun
     --nproc_per_node=1``) is allowed; bare single-process is not.
 
     Pass ``hf_config`` if the caller has already fetched it (skips a redundant fetch).
 
-    ``broadcast_chunk_size`` sets how many of a source's owned layers are broadcast per collective:
-    a smaller value lowers the peak transient GPU memory at the cost of more collectives (default 8;
-    pass ``None`` to broadcast all of a source's layers at once).
+    ``broadcast_chunk_size`` is deprecated and has no effect: nothing is broadcast.
 
     It records no distribution plan: a caller records its own, as :func:`load_pretrained` does
     (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`).
     """
+    _warn_broadcast_chunk_size(broadcast_chunk_size)
+    if (rank, world_size) != (dist.rank(), dist.size()):
+        raise ValueError(
+            f"rank={rank}, world_size={world_size}, but this process is rank {dist.rank()} of "
+            f"{dist.size()}."
+        )
     resolved_path = _resolve_checkpoint_dir(ckpt_path, rank)
-    weight_map = indexed_weight_map(resolved_path)
-    if not weight_map:
+    if not indexed_weight_map(resolved_path):
         raise RuntimeError(
             f"No safetensors checkpoint at {resolved_path} "
             "(expected model.safetensors or model.safetensors.index.json)."
@@ -1582,22 +1664,17 @@ def parallel_load_and_prepare_fsdp2(
     plan = _conversion_plan(model)
 
     # fsdp2_wrap shards each decoder layer + the root (embed/lm_head/norm sharded, not replicated).
-    decoder_layers = fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
-    module_to_name = {m: n for n, m in model.named_modules()}
-    layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
+    fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
 
     # Valid targets; keys converting to anything else are aux weights (e.g. an MTP head) we skip.
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
 
-    # Bucket each checkpoint tensor by its target's decoder layer (root params go to
-    # non_layer_sources). Every tensor in the files the index names, not only the ones it lists, so
-    # the unplaced ones fall out of this same pass. A model built from its config ran no
-    # conversions of its own, so the stock plan is the only one.
-    layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
-        checkpoint_tensor_files(resolved_path),
-        [plan] if plan else [],
-        model_param_names,
-        layer_prefixes,
+    # The parameter each checkpoint tensor loads into. Every tensor in the files the index names,
+    # not only the ones it lists, so the unplaced ones fall out of this same pass. A model built
+    # from its config ran no conversions of its own, so the stock plan is the only one.
+    tensor_files = checkpoint_tensor_files(resolved_path)
+    sources, unplaced = _group_sources_by_target(
+        tensor_files, [plan] if plan else [], model_param_names
     )
     if unplaced:
         logger.debug(
@@ -1615,52 +1692,18 @@ def parallel_load_and_prepare_fsdp2(
     model._weight_conversions = [
         c for c in (plan["conversions"] if plan else []) if getattr(c, "was_used", lambda: True)()
     ]
-    _check_every_param_sourced(model, sourced_targets)
+    _check_every_param_sourced(model, set(sources))
 
-    _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
-
-    owned_layer_indices = _layers_for_rank(len(decoder_layers), world_size, rank)
-    owned_layer_state_dicts = _read_owned_layers(
-        resolved_path, weight_map, layer_sources, owned_layer_indices, plan
-    )
-
-    # Smaller broadcast_chunk_size lowers the transient GPU peak (more, smaller collectives).
-    for source_rank in range(world_size):
-        source_layer_indices = _layers_for_rank(len(decoder_layers), world_size, source_rank)
-        if not source_layer_indices:
-            continue
-        chunk = broadcast_chunk_size or len(source_layer_indices)
-        for start in range(0, len(source_layer_indices), chunk):
-            _broadcast_load_group(
-                source_layer_indices[start : start + chunk],
-                source_rank,
-                rank,
-                owned_layer_state_dicts,
-                decoder_layers,
-                layer_prefixes,
-                device,
-                cpu_offload,
-            )
-
-    # Non-decoder params: rank 0 reads + broadcasts; resharded into the root below.
-    # TODO: layerwise support.
-    non_layer = None
-    if rank == 0:
-        non_layer = _read_and_convert(resolved_path, weight_map, set(non_layer_sources), plan)
-    non_layer = broadcast_state_dict(non_layer, src=0, device=device)
-    if cpu_offload:
-        non_layer = {k: v.cpu() for k, v in non_layer.items()}
-    # shard_root=True makes the root params sharded DTensors, so reshard the full tensors via
-    # set_model_state_dict. strict=False: decoder keys are absent here (loaded above).
-    set_model_state_dict(
-        model,
-        non_layer,
-        options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False, strict=False),
-    )
+    # No collective runs while the ranks read, so a rank that fails (a file it cannot read, a tensor
+    # the model does not match, its memory) fails every rank here, rather than leave the others
+    # waiting in the first collective after the load.
+    with _refused_together("the FSDP2 load's reads", alone=False):
+        _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
+        _read_local_shards(model, resolved_path, tensor_files, sources, plan)
 
     if cpu_offload:
-        # Loaded on CPU for set_model_state_dict; FSDP2 streams decoder shards per forward, but
-        # the unwrapped root must live on GPU, so promote it.
+        # Read into the CPU, where FSDP2 keeps the offloaded shards between forwards; the params
+        # it does not manage must live on GPU, so promote them.
         _promote_non_dtensor_to_gpu(model, device)
     if hasattr(model, "tie_weights"):
         model.tie_weights()

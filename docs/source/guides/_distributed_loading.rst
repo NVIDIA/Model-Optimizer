@@ -29,7 +29,8 @@ Routes
   FSDP2-sharded as the plan says, and tokens reach their experts' ranks by all-to-all.
 * A plan with ``dense="fsdp"`` takes the FSDP2 load (``parallel_load_and_prepare_fsdp2``): a causal
   LM, or a text-only VLM it supports (Qwen3.5), is FSDP2-sharded over the process group, each rank
-  reading its own layers.
+  reading only its own shards from the checkpoint: its rows of each weight, and of a fused-expert
+  weight its experts alone. No rank holds a whole sharded weight, and nothing is broadcast.
 * Any other plan gives every rank the whole model, through ``auto_class.from_pretrained``
   (``auto_class`` defaults to ``AutoModelForCausalLM``).
 
@@ -62,9 +63,9 @@ Whole-model loads
   ``from_pretrained``'s own default, loads it on the CPU for the caller to place. A rank without a
   GPU of its own warns and loads where ``from_pretrained`` places it.
 * The options only the FSDP2 load takes are refused, except at the FSDP2 load's own defaults
-  (``cpu_offload=False``, ``mp_policy=None``, ``broadcast_chunk_size=8``) or
-  ``cpu_offload=None``, which ask nothing of a whole-model load, so a caller can forward them
-  whatever the plan. ``broadcast_chunk_size=None`` asks for all of a source's layers at once.
+  (``cpu_offload=False``, ``mp_policy=None``) or ``cpu_offload=None``, which ask nothing of a
+  whole-model load, so a caller can forward them whatever the plan. ``broadcast_chunk_size`` is
+  deprecated and has no effect on any load.
 
 Sharded loads
 =============
@@ -73,10 +74,10 @@ Sharded loads
   The FSDP2 load builds a text-only VLM through its image-text class and anything else through
   ``AutoModelForCausalLM``; the expert-parallel load builds the checkpoint's own class, a VLM's
   image-text class included.
-* Besides its own options (the FSDP2 load's ``cpu_offload``, ``mp_policy`` and
-  ``broadcast_chunk_size``; the expert-parallel load's ``freeze`` and ``require_lm_head``) each
-  takes ``trust_remote_code``, ``attn_implementation`` and ``hf_config``, and refuses any other
-  keyword rather than ignore it, the other sharded load's options as that load's own. An option
+* Besides its own options (the FSDP2 load's ``cpu_offload`` and ``mp_policy``; the
+  expert-parallel load's ``freeze`` and ``require_lm_head``) each takes ``trust_remote_code``,
+  ``attn_implementation`` and ``hf_config``, and refuses any other keyword rather than ignore it,
+  the other sharded load's options as that load's own. An option
   passed as ``None``, ``from_pretrained``'s own default, asks nothing and is not refused, nor is an
   FSDP2 option at that load's own default. The expert-parallel load leaves the model unfrozen, as
   the other loads do, unless ``freeze=True``.
