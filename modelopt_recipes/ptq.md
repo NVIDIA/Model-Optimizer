@@ -321,7 +321,7 @@ that baseline. The deviations come in four kinds:
 |------|-------------------------------------|----------|
 | **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
-| **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
+| **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches, or layers a serving engine cannot load quantized, stay full precision | `nemotron_vl`, `diffusion_gemma`, `kimi_k3` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
 
 The numerics and standard exclusions are still inherited from `configs/`
@@ -438,7 +438,7 @@ These quantize the **same layers** as the general recipes; only the
 *Why special:* identical scope/numerics to a general scheme, but a general
 recipe's default algorithm would overflow or regress here.
 
-### Extra exclusions — `nemotron_vl`, `diffusion_gemma`
+### Extra exclusions — `nemotron_vl`, `diffusion_gemma`, `kimi_k3`
 
 Each of these is **numerically identical** to a general recipe. What makes them
 special is a model-local `disabled_quantizers.yaml` unit that *extends* the
@@ -453,11 +453,19 @@ standard exclusions so a model-specific branch stays in full precision:
   `*self_conditioning*`: the self-conditioning network is text-only and never
   exercised by standard PTQ calibration data, so its quantizers collect no amax
   and export crashes; the exclusion keeps it in BF16.
+- **`kimi_k3`** — general `nvfp4_experts_only-kv_fp8_cast` numerics, adding the
+  layers vLLM's Kimi-K3 builds unquantized whatever the checkpoint holds: the
+  latent MoE projections `routed_expert_{down,up}_proj`, which the general
+  recipe's `*block_sparse_moe*` patterns would quantize, the `*_res_proj`
+  residual projections and the KDA short convolutions. A checkpoint that
+  stores any of them quantized does not load in vLLM; the shared experts stay
+  quantized as in the general recipe. See `model_type/kimi_k3/ptq/README.md`.
 
 *Why special:* a general recipe would happily quantize the vision/audio
 encoders (or the never-calibrated self-conditioning branch), regressing those
-modalities or crashing export. The extra patterns keep them in full precision;
-everything else matches the general recipe.
+modalities or crashing export, and Kimi-K3 layers vLLM can only load
+unquantized. The extra patterns keep them in full precision; everything else
+matches the general recipe.
 
 ### Checkpoint mirrors — `models/<org>/<checkpoint>`
 

@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Kimi-K3 PTQ recipe: the general ``nvfp4_experts_only-kv_fp8_cast`` recipe with the layers vLLM's
+# Kimi-K3 builds unquantized kept in BF16, through the local ``disabled_quantizers`` unit in place
+# of ``default_disabled_quantizers``. The general recipe's ``*block_sparse_moe*`` patterns would
+# otherwise quantize Kimi-K3's latent MoE projections, which the model card's vLLM image cannot
+# load. See README.md.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  disabled_quantizers: model_type/kimi_k3/ptq/disabled_quantizers
+  nvfp4: configs/numerics/nvfp4
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+
+metadata:
+  description: >-
+    Kimi-K3 recipe: the general nvfp4_experts_only-kv_fp8_cast (dynamic NVFP4 on expert-layer
+    weight and input quantizers, FP8 KV-cache cast mode using constant amax, max calibration),
+    except that the layers vLLM's Kimi-K3 builds unquantized stay BF16: the latent MoE
+    projections, the residual projections and the KDA short convolutions.
+quantize:
+  algorithm:
+    method: max
+    # Max calibration is fast and does not typically need checkpointing.
+    # layerwise.enable=false required for VLMs where the decoder layers are nested under
+    # `model.language_model.layers` (layerwise_calibrate can't find them otherwise).
+    layerwise: {enable: false}
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*.experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*.experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*block_sparse_moe*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*block_sparse_moe*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - $import: kv_fp8_cast
+    - $import: disabled_quantizers
