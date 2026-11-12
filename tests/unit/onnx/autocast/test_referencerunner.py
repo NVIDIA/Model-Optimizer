@@ -21,6 +21,7 @@ from unittest.mock import Mock
 
 import numpy as np
 import onnx
+import onnxruntime as ort
 import polygraphy.backend.onnx as polygraphy_onnx
 import polygraphy.backend.onnxrt as polygraphy_onnxrt
 import pytest
@@ -195,6 +196,22 @@ def test_run_with_dict_inputs(reference_runner):
 
 class TestPerNodeReferenceRunner:
     """Tests for memory-bounded per-node reference execution."""
+
+    def test_disables_cpu_memory_arena(self, monkeypatch, reference_runner):
+        session_options = []
+        original_session_options = ort.SessionOptions
+
+        def record_session_options():
+            options = original_session_options()
+            session_options.append(options)
+            return options
+
+        monkeypatch.setattr(ort, "SessionOptions", record_session_options)
+
+        reference_runner.run(calibrate_per_node=True)
+
+        assert session_options
+        assert all(not options.enable_cpu_mem_arena for options in session_options)
 
     def test_matches_all_outputs(self, reference_runner):
         inputs = {
