@@ -91,7 +91,7 @@ response token. Training data is teacher generated responses. Responses should b
 
 For a simple first attempt at draft training we tend to use 100-200k training samples taken from `nvidia/Nemotron-Post-Training-Dataset-v2`, we recommend initially trying an even split of datasets. If a user has a specific deployment use case then training data should be specialized toward that, however, we do still recommend maintaining a mix of subjects in the training data. Ideally some component of the training data should also match the context size that you intend to deploy the draft-target pair at.
 
-The data format: 
+The data format:
 
 `$CONVERSATIONS` should carry responses the **target generated itself**, not the responses
 that shipped with the prompts. The objective trains the draft to match the target at the
@@ -248,4 +248,3 @@ torchrun --nproc_per_node 8 main.py \
 > **Note on the learning rate:** we recommend sweeping to find the best rate for your own
 > draft and target. The hyperparameters chosen here came from a sweep over learning rate and
 > loss, scored on acceptance length.
-
