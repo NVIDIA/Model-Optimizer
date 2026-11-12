@@ -53,6 +53,36 @@ def create_multi_io_model():
     return model
 
 
+def create_if_model():
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3])
+    then_output = helper.make_tensor_value_info("then_output", TensorProto.FLOAT, [1, 3])
+    else_output = helper.make_tensor_value_info("else_output", TensorProto.FLOAT, [1, 3])
+    then_branch = helper.make_graph(
+        [helper.make_node("Identity", ["X"], ["then_output"])],
+        "then_branch",
+        [],
+        [then_output],
+    )
+    else_branch = helper.make_graph(
+        [helper.make_node("Neg", ["X"], ["else_output"])],
+        "else_branch",
+        [],
+        [else_output],
+    )
+    if_node = helper.make_node(
+        "If",
+        ["condition"],
+        ["Y"],
+        name="if_node",
+        then_branch=then_branch,
+        else_branch=else_branch,
+    )
+    graph = helper.make_graph([if_node], "if_model", [condition, x], [y])
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+
+
 @pytest.fixture
 def simple_model():
     return create_multi_io_model()
@@ -207,6 +237,62 @@ def test_per_node_run_matches_all_outputs(reference_runner):
         np.testing.assert_allclose(actual[name].min_val, np.min(expected_value))
         np.testing.assert_allclose(actual[name].max_val, np.max(expected_value))
         assert actual[name].shape == expected_value.shape
+
+
+def test_per_node_run_supports_control_flow_captures():
+    runner = ReferenceRunner(create_if_model())
+    inputs = {
+        "condition": np.array(True),
+        "X": np.array([[1.0, -2.0, 3.0]], dtype=np.float32),
+    }
+    expected = runner.run(inputs)
+    actual = runner.run(inputs, calibrate_per_node=True)
+
+    np.testing.assert_allclose(actual["Y"].absmax, np.max(np.abs(expected["Y"])))
+    np.testing.assert_allclose(actual["Y"].min_val, np.min(expected["Y"]))
+    np.testing.assert_allclose(actual["Y"].max_val, np.max(expected["Y"]))
+    assert actual["Y"].shape == expected["Y"].shape
+
+
+def test_per_node_run_preserves_local_functions():
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3])
+    function = helper.make_function(
+        "local",
+        "Double",
+        ["function_input"],
+        ["function_output"],
+        [
+            helper.make_node(
+                "Add",
+                ["function_input", "function_input"],
+                ["function_output"],
+            )
+        ],
+        opset_imports=[helper.make_opsetid("", 20)],
+    )
+    graph = helper.make_graph(
+        [helper.make_node("Double", ["X"], ["Y"], domain="local", name="double")],
+        "local_function_model",
+        [x],
+        [y],
+    )
+    model = helper.make_model(
+        graph,
+        functions=[function],
+        opset_imports=[helper.make_opsetid("", 20), helper.make_opsetid("local", 1)],
+        ir_version=10,
+    )
+    runner = ReferenceRunner(model)
+
+    results = runner.run(
+        {"X": np.array([[1.0, -2.0, 3.0]], dtype=np.float32)},
+        calibrate_per_node=True,
+    )
+
+    assert results["Y"].absmax == 6.0
+    assert results["Y"].min_val == -4.0
+    assert results["Y"].max_val == 6.0
 
 
 def test_invalid_input_format(reference_runner):
@@ -378,6 +464,34 @@ def test_run_with_multi_batch_npz_directory(reference_runner, calibrate_per_node
         assert results["Y2"].min_val == 2.0
         assert results["Y2"].max_val == 70.0
         assert results["Y2"].shape == (1, 3)
+
+
+def test_per_node_multi_batch_preserves_first_runtime_shape():
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [None, 3])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [None, 3])
+    graph = helper.make_graph(
+        [helper.make_node("Identity", ["X"], ["Y"], name="identity")],
+        "dynamic_identity",
+        [x],
+        [y],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+    runner = ReferenceRunner(model)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        np.savez(
+            os.path.join(temp_dir, "batch_001.npz"),
+            X=np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+        )
+        np.savez(
+            os.path.join(temp_dir, "batch_002.npz"),
+            X=np.array([[4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], dtype=np.float32),
+        )
+
+        results = runner.run(temp_dir, calibrate_per_node=True)
+
+    assert results["Y"].shape == (1, 3)
+    assert results["Y"].absmax == 9.0
 
 
 def test_run_with_empty_npz_directory(reference_runner):

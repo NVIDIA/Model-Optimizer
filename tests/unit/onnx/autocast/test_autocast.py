@@ -231,7 +231,7 @@ def test_convert_external_data_sanitizes_once_and_materializes_initializers(
 
     monkeypatch.setattr(GraphSanitizer, "sanitize", record_sanitize)
 
-    converted_model = convert_to_mixed_precision(onnx_path=str(model_path), data_max=np.inf)
+    converted_model = convert_to_mixed_precision(onnx_path=str(model_path), calibrate_per_node=True)
 
     assert sanitize_calls == [(str(model_path.resolve()), onnx.TensorProto.EXTERNAL, False)]
     for initializer in converted_model.graph.initializer:
