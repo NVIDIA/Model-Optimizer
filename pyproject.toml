@@ -262,6 +262,8 @@ extend-ignore = [
 "modelopt/torch/kernels/quantization/linear_attention/fla_*.py" = ["D", "E501"] # Vendored flash-linear-attention kernels
 "*.ipynb" = ["D", "E501"] # Ignore missing docstrings or line length for Jupyter notebooks
 "modelopt/torch/kernels/*" = ["N803", "N806", "E731"] # triton style
+"modelopt/torch/quantization/rotation/*" = ["N802", "N803", "N806"] # SpinQuant math notation (R1/R2 rotations, Hadamard H, Cayley tangent W)
+"tests/unit/torch/quantization/test_rotation_*.py" = ["N802", "N803", "N806", "PERF203"] # same math notation; PERF203: the standalone __main__ drivers run each test in a try/except loop by design
 "modelopt/torch/puzzletron/*" = [
     "C4",
     "D",
