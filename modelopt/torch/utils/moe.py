@@ -123,7 +123,7 @@ def _choose_ep_degree(world_size: int, num_experts: int) -> int:
 # The styles a base_model_ep_plan gives a layer's routed-experts container. A plan that styles the
 # experts' grouped-GEMM parameters names the containers through their parents too, so a plan that
 # styles some containers one way and others the other names them all.
-_EXPERTS_STYLES = ("moe_tp_experts", "nemotron_experts_ep")
+_EXPERTS_STYLES = ("moe_tp_experts",)
 
 
 def _routed_expert_keys(ep_plan: dict[str, str]) -> set[str]:

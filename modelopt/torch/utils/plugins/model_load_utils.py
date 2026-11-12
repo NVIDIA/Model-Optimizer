@@ -2674,7 +2674,6 @@ _EP_SOURCE_FORMATS: frozenset[str | None] = frozenset({None, "fp8"})
 _EP_STYLE_SWAP = {
     "ep_router": "torch_a2a_router",
     "moe_tp_experts": "torch_a2a_experts",
-    "nemotron_experts_ep": "torch_a2a_experts",
 }
 
 
