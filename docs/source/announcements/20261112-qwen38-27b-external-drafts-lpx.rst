@@ -26,7 +26,7 @@ multi-layer standalone drafts. By deploying these larger draft models, along wit
 on NVIDIA Groq 3 LPX, acceptance lengths similar to, and in some cases better than, tail-augmented
 drafts can be achieved without sacrificing system latency. Standalone drafts also need only the
 target's tokens and probabilities, not its hidden states, which suits a disaggregated system where
-the draft and verifier run on separate hardware. Coupled with pipelined verification and parallel
+the draft and target run on separate hardware. Coupled with pipelined verification and parallel
 drafting, drafting time can be largely hidden behind verification time, resulting in SOTA
 performance in minimum-latency scenarios (see Figure 1).
 
@@ -39,8 +39,8 @@ performance in minimum-latency scenarios (see Figure 1).
 Analysis and NVIDIA.**
 
 In this report we outline the ultra-low latency NVIDIA Groq 3 LPX speculative decoding system in
-more detail. We also describe the process of training external drafts from existing small model
-architectures using the ModelOpt library. Further, today we release three new external draft models,
+more detail. We also describe the process of training standalone drafts from existing small model
+architectures using the ModelOpt library. Further, today we release three new standalone draft models,
 trained for the ``Qwen/Qwen3.8-27B`` target:
 
 - ``nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft``
@@ -67,12 +67,12 @@ unique qualities:
 
 .. image:: assets/qwen38-27b-external-drafts-lpx-streaming-verify.webp
    :alt: Animation of the drafter streaming tokens through a live draft pool into the pipelined LPU
-         verifier, which stops the drafter on a rejection
+         target model, which stops the drafter on a rejection
    :width: 100%
 
 **Figure 2. Parallel, fully dynamic unbounded speculative decoding on LPX.**
 
-The fully dynamic unbounded drafting in particular is well suited to external drafts, where it is
+The fully dynamic unbounded drafting in particular is well suited to standalone drafts, where it is
 observed that the acceptance lengths at longer draft lengths are generally better than
 tail-augmented methods. The *Results* section below presents a case study comparing standalone
 drafts for deployment on Groq 3 LPX to the model's stock MTP head.
@@ -92,7 +92,7 @@ the token sequences the target generated in a live MTP run on the same benchmark
 line refers to the fully dynamic unbounded drafting technique described in the above section.
 
 .. image:: assets/qwen38-27b-external-drafts-lpx-acceptance-length.png
-   :alt: Acceptance length against draft length for the 4B, 0.8B and 1B external drafts and the
+   :alt: Acceptance length against draft length for the 4B, 0.8B and 1B standalone drafts and the
          stock MTP head, with dashed lines for unbounded acceptance length
    :width: 100%
 
@@ -105,18 +105,18 @@ shows that ``nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft`` outperforms the native MTP at
 ``nvidia/Qwen3.5-0.8B-Qwen3.8-27B-Draft`` is slightly behind the MTP at a draft length of 7 and
 ahead of it from 11 onward. ``nvidia/Llama-3.2-1B-Qwen3.8-27B-Draft`` trails the MTP at fixed draft
 lengths. The MTP gains little beyond a draft length of 16, while the standalone drafts keep
-improving, so the picture shifts at unbounded draft length. ``nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft``
+improving. The picture shifts at unbounded draft length where ``nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft``
 accepts 6.13 tokens against the MTP’s 3.85, an increase of 59%. Qwen3.5-0.8B, at a fifth of the 4B's
 parameters, is 6% better than the MTP head. The 1B draft, built from a model with a different
 tokenizer, comes within 9% of the MTP at 3.52.
 
-Because the draft and verifier run on separate hardware in the Groq 3 LPX system, a tail-augmented
+Because the draft and target run on separate hardware in the Groq 3 LPX system, a tail-augmented
 head such as MTP would also have to receive the target's hidden states at every step. A standalone
 draft with a somewhat lower acceptance length, such as the 1B, can therefore still be the better
 trade.
 
 The Draft Models
-================
+****************
 
 .. list-table::
    :header-rows: 1
@@ -166,8 +166,8 @@ Draft models must be aligned with target models to achieve high acceptance lengt
 supports training of standalone drafts for deployment on NVIDIA Groq 3 LPX. All three standalone
 drafts presented in the results section were trained using ModelOpt’s `external draft training
 flow <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/speculative_decoding/doc/external_draft.md>`__.
-The complete commands for the 1B draft are given at the end of this section. The following sections
-provide a high level overview of the draft alignment process.
+The complete commands for the Llama-3.2-1B draft are given at the end of this section. The following
+sections provide a high level overview of the draft alignment process.
 
 Vocabulary Swap
 ===============
@@ -208,9 +208,9 @@ response token.
 The training corpus used for the experiments in the results section is a 199,998-conversation sample
 of ``nvidia/Nemotron-Post-Training-Dataset-v2``, drawn evenly across nine categories (22,222 each):
 STEM, chat, code, math, and five multilingual splits covering German, Spanish, French, Italian and
-Japanese. Each prompt is the first user turn of a source conversation, at most 3,072 tokens long,
-and each response was generated by ``Qwen/Qwen3.8-27B`` at reasoning effort xhigh. This balance was
-used to create a broad, general draft model.
+Japanese. Each prompt is the first user turn of a source conversation, and each response was
+generated by ``Qwen/Qwen3.8-27B`` at reasoning effort xhigh. This balance was used to create a broad,
+general draft model.
 
 .. list-table::
    :header-rows: 1
@@ -282,12 +282,13 @@ swapped in at step 2.
    # 0. Environment. The [hf] extra brings the datasets package, which stages 1 and 4 import.
    # ---------------------------------------------------------------------------
    git clone https://github.com/NVIDIA/Model-Optimizer.git
-   cd Model-Optimizer && pip install -e ".[hf]" && cd examples/speculative_decoding
+   cd Model-Optimizer && pip install -e ".[hf]" vllm && cd examples/speculative_decoding
 
    export TARGET=Qwen/Qwen3.8-27B
    export DRAFT=meta-llama/Llama-3.2-1B-Instruct
    export SEQ_LEN=12288              # training.training_seq_len; every stage reads it
    export WORK=/data/q38-llama1b
+   export CHAT_TEMPLATE=/path/to/target_chat_template_with_generation_tags.jinja  # see stage 3
 
    # ---------------------------------------------------------------------------
    # 1. Prompts from Nemotron-Post-Training-Dataset-v2 with the final assistant
@@ -323,7 +324,7 @@ swapped in at step 2.
      --top-k 20 --top-p 0.95 \
      --max-seq-len $SEQ_LEN \
      --answer-only-loss \
-     --chat-template <path/to/target_chat_template_with_generation_tags.jinja>
+     --chat-template "$CHAT_TEMPLATE"
 
    # ---------------------------------------------------------------------------
    # 4. Build the memmap cache once, in a single process, before torchrun.
@@ -385,11 +386,17 @@ drafts.
 Resources
 *********
 
-- ModelOpt external draft mode: PRs #2635, #2790, #2637, #2638, #2639, #2640, #2687, #2688
-- Recipe: ``modelopt_recipes/general/speculative_decoding/external_draft.yaml``
-- Worked example: ``examples/speculative_decoding/doc/external_draft.md``
+- ModelOpt external draft mode: PRs `#2635 <https://github.com/NVIDIA/Model-Optimizer/pull/2635>`__, `#2790 <https://github.com/NVIDIA/Model-Optimizer/pull/2790>`__,
+  `#2637 <https://github.com/NVIDIA/Model-Optimizer/pull/2637>`__, `#2638 <https://github.com/NVIDIA/Model-Optimizer/pull/2638>`__,
+  `#2639 <https://github.com/NVIDIA/Model-Optimizer/pull/2639>`__, `#2640 <https://github.com/NVIDIA/Model-Optimizer/pull/2640>`__,
+  `#2687 <https://github.com/NVIDIA/Model-Optimizer/pull/2687>`__, `#2688 <https://github.com/NVIDIA/Model-Optimizer/pull/2688>`__
+- Recipe: `modelopt_recipes/general/speculative_decoding/external_draft.yaml
+  <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/general/speculative_decoding/external_draft.yaml>`__
+- Worked example: `examples/speculative_decoding/doc/external_draft.md
+  <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/speculative_decoding/doc/external_draft.md>`__
 - Teacher-policy dumper:
-  ``examples/speculative_decoding/collect_hidden_states/compute_sparse_policy_hf.py``
+  `examples/speculative_decoding/collect_hidden_states/compute_sparse_policy_hf.py
+  <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/speculative_decoding/collect_hidden_states/compute_sparse_policy_hf.py>`__
 
 Appendix
 ********
