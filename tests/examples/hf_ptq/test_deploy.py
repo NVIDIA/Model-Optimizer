@@ -113,15 +113,8 @@ def cleanup_after_test():
             tensor_parallel_size=8,
             mini_sm=100,
         ),
-        # DeepSeek-V4.1-Flash-1017 stores its Engram lookup tables as MXFP4 and serves them
-        # through DeepSeek-V4.1's sparse MLA, so each backend needs the settings its model card
-        # records; the generic defaults cannot load it. One entry per backend, because the two
-        # take different arguments. TP and the arguments below are the card's validated
-        # configurations, which ran on four GB300 GPUs. vLLM needs a build carrying
-        # vllm-project/vllm#61530 and SGLang one carrying sgl-project/sglang#47935.
-        # Neither card command names a quantization method: each engine reads the checkpoint's
-        # mixed FP8 + NVFP4 layout from its quantization_config, which the deployer's default
-        # modelopt_fp4 would override, so quantization is reset to None.
+        # Model card settings; needs vllm-project/vllm#61530 or sgl-project/sglang#47935.
+        # quantization=None lets each engine detect the mixed FP8 + NVFP4 quantization_config.
         *ModelDeployerList(
             model_id="nvidia/DeepSeek-V4.1-Flash-1017-NVFP4",
             backend=("vllm",),

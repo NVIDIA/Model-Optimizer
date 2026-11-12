@@ -245,12 +245,8 @@ class ModelDeployer:
             tensor_parallel_size: Tensor parallel size for distributed inference
             mini_sm: Minimum SM (Streaming Multiprocessor) requirement for the model
             attn_backend: is for TRT LLM deployment
-            engine_kwargs: extra keyword arguments for the engine constructor on the ordinary
-                vLLM and SGLang paths, overriding the defaults there. For a checkpoint whose model
-                card asks for settings the defaults do not cover, pass them here rather than
-                special-casing the model id. The other backends and paths refuse them instead of
-                ignoring them, and tensor parallelism is set only by tensor_parallel_size, the
-                value run() checks the GPU count against.
+            engine_kwargs: engine constructor overrides on the ordinary vLLM and SGLang paths.
+                Other paths refuse them; set TP through tensor_parallel_size only.
             sm_family: if set, skip unless the GPU belongs to this SM family (100 for SM100 to
                 SM103), for a backend path that checks the family rather than a minimum SM
         """
