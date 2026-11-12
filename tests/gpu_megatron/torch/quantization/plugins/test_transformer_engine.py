@@ -172,6 +172,39 @@ def test_fold_weight_grouped_linear(share_weight_quantizer):
         assert not hasattr(quantizer, "_amax")
 
 
+@pytest.mark.parametrize("share_weight_quantizer", [False, True])
+def test_initialize_grouped_weights(share_weight_quantizer):
+    model = TEGroupedLinear().cuda()
+    data = [model.get_input().cuda()]
+    quantize_model_and_forward(model, mtq.INT8_DEFAULT_CFG, data)
+    module = model.net
+    if share_weight_quantizer:
+        module.weight_quantizer = module.weight_quantizer[0]
+    pairs = list(module.iter_weights_for_calibration())
+    expected = [q(weight).detach().clone() for weight, q in pairs]
+    parameters = dict(model.named_parameters())
+    mtq.initialize_qdq_weights(model)
+    for (weight, q), target in zip(pairs, expected):
+        torch.testing.assert_close(weight, target, rtol=0, atol=0)
+        assert q.is_enabled
+    assert all(p is parameters[name] for name, p in model.named_parameters())
+
+
+def test_initialize_preserves_unquantized_output_rows():
+    model = TELinear().cuda()
+    quantize_model_and_forward(model, mtq.INT8_DEFAULT_CFG, [model.get_input().cuda()])
+    layer = model.net[1]
+    rows = slice(2, 5)
+    layer._modelopt_unquantized_output_rows = rows
+    original = layer.weight.detach().clone()
+    expected = layer.weight_quantizer(layer.weight).detach().clone()
+    expected[rows] = original[rows]
+    mtq.initialize_qdq_weights(model)
+    with torch.enable_grad():
+        layer._initialize_qdq_weights(False, set())
+    torch.testing.assert_close(layer.weight, expected, rtol=0, atol=0)
+
+
 def test_quantize_forward_backward():
     set_seed()
     model = TELinear().cuda()

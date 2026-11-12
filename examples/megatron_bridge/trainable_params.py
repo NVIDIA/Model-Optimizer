@@ -16,14 +16,66 @@
 """Parameter selection for the Megatron-Bridge distillation example."""
 
 import fnmatch
+import re
+from pathlib import Path
 
+import torch
 from torch import nn
 
 from modelopt.torch.opt import ModeloptStateManager
-from modelopt.torch.quantization import enable_quant_input_gradients, has_quant_lora
+from modelopt.torch.quantization import (
+    enable_quant_input_gradients,
+    has_quant_lora,
+    initialize_qdq_weights,
+)
 from modelopt.torch.quantization.qtensor import QTensorWrapper
 
-__all__ = ["configure_trainable_parameters"]
+__all__ = [
+    "configure_trainable_parameters",
+    "initialize_student_weights",
+    "should_initialize_student_weights",
+]
+
+
+def should_initialize_student_weights(
+    qdq_student_weight: bool,
+    checkpoint_dir: str | Path,
+    student_checkpoint: str | Path | None = None,
+) -> bool:
+    """Skip native resumes and refuse QDQ reinitialization of a trained source."""
+    if not qdq_student_weight or any(
+        (Path(checkpoint_dir) / name).is_file()
+        for name in ("latest_checkpointed_iteration.txt", "latest_train_state.pt")
+    ):
+        return False
+    if student_checkpoint is not None:
+        source = Path(student_checkpoint)
+        iteration = re.fullmatch(r"iter_(\d+)", source.name)
+        step = int(iteration[1]) if iteration else 0
+        train_state = source / "train_state.pt"
+        if train_state.is_file():
+            step = torch.load(train_state, map_location="cpu", weights_only=True)["step"]
+        if step > 0:
+            raise ValueError(
+                "--qdq_student_weight would reinitialize a trained student checkpoint. "
+                "Remove the flag to retain its trained latents; use the original output directory "
+                "for a native resume that also restores optimizer state."
+            )
+    return True
+
+
+def initialize_student_weights(
+    model: nn.Module,
+    qdq_student_weight: bool,
+    checkpoint_dir: str | Path,
+    student_checkpoint: str | Path | None = None,
+) -> nn.Module:
+    """Initialize selected student weights on a fresh run, preserving native resumes."""
+    if not should_initialize_student_weights(
+        qdq_student_weight, checkpoint_dir, student_checkpoint
+    ):
+        return model
+    return initialize_qdq_weights(model, trainable_only=True)
 
 
 def configure_trainable_parameters(model: nn.Module, target_parameters: list[str]) -> nn.Module:

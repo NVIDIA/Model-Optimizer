@@ -92,6 +92,10 @@ def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
 
     checkpoint_root = distill_output_dir / "checkpoints"
     assert (checkpoint_root / f"iter_{train_iters:07d}").exists()
+    # A carried-over QDQ flag must be ignored on a full-precision native resume too.
+    run_example_command(
+        [*distill_cmd_parts, "--qdq_student_weight"], example_path="megatron_bridge"
+    )
     assert (distilled_hf_path / "config.json").exists()
     if fake_hub_checkpoint.active:
         assert (distilled_hf_path / fake_hub_checkpoint.marker).exists()
