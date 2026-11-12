@@ -506,25 +506,33 @@ def _read_local_shards(
         for prefix, module in model.named_modules()
         for name in module._non_persistent_buffers_set
     }
-    with contextlib.ExitStack() as stack:
-        opened: dict[str, Any] = {}
+    opened: dict[str, Any] = {}
 
-        def stored(key: str) -> Any:
-            if (file := tensor_files[key]) not in opened:
-                path = os.path.join(ckpt_dir, file)
-                opened[file] = stack.enter_context(safe_open(path, framework="pt", device="cpu"))
-            return opened[file]
+    def stored(key: str) -> Any:
+        if (file := tensor_files[key]) not in opened:
+            path = os.path.join(ckpt_dir, file)
+            opened[file] = safe_open(path, framework="pt", device="cpu").__enter__()
+        return opened[file]
 
-        def read(key: str, rows: slice | None) -> torch.Tensor:
-            return stored(key).get_tensor(key) if rows is None else stored(key).get_slice(key)[rows]
+    def close(files: list[str]) -> None:
+        for file in files:
+            opened.pop(file).__exit__(None, None, None)
 
-        def shape(key: str) -> list[int]:
-            return stored(key).get_slice(key).get_shape()
+    def read(key: str, rows: slice | None) -> torch.Tensor:
+        return stored(key).get_tensor(key) if rows is None else stored(key).get_slice(key)[rows]
 
-        # File by file, so each file's reads come together.
-        for name, keys in sorted(
-            sources.items(), key=lambda item: (tensor_files[item[1][0]], dot_natural_key(item[0]))
-        ):
+    def shape(key: str) -> list[int]:
+        return stored(key).get_slice(key).get_shape()
+
+    # File by file, so each file's reads come together, and each file closes after its last read:
+    # until then the pages its reads touched stay resident, which adds up to the rank's whole shard.
+    order = sorted(
+        sources.items(), key=lambda item: (tensor_files[item[1][0]], dot_natural_key(item[0]))
+    )
+    last_read = {tensor_files[key]: i for i, (_, keys) in enumerate(order) for key in keys}
+    try:
+        for i, (name, keys) in enumerate(order):
+            close([file for file in opened if last_read[file] < i])
             if name in computed:
                 continue
             tensor = tensors[name]
@@ -544,6 +552,8 @@ def _read_local_shards(
                 )
             with torch.no_grad():
                 local.copy_(value)
+    finally:
+        close(list(opened))
 
 
 def _check_every_param_sourced(model: nn.Module, sourced_targets: set[str]) -> None:

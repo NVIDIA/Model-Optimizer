@@ -483,20 +483,24 @@ def test_keep_in_fp32_tensors_load_in_fp32(tmp_path, gloo_group, monkeypatch):
 
 
 class _CountedReads:
-    """A safetensors file whose tensor reads, whole or in part, add their bytes to ``read``."""
+    """A safetensors file whose tensor reads, whole or in part, add their bytes to
+    ``counts["bytes"]``, and which counts itself in ``counts["open"]`` until it closes."""
 
-    def __init__(self, opened, read):
-        self.opened, self.read = opened, read
+    def __init__(self, opened, counts):
+        self.opened, self.counts = opened, counts
+        counts["open"] += 1
+        counts["most_open"] = max(counts["most_open"], counts["open"])
 
     def __enter__(self):
         self.opened.__enter__()
         return self
 
     def __exit__(self, *exc):
+        self.counts["open"] -= 1
         return self.opened.__exit__(*exc)
 
     def _counted(self, tensor):
-        self.read[0] += tensor.numel() * tensor.element_size()
+        self.counts["bytes"] += tensor.numel() * tensor.element_size()
         return tensor
 
     def get_tensor(self, key):
@@ -516,10 +520,10 @@ class _CountedReads:
 
 
 def _shard_reads_job(rank, size, ckpt_dir, expected_path):
-    read = [0]
+    counts = {"bytes": 0, "open": 0, "most_open": 0}
     opened = model_load_utils.safe_open
     with mock.patch.object(
-        model_load_utils, "safe_open", lambda *a, **k: _CountedReads(opened(*a, **k), read)
+        model_load_utils, "safe_open", lambda *a, **k: _CountedReads(opened(*a, **k), counts)
     ):
         model = parallel_load_and_prepare_fsdp2(ckpt_dir, torch.device("cpu"), rank, size)
     expected = load_file(expected_path)
@@ -529,14 +533,19 @@ def _shard_reads_job(rank, size, ckpt_dir, expected_path):
         local = param.to_local()
         held += local.numel() * local.element_size()
         assert torch.equal(param.full_tensor(), expected[name]), name
-    assert read[0] == held
+    assert counts["bytes"] == held
+    # The weights' sources span at most two files, so no more are open together.
+    assert counts["open"] == 0
+    assert counts["most_open"] <= 2
 
 
 @pytest.mark.skipif(torch.cuda.is_available(), reason="with a GPU, FSDP2 shards onto it")
 def test_each_rank_reads_only_its_own_shards(cpu_dist_workers, tmp_path):
     """Each rank reads from the checkpoint exactly the bytes its FSDP2 shards hold: its rows of a
     weight, and its experts of a fused one stored one tensor per expert, and every weight loads as
-    stored. The sizes split unevenly over two ranks: 5 experts, 67 rows of embeddings, 33 of o_proj."""
+    stored. The sizes split unevenly over two ranks: 5 experts, 67 rows of embeddings, 33 of o_proj.
+    A rank closes each of the checkpoint's files after its last read rather than holding them all
+    open, since the pages a read touches stay resident while their file is open."""
     config = Qwen3MoeConfig(
         vocab_size=67,
         hidden_size=33,
@@ -552,10 +561,13 @@ def test_each_rank_reads_only_its_own_shards(cpu_dist_workers, tmp_path):
     )
     config.dtype = torch.float32
     model = Qwen3MoeForCausalLM(config)
-    model.save_pretrained(tmp_path / "ckpt")
-    assert "model.layers.0.mlp.experts.4.down_proj.weight" in load_file(
-        tmp_path / "ckpt" / "model.safetensors"
-    ), "the checkpoint was to store its experts one tensor per expert"
+    model.save_pretrained(tmp_path / "ckpt", max_shard_size="30KB")
+    index = json.loads((tmp_path / "ckpt" / "model.safetensors.index.json").read_text())
+    stored_in = index["weight_map"]
+    assert "model.layers.0.mlp.experts.4.down_proj.weight" in stored_in, (
+        "the checkpoint was to store its experts one tensor per expert"
+    )
+    assert len(set(stored_in.values())) > 2, "the checkpoint was to span several files"
     save_file(
         {name: tensor.contiguous() for name, tensor in model.state_dict().items()},
         tmp_path / "expected.safetensors",
