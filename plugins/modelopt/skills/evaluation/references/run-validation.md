@@ -36,18 +36,16 @@ single-model run:
 Report the run-validation summary before any score: log scan status, coverage,
 reasoning/answer parsing status, and any errors or warnings found. If an
 independent validation item fails, label the result incomplete or invalid and
-return findings and a recommendation to the parent (or user); do not
-automatically resubmit a completed run.
+report findings and a recommendation.
 
 For Terminal-Bench 2.1, also complete the [run health screen](../recipes/tasks/aa_next/terminal_bench_2_1.md#run-health-screen)
 and include its evidence and verdict before reporting `pass@1`.
 
-### Bounded Evaluation-Failure Policy (Parent and Evaluator)
+### Bounded Evaluation-Failure Policy
 
 Accept complete runs with **<2% failures in each applicable gate**, measured
 before rounding. Warn for nonzero rates; do not abort, invalidate, or retry solely
-for bounded failures. At or above 2%, return findings to the parent/user without
-automatic retry or a success verdict.
+for bounded failures. At or above 2%, report findings without a success verdict.
 
 Skip the 2% cutoff in both gates for a canary
 that will be followed by a full evaluation.
@@ -75,10 +73,9 @@ scores, secret leaks, wrong identity/configuration, contamination, provenance
 failures, input/context clipping, systemic serving/scoring failures, and violated
 benchmark rules remain blockers. Never select passing repeats or silently regrade.
 
-Keep protocol limits fixed, verify prompt/history plus output fits deployed
-context, and report mismatches or unknown reference settings; proposed changes
-need parent/user approval. Tolerance does not prove negligible score impact or
-leaderboard comparability.
+Verify prompt/history plus output fits deployed context, and report mismatches
+or unknown reference settings. Tolerance does not prove negligible score impact
+or leaderboard comparability.
 
 Keep score, validation, and MLflow delivery separate. Carry counts, rates, and
 warnings into handoffs. In day0 summaries, accepted diagnostics go in `warnings`;
