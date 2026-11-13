@@ -33,6 +33,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from jinja2 import TemplateSyntaxError
 
 # hf_streaming_dataset imports LabelSmoother at module scope.
 pytest.importorskip("transformers")
@@ -503,7 +504,7 @@ def test_sidecar_port_taken_from_response(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _fast_tokenizer_with_template(template: str, seq: int = 8) -> MagicMock:
+def _fast_tokenizer_with_template(template: str | None, seq: int = 8) -> MagicMock:
     """Fast-tokenizer mock with a given chat template; returns ids + assistant_masks."""
     tok = MagicMock()
     tok.is_fast = True
@@ -519,13 +520,14 @@ def _fast_tokenizer_with_template(template: str, seq: int = 8) -> MagicMock:
 _CONV = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
 
 
-def test_answer_only_loss_rejects_template_without_generation_tags():
+@pytest.mark.parametrize("template", [None, "{{ bos }}{% if add_generation_prompt %}x{% endif %}"])
+def test_answer_only_loss_rejects_template_without_generation_tags(template):
     """A fast tokenizer whose template lacks {% generation %} tags fails loudly.
 
     Without the guard transformers only warns and returns an ALL-ZERO assistant
     mask -- every sample then trains at zero loss with no other symptom.
     """
-    tok = _fast_tokenizer_with_template("{{ bos }}{% if add_generation_prompt %}x{% endif %}")
+    tok = _fast_tokenizer_with_template(template)
     with pytest.raises(RuntimeError, match="generation"):
         hf_streaming_dataset._tokenize_with_loss_mask(tok, _CONV, answer_only_loss=True)
 
@@ -545,6 +547,16 @@ def test_full_loss_skips_template_guard():
     assert mask.sum() == ids.shape[-1]
 
 
+@pytest.mark.parametrize(
+    ("template", "error"), [(None, ValueError), ("{% if %}", TemplateSyntaxError)]
+)
+def test_template_configuration_errors_propagate(tiny_tokenizer, template, error):
+    tiny_tokenizer.chat_template = template
+    entry = {"conversation_id": "configured", "messages": _CONV}
+    with pytest.raises(error):
+        StreamingDataset([entry], tiny_tokenizer)._tokenize_entry(entry)
+
+
 def test_answer_only_loss_rejects_slow_tokenizer_without_recovery():
     """A slow tokenizer with no registered recovery fails loudly even on a tagged template.
 
@@ -562,8 +574,11 @@ def test_answer_only_loss_rejects_slow_tokenizer_without_recovery():
 @pytest.mark.parametrize("answer_only_loss", [False, True])
 def test_streaming_entries_preserve_template_inputs(tiny_tokenizer, serialized, answer_only_loss):
     tokenizer = tiny_tokenizer
-    tokenizer.add_tokens(["reply"])
+    tokenizer.add_tokens(
+        ["reply", "calculator", "high", "python", "assistant", "plain", "thinking"]
+    )
     tokenizer.chat_template = (
+        "{% if enable_thinking is not defined or enable_thinking %}thinking {% else %}plain {% endif %}"
         "{{ tools[0]['function']['name'] }} {{ reasoning_effort }} "
         "{{ builtin_tools[0] }} {{ model_identity }} "
         "{{ messages[0]['content'] }} {% generation %}{{ messages[1]['content'] }}{% endgeneration %}"
@@ -578,8 +593,13 @@ def test_streaming_entries_preserve_template_inputs(tiny_tokenizer, serialized, 
         "messages": json.dumps(messages) if serialized else messages,
         "tools": json.dumps(tools) if serialized else tools,
         "reasoning_effort": "high",
-        "builtin_tools": ["python"],
-        "model_identity": "assistant",
+        "builtin_tools": json.dumps(["python"]) if serialized else ["python"],
+        "model_identity": "" if serialized else None,
+        "chat_template_kwargs": json.dumps(
+            {"enable_thinking": False, "model_identity": "assistant", "builtin_tools": ""}
+        )
+        if serialized
+        else {"enable_thinking": False, "model_identity": "assistant", "builtin_tools": None},
     }
     dataset = StreamingDataset(
         [entry], tokenizer, config=StreamingConfig(answer_only_loss=answer_only_loss)
@@ -587,7 +607,7 @@ def test_streaming_entries_preserve_template_inputs(tiny_tokenizer, serialized, 
     sample = dataset._tokenize_entry(entry)
     assert sample is not None
     expected_ids = tokenizer(
-        "calculator high python assistant question reply", add_special_tokens=False
+        "plain calculator high python assistant question reply", add_special_tokens=False
     )["input_ids"]
     assert sample["token_ids"] == expected_ids
     expected_mask = (
@@ -616,7 +636,7 @@ def test_answer_only_loss_resolves_named_templates(tiny_tokenizer, tools):
         [entry], tiny_tokenizer, config=StreamingConfig(answer_only_loss=True)
     )._tokenize_entry(entry)
     assert sample is not None
-    expected = "tool hi reply" if tools else "hi reply"
+    expected = "tool hi reply" if tools is not None else "hi reply"
     expected_ids = tiny_tokenizer(expected, add_special_tokens=False)["input_ids"]
     assert sample["token_ids"] == expected_ids
     assert sample["loss_mask"].tolist() == [0] * (len(expected_ids) - 1) + [1]
@@ -652,6 +672,11 @@ def test_serialized_empty_conversations_falls_back_to_messages(tiny_tokenizer, c
         "conversation_id": "fallback",
         "conversations": conversations,
         "messages": json.dumps([{"role": "user", "content": "hello"}]),
+        "tools": "",
+        "reasoning_effort": "",
+        "builtin_tools": "",
+        "model_identity": "",
+        "chat_template_kwargs": "",
     }
     dataset = StreamingDataset([entry], tiny_tokenizer)
     sample = dataset._tokenize_entry(entry)
@@ -670,8 +695,18 @@ def test_serialized_empty_conversations_falls_back_to_messages(tiny_tokenizer, c
         ("tools", [1]),
         ("tools", "[1]"),
         ("reasoning_effort", {"effort": "high"}),
+        ("model_identity", ["assistant"]),
+        ("builtin_tools", '["python", 1]'),
+        ("chat_template_kwargs", "[]"),
+        ("chat_template_kwargs", '{"tokenize": false}'),
+        ("chat_template_kwargs", {"tools": []}),
+        ("chat_template_kwargs", {"reasoning_effort": "high"}),
         ("messages", [{"role": "user"}, {"role": "assistant", "content": "reply"}]),
         ("messages", '[{"role":"user"},{"role":"assistant","content":"reply"}]'),
+        ("messages", [{"role": "system"}, {"role": "assistant", "content": "reply"}]),
+        ("messages", [{"role": "developer", "content": None}]),
+        ("messages", [{"role": "tool", "content": None}]),
+        ("messages", [{"role": "user", "content": 123}]),
     ],
 )
 def test_getitem_resamples_malformed_fields(tiny_tokenizer, project_root_path, field, value):
@@ -684,7 +719,12 @@ def test_getitem_resamples_malformed_fields(tiny_tokenizer, project_root_path, f
 
     tiny_tokenizer.chat_template = "{{ messages[0]['content'] }}"
     valid = {"conversation_id": "valid", "messages": [{"role": "user", "content": "hello"}]}
-    uses_gpt_oss = field in ("reasoning_effort", "messages")
+    uses_gpt_oss = field in (
+        "reasoning_effort",
+        "model_identity",
+        "messages",
+        "chat_template_kwargs",
+    )
     if uses_gpt_oss:
         tiny_tokenizer.chat_template = (
             project_root_path
@@ -758,5 +798,5 @@ def test_empty_tools_preserve_template_semantics(tiny_tokenizer, tools, template
     }
     sample = StreamingDataset([entry], tiny_tokenizer)._tokenize_entry(entry)
     assert sample is not None
-    expected = "hello" if template_kind == "default" else "tool hello"
+    expected = "tool hello"
     assert sample["token_ids"] == tiny_tokenizer(expected, add_special_tokens=False)["input_ids"]

@@ -38,17 +38,20 @@ consecutive-failure circuit breaker, loss_mask alignment); subclasses override
 """
 
 import base64
+import inspect
 import json
 import os
 import re
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TypedDict, cast
 
 import httpx
 import torch
+from jinja2 import TemplateError, TemplateSyntaxError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from torch.utils.data import Dataset
+from transformers import PreTrainedTokenizerBase
 from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.utils import print_rank_0, warn_rank_0
@@ -84,6 +87,16 @@ def nixl_backends_from_env() -> list[str]:
 # propagates instead of being silently masked as a fetch miss.
 _TRANSIENT_FETCH_ERRORS = (httpx.HTTPError, OSError)
 
+# Per-row template variables must not change tokenization or the conversation.
+_CHAT_TEMPLATE_RESERVED_KWARGS = (
+    set(inspect.signature(PreTrainedTokenizerBase.apply_chat_template).parameters)
+    - {"self", "kwargs"}
+) | {"messages"}
+
+
+class _ChatTemplateRenderingError(ValueError):
+    pass
+
 
 def _tokenize_with_loss_mask(
     tokenizer,
@@ -113,8 +126,13 @@ def _tokenize_with_loss_mask(
         # zero loss with no other symptom. (The regex matches the tag itself, not the
         # unrelated `add_generation_prompt` identifier most templates contain.)
         template_kwargs = dict(template_kwargs or {})
-        template = tokenizer.get_chat_template(
-            chat_template=template_kwargs.get("chat_template"), tools=template_kwargs.get("tools")
+        template = (
+            tokenizer.get_chat_template(
+                chat_template=template_kwargs.get("chat_template"),
+                tools=template_kwargs.get("tools"),
+            )
+            if getattr(tokenizer, "chat_template", None) or template_kwargs.get("chat_template")
+            else ""
         )
         template_kwargs["chat_template"] = template
         if not re.search(r"\{%-?\s*generation\b", template):
@@ -138,17 +156,22 @@ def _tokenize_with_loss_mask(
                 "a loss-mask recovery (modelopt.torch.utils.loss_mask), or set "
                 "answer_only_loss=false."
             )
-    out = tokenizer.apply_chat_template(
-        conversations,
-        tokenize=True,
-        return_tensors="pt",
-        return_dict=True,
-        return_assistant_tokens_mask=answer_only_loss and recovery is None,
-        add_generation_prompt=False,
-        truncation=max_seq_len is not None,
-        max_length=max_seq_len,
-        **(template_kwargs or {}),
-    )
+    try:
+        out = tokenizer.apply_chat_template(
+            conversations,
+            tokenize=True,
+            return_tensors="pt",
+            return_dict=True,
+            return_assistant_tokens_mask=answer_only_loss and recovery is None,
+            add_generation_prompt=False,
+            truncation=max_seq_len is not None,
+            max_length=max_seq_len,
+            **(template_kwargs or {}),
+        )
+    except TemplateSyntaxError:
+        raise
+    except (TemplateError, TypeError) as exc:
+        raise _ChatTemplateRenderingError(type(exc).__name__) from exc
     input_ids = out["input_ids"]
     seq_len = input_ids.shape[-1]
     if not answer_only_loss:
@@ -242,6 +265,7 @@ class StreamingDataset(Dataset):
         # Per-process consecutive-failure counter for the circuit breaker. Reset to 0
         # on every successful fetch; tripped only by fetch failures (not unfit entries).
         self._consecutive_fail = 0
+        self._warned_unfit_reasons: set[str] = set()
         print_rank_0(f"[{type(self).__name__}] map-style dataset over {len(self.entries)} entries")
 
     def __len__(self) -> int:
@@ -313,51 +337,85 @@ class StreamingDataset(Dataset):
                     convs = json.loads(convs)
                 if convs:
                     break
-            template_kwargs = {
-                key: json.loads(entry[key])
-                if key == "tools" and isinstance(entry[key], str)
-                else entry[key]
-                for key in ("tools", "reasoning_effort", "builtin_tools", "model_identity")
-                if entry.get(key) is not None
-            }
+            template_kwargs = entry.get("chat_template_kwargs")
+            if template_kwargs is None or template_kwargs == "":
+                template_kwargs = {}
+            if isinstance(template_kwargs, str):
+                template_kwargs = json.loads(template_kwargs)
+            if not isinstance(template_kwargs, Mapping) or any(
+                not isinstance(key, str) for key in template_kwargs
+            ):
+                self._warn_unfit(cid, "chat_template_kwargs must be an object")
+                return None
+            if _CHAT_TEMPLATE_RESERVED_KWARGS.intersection(template_kwargs):
+                self._warn_unfit(cid, "chat_template_kwargs contains a tokenizer argument")
+                return None
+            template_kwargs = dict(template_kwargs)
+            for key in ("tools", "reasoning_effort", "builtin_tools", "model_identity"):
+                value = entry.get(key)
+                if value is None or value == "":
+                    continue
+                if template_kwargs.get(key) is not None and template_kwargs[key] != "":
+                    self._warn_unfit(cid, f"duplicate template argument: {key}")
+                    return None
+                template_kwargs[key] = value
+            for key in ("tools", "builtin_tools"):
+                value = template_kwargs.get(key)
+                if value is None or value == "":
+                    template_kwargs.pop(key, None)
+                elif isinstance(value, str):
+                    template_kwargs[key] = json.loads(value)
         except json.JSONDecodeError:
+            self._warn_unfit(cid, "malformed JSON in conversation or template inputs")
             return None
         if cid is None or not convs or not isinstance(convs, list):
+            self._warn_unfit(cid, "missing conversation ID or nonempty conversation list")
             return None
         if any(
             not isinstance(message, dict)
-            or (message.get("role") == "user" and "content" not in message)
+            or (message.get("role") != "assistant" and message.get("content") is None)
             for message in convs
         ):
+            self._warn_unfit(cid, "non-object message or non-assistant message without content")
             return None
-        tools = template_kwargs.get("tools")
-        if tools is not None and not (
-            isinstance(tools, list) and all(isinstance(tool, dict) for tool in tools)
-        ):
+        for key, item_type in (("tools", dict), ("builtin_tools", str)):
+            value = template_kwargs.get(key)
+            if value is not None and not (
+                isinstance(value, list) and all(isinstance(item, item_type) for item in value)
+            ):
+                self._warn_unfit(cid, f"{key} must be a list of {item_type.__name__}")
+                return None
+        for key in ("reasoning_effort", "model_identity"):
+            value = template_kwargs.get(key)
+            if value is None or value == "":
+                template_kwargs.pop(key, None)
+            elif not isinstance(value, str):
+                self._warn_unfit(cid, f"{key} must be a string")
+                return None
+        try:
+            input_ids, loss_mask = _tokenize_with_loss_mask(
+                self.tokenizer,
+                convs,
+                self.config.answer_only_loss,
+                max_seq_len=self.config.max_seq_len,
+                template_kwargs=template_kwargs,
+            )
+        except _ChatTemplateRenderingError as exc:
+            self._warn_unfit(cid, f"chat template rendering failed ({exc})")
             return None
-        reasoning_effort = template_kwargs.get("reasoning_effort")
-        if reasoning_effort is not None and not isinstance(reasoning_effort, str):
-            return None
-        if (
-            tools == []
-            and isinstance(self.tokenizer.chat_template, dict)
-            and "default" in self.tokenizer.chat_template
-        ):
-            template_kwargs["chat_template"] = self.tokenizer.get_chat_template()
-        input_ids, loss_mask = _tokenize_with_loss_mask(
-            self.tokenizer,
-            convs,
-            self.config.answer_only_loss,
-            max_seq_len=self.config.max_seq_len,
-            template_kwargs=template_kwargs,
-        )
         if int(loss_mask.sum()) == 0:
+            self._warn_unfit(cid, "no supervised tokens after tokenization")
             return None
         return {
             "cid": str(cid),
             "token_ids": input_ids.squeeze(0).tolist(),
             "loss_mask": loss_mask,
         }
+
+    def _warn_unfit(self, cid: object, reason: str) -> None:
+        if reason not in self._warned_unfit_reasons:
+            self._warned_unfit_reasons.add(reason)
+            warn_rank_0(f"[streaming] skipping row {cid!r}: {reason}; further warnings suppressed")
 
     def _fetch(self, sample: dict) -> dict | None:
         """Backend hook: send the request and decode the server's response.
