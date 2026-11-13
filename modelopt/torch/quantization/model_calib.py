@@ -24,6 +24,7 @@ import warnings
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
+from contextvars import ContextVar
 from functools import partial
 from typing import Any, TypeAlias
 
@@ -85,7 +86,7 @@ from .utils.calib_utils import (
     track_calib_forward_memory,
     update_expert_weights,
 )
-from .utils.core_utils import overlaps_any, tied_parameters
+from .utils.core_utils import tied_parameters
 
 __all__ = [
     "CalibratorFactory",
@@ -2537,7 +2538,8 @@ def layerwise_calibrate(
         layer_pbar.set_postfix_str(status, refresh=True)
 
     input_getter = LayerActivationCollector(model, status_callback=_set_layer_status)
-
+    # Each layer is calibrated, and materialized, on its own, so ties are found on the whole model.
+    shared_token = _SHARED_WEIGHT_QUANTIZERS.set(_shared_weight_quantizers(model))
     try:
         input_getter._patch_all_layers(decoder_layers=transformer_layers)
         resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
@@ -2614,6 +2616,7 @@ def layerwise_calibrate(
             torch.cuda.empty_cache()
             layer_inputs = next_inputs  # noqa: F841 (used in next iteration's closure)
     finally:
+        _SHARED_WEIGHT_QUANTIZERS.reset(shared_token)
         input_getter._unpatch_all_layers()
         layer_pbar.close()
 
@@ -2978,20 +2981,43 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
             handle.remove()
 
     # Rewriting a tied weight would change every other use of its storage too.
-    tied = tied_parameters(model)
+    shared = _SHARED_WEIGHT_QUANTIZERS.get()
+    if shared is None:
+        shared = _shared_weight_quantizers(model)
 
     def encode(weight, quantizer):
         """Encode one weight weighted by its inputs' per-column second moments."""
         sum_sq, count = targets[id(quantizer)]
         second_moments = None if count == 0 else sum_sq.to(weight.device) / count
         kept = encoders[id(quantizer)].encode(
-            weight, quantizer, second_moments, shared=overlaps_any(weight, tied)
+            weight, quantizer, second_moments, shared=id(quantizer) in shared
         )
         if kept is not weight:
             weight.copy_(kept)
 
     encoded = _encode_weights(model, names, target_modules, encoders, encode)
     print_rank_0(f"imatrix: encoded {encoded} weights")
+
+
+# id() of every weight quantizer whose weight another parameter shares, as found on the whole model
+# before calibration materializes anything. Set while layerwise calibration runs, which hands each
+# calibration one layer; and inside a materialization window a weight is a temporary copy, so the
+# tie is decided per quantizer from the registered parameters rather than from the weight it gets.
+_SHARED_WEIGHT_QUANTIZERS: ContextVar[frozenset[int] | None] = ContextVar(
+    "_SHARED_WEIGHT_QUANTIZERS", default=None
+)
+
+
+def _shared_weight_quantizers(model: nn.Module) -> frozenset[int]:
+    """``id()`` of each weight quantizer of a module that holds a parameter another use shares."""
+    tied = {id(param) for param in tied_parameters(model)}
+    return frozenset(
+        id(quantizer)
+        for module in model.modules()
+        if isinstance(module, QuantModule)
+        and any(id(param) in tied for param in module.parameters(recurse=False))
+        for quantizer in module.iter_weight_quantizers_for_calibration()
+    )
 
 
 def _encoder_targets(names, registry, algorithm: str):

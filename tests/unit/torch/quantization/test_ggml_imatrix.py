@@ -17,14 +17,18 @@
 
 import copy
 import dataclasses
+from collections import defaultdict
 
 import pytest
 import torch
 import torch.nn.functional as F
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.models import TOY_MOE_EXPERTS as NUM_EXPERTS
 from _test_utils.torch.quantization.models import TOY_MOE_HIDDEN as HIDDEN
 from _test_utils.torch.transformers_models import get_tiny_llama
 from torch import nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
@@ -141,6 +145,38 @@ def test_imatrix_leaves_a_tied_weight_unchanged_and_forwards_its_codes(pattern):
         torch.testing.assert_close(layer(inputs), inputs @ expected.T)
 
 
+def _tied_fsdp2_weight_job(rank, size):
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(512, 512, bias=False), nn.Linear(512, 512, bias=False))
+    model[1].weight = model[0].weight
+    original = model[0].weight.detach().clone()
+    fully_shard(model, mesh=init_device_mesh("cpu", (size,)))
+    inputs = _inputs(rows=64)
+    with bounded_collectives():
+        mtq.quantize(model, _config(IMATRIX, "0.weight_quantizer"), lambda m: m(inputs))
+    assert torch.equal(model[0].weight.full_tensor(), original)
+
+
+def test_imatrix_leaves_a_tied_weight_of_a_sharded_fsdp2_model_unchanged(cpu_dist_workers):
+    # Inside its materialization window the weight is a gathered copy sharing no storage.
+    cpu_dist_workers.run(_tied_fsdp2_weight_job)
+
+
+def test_layerwise_imatrix_leaves_a_weight_tied_across_layers_unchanged():
+    # Layerwise calibration hands imatrix one decoder layer, in which the tie is not visible.
+    model = get_tiny_llama(
+        dtype=torch.float32, hidden_size=256, intermediate_size=256, num_attention_heads=4
+    )
+    layers = model.model.layers
+    layers[1].mlp.gate_proj.weight = layers[0].mlp.gate_proj.weight
+    original = layers[0].mlp.gate_proj.weight.detach().clone()
+    input_ids = torch.randint(0, 32, (4, 16), generator=torch.Generator().manual_seed(0))
+    algorithm = {"method": "imatrix", "layerwise": {"enable": True}}
+    pattern = "*layers.0.mlp.gate_proj.weight_quantizer"
+    mtq.quantize(model, _config(algorithm, pattern), lambda m: m(input_ids))
+    assert torch.equal(layers[0].mlp.gate_proj.weight.detach(), original)
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float64])
 def test_imatrix_matches_each_blocks_energy_and_keeps_a_weight_encoding_to_its_codes(dtype):
     # The stored scales are rescaled after the search and the weight is scaled alike, so the codes
@@ -251,9 +287,18 @@ def test_a_module_calibration_never_reached_gets_the_plain_search(algorithm):
     assert torch.equal(model["unused"].weight, original) == (algorithm is LOCAL_HESSIAN)
 
 
-def test_imatrix_weights_each_fused_expert_by_its_own_tokens(moe):
+def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
     original = copy.deepcopy(moe.mlp)
     inputs = _inputs(rows=96, columns=HIDDEN)
+    searches = defaultdict(list)  # the importance of every search, by the weight it searched
+
+    def recording_quantize(weight, **kwargs):
+        searches[weight.data_ptr()].append(kwargs.get("importance"))
+        return IQ2_XXS.quantize(weight, **kwargs)
+
+    monkeypatch.setitem(
+        GGML_FORMAT_REGISTRY, "iq2_xxs", dataclasses.replace(IQ2_XXS, quantize=recording_quantize)
+    )
     # The shipped experts-only recipe, which calibrates in a single pass.
     recipe = load_recipe("general/ptq/iq2_xxs_experts_only").quantize.model_dump()
     assert recipe["algorithm"]["method"] == "imatrix"
@@ -272,14 +317,23 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(moe):
         down_importance = pinned_importance(experts.down_proj_weight_quantizers[idx], "iq2_xxs")
         if len(tokens) == 0:
             # The idle expert keeps the plain search, and its codes are still pinned.
-            assert gate_up_importance is None
-            assert down_importance is None
+            expected_gate_up = expected_down = None
         else:
             gate, up = F.linear(tokens, original.experts.gate_up_proj[idx]).chunk(2, dim=-1)
-            torch.testing.assert_close(gate_up_importance, _importance(tokens.square().mean(dim=0)))
-            torch.testing.assert_close(
-                down_importance, _importance((F.silu(gate) * up).square().mean(dim=0))
-            )
+            expected_gate_up = _importance(tokens.square().mean(dim=0))
+            expected_down = _importance((F.silu(gate) * up).square().mean(dim=0))
+        # Every search of an expert's weight used its own tokens, as did the importance pinned.
+        for weight, importance, expected in (
+            (experts.gate_up_proj[idx], gate_up_importance, expected_gate_up),
+            (experts.down_proj[idx], down_importance, expected_down),
+        ):
+            used = searches[weight.data_ptr()]
+            assert used
+            for found in (*used, importance):
+                if expected is None:
+                    assert found is None
+                else:
+                    torch.testing.assert_close(found, expected)
         for weight, original_weight, quantizers in (
             (
                 experts.gate_up_proj,

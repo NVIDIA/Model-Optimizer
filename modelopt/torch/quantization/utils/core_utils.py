@@ -1348,15 +1348,3 @@ def tied_parameters(model: nn.Module) -> set[nn.Parameter]:
             ):
                 tied.add(param)
     return tied
-
-
-def overlaps_any(tensor: torch.Tensor, params) -> bool:
-    """Whether ``tensor``'s bytes overlap those of any of ``params``."""
-    span = storage_span(tensor)
-    return span is not None and any(
-        (other := storage_span(param)) is not None
-        and other[0] == span[0]
-        and other[1] < span[2]
-        and span[1] < other[2]
-        for param in params
-    )
