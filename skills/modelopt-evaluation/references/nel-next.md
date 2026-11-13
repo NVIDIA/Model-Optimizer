@@ -165,8 +165,8 @@ with its own `run_id`, copying the shared `services:` block.
   by construction. **Re-canary whenever either side moves**, and treat a post-allocation
   `ValidationError` mentioning an unknown/missing config field as skew, not a config bug.
 - **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}` → `0.5.0.1-harbor` (multi-arch). Re-check
-  against `configs/shared/nel_next_containers.yaml` in the eval-factory repo, which is the
-  pin and does move; tag runs with its `nemo_evaluator_next_version` (MLflow tag
+  against the eval-image pin the benchmark owners publish (see the eval-config "source of truth"
+  note), which is the pin and does move; tag runs with its `nemo_evaluator_next_version` (MLflow tag
   `nemo-evaluator-next-version`). Arch-suffixed `0.17.x/0.18.x-harbor-<arch>` are too old for TB 2.1.
   Private gitlab-master image → cluster needs enroot creds (SKILL Step 7.5).
 - **Always set `proxy.request_timeout` explicitly** (`3600`, >= `agent_kwargs.llm_kwargs.timeout`).
