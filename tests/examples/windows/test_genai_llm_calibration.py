@@ -303,6 +303,30 @@ def test_invalid_embedding_cache_is_rebuilt(tmp_path, corruption):
     np.testing.assert_array_equal(recovered, values.astype(np.float16))
 
 
+@pytest.mark.parametrize("destination", ["missing", "valid", "invalid"])
+def test_embedding_cache_publication_failure(tmp_path, monkeypatch, destination):
+    model = tmp_path / "checkpoint"
+    values, _ = _checkpoint(model)
+    cache = tmp_path / "cache" / "embedding.npy"
+
+    def blocked_replace(source, target):
+        if destination != "missing":
+            contents = values.astype(np.float16)
+            if destination == "invalid":
+                contents[0, 0] = np.nan
+            np.save(target, contents)
+        raise PermissionError("Cache destination is locked")
+
+    monkeypatch.setattr(calibration.os, "replace", blocked_replace)
+    if destination == "valid":
+        recovered = calibration.embed_table(str(model), cache)
+        np.testing.assert_array_equal(recovered, values.astype(np.float16))
+    else:
+        with pytest.raises(PermissionError):
+            calibration.embed_table(str(model), cache)
+    assert len(list(cache.parent.iterdir())) == (destination != "missing")
+
+
 @pytest.mark.parametrize("oversized", [False, True])
 def test_hub_embedding_is_downloaded_in_bounded_ranges(tmp_path, monkeypatch, oversized):
     values = np.ones((4096, 1024), dtype="<f4")
@@ -310,7 +334,7 @@ def test_hub_embedding_is_downloaded_in_bounded_ranges(tmp_path, monkeypatch, ov
         "model.embed_tokens.weight": {
             "dtype": "F32",
             "shape": [2**30, 1024] if oversized else list(values.shape),
-            "data_offsets": [0, 2**41 if oversized else values.nbytes],
+            "data_offsets": [0, 2**42 if oversized else values.nbytes],
         }
     }
     header = json.dumps(metadata).encode()
@@ -368,7 +392,7 @@ def test_hub_embedding_is_downloaded_in_bounded_ranges(tmp_path, monkeypatch, ov
             pytest.fail("Oversized checkpoint must be rejected before cache allocation")
 
         monkeypatch.setattr(calibration.np.lib.format, "open_memmap", reject_allocation)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="exceeds the configured maximum cache size"):
             calibration.embed_table("test/model", tmp_path / "cache" / "embedding.npy")
         assert not (tmp_path / "cache").exists()
         return
