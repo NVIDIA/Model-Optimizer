@@ -15,8 +15,9 @@
 
 """Per-model descriptors, one package per HF model type.
 
-Directory names are the HF ``config.model_type`` they describe; a model whose code
-ships with the checkpoint uses its remote-code ``model_type`` and records that as
+Directory names are the HF ``config.model_type`` they describe, in snake case
+(``NemotronH_Nano_VL_V2`` is ``nemotron_h_nano_vl_v2``); a model whose code ships with
+the checkpoint uses its remote-code ``model_type`` and records that as
 ``ModelSpec.modeling_source``, while a model defined in transformers records the release
 its definitions come from as ``ModelSpec.min_transformers_version``. Each package's
 ``specs.py`` registers one global ``ModelSpec`` (built from the section classes in this
@@ -28,12 +29,13 @@ The per-model file is named for what it holds, not for who reads it: a model's s
 general model data, and export is only its first consumer.
 
 A package may also hold ``modeling_ptq.py`` and ``modeling_ptq_vllm.py``, the model-specific PTQ
-wrappers for transformers and vLLM. They are not imported here; the HF and vLLM quantization
-plugins import them with ``import_model_modules`` (see ``README.md``).
+wrappers for transformers and vLLM. They are not imported here: quantization imports a model's
+own with ``import_model_modules`` just before converting it (see ``README.md``).
 """
 
 import importlib
 import os
+import re
 
 from .moe import is_moe
 from .specs import (
@@ -128,17 +130,37 @@ from . import (  # isort: skip
 )
 
 
-def import_model_modules(module_name: str) -> None:
-    """Import ``<model_type>/<module_name>.py`` from every model package that has one.
+def import_model_modules(model, module_name: str) -> None:
+    """Import ``<package>/<module_name>.py`` for each of ``model``'s model types that has one.
 
-    The quantization plugins load the model-specific PTQ wrappers this way (``modeling_ptq`` for
-    transformers, ``modeling_ptq_vllm`` for vLLM), so they name no model: such a module registers
-    its wrappers on import, and adding one needs no list entry. Packages are visited in name
-    order, so the registration order is the same on every run.
+    The model types are the root ``model.config.model_type``, then those of the configs nested in
+    it, so a composite model (a VLM, say) also gets its language model's modules. Quantization
+    loads a model's PTQ wrappers this way just before converting it (``modeling_ptq`` for
+    transformers, ``modeling_ptq_vllm`` for vLLM): such a module registers them on import, so no
+    model's wrappers are loaded until a model of its type is converted.
     """
     models_dir = os.path.dirname(__file__)
-    # One file check per package: listing every package directory, as pkgutil does, takes ~40 ms
-    # on NFS.
-    for package in sorted(os.listdir(models_dir)):
-        if os.path.isfile(os.path.join(models_dir, package, f"{module_name}.py")):
+    for model_type in _model_types(model):
+        package = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", model_type).lower().replace("-", "_")
+        if package.isidentifier() and os.path.isfile(
+            os.path.join(models_dir, package, f"{module_name}.py")
+        ):
             importlib.import_module(f"{__name__}.{package}.{module_name}")
+
+
+def _model_types(model) -> list[str]:
+    """Return the root ``model.config.model_type``, then those of the configs nested in it."""
+    model_types: list[str] = []
+    configs = [getattr(model, "config", None)]
+    seen: set[int] = set()
+    while configs:
+        config = configs.pop(0)
+        model_type = getattr(config, "model_type", None)
+        if not isinstance(model_type, str) or id(config) in seen:
+            continue
+        seen.add(id(config))
+        if model_type and model_type not in model_types:
+            model_types.append(model_type)
+        # A nested config (``text_config``, ``llm_config``, ...) is an attribute of its parent.
+        configs.extend(getattr(config, "__dict__", {}).values())
+    return model_types

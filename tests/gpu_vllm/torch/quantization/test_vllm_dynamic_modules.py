@@ -509,26 +509,35 @@ def test_non_kimi_conversion_never_imports_kimi():
 _CHECK_MODEL_PACKAGES_IMPORTED = """
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import torch
 
 import modelopt.torch.quantization
 from modelopt.torch import models
+from modelopt.torch.quantization.plugins.custom import register_custom_model_plugins_on_the_fly
 
-expected = {
-    f"modelopt.torch.models.{path.parent.name}.modeling_ptq_vllm"
-    for path in Path(models.__file__).parent.glob("*/modeling_ptq_vllm.py")
-}
-missing = sorted(expected - sys.modules.keys())
-assert expected and not missing, f"the vLLM plugin did not import {missing}"
+packages = sorted(
+    path.parent.name for path in Path(models.__file__).parent.glob("*/modeling_ptq_vllm.py")
+)
+modules = [f"modelopt.torch.models.{package}.modeling_ptq_vllm" for package in packages]
+assert packages and not set(modules) & sys.modules.keys(), "imported before any conversion"
+for package, module in zip(packages, modules):
+    # A vLLM model keeps its HF config, whose model type names its package.
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(model_type=package)
+    register_custom_model_plugins_on_the_fly(model)
+    assert module in sys.modules, f"converting a {package} model did not import {module}"
 """
 
 
 # A fresh interpreter importing torch, vLLM and modelopt can outlast the 60 s per-test default.
 @pytest.mark.timeout(300)
-def test_vllm_plugin_imports_every_model_package():
-    """Importing modelopt registers every model package's vLLM wrappers.
+def test_vllm_model_packages_are_imported_on_conversion():
+    """Converting a vLLM model imports its type's ``modeling_ptq_vllm``, and importing modelopt none.
 
-    The vLLM plugin finds each ``modelopt/torch/models/<model_type>/modeling_ptq_vllm.py`` by file
-    name, and ``import_plugin`` would hide one that fails to import.
+    The vLLM plugin finds ``modelopt/torch/models/<model_type>/modeling_ptq_vllm.py`` by the model
+    type in the model's HF config.
     """
     # The child only asserts; tracing its imports for coverage would just slow it down.
     env = {k: v for k, v in os.environ.items() if k != "COVERAGE_PROCESS_START"}

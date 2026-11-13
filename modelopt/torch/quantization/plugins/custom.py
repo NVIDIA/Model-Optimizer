@@ -22,6 +22,7 @@ from types import ModuleType
 
 import torch
 
+from modelopt.torch.models import import_model_modules
 from modelopt.torch.utils.distributed import ParallelState
 
 from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
@@ -37,12 +38,18 @@ from ..utils import multi_context, replace_function
 
 CUSTOM_MODEL_PLUGINS = set()
 CUSTOM_POST_CONVERSION_PLUGINS = set()
+# The model-specific PTQ modules each framework plugin loads, by file name: before a model is
+# converted, its own ``modelopt/torch/models/<model_type>/<name>.py`` is imported.
+MODEL_PTQ_MODULES: list[str] = []
 
 
 # TODO: This is a temporary solution
 # In future implement a decorator to register methods updating QUANT_MODULE on the fly
 def register_custom_model_plugins_on_the_fly(model):
     """Registers custom modules as QUANT_MODULE on the fly."""
+    # The model's own PTQ modules first: importing one registers its wrappers and callbacks.
+    for module_name in MODEL_PTQ_MODULES:
+        import_model_modules(model, module_name)
     for callback in CUSTOM_MODEL_PLUGINS:
         callback(model)
 
