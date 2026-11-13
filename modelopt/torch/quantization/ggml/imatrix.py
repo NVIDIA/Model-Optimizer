@@ -31,10 +31,9 @@ class GGMLImatrixEncoder(ImatrixEncoder):
     """Encodes a ``ggml``-backend weight with llama.cpp's imatrix statistic and pins its codes.
 
     The encode is :func:`~.common.pin_energy_matched` under ``E[x_j^2]``, the exact diagonal of the
-    output error, whose search takes its square root; the weight is left unrounded but scaled per
-    block like its stored scale, as that function describes, unless its storage is shared. The
-    pinned payload is what later forwards and export use, and it marks the weight as final: a
-    quantizer that already holds one, such as GPTQ's, is left alone.
+    output error, whose search takes its square root. The pinned payload is what later forwards and
+    export use, and it marks the weight as final: a quantizer that already holds one, such as
+    GPTQ's, is left alone. The weight itself is left as it is.
     """
 
     def accepts(self, quantizer) -> bool:
@@ -59,16 +58,11 @@ class GGMLImatrixEncoder(ImatrixEncoder):
                 f"{ggml_format.name.upper()}"
             )
 
-    def encode(self, weight, quantizer, second_moments, *, shared=False):
+    def encode(self, weight, quantizer, second_moments):
         """Encode ``weight`` once, weighted by ``second_moments``, and pin the payload."""
         ggml_format = GGML_FORMAT_REGISTRY[quantizer.num_bits]
-        return pin_energy_matched(
-            ggml_format,
-            quantizer,
-            weight,
-            floored_second_moments(second_moments),
-            rescale=not shared,
-        )
+        pin_energy_matched(ggml_format, quantizer, weight, floored_second_moments(second_moments))
+        return weight
 
 
 register_imatrix_encoder("ggml", GGMLImatrixEncoder())

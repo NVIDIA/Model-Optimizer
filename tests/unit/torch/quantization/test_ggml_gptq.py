@@ -481,8 +481,8 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
 
 
 # Q8_0 keeps no scales: its pin holds while the weight is the decoding. IQ2_XS keeps its pinned
-# scales: it re-encodes the unrounded weight, so needs the importance too, and local_hessian's
-# searched choices need the source fingerprint as well.
+# scales: it re-encodes the unrounded weight, so needs the importance too, local_hessian's
+# searched choices need the source fingerprint, and imatrix's the scales its codes were searched at.
 @pytest.mark.parametrize(
     ("num_bits", "algorithm"),
     [
@@ -490,8 +490,9 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
         ("iq2_xs", {**GPTQ, "importance_weighted": True}),
         ("iq2_xxs", {**GPTQ, "importance_weighted": True}),
         ("iq2_xs", {"method": "local_hessian"}),
+        ("iq2_xs", {"method": "imatrix"}),
     ],
-    ids=["q8_0-gptq", "iq2_xs-gptq", "iq2_xxs-gptq", "iq2_xs-local_hessian"],
+    ids=["q8_0-gptq", "iq2_xs-gptq", "iq2_xxs-gptq", "iq2_xs-local_hessian", "iq2_xs-imatrix"],
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_pin_survives_save_and_restore(num_bits, algorithm, dtype):

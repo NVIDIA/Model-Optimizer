@@ -59,9 +59,9 @@ def test_imatrix_encodes_each_gpus_weights_at_once(need_2_gpus, monkeypatch, inf
     spans = []
     encode = GGMLImatrixEncoder.encode
 
-    def timed_encode(self, weight, quantizer, second_moments, **kwargs):
+    def timed_encode(self, weight, quantizer, second_moments):
         start = time.perf_counter()
-        decoded = encode(self, weight, quantizer, second_moments, **kwargs)
+        decoded = encode(self, weight, quantizer, second_moments)
         torch.cuda.synchronize(weight.device)
         # Stands in for a long encode: encodes on two GPUs overlap only if they run at once.
         time.sleep(0.2)
