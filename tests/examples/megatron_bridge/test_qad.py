@@ -36,6 +36,7 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_dir,
 )
 from torch.distributed.checkpoint import FileSystemReader
+from torch.distributed.elastic.multiprocessing.errors import ChildFailedError
 
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -210,10 +211,15 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
         reinitialize_cmd[reinitialize_cmd.index("--output_dir") + 1] = str(
             tmp_path / "fresh_output"
         )
-        with pytest.raises(ValueError, match="trained student checkpoint"):
+        # A multi-rank step surfaces the worker's ValueError as a ChildFailedError, with the message
+        # only in the captured output.
+        with pytest.raises((ValueError, ChildFailedError)) as reinitialize_error:
             run_example_command(
                 reinitialize_cmd, example_path="megatron_bridge", setup_free_port=True
             )
+        assert "trained student checkpoint" in (
+            f"{reinitialize_error.value}{getattr(reinitialize_error.value, 'captured_output', '')}"
+        )
         for name in frozen:
             assert torch.equal(initial[name].view(torch.uint8), trained[name].view(torch.uint8)), (
                 name
