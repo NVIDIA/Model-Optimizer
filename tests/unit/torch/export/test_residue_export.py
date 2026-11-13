@@ -60,6 +60,38 @@ def test_residue_export_rejects_invalid_state_before_writing(tmp_path, invalid):
         torch.testing.assert_close(model.state_dict()[key], value, rtol=0, atol=0)
 
 
+def test_reused_export_dir_drops_stale_residue_metadata(tmp_path):
+    """An ordinary export must not inherit a previous model's residue sidecar."""
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    def tiny_llama():
+        return LlamaForCausalLM(
+            LlamaConfig(
+                vocab_size=64,
+                hidden_size=128,
+                intermediate_size=256,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                num_key_value_heads=4,
+                max_position_embeddings=32,
+                tie_word_embeddings=False,
+            )
+        )
+
+    target = tmp_path / "checkpoint"
+    config = deepcopy(mtq.MXFP4_DEFAULT_CFG)
+    config["algorithm"] = {"method": "residue_max", "residue_ratio": 0.25}
+    tokens = torch.randint(0, 64, (2, 8))
+    residue = mtq.quantize(tiny_llama(), config, lambda m: m(tokens))
+    export_hf_checkpoint(residue, export_dir=target)
+    metadata = target / "residue_kernel_metadata.json"
+    assert metadata.exists()
+
+    ordinary = mtq.quantize(tiny_llama(), mtq.MXFP4_DEFAULT_CFG, lambda m: m(tokens))
+    export_hf_checkpoint(ordinary, export_dir=target)
+    assert not metadata.exists()
+
+
 @pytest.mark.parametrize("ordinary_sibling", [False, True])
 def test_residue_export_preserves_independent_projection_channels(ordinary_sibling):
     config = deepcopy(mtq.MXFP4_DEFAULT_CFG)

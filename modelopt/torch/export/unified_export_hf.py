@@ -2463,10 +2463,15 @@ def export_hf_checkpoint(
 
         if rank == 0:
             _write_hf_export_config(model, hf_quant_config, export_dir)
+            # A reused directory may still hold an earlier model's sidecar, which would
+            # describe a residue layout for weights that no longer have one.
+            metadata_path = export_dir / "residue_kernel_metadata.json"
             if residue_metadata:
-                (export_dir / "residue_kernel_metadata.json").write_text(
+                metadata_path.write_text(
                     json.dumps(residue_metadata, indent=2) + "\n", encoding="utf-8"
                 )
+            elif metadata_path.exists():
+                metadata_path.unlink()
             copy_off_index_safetensors(_source_checkpoint(model), export_dir)
             if not (_offloaded or is_fsdp2_sharded or use_no_gather_writer):
                 # The streaming paths and the no-gather writer already did, from
