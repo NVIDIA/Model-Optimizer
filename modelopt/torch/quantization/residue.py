@@ -28,7 +28,7 @@ import torch.nn.functional as F
 
 from .config import ResidueMaxCalibConfig
 from .conversion import create_and_replace_residue_linear_on_the_fly, set_quantizer_by_cfg_context
-from .model_calib import _register_weight_input_hooks, max_calibrate
+from .model_calib import _register_weight_input_hooks, _warn_if_fused_experts_skipped, max_calibrate
 from .nn import TensorQuantizer
 from .utils import module_name_maps
 from .utils.shared_input import SHARED_PATTERNS, find_shared_input_groups
@@ -163,7 +163,7 @@ def _validate_modules(model, salience_metric):
     for name, module in model.named_modules():
         if not hasattr(module, "weight_quantizer") or not module.weight_quantizer.is_enabled:
             continue
-        if not isinstance(module, nn.Linear) or hasattr(module, "_original_in_features"):
+        if not isinstance(module, nn.Linear):
             raise NotImplementedError(
                 "Residue calibration requires unextended dense Linear modules."
             )
@@ -225,6 +225,7 @@ def residue_max_calibrate(
     if forward_loop is None:
         raise ValueError("forward_loop is required for residue_max calibration.")
     names = _validate_modules(model, salience_metric)
+    _warn_if_fused_experts_skipped(model, "residue_max")
     patterns = SHARED_PATTERNS if shared_input_patterns is None else shared_input_patterns
     module_names = {id(model.get_submodule(name)): name for name in names}
     groups = []
@@ -251,7 +252,10 @@ def residue_max_calibrate(
     with _calibration_state(model), ExitStack() as stack:
 
         def capture(weight_quantizer, weight, inputs):
-            by_quantizer[id(weight_quantizer)].collect(inputs)
+            # The shared hooks also report fused MoE experts, which keep max calibration.
+            helper = by_quantizer.get(id(weight_quantizer))
+            if helper is not None:
+                helper.collect(inputs)
 
         # Register before disabling quantizers: the shared helper filters enabled weights.
         handles = _register_weight_input_hooks(model, module_name_maps(model), capture)

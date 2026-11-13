@@ -109,7 +109,6 @@ repos:
         exclude: >
           (?x)^(
               modelopt/torch/quantization/residue.py|
-              modelopt/torch/quantization/nn/modules/quant_linear.py|
               modelopt/torch/quantization/utils/calib_utils.py|
               modelopt/torch/quantization/ggml/codebooks.py|
               modelopt/onnx/quantization/operators.py|

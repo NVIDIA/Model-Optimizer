@@ -86,7 +86,7 @@ def _residue_layer_metadata(module):
             raise ValueError(
                 "Residue deployment requires 1, 2 or 4 selected channels per block of 8."
             )
-    if hasattr(module, "_original_in_features") or weight.shape != (module.out_features, width):
+    if weight.shape != (module.out_features, width):
         raise ValueError("Residue weight dimensions do not match the calibrated channels.")
     if getattr(module, "output_quantizer", None) is not None and module.output_quantizer.is_enabled:
         raise NotImplementedError("Residue export does not support output quantization.")

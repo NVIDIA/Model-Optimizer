@@ -189,6 +189,23 @@ def test_recalibration_preserves_awq_state():
         assert torch.equal(model.state_dict()[key], value), key
 
 
+def test_fused_moe_experts_keep_max_calibration(moe):
+    inputs = torch.randn(12, moe.mlp.shared_expert.in_features)
+    with pytest.warns(UserWarning, match="residue_max does not apply to fused MoE experts"):
+        model = mtq.quantize(moe, _config(), lambda m: m(inputs))
+    shared, experts = model.mlp.shared_expert, model.mlp.experts
+    assert isinstance(shared, ResidueQuantLinear)
+    assert shared.input_quantizer._salient_indices.numel() == shared.in_features // 4
+    for quantizer in (
+        experts.gate_up_proj_input_quantizer,
+        experts.down_proj_input_quantizer,
+        *experts.gate_up_proj_weight_quantizers,
+        *experts.down_proj_weight_quantizers,
+    ):
+        assert quantizer.amax is not None
+        assert not hasattr(quantizer, "_salient_indices")
+
+
 @pytest.mark.parametrize("ratio", [-0.1, 1.01, float("nan"), float("inf")])
 def test_invalid_ratio(ratio):
     with pytest.raises(ValidationError):
