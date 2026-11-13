@@ -1968,7 +1968,8 @@ def merge_auto_quantize_shards(shard_states: Sequence[dict]) -> dict:
                 current = target["raw_scores"][i]
                 if score is None or current == score:
                     continue
-                # Every shard scores BF16 and fixed groups alike (0); a sharded format only once.
+                # Every shard scores fixed groups alike (0), and BF16 too unless a KL context has
+                # shard 0 alone measure it; a sharded format is scored only once.
                 if current is not None:
                     raise ValueError(f"Two format shards scored {target['formats'][i]} for {name}.")
                 target["raw_scores"][i] = score
@@ -2411,11 +2412,12 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
         """Get the default config for the searcher.
 
         ``context``: what the other searched groups use while one group's candidates are scored.
-        ``None`` (default) leaves them unquantized. ``"lowest"`` (or an int ``k``) quantizes each
-        to its lowest-bit (``k``-th lowest-bit, capped at its highest) quantized candidate, so a
-        score is the KL at that operating point and also counts how a group's error compounds with
-        the others'; every candidate, BF16 included, is then measured. Pick the candidate nearest
-        the budget: the further the context is from the selection, the less its scores add up.
+        ``None`` (default) leaves them unquantized. ``"lowest"`` quantizes each to its lowest-bit
+        quantized candidate, and an int ``k`` to the ``k``-th from the lowest, counting from 0
+        (so ``0`` is ``"lowest"``) and capped at its highest. A score is then the KL at that
+        operating point and also counts how a group's error compounds with the others'; every
+        candidate, BF16 included, is measured. Pick the context nearest the budget: the further it
+        is from the selection, the less its scores add up.
         """
         config = super().default_search_config
         config.update(
@@ -2499,27 +2501,45 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
             set_to_unquantized()
             logits_unquant = self.config["forward_step"](self.model, data)
             log_prob_unquant = _get_log_prob(logits_unquant, lm_head=_get_lm_head(self.model))
-            set_to(context_recipe)
 
-            for name, hparam in tqdm(
-                list(named_hparams(self.model, configurable=True)), desc="Evaluating hparams"
+            def kl_to_unquantized():
+                logits_quant = self.config["forward_step"](self.model, data)
+                # Summed over batches in fp32: a context adds one large base to every score, and
+                # a bf16 running sum (Megatron's log-probs) would round away their differences.
+                return _get_kl_div_loss(
+                    log_prob_unquant, logits_quant, _get_lm_head(self.model)
+                ).float()
+
+            set_to(context_recipe)
+            hparams = [
+                hparam
+                for _, hparam in named_hparams(self.model, configurable=True)
+                if isinstance(hparam, QuantRecipeHparam)
+            ]
+            # A group at its own context recipe leaves the model in the context, so one forward
+            # scores that recipe for every group.
+            context_score = None
+            if context is not None and any(
+                self._scores_recipe(hparam, context_recipe(hparam)) for hparam in hparams
             ):
-                if not isinstance(hparam, QuantRecipeHparam):
-                    continue
-                for recipe in hparam.choices:
+                context_score = kl_to_unquantized()
+
+            for hparam in tqdm(hparams, desc="Evaluating hparams"):
+                for recipe in hparam.solver_choices:
                     if recipe == no_quant and context is None:
                         continue  # scores 0 by construction
                     if not self._scores_recipe(hparam, recipe):
                         continue
-                    hparam.active = recipe
-                    logits_quant = self.config["forward_step"](self.model, data)
-                    score = _get_kl_div_loss(
-                        log_prob_unquant, logits_quant, _get_lm_head(self.model)
-                    )
-                    if hparam._importance_dict[recipe][hparam.score_modules[0]] is None:
-                        hparam._importance_dict[recipe][hparam.score_modules[0]] = score
+                    if context_score is not None and recipe == context_recipe(hparam):
+                        score = context_score
                     else:
-                        hparam._importance_dict[recipe][hparam.score_modules[0]] += score
+                        hparam.active = recipe
+                        score = kl_to_unquantized()
+                    scores = hparam._importance_dict[recipe]
+                    previous = scores[hparam.score_modules[0]]
+                    scores[hparam.score_modules[0]] = (
+                        score if previous is None else previous + score
+                    )
                 hparam.active = context_recipe(hparam)
             set_to_unquantized()
 
