@@ -401,6 +401,54 @@ def test_quantize_opset_handling(
 
 
 @pytest.mark.parametrize(
+    ("autotune_verbose", "log_level", "expected_log_level"),
+    [(False, "WARNING", "WARNING"), (True, "ERROR", "DEBUG")],
+)
+def test_autotune_verbose_sets_quantizer_log_level(
+    monkeypatch, tmp_path, autotune_verbose, log_level, expected_log_level
+):
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+    onnx_path = tmp_path / "model.onnx"
+    onnx_path.write_bytes(b"")
+    captured = {}
+
+    monkeypatch.setattr(
+        quantize_module,
+        "_preprocess_onnx",
+        lambda *args, **kwargs: (str(onnx_path), object(), [], False, False, False, {}, {}),
+    )
+    monkeypatch.setattr(quantize_module, "_has_qdq_site", lambda *args: False)
+    monkeypatch.setattr(quantize_module, "validate_op_types_spelling", lambda *args: None)
+    monkeypatch.setattr(quantize_module, "find_nodes_from_mha_to_exclude", lambda *args: [])
+    monkeypatch.setattr(
+        quantize_module,
+        "_find_nodes_to_quantize_autotune",
+        lambda *args, **kwargs: quantize_module._AutotuneContext(
+            ort_config=([], [], [], []),
+            baseline_model=object(),
+            performance_threshold=1.02,
+            output_dir=tmp_path,
+        ),
+    )
+    monkeypatch.setattr(
+        quantize_module,
+        "quantize_int8",
+        lambda **kwargs: captured.update(log_level=kwargs["log_level"]),
+    )
+    monkeypatch.setattr(quantize_module.onnx.checker, "check_model", lambda *args: None)
+
+    moq.quantize(
+        str(onnx_path),
+        calibration_data_reader=object(),
+        autotune=True,
+        autotune_verbose=autotune_verbose,
+        log_level=log_level,
+    )
+
+    assert captured["log_level"] == expected_log_level
+
+
+@pytest.mark.parametrize(
     ("args", "expected"),
     [
         ([], False),

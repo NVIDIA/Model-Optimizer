@@ -19,7 +19,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from modelopt.onnx.logging_config import logger
+from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.quantization.autotune.benchmark import default_timing_cache_file
 from modelopt.onnx.quantization.autotune.utils import (
     DEFAULT_NUM_SCHEMES,
@@ -93,6 +93,7 @@ def run_autotune() -> int:
     """
     args = get_parser().parse_args()
     apply_mode_presets(args)
+    configure_logging("DEBUG" if args.verbose else "INFO")
     args.timing_cache = args.timing_cache or default_timing_cache_file()
     model_path = validate_file_path(args.onnx_path, "Model file")
     validate_file_path(args.qdq_baseline, "QDQ baseline model")

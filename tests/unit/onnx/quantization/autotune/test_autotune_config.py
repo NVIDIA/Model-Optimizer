@@ -20,12 +20,34 @@ Tests configuration parameter validation, defaults, and CLI --mode preset
 selection and explicit-flag precedence.
 """
 
+import logging
+import sys
+
+from modelopt.onnx.logging_config import configure_logging, logger
+from modelopt.onnx.quantization.autotune import __main__ as autotune_cli
 from modelopt.onnx.quantization.autotune.__main__ import (
     MODE_PRESETS,
     apply_mode_presets,
     get_parser,
 )
 from modelopt.onnx.quantization.autotune.common import Config
+
+
+def test_verbose_cli_enables_debug_logging(monkeypatch, tmp_path):
+    model_path = tmp_path / "model.onnx"
+    model_path.write_bytes(b"")
+    monkeypatch.setattr(
+        sys, "argv", ["modelopt.onnx.quantization.autotune", "--onnx_path", str(model_path), "-v"]
+    )
+    monkeypatch.setattr(autotune_cli, "init_benchmark_instance", lambda **kwargs: None)
+
+    original_level = logger.level
+    configure_logging(logging.INFO)
+    try:
+        assert autotune_cli.run_autotune() == 1
+        assert logger.isEnabledFor(logging.DEBUG)
+    finally:
+        configure_logging(original_level)
 
 
 class TestConfig:

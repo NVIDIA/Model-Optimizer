@@ -715,6 +715,8 @@ def quantize(
             "Remove --trt_plugins or select the classic TensorRT EP."
         )
 
+    if autotune and autotune_verbose:
+        log_level = "DEBUG"
     configure_logging(log_level.upper(), log_file)
     logger.info(f"Starting quantization process for model: {onnx_path}")
     logger.info(f"Quantization mode: {quantize_mode}")
