@@ -241,7 +241,7 @@ def test_awq_reuses_adjacent_activations(
     awq_init = moq.int4.AWQLiteHelper.__init__
 
     def capture_weight_samples(self, x, *args, **kwargs):
-        weight_samples.append(x.copy())
+        weight_samples.append(x.get() if moq.int4.has_cupy else x.copy())
         awq_init(self, x, *args, **kwargs)
 
     def counted_session(*args, **kwargs):
