@@ -259,16 +259,14 @@ class NormVarianceRule(NodeRuleBase):
     """Rule for keeping the variance of decomposed RMSNorm in high precision.
 
     It also covers decomposed LayerNorm that ``GraphSanitizer`` did not fuse into
-    ``LayerNormalization``. ``x * x`` overflows fp16 once ``|x|`` exceeds about 256, which LLM residual streams with
-    outlier channels routinely reach. Random reference inputs rarely produce such values, so the
-    I/O range rule alone can leave ``Pow -> ReduceMean -> Add -> Sqrt`` in fp16. Low-precision
-    EPs then normalize those rows with an infinite variance and zero them; the CPU EP hides the
-    problem because it computes these ops in fp32. The final ``Div``/``Mul`` only sees values
-    within fp16 range, so it stays eligible for low precision. ``nodes_to_include`` or
+    ``LayerNormalization``. ``x * x`` overflows fp16 once ``|x|`` exceeds about 256, which LLM
+    residual streams with outlier channels routinely reach. Random reference inputs rarely produce
+    such values, so the I/O range rule alone can leave ``Pow -> ReduceMean -> Add -> Sqrt`` in
+    fp16. Low-precision EPs then normalize those rows with an infinite variance and zero them; the
+    CPU EP hides the problem because it computes these ops in fp32. The final ``Div``/``Mul`` only
+    sees values within fp16 range, so it stays eligible for low precision. ``nodes_to_include`` or
     ``op_types_to_include`` still force these nodes to low precision.
     """
-
-    _STOP_EXPONENTS = (0.5, -0.5)
 
     def __init__(self, model, initializer_map):
         """Initialize the rule.
@@ -283,14 +281,16 @@ class NormVarianceRule(NodeRuleBase):
             if node.op_type == "Constant" and node.attribute and node.attribute[0].name == "value"
         }
 
-        def exponent_is(node, values):
+        def is_squared(node):
+            if node.op_type == "Mul":
+                return node.input[0] == node.input[1]
+            if node.op_type != "Pow":
+                return False
             # Only scalar exponents are read, so weights are never converted to numpy.
-            name = node.input[1] if len(node.input) > 1 else ""
-            tensor = initializer_map.get(name, constants.get(name))
+            tensor = initializer_map.get(node.input[1], constants.get(node.input[1]))
             if tensor is None or np.prod(tensor.dims) != 1:
                 return False
-            exponent = float(onnx.numpy_helper.to_array(tensor).item())
-            return any(np.isclose(exponent, value) for value in values)
+            return np.isclose(float(onnx.numpy_helper.to_array(tensor).item()), 2.0)
 
         producer = {out: node for node in model.graph.node for out in node.output}
         consumers: dict[str, list[onnx.NodeProto]] = {}
@@ -303,11 +303,7 @@ class NormVarianceRule(NodeRuleBase):
             if reduce.op_type != "ReduceMean":
                 continue
             square = producer.get(reduce.input[0])
-            is_square = square is not None and (
-                (square.op_type == "Pow" and exponent_is(square, (2.0,)))
-                or (square.op_type == "Mul" and square.input[0] == square.input[1])
-            )
-            if not is_square:
+            if square is None or not is_squared(square):
                 continue
             chain = [square, reduce]
             node = reduce
@@ -316,9 +312,7 @@ class NormVarianceRule(NodeRuleBase):
                 if node.op_type == "Add":
                     chain.append(node)
                     continue
-                if node.op_type == "Sqrt" or (
-                    node.op_type == "Pow" and exponent_is(node, self._STOP_EXPONENTS)
-                ):
+                if node.op_type == "Sqrt":
                     chain.append(node)
                 break
             self.variance_nodes.update(n.name for n in chain)
