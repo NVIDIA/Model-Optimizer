@@ -340,6 +340,21 @@ class TestNormalizeQuantCfgList:
         assert len(default_entries) == 1
         assert default_entries[0]["enable"] is False
 
+    def test_legacy_flat_dict_default_key_comes_first(self):
+        """Legacy 'default' key becomes the first entry wherever it appears in the dict."""
+        raw = {
+            "*weight_quantizer": {"num_bits": 8},
+            "*input_quantizer": {"num_bits": 8},
+            "default": {"enable": False},
+        }
+        result = normalize_quant_cfg_list(raw)
+        assert [e["quantizer_name"] for e in result] == [
+            "*",
+            "*weight_quantizer",
+            "*input_quantizer",
+        ]
+        assert result[0]["enable"] is False
+
     def test_legacy_nn_class_multi_key(self):
         """Legacy nn.* scoped format with multiple sub-keys produces multiple entries."""
         raw = [
