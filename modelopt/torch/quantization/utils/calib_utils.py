@@ -649,13 +649,19 @@ class ImatrixEncoder(_WeightEncoder):
     """
 
     def encode(
-        self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
+        self,
+        weight: torch.Tensor,
+        quantizer,
+        second_moments: torch.Tensor | None,
+        *,
+        shared: bool = False,
     ) -> torch.Tensor:
         """Encode ``weight`` weighted by ``second_moments`` and return the weight to keep.
 
         That is ``weight`` fake-quantized by ``quantizer``, or a weight ``quantizer`` re-derives the
         encoding from, such as ``weight`` itself or ``weight`` updated in place. ``second_moments``
-        is ``None`` when no calibration input reached the weight.
+        is ``None`` when no calibration input reached the weight. With ``shared``, another
+        parameter shares ``weight``'s storage (tied weights), so ``weight`` must be kept unchanged.
         """
         raise NotImplementedError
 

@@ -58,6 +58,7 @@ from .ggml import GGML_FORMAT_REGISTRY
 from .ggml.common import PIN_OVERRIDES_WEIGHT
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
+from .utils.core_utils import tied_parameters
 
 
 def _is_hf_quant_fused_experts_module(module: nn.Module) -> bool:
@@ -183,16 +184,6 @@ def _refuse_layerwise_dirs(recipe: "QuantRecipe", search_rewrites_weights: bool)
             )
 
 
-def _storage_span(tensor: torch.Tensor):
-    """``tensor``'s storage and the bytes of it ``tensor`` spans; None if it holds no data here."""
-    if tensor.is_meta or isinstance(tensor, DTensor) or tensor.numel() == 0:
-        return None
-    start = tensor.storage_offset() * tensor.element_size()
-    last = sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()))
-    storage = (tensor.device, tensor.untyped_storage().data_ptr())
-    return storage, start, start + (last + 1) * tensor.element_size()
-
-
 def _iter_tensor_quantizers(module: nn.Module):
     if isinstance(module, TensorQuantizer):
         yield module
@@ -258,12 +249,7 @@ def _check_restorable(model: nn.Module, params: dict) -> None:
     unsharded, stored as a float the GGML decoder writes, and hold storage no other parameter
     shares.
     """
-    uses = defaultdict(int)
-    spans = defaultdict(list)  # storage -> (parameter, first byte, end byte) of each parameter
-    for _, param in model.named_parameters(remove_duplicate=False):
-        uses[param] += 1
-        if uses[param] == 1 and (span := _storage_span(param)) is not None:
-            spans[span[0]].append((param, *span[1:]))
+    tied = tied_parameters(model)
     for param, name in params.items():
         if param.is_meta or isinstance(param, DTensor):
             raise NotImplementedError(
@@ -278,14 +264,7 @@ def _check_restorable(model: nn.Module, params: dict) -> None:
                 f"16-bit or wider float; {name}'s are {param.dtype}. Dequantize the model "
                 "first, or search it with a calibration that leaves weights unchanged."
             )
-        span = _storage_span(param)
-        if uses[param] > 1 or (
-            span is not None
-            and any(
-                other is not param and first < span[2] and span[1] < end
-                for other, first, end in spans[span[0]]
-            )
-        ):
+        if param in tied:
             raise NotImplementedError(
                 f"{name}'s weight shares its storage with another parameter (tied weights, or "
                 "a view of them), which a weight-rewriting AutoQuantize candidate would change "

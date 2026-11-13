@@ -693,14 +693,21 @@ def quantize_energy_matched(
 
 
 def pin_energy_matched(
-    ggml_format: GGMLFormat, quantizer, weight: torch.Tensor, second_moments: torch.Tensor | None
+    ggml_format: GGMLFormat,
+    quantizer,
+    weight: torch.Tensor,
+    second_moments: torch.Tensor | None,
+    *,
+    rescale: bool = True,
 ) -> torch.Tensor:
     """Pin the :func:`quantize_energy_matched` codes of ``weight``; return the weight to keep.
 
     The kept weight is ``weight`` unrounded, as GPTQ leaves it, but scaled in place per block like
     its stored scale. The search is scale-equivariant, so under the stored scales the kept weight
     encodes to the codes picked for ``weight``, up to its rounding; the pin is what it does encode
-    to, so QAD's re-encodes start from exactly the pinned codes.
+    to, so QAD's re-encodes start from exactly the pinned codes. Without ``rescale``, ``weight`` is
+    kept unchanged and pinned as the codes' source, as local_hessian pins its own; a block QAD then
+    changes is searched again at the raised scale.
     """
     payload_scales = ggml_format.payload_scales
     if payload_scales is None:
@@ -708,6 +715,10 @@ def pin_energy_matched(
     extra_args = quantizer.backend_extra_args or {}
     kwargs = {"block_chunk_size": extra_args.get("block_chunk_size", ggml_format.block_chunk_size)}
     packed, _, ratio = quantize_energy_matched(ggml_format, weight, second_moments, **kwargs)
+    if not rescale:
+        importance = None if second_moments is None else second_moments.sqrt()
+        pin_packed_weight(quantizer, ggml_format.name, packed, importance, source=weight)
+        return weight
     kept = weight if weight.is_contiguous() else weight.contiguous()
     rows, ratio = kept.view(-1, GGML_BLOCK_SIZE), ratio.reshape(-1, 1)
     compute_dtype = torch.promote_types(kept.dtype, torch.float32)
@@ -732,13 +743,16 @@ def _derived_scales(
 ) -> torch.Tensor:
     """The FP16 super-block scale of each block: its largest sub-block fit over ``fit.top``."""
     x = narrow_to_float32(blocks)
+    to_unit, from_unit = _unit_powers_of_two(x)
+    x = x * to_unit
     # llama.cpp's element weights, which favour a block's large values over its small ones.
     weights = (x.square().mean(dim=-1, keepdim=True) + x.square()).sqrt()
     if columns is not None:
         weights = weights * _block_rows(columns, start, start + len(x)).sqrt()
     values = (x if fit.signed else x.abs()).reshape(len(x), -1, fit.group)
     scale = _fit_sub_blocks(values, weights.reshape(values.shape), fit.levels)
-    return (scale.amax(dim=-1) / fit.top).clamp(max=65504.0).to(torch.float16)
+    scale = scale.amax(dim=-1) / fit.top * from_unit.squeeze(-1)
+    return scale.clamp(max=65504.0).to(torch.float16)
 
 
 def _fit_sub_blocks(
@@ -779,6 +793,17 @@ def _fit_sub_blocks(
     return best_scale
 
 
+def _unit_powers_of_two(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per row of ``x``, ``2**k`` bringing its largest magnitude into [0.5, 1), and ``2**-k``.
+
+    Scaling by them keeps the squares and sums of a block near the float32 maximum finite, and
+    changes no result that did not overflow: they are built from their bits, so the scaling is
+    exact, and ``k`` is clamped so both stay normal.
+    """
+    k = (-torch.frexp(x.abs().amax(dim=-1, keepdim=True)).exponent).clamp(-126, 126)
+    return ((k + 127) << 23).view(torch.float32), ((127 - k) << 23).view(torch.float32)
+
+
 def _energy_factors(
     ggml_format: GGMLFormat,
     blocks: torch.Tensor,
@@ -795,6 +820,8 @@ def _energy_factors(
         dtype=torch.float32,
         block_chunk_size=ggml_format.decode_chunk_size,
     ).reshape(x.shape)
+    to_unit, _ = _unit_powers_of_two(x)
+    x, decoded = x * to_unit, decoded * to_unit
     weights = 1.0 if columns is None else _block_rows(columns, start, start + len(x))
     target = (weights * x.square()).sum(dim=-1)
     energy = (weights * decoded.square()).sum(dim=-1)
