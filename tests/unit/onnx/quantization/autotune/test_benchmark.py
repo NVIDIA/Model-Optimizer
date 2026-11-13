@@ -20,7 +20,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-from modelopt.onnx.quantization.autotune.benchmark import Benchmark, default_timing_cache_file
+import pytest
+
+from modelopt.onnx.quantization.autotune.benchmark import (
+    Benchmark,
+    TrtExecBenchmark,
+    default_timing_cache_file,
+)
 
 
 class _NoOpBenchmark(Benchmark):
@@ -41,3 +47,12 @@ def test_default_timing_cache_is_private_and_shared_within_a_process(tmp_path, m
     assert first.parent.parent == tmp_path
     if sys.platform != "win32":  # POSIX file modes
         assert stat.S_IMODE(first.parent.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize(
+    "remote_model_path",
+    ["custom engine.trt", "~/engine.trt", "-engine.trt", "/tmp/"],
+)
+def test_remote_model_path_rejects_values_scp_cannot_handle(remote_model_path):
+    with pytest.raises(ValueError, match="Invalid remote_model_path"):
+        TrtExecBenchmark(remote_model_path=remote_model_path)

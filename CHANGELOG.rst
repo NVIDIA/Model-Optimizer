@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- ONNX AutoTune can now upload its remote safety engine to a chosen path with ``autotune_remote_model_path`` / ``--autotune_remote_model_path`` (``--remote_model_path`` in the AutoTune CLI); its unique temporary filename remains the default.
 - Add an experimental NeMo AutoModel NVFP4 expert adapter example with fixed published scales, FSDP2 training support, and expert-weight export. It supports the bias-free SwiGLU torch expert loop with expert parallel size 1.
 
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
