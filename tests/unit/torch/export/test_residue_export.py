@@ -34,7 +34,7 @@ from modelopt.torch.export.unified_export_hf import (
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 
 
-@pytest.mark.parametrize("invalid", ["indices", "pre_scale", "weight_shape"])
+@pytest.mark.parametrize("invalid", ["indices", "pre_scale", "weight_shape", "modelopt_state"])
 def test_residue_export_rejects_invalid_state_before_writing(tmp_path, invalid):
     config = deepcopy(mtq.MXFP4_DEFAULT_CFG)
     config["algorithm"] = {"method": "residue_max", "residue_ratio": 1.0}
@@ -43,13 +43,16 @@ def test_residue_export_rejects_invalid_state_before_writing(tmp_path, invalid):
         model.input_quantizer._salient_indices = torch.arange(127, -1, -1)
     elif invalid == "pre_scale":
         model.input_quantizer.pre_quant_scale = torch.ones(128)
-    else:
+    elif invalid == "weight_shape":
         model.weight = nn.Parameter(torch.cat([model.weight, model.weight], dim=-1))
     before = deepcopy(model.state_dict())
     parameter = model.weight
     target = tmp_path / "checkpoint"
     with pytest.raises((ValueError, NotImplementedError)):
-        export_hf_checkpoint(model, export_dir=target)
+        # Export drops the residue indices, so a ModelOpt state saved with it could not restore.
+        export_hf_checkpoint(
+            model, export_dir=target, save_modelopt_state=invalid == "modelopt_state"
+        )
     assert not target.exists()
     assert model.weight is parameter
     assert model.state_dict().keys() == before.keys()

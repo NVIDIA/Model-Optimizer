@@ -1403,7 +1403,6 @@ def _export_diffusers_checkpoint(
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors`. See its docstring for details.
     """
-    _check_residue_export(pipe, components)
     export_dir = Path(export_dir)
 
     # Get all pipeline components (nn.Module, tokenizers, schedulers, etc.)
@@ -2165,8 +2164,6 @@ def export_hf_checkpoint(
     residue_metadata = _check_residue_export(model, components)
     if residue_metadata and save_modelopt_state:
         raise ValueError("Save a residue ModelOpt checkpoint separately before deployment export.")
-    if residue_metadata and Path(export_dir).exists() and any(Path(export_dir).iterdir()):
-        raise FileExistsError(f"Refusing to overwrite residue export: {export_dir}")
     # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
     # source so the exported checkpoint is the complete model. Merged here, ahead of the path
     # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict

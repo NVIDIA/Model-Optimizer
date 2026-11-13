@@ -410,31 +410,12 @@ class ResidueQuantLinear(QuantLinearConvBase):
 
     def forward(self, input, *args, **kwargs):
         """Apply residue QDQ, or collect statistics before channel selection."""
-        input_has_salient_attr = hasattr(self.input_quantizer, "_enable_salient_indices")
-        weight_has_salient_attr = hasattr(self.weight_quantizer, "_enable_salient_indices")
-        if not input_has_salient_attr and not weight_has_salient_attr:
-            # ModelOpt auto-search can activate a plain NVFP4 candidate on the
-            # same module. Without residue metadata, use the ordinary path.
-            return super().forward(input, *args, **kwargs)
-        if input_has_salient_attr != weight_has_salient_attr:
-            raise RuntimeError(
-                "Mixed residue/plain quantizer state is invalid: "
-                f"input_has_salient_attr={input_has_salient_attr}, "
-                f"weight_has_salient_attr={weight_has_salient_attr}."
-            )
-
         salient_indices = getattr(self.input_quantizer, "_salient_indices", None)
         if not getattr(self.input_quantizer, "_enable_salient_indices", True):
             salient_indices = None
         has_salient_indices = salient_indices is not None and salient_indices.numel() > 0
 
         if not has_salient_indices:
-            weight = self.weight
-            if weight.shape[-1] > input.shape[-1]:
-                raise RuntimeError(
-                    "Extended residue weight requires input quantizer salient indices "
-                    "during forward, but none were loaded."
-                )
             active_fake_quant = (
                 self.input_quantizer.is_enabled
                 and getattr(self.input_quantizer, "_if_quant", True)

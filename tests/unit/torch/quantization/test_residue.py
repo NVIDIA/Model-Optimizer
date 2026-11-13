@@ -29,7 +29,6 @@ from modelopt.torch.export.unified_export_hf import (
     _export_transformers_checkpoint,
     export_hf_checkpoint,
 )
-from modelopt.torch.quantization.algorithms import QuantRecipe, QuantRecipeHparam
 from modelopt.torch.quantization.conversion import restore_residue_model
 from modelopt.torch.quantization.nn import ResidueQuantLinear, TensorQuantizer
 
@@ -189,6 +188,18 @@ def test_recalibration_preserves_awq_state():
         assert torch.equal(model.state_dict()[key], value), key
 
 
+def test_recalibration_updates_input_amax():
+    inputs = torch.randn(4, 64)
+    model = mtq.quantize(nn.Linear(64, 8), _config(), lambda m: m(inputs))
+    mtq.calibrate(model, {"method": "residue_max"}, lambda m: m(10 * inputs))
+    torch.testing.assert_close(model.input_quantizer.amax, 10 * inputs.abs().max())
+
+
+def test_ratio_selecting_no_channels_warns():
+    with pytest.warns(UserWarning, match="selects no channels"):
+        mtq.quantize(nn.Linear(64, 8), _config(residue_ratio=0.1), lambda m: m(torch.ones(2, 64)))
+
+
 def test_fused_moe_experts_keep_max_calibration(moe):
     inputs = torch.randn(12, moe.mlp.shared_expert.in_features)
     with pytest.warns(UserWarning, match="residue_max does not apply to fused MoE experts"):
@@ -307,35 +318,3 @@ def test_registration_is_opt_in_and_excluded_layers_survive_restore(tmp_path):
     ordinary = mtq.quantize(nn.Linear(64, 8), mtq.INT8_DEFAULT_CFG, lambda m: m(torch.ones(2, 64)))
     assert not isinstance(ordinary, ResidueQuantLinear)
     assert type(ordinary.input_quantizer) is mtq.nn.TensorQuantizer
-
-
-def test_residue_indices_follow_native_quantizer_candidates():
-    inputs = torch.randn(2, 64)
-    cfg = _config("MXFP4")
-    cfg["algorithm"] = None
-    model = mtq.quantize(nn.Linear(64, 3), cfg)
-    residue = QuantRecipe(_config("MXFP4"), name="residue")
-    plain = QuantRecipe(None)
-    hparam = QuantRecipeHparam(choices=[plain, residue], quant_modules=[model])
-    hparam.set_calibration_recipe(residue)
-    quantizers = (model.input_quantizer, model.weight_quantizer)
-    mtq.calibrate(model, {"method": "residue_max"}, lambda m: m(inputs))
-    assert (model.input_quantizer, model.weight_quantizer) == quantizers
-    assert all(type(q) is TensorQuantizer for q in quantizers)
-    indices = model.input_quantizer._salient_indices.clone()
-    # Native FP4 QDQ requires CUDA; exercise candidate state switching on CPU.
-    model.input_quantizer.disable()
-    model.weight_quantizer.disable()
-    residue_output = model(inputs)
-    hparam.active = plain
-    assert not hasattr(model.input_quantizer, "_salient_indices")
-    torch.testing.assert_close(
-        model(inputs), torch.nn.functional.linear(inputs, model.weight, model.bias)
-    )
-    hparam.active = residue
-    assert torch.equal(model.input_quantizer._salient_indices, indices)
-    torch.testing.assert_close(model(inputs), residue_output)
-    # Reject accidentally pairing a residue input with a plain weight quantizer.
-    model.weight_quantizer = TensorQuantizer()
-    with pytest.raises(RuntimeError, match="Mixed residue/plain"):
-        model(inputs)

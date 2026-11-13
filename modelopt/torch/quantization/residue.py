@@ -24,6 +24,8 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
+from modelopt.torch.utils import warn_rank_0
+
 from .config import ResidueMaxCalibConfig
 from .conversion import create_and_replace_residue_linear_on_the_fly, set_quantizer_by_cfg_context
 from .model_calib import _register_weight_input_hooks, _warn_if_fused_experts_skipped, max_calibrate
@@ -71,8 +73,10 @@ class ResidueHelper:
         self.salience_metric = salience_metric
         self.act_scale = 0.0
         self.num_cache_steps = 0
-        self.is_input_quantized = module.input_quantizer.is_enabled
-        self._saved_awq_amax = module.input_quantizer.amax
+        quantizer = module.input_quantizer
+        self.is_input_quantized = quantizer.is_enabled
+        # Only an amax calibrated on AWQ-scaled inputs outlives recalibration.
+        self._saved_awq_amax = quantizer.amax if quantizer.pre_quant_scale is not None else None
 
     def setup(self):
         """Collect raw-input statistics while the native forward stays unquantized."""
@@ -222,6 +226,10 @@ def residue_max_calibrate(
     )
     if forward_loop is None:
         raise ValueError("forward_loop is required for residue_max calibration.")
+    if residue_ratio > 0 and int(residue_ratio * block_size) == 0:
+        warn_rank_0(
+            f"residue_ratio={residue_ratio} selects no channels with block_size={block_size}."
+        )
     names = _validate_modules(model, salience_metric)
     _warn_if_fused_experts_skipped(model, "residue_max")
     patterns = SHARED_PATTERNS if shared_input_patterns is None else shared_input_patterns
