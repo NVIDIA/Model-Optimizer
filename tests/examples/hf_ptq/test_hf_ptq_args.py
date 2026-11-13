@@ -756,6 +756,17 @@ def test_calib_seq_must_be_positive(monkeypatch):
         _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--calib_seq", "0")
 
 
+@pytest.mark.parametrize(
+    "data", [["--calib_with_images"], ["--specdec_offline_dataset", "/data/offline"]]
+)
+def test_calib_pack_is_refused_for_calibration_data_that_is_not_text(monkeypatch, capsys, data):
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(
+            monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--calib_pack", *data
+        )
+    assert "--calib_pack" in capsys.readouterr().err
+
+
 def test_mlflow_rejects_a_bad_tracking_uri(monkeypatch):
     with pytest.raises(SystemExit):
         _parse_hf_ptq_args(
