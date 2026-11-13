@@ -175,6 +175,9 @@ For more benchmark results and detailed accuracy metrics, refer to the [Benchmar
 
 ### Hybrid decoder inputs
 
+Install this example's requirements before calibration. Hybrid configuration loading
+requires Transformers 5.x; the supported range is `>=5.5,<5.19`.
+
 The quantization script also handles text-only calibration of hybrid decoder exports
 that take `inputs_embeds` or linear-attention `past_key_values.*.conv_state` and
 `recurrent_state` inputs. It reads the ONNX input signature to build calibration
@@ -191,9 +194,12 @@ video inputs.
 
 Embedding caches are bound to local tensor contents or an immutable Hub commit;
 changing weights at the same path or updating a Hub branch creates a new cache.
-Local cache validation reads the embedding bytes on each lookup without loading
-the full tensor into memory. Hub lookups require access to resolve the current
+Local cache validation reads the embedding bytes on each lookup without creating
+a full-size in-memory copy. Hub lookups require access to resolve the current
 commit and pin every download to that commit. Legacy unversioned caches are ignored.
+Cached arrays are checked for the expected shape, float16 dtype, and finite values
+in bounded chunks; invalid entries are rebuilt. The float16 embedding cache has an
+8 GiB allocation limit by default (`embed_table(..., max_output_bytes=...)`).
 
 The download cache remains `C:\\tmp` on Windows and uses `~/.cache/modelopt` on
 Linux/WSL. Small ONNX constants remain inline when external weights are saved so
