@@ -376,13 +376,13 @@ def fake_quantize_with_cache(
 class ScaleFit:
     """How a format's super-block scale follows from the values it encodes.
 
-    Each ``group``-value sub-block is fit in weighted least squares by one scale times three
-    ``levels`` -- magnitudes for IQ2, signed values once per delta sign (one level triple each) for
-    IQ1 -- and the super-block scale is the largest fitted scale over ``top``, the largest local
-    multiplier, so the local scales span every sub-block without an empirical anchor.
+    Each sub-block -- one of the format's ``choice_groups``, which pick their local scales -- is fit
+    in weighted least squares by one scale times three ``levels``: magnitudes for IQ2, signed values
+    once per delta sign (one level triple each) for IQ1. The super-block scale is the largest fitted
+    scale over ``top``, the largest local multiplier, so the local scales span every sub-block
+    without an empirical anchor.
     """
 
-    group: int
     top: int
     levels: tuple[tuple[float, float, float], ...]
 
@@ -434,6 +434,12 @@ class GGMLFormat:
     def __post_init__(self):
         if (self.scale_fit is None) != (self.replace_payload_scales is None):
             raise ValueError(f"{self.name}: scale_fit needs replace_payload_scales, and vice versa")
+        if self.scale_fit is not None and (
+            self.choice_groups <= 0 or self.block_size % self.choice_groups
+        ):
+            raise ValueError(
+                f"{self.name}: scale_fit fits sub-blocks, which choice_groups must split"
+            )
 
     @property
     def effective_bits(self) -> float:
@@ -717,7 +723,9 @@ def quantize_energy_matched(
     importance = None if second_moments is None else second_moments.sqrt()
     scales = torch.cat(
         [
-            _derived_scales(blocks[start : start + _FIT_BLOCKS_PER_CHUNK], columns, start, fit)
+            _derived_scales(
+                ggml_format, blocks[start : start + _FIT_BLOCKS_PER_CHUNK], columns, start
+            )
             for start in range(0, len(blocks), _FIT_BLOCKS_PER_CHUNK)
         ]
     )
@@ -760,9 +768,11 @@ _FIT_BLOCKS_PER_CHUNK = 1024
 
 
 def _derived_scales(
-    blocks: torch.Tensor, columns: torch.Tensor | None, start: int, fit: ScaleFit
+    ggml_format: GGMLFormat, blocks: torch.Tensor, columns: torch.Tensor | None, start: int
 ) -> torch.Tensor:
-    """The FP16 super-block scale of each block: its largest sub-block fit over ``fit.top``."""
+    """The FP16 super-block scale of each block: its largest sub-block fit over ``scale_fit.top``."""
+    fit = ggml_format.scale_fit
+    assert fit is not None
     x = narrow_to_float32(blocks)
     to_unit, from_unit = _unit_powers_of_two(x)
     x = x * to_unit
@@ -770,7 +780,8 @@ def _derived_scales(
     weights = (x.square().mean(dim=-1, keepdim=True) + x.square()).sqrt()
     if columns is not None:
         weights = weights * _block_rows(columns, start, start + len(x)).sqrt()
-    values = (x if fit.signed else x.abs()).reshape(len(x), -1, fit.group)
+    group = ggml_format.block_size // ggml_format.choice_groups
+    values = (x if fit.signed else x.abs()).reshape(len(x), -1, group)
     scale = _fit_sub_blocks(values, weights.reshape(values.shape), fit.levels)
     scale = scale.amax(dim=-1) / fit.top * from_unit.squeeze(-1)
     return scale.clamp(max=65504.0).to(torch.float16)
