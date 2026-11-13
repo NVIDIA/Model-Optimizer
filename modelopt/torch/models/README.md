@@ -61,8 +61,9 @@ Quantized-module wrappers and registrations that only one model needs (e.g. Llam
 BMM experts, Step's expert-indexed `MoELinear`) live in `<model_type>/modeling_ptq.py`; generic
 ones (fused/sequential MoE auto-detection, attention, `FP8Linear`) stay in
 `modelopt/torch/quantization/plugins/huggingface.py`. Nothing imports a `modeling_ptq` up front:
-just before converting a model, quantization imports those of its model types with
-`import_model_modules`, which finds them by file name. A model's types are its root
+before converting a model or finding its decoder layers (which loading with FSDP2 does first),
+quantization imports those of its model types with `import_model_modules`, which finds them by
+file name. A model's types are its root
 `config.model_type` and those of the configs nested in it, so a VLM also gets its language
 model's. A new `modeling_ptq` therefore needs no list entry, and the plugins name no model.
 Leave the model's `__init__.py` importing only `specs`: `modeling_ptq` pulls in quantization and

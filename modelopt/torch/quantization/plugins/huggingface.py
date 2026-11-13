@@ -2010,11 +2010,11 @@ AutoQuantizeGradientSearcher.register_custom_support(
 
 # Model-specific PTQ support lives with its model in
 # ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import, which
-# happens only when a model of that type is converted.
+# happens only when a model of that type is used: converted, or its decoder layers looked up.
 MODEL_PTQ_MODULES.append("modeling_ptq")
 
 # A fallback: a model's own discoverer is the more specific one, and its modeling_ptq registers
-# it only when that model is converted, after this one.
+# it only when that model is used, after this one.
 LayerActivationCollector.register_decoder_layer_support(
     is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers, fallback=True
 )
