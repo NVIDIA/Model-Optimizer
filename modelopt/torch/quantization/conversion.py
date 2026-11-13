@@ -157,6 +157,15 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
             quantizer = getattr(module, handle)
             if key not in quantizer_state_dict and not quantizer.is_enabled:
                 quantizer_state_dict[key] = quantizer.get_modelopt_state()
+    # Likewise for a p_bmm_quantizer the checkpoint has no state for (Megatron core attention
+    # had none before). Its name configured nothing when the checkpoint was saved, so it stays
+    # off even if the saved config matches it.
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer) and name.endswith("p_bmm_quantizer"):
+            key = get_unwrapped_name(name, model)
+            if key not in quantizer_state_dict:
+                module.disable()
+                quantizer_state_dict[key] = module.get_modelopt_state()
     unmatched_keys = quantizer_state_dict.keys() - quantizer_state(model).keys()
     extra_keys = quantizer_state(model).keys() - quantizer_state_dict.keys()
 

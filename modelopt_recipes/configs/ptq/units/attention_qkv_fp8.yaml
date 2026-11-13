@@ -17,6 +17,8 @@
 # bmm and the softmax-P quantizer. The softmax-P quantizer has a different attribute
 # name per backend (diffusers attention: softmax_quantizer; HF attention:
 # p_bmm_quantizer), so both are listed -- each is a no-op on the backend that lacks it.
+# Megatron core attention has a p_bmm_quantizer too: there it needs FlashAttention-4 with
+# p_quant on a B200 and raises without it.
 # Pair with a model preset to add bmm2-output entries.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig

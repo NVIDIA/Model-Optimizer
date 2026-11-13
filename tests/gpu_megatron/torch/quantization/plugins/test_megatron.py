@@ -15,6 +15,7 @@
 
 import copy
 import math
+import os
 import sys
 import types
 from contextlib import ExitStack, nullcontext
@@ -1959,6 +1960,8 @@ def _test_kv_cache_quant_helper(config, rank, size):
             # Verify K and V quantizers are enabled (main purpose of KV cache configs)
             assert module.k_bmm_quantizer.is_enabled, f"K quantizer not enabled in {name}"
             assert module.v_bmm_quantizer.is_enabled, f"V quantizer not enabled in {name}"
+            # A KV cache config does not turn on quantization of the attention probabilities.
+            assert not module.p_bmm_quantizer.is_enabled, f"P quantizer enabled in {name}"
 
     assert te_attention_found, "No TEDotProductAttention with KV cache quantizers found in model"
 
@@ -1984,6 +1987,93 @@ def test_kv_cache_quant(dist_workers_size_1, config):
     is only available with transformer_impl="modelopt" or "transformer_engine" (not "local").
     """
     dist_workers_size_1.run(partial(_test_kv_cache_quant_helper, config))
+
+
+P_BMM_CFGS = {
+    "fp8": {"num_bits": (4, 3), "axis": None},
+    "nvfp4": {
+        "num_bits": (2, 1),
+        "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        "axis": None,
+    },
+}
+
+
+def _test_p_bmm_quant_helper(fmt, rank, size):
+    from megatron.core.transformer.enums import AttnBackend
+
+    from modelopt.torch.kernels.quantization.attention import te_fa4_p_quant
+
+    initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)
+    runs_kernel = bool(
+        te_fa4_p_quant.fa4_p_quant_formats()
+    ) and torch.cuda.get_device_capability() == (10, 0)
+    # Megatron turns these config fields into Transformer Engine's process-wide NVTE_* switches;
+    # put them back afterwards so that later models in this worker choose their own backend.
+    nvte = {name: value for name, value in os.environ.items() if name.startswith("NVTE_")}
+    try:
+        model = get_mcore_gpt_model(
+            num_layers=2,
+            hidden_size=256,
+            num_attention_heads=4,  # head dimension 64, one the kernel supports
+            num_query_groups=2,
+            ffn_hidden_size=256,
+            max_sequence_length=64,
+            vocab_size=32,
+            transformer_impl="modelopt",
+            **(
+                # FlashAttention-4 has no attention dropout.
+                {
+                    "attention_backend": AttnBackend.flash,
+                    "flash_attention_version": 4,
+                    "attention_dropout": 0.0,
+                }
+                if runs_kernel
+                else {}
+            ),
+        ).cuda()
+        forward = get_forward(model)
+        config = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*p_bmm_quantizer", "cfg": P_BMM_CFGS[fmt]},
+            ],
+            "algorithm": "max",
+        }
+        model = mtq.quantize(model, config, forward)
+        attentions = [m for m in model.modules() if hasattr(m, "p_bmm_quantizer")]
+        assert attentions and all(m.p_bmm_quantizer.is_enabled for m in attentions)
+        # The formats have a fixed scale: calibration leaves no amax behind.
+        assert all(m.p_bmm_quantizer.amax is None for m in attentions)
+
+        if not runs_kernel:
+            # No kernel for this GPU or this FlashAttention-4: refuse, never run unquantized P.
+            with pytest.raises(RuntimeError):
+                forward(model)
+            return
+
+        loss = forward(model).float().mean()
+        loss.backward()
+        grads = [p.grad for p in model.parameters() if p.grad is not None]
+        assert grads and all(torch.isfinite(g).all() for g in grads)
+        with torch.no_grad():
+            quantized = forward(model).float()
+            for m in attentions:
+                m.p_bmm_quantizer.disable()
+            unquantized = forward(model).float()
+        assert torch.isfinite(quantized).all()
+        assert not torch.equal(quantized, unquantized)
+    finally:
+        for name in [name for name in os.environ if name.startswith("NVTE_")]:
+            del os.environ[name]
+        os.environ.update(nvte)
+
+
+@pytest.mark.parametrize("fmt", ["fp8", "nvfp4"])
+def test_p_bmm_quant(dist_workers_size_1, fmt):
+    """An enabled p_bmm_quantizer runs FlashAttention-4's fused quant-dequant of the attention
+    probabilities (and trains through it) where that kernel exists, and raises elsewhere."""
+    dist_workers_size_1.run(partial(_test_p_bmm_quant_helper, fmt))
 
 
 INDEXER_FP8_CFG = {
