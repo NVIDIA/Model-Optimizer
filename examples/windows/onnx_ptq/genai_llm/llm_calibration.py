@@ -409,8 +409,10 @@ def embed_table(model_name, cache_file, max_output_bytes=8 * 1024**3):
             os.replace(temporary, cache_path)
         except OSError:
             # Another reader can already have the same immutable cache mapped on Windows.
-            if not cache_path.is_file():
+            cached = _cached_embedding(cache_path, shape, chunk_size)
+            if cached is None:
                 raise
+            return cached
     finally:
         # Close memory maps before rename/unlink on Windows, including failed downloads.
         if mapped is not None:
