@@ -157,6 +157,14 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
             quantizer = getattr(module, handle)
             if key not in quantizer_state_dict and not quantizer.is_enabled:
                 quantizer_state_dict[key] = quantizer.get_modelopt_state()
+    # Likewise for the p_bmm_quantizer of Megatron core attention, disabled unless configured.
+    for key, state in quantizer_state(model).items():
+        if (
+            key.endswith("p_bmm_quantizer")
+            and key not in quantizer_state_dict
+            and state.get("_disabled")
+        ):
+            quantizer_state_dict[key] = state
     unmatched_keys = quantizer_state_dict.keys() - quantizer_state(model).keys()
     extra_keys = quantizer_state(model).keys() - quantizer_state_dict.keys()
 

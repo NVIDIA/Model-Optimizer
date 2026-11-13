@@ -47,13 +47,14 @@ from megatron.core.transformer.attention import Attention
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_pg_rank, get_pg_size, get_tensor_model_parallel_group_if_none
 
+from modelopt.torch.kernels.quantization.attention import te_fa4_p_quant
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.opt.plugins.megatron import (
     _MegatronMLP,
     ensure_metadata_has_dp_cp_group,
     register_modelopt_extra_state_callbacks,
 )
-from modelopt.torch.utils import warn_rank_0
+from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
@@ -1053,18 +1054,36 @@ class _MegatronTEGroupedMLP(_MegatronMLP):
         self.linear_fc2._parallel_state = self.parallel_state
 
 
+# p_quant formats already reported in this process (one line each, not one per forward).
+_P_QUANT_ANNOUNCED: set[str] = set()
+
+
 @QuantModuleRegistry.register({TEDotProductAttention: "TEDotProductAttention"})
 class _QuantCoreAttention(QuantModule):
     """Core attention (TEDotProductAttention, DSAttention) with KV cache quantization.
 
-    Adds q/k/v_bmm_quantizers that quantize the post-RoPE query, key and value tensors.
+    Adds q/k/v_bmm_quantizers that quantize the post-RoPE query, key and value tensors, and a
+    p_bmm_quantizer for the attention probabilities (the P operand of the second matmul).
+
+    P never exists as a tensor here, so the p_bmm_quantizer is not applied to one: when it is
+    enabled, the attention runs FlashAttention-4's fused quant-dequant of P (straight-through
+    backward) through Transformer Engine, context parallel included. Its formats have a fixed
+    scale, so it is not calibrated. See
+    :mod:`modelopt.torch.kernels.quantization.attention.te_fa4_p_quant`.
     """
 
     def _setup(self):
-        """Initialize quantizers for Q, K, V tensors."""
+        """Initialize quantizers for Q, K, V tensors and the attention probabilities."""
         self.q_bmm_quantizer = TensorQuantizer()
         self.k_bmm_quantizer = TensorQuantizer()
         self.v_bmm_quantizer = TensorQuantizer()
+        # Disabled until a config enables it: a checkpoint saved before this quantizer existed
+        # carries no state for it and must keep running unquantized P.
+        self.p_bmm_quantizer = TensorQuantizer()
+        self.p_bmm_quantizer.disable()
+        # Also makes this FlashAttention-4 revision read TE's causal window as TE means it, for
+        # every model in the process (the teacher of a distillation run included).
+        te_fa4_p_quant.install()
 
         # Set parallel_state for distributed sync of BMM quantizers
         try:
@@ -1088,7 +1107,57 @@ class _QuantCoreAttention(QuantModule):
         else:
             value = self.v_bmm_quantizer(value)
         key = self.k_bmm_quantizer(key)
-        return super().forward(query, key, value, *args, **kwargs)
+        p_quant = self._p_quant_mode()
+        if p_quant is None:
+            return super().forward(query, key, value, *args, **kwargs)
+        with te_fa4_p_quant.p_quant_scope(p_quant) as scope:
+            output = super().forward(query, key, value, *args, **kwargs)
+        if scope.calls == 0:
+            raise RuntimeError(
+                f"p_bmm_quantizer ({p_quant}) is enabled but this attention did not run "
+                "FlashAttention-4, so the attention probabilities were not quantized. The mode "
+                "needs Transformer Engine's FlashAttention-4 backend (run with NVTE_FUSED_ATTN=0 "
+                "and NVTE_UNFUSED_ATTN=0 so that it is selected) on a GPU the kernel supports."
+            )
+        if p_quant not in _P_QUANT_ANNOUNCED:
+            _P_QUANT_ANNOUNCED.add(p_quant)
+            print_rank_0(
+                f"p_bmm_quantizer: attention probabilities run FlashAttention-4 p_quant={p_quant} "
+                f"({scope.calls} kernel call(s) in the first forward)"
+            )
+        return output
+
+    def _p_quant_mode(self) -> str | None:
+        """FlashAttention-4 ``p_quant`` format of the p_bmm_quantizer; None runs unquantized P.
+
+        None while the quantizer is disabled or not quantizing (calibration). An enabled
+        quantizer the kernel cannot honour raises instead of running unquantized.
+        """
+        pq = self.p_bmm_quantizer
+        if not pq.is_enabled or not pq._if_quant:
+            return None
+        if pq.is_fp8:
+            p_quant = "fp8_e4m3"
+        # The kernel has one E4M3 scale per 16 keys; other block sizes are not this format.
+        elif pq.is_nvfp4_dynamic and (pq.block_sizes or {}).get(-1) == 16:
+            p_quant = "nvfp4"
+        else:
+            raise NotImplementedError(
+                f"p_bmm_quantizer not supported: {pq}. Supported: per-tensor FP8 (E4M3) and "
+                "dynamic NVFP4 with block size 16."
+            )
+        if getattr(pq, "_amax", None) is not None:
+            # FP8 here is P * 2^8 and NVFP4 uses a unit range, as the inference kernels do.
+            raise NotImplementedError(
+                "p_bmm_quantizer has an amax, but the FlashAttention-4 formats use a fixed scale."
+            )
+        formats = te_fa4_p_quant.fa4_p_quant_formats()
+        if p_quant not in formats or not te_fa4_p_quant.install():
+            raise RuntimeError(
+                f"p_bmm_quantizer ({p_quant}) needs a FlashAttention-4 (flash_attn.cute) with "
+                f"p_quant support, bound by Transformer Engine. Formats found: {list(formats)}."
+            )
+        return p_quant
 
     def modelopt_post_restore(self, name=""):
         """Restore quantizer states after model loading."""
