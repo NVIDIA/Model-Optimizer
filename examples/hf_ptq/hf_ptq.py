@@ -81,7 +81,6 @@ from modelopt.torch.export import (
 )
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
-from modelopt.torch.export.plugins.vllm_fakequant_hf import _carry_over_unplaced_weights
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
 from modelopt.torch.models import get_ptq_spec, hf_model_type
 from modelopt.torch.models.hf import (
@@ -362,8 +361,6 @@ def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
     plan, hf_config = resolve_distribution(args)
-    if getattr(args, "output_qdq_weight", False) and plan.is_expert_parallel:
-        raise ValueError("--output_qdq_weight requires an unsharded HF model.")
     if plan.is_expert_parallel:
         full_model = load_pretrained(
             args.local_checkpoint_path,
@@ -731,10 +728,6 @@ def export_quantized(
     model_type: str | None,
 ):
     plan = distribution_plan(full_model)
-    if getattr(args, "output_qdq_weight", False) and (
-        plan.is_fsdp_dense or plan.is_expert_parallel
-    ):
-        raise ValueError("--output_qdq_weight requires an unsharded HF model.")
     if not (args.dist_state.is_main or plan.is_fsdp_dense or plan.is_expert_parallel):
         # Replicated over the ranks, the model is whole on each: rank 0 writes it, and the rest
         # would race it into the same directory. A sharded model needs every rank for its part.
@@ -743,15 +736,6 @@ def export_quantized(
     # inference tensors break the subsequent state_dict() -> param.detach().
     with torch.no_grad():
         export_path = args.export_path
-
-        if getattr(args, "output_qdq_weight", False):
-            mtq.initialize_qdq_weights(full_model)
-            full_model.save_pretrained(export_path)
-            _carry_over_unplaced_weights(Path(export_path), full_model)
-            copy_non_model_files(args.local_checkpoint_path, export_path)
-            args.checkpoint_exported = True
-            print_rank_0(f"Saved floating QDQ weights and ModelOpt state to: {export_path}")
-            return
 
         # Early exit for speculative decoding checkpoints
         # No tokenizer saving needed for spec ckpts
@@ -1073,8 +1057,6 @@ def quantize_main(
             "per-layer pass to write the shards: the whole-model export runs instead, which "
             "holds the full state dict in host memory."
         )
-    if getattr(args, "output_qdq_weight", False) and args.layerwise_export:
-        raise ValueError("--output_qdq_weight cannot be combined with layerwise export.")
     if args.layerwise_export:
         if isinstance(recipe, ModelOptAutoQuantizeRecipe):
             # Only the mono-quantize path retargets export_dir and runs the refusals;
@@ -1313,11 +1295,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--export_path", default="exported_model")
     parser.add_argument(
-        "--output_qdq_weight",
-        action="store_true",
-        help="Save floating QDQ weights and ModelOpt state for QAD instead of a packed deployment checkpoint.",
-    )
-    parser.add_argument(
         "--dataset",
         help=(
             f"name of a dataset, or a comma separated list of datasets. "
@@ -1550,17 +1527,6 @@ def parse_args() -> argparse.Namespace:
     # is gated on it rather than on --export_path existing, which proves nothing.
     args.checkpoint_exported = False
     resolve_mlflow_args(args, parser, HF_PTQ)
-
-    if args.output_qdq_weight and (
-        args.use_fsdp2
-        or args.low_memory_mode
-        or args.offload_folder is not None
-        or args.vllm_fakequant_export
-        or args.specdec_offline_dataset is not None
-        or args.sparsity_fmt != "dense"
-        or args.export_fmt != "hf"
-    ):
-        parser.error("--output_qdq_weight requires materialized, unsharded fake-quant weights.")
 
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")

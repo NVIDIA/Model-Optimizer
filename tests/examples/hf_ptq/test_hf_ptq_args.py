@@ -1143,15 +1143,3 @@ def test_tensorrt_llm_export_copies_non_model_files_from_the_local_copy(monkeypa
     hf_ptq.export_quantized(args, model, model, "llama")
 
     assert copies == [(str(tmp_path / "local"), str(tmp_path / "export"))]
-
-
-@pytest.mark.parametrize(
-    "unsupported",
-    ["--use_fsdp2", "--low_memory_mode", "--vllm_fakequant_export", "--offload_folder"],
-)
-def test_output_qdq_weight_rejects_incompatible_export(monkeypatch, unsupported):
-    options = [unsupported, "/tmp/offload"] if unsupported == "--offload_folder" else [unsupported]
-    with pytest.raises(SystemExit):
-        _parse_hf_ptq_args(
-            monkeypatch, "--pyt_ckpt_path", "/local/model", "--output_qdq_weight", *options
-        )
