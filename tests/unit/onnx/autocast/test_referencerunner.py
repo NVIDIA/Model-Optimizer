@@ -26,7 +26,7 @@ import polygraphy.backend.onnx as polygraphy_onnx
 import polygraphy.backend.onnxrt as polygraphy_onnxrt
 import pytest
 from _test_utils.onnx.lib_test_models import build_if_outer_scope_model
-from onnx import TensorProto, helper
+from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast.referencerunner import ReferenceRunner, TensorStats
@@ -197,6 +197,65 @@ def test_run_with_dict_inputs(reference_runner):
 class TestPerNodeReferenceRunner:
     """Tests for memory-bounded per-node reference execution."""
 
+    def test_single_node_model_uses_size_aware_shape_inference(self, monkeypatch, reference_runner):
+        infer_shapes = Mock(side_effect=lambda model: model)
+        monkeypatch.setattr(onnx_utils, "infer_shapes", infer_shapes)
+        monkeypatch.setattr(
+            onnx.shape_inference,
+            "infer_shapes",
+            Mock(side_effect=AssertionError("in-memory shape inference was used")),
+        )
+        node = reference_runner.model.graph.node[0]
+        runtime_values = {
+            "X1": np.ones((1, 3), dtype=np.float32),
+            "X2": np.ones((1, 3), dtype=np.float32),
+        }
+        value_info_map = {
+            value_info.name: value_info
+            for value_info in [
+                *reference_runner.model.graph.input,
+                *reference_runner.model.graph.output,
+                *reference_runner.model.graph.value_info,
+            ]
+        }
+
+        reference_runner._make_single_node_model(
+            node,
+            reference_runner._get_node_dependencies(node),
+            value_info_map,
+            {},
+            runtime_values,
+        )
+
+        infer_shapes.assert_called_once()
+
+    def test_single_node_model_copies_initializers_without_repeated_field_extend(self, monkeypatch):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 2])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 2])
+        weight = numpy_helper.from_array(np.eye(2, dtype=np.float32), name="weight")
+        node = helper.make_node("MatMul", ["X", "weight"], ["Y"], name="matmul")
+        graph = helper.make_graph([node], "matmul", [x], [y], [weight])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+        runner = ReferenceRunner(model)
+        original_make_graph = onnx.helper.make_graph
+
+        def reject_initializer_extend(*args, **kwargs):
+            initializers = kwargs.get("initializer", args[4] if len(args) > 4 else None)
+            assert not initializers, "make_graph would copy initializers with repeated-field extend"
+            return original_make_graph(*args, **kwargs)
+
+        monkeypatch.setattr(onnx.helper, "make_graph", reject_initializer_extend)
+
+        single_node_model = runner._make_single_node_model(
+            node,
+            ["X", "weight"],
+            {"X": x, "Y": y},
+            {"weight": weight},
+            {"X": np.ones((1, 2), dtype=np.float32)},
+        )
+
+        assert single_node_model.graph.initializer[0].name == "weight"
+
     def test_casts_inputs_to_model_dtype(self, reference_runner):
         inputs = {
             "X1": np.array([[1.0, -2.0, 3.0]], dtype=np.float64),
@@ -258,6 +317,42 @@ class TestPerNodeReferenceRunner:
 
         assert results["X_empty"].shape == (2, 0)
         assert results["Y"].shape == (2, 1)
+
+    def test_seeded_stochastic_node_restarts_for_each_batch(self):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
+        random_output = helper.make_tensor_value_info("random_output", TensorProto.FLOAT, [1])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
+        graph = helper.make_graph(
+            [
+                helper.make_node(
+                    "RandomUniform",
+                    [],
+                    ["random_output"],
+                    name="random",
+                    shape=[1],
+                    seed=7.0,
+                ),
+                helper.make_node("Add", ["X", "random_output"], ["Y"], name="add"),
+            ],
+            "seeded_random",
+            [x],
+            [y],
+            value_info=[random_output],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for batch_index in range(2):
+                np.savez(
+                    os.path.join(temp_dir, f"batch_{batch_index}.npz"),
+                    X=np.zeros((1,), dtype=np.float32),
+                )
+            runner = ReferenceRunner(model)
+            default = runner.run(temp_dir)
+            per_node = runner.run(temp_dir, calibrate_per_node=True)
+
+        assert per_node["random_output"].min_val == per_node["random_output"].max_val
+        assert default["random_output"].min_val != default["random_output"].max_val
 
     def test_disables_cpu_memory_arena(self, monkeypatch, reference_runner):
         session_options = []

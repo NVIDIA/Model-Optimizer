@@ -336,8 +336,9 @@ class ReferenceRunner:
             f"{self.model.graph.name}_{node.name}",
             model_inputs,
             model_outputs,
-            model_initializers,
         )
+        for initializer in model_initializers:
+            graph.initializer.add().CopyFrom(initializer)
         model = onnx.helper.make_model(
             graph,
             opset_imports=self.model.opset_import,
@@ -345,7 +346,7 @@ class ReferenceRunner:
             ir_version=self.model.ir_version,
         )
         if node.domain in ("", "ai.onnx"):
-            model = onnx.shape_inference.infer_shapes(model)
+            model = onnx_utils.infer_shapes(model)
         return model
 
     @classmethod
