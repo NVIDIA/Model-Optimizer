@@ -56,6 +56,14 @@ _qwen3_5_extra_export: dict = {
     "shared_experts.linear_fc1": GatedMLPSlicing("model.layers.{}.mlp.shared_expert."),
     "shared_experts.linear_fc2": NameRemapping("model.layers.{}.mlp.shared_expert.down_proj."),
     "shared_experts.gate_weight": NameRemapping("model.layers.{}.mlp.shared_expert_gate.weight"),
+    # MTP predictor wrapper. Its inner TransformerLayer is exported by the base rules under
+    # ``mtp.layers.{}.``; these are the wrapper's own parameters, which Qwen3.5 stores once at the
+    # top level (``mtp.fc``, not ``mtp.layers.{}.eh_proj``). ``_get_mtp_state_dict`` exports each
+    # only when its rule exists, so without them the checkpoint silently lacks these four tensors.
+    "mtp.eh_proj": NameRemapping("mtp.fc."),
+    "mtp.enorm": NameRemapping("mtp.pre_fc_norm_embedding."),
+    "mtp.hnorm": NameRemapping("mtp.pre_fc_norm_hidden."),
+    "mtp.final_layernorm": NameRemapping("mtp.norm."),
 }
 
 qwen3_5_vl_causal_lm_export = with_language_model_prefix(
