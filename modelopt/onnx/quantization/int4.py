@@ -784,6 +784,9 @@ def run_awq_scale_search_per_node(
 ):
     """Method that iterates over each quantizable node for scale search."""
     assert len(awq_lite) == len(wa_pack)
+    reuse_activations = kwargs.get("awqlite_reuse_activations", False)
+    cached_activation = None
+    cached_activation_name = None
     for i in tqdm(
         range(len(wa_pack)),
         desc="Running AWQ scale search per node" + tqdm_msg_append_str,
@@ -802,7 +805,7 @@ def run_awq_scale_search_per_node(
                 # want to free system RAM asap since that data is here copied to GPU for this node
                 output_data[j][i] = None
             output_dicts[act_tensor.name] = node_inputs
-        else:
+        elif cached_activation_name != act_tensor.name:
             # First capture all the  activation values after calibration data sweep
             for inp_d in inputs:
                 np_inp_d = {name: numpy.asarray(tensor) for name, tensor in inp_d.items()}
@@ -818,9 +821,12 @@ def run_awq_scale_search_per_node(
             w = w.T
         w = np.asarray(w)
 
-        x = np.concatenate(output_dicts[act_tensor.name], axis=0).reshape(
-            (-1, w.shape[0])
-        )  # n_token, ci
+        if cached_activation is not None and cached_activation_name == act_tensor.name:
+            x = cached_activation.reshape((-1, w.shape[0]))
+        else:
+            x = np.concatenate(output_dicts[act_tensor.name], axis=0).reshape(
+                (-1, w.shape[0])
+            )  # n_token, ci
         # Updating the block size as for 8bit quantization, per-channel quantization is used.
         num_bits = get_num_bits(layer_info, weight_tensor.name)
         block_size_updated = update_block_size(block_size, layer_info, weight_tensor.name, w=w)
@@ -854,6 +860,18 @@ def run_awq_scale_search_per_node(
             awq_clip = AWQClipHelper(w, block_size_updated, **kwargs)
             _clip_search(x, w, awq_clip, num_bits=num_bits, **kwargs)
             clip_alphas[weight_tensor.name] = awq_clip.best_alpha
+        # Share only the current activation with adjacent consumers; release it before the next input.
+        if (
+            reuse_activations
+            and not enable_fast_path_using_high_sysram
+            and i + 1 < len(wa_pack)
+            and wa_pack[i + 1][0].name == act_tensor.name
+        ):
+            cached_activation = x
+            cached_activation_name = act_tensor.name
+        else:
+            cached_activation = None
+            cached_activation_name = None
         del x, w, out_actual, output_dicts
         if has_cupy:
             np.get_default_memory_pool().free_all_blocks()
@@ -1486,6 +1504,14 @@ def quantize(
 
                 - **awqlite_alpha_step** (float): Step size to find best Alpha in awq-lite.Range: [0, 1].
                                               Default: 0.1.
+                - **awqlite_reuse_activations** (bool): Reuse calibration activations across adjacent
+                                              weights sharing an input in per-node AWQ Lite/Full.
+                                              Default: False. Independent per-weight captures require
+                                              per-node mode with enable_fast_path_using_high_sysram=False.
+                                              Enable only when sharing activation samples is acceptable;
+                                              this does not change random operators, seeds, or backend determinism.
+                                              For stochastic graphs, reuse changes which samples adjacent
+                                              weights share compared with independent calibration.
                 - **awqclip_alpha_step** (float): Step size to find best Alpha in awq-clip.
                                               Default: 0.05
                 - **awqclip_alpha_min** (float): Minimum threshold for weight-clipping in awq-clip.

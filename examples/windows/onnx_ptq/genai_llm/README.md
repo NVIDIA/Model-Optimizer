@@ -62,6 +62,7 @@ The table below lists key command-line arguments of the ONNX PTQ example script.
 | `--use_zero_point` | Default: zero-point is disabled | Use this option to enable zero-point based quantization. |
 | `--block-size` | 32, 64, 128 (default) | Block size for AWQ. |
 | `--awqlite_alpha_step` | 0.1 (default) | Step-size for AWQ scale search, user-defined |
+| `--awqlite_reuse_activations` | Disabled by default | Opt in to reusing calibration activations for adjacent weights sharing an input in per-node AWQ Lite. No model-specific selection is applied. |
 | `--awqlite_run_per_subgraph` | Default: run_per_subgraph is disabled | Use this option to run AWQ scale search at the subgraph level |
 | `--awqlite_disable_fuse_nodes` | Default: fuse_nodes enabled | Use this option to disable fusion of input scales in parent nodes. |
 | `--awqclip_alpha_step` | 0.05 (default) | Step-size for AWQ weight clipping, user-defined |
@@ -81,6 +82,13 @@ Run the following command to view all available parameters in the script:
 ```bash
 python quantize.py --help
 ```
+
+Activation reuse is opt-in: pass `--awqlite_reuse_activations` or set
+`awqlite_reuse_activations=True` in the INT4 Python API. It does not modify random operators,
+seeds, or backend determinism. With stochastic graphs, enabling reuse shares a captured
+activation sample across adjacent weights. Independent per-weight captures require reuse to
+remain disabled in per-node mode with `enable_fast_path_using_high_sysram=False`; disabling
+reuse alone does not guarantee independent captures in other modes.
 
 Note:
 

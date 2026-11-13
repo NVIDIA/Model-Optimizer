@@ -175,6 +175,111 @@ def test_shape_awq(tmp_path):
     )  # Ensure it passes.
 
 
+@pytest.mark.parametrize("calibration_method", ["awq_lite", "awq_full"])
+@pytest.mark.parametrize(
+    ("reuse_activations", "random_activation"),
+    [(None, False), (False, False), (True, False), (None, True), (False, True), (True, True)],
+)
+def test_awq_reuses_adjacent_activations(
+    tmp_path, monkeypatch, calibration_method, reuse_activations, random_activation
+):
+    """Opt in to reuse while preserving independent stochastic captures by default."""
+    rng = np.random.default_rng(37)
+    weights = [
+        onnx.numpy_helper.from_array(rng.normal(size=(16, 16)).astype(np.float32), name)
+        for name in ("wa", "wb", "wc", "wd")
+    ]
+    nodes = [
+        onnx.helper.make_node("MatMul", ["x", "wa"], ["a"], name="a"),
+        onnx.helper.make_node("MatMul", ["x", "wb"], ["b"], name="b"),
+        onnx.helper.make_node("Relu", ["a"], ["hidden"], name="hidden"),
+        onnx.helper.make_node("MatMul", ["hidden", "wc"], ["c"], name="c"),
+        onnx.helper.make_node("MatMul", ["x", "wd"], ["d"], name="d"),
+        onnx.helper.make_node("Add", ["b", "c"], ["sum"], name="sum"),
+        onnx.helper.make_node("Add", ["sum", "d"], ["y"], name="y"),
+    ]
+    activation_name = "sample" if random_activation else "x"
+    if random_activation:
+        for node in nodes:
+            if node.input[0] == "x":
+                node.input[0] = activation_name
+        nodes[:0] = [
+            onnx.helper.make_node("RandomNormalLike", ["x"], ["noise"], seed=1.0),
+            onnx.helper.make_node("Add", ["x", "noise"], [activation_name]),
+        ]
+    graph = onnx.helper.make_graph(
+        nodes,
+        "shared_activations",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [4, 16])],
+        [onnx.helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [4, 16])],
+        weights,
+    )
+    model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 21)])
+    model.ir_version = 10
+    path = str(tmp_path / "shared.onnx")
+    onnx.save(model, path)
+    inputs = [{"x": rng.normal(size=(4, 16)).astype(np.float32)} for _ in range(2)]
+    kwargs = {
+        "calibration_method": calibration_method,
+        "calibration_data_reader": inputs,
+        "calibration_eps": ["cpu"],
+        "block_size": 8,
+        "use_external_data_format": False,
+    }
+    reference = None
+    if not (random_activation and reuse_activations):
+        reference = quantize_int4(
+            path,
+            awqlite_reuse_activations=False,
+            enable_fast_path_using_high_sysram=not random_activation,
+            **kwargs,
+        )
+    session_calls = []
+    captured_samples = []
+    weight_samples = []
+    create_session = moq.int4.create_inference_session
+    awq_init = moq.int4.AWQLiteHelper.__init__
+
+    def capture_weight_samples(self, x, *args, **kwargs):
+        weight_samples.append(x.get() if moq.int4.has_cupy else x.copy())
+        awq_init(self, x, *args, **kwargs)
+
+    def counted_session(*args, **kwargs):
+        session = create_session(*args, **kwargs)
+        run = session.run
+
+        def counted_run(names, feed):
+            session_calls.append(tuple(names))
+            outputs = run(names, feed)
+            if random_activation and names == [activation_name]:
+                captured_samples.append(outputs[0].copy())
+            return outputs
+
+        session.run = counted_run
+        return session
+
+    monkeypatch.setattr(moq.int4, "create_inference_session", counted_session)
+    if random_activation:
+        monkeypatch.setattr(moq.int4.AWQLiteHelper, "__init__", capture_weight_samples)
+    if reuse_activations is not None:
+        kwargs["awqlite_reuse_activations"] = reuse_activations
+    actual = quantize_int4(path, **kwargs)
+    if reference is not None:
+        assert actual.SerializeToString() == reference.SerializeToString()
+    first_group_calls = 2 if reuse_activations else 4
+    assert session_calls == (
+        [(activation_name,)] * first_group_calls + [("hidden",)] * 2 + [(activation_name,)] * 2
+    )
+    if random_activation:
+        assert not np.array_equal(captured_samples[0], captured_samples[2])
+        assert len(weight_samples) == 4
+        if reuse_activations:
+            np.testing.assert_array_equal(weight_samples[0], weight_samples[1])
+        else:
+            assert not np.array_equal(weight_samples[0], weight_samples[1])
+        assert not np.array_equal(weight_samples[0], weight_samples[3])
+
+
 def test_int4_gather(tmp_path):
     gather_rows = 8
     gather_cols = 16
