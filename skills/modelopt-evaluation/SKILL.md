@@ -1,6 +1,6 @@
 ---
 name: modelopt-evaluation
-description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Always load when validating completed runs or reporting evaluation scores, including standalone modelopt-launching-evals analysis. Not for quantizing models (use modelopt-ptq), standalone serving (use modelopt-deployment), or comparing completed baseline-vs-quantized results (use modelopt-compare-results).
+description: NEL backend: creates configs, launches and validates accuracy evaluations with NeMo Evaluator Launcher (NEL). Use only when the task or the user names NEL (nel, nemo-evaluator-launcher); for any other evaluation tool use that tool's own skills. Also use for validating completed NEL runs. Not for quantizing models (use modelopt-ptq), standalone serving (use modelopt-deployment), or comparing completed baseline-vs-quantized results (use modelopt-compare-results).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073).
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant

@@ -1,6 +1,6 @@
 ---
 name: modelopt-launching-evals
-description: Run, monitor, analyze, and debug LLM evaluations via nemo-evaluator-launcher. Covers running evaluations, checking status and live progress, debugging failed runs, exporting artifacts and logs, and analyzing results. ALWAYS triggers on mentions of running evaluations, checking progress, debugging failed evals, analyzing or analysing runs or results, run directories or artifact paths on clusters, Slurm job issues, invocation IDs, or inspecting logs (client logs, server logs, SSH to cluster, tail logs, grep logs). Do NOT use for creating or modifying evaluation configs.
+description: NEL backend: run, monitor, analyze, and debug LLM evaluations via nemo-evaluator-launcher. Use only for NEL runs (the task or user names NEL, or an invocation ID or run directory comes from NEL); evaluations run with another tool use that tool's own skills. Covers checking status and live progress, debugging failed runs, exporting artifacts and logs, and analyzing results. Do NOT use for creating or modifying evaluation configs.
 license: Apache-2.0
 # Vendored verbatim from NVIDIA NeMo Evaluator (commit 8fa16b2)
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/8fa16b237d11e213ea665d5bad6b44d393762317/packages/nemo-evaluator-launcher/.claude/skills/launching-evals

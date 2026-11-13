@@ -1,6 +1,6 @@
 ---
 name: modelopt-monitor
-description: Monitor submitted jobs (PTQ, evaluation, deployment) on SLURM clusters. Use when the user asks "check job status", "is my job done", "monitor my evaluation", "what's the status of the PTQ", "check on job" followed by a SLURM job ID, or after any skill submits a long-running job. Also triggers on "nel status", "squeue", or any request to check progress of a previously submitted job.
+description: Monitor submitted jobs (PTQ, evaluation, deployment) on SLURM clusters. Use when the user asks "check job status", "is my job done", "what's the status of the PTQ", "check on job" followed by a SLURM job ID, or after any skill submits a long-running job. `nel status` applies to NEL runs only; for evaluation jobs submitted by another tool use that tool's own status commands.
 ---
 
 # Job Monitor
