@@ -1110,7 +1110,9 @@ def auto_quantize(
             (default; uses gradient-based loss estimation, linear programming search, and requires
             ``loss_func`` or ``forward_backward_step``), ``"kl_div"`` (uses KL divergence between
             unquantized and quantized outputs, relies on threshold-based binary search, and only
-            requires ``forward_step`` returning logits), and ``"aumann_shapley"`` (path-integral
+            requires ``forward_step`` returning logits; ``{"method": "kl_div", "context": "lowest"}``
+            scores each candidate with the other searched groups quantized instead and searches by
+            linear programming), and ``"aumann_shapley"`` (path-integral
             damage attributions, calibrated against a directly measured reference point; label-free
             like ``"kl_div"``, and additionally reports a ``predicted_damage`` estimate for the
             selected recipe). For example, use
@@ -1348,8 +1350,9 @@ def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint
     ``format_shard``) to restore every format's calibration and scores and solve. The shard files
     are memory-mapped on the CPU, so any host can merge them, and the restore moves each
     calibration onto the model's devices. Under distributed scoring, merge each rank's files
-    separately. Shards that recorded different search setups (formats, groups, method, cost, or
-    calibration and scoring step counts) are refused; running every shard on the same weights
+    separately. Shards that recorded different search setups (formats, groups, method, scoring
+    options such as the KL context, cost, or calibration and scoring step counts) are refused;
+    running every shard on the same weights
     and batches is up to the caller.
 
     Args:
