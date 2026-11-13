@@ -1358,6 +1358,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 costs.append(hparam.get_cost(recipe))
             scores = _monotone_scores(raw_scores)
 
+            # A restored checkpoint loads candidate_stats as a plain dict, not a defaultdict.
+            self.candidate_stats.setdefault(name, {})
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
             self.candidate_stats[name]["raw_scores"] = raw_scores
