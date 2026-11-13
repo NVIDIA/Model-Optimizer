@@ -24,10 +24,10 @@ from modelopt.torch.export.plugins.mcore_common import MCORE_MODEL_TYPES
 
 
 def test_every_model_mcore_module_is_imported():
-    # A model's mbridge_hf_mapping.py registers its mappings only if mcore_common imports it; a
+    # A model's mcore_hf_mapping.py registers its mappings only if mcore_common imports it; a
     # forgotten one would surface as a KeyError at export time on a GPU.
     on_disk = {
-        path.parent.name for path in Path(models.__file__).parent.glob("*/mbridge_hf_mapping.py")
+        path.parent.name for path in Path(models.__file__).parent.glob("*/mcore_hf_mapping.py")
     }
     assert on_disk == set(MCORE_MODEL_TYPES)
 

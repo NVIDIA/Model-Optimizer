@@ -69,7 +69,7 @@ llama4_causal_lm_export: dict[str, CustomModuleMapping | bool] = {
 llama4_causal_lm_import: dict[str, CustomModuleMapping | bool] = {
     "word_embeddings": NameRemapping("language_model.model.embed_tokens.", COL_TP),
     "input_layernorm": NameRemapping("language_model.model.layers.{}.input_layernorm.", REPLICATE),
-    # Fused TE spec (TELayerNormColumnParallelLinear) — rationale in qwen3/mbridge_hf_mapping.py.
+    # Fused TE spec (TELayerNormColumnParallelLinear) — see qwen3/mcore_hf_mapping.py for rationale.
     # Llama4 is MoE-only on the MLP side (no layer.mlp.linear_fc1), so the importer's
     # fused_pre_mlp_layernorm path is unreachable; only fused_input_layernorm is wired.
     "fused_input_layernorm": NameRemapping("language_model.model.layers.{}.input_layernorm.weight"),

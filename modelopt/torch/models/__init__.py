@@ -29,7 +29,7 @@ general model data, and export is only its first consumer.
 
 A package may also hold ``modeling_ptq.py``, the model-specific PTQ wrappers. It is not imported
 here; the HF quantization plugin imports it (see ``README.md``). Likewise
-``mbridge_hf_mapping.py``, the model's Megatron-Core mapping tables, is imported by
+``mcore_hf_mapping.py``, the model's Megatron-Core mapping tables, is imported by
 ``modelopt.torch.export.plugins.mcore_common``.
 """
 

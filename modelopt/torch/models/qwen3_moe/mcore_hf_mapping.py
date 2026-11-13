@@ -20,7 +20,7 @@ Reuses the dense Qwen3 rules.
 
 from modelopt.torch.export.plugins.mcore_custom import register_mcore_hf_mapping
 
-from ..qwen3.mbridge_hf_mapping import qwen3_causal_lm_export, qwen3_causal_lm_import
+from ..qwen3.mcore_hf_mapping import qwen3_causal_lm_export, qwen3_causal_lm_import
 
 __all__: list[str] = []
 

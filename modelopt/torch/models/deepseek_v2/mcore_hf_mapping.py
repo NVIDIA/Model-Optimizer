@@ -20,7 +20,7 @@ Reuses the DeepSeek-V3 rules.
 
 from modelopt.torch.export.plugins.mcore_custom import register_mcore_hf_mapping
 
-from ..deepseek_v3.mbridge_hf_mapping import deepseek_causal_lm_export, deepseek_causal_lm_import
+from ..deepseek_v3.mcore_hf_mapping import deepseek_causal_lm_export, deepseek_causal_lm_import
 
 __all__: list[str] = []
 

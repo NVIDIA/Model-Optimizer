@@ -29,7 +29,7 @@ __all__ = [
     "all_mcore_hf_vision_passthrough_mapping",
 ]
 
-# The mappings live with their model in ``modelopt/torch/models/<model_type>/mbridge_hf_mapping.py``
+# The mappings live with their model in ``modelopt/torch/models/<model_type>/mcore_hf_mapping.py``
 # and register themselves on import; add a new model type here.
 MCORE_MODEL_TYPES = (
     "deepseek_v2",
@@ -51,4 +51,4 @@ MCORE_MODEL_TYPES = (
 )
 
 for _model_type in MCORE_MODEL_TYPES:
-    importlib.import_module(f"modelopt.torch.models.{_model_type}.mbridge_hf_mapping")
+    importlib.import_module(f"modelopt.torch.models.{_model_type}.mcore_hf_mapping")

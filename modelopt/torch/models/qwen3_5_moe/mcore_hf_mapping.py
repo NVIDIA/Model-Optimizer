@@ -20,7 +20,7 @@ Reuses the Qwen3.5 rules.
 
 from modelopt.torch.export.plugins.mcore_custom import register_mcore_hf_mapping
 
-from ..qwen3_5.mbridge_hf_mapping import QWEN3_5_VL_VISION_PREFIXES, qwen3_5_vl_causal_lm_export
+from ..qwen3_5.mcore_hf_mapping import QWEN3_5_VL_VISION_PREFIXES, qwen3_5_vl_causal_lm_export
 
 __all__: list[str] = []
 

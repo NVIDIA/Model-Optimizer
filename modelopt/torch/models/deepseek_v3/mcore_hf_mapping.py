@@ -95,7 +95,7 @@ deepseek_causal_lm_import = {
     "output_layer": NameRemapping("lm_head.", COL_TP),
     # Per-layer
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm.", REPLICATE),
-    # Fused TE spec (TELayerNormColumnParallelLinear) — rationale in qwen3/mbridge_hf_mapping.py.
+    # Fused TE spec (TELayerNormColumnParallelLinear) — see qwen3/mcore_hf_mapping.py for rationale.
     # MLA has no linear_qkv so fused_input_layernorm is inert for DeepSeek today; included
     # for parity in case a future spec fuses the layernorm into a Q/KV projection.
     "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),

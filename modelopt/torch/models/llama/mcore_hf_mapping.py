@@ -122,7 +122,7 @@ eagle3_deep_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
 llama_causal_lm_import: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("model.embed_tokens.", COL_TP),
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm.", REPLICATE),
-    # Fused TE spec (TELayerNormColumnParallelLinear) — rationale in qwen3/mbridge_hf_mapping.py.
+    # Fused TE spec (TELayerNormColumnParallelLinear) — see qwen3/mcore_hf_mapping.py for rationale.
     "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
     "linear_qkv": QKVMerging("model.layers.{}.self_attn.", COL_TP),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj.", ROW_TP),
