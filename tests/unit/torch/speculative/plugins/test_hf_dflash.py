@@ -253,15 +253,15 @@ class TestDPaceLossIntegration:
     """Exercise the _compute_loss block-weighting branches on CPU."""
 
     @staticmethod
-    def _make_inputs(vocab=32, seq_len=SEQ_LEN, n_blocks=2):
-        """Synthetic CPU inputs for _compute_loss (no model forward needed)."""
+    def _make_inputs(model, seq_len=SEQ_LEN, n_blocks=2):
+        """Synthetic CPU inputs for _compute_loss (no draft forward needed)."""
         bsz = 1
-        logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab)
-        input_ids = torch.randint(0, vocab, (bsz, seq_len))
+        draft_hidden = _random_draft_hidden(model, bsz, n_blocks)
+        input_ids = torch.randint(0, model.config.vocab_size, (bsz, seq_len))
         anchor_positions = torch.tensor([[0, BLOCK_SIZE]])[:, :n_blocks]
         block_keep_mask = torch.ones(bsz, n_blocks)
         loss_mask = torch.ones(bsz, seq_len)
-        return logits, input_ids, anchor_positions, block_keep_mask, loss_mask
+        return draft_hidden, input_ids, anchor_positions, block_keep_mask, loss_mask
 
     def _converted_model(self, objective, **overrides):
         model = get_tiny_llama(num_hidden_layers=4)
@@ -274,7 +274,7 @@ class TestDPaceLossIntegration:
     def test_compute_loss_dpace_branch(self):
         """Default dpace objective produces a finite loss and valid accuracy."""
         model = self._converted_model("dpace", dflash_self_logit_distillation=False)
-        loss, acc = model._compute_loss(*self._make_inputs())
+        loss, acc = model._compute_loss(*self._make_inputs(model))
         assert torch.isfinite(loss).item() and loss.item() > 0
         assert 0.0 <= acc <= 1.0
 
@@ -283,16 +283,17 @@ class TestDPaceLossIntegration:
         model = self._converted_model(
             "decay", dflash_loss_decay_factor=4.0, dflash_self_logit_distillation=False
         )
-        loss, acc = model._compute_loss(*self._make_inputs())
+        loss, acc = model._compute_loss(*self._make_inputs(model))
         assert torch.isfinite(loss).item() and loss.item() > 0
         assert 0.0 <= acc <= 1.0
 
     def test_compute_loss_dpace_kd_branch(self):
         """dpace + KD: confidences use a dedicated no_grad CE pass."""
-        vocab = 32
         model = self._converted_model("dpace")
-        inputs = self._make_inputs(vocab=vocab)
-        teacher = DFlashBaseModelOutput(None, logits=torch.randn(1, SEQ_LEN, vocab))
+        inputs = self._make_inputs(model)
+        teacher = DFlashBaseModelOutput(
+            None, logits=torch.randn(1, SEQ_LEN, model.config.vocab_size)
+        )
         loss, acc = model._compute_loss(*inputs, base_outputs=teacher)
         assert torch.isfinite(loss).item()
         assert 0.0 <= acc <= 1.0
@@ -301,7 +302,7 @@ class TestDPaceLossIntegration:
         """KD is decided by the config, so a missing teacher cannot fall back to CE."""
         model = self._converted_model("dpace")
         with pytest.raises(ValueError, match="base_outputs"):
-            model._compute_loss(*self._make_inputs())
+            model._compute_loss(*self._make_inputs(model))
 
 
 class TestDFlashSaveRestore:
@@ -971,6 +972,12 @@ class TestEnsureGenerationTags:
         assert "How are you?" not in decoded
 
 
+def _random_draft_hidden(model, bsz, n_blocks):
+    """Draft hidden states for ``n_blocks`` blocks, in the dtype the lm_head projects."""
+    dtype = model._base_model_lm_head.weight.dtype
+    return torch.randn(bsz, n_blocks * BLOCK_SIZE, model.config.hidden_size, dtype=dtype)
+
+
 def _dflash_batch(vocab_size, bsz=2, seq_len=SEQ_LEN):
     torch.manual_seed(0)
     input_ids = torch.randint(1, vocab_size, (bsz, seq_len))
@@ -1500,13 +1507,13 @@ class TestAnchorSamplingStaticShape:
         torch.manual_seed(0)
         input_ids = torch.randint(0, vocab, (bsz, SEQ_LEN))
         loss_mask = torch.ones(bsz, SEQ_LEN)
-        logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab)
+        draft_hidden = _random_draft_hidden(model, bsz, n_blocks)
         anchors = torch.tensor([[0, BLOCK_SIZE]])[:, :n_blocks]
         keep = torch.ones(bsz, n_blocks)
 
-        base_loss, base_acc = model._compute_loss(logits, input_ids, anchors, keep, loss_mask)
+        base_loss, base_acc = model._compute_loss(draft_hidden, input_ids, anchors, keep, loss_mask)
         padded_loss, padded_acc = model._compute_loss(
-            torch.cat([logits, torch.randn(bsz, pad * BLOCK_SIZE, vocab)], dim=1),
+            torch.cat([draft_hidden, _random_draft_hidden(model, bsz, pad)], dim=1),
             input_ids,
             torch.cat([anchors, torch.zeros(bsz, pad, dtype=anchors.dtype)], dim=1),
             torch.cat([keep, torch.zeros(bsz, pad)], dim=1),
@@ -1692,7 +1699,7 @@ class TestTeacherLogits:
         """KD read from the base hidden equals KD from the same logits built in full."""
         model = self._model()
         hidden = self._hidden(model, bsz=1)
-        inputs = TestDPaceLossIntegration._make_inputs(vocab=model.config.vocab_size)
+        inputs = TestDPaceLossIntegration._make_inputs(model)
         full = DFlashBaseModelOutput(None, logits=model._base_model_lm_head(hidden))
         loss_full, _ = model._compute_loss(*inputs, base_outputs=full)
         loss, _ = model._compute_loss(
@@ -1727,3 +1734,102 @@ class TestTeacherLogits:
         ).loss.backward()
         assert len(seen) == 2, seen  # the draft's logits, then the KD teacher rows
         assert (bsz, SEQ_LEN, hidden) not in seen, seen
+
+
+class _TransformedHead(torch.nn.Linear):
+    """An lm_head that scales and soft-caps its logits, and declares so for the fused pass."""
+
+    SCALE, CAP = 0.5, 3.0
+
+    def forward(self, x):
+        return self.CAP * torch.tanh(super().forward(x) * self.SCALE / self.CAP)
+
+    def logit_transform(self):
+        return self.SCALE, self.CAP
+
+
+class _UndeclaredHead(torch.nn.Linear):
+    """An lm_head whose forward does more than project, without declaring it."""
+
+    def forward(self, x):
+        return 2 * super().forward(x)
+
+
+def _swap_lm_head(model, head_cls):
+    """Replace ``model.lm_head`` with a ``head_cls`` holding the same weight."""
+    old = model.lm_head
+    model.lm_head = head_cls(old.in_features, old.out_features, bias=False, dtype=old.weight.dtype)
+    model.lm_head.weight.data.copy_(old.weight.data)
+
+
+class TestDFlashFusedLoss:
+    """``dflash_fused_loss`` trains exactly what the loss on materialized logits trains."""
+
+    @staticmethod
+    def _step(fused, offline, transformed_head=False, **overrides):
+        """One training step's output and draft gradients, from fixed weights, data and anchors."""
+        torch.manual_seed(0)
+        model = get_tiny_llama(num_hidden_layers=4)
+        if transformed_head:
+            _swap_lm_head(model, _TransformedHead)
+        if offline:
+            model.config.num_orig_hidden_layers = 4
+        config = get_dflash_config(offline=offline)
+        config.update(dflash_fused_loss=fused, **overrides)
+        mtsp.convert(model, [("dflash", config)])
+        model.float().train()  # fp32, so the two paths differ only by rounding
+        batch = _dflash_batch(model.config.vocab_size)
+        if offline:
+            hidden = model.config.hidden_size
+            batch["base_model_outputs"] = {
+                "aux_hidden_states": torch.randn(2, SEQ_LEN, len(model.target_layer_ids) * hidden),
+                "base_model_hidden_states": torch.randn(2, SEQ_LEN, hidden),
+            }
+        torch.manual_seed(1)
+        out = model(**batch)
+        out.loss.backward()
+        params = model.dflash_module.named_parameters()
+        return out, {name: p.grad for name, p in params if p.grad is not None}
+
+    @pytest.mark.parametrize(
+        ("offline", "transformed_head", "overrides"),
+        [
+            (False, False, {}),  # KD on the base's logits, D-PACE weighting
+            (True, False, {"dflash_loss_objective": "decay", "dflash_loss_decay_factor": 4.0}),
+            (False, False, {"dflash_self_logit_distillation": False}),  # cross-entropy, D-PACE
+            (True, True, {}),  # KD on the base's hidden, through a declared logit transform
+        ],
+        ids=["kd-online", "kd-offline-decay", "ce", "kd-offline-transformed-head"],
+    )
+    def test_matches_the_materialized_logits(self, offline, transformed_head, overrides):
+        eager, eager_grads = self._step(False, offline, transformed_head, **overrides)
+        fused, fused_grads = self._step(True, offline, transformed_head, **overrides)
+        torch.testing.assert_close(fused.loss, eager.loss)
+        assert fused.train_acc == eager.train_acc
+        assert fused_grads.keys() == eager_grads.keys()
+        for name, grad in eager_grads.items():
+            torch.testing.assert_close(fused_grads[name], grad, msg=name)
+
+    @pytest.mark.parametrize(
+        ("overrides", "arch", "lm_head"),
+        [
+            ({}, {"projector_type": "dspark", "markov_rank": 4}, None),
+            ({}, {"projector_type": "domino", "gru_hidden_dim": 8, "emb_dim": 8}, None),
+            ({"dflash_freeze_base_model": False}, {}, None),
+            ({}, {}, "hooked"),
+            ({}, {}, "undeclared"),
+        ],
+        ids=["dspark", "domino", "trainable-lm-head", "hooked-lm-head", "undeclared-lm-head"],
+    )
+    def test_unsupported_setups_are_rejected(self, overrides, arch, lm_head):
+        """Each would make the fused pass skip a term or a gradient the eager loss has."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        if lm_head == "hooked":
+            model.lm_head.register_forward_hook(lambda module, args, output: output * 2)
+        elif lm_head == "undeclared":
+            _swap_lm_head(model, _UndeclaredHead)
+        config = get_dflash_config()
+        config.update(dflash_fused_loss=True, **overrides)
+        config["dflash_architecture_config"].update(arch)
+        with pytest.raises(ValueError, match="dflash_fused_loss"):
+            mtsp.convert(model, [("dflash", config)])
