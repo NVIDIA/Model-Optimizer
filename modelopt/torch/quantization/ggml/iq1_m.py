@@ -327,7 +327,7 @@ IQ1_M_FORMAT = GGMLFormat(
     choice_groups=16,
     num_choices=8,
     payload_scales=_payload_scales,
-    scale_fit=ScaleFit(group=16, top=15, levels=_IQ1_LEVELS),
+    scale_fit=ScaleFit(top=15, levels=_IQ1_LEVELS),
     replace_payload_scales=_replace_payload_scales,
 )
 

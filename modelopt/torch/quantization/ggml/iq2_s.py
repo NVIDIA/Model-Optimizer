@@ -310,7 +310,7 @@ IQ2_S_FORMAT = GGMLFormat(
     num_choices=_IQ2_S_LOCAL_SCALES,
     payload_scales=leading_fp16_scales,
     # Fit at llama.cpp's levels 1, 3, 5, the odd steps its grid's 8, 25, 43 (in eighths) round to.
-    scale_fit=ScaleFit(group=16, top=31, levels=((1.0, 3.0, 5.0),)),
+    scale_fit=ScaleFit(top=31, levels=((1.0, 3.0, 5.0),)),
     replace_payload_scales=with_leading_fp16_scales,
 )
 
