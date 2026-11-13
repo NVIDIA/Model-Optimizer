@@ -247,14 +247,16 @@ def test_int4_gather(tmp_path, calibration_method, opset):
         assert quant_axis in [0, 1], "Incorrect quant-axis"  # used for 0/1 indexing below
         orig_shape = [gather_rows, gather_cols]
         graph = gs.import_onnx(model)
+        found_scale = False
         for node in graph.nodes:
             if node.op == "DequantizeLinear":
                 for inp in node.inputs:
-                    if inp.name == "x_scale":
-                        print(f"\nname={inp.name}, shape={inp.shape}\n")
+                    if inp.name == "data_scale":
+                        found_scale = True
                         c1 = (orig_shape[quant_axis] // block_size) == inp.shape[quant_axis]
                         c2 = orig_shape[1 - quant_axis] == inp.shape[1 - quant_axis]
                         assert c1 and c2, "Incorrect scale shape in DQ node for Gather"
+        assert found_scale, "Gather DQ scale not found"
         return True
 
     assert is_quant_scale_with_right_shape(m1, 1, gather_block_size), (
@@ -264,6 +266,9 @@ def test_int4_gather(tmp_path, calibration_method, opset):
         "DQ Scale Error in rtn_dq quantization, axis 0"
     )
 
+    data = np.arange(gather_rows * gather_cols, dtype=np.float32).reshape(gather_rows, gather_cols)
+    # Symmetric INT4 RTN: the error is at most half a step, amax / 7 / 2, plus fp16 rounding.
+    atol = np.abs(data).max() / 7 / 2 + 0.1
     for model in [m1, m2]:
         model = _upgrade_opset_after_quantize(model)
         options = ort.SessionOptions()
@@ -274,6 +279,7 @@ def test_int4_gather(tmp_path, calibration_method, opset):
         )
         output = session.run(None, {"indices": np.asarray(3, dtype=np.int64)})[0]
         assert output.shape == (gather_cols,)
+        np.testing.assert_allclose(output.astype(np.float32), data[3], rtol=0, atol=atol)
 
 
 @pytest.mark.parametrize("calibration_method", ["awq_lite", "awq_clip"])
