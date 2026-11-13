@@ -16,6 +16,8 @@
 import copy
 
 import pytest
+import torch
+import torch.nn as nn
 from _test_utils.torch.misc import compare_outputs
 from _test_utils.torch.nas_prune.models import BaseExampleModel, get_example_models
 
@@ -113,3 +115,29 @@ def test_specify_forward_loop():
     # try specifying both
     with pytest.raises(AssertionError, match="Only provide `data_loader` or `forward_loop`!"):
         searcher.search(model, {}, (), {**config_data_loader, **config_loop})
+
+
+def test_sparsegpt_updates_weights():
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(64, 32, bias=False))
+    w_dense = model[0].weight.detach().clone()
+    # correlated inputs, so the SparseGPT update can compensate for the pruned weights
+    x = torch.randn(512, 8) @ torch.randn(8, 64) + 0.05 * torch.randn(512, 64)
+    y_dense = x @ w_dense.t()
+
+    model = mts.sparsify(
+        model, "sparsegpt", config={"forward_loop": lambda m: m(x), "device": "cpu"}
+    )
+    model = mts.export(model)
+
+    w = model[0].weight.detach()
+    mask = w != 0
+    assert ((w.view(-1, 4) != 0).sum(dim=1) <= 2).all()
+    # the kept weights must carry the SparseGPT update, not the dense values
+    assert not torch.allclose(w[mask], w_dense[mask])
+
+    def mse(weight):
+        return ((x @ weight.t() - y_dense) ** 2).mean()
+
+    # the update must reduce the output error of the mask alone
+    assert mse(w) < 0.9 * mse(w_dense * mask)

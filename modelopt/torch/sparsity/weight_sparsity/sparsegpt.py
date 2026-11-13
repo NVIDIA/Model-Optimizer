@@ -72,10 +72,8 @@ def prepare(
 
 
 @torch.no_grad()
-def create_sgpt_mask(
-    tensor: torch.Tensor, hessian: torch.Tensor, config: SearchConfig
-) -> torch.Tensor:
-    """Create a sparse mask for the given tensor."""
+def _sgpt_prune(tensor: torch.Tensor, hessian: torch.Tensor, config: SearchConfig) -> torch.Tensor:
+    """Return the SparseGPT-pruned and updated copy of ``tensor``; pruned entries are zero."""
     shape = tensor.size()
     weight, hessian_inv = prepare(tensor, hessian, config["hessian_damp"])
     rows, cols = weight.size()
@@ -136,9 +134,14 @@ def create_sgpt_mask(
 
         weight[r1:r2] = w_rows
 
-    mask = weight != 0
+    return weight.view(shape)
 
-    return mask.view(shape)
+
+def create_sgpt_mask(
+    tensor: torch.Tensor, hessian: torch.Tensor, config: SearchConfig
+) -> torch.Tensor:
+    """Create a sparse mask for the given tensor."""
+    return _sgpt_prune(tensor, hessian, config) != 0
 
 
 class SparseGPTSearcher(BaseSparseSearcher):
@@ -170,9 +173,13 @@ class SparseGPTSearcher(BaseSparseSearcher):
 
         return True
 
+    @torch.no_grad()
     def _compute_mask(self, module: SparseModule) -> torch.BoolTensor:
-        """Compute the mask (and weight update) for the given module."""
-        return create_sgpt_mask(module.weight, module.hessian, self.config)
+        """Compute the mask and write the SparseGPT weight update into the module."""
+        weight = _sgpt_prune(module.weight, module.hessian, self.config)
+        # write into the raw parameter; ``module.weight`` is a masked copy of it
+        module._parameters["weight"].copy_(weight)
+        return weight != 0
 
     @torch.no_grad()
     def before_search(self):
