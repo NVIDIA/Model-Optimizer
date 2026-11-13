@@ -2022,7 +2022,12 @@ def _test_p_bmm_quant_helper(fmt, rank, size):
             vocab_size=32,
             transformer_impl="modelopt",
             **(
-                {"attention_backend": AttnBackend.flash, "flash_attention_version": 4}
+                # FlashAttention-4 has no attention dropout.
+                {
+                    "attention_backend": AttnBackend.flash,
+                    "flash_attention_version": 4,
+                    "attention_dropout": 0.0,
+                }
                 if runs_kernel
                 else {}
             ),
