@@ -24,7 +24,11 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import GPT2Config, GPT2LMHeadModel
+from datasets import Dataset
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast
 
 
 @pytest.fixture
@@ -95,6 +99,8 @@ def test_real_generation_stops_at_eos_and_scores_it(kl_eval, monkeypatch, detail
         argv.append("--detailed_results")
     monkeypatch.setattr(sys, "argv", argv)
     args = kl_eval._parse_args()
+    assert args.num_examples == 300
+    assert args.eval_revision == kl_eval.EVALUATION_REVISION
     reference = _tiny_model()
     with torch.no_grad():
         for parameter in reference.parameters():
@@ -106,7 +112,7 @@ def test_real_generation_stops_at_eos_and_scores_it(kl_eval, monkeypatch, detail
     original_generation = copy.deepcopy(reference.generation_config)
     quantized = copy.deepcopy(reference)
     tokenizer = SimpleNamespace(eos_token_id=0, pad_token_id=0)
-    prompts = [{"block_index": 3, "input_ids": [4, 5, 6]}]
+    prompts = [{"id": "fixture-3", "source": "fixture", "cohort_rank": 3, "input_ids": [4, 5, 6]}]
     result = kl_eval.evaluate(
         reference,
         quantized,
@@ -122,7 +128,9 @@ def test_real_generation_stops_at_eos_and_scores_it(kl_eval, monkeypatch, detail
         assert result["examples"] == [
             {
                 "example": 0,
-                "block_index": 3,
+                "id": "fixture-3",
+                "source": "fixture",
+                "cohort_rank": 3,
                 "prompt_ids": [4, 5, 6],
                 "generated_ids": [0],
                 "generated_tokens": 1,
@@ -137,3 +145,53 @@ def test_real_generation_stops_at_eos_and_scores_it(kl_eval, monkeypatch, detail
 def test_invalid_logits_fail_instead_of_dropping_positions(kl_eval):
     with pytest.raises(ValueError, match="Non-finite KL"):
         kl_eval.mean_kl(torch.zeros(2, 4), torch.full((2, 4), float("nan")), top_k=2)
+
+
+@pytest.fixture
+def blended_fixture(kl_eval, monkeypatch):
+    backend = Tokenizer(WordLevel({"[UNK]": 0, "user": 1, "assistant": 2, "alpha": 3, "beta": 4}))
+    backend.pre_tokenizer = Whitespace()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="[UNK]")
+    tokenizer.chat_template = (
+        "{% for message in messages %}{{ message['role'] }} {{ message['content'] }} "
+        "{% endfor %}{% if add_generation_prompt %}assistant{% endif %}"
+    )
+    dataset = Dataset.from_list(
+        [
+            {
+                "id": str(index),
+                "source": "fixture",
+                "cohort_rank": index,
+                "messages": [{"role": "user", "content": content}],
+                "intrinsic_score": 999,
+                "gold_answer": "must not enter prompt",
+            }
+            for index, content in enumerate(["alpha beta", "beta", "alpha " * 128])
+        ]
+    )
+    # Replace only the external Hub read; exercise real dataset selection and chat tokenization.
+    monkeypatch.setattr(kl_eval, "load_dataset", lambda *_a, **_kw: dataset)
+    return tokenizer, dataset
+
+
+def test_blended_prompts_preserve_messages_order_and_identity(kl_eval, blended_fixture):
+    tokenizer, dataset = blended_fixture
+    prompts, fingerprint = kl_eval._blended_prompts(tokenizer, 3, "revision", 256, 4)
+    assert prompts == [
+        {"id": "0", "source": "fixture", "cohort_rank": 0, "input_ids": [1, 3, 4, 2]},
+        {"id": "1", "source": "fixture", "cohort_rank": 1, "input_ids": [1, 4, 2]},
+        {"id": "2", "source": "fixture", "cohort_rank": 2, "input_ids": [1] + [3] * 128 + [2]},
+    ]
+    assert fingerprint == dataset._fingerprint
+
+
+@pytest.mark.parametrize(
+    ("num_examples", "context_limit", "error"),
+    [(0, 256, "dataset rows"), (4, 256, "dataset rows"), (3, 133, "not truncated")],
+)
+def test_blended_prompts_refuse_short_banks_and_context_overflow(
+    kl_eval, blended_fixture, num_examples, context_limit, error
+):
+    tokenizer, _ = blended_fixture
+    with pytest.raises(ValueError, match=error):
+        kl_eval._blended_prompts(tokenizer, num_examples, "revision", context_limit, 4)

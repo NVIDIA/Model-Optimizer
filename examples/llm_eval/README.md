@@ -6,7 +6,7 @@ The following instructions show how to evaluate the Model Optimizer quantized LL
 
 ## PyTorch KL evaluation prototype
 
-`kl_eval.py` compares an unquantized BF16 base model with a separately calibrated fake-quant copy. Supply a model and a fixed PTQ recipe; calibration reuses the `hf_ptq.py` workflow and stops before checkpoint export. Install ModelOpt and the [hf_ptq requirements](../hf_ptq/requirements.txt) as described in the [hf_ptq setup](../hf_ptq/README.md).
+`kl_eval.py` compares an unquantized BF16 base model with a separately calibrated fake-quant copy. Evaluation defaults to the private [NVIDIA 300-prompt benchmark blend](https://huggingface.co/datasets/nvidia/balanced-benchmark-prompts-300). Supply a model and a fixed PTQ recipe; calibration reuses the `hf_ptq.py` workflow and stops before checkpoint export. Install ModelOpt and the [hf_ptq requirements](../hf_ptq/requirements.txt) as described in the [hf_ptq setup](../hf_ptq/README.md).
 
 Run from the repository root:
 
@@ -19,13 +19,15 @@ python examples/llm_eval/kl_eval.py \
 
 This is a usage example, not a validated model/recipe result. The recipe includes NVFP4 weights and activations with FP8 KV-cache cast quantization. Other built-in PTQ recipe names or YAML paths can be supplied through `--recipe`.
 
-- Evaluation uses 100 non-overlapping, 128-token windows from the tokenized WikiText-2-raw-v1 test split, selected with seed 0. Text is joined with blank lines and encoded without a chat template or added special tokens.
+- Evaluation uses all 300 rows of the blend's `test` split at revision `c211674f78e43ecd5aa487b3d3539499efafce78`, in their saved order: 50 prompts each from HLE, LiveCodeBench, LongBench v2, MathArena, GPQA, and IFBench. Only each row's `messages` are passed through the model tokenizer's chat template with an assistant generation prompt; labels and difficulty metadata never enter the model. Prompts remain complete, and a prompt plus the requested continuation that exceeds the model context raises an error before calibration.
 - The BF16 model greedily generates up to 512 tokens per prompt, stopping at EOS. Both models then receive the identical prompt and continuation. Only the generated-token predictions, including EOS, contribute to the score.
 - Full-vocabulary KL is `KL(BF16 || fake-quant)` over all vocabulary tokens. Conditional top-k KL selects the BF16 model's top 128 token IDs at each position and separately normalizes both models over those same IDs. It excludes tail mass and is not an approximation with an `OTHER` bucket.
 - Log-softmax and KL use FP32, in chunks of 32 positions. Each reported mean first averages positions within an example, then averages the example scores equally. Units are nats. Non-finite scores raise an error rather than being dropped.
-- The JSON contains only the overall `full_vocab_kl` and `conditional_topk_kl` means by default. Add `--detailed_results` to save a report with `summary`, per-example scores and token counts, prompt/continuation token IDs, and resolved recipe and run settings. Logits are held for one example at a time and are not saved.
+- The JSON contains only the overall `full_vocab_kl` and `conditional_topk_kl` means by default. Add `--detailed_results` to save a report with `summary`, per-example scores and token counts, prompt/continuation token IDs, dataset IDs/source/cohort ranks, and resolved recipe and run settings, including the dataset revision, fingerprint, and actual prompt lengths. Logits are held for one example at a time and are not saved.
 
-Override evaluation settings with `--num_examples`, `--prompt_tokens`, `--max_new_tokens`, `--top_k`, and `--seed`. Calibration is separate from WikiText evaluation and inherits `hf_ptq.py` defaults: the CNN/DailyMail + Nemotron mixture, 1,024 samples, maximum length 512, and automatic batch sizing. Override those with `--dataset`, `--calib_size`, `--calib_seq`, and `--batch_size`; these flags affect calibration only. Evaluation processes one prompt at a time.
+Override evaluation settings with `--num_examples`, `--eval_revision`, `--max_new_tokens`, `--top_k`, and `--seed`. Smaller example counts select a prefix in saved order; the seed does not reshuffle the cohort. Calibration is separate from blended-prompt evaluation and inherits `hf_ptq.py` defaults: the CNN/DailyMail + Nemotron mixture, 1,024 samples, maximum length 512, and automatic batch sizing. Override those with `--dataset`, `--calib_size`, `--calib_seq`, and `--batch_size`; these flags affect calibration only. Evaluation processes one prompt at a time.
+
+Authenticate with a Hugging Face account that has read access to the NVIDIA dataset repository, using `hf auth login` or `HF_TOKEN`. NVIDIA organization membership must include repository read access; the dataset remains private. No prompt contents are bundled with this example.
 
 The default [Nemotron calibration dataset](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) is gated. Authenticate with a Hugging Face account that has access before running; if using an isolated `HF_HOME`, make the token available through `HF_TOKEN_PATH`.
 

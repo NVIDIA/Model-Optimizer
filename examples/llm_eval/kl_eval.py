@@ -13,13 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Compare a fake-quant model with BF16 on shared WikiText-prompted continuations."""
+"""Compare a fake-quant model with BF16 on shared blended-benchmark continuations."""
 
 import argparse
 import copy
 import json
 import os
-import random
 import sys
 from pathlib import Path
 
@@ -29,6 +28,9 @@ from datasets import load_dataset
 from transformers import GenerationConfig, set_seed
 
 __all__ = ["evaluate", "mean_kl", "score_continuation"]
+
+EVALUATION_DATASET = "nvidia/balanced-benchmark-prompts-300"
+EVALUATION_REVISION = "c211674f78e43ecd5aa487b3d3539499efafce78"
 
 
 @torch.inference_mode()
@@ -122,7 +124,9 @@ def evaluate(
             results.append(
                 {
                     "example": index,
-                    "block_index": prompt["block_index"],
+                    "id": prompt["id"],
+                    "source": prompt["source"],
+                    "cohort_rank": prompt["cohort_rank"],
                     "prompt_ids": prompt["input_ids"],
                     "generated_ids": sequence[0, inputs.shape[1] :].cpu().tolist(),
                     "generated_tokens": generated_tokens,
@@ -134,21 +138,36 @@ def evaluate(
     return {"summary": summary, "examples": results} if detailed_results else summary
 
 
-def _wikitext_prompts(tokenizer, num_examples, prompt_tokens, seed):
-    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
-    text = "\n\n".join(row for row in dataset["text"] if row.strip())
-    token_ids = tokenizer.encode(text, add_special_tokens=False)
-    num_blocks = len(token_ids) // prompt_tokens
-    if num_blocks < num_examples:
-        raise ValueError(f"WikiText has only {num_blocks} complete prompt windows.")
-    selected = random.Random(seed).sample(range(num_blocks), num_examples)
-    prompts = [
-        {
-            "block_index": block,
-            "input_ids": token_ids[block * prompt_tokens : (block + 1) * prompt_tokens],
-        }
-        for block in selected
-    ]
+def _blended_prompts(tokenizer, num_examples, revision, context_limit, max_new_tokens):
+    dataset = load_dataset(EVALUATION_DATASET, split="test", revision=revision, token=True)
+    if not 1 <= num_examples <= len(dataset):
+        raise ValueError(f"Require 1 <= num_examples <= {len(dataset)} dataset rows.")
+    prompts = []
+    for row in dataset.select(range(num_examples)):
+        # Only messages enter the model; difficulty labels and other metadata stay outside it.
+        input_ids = tokenizer.apply_chat_template(
+            row["messages"],
+            tokenize=True,
+            add_generation_prompt=True,
+            truncation=False,
+            return_dict=False,
+        )
+        if not input_ids:
+            raise ValueError(f"Empty prompt for dataset row {row['cohort_rank']}.")
+        if context_limit and len(input_ids) + max_new_tokens > context_limit:
+            raise ValueError(
+                f"Dataset row {row['cohort_rank']} requires {len(input_ids)} prompt tokens "
+                f"plus {max_new_tokens} continuation tokens, exceeding context {context_limit}. "
+                "Prompts are not truncated; use a model with a sufficient context window."
+            )
+        prompts.append(
+            {
+                "id": row["id"],
+                "source": row["source"],
+                "cohort_rank": row["cohort_rank"],
+                "input_ids": input_ids,
+            }
+        )
     return prompts, dataset._fingerprint
 
 
@@ -156,8 +175,10 @@ def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
     parser.add_argument("--recipe", required=True, help="Built-in PTQ recipe name or YAML path.")
-    parser.add_argument("--num_examples", type=int, default=100)
-    parser.add_argument("--prompt_tokens", type=int, default=128)
+    parser.add_argument(
+        "--num_examples", type=int, default=300, help="Evaluate this many rows in dataset order."
+    )
+    parser.add_argument("--eval_revision", default=EVALUATION_REVISION)
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--top_k", type=int, default=128)
     parser.add_argument("--seed", type=int, default=0)
@@ -178,7 +199,7 @@ def _parse_args():
     parser.add_argument("--attn_implementation")
     parser.add_argument("--trust_remote_code", action="store_true")
     args = parser.parse_args()
-    for name in ("num_examples", "prompt_tokens", "max_new_tokens", "top_k"):
+    for name in ("num_examples", "max_new_tokens", "top_k"):
         if getattr(args, name) < 1:
             parser.error(f"--{name} must be positive.")
     if args.calib_seq is not None and args.calib_seq < 1:
@@ -247,13 +268,11 @@ def main():
             raise ValueError("This prototype requires text-only calibration and generation.")
         config = getattr(reference.config, "text_config", reference.config)
         context_length = getattr(config, "max_position_embeddings", None)
-        if context_length and args.prompt_tokens + args.max_new_tokens > context_length:
-            raise ValueError("Prompt plus continuation exceeds the model's context length.")
         if args.top_k > config.vocab_size:
             raise ValueError("--top_k exceeds the model vocabulary.")
 
-        prompts, fingerprint = _wikitext_prompts(
-            tokenizer, args.num_examples, args.prompt_tokens, args.seed
+        prompts, fingerprint = _blended_prompts(
+            tokenizer, args.num_examples, args.eval_revision, context_length, args.max_new_tokens
         )
         quantized = hf_ptq.quantize_main(ptq_args, *loaded, export=False)
         if any(
@@ -284,10 +303,13 @@ def main():
                 "kl_direction": "reference_to_quantized",
                 "units": "nats",
                 "aggregation": "mean_tokens_per_example_then_mean_examples",
-                "evaluation_dataset": "Salesforce/wikitext/wikitext-2-raw-v1/test",
+                "evaluation_dataset": EVALUATION_DATASET,
+                "evaluation_revision": args.eval_revision,
+                "evaluation_split": "test",
+                "prompt_format": "tokenizer_chat_template_with_generation_prompt",
                 "dataset_fingerprint": fingerprint,
                 "num_examples": args.num_examples,
-                "prompt_tokens": args.prompt_tokens,
+                "prompt_tokens": [len(prompt["input_ids"]) for prompt in prompts],
                 "max_new_tokens": args.max_new_tokens,
                 "top_k": args.top_k,
                 "seed": args.seed,
