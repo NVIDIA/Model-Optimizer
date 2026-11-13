@@ -454,27 +454,21 @@ torchrun --nproc_per_node 2 quantize.py \
     --export_megatron_path /output/qwen3_qdq
 ```
 
-`--output_qdq_weight` saves floating Q→DQ weights with quantizers and calibration state
-retained. It requires uncompressed, adapter-free weights. Pass the checkpoint to
-`distill.py --student_megatron_path /output/qwen3_qdq`; training and native resume load
-its weights unchanged. The former training flag `--qdq_student_weight` is removed.
-PTQ initializes all enabled quantized weights, independent of later trainable-parameter selection.
+`--output_qdq_weight` saves decoded floating-point weights and quantization state for QAD.
+Use an uncompressed, adapter-free checkpoint and load it with
+`distill.py --student_megatron_path /output/qwen3_qdq`.
+PTQ prepares all enabled quantized weights; choose trainable parameters during QAD.
 
-Unpinned GGML PTQ reuses its initial packed payload while weights remain unchanged, including
-zero-LR updates. The first actual change resumes ordinary PTQ scale/code search. GPTQ retains
-its original super-block scales and FP32 importance buffers. Shared or sequential unpinned
-GGML quantizers are rejected. Other dynamic quantizers and BF16 inverse transforms can still
-change effective weights; exact forward equality is not guaranteed for every format.
+- **GGML PTQ:** reuse initial codes until weights change, then recompute scales and codes.
+- **GPTQ:** keep super-block scales and FP32 importance fixed.
 
-Megatron keeps the packed initialization buffer and a sharded activity flag after retirement,
-so TP ranks can update independently without changing checkpoint keys. For IQ2_XXS this retains
-about 13.1% of the BF16 weight storage; it does not retain another floating-weight copy.
-Native resume preserves each shard's activity. Changing TP topology to combine active and
-retired shards is rejected; keep the saved topology until all initialization shards retire.
+Megatron retains compact initialization data for checkpointing—about 13.1% of BF16 weight
+storage for IQ2_XXS. Keep the saved tensor-parallel layout while any shard uses its initial codes.
+Shared or sequential GGML PTQ quantizers are unsupported. Some formats and BF16 transforms
+may still change the effective weights during initialization.
 
-For a custom PTQ pipeline, call `mtq.initialize_qdq_weights(model)` after calibration or
-restoration, before saving an uncompressed checkpoint. Do not call it in the training loop
-or on a resumed training checkpoint.
+For custom PTQ, call `mtq.initialize_qdq_weights(model)` once after calibration or restoration,
+before saving the checkpoint. Do not repeat it during training or resume.
 
 ### LoRA QAD
 
