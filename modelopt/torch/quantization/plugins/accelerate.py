@@ -18,13 +18,20 @@ import inspect
 import os
 import warnings
 from contextlib import contextmanager
+from itertools import chain
 from typing import Any
 
 import torch
 import transformers
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+from accelerate import dispatch_model, init_empty_weights
 from accelerate.hooks import AlignDevicesHook, SequentialHook
-from accelerate.utils import get_max_memory, infer_auto_device_map
+from accelerate.utils import (
+    find_tied_parameters,
+    get_max_memory,
+    infer_auto_device_map,
+    retie_parameters,
+    set_module_tensor_to_device,
+)
 from accelerate.utils.dataclasses import CustomDtype
 from accelerate.utils.offload import PrefixedDataset
 
@@ -201,6 +208,88 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
                 hook.post_forward(mod, None)
 
 
+# load_checkpoint_and_dispatch() options the loader here has no counterpart for.
+_LOADER_ONLY_KWARGS = (
+    "offload_folder",
+    "offload_state_dict",
+    "strict",
+    "full_state_dict",
+    "broadcast_from_rank0",
+    "max_memory",
+    "no_split_module_classes",
+)
+
+
+def _param_device(device_map: dict, name: str):
+    while name and name not in device_map:
+        name = name.rpartition(".")[0]
+    return device_map[name]
+
+
+def _load_checkpoint_in_model(model, checkpoint: str, device_map: dict, dtype, layer_prefixes):
+    """Fill the meta ``model`` from ``checkpoint``, naming its tensors as ``from_pretrained`` does.
+
+    accelerate's loader matches checkpoint keys to parameters by name, but transformers renames and
+    fuses keys as it loads (a Qwen3-MoE checkpoint's per-expert ``experts.N.gate_proj.weight`` feed
+    the model's one ``experts.gate_up_proj``), so the model's conversion mapping is replayed here
+    with the FSDP2 loader's machinery, one decoder layer at a time to bound host memory.
+    """
+    # Imported here: model_load_utils imports this package.
+    from modelopt.torch.utils.plugins.hf_checkpoint_utils import checkpoint_tensor_files
+    from modelopt.torch.utils.plugins.model_load_utils import (
+        _conversion_plan,
+        _group_sources_by_layer,
+        _read_and_convert,
+    )
+
+    if "disk" in device_map.values():
+        raise ValueError(
+            "init_quantized_weights() does not offload weights to disk; the model does not fit "
+            "the GPUs and host memory at this gpu_mem_percentage."
+        )
+    tensor_files = checkpoint_tensor_files(checkpoint)
+    if not tensor_files:
+        raise RuntimeError(
+            f"No safetensors checkpoint at {checkpoint} "
+            "(expected model.safetensors or model.safetensors.index.json)."
+        )
+    plan = _conversion_plan(model)
+    # Every name of a tied parameter: a checkpoint may store the one named_parameters() drops.
+    param_names = {
+        n
+        for n, _ in chain(
+            model.named_parameters(remove_duplicate=False),
+            model.named_buffers(remove_duplicate=False),
+        )
+    }
+    layer_sources, root_sources, _, _ = _group_sources_by_layer(
+        tensor_files, [plan] if plan else [], param_names, layer_prefixes
+    )
+    # set_module_tensor_to_device replaces the parameter, which unties it from its alias.
+    tied = find_tied_parameters(model)
+    for sources in (*layer_sources.values(), root_sources):
+        state = _read_and_convert(checkpoint, tensor_files, set(sources), plan)
+        for name, tensor in state.items():
+            set_module_tensor_to_device(
+                model, name, _param_device(device_map, name), value=tensor, dtype=dtype
+            )
+        del state
+    retie_parameters(model, tied)
+    # quantize() took weight amax from the meta weights; RealQuantLinear replaces its own as the
+    # weight is assigned, a fused experts module's are dropped here for calibration to recompute.
+    for quantizer in model.modules():
+        if isinstance(quantizer, TensorQuantizer) and getattr(quantizer, "_amax", None) is not None:
+            if quantizer._amax.is_meta:
+                quantizer.reset_amax()
+    meta = sorted(n for n, t in chain(model.named_parameters(), model.named_buffers()) if t.is_meta)
+    if meta:
+        raise RuntimeError(
+            f"init_quantized_weights(): {len(meta)} parameter(s) got no tensor from {checkpoint}, "
+            f"e.g. {meta[:5]}. The checkpoint's key layout does not match the model built from "
+            "its config."
+        )
+
+
 @contextmanager
 def init_quantized_weights(
     quant_cfg: dict[str, Any], gpu_mem_percentage: float = 0.8, quant_gemm: bool = False
@@ -321,8 +410,15 @@ def init_quantized_weights(
         legacy_dtype = kwargs.pop("torch_dtype", None)
         if kwargs.get("dtype") is None and legacy_dtype is not None:
             kwargs["dtype"] = legacy_dtype
-        # load_checkpoint_and_dispatch() gets only the kwargs it takes; the rest build the model.
-        dispatch_params = inspect.signature(load_checkpoint_and_dispatch).parameters
+        # The loader here reads safetensors onto the device map it computed; accelerate's loader
+        # options have nothing to act on, and would otherwise reach the model constructor.
+        for key in _LOADER_ONLY_KWARGS:
+            if key in kwargs:
+                raise ValueError(
+                    f"init_quantized_weights() loads the checkpoint itself; drop {key}."
+                )
+        # The load and dispatch_model() get only the kwargs they take; the rest build the model.
+        dispatch_params = {"dtype", *inspect.signature(dispatch_model).parameters}
         dispatch_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in dispatch_params}
         if config is None:
             # Get config from pretrained model
@@ -350,13 +446,18 @@ def init_quantized_weights(
         mtq.compress(model, config=mtq.CompressConfig(quant_gemm=quant_gemm))
         _device_map = get_model_device_map(model, gpu_mem_percentage)
 
-        return load_checkpoint_and_dispatch(
+        no_split_classes = get_no_split_module_classes(model)
+        layer_prefixes = [
+            name + "." for name, m in model.named_modules() if type(m).__name__ in no_split_classes
+        ]
+        _load_checkpoint_in_model(
             model,
-            checkpoint=pretrained_model_name_or_path,
-            device_map=_device_map,
-            *args,
-            **dispatch_kwargs,
+            pretrained_model_name_or_path,
+            _device_map,
+            dispatch_kwargs.pop("dtype", None),
+            layer_prefixes,
         )
+        return dispatch_model(model, *args, device_map=_device_map, **dispatch_kwargs)
 
     # A sharded load_pretrained builds the model without from_pretrained, so it reads this mark.
     patched_from_pretrained._modelopt_init_quantized_weights = True  # type: ignore[attr-defined]
