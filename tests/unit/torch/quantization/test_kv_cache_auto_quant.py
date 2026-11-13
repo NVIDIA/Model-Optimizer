@@ -379,6 +379,8 @@ def test_kv_autoquant_scores_and_applies_one_format_per_layer(tmp_path, nvfp4_fa
 
     resolved_config = mtq.get_auto_quantize_config(state, {"effective_bits": 4.5})
     assert resolved_config["algorithm"] is None
+    with pytest.raises(ValueError, match="carry no calibration algorithm"):
+        mtq.get_auto_quantize_config(state, algorithm="max")
     assert resolved_config["quant_cfg"][0] == {"quantizer_name": "*", "enable": False}
     assert {entry["quantizer_name"] for entry in resolved_config["quant_cfg"]} == {
         "*",
