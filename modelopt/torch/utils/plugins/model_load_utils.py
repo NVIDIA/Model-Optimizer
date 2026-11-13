@@ -18,6 +18,7 @@
 import contextlib
 import copy
 import dataclasses
+import functools
 import inspect
 import json
 import logging
@@ -884,18 +885,101 @@ def _load_sharded(route, ckpt_path, load_kwargs) -> nn.Module:
     )
 
 
+@functools.cache
+def _keep_mxfp4_packed_op():
+    """Transformers' MXFP4 dequantizing conversion, handing over the packed values and scales instead.
+
+    A subclass, so it reverses as the dequantizing one does, and the export's reverse of the
+    conversions the load ran stays the decompressing load's.
+    """
+    # Loaded only by an MXFP4 load: transformers releases without its MXFP4 integration load others.
+    from transformers.integrations.mxfp4 import Mxfp4Dequantize
+
+    class KeepMxfp4Packed(Mxfp4Dequantize):
+        def convert(
+            self, input_dict, model=None, full_layer_name=None, missing_keys=None, **kwargs
+        ):
+            proj = "gate_up_proj" if "gate_up_proj" in full_layer_name else "down_proj"
+            # The loader may hand them over cast to the model's dtype: a byte value is exact there.
+            blocks, scales = (
+                (value[0] if isinstance(value, list) else value).to(torch.uint8)
+                for value in (input_dict[f"{proj}_blocks"], input_dict[f"{proj}_scales"])
+            )
+            return {
+                full_layer_name: blocks.reshape(*scales.shape[:-1], -1),
+                f"{full_layer_name}_scales": scales,
+            }
+
+    return KeepMxfp4Packed
+
+
+@contextmanager
+def _mxfp4_experts_kept_packed():
+    """Keep the experts packed of the MXFP4 checkpoint ``from_pretrained`` loads in this block.
+
+    The checkpoint loads with ``Mxfp4Config(dequantize=True)``, whose conversions dequantize the
+    experts to the transposed ``(num_experts, in, out)`` layout; that is swapped for handing the packed
+    values to the experts modules, stored packed for them
+    (:func:`~modelopt.torch.quantization.utils.packed_experts.pack_experts`) before the device map is
+    sized. Yields the list of those modules, filled by the load.
+    """
+    # Imported here: transformers releases without the MXFP4 integration load other checkpoints.
+    from transformers.integrations.mxfp4 import Mxfp4Dequantize
+
+    from modelopt.torch.quantization.utils.packed_experts import pack_experts
+
+    stock, kept = hf_modeling_utils.get_model_conversion_mapping, []
+
+    def conversions(model, *args, **kwargs):
+        convs = stock(model, *args, **kwargs)
+        leaves = set()
+        for conv in convs:
+            ops = getattr(conv, "operations", ())
+            if any(isinstance(op, Mxfp4Dequantize) for op in ops):
+                conv.operations = [
+                    _keep_mxfp4_packed_op()(op.hf_quantizer)
+                    if isinstance(op, Mxfp4Dequantize)
+                    else op
+                    for op in ops
+                ]
+                leaves.update(p.strip("^$").rpartition(".")[2] for p in conv.target_patterns)
+        for module in model.modules():
+            names = tuple(
+                n for n in sorted(leaves) if getattr(module._parameters.get(n), "ndim", 0) == 3
+            )
+            if names:
+                pack_experts(module, names, transposed=True)
+                kept.append(module)
+        return convs
+
+    hf_modeling_utils.get_model_conversion_mapping = conversions
+    try:
+        yield kept
+    finally:
+        hf_modeling_utils.get_model_conversion_mapping = stock
+
+
 def load_pretrained(
     ckpt_path: str,
     auto_class: Any = None,
     *,
     model_type: str | None = None,
     distribution: DistributionPlan | None = None,
+    keep_compressed: bool = False,
     **kwargs,
 ) -> nn.Module:
     """Load a Hugging Face model for ModelOpt to optimize and export, whole or distributed.
 
     ``distribution`` is the :class:`~modelopt.torch.utils.distributed.DistributionPlan` to load by:
     every rank takes rank 0's or, when rank 0 passes none, :func:`resolve_distribution_plan`'s.
+
+    ``keep_compressed`` keeps the routed experts of an MXFP4 checkpoint packed as stored, 4.25 bits a
+    weight, which a whole-model load with ``quantization_config=Mxfp4Config(dequantize=True)`` would
+    decompress to bf16. They decompress on use: for each forward of the experts, for a weight read
+    through :func:`~modelopt.torch.quantization.utils.enable_weight_access_and_writeback`, and for
+    good at the export (:mod:`~modelopt.torch.quantization.utils.packed_experts`). So calibration and
+    the export compute what the decompressing load would, and an algorithm that updates the experts'
+    weights in place is refused. A load that keeps no experts packed is refused.
 
     * ``ep_size > 1``: :func:`load_and_prepare_ep` shards an MoE's routed experts over the process
       group as they load, with the dense part replicated or FSDP2-sharded as the plan says. It
@@ -1074,6 +1158,11 @@ def load_pretrained(
                 f"{sharded} only apply to the expert-parallel load, but {plan!r} gives every rank "
                 "the whole model; pass a plan with ep_size > 1 to shard an MoE's routed experts."
             )
+        if keep_compressed and route is not None:
+            raise NotImplementedError(
+                f"keep_compressed keeps the MXFP4 experts of a whole-model load packed; the {route} "
+                f"load {plan!r} asks for decompresses them."
+            )
         # Whether the decision chose this sharded layout with nothing asking for it: by rank 0's GPU
         # memory for the FSDP2 load, by the model's routed experts for the expert-parallel one.
         measured = decided and (
@@ -1143,10 +1232,19 @@ def load_pretrained(
                     stacklevel=2,
                 )
             whole = None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class
-            with prepare_model_for_loading(
-                model_type, ckpt_path, trust_remote_code, model_class=whole
+            packing = _mxfp4_experts_kept_packed() if keep_compressed else contextlib.nullcontext()
+            with (
+                prepare_model_for_loading(
+                    model_type, ckpt_path, trust_remote_code, model_class=whole
+                ),
+                packing as kept,
             ):
                 model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
+            if keep_compressed and not kept:
+                raise ValueError(
+                    "keep_compressed=True kept no experts packed: it keeps those of an MXFP4 "
+                    "checkpoint loaded with quantization_config=Mxfp4Config(dequantize=True)."
+                )
         keys = None
     set_distribution_plan(model, plan)
     unplaced = record_unplaced_source_keys(model, ckpt_path, keys)

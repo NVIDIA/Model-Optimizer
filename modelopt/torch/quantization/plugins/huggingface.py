@@ -49,6 +49,7 @@ from ..nn.modules.quant_linear import _QuantLinear
 from ..nn.modules.tensor_quantizer import _try_stacked_fake_quant
 from ..utils import replace_function, sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
+from ..utils.packed_experts import unpacked
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 
@@ -643,9 +644,11 @@ class _TransposedExpertsCalibMixin:
 
     def iter_weights_for_calibration(self):
         """Yield ``(transposed_weight, weight_quantizer)`` for each expert projection."""
-        for weight_name in ("gate_up_proj", "down_proj"):
-            weight = getattr(self, weight_name)
-            yield weight.transpose(-1, -2), getattr(self, f"{weight_name}_weight_quantizer")
+        # Experts kept packed are read decompressed, in a window held open across the yields.
+        with unpacked(self, writeback=True):
+            for weight_name in ("gate_up_proj", "down_proj"):
+                weight = getattr(self, weight_name)
+                yield weight.transpose(-1, -2), getattr(self, f"{weight_name}_weight_quantizer")
 
 
 class _QuantSparseSequentialMoe(QuantModule):
