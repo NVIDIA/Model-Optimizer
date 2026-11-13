@@ -70,6 +70,15 @@ def _gather_model(rows, cols, tmp_path, opset=21):
     return onnx_path
 
 
+def _upgrade_opset_after_quantize(model: onnx.ModelProto) -> onnx.ModelProto:
+    # Mirror examples/windows/onnx_ptq/genai_llm/quantize.py, which quantizes first and
+    # only then raises the default-domain opset to 21 for INT4 Q/DQ.
+    for opset in model.opset_import:
+        if opset.domain in ("", "ai.onnx") and opset.version < 21:
+            opset.version = 21
+    return model
+
+
 def test_int4_rtn(tmp_path):
     # Test scale factor computation.
     # Use moq.quantize once to check that path doesnt have any bugs
@@ -150,11 +159,6 @@ def test_shape_rtn(tmp_path, block_size, layers_8bit, opset):
         tmp_path=tmp_path,
         opset=opset,
     )
-    if opset < 21:
-        for method in ["rtn", "rtn_dq"]:
-            with pytest.raises(ValueError, match="requires opset 21"):
-                quantize_int4(onnx_path, method, block_size=block_size, layers_8bit=layers_8bit)
-        return
     outputs = []
     for method in ["rtn", "rtn_dq"]:
         model = quantize_int4(
@@ -165,6 +169,7 @@ def test_shape_rtn(tmp_path, block_size, layers_8bit, opset):
             layers_8bit=layers_8bit,
             use_external_data_format=False,
         )
+        model = _upgrade_opset_after_quantize(model)
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
         options.intra_op_num_threads = 1
@@ -173,28 +178,6 @@ def test_shape_rtn(tmp_path, block_size, layers_8bit, opset):
         )
         outputs.append(session.run(None, onnx_dataloader[0])[0])
     np.testing.assert_allclose(outputs[0], outputs[1], rtol=1e-5, atol=1e-5)
-
-
-@pytest.mark.parametrize(("opset", "plugin_opset"), [(20, 999), (21, 1)])
-def test_direct_rtn_checks_standard_onnx_opset(tmp_path, opset, plugin_opset):
-    source = _matmul_model(
-        w=np.ones((8, 1), dtype=np.float32),
-        in_shape=(1, 8),
-        out_shape=(1, 1),
-        tmp_path=tmp_path,
-        opset=opset,
-    )
-    model = onnx.load(source)
-    model.opset_import.insert(0, onnx.helper.make_opsetid("trt.plugins", plugin_opset))
-
-    if opset < 21:
-        original_bytes = model.SerializeToString()
-        with pytest.raises(ValueError, match="requires opset 21"):
-            quantize_int4(model, "rtn", block_size=8)
-        assert model.SerializeToString() == original_bytes
-    else:
-        quantized = quantize_int4(model, "rtn", block_size=8)
-        assert any(node.op_type == "QuantizeLinear" for node in quantized.graph.node)
 
 
 def test_shape_awq(tmp_path):
@@ -230,19 +213,6 @@ def test_int4_gather(tmp_path, calibration_method, opset):
     gather_block_size = 8
 
     m = _gather_model(gather_rows, gather_cols, tmp_path=tmp_path, opset=opset)
-
-    if opset < 21:
-        source_model = onnx.load(m)
-        source_bytes = source_model.SerializeToString()
-        with pytest.raises(ValueError, match="requires opset 21"):
-            quantize_int4(
-                source_model,
-                calibration_method=calibration_method,
-                gather_block_size=gather_block_size,
-                gather_quantize_axis=1,
-            )
-        assert source_model.SerializeToString() == source_bytes
-        return
 
     m1 = quantize_int4(
         m,
@@ -295,6 +265,7 @@ def test_int4_gather(tmp_path, calibration_method, opset):
     )
 
     for model in [m1, m2]:
+        model = _upgrade_opset_after_quantize(model)
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
         options.intra_op_num_threads = 1
