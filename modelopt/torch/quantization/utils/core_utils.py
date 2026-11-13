@@ -19,7 +19,7 @@ import copy
 import itertools
 import warnings
 import weakref
-from collections import namedtuple
+from collections import defaultdict, namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -1315,3 +1315,48 @@ def promote_static_block_weight_quantizers(model: nn.Module) -> int:
 def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
     """Compatibility wrapper for static-block weight quantizer promotion."""
     return promote_static_block_weight_quantizers(model)
+
+
+def storage_span(tensor: torch.Tensor):
+    """``tensor``'s storage and the bytes of it ``tensor`` spans; None if it holds no data here."""
+    if tensor.is_meta or isinstance(tensor, DTensor) or tensor.numel() == 0:
+        return None
+    start = tensor.storage_offset() * tensor.element_size()
+    last = sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()))
+    storage = (tensor.device, tensor.untyped_storage().data_ptr())
+    return storage, start, start + (last + 1) * tensor.element_size()
+
+
+def tied_parameters(model: nn.Module) -> set[nn.Parameter]:
+    """The parameters of ``model`` whose storage another use shares.
+
+    That is a parameter registered more than once (tied weights) or one overlapping another
+    parameter's storage (a view of one). Rewriting such a parameter in place changes the others.
+    """
+    uses: dict[nn.Parameter, int] = defaultdict(int)
+    spans = defaultdict(list)  # storage -> (parameter, first byte, end byte) of each parameter
+    for _, param in model.named_parameters(remove_duplicate=False):
+        uses[param] += 1
+        if uses[param] == 1 and (span := storage_span(param)) is not None:
+            spans[span[0]].append((param, *span[1:]))
+    tied = {param for param, count in uses.items() if count > 1}
+    for entries in spans.values():
+        for param, first, end in entries:
+            if any(
+                other is not param and o_first < end and first < o_end
+                for other, o_first, o_end in entries
+            ):
+                tied.add(param)
+    return tied
+
+
+def overlaps_any(tensor: torch.Tensor, params) -> bool:
+    """Whether ``tensor``'s bytes overlap those of any of ``params``."""
+    span = storage_span(tensor)
+    return span is not None and any(
+        (other := storage_span(param)) is not None
+        and other[0] == span[0]
+        and other[1] < span[2]
+        and span[1] < other[2]
+        for param in params
+    )

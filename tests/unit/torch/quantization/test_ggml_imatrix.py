@@ -121,6 +121,26 @@ def test_pins_the_codes_it_chose(algorithm):
     assert output_error(decoded) < output_error(plain.weight_quantizer(plain.weight))
 
 
+@pytest.mark.parametrize(
+    "pattern", ["0.weight_quantizer", "*weight_quantizer"], ids=["one", "both"]
+)
+def test_imatrix_leaves_a_tied_weight_unchanged_and_forwards_its_codes(pattern):
+    # Scaling the weight in place would change the tied layer's weight too, quantized or not.
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(512, 512, bias=False), nn.Linear(512, 512, bias=False))
+    model[1].weight = model[0].weight
+    original = model[0].weight.detach().clone()
+    inputs = _inputs()
+    mtq.quantize(model, _config(IMATRIX, pattern), forward_loop=lambda m: m(inputs))
+
+    assert torch.equal(model[0].weight.detach(), original)
+    for layer in model:
+        expected = original
+        if layer.weight_quantizer.is_enabled:
+            expected = _decoded(layer.weight_quantizer, original.shape)
+        torch.testing.assert_close(layer(inputs), inputs @ expected.T)
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float64])
 def test_imatrix_matches_each_blocks_energy_and_keeps_a_weight_encoding_to_its_codes(dtype):
     # The stored scales are rescaled after the search and the weight is scaled alike, so the codes

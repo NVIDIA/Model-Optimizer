@@ -85,6 +85,7 @@ from .utils.calib_utils import (
     track_calib_forward_memory,
     update_expert_weights,
 )
+from .utils.core_utils import overlaps_any, tied_parameters
 
 __all__ = [
     "CalibratorFactory",
@@ -2927,7 +2928,8 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
     encoder (see :func:`~modelopt.torch.quantization.utils.calib_utils.register_imatrix_encoder`)
     and accepts the quantizer. Each such weight is then encoded once, its search weighted by that
     statistic, and replaced by the weight its encoder keeps: its fake-quantized value, or one that
-    encodes to the pinned codes, such as the GGML IQ formats' per-block rescaled weight. Dense
+    encodes to the pinned codes, such as the GGML IQ formats' per-block rescaled weight. A weight
+    whose storage another parameter shares (tied weights) is kept unchanged. Dense
     quantized linears and HF fused-MoE experts (one statistic per expert, over the tokens routed
     to it) are both covered. Encoders skip a quantizer that already holds final codes, so
     ``[gptq, imatrix]`` runs GPTQ where it applies and imatrix on any weight it leaves.
@@ -2975,11 +2977,16 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         for handle in handles:
             handle.remove()
 
+    # Rewriting a tied weight would change every other use of its storage too.
+    tied = tied_parameters(model)
+
     def encode(weight, quantizer):
         """Encode one weight weighted by its inputs' per-column second moments."""
         sum_sq, count = targets[id(quantizer)]
         second_moments = None if count == 0 else sum_sq.to(weight.device) / count
-        kept = encoders[id(quantizer)].encode(weight, quantizer, second_moments)
+        kept = encoders[id(quantizer)].encode(
+            weight, quantizer, second_moments, shared=overlaps_any(weight, tied)
+        )
         if kept is not weight:
             weight.copy_(kept)
 
