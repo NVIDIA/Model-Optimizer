@@ -141,6 +141,23 @@ Once we finish dumping hidden states, launch offline training pointing to the hi
 
 For large base models, you can stream hidden states from a live `vllm serve` instead of dumping them to disk: a co-located server produces the base-model hidden states on the fly and sends them to the trainer over NIXL RDMA, scaling to multiple nodes (dedicated serve replicas + DDP trainers). See the launcher examples, e.g. [Kimi-K2.5 streaming EAGLE3](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_eagle3_multi_node.yaml) and [streaming DFlash](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_dflash_multi_node.yaml).
 
+Streaming input accepts `conversations` or `messages` as a list or a JSON-encoded list.
+Prefer JSON-encoded `tools` and conversations containing `tool_calls`: datasets 3.x/4.x
+can fill missing nested keys with nulls, changing the rendered prompt. `tools` must
+decode to a list of objects, and `builtin_tools` to a list of strings; both also
+accept native lists. Per-row `reasoning_effort` and `model_identity` must be strings.
+Nulls and empty strings in these optional fields are treated as absent; `tools=[]`
+is preserved and uses the tokenizer's native template selection, including `tool_use`.
+
+Other per-row variables, such as `enable_thinking=false`, go in `chat_template_kwargs`
+(an object or JSON-encoded object). It also accepts `reasoning_effort`, `model_identity`
+and `builtin_tools`, with the same normalization; nonempty duplicates at the top level
+are rejected. Tokenizer control arguments, including `tools`, `chat_template`,
+`add_generation_prompt` and tokenization options, are rejected inside this object.
+Include the source conversation's template inputs so training uses the same tokenization.
+Malformed rows and template rendering failures are resampled, with one warning per
+reason per dataset worker. Missing templates, template syntax errors and loss-mask errors still raise.
+
 ## Training a Standalone (External) Draft Model
 
 The modes above graft a draft head onto the target. The `external` mode instead

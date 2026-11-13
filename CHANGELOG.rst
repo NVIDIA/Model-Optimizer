@@ -40,6 +40,7 @@ Changelog
 *Speculative Decoding*
 
 - Add uniform-layer hidden-state mixing for Hugging Face and Megatron EAGLE training. Enable it with ``eagle_mix_hidden_states=True`` and ``eagle_mix_hidden_states_mode="uniform_layer_sample"``; the default ``sparse_replace`` mode preserves the existing mixing behavior.
+- Streaming datasets accept JSON-encoded conversation and tool fields and preserve per-row chat-template arguments.
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
 - Add support for the `SPEED-Bench v1.1 <https://huggingface.co/datasets/nvidia/SPEED-Bench>`_ dataset.
 - With ``training.dataloader_num_workers`` > 0, ``examples/speculative_decoding/main.py`` now yields each training batch as soon as a worker finishes it, so one slow sample, such as a slow hidden-state fetch in streaming training, no longer stalls every DDP rank. Sample order within the prefetch window is then no longer deterministic; set ``training.dataloader_in_order=true`` to restore it (context-parallel and ``full_determinism`` runs always keep it).
