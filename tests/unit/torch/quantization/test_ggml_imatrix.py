@@ -148,6 +148,21 @@ def test_imatrix_matches_each_blocks_energy_and_encodes_again_to_its_codes(dtype
     assert torch.equal(IQ2_XXS.pack(model.weight.detach(), quantizer), pinned)
 
 
+def test_imatrix_encodes_alike_under_a_statistic_near_the_float32_maximum():
+    # Scaling every calibration input by a power of two scales the statistic, and so every weight
+    # of the scale fit, the search and the energy match, alike, which changes none of them, even
+    # where the statistic (2**118 here, about the largest its floor's mean accepts) is near the
+    # float32 maximum.
+    signs = torch.randn(8, 512, generator=torch.Generator().manual_seed(0)).sign()
+    pins = []
+    for scale in (1.0, 2.0**59):
+        torch.manual_seed(0)
+        model = nn.Linear(512, 16, bias=False)
+        mtq.quantize(model, _config(IMATRIX), lambda m, scale=scale: m(signs * scale))
+        pins.append(pinned_packed_weight(model.weight_quantizer, "iq2_xxs"))
+    assert torch.equal(*pins)
+
+
 @ENCODERS
 def test_weight_only_calibration_runs_one_forward(algorithm):
     inputs = _inputs()
