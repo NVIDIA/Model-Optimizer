@@ -511,6 +511,12 @@ class GGMLFormat:
             else None
         )
         if cache is None:
+            # Codes searched at other scales than their pinned ones are found from the weight they
+            # were searched for, not from their decoding, which export also hands over whole.
+            if quantizer is not None and _pinned_search_scales(quantizer, self.name) is not None:
+                rows = self._pinned_rows(quantizer, weight)
+                if rows is not None:
+                    return rows
             return self._pinned_or_quantize(quantizer, weight)[0]
         return cache.packed_weights.reshape(
             *weight.shape[:-1], weight.shape[-1] // self.block_size, self.block_bytes

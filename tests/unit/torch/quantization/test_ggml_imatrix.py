@@ -139,9 +139,13 @@ def test_imatrix_matches_each_blocks_energy_and_encodes_again_to_its_codes(dtype
     energy = (second_moments * decoded.square()).sum(-1)
     target = (second_moments * original.float().reshape(16, 2, 256).square()).sum(-1)
     torch.testing.assert_close(energy, target, rtol=1e-2, atol=0)
-    assert torch.equal(
-        IQ2_XXS.pack(model.weight.detach(), quantizer), pinned_packed_weight(quantizer, "iq2_xxs")
-    )
+    pinned = pinned_packed_weight(quantizer, "iq2_xxs")
+    assert torch.equal(IQ2_XXS.pack(model.weight.detach(), quantizer), pinned)
+    # Export packs the decoding pin_current_codes returns, whole as well as in rows, and the weight
+    # it was searched for still packs to the same codes afterwards.
+    decoding = IQ2_XXS.pin_current_codes(model.weight.detach(), quantizer)
+    assert torch.equal(IQ2_XXS.pack(decoding, quantizer), pinned)
+    assert torch.equal(IQ2_XXS.pack(model.weight.detach(), quantizer), pinned)
 
 
 @ENCODERS
@@ -283,6 +287,7 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
             (experts.down_proj, original.experts.down_proj, experts.down_proj_weight_quantizers),
         ):
             pinned = pinned_packed_weight(quantizers[idx], "iq2_xxs")
+            assert torch.equal(weight[idx], original_weight[idx])
             assert torch.equal(IQ2_XXS.pack(weight[idx].detach().clone(), quantizers[idx]), pinned)
 
 
