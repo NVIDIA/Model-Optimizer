@@ -401,7 +401,7 @@ def main(args):
     ):
         # TRT EPs use min/opt/max profiles for dynamic model inputs.
         input_shapes_profile_data = (
-            llm_calibration.ep_profiles(signature, args.calibration_eps)
+            llm_calibration.ep_profiles(signature, args.calibration_eps, args.batch_size)
             if own_inputs
             else create_input_shapes_profile(
                 args.model_name,
