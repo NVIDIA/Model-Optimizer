@@ -140,10 +140,11 @@ Best Practices
    - Use ``--calibrate_per_node`` when retaining every intermediate activation during calibration exceeds available
      memory.
    - Per-node calibration executes and releases one node at a time while keeping only tensors still needed by
-     downstream nodes. It produces the same tensor range statistics for deterministic nodes but takes longer because
+     downstream nodes. It produces the same tensor range statistics for deterministic graphs but takes longer because
      it creates a separate ONNX Runtime session for each node and calibration batch.
    - For stochastic nodes, each fresh session restarts the random state. Seeded random operators therefore repeat
-     their first sample in every batch, so their aggregated range statistics can differ from default calibration.
+     their first sample in every batch, so their aggregated range statistics and those of downstream consumers can
+     differ from default calibration.
 
 #. **TensorRT custom op support**
 
