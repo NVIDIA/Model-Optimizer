@@ -34,6 +34,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import onnx
+import onnxruntime as ort
+from polygraphy.common import TensorMetadata
 
 from modelopt.onnx import utils as onnx_utils
 from modelopt.onnx.autocast.logging_config import configure_logging, logger
@@ -211,7 +213,6 @@ class ReferenceRunner:
                 model_bytes_or_path = BytesFromOnnx(modified_model)
 
             if disable_cpu_mem_arena:
-                import onnxruntime as ort
 
                 def build_onnxrt_session():
                     model = (
@@ -297,6 +298,7 @@ class ReferenceRunner:
         dependency_names: list[str],
         value_info_map: dict[str, onnx.ValueInfoProto],
         initializer_map: dict[str, onnx.TensorProto],
+        runtime_values: dict[str, np.ndarray],
     ) -> onnx.ModelProto:
         """Build a runnable model containing one node from the reference graph."""
         model_inputs = []
@@ -305,7 +307,12 @@ class ReferenceRunner:
             if input_name in initializer_map:
                 model_initializers.append(initializer_map[input_name])
             elif input_name in value_info_map:
-                model_inputs.append(value_info_map[input_name])
+                runtime_input = copy.deepcopy(value_info_map[input_name])
+                runtime_shape = runtime_input.type.tensor_type.shape
+                runtime_shape.ClearField("dim")
+                for dimension in runtime_values[input_name].shape:
+                    runtime_shape.dim.add().dim_value = dimension
+                model_inputs.append(runtime_input)
             else:
                 raise ValueError(
                     f"Tensor {input_name!r} required by node {node.name!r} has no type metadata."
@@ -319,7 +326,10 @@ class ReferenceRunner:
                 raise ValueError(
                     f"Tensor {output_name!r} produced by node {node.name!r} has no type metadata."
                 )
-            model_outputs.append(value_info_map[output_name])
+            output = copy.deepcopy(value_info_map[output_name])
+            if node.domain in ("", "ai.onnx"):
+                output.type.tensor_type.ClearField("shape")
+            model_outputs.append(output)
 
         graph = onnx.helper.make_graph(
             [node],
@@ -334,6 +344,8 @@ class ReferenceRunner:
             functions=self.model.functions,
             ir_version=self.model.ir_version,
         )
+        if node.domain in ("", "ai.onnx"):
+            model = onnx.shape_inference.infer_shapes(model)
         return model
 
     @classmethod
@@ -384,9 +396,9 @@ class ReferenceRunner:
         batch_max = np.max(value) if value.size else 0
         previous = stats.get(name)
         stats[name] = TensorStats(
-            absmax=max(previous.absmax, batch_absmax) if previous else batch_absmax,
-            min_val=min(previous.min_val, batch_min) if previous else batch_min,
-            max_val=max(previous.max_val, batch_max) if previous else batch_max,
+            absmax=max(previous.absmax if previous else -np.inf, batch_absmax),
+            min_val=min(previous.min_val if previous else np.inf, batch_min),
+            max_val=max(previous.max_val if previous else -np.inf, batch_max),
             shape=previous.shape if previous else value.shape,
         )
 
@@ -415,13 +427,11 @@ class ReferenceRunner:
         stats = OrderedDict()
         data_loader = self._load_inputs(inputs)
         if inputs is None:
-            from polygraphy.common import TensorMetadata
-
             input_metadata = TensorMetadata()
             for model_input in self.model.graph.input:
                 tensor_type = model_input.type.tensor_type
                 shape = tuple(
-                    dimension.dim_value if dimension.dim_value > 0 else None
+                    dimension.dim_value if dimension.HasField("dim_value") else None
                     for dimension in tensor_type.shape.dim
                 )
                 input_metadata.add(
@@ -432,7 +442,13 @@ class ReferenceRunner:
             data_loader.input_metadata = input_metadata
 
         for input_data in data_loader:
-            live_values = dict(input_data)
+            live_values = {}
+            for name, value in input_data.items():
+                if name not in value_info_map:
+                    raise ValueError(f"Tensor {name!r} has no type metadata.")
+                elem_type = value_info_map[name].type.tensor_type.elem_type
+                dtype = onnx.helper.tensor_dtype_to_np_dtype(elem_type)
+                live_values[name] = value.astype(dtype, copy=False)
             remaining_consumers = consumer_counts.copy()
             for name in live_values:
                 self._update_tensor_stats(stats, name, live_values[name])
@@ -448,7 +464,7 @@ class ReferenceRunner:
                     )
                 feed_dict = {name: live_values[name] for name in runtime_input_names}
                 single_node_model = self._make_single_node_model(
-                    node, dependency_names, value_info_map, initializer_map
+                    node, dependency_names, value_info_map, initializer_map, live_values
                 )
                 runners, model_temp_dir = self._get_ort_runner(
                     lambda: single_node_model, disable_cpu_mem_arena=True
@@ -495,7 +511,6 @@ class ReferenceRunner:
             OrderedDict: Combined input and output data. Per-node mode and multi-batch normal mode
                 return TensorStats objects; single-batch normal mode returns raw arrays.
         """
-        import onnxruntime as ort
         from polygraphy import constants
         from polygraphy.backend.onnx import ModifyOutputs as ModifyOnnxOutputs
         from polygraphy.comparator import Comparator

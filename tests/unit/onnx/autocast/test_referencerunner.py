@@ -197,6 +197,68 @@ def test_run_with_dict_inputs(reference_runner):
 class TestPerNodeReferenceRunner:
     """Tests for memory-bounded per-node reference execution."""
 
+    def test_casts_inputs_to_model_dtype(self, reference_runner):
+        inputs = {
+            "X1": np.array([[1.0, -2.0, 3.0]], dtype=np.float64),
+            "X2": np.array([[4.0, 5.0, -6.0]], dtype=np.float64),
+        }
+
+        expected = reference_runner.run(inputs)
+        actual = reference_runner.run(inputs, calibrate_per_node=True)
+
+        for name, expected_value in expected.items():
+            np.testing.assert_allclose(actual[name].absmax, np.max(np.abs(expected_value)))
+            np.testing.assert_allclose(actual[name].min_val, np.min(expected_value))
+            np.testing.assert_allclose(actual[name].max_val, np.max(expected_value))
+
+    def test_uses_runtime_shape_for_intermediate_inputs(self):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3])
+        stale_intermediate = helper.make_tensor_value_info("intermediate", TensorProto.FLOAT, [])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 3])
+        graph = helper.make_graph(
+            [
+                helper.make_node("Identity", ["X"], ["intermediate"], name="identity"),
+                helper.make_node("Relu", ["intermediate"], ["Y"], name="relu"),
+            ],
+            "stale_intermediate_shape",
+            [x],
+            [y],
+            value_info=[stale_intermediate],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+        runner = ReferenceRunner(model)
+        inputs = {"X": np.arange(6, dtype=np.float32).reshape(2, 3)}
+
+        expected = runner.run(inputs)
+        actual = runner.run(inputs, calibrate_per_node=True)
+
+        assert actual["intermediate"].shape == expected["intermediate"].shape
+        assert actual["Y"].shape == expected["Y"].shape
+        np.testing.assert_allclose(actual["Y"].max_val, np.max(expected["Y"]))
+
+    def test_random_inputs_preserve_explicit_zero_dimensions(self):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 1])
+        x_empty = helper.make_tensor_value_info("X_empty", TensorProto.FLOAT, [2, 0])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 1])
+        graph = helper.make_graph(
+            [
+                helper.make_node(
+                    "Concat", ["X", "X_empty"], ["concat_output"], name="concat", axis=1
+                ),
+                helper.make_node("Relu", ["concat_output"], ["Y"], name="relu"),
+            ],
+            "empty_input",
+            [x, x_empty],
+            [y],
+            value_info=[helper.make_tensor_value_info("concat_output", TensorProto.FLOAT, [2, 1])],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+
+        results = ReferenceRunner(model).run(calibrate_per_node=True)
+
+        assert results["X_empty"].shape == (2, 0)
+        assert results["Y"].shape == (2, 1)
+
     def test_disables_cpu_memory_arena(self, monkeypatch, reference_runner):
         session_options = []
         original_session_options = ort.SessionOptions
