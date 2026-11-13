@@ -466,6 +466,12 @@ its original super-block scales and FP32 importance buffers. Shared or sequentia
 GGML quantizers are rejected. Other dynamic quantizers and BF16 inverse transforms can still
 change effective weights; exact forward equality is not guaranteed for every format.
 
+Megatron keeps the packed initialization buffer and a sharded activity flag after retirement,
+so TP ranks can update independently without changing checkpoint keys. For IQ2_XXS this retains
+about 13.1% of the BF16 weight storage; it does not retain another floating-weight copy.
+Native resume preserves each shard's activity. Changing TP topology to combine active and
+retired shards is rejected; keep the saved topology until all initialization shards retire.
+
 For a custom PTQ pipeline, call `mtq.initialize_qdq_weights(model)` after calibration or
 restoration, before saving an uncompressed checkpoint. Do not call it in the training loop
 or on a resumed training checkpoint.

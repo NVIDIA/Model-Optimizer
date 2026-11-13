@@ -196,6 +196,8 @@ def pin_packed_weight(
     initial_name = _initialization_name(format_name)
     if hasattr(quantizer, initial_name):
         delattr(quantizer, initial_name)
+    if hasattr(quantizer, initial_name + "_active"):
+        delattr(quantizer, initial_name + "_active")
     quantizer._set_buffer(_pin_name(format_name), packed_weights)
     importance_name = PINNED_IMPORTANCE_PREFIX + format_name
     if importance is not None:
@@ -331,12 +333,19 @@ def fake_quantize_with_cache(
 
     initialization_shape = getattr(quantizer, "_qdq_initialization_shape", None)
     if initialization_shape is not None and pinned_packed_weight(quantizer, format_name) is None:
+        initial_name = _initialization_name(format_name)
         quantizer._set_buffer(
-            _initialization_name(format_name),
+            initial_name,
             packed_weights.reshape(
                 *initialization_shape[:-1], initialization_shape[-1] // block_size, -1
             ),
         )
+        if getattr(quantizer, "_ggml_retain_initialization", False):
+            # Stable, shardable checkpoint keys even if TP shards retire at different updates.
+            quantizer._set_buffer(
+                initial_name + "_active",
+                torch.ones_like(getattr(quantizer, initial_name)[..., :1], dtype=torch.bool),
+            )
 
     # Sized separately from the encode chunk: packing happens once per weight and is bounded
     # by its search temporaries, while this runs on every forward and is bounded by launches.
@@ -477,6 +486,17 @@ class GGMLFormat:
         kwargs = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
         initial_name = _initialization_name(self.name)
         initial = getattr(quantizer, initial_name, None)
+        active = getattr(quantizer, initial_name + "_active", None)
+        if active is not None:
+            if initial is None:
+                raise ValueError("GGML initialization activity state is missing its payload.")
+            if not bool(active.any()):
+                initial = None
+            elif not bool(active.all()):
+                raise NotImplementedError(
+                    "Cannot combine active and retired GGML initialization shards. "
+                    "Resume with the saved tensor-parallel topology until all shards retire."
+                )
         if initial is not None:
             packed = self._pinned_rows(quantizer, weight, payload=initial)
             if packed is not None:
@@ -484,7 +504,10 @@ class GGMLFormat:
             # A no-op optimizer step may invalidate the cache without changing the weight.
             # Export slices cannot establish whether the whole weight changed.
             if weight.numel() == initial.numel() // self.block_bytes * self.block_size:
-                delattr(quantizer, initial_name)
+                if active is None:
+                    delattr(quantizer, initial_name)
+                else:
+                    active.zero_()
         pinned = pinned_packed_weight(quantizer, self.name)
         keeps_scales = pinned is not None and self.payload_scales is not None
         # Unless the pin stands in for the weight (PIN_OVERRIDES_WEIGHT): AutoQuantize then keeps

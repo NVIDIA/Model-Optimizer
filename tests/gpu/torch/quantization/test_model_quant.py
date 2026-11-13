@@ -159,8 +159,13 @@ def test_initialize_bf16_transformed_weights():
 
 
 @pytest.mark.parametrize("cache_enabled", [False, True])
-@pytest.mark.parametrize("num_bits", ["nvfp4", "iq2_xxs"])
-def test_initialize_weight_memory_and_time(record_property, capsys, cache_enabled, num_bits):
+@pytest.mark.parametrize(
+    ("num_bits", "retain_initialization"),
+    [("nvfp4", False), ("iq2_xxs", False), ("iq2_xxs", True)],
+)
+def test_initialize_weight_memory_and_time(
+    record_property, capsys, cache_enabled, num_bits, retain_initialization
+):
     model = nn.Sequential(*(nn.Linear(4096, 4096, bias=False) for _ in range(4)))
     model = model.to(device="cuda", dtype=torch.bfloat16)
     inputs = torch.randn(2, 4096, device="cuda", dtype=torch.bfloat16)
@@ -180,6 +185,9 @@ def test_initialize_weight_memory_and_time(record_property, capsys, cache_enable
         }
     )
     mtq.quantize(model, config, lambda m: m(inputs))
+    if retain_initialization:
+        for layer in model:
+            layer.weight_quantizer._ggml_retain_initialization = True
     if cache_enabled:
         enable_weight_cache(model)
     torch.cuda.synchronize()
@@ -203,30 +211,46 @@ def test_initialize_weight_memory_and_time(record_property, capsys, cache_enable
     )
     record_property("retained_initialization_payload_bytes", packed_bytes)
     optimizer = torch.optim.SGD(model.parameters(), lr=0)
-    model(inputs)  # Populate normal forward caches before forcing cache misses.
     for phase in ("unchanged", "first_change", "subsequent_change"):
         if phase != "unchanged":
             with torch.no_grad():
                 for parameter in model.parameters():
                     parameter.add_(0.001)
         optimizer.step()  # Invalidates GGML caches even at zero LR.
-        torch.cuda.synchronize()
-        baseline = torch.cuda.memory_allocated()
-        torch.cuda.reset_peak_memory_stats()
-        start.record()
-        wall_start = time.perf_counter()
-        with torch.no_grad():
-            model(inputs)
-        end.record()
-        torch.cuda.synchronize()
-        record_property(f"{phase}_forward_ms", start.elapsed_time(end))
-        record_property(f"{phase}_forward_wall_ms", (time.perf_counter() - wall_start) * 1000)
+        with weight_cache_scope(model) if cache_enabled else nullcontext() as stats:
+            for access in ("cold", "warm"):
+                torch.cuda.synchronize()
+                baseline = torch.cuda.memory_allocated()
+                torch.cuda.reset_peak_memory_stats()
+                start.record()
+                wall_start = time.perf_counter()
+                with torch.no_grad():
+                    model(inputs)
+                end.record()
+                torch.cuda.synchronize()
+                record_property(f"{phase}_{access}_forward_ms", start.elapsed_time(end))
+                record_property(
+                    f"{phase}_{access}_forward_wall_ms", (time.perf_counter() - wall_start) * 1000
+                )
+                record_property(
+                    f"{phase}_{access}_forward_extra_peak_bytes",
+                    torch.cuda.max_memory_allocated() - baseline,
+                )
+            if cache_enabled:
+                assert stats is not None
+                assert stats.misses == 4 and stats.hits == 4
         record_property(
-            f"{phase}_forward_extra_peak_bytes", torch.cuda.max_memory_allocated() - baseline
+            f"{phase}_initialization_state_bytes",
+            sum(
+                buffer.numel() * buffer.element_size()
+                for name, buffer in model.named_buffers()
+                if "_qdq_initialization" in name
+            ),
         )
     with capsys.disabled():
         print(
             f"QDQ initialization: device={torch.cuda.get_device_name()}, "
             f"format={num_bits}, dtype=BF16, weights=4x4096x4096, cache_enabled={cache_enabled}, "
+            f"retain_initialization={retain_initialization}, "
             f"elapsed_ms={elapsed_ms:.3f}, extra_peak_allocated_bytes={extra_peak_bytes}"
         )
