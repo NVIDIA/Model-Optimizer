@@ -292,7 +292,7 @@ class Testfp4:
     )
     @pytest.mark.parametrize("block_size", [8, 16, 32])
     @pytest.mark.parametrize("skip_scale_quant", [True, False])
-    def test_static_blockwise_fp4(self, set_torch_dtype, block_size, skip_scale_quant):
+    def test_static_blockwise_fp4(self, set_torch_dtype, block_size, skip_scale_quant, monkeypatch):
         # Test with e2m1 table values
         sign = torch.randint(0, 2, (1, 8)).cuda() * 2 - 1
 
@@ -337,6 +337,26 @@ class Testfp4:
             test_in *= sign
             test_out = torch.tensor([[0.5, 1, 1.5, 2, 3, 4, 6, 6]]).cuda() * sign
             _test_static_fp4_kernel(test_in, test_out)
+        elif torch.cuda.get_device_capability() >= (8, 9):
+            # The in-kernel FP8 scale quantization must match the pre-SM89 path, which quantizes
+            # the scales with compute_fp4_scales and loads them as FP32.
+            x = torch.randn(64, block_size * 4, device="cuda")
+            # Spread over E4M3's range so scales hit rounding midpoints and subnormals.
+            amax = torch.logspace(-6, 2, x.numel() // block_size, device="cuda")
+            tiny, zero = torch.tensor(1e-40, device="cuda"), torch.tensor(0.0, device="cuda")
+            cases = [(None, 448.0), (None, 256.0), (amax.max() * 3, 448.0), (tiny, 448.0)]
+            for global_amax, norm in [*cases, (zero, 448.0)]:
+                outs = []
+                for cap in [None, (8, 0)]:
+                    if cap:
+                        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: cap)
+                    outs.append(
+                        triton_kernel.static_blockwise_fp4_fake_quant(
+                            x, amax, global_amax, fp8_max_for_normalization=norm
+                        )
+                    )
+                    monkeypatch.undo()
+                assert torch.equal(outs[0], outs[1]), (global_amax, norm)
 
     @pytest.mark.skipif(
         not hasattr(triton_kernel, "fp4_fake_quant_block"),
@@ -459,3 +479,18 @@ class Testfp4:
         x = x * (torch.randint(0, 2, x.shape, device="cuda") * 2 - 1)
         output = triton_kernel.fp4_fake_quant_block(x, torch.tensor(global_amax, device="cuda"))
         assert torch.equal(output, x)
+
+    @pytest.mark.skipif(not triton_kernel.IS_AVAILABLE, reason="triton kernel is not available")
+    def test_fp8_scale_boundary_without_cuda_ext(self, monkeypatch):
+        """FP8 block scales match with and without the CUDA extension at an E4M3 rounding tie."""
+        from modelopt.torch.kernels.quantization.gemm import fp4_kernel
+
+        global_amax = torch.tensor(5.553690433502197, device="cuda")
+        block_amax = torch.tensor([2.6776721477508545], device="cuda")
+
+        ref = fp4_kernel.compute_fp4_scales(block_amax, global_amax)
+        with monkeypatch.context() as m:
+            m.setattr(tensor_quant, "get_cuda_ext_fp8", lambda raise_if_failed=False: None)
+            fallback = fp4_kernel.compute_fp4_scales(block_amax, global_amax)
+
+        assert torch.equal(ref, fallback)
