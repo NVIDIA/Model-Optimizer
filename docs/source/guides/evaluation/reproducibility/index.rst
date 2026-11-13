@@ -70,14 +70,15 @@ uncertain guesses do not count.
 Saved metrics
 -------------
 
-We save the accuracy differences, cap-hit rates, confidence intervals, and p-values shown in the
+We save the means, observed standard deviations, confidence intervals, and p-values shown in the
 guide’s four plots as CSV summaries:
 
-- **SciCode: question-level versus repetition-level analysis** — data used in the guide section
-  :ref:`Prioritize question coverage over repetitions <evaluation-prioritize-question-coverage>`. CSV file: :download:`scicode-cap-analysis-unit.csv <scicode-cap-analysis-unit.csv>`.
-- **MMLU-Pro: fixed response budget** — data used in the guide section
-  :ref:`Prioritize question coverage over repetitions <evaluation-prioritize-question-coverage>`.
-  CSV file: :download:`allocation-accuracy-gap.csv <allocation-accuracy-gap.csv>`.
+- **MMLU-Pro and SciCode: Candidate accuracy at fixed response budgets** — data used in the guide
+  section :ref:`Choose between question-level and repetition-level analysis <evaluation-choose-questions-and-repetitions>`.
+  CSV file: :download:`budget-allocation-accuracy.csv <budget-allocation-accuracy.csv>`.
+- **MMLU-Pro and SciCode: accuracy and cap-hit-rate differences at fixed response budgets** — data
+  used in the same section.
+  CSV file: :download:`budget-allocation-differences.csv <budget-allocation-differences.csv>`.
 - **SciCode: cap-hit rates** — data used in the guide section
   :ref:`Collect as much evaluation data as you need <evaluation-collect-data>`.
   CSV file: :download:`scicode-cap-data-volume.csv <scicode-cap-data-volume.csv>`.
@@ -111,6 +112,25 @@ the same parent problem may need to be analyzed together.
 
 Each test uses p < 0.05. We do not make that threshold stricter because other metrics were also
 tested. Reverse-direction p-values provide context only.
+
+Observed variation at fixed response budgets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For a budget of B responses per model and R repetitions, each score averages B/R questions with
+R repetitions each. We split the saved question order into consecutive groups of B/R questions
+and the repetition order into blocks of R. Each response appears once per allocation; both models
+use matching groups. This gives 20 group scores for each allocation, without random resampling.
+
+The pools contain 1,000 MMLU-Pro questions × 20 repetitions and the first 280 subtasks in the frozen
+SciCode evaluation order × 20 repetitions. Using 280 of the 294 held-out subtasks allows exact
+grouping at every tested repetition count; the main SciCode tables still use all 294. The dotted
+references use all 1,000 MMLU-Pro questions or 294 SciCode subtasks, each with 20 repetitions.
+
+We report the mean and sample SD across the 20 group scores, using a divisor of 19 for the variance.
+Accuracy means are percentages; Candidate minus Baseline differences and all SDs are in percentage
+points. The means stay fixed because every allocation partitions the same saved response pool.
+Groups can share question or repetition IDs, so their observed spread is descriptive; these are
+not 20 new independent benchmark runs or a validation of confidence-interval coverage.
 
 .. _evaluation-pvalue-methods:
 

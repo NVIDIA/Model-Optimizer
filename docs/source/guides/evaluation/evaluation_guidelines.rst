@@ -39,8 +39,8 @@ examples <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/llm_eval/
 
 **How can you evaluate faster?**
 
-- **Prioritize question coverage over repetitions:** repeat evaluations when the available questions
-  do not provide enough evidence.
+- **Choose between question-level and repetition-level analysis:** match the approach to your goal
+  and evaluation budget.
 - **Collect as much evaluation data as you need:** use pilot results to choose enough questions or
   repetitions to assess regression.
 - **Test known weaknesses on a focused subset:** failure-prone questions can reveal targeted
@@ -247,37 +247,54 @@ the same question IDs for both models. See :ref:`Data preparation <evaluation-da
 for how we selected the benchmark questions.
 
 .. _evaluation-prioritize-question-coverage:
+.. _evaluation-choose-questions-and-repetitions:
 
-Prioritize question coverage over repetitions
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Choose between question-level and repetition-level analysis
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Question-level analysis asks whether Candidate performs better on average on questions like those in
-the benchmark. It averages repetitions within each question and compares paired differences; with
-enough independent questions, it can use one repetition. Repetition-level (run-level) analysis asks
-whether Candidate performs better on average across repeated runs of the same fixed questions.
-It compares aggregate benchmark scores across repetitions, so it needs multiple runs to estimate
-uncertainty.
+Both approaches are valid. Choose based on your goal and the balance between precision and
+evaluation speed:
 
-In this SciCode example, question-level analysis detects a lower Candidate cap-hit rate at p < 0.001
-after three repetitions; repetition-level analysis needs six, requiring twice as many responses.
-Both use identical responses from the same 294 subtasks at each repetition count. We calculate both
-p-values using the methods in :ref:`Question-level and repetition-level p-values <evaluation-pvalue-methods>`
-in the reproducibility notes.
+- **Estimate accuracy on a fixed benchmark.** Treat its question set as a black box: compute one average
+  score per complete run, then estimate uncertainty across independent runs. Multiple complete
+  passes can be expensive.
+- **Get accurate results quickly for the domain represented by a benchmark.** Use representative questions:
+  compute an average score per question across repetitions, then estimate uncertainty across
+  questions. With sufficiently independent questions, this approach can support faster experimentation.
 
-.. image:: images/scicode-cap-analysis-unit.svg
-   :alt: One-sided p-values for fewer candidate cap hits across one to twenty repetitions on the same 294 SciCode subtasks. The paired subtask-permutation test reaches p below 0.001 at three repetitions, or 882 responses per model; the run-level Welch t-test reaches it at six repetitions, or 1,764 responses per model. Welch is unavailable with one repetition.
-   :width: 640px
+Is question-level analysis reliable on real benchmarks compared with repetition-level analysis?
+We compare the two approaches by spending the same response budget on more unique questions or
+more repetitions per question, then measuring how much the resulting scores vary. Each allocation
+produces 20 observed scores, using 1,000
+responses per model for MMLU-Pro and 280 for SciCode. In the plots below, solid lines show means;
+shading shows ±1 observed standard deviation (SD). Means stay fixed because every allocation
+uses the same saved response pool: 1,000 questions × 20 repetitions for MMLU-Pro (20,000 responses
+per model) and 280 subtasks × 20 repetitions for SciCode (5,600 responses per model).
+Lower observed SD means more consistent score estimates across these groups for the same response budget.
 
-For MMLU-Pro, we tested whether the same response budget was better spent on more questions or more
-repetitions. We used 1,000 responses per model, sampling within subjects. To calculate the overall
-accuracy difference, we averaged subject results in proportion to their size in the original
-1,000-question sample. Both allocations gave similarly stable estimates of the accuracy difference.
-Together with the SciCode comparison, this supports prioritizing question coverage, then adding
-repetitions when the available questions do not provide enough evidence.
+.. figure:: images/budget-allocation-accuracy.svg
+   :alt: Candidate mean accuracy with plus or minus one observed standard deviation. At fixed response budgets, using more unique questions gives less spread for MMLU-Pro and SciCode.
+   :width: 720px
 
-.. image:: images/allocation-accuracy-gap.svg
-   :alt: At a fixed 1,000-response budget, the mean accuracy gap and observed variation remain similar across one to twenty repetitions.
-   :width: 640px
+For both MMLU-Pro and SciCode, greater question coverage gives more reliable Candidate accuracy
+estimates, with lower observed SD.
+Along the x-axis, more repetitions mean fewer unique questions or subtasks within the same
+response budget.
+
+Comparing Candidate and Baseline on the same questions can reduce variation caused by question
+difficulty. MMLU-Pro's accuracy difference has slightly less
+observed spread with more repetitions; SciCode's accuracy and cap-hit-rate differences have less
+spread with more subtask coverage. Check the metric you intend to use for the comparison.
+
+.. figure:: images/budget-allocation-differences.svg
+   :alt: Mean Candidate minus Baseline differences with plus or minus one observed standard deviation. More repetitions slightly reduce spread for MMLU-Pro accuracy differences, while more subtask coverage gives less spread for SciCode accuracy and cap-hit-rate differences.
+   :width: 720px
+
+The useful budget allocation can differ for absolute scores and paired model differences.
+
+Future benchmarks could make experimentation faster by providing representative, approximately
+independent questions sampled from their intended domain, and documenting dependencies between
+related tasks.
 
 .. _evaluation-collect-data:
 
