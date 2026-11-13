@@ -1116,8 +1116,9 @@ class _QuantCoreAttention(QuantModule):
             raise RuntimeError(
                 f"p_bmm_quantizer ({p_quant}) is enabled but this attention did not run "
                 "FlashAttention-4, so the attention probabilities were not quantized. The mode "
-                "needs Transformer Engine's FlashAttention-4 backend (run with NVTE_FUSED_ATTN=0 "
-                "and NVTE_UNFUSED_ATTN=0 so that it is selected) on a GPU the kernel supports."
+                "needs Transformer Engine's FlashAttention-4 backend (attention_backend=flash and "
+                "flash_attention_version=4 in the Megatron model config) on a GPU the kernel "
+                "supports."
             )
         if p_quant not in _P_QUANT_ANNOUNCED:
             _P_QUANT_ANNOUNCED.add(p_quant)
