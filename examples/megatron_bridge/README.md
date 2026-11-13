@@ -133,6 +133,60 @@ torchrun --nproc_per_node 2 export_quantized_megatron_to_hf.py \
 
 To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export_quantized_megatron_to_hf.py --help`).
 
+### Quantizing the attention probabilities (P)
+
+Low-precision attention kernels also quantize the attention probabilities `P = softmax(Q K^T)` before the `P V` matmul. To make QAD see that noise, enable the `p_bmm_quantizer` of the core attention in a recipe, next to the KV-cache quantizers:
+
+```yaml
+# p_fp8.yaml: NVFP4 weights and activations, FP8 KV cache, FP8 attention probabilities
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  w4a4_nvfp4_nvfp4: configs/ptq/units/w4a4_nvfp4_nvfp4
+  kv_fp8: configs/ptq/units/kv_fp8
+  p_numerics: configs/numerics/fp8  # or configs/numerics/nvfp4
+metadata:
+  recipe_type: ptq
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: w4a4_nvfp4_nvfp4
+    - $import: kv_fp8
+    - quantizer_name: '*p_bmm_quantizer'
+      cfg:
+        $import: p_numerics
+    - $import: default_disabled_quantizers
+```
+
+P is never a tensor in Megatron: it is quantized inside the attention kernel, FlashAttention-4 (`flash_attn.cute`) called through Transformer Engine, with a straight-through backward. Requirements:
+
+- A Blackwell data-center GPU (B200, compute capability 10.0), BF16, attention head dimension 64, 96 or 128, and no attention dropout.
+- A FlashAttention-4 whose `flash_attn_func` takes `p_quant`. No release has it yet; put a source tree that has it ahead of the container's package, e.g. `export PYTHONPATH=/path/to/flash-attention:$PYTHONPATH`.
+- `--flash_attention_version 4` on `quantize.py` and on `distill.py`. Megatron selects the Transformer Engine backend from its model config, so setting the `NVTE_*` environment variables instead fails.
+
+Two formats are supported, both with a fixed scale and therefore no calibration: per-tensor FP8 (`configs/numerics/fp8`; E4M3 of `256 P`) and dynamic NVFP4 with block size 16 (`configs/numerics/nvfp4`; one E4M3 scale per 16 keys). The FP8 grid differs from the one the HuggingFace and vLLM plugins use for P (`448 / amax`, amax 1 by default). Any other `p_bmm_quantizer` config raises, and so does a forward that did not run FlashAttention-4: P is never left unquantized silently. Context parallelism is supported.
+
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --recipe p_fp8.yaml \
+    --flash_attention_version 4 \
+    --seq_length 4096 \
+    --export_megatron_path /tmp/Qwen3-8B-NVFP4-P-megatron
+
+torchrun --nproc_per_node 2 distill.py \
+    --cp_size 2 \
+    --flash_attention_version 4 \
+    --teacher_hf_path Qwen/Qwen3-8B \
+    --student_hf_path Qwen/Qwen3-8B \
+    --student_megatron_path /tmp/Qwen3-8B-NVFP4-P-megatron \
+    --use_mock_data --seq_length 4096 --mbs 1 --gbs 2 --train_iters 20 --lr 1e-5 \
+    --output_dir /output/qwen3_8b_nvfp4_p_qad
+```
+
+The first quantized forward logs `p_bmm_quantizer: attention probabilities run FlashAttention-4 p_quant=fp8_e4m3`. `--flash_attention_version` applies to the whole process, so the teacher runs FlashAttention-4 too, unquantized. Exporting the `p_bmm_quantizer` to a HuggingFace checkpoint is not supported yet.
+
 ### Vision-Language Models (VLMs)
 
 For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automatically quantizes only the **language model** and leaves the vision tower and vision-language projector in full precision, then saves the full VLM back as a Megatron checkpoint. The calibration modality is inferred from `--calib_dataset_name`:

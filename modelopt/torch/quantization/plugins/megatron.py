@@ -307,6 +307,10 @@ def quant_module_set_extra_state(self, state: Any):
                     fallback = re.sub(r"(weight_quantizer)\.\d+", r"\1.0", name)
                     quantizer_substate = quantizer_state.get(fallback)
                 if quantizer_substate is None:
+                    if name.endswith("p_bmm_quantizer"):
+                        # Saved before this quantizer existed: its name configured nothing
+                        # then, so it stays off even if the saved config matches it.
+                        module.disable()
                     continue
                 maybe_promote_nvfp4_static_quantizer(module, quantizer_substate)
                 module.set_from_modelopt_state(quantizer_substate, properties_only=False)
@@ -1068,8 +1072,9 @@ class _QuantCoreAttention(QuantModule):
     P never exists as a tensor here, so the p_bmm_quantizer is not applied to one: when it is
     enabled, the attention runs FlashAttention-4's fused quant-dequant of P (straight-through
     backward) through Transformer Engine, context parallel included. Its formats have a fixed
-    scale, so it is not calibrated. See
-    :mod:`modelopt.torch.kernels.quantization.attention.te_fa4_p_quant`.
+    scale, so it is not calibrated and an amax is refused. FP8 here is E4M3 of ``256 * P``;
+    the HuggingFace and vLLM plugins scale FP8 P by ``448 / amax`` (amax 1 by default), which
+    is another grid. See :mod:`modelopt.torch.kernels.quantization.attention.te_fa4_p_quant`.
     """
 
     def _setup(self):
@@ -1124,7 +1129,7 @@ class _QuantCoreAttention(QuantModule):
             _P_QUANT_ANNOUNCED.add(p_quant)
             print_rank_0(
                 f"p_bmm_quantizer: attention probabilities run FlashAttention-4 p_quant={p_quant} "
-                f"({scope.calls} kernel call(s) in the first forward)"
+                f"({scope.calls} kernel call(s) per attention forward)"
             )
         return output
 
@@ -1153,10 +1158,15 @@ class _QuantCoreAttention(QuantModule):
                 "p_bmm_quantizer has an amax, but the FlashAttention-4 formats use a fixed scale."
             )
         formats = te_fa4_p_quant.fa4_p_quant_formats()
-        if p_quant not in formats or not te_fa4_p_quant.install():
+        if p_quant not in formats:
             raise RuntimeError(
                 f"p_bmm_quantizer ({p_quant}) needs a FlashAttention-4 (flash_attn.cute) with "
-                f"p_quant support, bound by Transformer Engine. Formats found: {list(formats)}."
+                f"p_quant support. Formats of the installed one: {list(formats)}."
+            )
+        if not te_fa4_p_quant.install():
+            raise RuntimeError(
+                f"p_bmm_quantizer ({p_quant}) needs Transformer Engine's FlashAttention-4 "
+                "backend, which this Transformer Engine does not provide."
             )
         return p_quant
 

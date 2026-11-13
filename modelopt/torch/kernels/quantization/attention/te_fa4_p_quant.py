@@ -32,8 +32,9 @@ passes ``window_size_left=-1, window_size_right=0`` for a causal mask; FA4 revis
 ``p_quant`` read -1 as unbounded only when both sides are negative, so that pair would be a
 window in which no key is visible. The backward name ``_flash_attn_bwd_v4`` gets the same
 translation and nothing else: TE passes the windows to the backward separately, and a
-backward left untranslated would use another mask than its forward. The translation applies
-to every FA4 call once installed, quantized or not.
+backward left untranslated would use another mask than its forward. Only -1 is translated;
+other negative sides keep their meaning. The translation applies to every FA4 call once
+installed, quantized or not.
 """
 
 import contextvars
@@ -87,11 +88,11 @@ def fa4_p_quant_formats() -> tuple[str, ...]:
 
 def _normalize_te_windows(kwargs: dict) -> None:
     for name in ("window_size_left", "window_size_right"):
-        if kwargs.get(name) is not None and kwargs[name] < 0:
+        if kwargs.get(name) == -1:
             kwargs[name] = None
     if kwargs.get("window_size") is not None:
         kwargs["window_size"] = tuple(
-            None if side is not None and side < 0 else side for side in kwargs["window_size"]
+            None if side == -1 else side for side in kwargs["window_size"]
         )
 
 

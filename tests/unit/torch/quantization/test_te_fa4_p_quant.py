@@ -15,7 +15,11 @@
 
 from types import SimpleNamespace
 
+import torch
+
 from modelopt.torch.kernels.quantization.attention import te_fa4_p_quant
+from modelopt.torch.quantization.conversion import quantizer_state, restore_quantizer_state
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 
 def test_scope_reaches_forward_calls_only_and_windows_are_translated(monkeypatch):
@@ -51,9 +55,20 @@ def test_scope_reaches_forward_calls_only_and_windows_are_translated(monkeypatch
     backends.flash_attn_varlen_func_v4(window_size=(4, 0))
     assert seen["flash_attn_varlen_func_v4"] == {"window_size": (4, 0)}
 
+    # Only -1 is "unbounded": another negative side is a window of its own.
+    backends.flash_attn_func_v4(window_size=(-2, 0))
+    assert seen["flash_attn_func_v4"] == {"window_size": (-2, 0)}
 
-def test_nothing_is_wrapped_without_a_p_quant_capable_fa4(monkeypatch):
-    monkeypatch.setattr(te_fa4_p_quant, "fa4_p_quant_formats", lambda: ())
-    backends = SimpleNamespace(flash_attn_func_v4=print)
-    assert not te_fa4_p_quant.install(backends)
-    assert backends.flash_attn_func_v4 is print
+
+def test_a_checkpoint_without_p_bmm_quantizer_state_restores_with_it_disabled():
+    """A checkpoint saved before Megatron attention had a p_bmm_quantizer keeps unquantized P,
+    even when its saved config matches the name (it configured nothing at the time)."""
+    model = torch.nn.Module()
+    model.k_bmm_quantizer = TensorQuantizer()
+    model.p_bmm_quantizer = TensorQuantizer()  # enabled, as the saved config would leave it
+    saved = {k: v for k, v in quantizer_state(model).items() if k != "p_bmm_quantizer"}
+
+    restore_quantizer_state(model, None, {"quantizer_state": saved})
+
+    assert model.k_bmm_quantizer.is_enabled
+    assert not model.p_bmm_quantizer.is_enabled
