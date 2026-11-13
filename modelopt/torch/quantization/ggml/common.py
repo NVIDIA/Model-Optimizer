@@ -177,6 +177,7 @@ def pin_packed_weight(
     packed_weights: torch.Tensor,
     importance: torch.Tensor | None = None,
     source: torch.Tensor | None = None,
+    search_scales: torch.Tensor | None = None,
 ) -> None:
     """Make ``packed_weights`` the ``format_name`` payload of ``quantizer``'s weight.
 
@@ -193,6 +194,11 @@ def pin_packed_weight(
     them, so each block still equal to that block of ``source``, or to its rounding by a cast to
     bfloat16 or float16, keeps its pinned codes; a block QAD changed is encoded as above, its local
     scales searched again under the pinned scale.
+
+    ``search_scales`` are the FP16 super-block scales the codes were searched at, when the pinned
+    ones were raised after the search, as :func:`quantize_energy_matched` raises them. Encoding again
+    then searches at these and keeps the pinned ones, so a block QAD changed is not searched at the
+    raised scale, which would shrink it. They are kept as their bits, which casting the model leaves.
     """
     quantizer._set_buffer(_pin_name(format_name), packed_weights)
     importance_name = PINNED_IMPORTANCE_PREFIX + format_name
@@ -207,6 +213,12 @@ def pin_packed_weight(
         quantizer._set_buffer(source_name, torch.stack(keys, dim=-1))
     elif hasattr(quantizer, source_name):
         delattr(quantizer, source_name)
+    search_name = _search_scales_name(format_name)
+    if search_scales is not None:
+        bits = search_scales.to(torch.float16).contiguous().view(torch.int16)
+        quantizer._set_buffer(search_name, bits.reshape(packed_weights.shape[:-1]))
+    elif hasattr(quantizer, search_name):
+        delattr(quantizer, search_name)
     quantizer._quantizer_cache = None
 
 
@@ -235,6 +247,30 @@ PINNED_IMPORTANCE_PREFIX = "_ggml_importance_"
 
 def _pin_name(format_name: str) -> str:
     return f"{PINNED_PAYLOAD_PREFIX}{format_name}"
+
+
+def _search_scales_name(format_name: str) -> str:
+    """The buffer holding the FP16 bits of the scales a pin's codes were searched at, ``[*rows, blocks]``."""
+    return f"{_pin_name(format_name)}_search_scales"
+
+
+def _pinned_search_scales(quantizer, format_name: str) -> torch.Tensor | None:
+    """The FP16 scales the ``format_name`` payload pinned to ``quantizer`` was searched at, if kept."""
+    bits = getattr(quantizer, _search_scales_name(format_name), None)
+    return None if bits is None else bits.reshape(-1).view(torch.float16)
+
+
+def drop_search_scales(quantizer) -> None:
+    """Forget the scales ``quantizer``'s pin was searched at, once its weight became its decoding.
+
+    The search scales are for the weight the codes were searched from; its decoding encodes to them
+    at the pinned scales instead, as :func:`~modelopt.torch.quantization.initialize_qdq_weights`
+    leaves it. A quantizer with no such pin is left alone.
+    """
+    num_bits = getattr(quantizer, "num_bits", None)
+    if isinstance(num_bits, str) and hasattr(quantizer, _search_scales_name(num_bits)):
+        delattr(quantizer, _search_scales_name(num_bits))
+        quantizer._quantizer_cache = None
 
 
 def _source_name(format_name: str) -> str:
@@ -510,14 +546,17 @@ class GGMLFormat:
                         packed = pinned.to(weight.device)
                         return packed.reshape(*weight.shape[:-1], -1, self.block_bytes), shape
                 importance = pinned_importance(quantizer, self.name)
+                scales = self.payload_scales(pinned.reshape(-1, self.block_bytes)).to(weight.device)
+                searched = _pinned_search_scales(quantizer, self.name)
                 packed, _ = self.quantize(
                     weight.reshape(pinned_shape),
-                    scales=self.payload_scales(pinned.reshape(-1, self.block_bytes)).to(
-                        weight.device
-                    ),
+                    scales=scales if searched is None else searched.to(weight.device),
                     importance=None if importance is None else importance.to(weight.device),
                     **kwargs,
                 )
+                if searched is not None and self.replace_payload_scales is not None:
+                    rows = self.replace_payload_scales(packed.reshape(-1, self.block_bytes), scales)
+                    packed = rows.reshape(packed.shape)
                 if unchanged is not None:
                     packed = torch.where(unchanged[..., None], pinned.to(packed.device), packed)
                 return packed.reshape(*weight.shape[:-1], -1, self.block_bytes), shape
@@ -567,6 +606,7 @@ class GGMLFormat:
             self.name,
             packed.reshape(pinned.shape).to(pinned.device),
             pinned_importance(quantizer, self.name),
+            search_scales=_pinned_search_scales(quantizer, self.name),
         )
         if source is not None:
             quantizer._set_buffer(_source_name(self.name), source)
@@ -660,8 +700,7 @@ def quantize_energy_matched(
     the two and needs no per-format constant.
 
     Returns:
-        The payload, the logical shape, and each block's stored scale over the scale its codes were
-        searched at, ``[*weight.shape[:-1], weight.shape[-1] // 256]``.
+        The payload, the logical shape, and the FP16 scale each block's codes were searched at.
     """
     fit, replace = ggml_format.scale_fit, ggml_format.replace_payload_scales
     if fit is None or replace is None:
@@ -687,53 +726,29 @@ def quantize_energy_matched(
         ]
     )
     stored = (scales.float() * factors).clamp(max=65504.0).to(torch.float16)
-    packed = replace(rows, stored).reshape(packed.shape)
-    ratio = torch.where(scales > 0, stored.float() / scales.float().clamp_min(1e-30), 1.0)
-    return packed, shape, ratio.reshape(*weight.shape[:-1], -1)
+    return replace(rows, stored).reshape(packed.shape), shape, scales
 
 
 def pin_energy_matched(
-    ggml_format: GGMLFormat,
-    quantizer,
-    weight: torch.Tensor,
-    second_moments: torch.Tensor | None,
-    *,
-    rescale: bool = True,
-) -> torch.Tensor:
-    """Pin the :func:`quantize_energy_matched` codes of ``weight``; return the weight to keep.
+    ggml_format: GGMLFormat, quantizer, weight: torch.Tensor, second_moments: torch.Tensor | None
+) -> None:
+    """Pin the :func:`quantize_energy_matched` codes of ``weight`` with the scales they were searched at.
 
-    The kept weight is ``weight`` unrounded, as GPTQ leaves it, but scaled in place per block like
-    its stored scale. The search is scale-equivariant, so under the stored scales the kept weight
-    encodes to the codes picked for ``weight``, up to its rounding; the pin is what it does encode
-    to, so QAD's re-encodes start from exactly the pinned codes. Without ``rescale``, ``weight`` is
-    kept unchanged and pinned as the codes' source, as local_hessian pins its own; a block QAD then
-    changes is searched again at the raised scale.
+    ``weight`` itself is left as it is. Encoding it again, as QAD does once it changes a block,
+    searches at those scales and keeps the raised ones, so the codes stay where the calibration put
+    them (see :func:`pin_packed_weight`).
     """
-    payload_scales = ggml_format.payload_scales
-    if payload_scales is None:
+    if ggml_format.payload_scales is None:
         raise ValueError(f"{ggml_format.name.upper()} does not keep its pinned scales")
     extra_args = quantizer.backend_extra_args or {}
-    kwargs = {"block_chunk_size": extra_args.get("block_chunk_size", ggml_format.block_chunk_size)}
-    packed, _, ratio = quantize_energy_matched(ggml_format, weight, second_moments, **kwargs)
-    if not rescale:
-        importance = None if second_moments is None else second_moments.sqrt()
-        pin_packed_weight(quantizer, ggml_format.name, packed, importance, source=weight)
-        return weight
-    kept = weight if weight.is_contiguous() else weight.contiguous()
-    rows, ratio = kept.view(-1, GGML_BLOCK_SIZE), ratio.reshape(-1, 1)
-    compute_dtype = torch.promote_types(kept.dtype, torch.float32)
-    for start in range(0, len(rows), _RESCALE_BLOCKS_PER_CHUNK):
-        chunk = rows[start : start + _RESCALE_BLOCKS_PER_CHUNK]
-        chunk.copy_(chunk.to(compute_dtype) * ratio[start : start + len(chunk)])
+    block_chunk_size = extra_args.get("block_chunk_size", ggml_format.block_chunk_size)
+    packed, _, searched = quantize_energy_matched(
+        ggml_format, weight, second_moments, block_chunk_size=block_chunk_size
+    )
     importance = None if second_moments is None else second_moments.sqrt()
-    scales = payload_scales(packed.reshape(-1, ggml_format.block_bytes))
-    packed, _ = ggml_format.quantize(kept, scales=scales, importance=importance, **kwargs)
-    pin_packed_weight(quantizer, ggml_format.name, packed, importance)
-    return kept
+    pin_packed_weight(quantizer, ggml_format.name, packed, importance, search_scales=searched)
 
 
-# Blocks rescaled at a time, bounding the float32 temporaries.
-_RESCALE_BLOCKS_PER_CHUNK = 65536
 # Blocks fitted at a time: a 32-value sub-block scores 561 splits, a 16-value one 153.
 _FIT_BLOCKS_PER_CHUNK = 1024
 

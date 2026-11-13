@@ -22,13 +22,10 @@ from collections import defaultdict
 import pytest
 import torch
 import torch.nn.functional as F
-from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.models import TOY_MOE_EXPERTS as NUM_EXPERTS
 from _test_utils.torch.quantization.models import TOY_MOE_HIDDEN as HIDDEN
 from _test_utils.torch.transformers_models import get_tiny_llama
 from torch import nn
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
@@ -116,8 +113,7 @@ def test_pins_the_codes_it_chose(algorithm):
 
     decoded = _decoded(model.weight_quantizer, model.weight.shape)
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
-    # local_hessian leaves the weight as it was; imatrix scales it like its stored scales.
-    assert torch.equal(model.weight.detach(), original) == (algorithm is LOCAL_HESSIAN)
+    assert torch.equal(model.weight.detach(), original)
 
     def output_error(weight):
         return ((weight - original) @ inputs.T).square().sum()
@@ -125,93 +121,27 @@ def test_pins_the_codes_it_chose(algorithm):
     assert output_error(decoded) < output_error(plain.weight_quantizer(plain.weight))
 
 
-@pytest.mark.parametrize(
-    "pattern", ["0.weight_quantizer", "*weight_quantizer"], ids=["one", "both"]
-)
-def test_imatrix_leaves_a_tied_weight_unchanged_and_forwards_its_codes(pattern):
-    # Scaling the weight in place would change the tied layer's weight too, quantized or not.
-    torch.manual_seed(0)
-    model = nn.Sequential(nn.Linear(512, 512, bias=False), nn.Linear(512, 512, bias=False))
-    model[1].weight = model[0].weight
-    original = model[0].weight.detach().clone()
-    inputs = _inputs()
-    mtq.quantize(model, _config(IMATRIX, pattern), forward_loop=lambda m: m(inputs))
-
-    assert torch.equal(model[0].weight.detach(), original)
-    for layer in model:
-        expected = original
-        if layer.weight_quantizer.is_enabled:
-            expected = _decoded(layer.weight_quantizer, original.shape)
-        torch.testing.assert_close(layer(inputs), inputs @ expected.T)
-
-
-def _tied_fsdp2_weight_job(rank, size):
-    torch.manual_seed(0)
-    model = nn.Sequential(nn.Linear(512, 512, bias=False), nn.Linear(512, 512, bias=False))
-    model[1].weight = model[0].weight
-    original = model[0].weight.detach().clone()
-    fully_shard(model, mesh=init_device_mesh("cpu", (size,)))
-    inputs = _inputs(rows=64)
-    with bounded_collectives():
-        mtq.quantize(model, _config(IMATRIX, "0.weight_quantizer"), lambda m: m(inputs))
-    assert torch.equal(model[0].weight.full_tensor(), original)
-
-
-def test_imatrix_leaves_a_tied_weight_of_a_sharded_fsdp2_model_unchanged(cpu_dist_workers):
-    # Inside its materialization window the weight is a gathered copy sharing no storage.
-    cpu_dist_workers.run(_tied_fsdp2_weight_job)
-
-
-@pytest.mark.parametrize("tied_use", ["decoder", "outside"])
-def test_layerwise_imatrix_leaves_a_weight_tied_across_layers_unchanged(tied_use):
-    # Layerwise calibration hands imatrix one decoder layer, and its pass over the weights outside
-    # the decoder layers hides them, so neither sees the tie on its own.
-    model = get_tiny_llama(
-        dtype=torch.float32,
-        hidden_size=256,
-        intermediate_size=256,
-        num_attention_heads=4,
-        vocab_size=256,
-    )
-    shared = model.model.layers[0].mlp.gate_proj.weight
-    if tied_use == "decoder":
-        model.model.layers[1].mlp.gate_proj.weight = shared
-        pattern = "*layers.0.mlp.gate_proj.weight_quantizer"
-    else:
-        model.lm_head.weight = shared
-        pattern = "*lm_head.weight_quantizer"
-    original = shared.detach().clone()
-    input_ids = torch.randint(0, 32, (4, 16), generator=torch.Generator().manual_seed(0))
-    algorithm = {"method": "imatrix", "layerwise": {"enable": True}}
-    mtq.quantize(model, _config(algorithm, pattern), lambda m: m(input_ids))
-    assert torch.equal(shared.detach(), original)
-
-
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float64])
-def test_imatrix_matches_each_blocks_energy_and_keeps_a_weight_encoding_to_its_codes(dtype):
-    # The stored scales are rescaled after the search and the weight is scaled alike, so the codes
-    # keep each block's energy and a block QAD changes is searched again from them.
+def test_imatrix_matches_each_blocks_energy_and_encodes_again_to_its_codes(dtype):
+    # The stored scales are raised after the search to keep each block's energy. Encoding the
+    # weight again, as QAD does once it changes, searches at the scales the codes were searched at,
+    # so it gives back the pinned codes rather than the smaller ones the raised scales would pick.
     torch.manual_seed(0)
     model = nn.Linear(512, 16, bias=False, dtype=dtype)
     original = model.weight.detach().clone()
     inputs = _inputs().to(dtype)
     mtq.quantize(model, _config(IMATRIX), forward_loop=lambda m: m(inputs))
     quantizer = model.weight_quantizer
-    pinned = pinned_packed_weight(quantizer, "iq2_xxs")
+    assert torch.equal(model.weight.detach(), original)
 
     second_moments = _floored(inputs.float().square().mean(dim=0)).reshape(2, 256)
     decoded = _decoded(quantizer, original.shape).reshape(16, 2, 256)
     energy = (second_moments * decoded.square()).sum(-1)
     target = (second_moments * original.float().reshape(16, 2, 256).square()).sum(-1)
-    # Up to the codes the rescaled weight's rounding flips when it is encoded again.
-    torch.testing.assert_close(energy, target, rtol=2e-2, atol=0)
-
-    rescanned, _ = IQ2_XXS.quantize(
-        model.weight.detach(),
-        scales=IQ2_XXS.payload_scales(pinned.reshape(-1, IQ2_XXS.block_bytes)),
-        importance=pinned_importance(quantizer, "iq2_xxs"),
+    torch.testing.assert_close(energy, target, rtol=1e-2, atol=0)
+    assert torch.equal(
+        IQ2_XXS.pack(model.weight.detach(), quantizer), pinned_packed_weight(quantizer, "iq2_xxs")
     )
-    assert torch.equal(rescanned, pinned)
 
 
 @ENCODERS
@@ -294,7 +224,7 @@ def test_a_module_calibration_never_reached_gets_the_plain_search(algorithm):
     packed, shape = IQ2_XXS.plain_quantize(original)
     plain = IQ2_XXS.dequantize(packed, shape, dtype=torch.float32)
     assert torch.equal(_decoded(model["unused"].weight_quantizer, original.shape), plain)
-    assert torch.equal(model["unused"].weight, original) == (algorithm is LOCAL_HESSIAN)
+    assert torch.equal(model["unused"].weight, original)
 
 
 def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
