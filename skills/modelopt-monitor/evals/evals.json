@@ -1,0 +1,46 @@
+{
+  "skill_name": "modelopt-monitor",
+  "evals": [
+    {
+      "id": "monitor-existing",
+      "prompt": "Check Slurm job 12345 using the supplied read-only status snapshot: RUNNING. Do not contact a cluster.",
+      "expected_output": "Reports running without claiming completion.",
+      "assertions": [
+        "Uses snapshot only",
+        "Does not launch jobs or claim successful completion"
+      ]
+    },
+    {
+      "id": "monitor-session",
+      "prompt": "Explain how to register a just-submitted PTQ job for monitoring. Do not run commands.",
+      "expected_output": "Uses a per-session registry and durable monitor.",
+      "assertions": [
+        "Keeps other sessions separate",
+        "Records job type, ID, host and owner",
+        "Plans both registration and durable monitoring"
+      ]
+    },
+    {
+      "id": "monitor-negative",
+      "prompt": "Quantize my model; no job has been submitted yet. Do not execute.",
+      "expected_output": "Routes quantization to modelopt-ptq without inventing a job.",
+      "expected_skill": null,
+      "assertions": [
+        "Does not invent a submitted job ID",
+        "Does not query a nonexistent job"
+      ]
+    },
+    {
+      "id": "monitor-standalone-install",
+      "prompt": "Only modelopt-monitor is installed in an isolated catalog directory. Reuse an existing patched ModelOpt checkout at ./Model-Optimizer. Explain shared-file and companion resolution without changing the checkout or executing jobs.",
+      "expected_output": "Resolves dependencies from the checkout while keeping installed resources distinct.",
+      "assertions": [
+        "Sets MODELOPT_ROOT to the existing checkout and MODELOPT_SKILLS to its root skills directory",
+        "Preserves patches and branch",
+        "Resolves common files under skills/common and companions under skills/modelopt-<name>",
+        "Keeps SKILL_DIR at the executing skill",
+        "Does not launch jobs"
+      ]
+    }
+  ]
+}

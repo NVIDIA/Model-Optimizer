@@ -1,5 +1,6 @@
 ---
 name: modelopt-ptq
+license: Apache-2.0
 description: >-
   Use when the user asks to "quantize a model", "run PTQ", "post-training
   quantization", "NVFP4 quantization", "FP8 quantization", "INT8

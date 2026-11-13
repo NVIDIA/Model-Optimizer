@@ -86,7 +86,8 @@ fetch_skill_recursive() {
 
         if [[ "$type" == "file" ]]; then
             local local_path="$rel_path"
-            [[ "$local_path" == "tests.json" ]] && local_path="evals/evals.json"
+            # Catalog datasets are maintained locally after schema normalization.
+            [[ "$local_path" == "tests.json" ]] && continue
             local dst="$DEST_BASE/modelopt-$skill/$local_path"
             echo "  fetch: $dst"
             fetch_file "$UPSTREAM_BASE/$skill/$rel_path" "$dst"
@@ -138,7 +139,7 @@ inject_provenance() {
 for skill in launching-evals accessing-mlflow; do
     echo ""
     echo "== $skill =="
-    rm -rf "${DEST_BASE:?}/modelopt-$skill"
+    # Preserve locally maintained evals and skill cards; overwrite upstream files.
     fetch_skill_recursive "$skill"
     if [[ -f "$DEST_BASE/modelopt-$skill/evals/evals.json" ]]; then
         ln -s evals/evals.json "$DEST_BASE/modelopt-$skill/tests.json"
