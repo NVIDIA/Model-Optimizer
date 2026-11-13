@@ -17,6 +17,7 @@
 
 import copy
 import importlib
+import logging
 import os
 import tempfile
 
@@ -30,6 +31,7 @@ from packaging import version
 
 import modelopt.onnx.quantization as moq
 import modelopt.onnx.trt_utils as trt_utils
+from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.__main__ import get_parser
 from modelopt.onnx.quantization.autotune import Config, QDQAutotuner
 from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
@@ -398,6 +400,23 @@ def test_quantize_opset_handling(
     assert output_opset == expected_opset, (
         f"[{scenario_name}] Expected opset {expected_opset} for {quant_mode}, got {output_opset}"
     )
+
+
+def test_autotune_verbose_sets_debug_logging(monkeypatch):
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+    monkeypatch.setattr(
+        quantize_module,
+        "_preprocess_onnx",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop after logging setup")),
+    )
+
+    original_level = logger.level
+    try:
+        with pytest.raises(RuntimeError):
+            moq.quantize("model.onnx", autotune=True, autotune_verbose=True)
+        assert logger.isEnabledFor(logging.DEBUG)
+    finally:
+        logger.setLevel(original_level)
 
 
 @pytest.mark.parametrize(
