@@ -17,7 +17,10 @@ import argparse
 import getpass
 import importlib
 import json
+import os
+import signal
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -754,6 +757,65 @@ def test_a_finalizing_run_sizes_its_batch_for_the_finalize_algorithm(monkeypatch
 def test_calib_seq_must_be_positive(monkeypatch):
     with pytest.raises(SystemExit):
         _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--calib_seq", "0")
+
+
+def test_a_run_dumps_its_ranks_stacks_while_it_runs(monkeypatch, tmp_path):
+    """MODELOPT_DUMP_TRACEBACK_EVERY_SEC dumps the rank's stacks to its own file during the run, after
+    the dumps of an earlier run, and the dumps stop when the run ends."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setenv("MODELOPT_DUMP_TRACEBACK_EVERY_SEC", "0.05")
+    monkeypatch.setenv("MODELOPT_DUMP_TRACEBACK_DIR", str(tmp_path / "dumps"))
+    monkeypatch.setenv("RANK", "3")
+    dump = tmp_path / "dumps" / "traceback.rank3.txt"
+    dump.parent.mkdir()
+    dump.write_text("the stacks of a run that hung\n")
+
+    with hf_ptq._dump_tracebacks():
+        time.sleep(0.3)
+    size = dump.stat().st_size
+    # Likely given the dump's file descriptor, which a timer left running would still write to.
+    with open(tmp_path / "next.txt", "w") as next_file:
+        time.sleep(0.2)
+        next_file.flush()
+
+    assert dump.read_text().startswith("the stacks of a run that hung\n")
+    assert "test_a_run_dumps_its_ranks_stacks_while_it_runs" in dump.read_text()
+    assert dump.stat().st_size == size
+    assert (tmp_path / "next.txt").read_text() == ""
+
+
+@pytest.mark.parametrize("every", ["soon", "-1", "nan", "inf"])
+def test_a_dump_period_that_is_not_a_number_of_seconds_is_refused(monkeypatch, every):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setenv("MODELOPT_DUMP_TRACEBACK_EVERY_SEC", every)
+
+    with (
+        pytest.raises(ValueError, match="MODELOPT_DUMP_TRACEBACK_EVERY_SEC"),
+        hf_ptq._dump_tracebacks(),
+    ):
+        pass
+
+
+@pytest.mark.filterwarnings("ignore:.*fork:DeprecationWarning")
+def test_sigterm_still_ends_the_run_after_dumping_its_stacks(monkeypatch, tmp_path):
+    """A SIGTERM prints every thread's stack, then ends the process as it would without the dump:
+    otherwise scancel, a Slurm time limit and torchrun's teardown would wait for SIGKILL."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    log = tmp_path / "stderr.txt"
+    pid = os.fork()
+    if pid == 0:  # the run: its stderr into the log, then a SIGTERM
+        try:
+            os.dup2(os.open(log, os.O_WRONLY | os.O_CREAT), 2)
+            with hf_ptq._dump_tracebacks():
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(10)
+        finally:
+            os._exit(0)  # reached only if the SIGTERM did not end the process
+    _, status = os.waitpid(pid, 0)
+
+    assert os.WIFSIGNALED(status)
+    assert os.WTERMSIG(status) == signal.SIGTERM
+    assert "most recent call first" in log.read_text()
 
 
 def test_mlflow_rejects_a_bad_tracking_uri(monkeypatch):

@@ -15,8 +15,11 @@
 
 import argparse
 import contextlib
+import faulthandler
+import math
 import os
 import random
+import signal
 import time
 import warnings
 from datetime import timedelta
@@ -1654,6 +1657,53 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+@contextlib.contextmanager
+def _dump_tracebacks():
+    """Print every thread's Python stack where a stuck or crashed rank would leave none.
+
+    On SIGTERM (torchrun stopping the ranks after one failed; Slurm's ``scancel`` or time limit if the
+    launch passes the signal on to the ranks, which a shell pipeline around torchrun may not) and on a
+    crash in native code, the stacks go to stderr; SIGTERM then still ends the process.
+    ``MODELOPT_DUMP_TRACEBACK_EVERY_SEC=<n>`` also appends each rank's stacks to
+    ``<MODELOPT_DUMP_TRACEBACK_DIR>/traceback.rank<RANK>.txt`` every n seconds, readable while a run
+    hangs: the stack that repeats is where it waits.
+    """
+    every = os.environ.get("MODELOPT_DUMP_TRACEBACK_EVERY_SEC") or "0"
+    try:
+        seconds = float(every)
+    except ValueError:
+        seconds = math.nan
+    if not 0 <= seconds < math.inf:
+        raise ValueError(
+            f"MODELOPT_DUMP_TRACEBACK_EVERY_SEC={every!r} is not a number of seconds (0 turns the "
+            "periodic dumps off)."
+        )
+    stderr = 2  # the process's own: sys.stderr may be a stand-in without a file descriptor
+    faulthandler.register(signal.SIGTERM, file=stderr, all_threads=True, chain=True)
+    if not faulthandler.is_enabled():
+        faulthandler.enable(file=stderr, all_threads=True)
+    periodic = None
+    if seconds > 0:
+        directory = os.environ.get("MODELOPT_DUMP_TRACEBACK_DIR") or "."
+        path = os.path.join(directory, f"traceback.rank{os.environ.get('RANK', '0')}.txt")
+        try:
+            os.makedirs(directory, exist_ok=True)
+            # Appended: a rerun keeps the dumps of the run it may have been started to debug.
+            periodic = open(path, "a", buffering=1)
+            print(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')}, process {os.getpid()}", file=periodic)
+        except OSError as e:
+            warnings.warn(f"Not dumping stacks every {seconds:g} s: cannot write {path} ({e}).")
+        else:
+            faulthandler.dump_traceback_later(seconds, repeat=True, file=periodic)
+    try:
+        yield
+    finally:
+        if periodic is not None:
+            faulthandler.cancel_dump_traceback_later()
+            periodic.close()
+        faulthandler.unregister(signal.SIGTERM)
+
+
 # Derived state and the tracking settings themselves; everything else argparse parsed is a
 # parameter of the run. Deriving the list means a new flag is tracked without touching this.
 def main(args: argparse.Namespace):
@@ -1733,4 +1783,5 @@ if __name__ == "__main__":
                 f"(got {args.qformat!r}). Use e.g. --qformat nvfp4 or nvfp4_mlp_only."
             )
 
-    main(args)
+    with _dump_tracebacks():
+        main(args)
