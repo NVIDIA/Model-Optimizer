@@ -188,22 +188,19 @@ recognized batch/sequence/cache names; it rejects unspecified dimensions.
 
 For embedding-only exports, `--model_name` must identify the matching Hugging Face
 checkpoint or a local checkpoint directory containing safetensors weights. The
-script loads the token embedding tensor, using byte-range downloads for Hub
-checkpoints, and caches it on disk. Authentication uses the standard Hugging Face
-token configuration. Unknown inputs or symbolic dimensions are rejected rather
-than assigned guessed values. This path prepares text calibration, not image or
-video inputs.
+script uses `hf_hub_download` to cache the embedding shard and `safe_open` to
+memory-map the tensor. Only selected token rows are converted to the ONNX input
+dtype; float32 inputs retain float32 checkpoint precision. Nonfinite or overflowing
+selected values are rejected. The first Hub download fetches the entire shard,
+including any other weights in it. Subsequent runs reuse the standard Hugging Face
+cache, including with `HF_HUB_OFFLINE=1` once the index and shard are cached.
+Authentication uses the standard Hugging Face token configuration. There is no
+separate converted embedding cache. Unknown inputs or symbolic dimensions are
+rejected rather than assigned guessed values. This path prepares text calibration,
+not image or video inputs. Zero cache/state arrays are shared across samples with
+the same resolved shape and dtype; calibration consumers must treat them as read-only.
 
-Embedding caches are bound to local tensor contents or an immutable Hub commit;
-changing weights at the same path or updating a Hub branch creates a new cache.
-Local cache validation reads the embedding bytes on each lookup without creating
-a full-size in-memory copy. Hub lookups require access to resolve the current
-commit and pin every download to that commit. Legacy unversioned caches are ignored.
-Cached arrays are checked for the expected shape, float16 dtype, and finite values
-in bounded chunks; invalid entries are rebuilt. The float16 embedding cache has an
-8 GiB allocation limit by default (`embed_table(..., max_output_bytes=...)`).
-
-The download cache remains `C:\\tmp` on Windows and uses `~/.cache/modelopt` on
+The download cache remains `C:\tmp` on Windows and uses `~/.cache/modelopt` on
 Linux/WSL. Small ONNX constants remain inline when external weights are saved so
 that ONNX Runtime can use them during shape inference.
 

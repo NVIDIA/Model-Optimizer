@@ -15,21 +15,16 @@
 
 """Calibration inputs and shape profiles for exported decoder-only and hybrid LLMs."""
 
-import hashlib
 import json
-import math
 import os
-import re
-import struct
-import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 import numpy as np
 import onnx
-from huggingface_hub import HfApi, get_token, hf_hub_url
+import torch
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import EntryNotFoundError
+from safetensors import safe_open
 
 __all__ = [
     "calibration_feed",
@@ -177,27 +172,37 @@ def ep_profiles(inputs, calibration_eps, batch_size=1):
     return profiles
 
 
-def calibration_feed(inputs, input_ids, attention_mask, table=None):
+def calibration_feed(inputs, input_ids, attention_mask, table=None, zero_cache=None):
     """Build a prefill calibration feed from the declared inputs.
 
     Attention and linear-attention caches start at zero. Embedding-only models
     require the checkpoint's token embedding table; unknown inputs are rejected.
+    A caller-owned zero_cache shares read-only state buffers across calibration samples.
     """
     ids = np.asarray(input_ids)
     mask = np.asarray(attention_mask)
     batch, seq = ids.shape
     feed = {}
+    if zero_cache is None:
+        zero_cache = {}
     for name, shape, dtype in inputs:
         if None in shape:
             raise ValueError(f"Unspecified dimension in ONNX input {name!r}")
         if kind_of(name) == "cache":
-            feed[name] = np.zeros(resolve_shape(shape, batch, seq=0, past=0), dtype=np_dtype(dtype))
+            key = (resolve_shape(shape, batch, seq=0, past=0), np_dtype(dtype))
+            if key not in zero_cache:
+                zero_cache[key] = np.zeros(key[0], dtype=key[1])
+            feed[name] = zero_cache[key]
         elif name == "input_ids":
             feed[name] = ids.astype(np_dtype(dtype))
         elif name == "inputs_embeds":
             if table is None:
                 raise ValueError("the model declares inputs_embeds: pass the token-embedding table")
-            feed[name] = table[ids].astype(np_dtype(dtype))
+            with np.errstate(over="ignore", invalid="ignore"):
+                values = table[torch.as_tensor(ids)].float().numpy().astype(np_dtype(dtype))
+            if not np.isfinite(values).all():
+                raise ValueError("Embedding values must be finite in the model's input dtype")
+            feed[name] = values
         elif name == "attention_mask":
             feed[name] = np.broadcast_to(mask, resolve_shape(shape, batch, seq, 0)).astype(
                 np_dtype(dtype)
@@ -212,210 +217,39 @@ def calibration_feed(inputs, input_ids, attention_mask, table=None):
     return feed
 
 
-class _HubRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        before, after = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
-        if after.scheme != "https":
-            raise ValueError("Checkpoint redirects must use HTTPS")
-        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if redirected is not None and (before.scheme, before.netloc) != (
-            after.scheme,
-            after.netloc,
-        ):
-            redirected.remove_header("Authorization")
-        return redirected
+def embed_table(model_name, cache_dir=None):
+    """Memory-map token embeddings from a local checkpoint or the Hugging Face cache."""
 
-
-def _read_range(opener, url, first, size, token):
-    request = urllib.request.Request(url, headers={"Range": f"bytes={first}-{first + size - 1}"})
-    if token:
-        request.add_header("Authorization", f"Bearer {token}")
-    with opener.open(request, timeout=120) as response:
-        expected = f"bytes {first}-{first + size - 1}/"
-        if response.status != 206 or not response.headers.get("Content-Range", "").startswith(
-            expected
-        ):
-            raise ValueError("Checkpoint server did not honor the requested byte range")
-        data = response.read(size + 1)
-    if len(data) != size:
-        raise ValueError("Incomplete checkpoint byte range")
-    return data
-
-
-def _cached_embedding(path, shape, chunk_size):
-    try:
-        table = np.load(path, mmap_mode="r", allow_pickle=False)
-        if (
-            not isinstance(table, np.memmap)
-            or table.shape != tuple(shape)
-            or table.dtype != np.float16
-        ):
-            return None
-        # Scan through bounded reads without faulting every mapped cache page into process RSS.
-        with Path(path).open("rb") as stream:
-            stream.seek(table.offset)
-            remaining = table.size
-            while remaining:
-                count = min(remaining, chunk_size // table.dtype.itemsize)
-                values = np.fromfile(stream, dtype=table.dtype, count=count)
-                if values.size != count or not np.isfinite(values).all():
-                    return None
-                remaining -= count
-        return table
-    except (OSError, ValueError, EOFError):
-        return None
-
-
-def embed_table(model_name, cache_file, max_output_bytes=8 * 1024**3):
-    """Load only the checkpoint's embedding tensor, caching float16 rows on disk.
-
-    Local cache identities hash the embedding bytes; Hub identities pin an immutable commit.
-    Hub weights are read with bounded byte ranges, never as an entire model shard.
-    The float16 cache is limited to 8 GiB by default, configurable via max_output_bytes.
-    """
-    local = Path(model_name).is_dir()
-    opener = urllib.request.build_opener(_HubRedirectHandler)
-    token = get_token()
-    revision = None
-    if not local:
-        api = HfApi()
-        if urllib.parse.urlsplit(api.endpoint).scheme != "https":
-            raise ValueError("Checkpoint downloads must use HTTPS")
-        revision = api.model_info(model_name, expand=["sha"], timeout=60, token=token).sha
-        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
-            raise ValueError("Expected an immutable Hub commit")
-
-    def read(filename, first, size):
+    def fetch(filename):
         # Shard names originate in the checkpoint index, not in trusted source code.
         if Path(filename).name != filename or "\\" in filename or filename in {".", ".."}:
             raise ValueError("Expected a checkpoint filename without directory components")
-        if local:
-            with (Path(model_name) / filename).open("rb") as stream:
-                stream.seek(first)
-                data = stream.read(size)
-            if len(data) != size:
-                raise ValueError("Incomplete local checkpoint tensor")
-            return data
-        url = hf_hub_url(model_name, filename, revision=revision)
-        if urllib.parse.urlsplit(url).scheme != "https":
-            raise ValueError("Checkpoint downloads must use HTTPS")
-        return _read_range(opener, url, first, size, token)
+        if Path(model_name).is_dir():
+            path = Path(model_name) / filename
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"Missing checkpoint file {path}. Embedding-only models need the Hub ID "
+                    "or the original safetensors checkpoint directory, not the ONNX export directory."
+                )
+            return path
+        return Path(hf_hub_download(model_name, filename, cache_dir=cache_dir))
 
     try:
-        filename = "model.safetensors.index.json"
-        if local:
-            with (Path(model_name) / filename).open() as stream:
-                index = json.load(stream)
-        else:
-            request = urllib.request.Request(hf_hub_url(model_name, filename, revision=revision))
-            if urllib.parse.urlsplit(request.full_url).scheme != "https":
-                raise ValueError("Checkpoint downloads must use HTTPS")
-            if token:
-                request.add_header("Authorization", f"Bearer {token}")
-            with opener.open(request, timeout=60) as response:
-                index = json.loads(response.read(16 * 1024 * 1024))
-        names = [name for name in index["weight_map"] if name.endswith("embed_tokens.weight")]
+        index = json.loads(fetch("model.safetensors.index.json").read_text())
+    except (FileNotFoundError, EntryNotFoundError):
+        shards = {"model.safetensors"}
+    else:
+        shards = {s for n, s in index["weight_map"].items() if n.endswith("embed_tokens.weight")}
+    if len(shards) != 1:
+        raise ValueError(f"Expected one embedding shard, found {sorted(shards)}")
+    with safe_open(fetch(shards.pop()), framework="pt", device="cpu") as checkpoint:
+        names = checkpoint.keys()
+        names = [n for n in names if n.endswith("embed_tokens.weight")]
         if len(names) != 1:
             raise ValueError(f"Expected one token embedding tensor, found {names}")
-        name = names[0]
-        shard = index["weight_map"][name]
-    except (FileNotFoundError, urllib.error.HTTPError) as error:
-        if isinstance(error, urllib.error.HTTPError) and error.code != 404:
-            raise
-        name, shard = None, "model.safetensors"
-
-    header_size = struct.unpack("<Q", read(shard, 0, 8))[0]
-    if not 0 < header_size <= 100 * 1024 * 1024:
-        raise ValueError("Invalid safetensors header size")
-    header_data = read(shard, 8, header_size)
-    header = json.loads(header_data)
-    if name is None:
-        names = [key for key in header if key.endswith("embed_tokens.weight")]
-        if len(names) != 1:
-            raise ValueError(f"Expected one token embedding tensor, found {names}")
-        name = names[0]
-    tensor = header[name]
-    shape, dtype = tensor["shape"], tensor["dtype"]
-    if len(shape) != 2 or any(type(dim) is not int or dim <= 0 for dim in shape):
+        table = checkpoint.get_tensor(names[0])
+    if table.ndim != 2 or any(dim <= 0 for dim in table.shape):
         raise ValueError("Expected a two-dimensional embedding tensor")
-    source_dtype = {"F16": "<f2", "F32": "<f4", "BF16": "<u2"}.get(dtype)
-    if source_dtype is None:
-        raise ValueError(f"Unsupported embedding dtype: {dtype}")
-    itemsize = np.dtype(source_dtype).itemsize
-    first, last = tensor["data_offsets"]
-    if (
-        not isinstance(first, int)
-        or not isinstance(last, int)
-        or first < 0
-        or last - first != math.prod(shape) * itemsize
-    ):
-        raise ValueError("Invalid embedding tensor byte offsets")
-    if math.prod(shape) * np.dtype(np.float16).itemsize > max_output_bytes:
-        raise ValueError("Embedding tensor exceeds the configured maximum cache size")
-
-    identity = {
-        "model": str(Path(model_name).resolve()) if local else model_name,
-        "revision": revision,
-        "name": name,
-        "tensor": tensor,
-    }
-    fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode())
-    chunk_size = 8 * 1024 * 1024
-    if local:
-        # Content, rather than timestamps, detects checkpoints copied or rewritten in place.
-        for offset in range(first, last, chunk_size):
-            fingerprint.update(
-                read(shard, 8 + header_size + offset, min(chunk_size, last - offset))
-            )
-    digest = fingerprint.hexdigest()
-    cache_path = Path(cache_file)
-    cache_path = cache_path.with_name(f"{cache_path.stem}_{digest}{cache_path.suffix}")
-    if cache_path.is_file():
-        cached = _cached_embedding(cache_path, shape, chunk_size)
-        if cached is not None:
-            return cached
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    # Disk-backed output avoids full-size byte buffers and conversion copies for large vocabularies.
-    with tempfile.NamedTemporaryFile(dir=cache_path.parent, suffix=".npy", delete=False) as stream:
-        temporary = Path(stream.name)
-    mapped = flat = None
-    try:
-        mapped = np.lib.format.open_memmap(
-            temporary, mode="w+", dtype=np.float16, shape=tuple(shape)
-        )
-        flat = mapped.reshape(-1)
-        converted_fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode())
-        for offset in range(first, last, chunk_size):
-            raw = read(shard, 8 + header_size + offset, min(chunk_size, last - offset))
-            if local:
-                converted_fingerprint.update(raw)
-            values = np.frombuffer(raw, dtype=source_dtype)
-            if dtype == "BF16":
-                values = (values.astype(np.uint32) << 16).view(np.float32)
-            with np.errstate(over="ignore", invalid="ignore"):
-                values = values.astype(np.float16)
-            if not np.isfinite(values).all():
-                raise ValueError("Embedding values must be finite and representable in float16")
-            start = (offset - first) // itemsize
-            flat[start : start + len(values)] = values
-        if local and (
-            converted_fingerprint.hexdigest() != digest
-            or read(shard, 8, header_size) != header_data
-        ):
-            raise ValueError("Checkpoint changed while loading the embedding tensor")
-        mapped.flush()
-        flat = mapped = None
-        try:
-            os.replace(temporary, cache_path)
-        except OSError:
-            # Another reader can already have the same immutable cache mapped on Windows.
-            cached = _cached_embedding(cache_path, shape, chunk_size)
-            if cached is None:
-                raise
-            return cached
-    finally:
-        # Close memory maps before rename/unlink on Windows, including failed downloads.
-        if mapped is not None:
-            flat = mapped = None
-        temporary.unlink(missing_ok=True)
-    return np.load(cache_path, mmap_mode="r", allow_pickle=False)
+    if table.dtype not in (torch.float16, torch.float32, torch.bfloat16):
+        raise ValueError(f"Unsupported embedding dtype: {table.dtype}")
+    return table
