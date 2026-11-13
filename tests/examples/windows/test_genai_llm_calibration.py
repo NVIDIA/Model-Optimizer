@@ -18,11 +18,7 @@
 import importlib
 import importlib.util
 import json
-import os
-import struct
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,8 +26,12 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import pytest
+import torch
 from datasets import Dataset
+from huggingface_hub import constants as hub_constants
 from onnx import TensorProto, helper, numpy_helper
+from safetensors import SafetensorError
+from safetensors.torch import save_file
 from transformers.models.qwen3_5.tokenization_qwen3_5 import Qwen3_5Tokenizer
 
 _EXAMPLE = Path(__file__).resolve().parents[3] / "examples/windows/onnx_ptq/genai_llm"
@@ -105,7 +105,7 @@ def test_signature_calibration_and_profiles(tmp_path, hybrid, batch_size):
     assert calibration.needs_signature_inputs(signature) == hybrid
     ids = np.array([[1, 2, 0], [2, 1, 2]])[:batch_size]
     mask = np.array([[1, 1, 0], [1, 1, 1]])[:batch_size]
-    embeddings = np.arange(16, dtype=np.float16).reshape(4, 4)
+    embeddings = torch.arange(16, dtype=torch.float16).reshape(4, 4)
     feed = calibration.calibration_feed(signature, ids, mask, embeddings if hybrid else None)
     assert set(feed) == {name for name, _, _ in signature}
     np.testing.assert_array_equal(
@@ -225,256 +225,148 @@ def test_local_hybrid_config_through_calibration_inputs(tmp_path, monkeypatch):
     assert feeds[0]["position_ids"].shape == (2, 2)
 
 
-def _checkpoint(directory, dtype="F16", indexed=False, invalid=False, offset=0, values=None):
-    directory.mkdir(exist_ok=True)
-    if values is None:
-        values = np.arange(24, dtype=np.float32).reshape(6, 4)
-    values = values + offset
-    raw = (
-        (values.view(np.uint32) >> 16).astype("<u2").tobytes()
-        if dtype == "BF16"
-        else values.astype("<f2" if dtype == "F16" else "<f4").tobytes()
-    )
-    name = "model.embed_tokens.weight"
-    metadata = {
-        name: {
-            "dtype": dtype,
-            "shape": list(values.shape),
-            "data_offsets": [0, len(raw) + int(invalid)],
-        }
-    }
-    header = json.dumps(metadata).encode()
-    payload = struct.pack("<Q", len(header)) + header + raw
-    shard = "model-00001-of-00002.safetensors" if indexed else "model.safetensors"
-    (directory / shard).write_bytes(payload)
-    if indexed:
-        (directory / "model.safetensors.index.json").write_text(
-            json.dumps({"weight_map": {name: shard}})
-        )
-    return values, payload
-
-
-@pytest.mark.parametrize("dtype", ["F16", "F32", "BF16"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("indexed", [False, True])
-def test_embedding_tensor_from_local_checkpoint_and_cache(tmp_path, dtype, indexed):
+@pytest.mark.parametrize("hub", [False, True])
+def test_embedding_checkpoint_calibration_offline(tmp_path, monkeypatch, dtype, indexed, hub):
     model = tmp_path / "checkpoint"
-    values, _ = _checkpoint(model, dtype, indexed)
-    cache = tmp_path / "cache" / "embedding.npy"
-    got = calibration.embed_table(str(model), cache)
-    assert isinstance(got, np.memmap)
-    np.testing.assert_array_equal(got, values.astype(np.float16))
-    cached = calibration.embed_table(str(model), cache)
-    assert cached.filename == got.filename
-    with pytest.raises(ValueError):
-        calibration.embed_table(str(model), cache, max_output_bytes=values.size * 2 - 1)
-    shard = next(model.glob("*.safetensors"))
-    stat = shard.stat()
-    updated, _ = _checkpoint(model, dtype, indexed, offset=2)
-    os.utime(shard, ns=(stat.st_atime_ns, stat.st_mtime_ns))
-    refreshed = calibration.embed_table(str(model), cache)
-    np.testing.assert_array_equal(refreshed, updated.astype(np.float16))
-    np.testing.assert_array_equal(got, values.astype(np.float16))
-    assert refreshed.filename != got.filename
-
-
-def test_invalid_tensor_leaves_no_cache(tmp_path):
-    model = tmp_path / "checkpoint"
-    _checkpoint(model, invalid=True)
-    cache = tmp_path / "cache" / "embedding.npy"
-    with pytest.raises(ValueError):
-        calibration.embed_table(str(model), cache)
-    assert not cache.exists()
-
-
-@pytest.mark.parametrize("corruption", ["shape", "dtype", "nonfinite", "truncated"])
-def test_invalid_embedding_cache_is_rebuilt(tmp_path, corruption):
-    model = tmp_path / "checkpoint"
-    values, _ = _checkpoint(model)
-    cache = tmp_path / "cache" / "embedding.npy"
-    table = calibration.embed_table(str(model), cache)
-    cached_path = Path(table.filename)
-    del table
-    if corruption == "truncated":
-        cached_path.write_bytes(cached_path.read_bytes()[:-2])
-    else:
-        corrupt = values.astype(np.float32 if corruption == "dtype" else np.float16)
-        if corruption == "shape":
-            corrupt = corrupt[:1]
-        elif corruption == "nonfinite":
-            corrupt[0, 0] = np.nan
-        np.save(cached_path, corrupt)
-    recovered = calibration.embed_table(str(model), cache)
-    assert recovered.dtype == np.float16
-    np.testing.assert_array_equal(recovered, values.astype(np.float16))
-
-
-@pytest.mark.parametrize("destination", ["missing", "valid", "invalid"])
-def test_embedding_cache_publication_failure(tmp_path, monkeypatch, destination):
-    model = tmp_path / "checkpoint"
-    values, _ = _checkpoint(model)
-    cache = tmp_path / "cache" / "embedding.npy"
-
-    def blocked_replace(source, target):
-        if destination != "missing":
-            contents = values.astype(np.float16)
-            if destination == "invalid":
-                contents[0, 0] = np.nan
-            np.save(target, contents)
-        raise PermissionError("Cache destination is locked")
-
-    monkeypatch.setattr(calibration.os, "replace", blocked_replace)
-    if destination == "valid":
-        recovered = calibration.embed_table(str(model), cache)
-        np.testing.assert_array_equal(recovered, values.astype(np.float16))
-    else:
-        with pytest.raises(PermissionError):
-            calibration.embed_table(str(model), cache)
-    assert len(list(cache.parent.iterdir())) == (destination != "missing")
-
-
-@pytest.mark.parametrize("oversized", [False, True])
-def test_hub_embedding_is_downloaded_in_bounded_ranges(tmp_path, monkeypatch, oversized):
-    values = np.ones((4096, 1024), dtype="<f4")
-    metadata = {
-        "model.embed_tokens.weight": {
-            "dtype": "F32",
-            "shape": [2**30, 1024] if oversized else list(values.shape),
-            "data_offsets": [0, 2**42 if oversized else values.nbytes],
-        }
-    }
-    header = json.dumps(metadata).encode()
-    payload = struct.pack("<Q", len(header)) + header + values.tobytes()
-    ranges = []
-    revision = "a" * 40
-    payloads = {
-        revision: payload,
-        "b" * 40: struct.pack("<Q", len(header)) + header + (values + 1).tobytes(),
-    }
-
-    class Response:
-        status = 206
-
-        def __init__(self, first, last, content):
-            self.first, self.last = first, last
-            self.content = content
-            self.headers = {"Content-Range": f"bytes {first}-{last}/{len(content)}"}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            pass
-
-        def read(self, limit):
-            return self.content[self.first : min(self.last + 1, self.first + limit)]
-
-    def open_request(request, timeout):
-        resolved_revision = request.full_url.split("/resolve/")[1].split("/")[0]
-        assert resolved_revision in payloads
-        if request.full_url.endswith(".index.json"):
-            raise urllib.error.HTTPError(request.full_url, 404, "Not found", {}, None)
-        assert request.get_header("Authorization") == "Bearer test-token"
-        first, last = map(int, request.get_header("Range").removeprefix("bytes=").split("-"))
-        ranges.append((first, last))
-        return Response(first, last, payloads[resolved_revision])
-
-    monkeypatch.setattr(
-        calibration.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_request)
-    )
-    monkeypatch.setattr(calibration, "get_token", lambda: "test-token")
-    monkeypatch.setattr(
-        calibration,
-        "HfApi",
-        lambda: SimpleNamespace(
-            endpoint="https://huggingface.co",
-            model_info=lambda *_a, **_k: SimpleNamespace(sha=revision),
-        ),
-        raising=False,
-    )
-    if oversized:
-
-        def reject_allocation(*_args, **_kwargs):
-            pytest.fail("Oversized checkpoint must be rejected before cache allocation")
-
-        monkeypatch.setattr(calibration.np.lib.format, "open_memmap", reject_allocation)
-        with pytest.raises(ValueError, match="exceeds the configured maximum cache size"):
-            calibration.embed_table("test/model", tmp_path / "cache" / "embedding.npy")
-        assert not (tmp_path / "cache").exists()
-        return
-    table = calibration.embed_table("test/model", tmp_path / "embedding.npy")
-    np.testing.assert_array_equal(table, values)
-    assert max(last - first + 1 for first, last in ranges) <= 8 * 1024 * 1024
-    assert sum(last - first + 1 for first, last in ranges) == len(payload)
-    ranges.clear()
-    cached = calibration.embed_table("test/model", tmp_path / "embedding.npy")
-    assert cached.filename == table.filename
-    assert sum(last - first + 1 for first, last in ranges) < len(payload)
-    revision = "b" * 40
-    refreshed = calibration.embed_table("test/model", tmp_path / "embedding.npy")
-    np.testing.assert_array_equal(refreshed, values + 1)
-    np.testing.assert_array_equal(table, values)
-
-
-def test_nonfinite_embedding_cleans_partial_download(tmp_path):
-    model = tmp_path / "checkpoint"
-    _checkpoint(model)
-    shard = model / "model.safetensors"
-    payload = bytearray(shard.read_bytes())
-    payload[-2:] = np.array([np.inf], dtype="<f2").tobytes()
-    shard.write_bytes(payload)
-    cache = tmp_path / "cache" / "embedding.npy"
-    with pytest.raises(ValueError):
-        calibration.embed_table(str(model), cache)
-    assert not list(cache.parent.iterdir())
-
-
-def test_checkpoint_change_during_conversion_cleans_partial_cache(tmp_path, monkeypatch):
-    model = tmp_path / "checkpoint"
-    _checkpoint(model, dtype="F32", values=np.ones((4096, 1024), dtype=np.float32))
-    original = np.frombuffer
-    changed = False
-
-    def change_later_chunk(*args, **kwargs):
-        nonlocal changed
-        if not changed:
-            changed = True
-            with (model / "model.safetensors").open("r+b") as stream:
-                stream.seek(-4, 2)
-                stream.write(np.array([2], dtype="<f4").tobytes())
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(calibration.np, "frombuffer", change_later_chunk)
-    cache = tmp_path / "cache" / "embedding.npy"
-    with pytest.raises(ValueError):
-        calibration.embed_table(str(model), cache)
-    assert not list(cache.parent.iterdir())
-
-
-def test_range_reader_rejects_ignored_ranges_and_strips_cross_host_auth():
-    class Response:
-        status = 200
-        headers = {}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            pass
-
-    opener = SimpleNamespace(open=lambda *_args, **_kwargs: Response())
-    with pytest.raises(ValueError):
-        calibration._read_range(opener, "https://huggingface.co/model", 0, 8, None)
-    request = urllib.request.Request(
-        "https://huggingface.co/model", headers={"Authorization": "Bearer test"}
-    )
-    redirected = calibration._HubRedirectHandler().redirect_request(
-        request, None, 302, "", {}, "https://cdn.example/model"
-    )
-    assert not redirected.has_header("Authorization")
-    with pytest.raises(ValueError):
-        calibration._HubRedirectHandler().redirect_request(
-            request, None, 302, "", {}, "http://cdn.example/model"
+    if hub:
+        model = tmp_path / "models--test--model" / "snapshots" / ("a" * 40)
+        refs = model.parents[1] / "refs"
+        refs.mkdir(parents=True)
+        (refs / "main").write_text("a" * 40)
+    model.mkdir(parents=True)
+    values = torch.tensor([[1.0001, 2.0002], [3.0003, 4.0004], [5.0005, 6.0006]], dtype=dtype)
+    shard = "model-00001-of-00002.safetensors" if indexed else "model.safetensors"
+    save_file({"model.embed_tokens.weight": values}, model / shard)
+    if indexed:
+        (model / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"model.embed_tokens.weight": shard}})
         )
+    elif hub:
+        missing = model.parents[1] / ".no_exist" / ("a" * 40)
+        missing.mkdir(parents=True)
+        (missing / "model.safetensors.index.json").touch()
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
+    table = calibration.embed_table("test/model" if hub else str(model), tmp_path)
+    assert table.dtype == dtype
+    # The tensor remains usable after safe_open closes, without a converted disk cache.
+    for target, numpy_dtype in (("tensor(float16)", np.float16), ("tensor(float)", np.float32)):
+        feed = calibration.calibration_feed(
+            [("inputs_embeds", [1, 2, 2], target)], [[2, 0]], [[1, 1]], table
+        )
+        np.testing.assert_array_equal(
+            feed["inputs_embeds"],
+            values[torch.tensor([[2, 0]])].float().numpy().astype(numpy_dtype),
+        )
+    assert not list(tmp_path.rglob("*.npy"))
+
+
+@pytest.mark.parametrize("bad_value", [float("inf"), float("nan"), 1e10])
+def test_embedding_selected_values_validate_model_dtype(tmp_path, bad_value):
+    values = torch.tensor([[1.0001], [bad_value]], dtype=torch.float32)
+    save_file({"model.embed_tokens.weight": values}, tmp_path / "model.safetensors")
+    table = calibration.embed_table(str(tmp_path))
+    signature = [("inputs_embeds", [1, 1, 1], "tensor(float16)")]
+    assert calibration.calibration_feed(signature, [[0]], [[1]], table)["inputs_embeds"].shape == (
+        1,
+        1,
+        1,
+    )
+    with pytest.raises(ValueError):
+        calibration.calibration_feed(signature, [[1]], [[1]], table)
+    if bad_value == 1e10:
+        signature[0] = ("inputs_embeds", [1, 1, 1], "tensor(float)")
+        assert (
+            calibration.calibration_feed(signature, [[1]], [[1]], table)["inputs_embeds"].item()
+            == values[1].item()
+        )
+
+
+@pytest.mark.parametrize(
+    "filename", ["../weights.safetensors", "sub/weights.safetensors", "sub\\weights.safetensors"]
+)
+def test_embedding_rejects_index_path_traversal(tmp_path, filename):
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"model.embed_tokens.weight": filename}})
+    )
+    with pytest.raises(ValueError):
+        calibration.embed_table(str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing_file", "invalid_file", "missing_embedding", "multiple_embeddings", "shape", "dtype"],
+)
+def test_embedding_rejects_invalid_checkpoint(tmp_path, case):
+    path = tmp_path / "model.safetensors"
+    tensors = {"model.embed_tokens.weight": torch.ones(2, 4)}
+    if case == "missing_embedding":
+        tensors = {"other.weight": torch.ones(2, 4)}
+    elif case == "multiple_embeddings":
+        tensors["other.embed_tokens.weight"] = torch.ones(2, 4)
+    elif case == "shape":
+        tensors["model.embed_tokens.weight"] = torch.ones(4)
+    elif case == "dtype":
+        tensors["model.embed_tokens.weight"] = torch.ones(2, 4, dtype=torch.int32)
+    save_file(tensors, path)
+    if case == "missing_file":
+        path.unlink()
+    if case == "invalid_file":
+        path.write_bytes(path.read_bytes()[:-1])
+    error = (
+        FileNotFoundError
+        if case == "missing_file"
+        else SafetensorError
+        if case == "invalid_file"
+        else ValueError
+    )
+    with pytest.raises(error):
+        calibration.embed_table(str(tmp_path))
+
+
+def test_calibration_shared_zero_states_remain_zero_in_ort():
+    signature = [
+        ("past_key_values.0.conv_state", ["batch_size", 4, 3], "tensor(float)"),
+        ("past_key_values.1.conv_state", ["batch_size", 4, 3], "tensor(float)"),
+        ("past_key_values.0.recurrent_state", ["batch_size", 2, 4, 4], "tensor(float16)"),
+        ("past_key_values.2.conv_state", ["batch_size", 4, 3], "tensor(float16)"),
+    ]
+    cache = {}
+    feeds = [
+        calibration.calibration_feed(signature, [[1, 2]], [[1, 1]], zero_cache=cache)
+        for _ in range(2)
+    ]
+    first, second = feeds
+    assert first[signature[0][0]] is first[signature[1][0]] is second[signature[0][0]]
+    assert first[signature[0][0]] is not first[signature[2][0]]
+    assert first[signature[0][0]] is not first[signature[3][0]]
+    graph_inputs = [
+        helper.make_tensor_value_info(
+            n,
+            TensorProto.FLOAT if t == "tensor(float)" else TensorProto.FLOAT16,
+            list(first[n].shape),
+        )
+        for n, _, t in signature
+    ]
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Add", [signature[0][0], signature[1][0]], ["y"])],
+            "states",
+            graph_inputs,
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 4, 3])],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=10,
+    )
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    for feed in feeds:
+        np.testing.assert_array_equal(session.run(None, feed)[0], np.zeros((1, 4, 3)))
+    assert all(not value.any() for value in cache.values())
+    different_batch = calibration.calibration_feed(
+        signature, [[1], [2]], [[1], [1]], zero_cache=cache
+    )
+    assert different_batch[signature[0][0]].shape == (2, 4, 3)
 
 
 def test_external_weights_keep_shape_constants_loadable(tmp_path):

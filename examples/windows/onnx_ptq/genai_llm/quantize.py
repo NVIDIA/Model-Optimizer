@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import argparse
-import hashlib
 import importlib
 import logging
 import os
@@ -168,13 +167,13 @@ def get_calib_inputs(
 ):
     # from transformers import LlamaConfig
     # config = LlamaConfig.from_pretrained(
-    #     model_name, use_auth_token=True, cache_dir=cache_dir, trust_remote_code=trust_remote_code
+    #     model_name, cache_dir=cache_dir, trust_remote_code=trust_remote_code
     # )
     config = AutoConfig.from_pretrained(
-        model_name, use_auth_token=True, cache_dir=cache_dir, trust_remote_code=trust_remote_code
+        model_name, cache_dir=cache_dir, trust_remote_code=trust_remote_code
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        model_name, use_auth_token=True, cache_dir=cache_dir, trust_remote_code=trust_remote_code
+        model_name, cache_dir=cache_dir, trust_remote_code=trust_remote_code
     )
     tokenizer.add_special_tokens({"pad_token": "[PAD]"})
     tokenizer.pad_token = tokenizer.eos_token
@@ -383,15 +382,12 @@ def main(args):
     if own_calib:
         table = None
         if any(name == "inputs_embeds" for name, _shape, _type in signature):
-            table = llm_calibration.embed_table(
-                args.model_name,
-                os.path.join(
-                    cache_dir,
-                    "embed_tokens_" + hashlib.sha256(args.model_name.encode()).hexdigest() + ".npy",
-                ),
-            )
+            table = llm_calibration.embed_table(args.model_name, cache_dir)
+        zero_cache = {}
         calib_inputs = [
-            llm_calibration.calibration_feed(signature, d["input_ids"], d["attention_mask"], table)
+            llm_calibration.calibration_feed(
+                signature, d["input_ids"], d["attention_mask"], table, zero_cache
+            )
             for d in calib_inputs
         ]
 
