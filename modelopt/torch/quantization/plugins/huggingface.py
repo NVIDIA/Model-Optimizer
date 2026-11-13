@@ -50,7 +50,7 @@ from ..nn.modules.tensor_quantizer import _try_stacked_fake_quant
 from ..utils import replace_function, sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
 from ..utils.numeric_utils import E8M0_BIAS, unpack_e2m1
-from ..utils.packed_experts import unpacked
+from ..utils.packed_experts import decompressed_shape, unpacked
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 
@@ -1143,7 +1143,10 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                 self._forward_count += 1
         self._stacked_weights = {}
         try:
-            return super().forward(*args, **kwargs)
+            # Experts kept packed run decompressed: opened here as well, as quantizer insertion and
+            # expert parallelism can each replace the forward their packing wrapped.
+            with unpacked(self):
+                return super().forward(*args, **kwargs)
         finally:
             # Autograd keeps what backward needs; holding more would pin every expert's copy.
             self._stacked_weights = {}
@@ -1163,18 +1166,20 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
         The base impl uses singular ``*_weight_quantizer`` and skips fused-
         experts modules, so weight-only calibration never reaches per-expert
-        quantizers without this override.
+        quantizers without this override. Experts kept packed are read decompressed, in a window
+        held open across the yields.
         """
-        for weight_name, quantizers_name in (
-            (self._first_proj_attr, self._first_proj_weight_quantizers_attr),
-            ("down_proj", "down_proj_weight_quantizers"),
-        ):
-            weight = getattr(self, weight_name, None)
-            quantizers = getattr(self, quantizers_name, None)
-            if weight is None or quantizers is None:
-                continue
-            for idx, q in enumerate(quantizers):
-                yield self.get_expert_weight(weight_name, idx), q
+        with unpacked(self, writeback=True):
+            for weight_name, quantizers_name in (
+                (self._first_proj_attr, self._first_proj_weight_quantizers_attr),
+                ("down_proj", "down_proj_weight_quantizers"),
+            ):
+                weight = getattr(self, weight_name, None)
+                quantizers = getattr(self, quantizers_name, None)
+                if weight is None or quantizers is None:
+                    continue
+                for idx, q in enumerate(quantizers):
+                    yield self.get_expert_weight(weight_name, idx), q
 
     def iter_weight_quantizers_for_calibration(self):
         """Yield the per-expert weight quantizers without slicing the fused 3-D weight.
@@ -1722,7 +1727,7 @@ def _transposed_experts(modules) -> list[str]:
     stored ``(num_experts, out_dim, in_dim)``, its first projection takes the dim ``down_proj`` puts
     out, which stored transposed it never does. A non-gated container (``up_proj``, as Nemotron-H's)
     matches no :func:`_fused_experts_wrapper`, so only its ``is_transposed`` is read, and its own
-    wrapper is responsible for the layout.
+    wrapper is responsible for the layout. Experts kept packed show it by their decompressed shapes.
     """
     return sorted(
         {
@@ -1731,7 +1736,8 @@ def _transposed_experts(modules) -> list[str]:
             if getattr(module, "is_transposed", False)
             or (
                 (wrapper := _fused_experts_wrapper(module)) is not None
-                and getattr(module, wrapper._first_proj_attr).shape[-1] != module.down_proj.shape[1]
+                and decompressed_shape(module, wrapper._first_proj_attr)[-1]
+                != decompressed_shape(module, "down_proj")[1]
             )
         }
     )
