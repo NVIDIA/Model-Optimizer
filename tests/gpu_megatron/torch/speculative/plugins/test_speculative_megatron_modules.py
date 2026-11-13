@@ -186,6 +186,21 @@ def _test_speculative_gpt_model(
                     torch.distributed.all_reduce(sp_grad, group=get_tensor_model_parallel_group())
                 reference_grad = reference.eagle_module.get_parameter(parameter_name).grad.float()
                 # Allow BF16 accumulation differences, but reject TP-scaled gradients.
+                # DIAG: rerun the reference to measure its own run-to-run noise.
+                ref_param = reference.eagle_module.get_parameter(parameter_name)
+                ref_param.grad = None
+                torch.cuda.set_rng_state(mixing_rng_state)
+                reference(prompt_tokens, position_ids, attention_mask, labels=labels).mean().backward()
+                reference_grad2 = ref_param.grad.float()
+                print(
+                    f"DIAG rank={rank} algo={algo} mode={mix_hidden_states_mode} "
+                    f"param={parameter_name} sp_flag={getattr(parameter, 'sequence_parallel', False)} "
+                    f"sp_vs_ref={((sp_grad - reference_grad).norm() / reference_grad.norm()).item():.3e} "
+                    f"ref_vs_ref2={((reference_grad2 - reference_grad).norm() / reference_grad.norm()).item():.3e} "
+                    f"norm_ratio={(sp_grad.norm() / reference_grad.norm()).item():.4f} "
+                    f"sp_norm={sp_grad.norm().item():.4e} ref_norm={reference_grad.norm().item():.4e}",
+                    flush=True,
+                )
                 assert (sp_grad - reference_grad).norm() <= 0.01 * reference_grad.norm()
 
 
