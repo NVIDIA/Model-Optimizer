@@ -240,7 +240,9 @@ def test_unaligned_deployment_export_rejected_without_mutation(tmp_path, fmt, ex
         assert torch.equal(model.state_dict()[key], value), key
 
 
-def test_diffusion_pipeline_export_rejected_before_writing(tmp_path):
+@pytest.mark.parametrize("standalone", [False, True])
+def test_diffusion_pipeline_export_rejected_before_writing(tmp_path, standalone):
+    """Reject residue pipelines and aligned components without changing their state."""
     diffusers = pytest.importorskip("diffusers")
 
     class ResiduePipeline(diffusers.DiffusionPipeline):
@@ -248,8 +250,16 @@ def test_diffusion_pipeline_export_rejected_before_writing(tmp_path):
             super().__init__()
             self.register_modules(transformer=transformer)
 
-    model = mtq.quantize(nn.Linear(64, 8), _config(), lambda m: m(torch.ones(2, 64)))
-    pipeline = ResiduePipeline(model)
+    class ResidueComponent(diffusers.ModelMixin):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(128, 32)
+
+        def forward(self, inputs):
+            return self.proj(inputs)
+
+    model = mtq.quantize(ResidueComponent(), _config(), lambda m: m(torch.ones(2, 128)))
+    pipeline = model if standalone else ResiduePipeline(model)
     before = deepcopy(model.state_dict())
     attributes = set(pipeline.__dict__)
     export_dir = tmp_path / "export"

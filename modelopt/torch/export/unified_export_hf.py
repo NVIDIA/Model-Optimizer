@@ -1040,10 +1040,10 @@ def _process_quantized_modules(
 
 def _check_residue_export(model, components=None):
     """Validate residue deployment before export changes weights or writes files."""
-    if isinstance(model, nn.Module):
-        return collect_residue_export_metadata(model)
-    elif HAS_DIFFUSERS and is_diffusers_object(model):
+    if HAS_DIFFUSERS and is_diffusers_object(model):
         modules = get_diffusion_components(model, components).values()
+    elif isinstance(model, nn.Module):
+        return collect_residue_export_metadata(model)
     else:
         return {}
     for module in modules:

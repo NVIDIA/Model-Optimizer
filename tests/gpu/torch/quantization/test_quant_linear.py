@@ -37,10 +37,7 @@ pytestmark = pytest.mark.skipif(
 def _reference(model, inputs):
     iq, wq = model.input_quantizer, model.weight_quantizer
     indices = iq._salient_indices
-    is_mx = iq.block_sizes["scale_bits"] == (8, 0)
     x = inputs if iq.pre_quant_scale is None else inputs * iq.pre_quant_scale
-    if is_mx and indices.numel():
-        x = x.float()
     # TensorQuantizer makes inputs contiguous before calling the native FP4 kernel.
     x = x.contiguous()
     block = iq.block_sizes[-1]
@@ -66,12 +63,13 @@ def _reference(model, inputs):
 
 @pytest.mark.parametrize("fmt", ["NVFP4", "MXFP4"])
 @pytest.mark.parametrize("ratio", [0.0, 0.25, 1.0])
-def test_residue_qdq_backward_matches_reference(fmt, ratio):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_residue_qdq_backward_matches_reference(fmt, ratio, dtype):
     torch.manual_seed(31)
     cfg = deepcopy(getattr(mtq, f"{fmt}_DEFAULT_CFG"))
     cfg["algorithm"] = {"method": "residue_max", "residue_ratio": ratio}
-    inputs = torch.randn(2, 64, 3, device="cuda").transpose(1, 2).requires_grad_()
-    model = mtq.quantize(nn.Linear(64, 17, device="cuda"), cfg, lambda m: m(inputs))
+    inputs = torch.randn(2, 64, 3, device="cuda", dtype=dtype).transpose(1, 2).requires_grad_()
+    model = mtq.quantize(nn.Linear(64, 17, device="cuda", dtype=dtype), cfg, lambda m: m(inputs))
     reference = deepcopy(model)
     reference_inputs = inputs.detach().clone().requires_grad_()
     parameter = model.weight
@@ -79,7 +77,8 @@ def test_residue_qdq_backward_matches_reference(fmt, ratio):
     indices = model.input_quantizer._salient_indices.clone()
     output = model(inputs)
     expected = _reference(reference, reference_inputs)
-    torch.testing.assert_close(output, expected, atol=1e-5, rtol=1e-5)
+    atol = rtol = 0.03 if dtype == torch.bfloat16 else 0.004 if dtype == torch.float16 else 1e-5
+    torch.testing.assert_close(output, expected, atol=atol, rtol=rtol)
     grad_output = torch.randn_like(output)
     output.backward(grad_output)
     expected.backward(grad_output)
@@ -90,7 +89,7 @@ def test_residue_qdq_backward_matches_reference(fmt, ratio):
     ):
         assert actual is not None and torch.isfinite(actual).all()
         assert actual.count_nonzero() > 0
-        torch.testing.assert_close(actual, target, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(actual, target, atol=atol, rtol=rtol)
     torch.optim.SGD(model.parameters(), lr=0.01).step()
     assert model.weight is parameter
     assert not torch.equal(model.weight, before)
@@ -114,7 +113,13 @@ def test_residue_qdq_and_checkpoint(tmp_path, fmt, width, ratio, dtype):
     model.weight_quantizer.pre_quant_scale = model.input_quantizer.pre_quant_scale.reciprocal()
     reference = _reference(model, inputs)
     atol = rtol = 0.03 if dtype == torch.bfloat16 else 0.004 if dtype == torch.float16 else 1e-5
-    torch.testing.assert_close(model(inputs), reference, atol=atol, rtol=rtol)
+    quantizer_dtypes = []
+    with model.input_quantizer.register_forward_pre_hook(
+        lambda _, args: quantizer_dtypes.append(args[0].dtype)
+    ):
+        output = model(inputs)
+    assert quantizer_dtypes and set(quantizer_dtypes) == {dtype}
+    torch.testing.assert_close(output, reference, atol=atol, rtol=rtol)
     checkpoint = tmp_path / "residue.pt"
     mto.save(model, checkpoint)
     restored = mto.restore(nn.Linear(width, 17, device="cuda", dtype=dtype), checkpoint)

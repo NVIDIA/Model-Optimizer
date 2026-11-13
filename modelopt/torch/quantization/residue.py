@@ -51,7 +51,7 @@ def get_salient_indices(act_scale_mean: torch.Tensor, block_size: int, ratio: fl
 
 def get_nvfp4_error_weighted_score(accumulated_error_sq, weight):
     """Return activation-error norm times weight-column norm for each input channel."""
-    weight_col_norm = weight.detach().float().square().sum(dim=0).sqrt()
+    weight_col_norm = torch.linalg.vector_norm(weight.detach(), ord=2, dim=0, dtype=torch.float32)
     return accumulated_error_sq.float().clamp_min(0).sqrt() * weight_col_norm
 
 

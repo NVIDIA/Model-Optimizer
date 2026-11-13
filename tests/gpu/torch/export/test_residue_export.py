@@ -23,6 +23,7 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file
 from transformers import LlamaConfig, LlamaForCausalLM
+from transformers.core_model_loading import Concatenate, WeightConverter, WeightRenaming
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -49,11 +50,10 @@ def _loaded_linear(inputs, tensors, metadata, fmt):
         block_sizes={-1: block},
     )
     amax = None if is_mx else tensors["input_scale"] * (6 * 448)
-    source = inputs.float() if is_mx else inputs
-    base = dynamic_block_quant(source, block, amax, None, (2, 1), bits)
+    base = dynamic_block_quant(inputs, block, amax, None, (2, 1), bits)
     indices = torch.tensor(metadata["salient_indices"], device=inputs.device, dtype=torch.long)
     if indices.numel():
-        residual = (source - base).index_select(-1, indices)
+        residual = (inputs - base).index_select(-1, indices)
         residual = dynamic_block_quant(residual, block, amax, None, (2, 1), bits)
         if metadata["runtime_mode"] == "mext_r1":
             return F.linear(base.to(inputs.dtype), weight, tensors.get("bias")) + F.linear(
@@ -154,8 +154,6 @@ def test_residue_hf_export_roundtrip(tmp_path, fmt, ratio, conversion):
             references[name] = inputs, expected
     assert references
     if conversion in ("split", "rename"):
-        from transformers.core_model_loading import Concatenate, WeightConverter, WeightRenaming
-
         if conversion == "split":
             model._weight_conversions = [
                 WeightConverter(

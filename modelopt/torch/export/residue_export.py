@@ -16,6 +16,7 @@
 """Native FP4 weight export with the ResServe residue metadata contract."""
 
 from collections import Counter
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -34,6 +35,7 @@ __all__: list[str] = []
 
 
 def _residue_layer_metadata(module):
+    """Validate one residue layer and describe its deployment channel layout."""
     weight = module.weight
     if weight.is_meta or hasattr(weight, "to_local") or not weight.is_floating_point():
         raise NotImplementedError("Residue export requires resident, uncompressed weights.")
@@ -92,6 +94,7 @@ def _residue_layer_metadata(module):
 
 
 def collect_residue_export_metadata(model):
+    """Validate export eligibility and shared channels without mutating the model."""
     residue = {name: m for name, m in model.named_modules() if isinstance(m, ResidueQuantLinear)}
     if not residue:
         return {}
@@ -133,6 +136,7 @@ def collect_residue_export_metadata(model):
 
 @torch.no_grad()
 def export_residue_weight(module, dtype):
+    """Pack residue weights with native FP4 scales, leaving the live module unchanged."""
     metadata = _residue_layer_metadata(module)
     weight = module.weight.detach()
     if metadata["runtime_mode"] == "extended_k":
@@ -148,6 +152,10 @@ def export_residue_weight(module, dtype):
     view.register_buffer("weight", weight)
     view.input_quantizer = module.input_quantizer
     view.weight_quantizer = module.weight_quantizer
+    if not is_mx:
+        # Normalize zero amax using the native export convention without changing QDQ state.
+        view.weight_quantizer = deepcopy(module.weight_quantizer)
+        view.weight_quantizer.amax = module.weight_quantizer.export_amax()
     # Bound native packing temporaries while retaining the calibrated global scales.
     rows = max(1, 2**22 // weight.shape[-1])
     parts = []

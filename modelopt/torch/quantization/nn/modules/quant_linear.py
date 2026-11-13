@@ -341,19 +341,16 @@ class ResidueQuantLinear(QuantLinearConvBase):
         salient_indices: torch.Tensor,
     ) -> torch.Tensor:
         input_for_quant = self._apply_pre_quant_scale(input)
-        is_mx = self.input_quantizer.block_sizes.get("scale_bits") == (8, 0)
-        if is_mx:
-            input_for_quant = input_for_quant.float()
         salient_indices = salient_indices.to(device=input.device, dtype=torch.long)
 
         input_base = self._input_qdq_without_pre_quant_scale(input_for_quant)
         input_residue = input_for_quant.index_select(-1, salient_indices) - input_base.index_select(
             -1, salient_indices
         )
+        del input_for_quant
         input_residue_q = self._input_qdq_without_pre_quant_scale(input_residue)
 
-        result = torch.cat([input_base, input_residue_q], dim=-1)
-        return result.to(input.dtype) if is_mx else result
+        return torch.cat([input_base, input_residue_q], dim=-1)
 
     def _make_residue_weight(
         self,
@@ -406,6 +403,7 @@ class ResidueQuantLinear(QuantLinearConvBase):
         weight = self._apply_weight_pre_quant_scale(weight, salient_indices)
         with self.weight_quantizer.disable_pre_quant_scale():
             weight_q = self.weight_quantizer(weight)
+        del weight  # Release the temporary extended weight before allocating the output.
 
         output = F.linear(input_ext_q, weight_q, self.bias)
         return self.output_quantizer(output) if hasattr(self, "output_quantizer") else output

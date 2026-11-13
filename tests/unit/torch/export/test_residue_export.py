@@ -31,6 +31,7 @@ from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _process_quantized_modules,
 )
+from modelopt.torch.quantization.qtensor import NVFP4QTensor
 
 
 @pytest.mark.parametrize("invalid", ["indices", "pre_scale", "weight_shape"])
@@ -98,3 +99,32 @@ def test_residue_handler_preserves_packed_tensors(ratio):
     assert model.weight.dtype == torch.uint8
     assert not model.weight.requires_grad
     assert not any("salient_indices" in name for name in model.state_dict())
+
+
+@pytest.mark.parametrize("ratio", [0.0, 0.25, 1.0])
+@pytest.mark.parametrize("weight_value", [0.0, 0.5])
+def test_residue_nvfp4_export_scales(ratio, weight_value):
+    """Export zero weights finitely while preserving nonzero scales and live state."""
+    config = deepcopy(mtq.NVFP4_DEFAULT_CFG)
+    config["algorithm"] = {"method": "residue_max", "residue_ratio": ratio}
+    model = nn.Linear(128, 32, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(weight_value)
+    model = mtq.quantize(model, config, lambda m: m(torch.ones(2, 128)))
+    before = deepcopy(model.state_dict())
+    parameter = model.weight
+    packed = export_residue_weight(model, torch.float32)
+    for name in ("weight_scale", "weight_scale_2"):
+        assert torch.isfinite(packed[name].float()).all()
+        assert (packed[name].float() > 0).all()
+    expected_amax = model.weight_quantizer.maxbound if weight_value == 0 else weight_value
+    torch.testing.assert_close(packed["weight_scale_2"], torch.tensor(expected_amax / (6 * 448)))
+    shape = (32, packed["weight"].shape[-1] * 2)
+    restored = NVFP4QTensor(shape, torch.float32, packed["weight"]).dequantize(
+        scale=packed["weight_scale"], double_scale=packed["weight_scale_2"], block_sizes={-1: 16}
+    )
+    torch.testing.assert_close(restored, torch.full(shape, weight_value))
+    assert model.weight is parameter
+    assert model.state_dict().keys() == before.keys()
+    for key, value in before.items():
+        torch.testing.assert_close(model.state_dict()[key], value, rtol=0, atol=0)
