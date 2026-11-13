@@ -60,7 +60,8 @@ def _substitute(monkeypatch, name, **changes):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("num_bits", FORMAT_NAMES)
-def test_ggml_backend_via_quantize(num_bits, dtype, record_property):
+@pytest.mark.parametrize("retain_initialization", [False, True])
+def test_ggml_backend_via_quantize(num_bits, dtype, retain_initialization, record_property):
     torch.manual_seed(1234)
     model = torch.nn.Linear(256, 2, bias=False, dtype=dtype)
     inputs = torch.randn(2, 256, dtype=dtype)
@@ -89,7 +90,9 @@ def test_ggml_backend_via_quantize(num_bits, dtype, record_property):
     parameter = model.weight
     expected_weight = model.weight_quantizer(parameter).detach().clone()
     buffers = {name: value.clone() for name, value in model.weight_quantizer.named_buffers()}
+    model.weight_quantizer._ggml_retain_initialization = retain_initialization
     mtq.initialize_qdq_weights(model)
+    checkpoint_keys = set(model.state_dict())
     assert model.weight is parameter and model.weight_quantizer.is_enabled
     torch.testing.assert_close(model.weight, expected_weight, rtol=0, atol=0)
     codec = GGML_FORMAT_REGISTRY[num_bits]
@@ -157,9 +160,48 @@ def test_ggml_backend_via_quantize(num_bits, dtype, record_property):
     torch.testing.assert_close(
         model(inputs), torch.nn.functional.linear(inputs, expected_after_update), rtol=0, atol=0
     )
-    assert not any(
-        name.endswith("_qdq_initialization") for name, _ in model.weight_quantizer.named_buffers()
+    assert (
+        any(
+            name.endswith("_qdq_initialization")
+            for name, _ in model.weight_quantizer.named_buffers()
+        )
+        == retain_initialization
     )
+    if retain_initialization:
+        assert set(model.state_dict()) == checkpoint_keys
+        active = next(
+            buffer
+            for name, buffer in model.weight_quantizer.named_buffers()
+            if name.endswith("_qdq_initialization_active")
+        )
+        assert active.dtype == torch.bool and not active.any()
+        after_update = io.BytesIO()
+        mto.save(model, after_update)
+        after_update.seek(0)
+        resumed = mto.restore(torch.nn.Linear(256, 2, bias=False, dtype=dtype), after_update)
+        torch.testing.assert_close(
+            resumed.weight_quantizer(resumed.weight), expected_after_update, rtol=0, atol=0
+        )
+        # Retirement must survive a reload even if weights later return to their initial values.
+        with torch.no_grad():
+            resumed.weight.copy_(expected_weight)
+        packed, shape = codec.quantize(expected_weight)
+        torch.testing.assert_close(
+            resumed.weight_quantizer(resumed.weight),
+            codec.dequantize(packed, shape, dtype=dtype),
+            rtol=0,
+            atol=0,
+        )
+        resumed_active = next(
+            buffer
+            for name, buffer in resumed.weight_quantizer.named_buffers()
+            if name.endswith("_qdq_initialization_active")
+        )
+        resumed_active[0].fill_(True)
+        with torch.no_grad():
+            resumed.weight.copy_(resumed.weight.detach().clone())
+        with pytest.raises(NotImplementedError):
+            resumed.weight_quantizer(resumed.weight)
     model.weight.grad = None
     model(inputs).float().square().mean().backward()
     assert model.weight.grad is not None and torch.isfinite(model.weight.grad).all()
