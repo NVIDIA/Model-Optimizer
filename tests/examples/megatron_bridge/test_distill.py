@@ -349,11 +349,14 @@ def test_distill_validate_only(tmp_path, num_gpus):
 
 # NOTE: Qwen3.5-VL-MoE covered by test_qad.py
 @pytest.mark.timeout(420)  # sometimes times out in CI env with default 300s timeout
-def test_distill_vlm(tmp_path, num_gpus, fake_hub_checkpoint):
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_distill_vlm(tmp_path, num_gpus, fake_hub_checkpoint, pp_size):
     # Self-distillation of a tiny VLM: only the language model is distilled; the vision tower and the
     # vision->language projector must be left byte-for-byte untouched.
-    tp_size = num_gpus
-    pp_size = 1
+    # pp_size=2: the mRoPE text model needs position ids on the second pipeline stage too.
+    if num_gpus < pp_size:
+        pytest.skip(f"needs {pp_size} GPUs for pipeline parallelism")
+    tp_size = num_gpus // pp_size
     vlm_hf_path, teacher_model = create_tiny_qwen3_5_vl_dir(
         tmp_path,
         with_tokenizer=True,
