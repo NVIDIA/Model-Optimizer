@@ -856,3 +856,13 @@ def test_infer_types_falls_back_to_standalone_when_onnx_fails():
     assert value_info_types.get("vals") == onnx.TensorProto.FLOAT
     assert value_info_types.get("inds") == onnx.TensorProto.INT64  # TopK indices
     assert output_types.get("out") == onnx.TensorProto.FLOAT
+
+
+def test_get_shapes_keep_rank_for_unknown_dims():
+    # A dim with neither dim_value nor dim_param is valid ONNX and must still count as a dim.
+    tensor = make_tensor_value_info("t", onnx.TensorProto.FLOAT, ["batch", None, 8, -1])
+    graph = make_graph([], "unknown_dims", [tensor], [tensor])
+    model = make_model(graph, opset_imports=[make_opsetid("", 17)])
+
+    assert onnx_utils.get_input_shapes(model) == {"t": [1, 1, 8, 1]}
+    assert onnx_utils.get_output_shapes(model) == {"t": [1, 1, 8, 1]}
