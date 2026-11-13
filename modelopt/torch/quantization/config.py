@@ -1226,8 +1226,23 @@ class ResidueMaxCalibConfig(QuantizeAlgorithmConfig):
     """Select activation residual channels within each block for NVFP4 or MXFP4 QDQ."""
 
     method: Literal["residue_max"] = ModeloptField("residue_max")
-    block_size: int = ModeloptField(default=8, ge=1)
-    residue_ratio: float = ModeloptField(default=0.25, ge=0.0, le=1.0)
+    block_size: int = ModeloptField(
+        default=8,
+        ge=1,
+        description="Number of input channels per block for salient-channel selection.",
+    )
+    residue_ratio: float = ModeloptField(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Select int(residue_ratio * block_size) channels per block, excluding padding. "
+            "Calibration and QDQ support selections beyond the current HF export layout. "
+            "For HF export, every consecutive group of 8 input channels must contain "
+            "the same number of selected channels: 1, 2, or 4, unless all or none "
+            "of the input channels are selected."
+        ),
+    )
     salience_metric: Literal["activation_max", "nvfp4_error_weighted"] = ModeloptField(
         default="activation_max",
         description="Mean absolute activation per batch, or NVFP4 error times weight-column norm.",
