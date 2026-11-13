@@ -1352,8 +1352,9 @@ def local_hessian_calibrate(
     until it is encoded (1 KiB per input feature for GGML's 256-wide blocks), so all of them are
     held at once unless layerwise calibration bounds it to one layer's.
 
-    We recommend using Local-Hessian with layerwise calibration enabled
-    (``"layerwise": {"enable": True}``) and a calibration batch size of 1.
+    For the amax search, we recommend layerwise calibration (``"layerwise": {"enable": True}``) and
+    a calibration batch size of 1. Encoded weights need layerwise calibration only when their
+    Hessians do not fit at once.
 
     Args:
         model: Model to be calibrated.

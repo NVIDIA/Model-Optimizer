@@ -71,6 +71,37 @@ target `v_target = x_1 - x_0` from a teacher-forced forward pass on the
 calibration clips. Layers the loss is sensitive to keep more bits
 (FP8/unquantized); less sensitive layers go to NVFP4.
 
+## Running the quantized checkpoint
+
+Call `mto.enable_huggingface_checkpointing()` before `from_pretrained` so it
+restores the saved quantizers; the model then takes the same inputs as before:
+
+```python
+import modelopt.torch.opt as mto
+import torch
+from alpamayo_r1.models.alpamayo_r1 import AlpamayoR1
+
+mto.enable_huggingface_checkpointing()
+model = AlpamayoR1.from_pretrained("./alpamayo-fp8", dtype=torch.float16)
+model = model.to(device="cuda", dtype=torch.float16).eval()  # as in quantize.py
+# Build model_inputs as make_joint_calibration_forward_loop in quantize.py does.
+with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
+    pred_xyz, pred_rot = model.sample_trajectories_from_data_with_vlm_rollout(
+        data=model_inputs, max_generation_length=256  # as in quantize.py
+    )
+```
+
+For an NVFP4 `--real-quant` checkpoint, use `.to("cuda")` without `dtype`:
+casting its FP8 block scales to fp16 changes the dequantized weights.
+
+`torch_tensorrt.compile(ir="dynamo")` cannot capture the whole rollout, quantized
+or not: `generate()` and the vision tower branch on tensor values, so export
+fails with `GuardOnDataDependentSymNode`. Compiling smaller pieces and running
+the generation and diffusion loops in Python is untested here; the pieces would
+have to pass the KV cache and `rope_deltas` from the VLM to the action expert.
+[examples/torch_trt](../torch_trt/README.md) compiles a fake-quantized FP8 ViT
+and does not cover packed NVFP4 (`--real-quant`) weights.
+
 ## Quantization-aware distillation
 
 `qad.py` recovers accuracy lost to quantization by distilling the quantized

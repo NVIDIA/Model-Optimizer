@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "modelopt",
+  "displayName": "ModelOpt",
+  "version": "0.1.0",
+  "description": "Skills for Model Optimizer development, quantization, deployment, and evaluation.",
+  "author": {
+    "name": "NVIDIA Corporation"
+  },
+  "homepage": "https://github.com/NVIDIA/Model-Optimizer",
+  "repository": "https://github.com/NVIDIA/Model-Optimizer",
+  "license": "Apache-2.0",
+  "keywords": [
+    "modelopt",
+    "quantization",
+    "evaluation",
+    "deployment",
+    "llm"
+  ],
+  "agents": [
+    "./.claude/agents/modelopt-model-distiller.md",
+    "./.claude/agents/modelopt-model-downloader.md",
+    "./.claude/agents/modelopt-model-evaluator.md",
+    "./.claude/agents/modelopt-model-performance-benchmarker.md",
+    "./.claude/agents/modelopt-model-quantize-recipe-searcher.md",
+    "./.claude/agents/modelopt-model-quantizer.md"
+  ],
+  "mcpServers": "./.claude-plugin/mcp.json"
+}

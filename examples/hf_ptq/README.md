@@ -436,9 +436,10 @@ and keeps the more sensitive ones at higher precision (or unquantized), so the m
 `effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
 `constraints.effective_bits`, `auto_quantize_method` (`gradient`, `kl_div`, or `aumann_shapley`),
 `method_options`, `score_size`, `module_search_spaces` (optional per-module candidate overrides),
-`disabled_layers` (excluded from the search), and `cost_excluded_layers` (kept out of the bit-budget
-accounting — e.g. VL vision towers). Recipes can splice a shared base `disabled_layers` set via `$import` (see
-`modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
+`disabled_layers` (excluded from the search), `cost_excluded_layers` (kept out of the bit-budget
+accounting — e.g. VL vision towers), and `finalize_algorithm` (see
+[below](#scoring-and-finalizing-autoquantize-in-separate-runs)). Recipes can splice a shared base
+`disabled_layers` set via `$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
 
 An Aumann-Shapley recipe can target effective bits:
 
@@ -588,6 +589,49 @@ The example scripts above also have an additional flag `--tasks`, where the actu
 > *If GPU out-of-memory error is reported running the scripts, please try editing the scripts and reducing the max batch size to save GPU memory.*
 
 > *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` or `aumann_shapley` methods. Aumann-Shapley does not need labels, but it still backpropagates its comparison loss. The `kl_div` method does not require backpropagation.*
+
+### Scoring and finalizing AutoQuantize in separate runs
+
+Sequential (layerwise) GPTQ makes each layer's result depend on the formats chosen for the layers
+before it, which a per-layer search cannot score. Set `auto_quantize.finalize_algorithm` to run such
+an algorithm once the formats are chosen; the search still scores each candidate with its own
+algorithm:
+
+```yaml
+auto_quantize:
+  # candidate_formats, constraints.effective_bits, ... as above
+  finalize_algorithm:
+    method: gptq
+    layerwise:
+      enable: true
+```
+
+The first run then saves the scores to `--auto_quantize_checkpoint` and stops without exporting.
+Rerun the same command: it re-solves for `constraints.effective_bits`, quantizes the freshly loaded
+source weights with the selected formats, `finalize_algorithm` and the KV-cache config, and exports.
+When `finalize_algorithm` is layerwise, the rerun's default batch is sized for one decoder layer.
+Changing only `effective_bits` finalizes the same scores at another budget; the disabled layers and
+cost model come from the checkpoint, so change those with a new one. From Python,
+`mtq.get_auto_quantize_config(search_state, constraints, algorithm=...)` returns the finalized config.
+
+Gradient and `kl_div` searches can also score their formats in parallel processes, at most one
+*format shard* per searched format. Give every shard the same explicit `--batch_size` and its own
+checkpoint, then merge them into a new checkpoint. The merge run solves and exports like the
+unsharded search, or finalizes if the recipe sets `finalize_algorithm`:
+
+```bash
+RECIPE=general/auto_quantize/nvfp4_fp8_at_5p4bits  # searches two formats
+for i in 0 1; do  # one shard per GPU
+  CUDA_VISIBLE_DEVICES=$i python hf_ptq.py --pyt_ckpt_path $HF_PATH --recipe $RECIPE --batch_size 4 \
+    --auto_quantize_checkpoint /path/to/shard$i.pth --auto_quantize_format_shard $i/2 &
+done; wait
+python hf_ptq.py --pyt_ckpt_path $HF_PATH --recipe $RECIPE \
+  --auto_quantize_merge_shards /path/to/shard0.pth,/path/to/shard1.pth \
+  --auto_quantize_checkpoint /path/to/merged.pth --export_path /path/to/export
+```
+
+Both need `--auto_quantize_checkpoint` and a weight search for `constraints.effective_bits` without
+a KV-cache search, in a single `hf_ptq.py` process: not under `torchrun` or with `--use_fsdp2`.
 
 ## Real Quant
 

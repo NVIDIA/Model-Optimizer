@@ -1954,6 +1954,7 @@ def test_get_auto_quantize_config(method):
         for entry in config["quant_cfg"]
     )
     assert config["algorithm"] == "max"
+    assert mtq.get_auto_quantize_config(search_state, algorithm="gptq")["algorithm"] == "gptq"
 
     # Re-solve with different constraints
     config_resoled = mtq.get_auto_quantize_config(

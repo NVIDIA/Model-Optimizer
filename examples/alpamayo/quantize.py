@@ -555,9 +555,8 @@ def main():
     ap.add_argument(
         "--real-quant",
         action="store_true",
-        help="Export packed real-quantized weights (fp8 / NVFP4) via "
-        "modelopt.torch.export.export_hf_checkpoint instead of "
-        "saving fake-quant fp16 weights with quantizer state.",
+        help="Save packed real-quantized weights (fp8 / NVFP4, via mtq.compress) instead of "
+        "fake-quant fp16 weights. Both save the quantizer state to modelopt_state.pth.",
     )
     args = ap.parse_args()
 

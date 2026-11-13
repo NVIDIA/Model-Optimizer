@@ -15,21 +15,27 @@
 # limitations under the License.
 set -euo pipefail
 repo_root=$(git rev-parse --show-toplevel)
-skills_src="$repo_root/.agents/skills"
+skills_src="$repo_root/skills"
 skills_dst="$repo_root/.claude/skills"
 
-added=()
+changed=()
 for d in "$skills_src"/*/; do
   [ -d "$d" ] || continue
   name=$(basename "$d")
   link="$skills_dst/$name"
-  if [ ! -e "$link" ] && [ ! -L "$link" ]; then
-    ln -s "../../.agents/skills/$name" "$link"
-    added+=("$link")
+  target="../../skills/$name"
+  if [ -L "$link" ]; then
+    [ "$(readlink "$link")" != "$target" ] || continue
+    ln -sfn "$target" "$link"
+  elif [ ! -e "$link" ]; then
+    ln -s "$target" "$link"
+  else
+    continue
   fi
+  changed+=("$link")
 done
 
-if [ "${#added[@]}" -gt 0 ]; then
-  git add "${added[@]}"
-  echo "claude-skills-sync: staged ${#added[@]} new symlink(s) in .claude/skills/"
+if [ "${#changed[@]}" -gt 0 ]; then
+  git add "${changed[@]}"
+  echo "claude-skills-sync: staged ${#changed[@]} symlink update(s) in .claude/skills/"
 fi
