@@ -161,8 +161,11 @@ def test_hybrid_token_input_and_unknown_input(tmp_path):
 
 
 @pytest.mark.parametrize("past_dimension", [None, 0])
-def test_signature_distinguishes_unspecified_and_zero_dimensions(tmp_path, past_dimension):
-    name = "past_key_values.0.key"
+@pytest.mark.parametrize("cache_kind", ["key", "conv_state"])
+def test_signature_distinguishes_unspecified_and_zero_dimensions(
+    tmp_path, past_dimension, cache_kind
+):
+    name = f"past_key_values.0.{cache_kind}"
     model = helper.make_model(
         helper.make_graph(
             [],
@@ -173,11 +176,13 @@ def test_signature_distinguishes_unspecified_and_zero_dimensions(tmp_path, past_
     )
     path = tmp_path / "model.onnx"
     onnx.save(model, path)
+    signature = calibration.read_signature(path)
+    assert signature[0][1][2] == past_dimension
+    assert calibration.needs_signature_inputs(signature) == (cache_kind == "conv_state")
     if past_dimension is None:
         with pytest.raises(ValueError, match=name):
-            calibration.read_signature(path)
+            calibration.calibration_feed(signature, [[1]], [[1]])
     else:
-        signature = calibration.read_signature(path)
         assert calibration.calibration_feed(signature, [[1]], [[1]])[name].shape == (1, 2, 0, 4)
 
 

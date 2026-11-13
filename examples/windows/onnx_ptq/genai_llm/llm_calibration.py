@@ -149,8 +149,6 @@ def read_signature(model_path):
             else None
             for d in i.type.tensor_type.shape.dim
         ]
-        if None in dims:
-            raise ValueError(f"Unspecified dimension in ONNX input {i.name!r}")
         elem = onnx.TensorProto.DataType.Name(i.type.tensor_type.elem_type)
         out.append((i.name, dims, _ONNX_ELEM.get(elem, f"tensor({elem.lower()})")))
     return out
@@ -190,6 +188,8 @@ def calibration_feed(inputs, input_ids, attention_mask, table=None):
     batch, seq = ids.shape
     feed = {}
     for name, shape, dtype in inputs:
+        if None in shape:
+            raise ValueError(f"Unspecified dimension in ONNX input {name!r}")
         if kind_of(name) == "cache":
             feed[name] = np.zeros(resolve_shape(shape, batch, seq=0, past=0), dtype=np_dtype(dtype))
         elif name == "input_ids":
