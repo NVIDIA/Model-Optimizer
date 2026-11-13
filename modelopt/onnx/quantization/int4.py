@@ -1506,7 +1506,8 @@ def quantize(
                                               Default: 0.1.
                 - **awqlite_reuse_activations** (bool): Reuse calibration activations across adjacent
                                               weights sharing an input in per-node AWQ Lite/Full.
-                                              Default: False (collect independently per weight).
+                                              Default: False. Independent per-weight captures require
+                                              per-node mode with enable_fast_path_using_high_sysram=False.
                                               Enable only when sharing activation samples is acceptable;
                                               this does not change random operators, seeds, or backend determinism.
                                               For stochastic graphs, reuse changes which samples adjacent
