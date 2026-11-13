@@ -55,7 +55,7 @@ from ._auto_quantize_cost import (
 from .config import LayerwiseConfig, QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
 from .ggml import GGML_FORMAT_REGISTRY
-from .ggml.common import PIN_OVERRIDES_WEIGHT
+from .ggml.common import PIN_OVERRIDES_WEIGHT, drop_search_scales
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
 
@@ -1436,6 +1436,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                                     quantizer, weight
                                 )
                             )
+                            # A decoding encodes to its codes at the pinned scales.
+                            drop_search_scales(quantizer)
                 # Including the candidates not selected, which would otherwise replay their codes
                 # over the selected weights if made active again.
                 for _, _, quantizer in hparam._iter_quantizer_choices():

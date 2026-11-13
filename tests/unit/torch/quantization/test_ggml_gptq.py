@@ -724,6 +724,8 @@ def test_auto_quantize_scores_other_candidates_on_the_source_weights_gptq_rewrot
         # The GGML entry replaces an earlier INT4 entry for the same quantizers.
         (GPTQ, "iq2_xxs", True, True),
         ({"method": "imatrix"}, "q8_0", False, False),  # imatrix leaves Q8_0 to plain PTQ
+        # imatrix keeps the scales its codes were searched at, which the decoding must not use.
+        ({"method": "imatrix"}, "iq2_xxs", True, False),
     ],
 )
 def test_auto_quantize_selects_the_codes_calibration_chose(
@@ -751,6 +753,9 @@ def test_auto_quantize_selects_the_codes_calibration_chose(
         )
         assert torch.equal(first.weight, decoded)
         assert not torch.equal(payload, ggml_format.quantize(source[0].weight.detach())[0])
+        # The returned model runs, and exports, the codes the search scored.
+        assert torch.equal(first.weight_quantizer(first.weight), decoded)
+        assert torch.equal(ggml_format.pack(first.weight, first.weight_quantizer), payload)
     else:
         assert payload is None
         assert torch.equal(first.weight, source[0].weight)
