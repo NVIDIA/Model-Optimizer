@@ -2538,8 +2538,10 @@ def layerwise_calibrate(
         layer_pbar.set_postfix_str(status, refresh=True)
 
     input_getter = LayerActivationCollector(model, status_callback=_set_layer_status)
-    # Each layer is calibrated, and materialized, on its own, so ties are found on the whole model.
-    shared_token = _SHARED_WEIGHT_QUANTIZERS.set(_shared_weight_quantizers(model))
+    # Each layer is calibrated, and materialized, on its own, and the outside pass below hides the
+    # layers, so ties are found on the whole model.
+    shared = _shared_weight_quantizers(model)
+    shared_token = _SHARED_WEIGHT_QUANTIZERS.set(shared)
     try:
         input_getter._patch_all_layers(decoder_layers=transformer_layers)
         resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
@@ -2623,7 +2625,11 @@ def layerwise_calibrate(
     if ckpt:
         ckpt.full_restore(transformer_layers, model)
 
-    outside_calibrator.calibrate()
+    shared_token = _SHARED_WEIGHT_QUANTIZERS.set(shared)
+    try:
+        outside_calibrator.calibrate()
+    finally:
+        _SHARED_WEIGHT_QUANTIZERS.reset(shared_token)
 
     if exporter is not None:
         warn_rank_0(
