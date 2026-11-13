@@ -20,7 +20,7 @@ export it; it lives here so that a model whose decoder layers are registered wit
 ``LayerActivationCollector`` can be wrapped without ``transformers`` or ``huggingface_hub``.
 """
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -34,23 +34,28 @@ from modelopt.torch.utils.logging import warn_rank_0
 __all__ = ["fsdp2_root_unsharded", "fsdp2_wrap"]
 
 
-def _off_dtype_params(model) -> set[torch.nn.Parameter]:
+def _off_dtype_params(model, skip: Iterable[torch.nn.Parameter] = ()) -> set[torch.nn.Parameter]:
     """Params whose dtype differs from the model's dominant (by element count) param dtype.
 
     FSDP2 needs one dtype per shard group, but HF models routinely keep a few params in fp32 for
     stability (e.g. MoE router gates). Pass these to ``fully_shard(ignored_params=...)``.
 
+    The params in ``skip``, which the caller leaves out of the shard groups anyway, neither count
+    nor are returned: routed experts kept packed store an integer dtype that can outnumber the rest.
+
     TODO: Drop this and shard the off-dtype params once a stable PyTorch release includes FSDP2
     mixed-precision parameter dtype support (already on nightly).
     """
+    skip_ids = {id(p) for p in skip}  # id-based: Tensor.__eq__ is elementwise
+    params = {n: p for n, p in model.named_parameters() if id(p) not in skip_ids}
     numel_by_dtype: dict[torch.dtype, int] = {}
-    for param in model.parameters():
+    for param in params.values():
         numel_by_dtype[param.dtype] = numel_by_dtype.get(param.dtype, 0) + param.numel()
     if len(numel_by_dtype) <= 1:
         return set()
 
     dominant = max(numel_by_dtype, key=lambda d: numel_by_dtype[d])
-    off_dtype = {n: p for n, p in model.named_parameters() if p.dtype != dominant}
+    off_dtype = {n: p for n, p in params.items() if p.dtype != dominant}
     off_numel = sum(numel_by_dtype[d] for d in numel_by_dtype if d != dominant)
     names = sorted(off_dtype)
     warn_rank_0(
