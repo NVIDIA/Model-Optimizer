@@ -2,10 +2,11 @@
 
 An external draft is an ordinary pretrained causal LM trained to propose tokens for a
 target model. Unlike the head-based modes (EAGLE, Medusa, DFlash) nothing is grafted onto
-the target: it contributes its vocabulary and, on the dense path, its `lm_head`. The result
-is a plain HuggingFace checkpoint.
+the target, and it has no dependence on target hidden states. Such drafters can be served efficiently on decode-efficient hardware such as the LPU.
 
-Recipe: [`modelopt_recipes/general/speculative_decoding/external_draft.yaml`](../../../modelopt_recipes/general/speculative_decoding/external_draft.yaml) |
+This document serves as a "quick start" guide to get users up and running with training drafts.
+
+Recipe: [`modelopt_recipes/general/speculative_decoding/external_draft.yaml`](../../../modelopt_recipes/general/speculative_decoding/external_draft.yaml)
 Swap implementation: [`vocab_swap.py`](../../../modelopt/torch/speculative/external/vocab_swap.py)
 
 ## Architecture
@@ -22,22 +23,13 @@ Target (frozen, never modified)
 Draft (a complete causal LM, trained)  ──► its own lm_head ──► draft logits
 ```
 
-**Key components:**
-
-- **No grafted head.** The draft owns its embeddings and `lm_head` and runs standalone at
-  serving time. Engines that already support a separate draft model load it with no
-  mode-specific support.
-- **Acceptance-shaped objectives.** Under rejection sampling the probability a proposed
-  token survives verification is `sum(min(p, q))`, so total-variation distance is
-  `1 - acceptance`. Training on TVD optimises the serving metric directly.
-- **Two data formats.** The TVD objectives need only the target's truncated next-token
-  distribution, which is far smaller than a hidden state per token and keeps the target off
-  the GPU at training time. `soft_ce` needs full logits and so needs dumped hidden states.
-- **Vocabulary coupling.** The draft must index the target's vocabulary. A draft from
-  another family can be re-indexed onto it, at the cost of replacing a large fraction of a
-  small model.
-
 ## Training
+
+We generally start draft training with an existing pre-trained small model. We then perform a "vocabulary" or "tokenizer swap" (see [`vocab_swap.py`](../../../modelopt/torch/speculative/external/vocab_swap.py)) to transform the existing small model into the target's embedding space. This allows for the small draft to be (1) directly optimized via logit distillation, (2) used directly as a draft, without the need for any transformation between the draft and target token spaces during inference.
+
+The tokenizer-swap does not completely preserve the small draft model's performance, and on top of this, we need to align the draft. As our intended deployment setting is always speculative decoding at non-zero temperatures with rejection sampling, we tend to opt for TVD loss, or combinations of TVD loss and e.g. cross entropy. These losses directly minimise the rejection probability under rejection sampling and as such are advantageous here.
+
+Furthermore, in search for a good drafter we recommend sweeping other hyperparameters, primarily the training loss, batch size, and potentially even teacher deployment settings.
 
 ### Quick Start
 
@@ -80,6 +72,8 @@ torchrun --nproc_per_node 8 main.py \
 
 ### Objectives
 
+We currently support the following objectives for external draft training though we intend to add more in the future:
+
 | `external_loss` | Scores | Needs |
 |-----------------|--------|-------|
 | `soft_ce` | Cross-entropy against the target's soft distribution (the EAGLE offline objective) | hidden states |
@@ -87,18 +81,17 @@ torchrun --nproc_per_node 8 main.py \
 | `tvd_deploy` | The same, with both sides put through the serving filter first | either format |
 | `tvd_ce` | `tvd` plus a cross-entropy term on the target's argmax token | either format |
 
-On the sparse path the target side is truncated by the dump whichever objective runs, since
-that is all the dump holds; `tvd` and `tvd_deploy` then differ only in whether the *draft*
-is put through the filter too. Only `tvd_deploy` applies the same nucleus to both sides.
-Pairing `soft_ce` with `data.sparse_data_path` is a hard error, not a quiet degradation.
-
-Report which truncation you trained under. `top_k` and `top_p` settings are not
-interchangeable, so a number quoted without them is not comparable to anything.
-
-`tvd_ce` exists because TVD is bounded and so ranks weakly among tokens inside the target's
-support; cross-entropy's log penalty has no such ceiling.
+We generally recommend using "TVD deploy" as it matches the deployment conditions for a draft model. On the sparse path the target side is truncated by the dump whichever objective runs, since that is all the saved dataset holds. The `tvd` and `tvd_deploy` losses then differ only in whether the *draft* is put through the filter too. Only `tvd_deploy` applies the same nucleus to both sides.
 
 ### Teacher policy data
+
+Standalone draft models are aligned via logit distillation against the target model. The required
+training data is a set of target model prompts and responses, with saved top-k logprobs for each
+response token. Training data is teacher generated responses. Responses should be generated at the deployment sampling parameters the draft model is intended to be used at, usually for this we reference a target models recommended sampling parameters. This is so that the draft learns the teacher distribution under the intended deployment settings.
+
+For a simple first attempt at draft training we tend to use 100-200k training samples taken from `nvidia/Nemotron-Post-Training-Dataset-v2`, we recommend initially trying an even split of datasets. If a user has a specific deployment use case then training data should be specialized toward that, however, we do still recommend maintaining a mix of subjects in the training data. Ideally some component of the training data should also match the context size that you intend to deploy the draft-target pair at.
+
+The data format:
 
 `$CONVERSATIONS` should carry responses the **target generated itself**, not the responses
 that shipped with the prompts. The objective trains the draft to match the target at the
@@ -163,14 +156,26 @@ python collect_hidden_states/compute_hidden_states_hf.py \
 
 ### Cross-tokenizer vocabulary swap (`external_vocab_swap`)
 
-Speculative decoding needs the draft to propose tokens the target can verify, so the two
-must index the same vocabulary. When the target's family has no small member to draft with,
-`external.external_vocab_swap=true` rebuilds the draft's embeddings and `lm_head` against
-the target's vocabulary before conversion. Rows for tokens both tokenizers spell identically
-carry over; the rest are drawn from the draft's own embedding statistics.
+In general, standalone draft models have to share the same vocabulary/embedding space as their
+target model. This allows for both the proposal of tokens in the target's native vocabulary, and
+for direct alignment of the draft via logit distillation. However, a target does not always have a
+small model in its own family, and sometimes a standalone draft must be produced from another
+source. Instead of a costly process of training a standalone draft from scratch, we use a
+"vocab-swap": taking an existing draft model candidate and transplanting the target model's
+vocabulary and embeddings onto it, in a way that is not totally destructive. Set
+`external.external_vocab_swap=true` to enable it. On a high level the process is to:
 
-The run reports what carried over, typically a minority of the table and nearly all of the
-most frequent ids, since the rare tail is where tokenizers disagree.
+1. **Create new embedding tables** for the draft at the target's vocabulary size, filled with
+   random rows drawn from the draft's original embedding statistics.
+2. **Carry over every token that both tokenizers spell identically**, copying the draft's trained
+   embedding row to the token's position in the target's vocabulary.
+3. **Leave the remaining rows at those random values.** Draft-target alignment then trains them.
+4. **Rebuild the output head the same way** when it is not tied to the embeddings.
+5. **Point the special tokens** (BOS, EOS, padding) at the target tokenizer's ids.
+
+After the swap the new resulting draft model undergoes the same draft-target alignment process as
+an in-family draft would. The run reports what carried over, typically a minority of the table and
+nearly all of the most frequent ids, since the rare tail is where tokenizers disagree.
 
 > **Note on judging a swap:** the match percentage describes the swap, not the draft.
 > Overlap figures far apart have behaved similarly, so do not read the coverage number as a
@@ -193,20 +198,11 @@ Training writes an ordinary HuggingFace checkpoint, shipped with the **target's*
 when the vocabulary was swapped, since the draft's rows are indexed by the target's ids from
 that point on. Nothing in the saved artifact depends on ModelOpt at load time.
 
-**There is no export step for this mode.** `scripts/export_hf_checkpoint.py` restructures a
-grafted head into a servable checkpoint; an external draft has no head to restructure, so the
-script rejects it. The training output is the artifact.
-
-`training.output_dir` also holds training residue that `from_pretrained` ignores:
-`modelopt_state.pth`, `trainer_state.json`, `training_args.bin` and the `checkpoint-*`
-directories. Ship `config.json`, `generation_config.json`, the weights and the tokenizer
-files.
-
 ## Reference Configuration (Llama-3.2-1B drafting for Qwen3.8-27B)
 
 A cross-tokenizer draft: Llama-3.2-1B-Instruct re-indexed onto Qwen3.8-27B's
 248,320-token vocabulary. Trained on a sparse teacher policy dumped once from the target,
-8 GPUs, one epoch.
+8 GPUs, two epochs.
 
 ### Teacher policy
 
@@ -221,17 +217,17 @@ torchrun --nproc_per_node 8 main.py \
   model.model_name_or_path=$TARGET \
   draft_model_name_or_path=meta-llama/Llama-3.2-1B-Instruct \
   external.external_vocab_swap=true \
-  external.external_loss=tvd \
+  external.external_loss=tvd_ce \
   external.external_top_k=20 external.external_top_p=0.95 \
   data.sparse_data_path=$POLICY_DIR \
   data.sparse_cache_dir=$CACHE_DIR \
   training.training_seq_len=12288 \
   training.per_device_train_batch_size=1 \
   training.gradient_accumulation_steps=2 \
-  training.learning_rate=2.0e-5 \
+  training.learning_rate=5.0e-5 \
   training.warmup_steps=250 \
   training.max_grad_norm=1.0 \
-  training.num_train_epochs=1 \
+  training.num_train_epochs=2 \
   training.seed=42 \
   training.output_dir=$OUTPUT_DIR
 ```
@@ -240,34 +236,15 @@ torchrun --nproc_per_node 8 main.py \
 
 | Parameter | Value |
 |-----------|-------|
-| Objective | `tvd` |
+| Objective | `tvd_ce` |
 | Vocabulary swap | yes (Llama tokenizer onto Qwen's) |
 | Sequence length | 12,288 |
 | Effective batch | 16 (1 per device × 2 accumulation × 8 GPUs) |
-| Learning rate | 2.0e-5 |
+| Learning rate | 5.0e-5 |
 | Warmup steps | 250 |
-| Epochs | 1 |
+| Epochs | 2 |
 | Serving policy | top-k 20, top-p 0.95, temperature 1.0 |
 
 > **Note on the learning rate:** we recommend sweeping to find the best rate for your own
-> draft and target.
-
-## Open Items
-
-### Validated end-to-end
-
-- Sparse teacher-policy training with `tvd`, from dump through training to a loadable
-  checkpoint.
-- The cross-tokenizer vocabulary swap, on a draft trained this way.
-
-### Covered by tests, not yet exercised in a full run
-
-- `soft_ce`, `tvd_deploy` and `tvd_ce`, and the dense hidden-states data path.
-- Resume, with and without a swap.
-- Untied output heads, and heads carrying a bias.
-
-### Not yet validated
-
-- Streaming the teacher data from a live `vllm serve`. It is accepted for this mode but has
-  not been exercised. Online training is rejected outright, since it produces no cached
-  target outputs for the draft to be scored against.
+> draft and target. The hyperparameters chosen here came from a sweep over learning rate and
+> loss, scored on acceptance length.
