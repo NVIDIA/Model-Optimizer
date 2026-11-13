@@ -5,11 +5,9 @@ run flow). Same harbor/ECS-Fargate flow as Terminal-Bench; the deltas are the
 **OpenHands agent**, a larger problem set, longer timeouts, and a different
 ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 
-> **Source of truth:** `configs/benchmarks/swe-bench-verified/bench.yaml` in
-> nvidia-eval-factory-benchmarking (`dl/JoC/competitive_evaluation/…`), with the eval-image
-> pin in `configs/shared/nel_next_containers.yaml` — match its values for a reference run.
+> **Reference values:** match the benchmark owners' published configuration (benchmark config and eval-image pin) for a reference run.
 >
-> The sibling `bench_direct.yaml` is a different backend (Gym/opencode) — don't mix its values in.
+> A Gym/opencode variant of this benchmark uses different values; don't mix them in.
 
 ## Output-token policy
 
@@ -82,9 +80,8 @@ obtain it:
 # (a) From a reference run dir — the exact file a scored run mounted. Read that run's
 #     full_config.yaml `cluster.container_mounts` entry for swebench_instruction.md, then:
 scp <ref-cluster>:<path-from-that-config> ./swebench_instruction.md
-# (b) From the eval-factory repo — the path `_swebench_verified.instruction_template` points at
-#     in configs/benchmarks/swe-bench-verified/bench.yaml
-#     (dl/JoC/competitive_evaluation/nvidia-eval-factory-benchmarking).
+# (b) From the benchmark owners' repository — the path `_swebench_verified.instruction_template`
+#     points at in the benchmark config (see the eval-config "source of truth" note).
 
 sha256sum ./swebench_instruction.md          # record this next to the score
 ssh <login> 'mkdir -p <lustre>/<user>/prompts'
