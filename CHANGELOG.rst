@@ -39,6 +39,8 @@ Changelog
 
 *Speculative Decoding*
 
+- Add ``data.padding_buckets`` for offline and streaming speculative training: right-pad microbatches to one or two configured lengths while retaining the training sequence cap. EAGLE reuses TTT FlexAttention block masks for both lengths with bounded retention.
+
 - Add uniform-layer hidden-state mixing for Hugging Face and Megatron EAGLE training. Enable it with ``eagle_mix_hidden_states=True`` and ``eagle_mix_hidden_states_mode="uniform_layer_sample"``; the default ``sparse_replace`` mode preserves the existing mixing behavior.
 - Streaming datasets accept JSON-encoded conversation and tool fields and preserve per-row chat-template arguments.
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.

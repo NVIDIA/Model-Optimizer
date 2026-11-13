@@ -428,20 +428,26 @@ class HFEagleModel(EagleModel):
         self._cached_attn_blk_mask_context = None
 
     def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step, *, device, dtype):
-        context = (seq_length, device, dtype, self.eagle_config._attn_implementation)
+        context = (device, dtype, self.eagle_config._attn_implementation)
         if context != self._cached_attn_blk_mask_context:
             self._cached_attn_blk_masks.clear()
             self._cached_attn_blk_mask_context = context
-        # compile and cached flex attention masks in first call
-        if ttt_step not in self._cached_attn_blk_masks:
-            self._cached_attn_blk_masks.update(
-                {
-                    ttt_step: self._compute_ttt_attention_mask(
-                        batch_size, seq_length, ttt_step, device=device, dtype=dtype
-                    )
-                }
+        # Block masks can retain both padding buckets; dense masks grow quadratically,
+        # so keep their existing single-length memory bound.
+        max_lengths = 2 if self.eagle_config._attn_implementation == "flex_attention" else 1
+        cache = self._cached_attn_blk_masks
+        lengths = {key[0] for key in cache}
+        if seq_length not in lengths and len(lengths) >= max_lengths:
+            oldest = next(iter(cache))[0]
+            for key in list(cache):
+                if key[0] == oldest:
+                    del cache[key]
+        key = (seq_length, ttt_step)
+        if key not in cache:
+            cache[key] = self._compute_ttt_attention_mask(
+                batch_size, seq_length, ttt_step, device=device, dtype=dtype
             )
-        return self._cached_attn_blk_masks[ttt_step]
+        return cache[key]
 
     def _prepare_decoder_attention_mask(
         self, attention_mask, input_shape, past_key_values_length, device, dtype

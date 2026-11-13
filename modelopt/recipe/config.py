@@ -504,6 +504,13 @@ class ModelOptSpeculativeRecipeBase(ModelOptRecipeBase):
         validate_default=True,
     )
 
+    @model_validator(mode="after")
+    def _check_padding_buckets(self) -> Self:
+        buckets = self.data.padding_buckets
+        if buckets is not None and buckets[-1] != self.training.training_seq_len:
+            raise ValueError("data.padding_buckets must end at training.training_seq_len")
+        return self
+
 
 class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
     """Our config class for EAGLE speculative decoding recipes."""
@@ -549,6 +556,18 @@ class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
         description="DFlash speculative decoding configuration.",
         validate_default=True,
     )
+
+    @model_validator(mode="after")
+    def _check_padding_bucket_alignment(self) -> Self:
+        buckets = self.data.padding_buckets
+        block_size = self.dflash.dflash_block_size
+        if buckets is not None and (
+            block_size <= 0 or any(length % block_size for length in buckets)
+        ):
+            raise ValueError(
+                "data.padding_buckets must be divisible by a positive dflash.dflash_block_size"
+            )
+        return self
 
     @model_validator(mode="after")
     def _derive_dflash_offline(self) -> Self:
