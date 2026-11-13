@@ -39,17 +39,23 @@ from ..utils import multi_context, replace_function
 CUSTOM_MODEL_PLUGINS = set()
 CUSTOM_POST_CONVERSION_PLUGINS = set()
 # The model-specific PTQ modules each framework plugin loads, by file name: before a model is
-# converted, its own ``modelopt/torch/models/<model_type>/<name>.py`` is imported.
+# converted or its decoder layers are looked up, its own
+# ``modelopt/torch/models/<model_type>/<name>.py`` is imported.
 MODEL_PTQ_MODULES: list[str] = []
+
+
+def import_model_ptq_modules(model):
+    """Import ``model``'s own PTQ modules, which register its wrappers, callbacks and discoverers."""
+    for module_name in MODEL_PTQ_MODULES:
+        import_model_modules(model, module_name)
 
 
 # TODO: This is a temporary solution
 # In future implement a decorator to register methods updating QUANT_MODULE on the fly
 def register_custom_model_plugins_on_the_fly(model):
     """Registers custom modules as QUANT_MODULE on the fly."""
-    # The model's own PTQ modules first: importing one registers its wrappers and callbacks.
-    for module_name in MODEL_PTQ_MODULES:
-        import_model_modules(model, module_name)
+    # The model's own PTQ modules first: some of the callbacks below are theirs.
+    import_model_ptq_modules(model)
     for callback in CUSTOM_MODEL_PLUGINS:
         callback(model)
 
