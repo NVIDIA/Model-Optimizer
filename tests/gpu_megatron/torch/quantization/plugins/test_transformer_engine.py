@@ -25,7 +25,12 @@ from _test_utils.torch.quantization.quantize_common import quantize_model_and_fo
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
-from modelopt.torch.quantization.nn import GroupedQuantizer, QuantModule
+from modelopt.torch.quantization.nn import (
+    GroupedQuantizer,
+    QuantModule,
+    register_quant_backend,
+    unregister_quant_backend,
+)
 
 
 class TELinear(nn.Module):
@@ -203,6 +208,77 @@ def test_initialize_preserves_unquantized_output_rows():
     with torch.enable_grad():
         layer._initialize_qdq_weights(False, set())
     torch.testing.assert_close(layer.weight, expected, rtol=0, atol=0)
+
+
+def _toy_fake_quant(x, scale):
+    """Round ``x`` to multiples of ``scale``, straight-through to ``x``, LSQ-like to ``scale``."""
+    t = x / scale
+    return ((t.round() - t).detach() + t) * scale
+
+
+def _toy_backend(inputs, quantizer):
+    return _toy_fake_quant(inputs, quantizer.toy_scale).to(inputs.dtype)
+
+
+def test_grouped_backend_te_grouped_linear():
+    """A grouped entrypoint quantizes all weights of a GroupedLinear in one differentiable call."""
+    set_seed()
+    model = TEGroupedLinear().cuda()
+    data = model.get_input().cuda().requires_grad_()
+    grouped_calls = []
+
+    def grouped(inputs, quantizers):
+        grouped_calls.append(len(inputs))
+        flat_x = torch.cat([x.reshape(-1) for x in inputs])
+        flat_s = torch.cat([q.toy_scale.reshape(-1) for q in quantizers])
+        flat_y = _toy_fake_quant(flat_x, flat_s)
+        sizes = [x.numel() for x in inputs]
+        return [y.view_as(x).to(x.dtype) for y, x in zip(flat_y.split(sizes), inputs)]
+
+    def step():
+        model.zero_grad()
+        data.grad = None
+        out = model(data)
+        out.square().sum().backward()
+        weights = [getattr(model.net, f"weight{i}") for i in range(model.num_gemms)]
+        scales = [q.toy_scale for q in model.net.weight_quantizer]
+        grads = [p.grad.clone() for p in [data, *weights, *scales]]
+        assert all(g.abs().sum() > 0 for g in grads)
+        return [out.detach(), *grads]
+
+    register_quant_backend("te_toy", _toy_backend)
+    try:
+        cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"backend": "te_toy"},
+                    "enable": True,
+                },
+            ],
+            "algorithm": "max",
+        }
+        mtq.quantize(model, cfg, lambda m: m(data))
+        # A learned scale per weight element: its gradient has no reduction, so it is exact.
+        for i, q in enumerate(model.net.weight_quantizer):
+            weight = getattr(model.net, f"weight{i}")
+            q.toy_scale = nn.Parameter(torch.rand_like(weight) / 8 + 1 / 16)
+        reference = step()
+        assert grouped_calls == []
+
+        unregister_quant_backend("te_toy")
+        register_quant_backend("te_toy", _toy_backend, grouped_entrypoint=grouped)
+        results = step()
+        assert grouped_calls == [model.num_gemms]
+        with torch.no_grad():
+            inference_out = model(data)
+        assert grouped_calls == [model.num_gemms] * 2
+    finally:
+        unregister_quant_backend("te_toy")
+    for result, expected in zip(results, reference):
+        assert torch.equal(result, expected)
+    assert torch.equal(inference_out, reference[0])
 
 
 def test_quantize_forward_backward():

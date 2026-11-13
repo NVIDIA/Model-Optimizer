@@ -241,6 +241,11 @@ def _suspend_weight_cache(model: nn.Module):
         _ACTIVE.update(sessions)
 
 
+def in_weight_cache_scope(quantizer) -> bool:
+    """Whether ``quantizer`` is enrolled in an open :func:`weight_cache_scope`."""
+    return bool(_num_open_scopes) and quantizer in _ACTIVE
+
+
 def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) -> torch.Tensor:
     """``quantizer._fake_quantize(inputs)``, reused while ``quantizer`` is in an open scope.
 
