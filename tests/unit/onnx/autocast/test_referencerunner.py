@@ -21,10 +21,12 @@ from unittest.mock import Mock
 
 import numpy as np
 import onnx
+import onnxruntime as ort
 import polygraphy.backend.onnx as polygraphy_onnx
 import polygraphy.backend.onnxrt as polygraphy_onnxrt
 import pytest
-from onnx import TensorProto, helper
+from _test_utils.onnx.lib_test_models import build_if_outer_scope_model
+from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast.referencerunner import ReferenceRunner, TensorStats
@@ -118,9 +120,10 @@ def test_run_cleans_model_tempdir_when_input_loading_fails(monkeypatch, referenc
     model_temp_dir.cleanup.assert_called_once_with()
 
 
-def test_run_with_random_inputs(reference_runner):
+@pytest.mark.parametrize("calibrate_per_node", [False, True])
+def test_run_with_random_inputs(reference_runner, calibrate_per_node):
     """Test running inference with random inputs."""
-    results = reference_runner.run()
+    results = reference_runner.run(calibrate_per_node=calibrate_per_node)
     assert isinstance(results, OrderedDict)
     assert "Y1" in results
     assert "Y2" in results
@@ -189,6 +192,279 @@ def test_run_with_dict_inputs(reference_runner):
     assert "Y2" in results
     assert results["Y1"].shape == (1, 3)
     assert results["Y2"].shape == (1, 3)
+
+
+class TestPerNodeReferenceRunner:
+    """Tests for memory-bounded per-node reference execution."""
+
+    def test_oversized_single_node_uses_file_backed_inference_and_execution(self, monkeypatch):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 32])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 32])
+        weight = numpy_helper.from_array(np.eye(32, dtype=np.float32), name="weight")
+        node = helper.make_node("MatMul", ["X", "weight"], ["Y"], name="matmul")
+        graph = helper.make_graph([node], "matmul", [x], [y], [weight])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+        infer_shapes_path_calls = []
+        original_infer_shapes_path = onnx.shape_inference.infer_shapes_path
+
+        def record_infer_shapes_path(*args, **kwargs):
+            infer_shapes_path_calls.append(args)
+            return original_infer_shapes_path(*args, **kwargs)
+
+        monkeypatch.setattr(onnx.shape_inference, "infer_shapes_path", record_infer_shapes_path)
+        monkeypatch.setattr(onnx.checker, "MAXIMUM_PROTOBUF", 1)
+        inputs = {"X": np.arange(32, dtype=np.float32).reshape(1, 32)}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            monkeypatch.setattr(tempfile, "tempdir", temp_dir)
+            results = ReferenceRunner(model).run(inputs, calibrate_per_node=True)
+
+            assert os.listdir(temp_dir) == []
+
+        assert len(infer_shapes_path_calls) == 1
+        assert results["Y"].shape == (1, 32)
+        assert results["Y"].min_val == 0.0
+        assert results["Y"].max_val == 31.0
+
+    def test_single_node_model_copies_initializers_without_repeated_field_extend(self, monkeypatch):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 2])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 2])
+        weight = numpy_helper.from_array(np.eye(2, dtype=np.float32), name="weight")
+        node = helper.make_node("MatMul", ["X", "weight"], ["Y"], name="matmul")
+        graph = helper.make_graph([node], "matmul", [x], [y], [weight])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+        runner = ReferenceRunner(model)
+        original_make_graph = onnx.helper.make_graph
+
+        def reject_initializer_extend(*args, **kwargs):
+            initializers = kwargs.get("initializer", args[4] if len(args) > 4 else None)
+            assert not initializers, "make_graph would copy initializers with repeated-field extend"
+            return original_make_graph(*args, **kwargs)
+
+        monkeypatch.setattr(onnx.helper, "make_graph", reject_initializer_extend)
+
+        single_node_model = runner._make_single_node_model(
+            node,
+            ["X", "weight"],
+            {"X": x, "Y": y},
+            {"weight": weight},
+            {"X": np.ones((1, 2), dtype=np.float32)},
+        )
+
+        assert single_node_model.graph.initializer[0].name == "weight"
+
+    def test_casts_inputs_to_model_dtype(self, reference_runner):
+        inputs = {
+            "X1": np.array([[1.0, -2.0, 3.0]], dtype=np.float64),
+            "X2": np.array([[4.0, 5.0, -6.0]], dtype=np.float64),
+        }
+
+        expected = reference_runner.run(inputs)
+        actual = reference_runner.run(inputs, calibrate_per_node=True)
+
+        for name, expected_value in expected.items():
+            np.testing.assert_allclose(actual[name].absmax, np.max(np.abs(expected_value)))
+            np.testing.assert_allclose(actual[name].min_val, np.min(expected_value))
+            np.testing.assert_allclose(actual[name].max_val, np.max(expected_value))
+
+    def test_uses_runtime_shape_for_intermediate_inputs(self):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3])
+        stale_intermediate = helper.make_tensor_value_info("intermediate", TensorProto.FLOAT, [])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 3])
+        graph = helper.make_graph(
+            [
+                helper.make_node("Identity", ["X"], ["intermediate"], name="identity"),
+                helper.make_node("Relu", ["intermediate"], ["Y"], name="relu"),
+            ],
+            "stale_intermediate_shape",
+            [x],
+            [y],
+            value_info=[stale_intermediate],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+        runner = ReferenceRunner(model)
+        inputs = {"X": np.arange(6, dtype=np.float32).reshape(2, 3)}
+
+        expected = runner.run(inputs)
+        actual = runner.run(inputs, calibrate_per_node=True)
+
+        assert actual["intermediate"].shape == expected["intermediate"].shape
+        assert actual["Y"].shape == expected["Y"].shape
+        np.testing.assert_allclose(actual["Y"].max_val, np.max(expected["Y"]))
+
+    def test_random_inputs_preserve_explicit_zero_dimensions(self):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 1])
+        x_empty = helper.make_tensor_value_info("X_empty", TensorProto.FLOAT, [2, 0])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 1])
+        graph = helper.make_graph(
+            [
+                helper.make_node(
+                    "Concat", ["X", "X_empty"], ["concat_output"], name="concat", axis=1
+                ),
+                helper.make_node("Relu", ["concat_output"], ["Y"], name="relu"),
+            ],
+            "empty_input",
+            [x, x_empty],
+            [y],
+            value_info=[helper.make_tensor_value_info("concat_output", TensorProto.FLOAT, [2, 1])],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+
+        results = ReferenceRunner(model).run(calibrate_per_node=True)
+
+        assert results["X_empty"].shape == (2, 0)
+        assert results["Y"].shape == (2, 1)
+
+    def test_seeded_stochastic_node_restarts_for_each_batch(self):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
+        random_output = helper.make_tensor_value_info("random_output", TensorProto.FLOAT, [1])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
+        graph = helper.make_graph(
+            [
+                helper.make_node(
+                    "RandomUniform",
+                    [],
+                    ["random_output"],
+                    name="random",
+                    shape=[1],
+                    seed=7.0,
+                ),
+                helper.make_node("Add", ["X", "random_output"], ["Y"], name="add"),
+            ],
+            "seeded_random",
+            [x],
+            [y],
+            value_info=[random_output],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for batch_index in range(2):
+                np.savez(
+                    os.path.join(temp_dir, f"batch_{batch_index}.npz"),
+                    X=np.zeros((1,), dtype=np.float32),
+                )
+            runner = ReferenceRunner(model)
+            default = runner.run(temp_dir)
+            per_node = runner.run(temp_dir, calibrate_per_node=True)
+
+        assert per_node["random_output"].min_val == per_node["random_output"].max_val
+        assert default["random_output"].min_val != default["random_output"].max_val
+        assert per_node["Y"].min_val == per_node["Y"].max_val
+        assert default["Y"].min_val != default["Y"].max_val
+
+    def test_disables_cpu_memory_arena(self, monkeypatch, reference_runner):
+        session_options = []
+        original_session_options = ort.SessionOptions
+
+        def record_session_options():
+            options = original_session_options()
+            session_options.append(options)
+            return options
+
+        monkeypatch.setattr(ort, "SessionOptions", record_session_options)
+
+        reference_runner.run(calibrate_per_node=True)
+
+        assert session_options
+        assert all(not options.enable_cpu_mem_arena for options in session_options)
+
+    def test_matches_all_outputs(self, reference_runner):
+        inputs = {
+            "X1": np.array([[1.0, -2.0, 3.0]], dtype=np.float32),
+            "X2": np.array([[4.0, 5.0, -6.0]], dtype=np.float32),
+        }
+        expected = reference_runner.run(inputs)
+        actual = reference_runner.run(inputs, calibrate_per_node=True)
+
+        assert actual.keys() == expected.keys()
+        for name, expected_value in expected.items():
+            assert isinstance(actual[name], TensorStats)
+            np.testing.assert_allclose(actual[name].absmax, np.max(np.abs(expected_value)))
+            np.testing.assert_allclose(actual[name].min_val, np.min(expected_value))
+            np.testing.assert_allclose(actual[name].max_val, np.max(expected_value))
+            assert actual[name].shape == expected_value.shape
+
+    def test_supports_control_flow_captures(self):
+        runner = ReferenceRunner(build_if_outer_scope_model(input_shape=(1, 3)))
+        inputs = {
+            "condition": np.array(True),
+            "X": np.array([[1.0, -2.0, 3.0]], dtype=np.float32),
+        }
+        expected = runner.run(inputs)
+        actual = runner.run(inputs, calibrate_per_node=True)
+
+        np.testing.assert_allclose(actual["Y"].absmax, np.max(np.abs(expected["Y"])))
+        np.testing.assert_allclose(actual["Y"].min_val, np.min(expected["Y"]))
+        np.testing.assert_allclose(actual["Y"].max_val, np.max(expected["Y"]))
+        assert actual["Y"].shape == expected["Y"].shape
+
+    def test_preserves_local_functions(self):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3])
+        function = helper.make_function(
+            "local",
+            "Double",
+            ["function_input"],
+            ["function_output"],
+            [
+                helper.make_node(
+                    "Add",
+                    ["function_input", "function_input"],
+                    ["function_output"],
+                )
+            ],
+            opset_imports=[helper.make_opsetid("", 20)],
+        )
+        graph = helper.make_graph(
+            [helper.make_node("Double", ["X"], ["Y"], domain="local", name="double")],
+            "local_function_model",
+            [x],
+            [y],
+        )
+        model = helper.make_model(
+            graph,
+            functions=[function],
+            opset_imports=[helper.make_opsetid("", 20), helper.make_opsetid("local", 1)],
+            ir_version=10,
+        )
+        runner = ReferenceRunner(model)
+
+        results = runner.run(
+            {"X": np.array([[1.0, -2.0, 3.0]], dtype=np.float32)},
+            calibrate_per_node=True,
+        )
+
+        assert results["Y"].absmax == 6.0
+        assert results["Y"].min_val == -4.0
+        assert results["Y"].max_val == 6.0
+
+    def test_multi_batch_preserves_first_runtime_shape(self):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [None, 3])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [None, 3])
+        graph = helper.make_graph(
+            [helper.make_node("Identity", ["X"], ["Y"], name="identity")],
+            "dynamic_identity",
+            [x],
+            [y],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+        runner = ReferenceRunner(model)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            np.savez(
+                os.path.join(temp_dir, "batch_001.npz"),
+                X=np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+            )
+            np.savez(
+                os.path.join(temp_dir, "batch_002.npz"),
+                X=np.array([[4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], dtype=np.float32),
+            )
+
+            results = runner.run(temp_dir, calibrate_per_node=True)
+
+        assert results["Y"].shape == (1, 3)
+        assert results["Y"].absmax == 9.0
 
 
 def test_invalid_input_format(reference_runner):
@@ -304,7 +580,8 @@ def test_tensor_stats():
     assert abs(stats) == 10.5  # Test __abs__ method
 
 
-def test_run_with_multi_batch_npz_directory(reference_runner):
+@pytest.mark.parametrize("calibrate_per_node", [False, True])
+def test_run_with_multi_batch_npz_directory(reference_runner, calibrate_per_node):
     """Test running inference with directory containing multiple NPZ files."""
     # Create temporary directory with multiple NPZ files
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -330,7 +607,7 @@ def test_run_with_multi_batch_npz_directory(reference_runner):
         np.savez(os.path.join(temp_dir, "batch_003.npz"), **inputs3)
 
         # Run with directory path
-        results = reference_runner.run(temp_dir)
+        results = reference_runner.run(temp_dir, calibrate_per_node=calibrate_per_node)
 
         # Should return TensorStats objects for multi-batch
         assert isinstance(results, OrderedDict)

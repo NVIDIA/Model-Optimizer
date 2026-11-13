@@ -16,6 +16,7 @@
 import numpy as np
 import onnx
 import pytest
+from _test_utils.onnx.lib_test_models import build_if_outer_scope_model
 from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.onnx.autocast.utils as utils
@@ -1884,39 +1885,8 @@ def test_if_subgraph_mixed_precision_boundary(
 
 @pytest.fixture
 def model_with_if_outer_scope_reference():
-    """Create a minimal model where If subgraphs reference outer scope variables.
-
-    This tests that subgraph value_info for outer scope variables is preserved during type clearing.
-    """
-    # Main graph inputs/outputs
-    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])
-    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
-    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 4])
-
-    # Create "then" branch: Identity on X from outer scope
-    then_y = helper.make_tensor_value_info("then_y", TensorProto.FLOAT, [2, 4])
-    then_identity = helper.make_node("Identity", ["X"], ["then_y"], name="then_identity")
-    then_graph = helper.make_graph([then_identity], "then_branch", [], [then_y])
-    # Add X to value_info - this is what needs to be preserved
-    then_graph.value_info.extend([helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])])
-
-    # Create "else" branch: Identity on X from outer scope
-    else_y = helper.make_tensor_value_info("else_y", TensorProto.FLOAT, [2, 4])
-    else_identity = helper.make_node("Identity", ["X"], ["else_y"], name="else_identity")
-    else_graph = helper.make_graph([else_identity], "else_branch", [], [else_y])
-    else_graph.value_info.extend([helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])])
-
-    # Create If node and main graph
-    if_node = helper.make_node(
-        "If", ["condition"], ["Y"], name="if_node", then_branch=then_graph, else_branch=else_graph
-    )
-    main_graph = helper.make_graph([if_node], "model_with_outer_scope", [x, condition], [y])
-
-    model = helper.make_model(main_graph, producer_name="model_with_outer_scope")
-    model.opset_import[0].version = 20
-    onnx.checker.check_model(model)
-
-    model = onnx_utils.infer_shapes(model)
+    """Create mappings for a model whose If branches reference an outer-scope value."""
+    model = build_if_outer_scope_model()
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
     return model, value_info_map, initializer_map, node_to_init_map
 

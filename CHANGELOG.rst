@@ -8,6 +8,8 @@ Changelog
 
 *Quantization*
 
+- ONNX AutoCast can now calibrate node by node with ``--calibrate_per_node`` or
+  ``calibrate_per_node=True``, reducing peak memory at the cost of longer calibration time.
 - Add an experimental NeMo AutoModel NVFP4 expert adapter example with fixed published scales, FSDP2 training support, and expert-weight export. It supports the bias-free SwiGLU torch expert loop with expert parallel size 1.
 
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.

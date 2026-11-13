@@ -81,6 +81,7 @@ def convert_to_mixed_precision(
     max_depth_of_reduction: int | None = None,
     opset: int | None = None,
     use_standalone_type_inference: bool = False,
+    calibrate_per_node: bool = False,
 ) -> onnx.ModelProto:
     """Convert model to mixed precision.
 
@@ -108,6 +109,7 @@ def convert_to_mixed_precision(
         use_standalone_type_inference: If True, use standalone type inference implementation instead of ONNX's
                                   infer_shapes. This is a workaround (WAR) when only type inference is
                                   needed without shape inference. Default: False.
+        calibrate_per_node: Whether to run calibration node by node to reduce peak memory.
 
     Returns:
         onnx.ModelProto: The converted mixed precision model.
@@ -206,7 +208,7 @@ def convert_to_mixed_precision(
     ref_outputs_dict = None
     if (data_max is not None and data_max != np.inf) or graph_sanitizer.custom_ops:
         ref_runner = ReferenceRunner(model, providers, trt_plugins)
-        ref_outputs_dict = ref_runner.run(calibration_data)
+        ref_outputs_dict = ref_runner.run(calibration_data, calibrate_per_node=calibrate_per_node)
 
     # Run conversion
     low_precision_nodes, high_precision_nodes = node_classifier.run(ref_outputs_dict)
