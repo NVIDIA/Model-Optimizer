@@ -394,6 +394,7 @@ def main(args):
         block_size=args.block_size,
         input_shapes_profile=input_shapes_profile_data,
         awqlite_alpha_step=args.awqlite_alpha_step,
+        awqlite_reuse_activations=args.awqlite_reuse_activations,
         awqlite_run_per_subgraph=args.awqlite_run_per_subgraph,
         awqlite_fuse_nodes=args.awqlite_fuse_nodes,
         awqclip_alpha_step=args.awqclip_alpha_step,
@@ -480,6 +481,12 @@ if __name__ == "__main__":
         type=float,
         default=0.1,
         help="Alpha step-size for AWQ scale search",
+    )
+    parser.add_argument(
+        "--awqlite_reuse_activations",
+        default=False,
+        action="store_true",
+        help="Reuse calibration activations for adjacent weights sharing an input (per-node AWQ Lite only)",
     )
     parser.add_argument(
         "--awqlite_run_per_subgraph",
