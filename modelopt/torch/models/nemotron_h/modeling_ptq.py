@@ -71,10 +71,8 @@ def get_nemotron_h_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
     return None
 
 
-# Order matters: more specific predicates must be registered first because
-# the first matching entry wins.  Nemotron-H must precede the generic
-# homogeneous HF discoverer; the HF plugin imports this module before
-# registering that discoverer.
+# The first matching entry wins, so Nemotron-H's must precede the generic homogeneous HF
+# discoverer, which the HF plugin registers as a fallback for that reason.
 LayerActivationCollector.register_decoder_layer_support(
     is_nemotron_h_model, get_nemotron_h_decoder_layers
 )

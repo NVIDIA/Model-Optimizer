@@ -21,32 +21,19 @@ dispatch, expert GEMMs and combine, so the quantizers of vLLM's ``RoutedExperts`
 tokens feed. ``combine_quantizer`` fake-quantizes the per-(token, top-k slot) expert outputs the
 kernel sends back, which stay in its symmetric buffer: after the kernel, they are quantized and
 summed again in the kernel's order, replacing its output.
+
+The models' packages register their experts classes with it
+(``modelopt/torch/models/<model_type>/modeling_ptq_vllm.py``).
 """
 
 import importlib
 
 import torch
 
-from ..nn import (
-    QuantLinearConvBase,
-    QuantModule,
-    QuantModuleRegistry,
-    SequentialQuantizer,
-    TensorQuantizer,
-)
+from ..nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .vllm import create_parallel_state
 
 __all__ = []
-
-# NotImplementedError: some vLLM model packages reject unsupported platforms at import.
-try:
-    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
-except (ImportError, NotImplementedError):
-    DeepseekV4MegaMoEExperts = None
-try:
-    from vllm.models.kimi_k3.nvidia.model import KimiK3MegaMoEExperts
-except (ImportError, NotImplementedError):
-    KimiK3MegaMoEExperts = None
 
 # Symmetric buffers whose combine-row layout was checked against the kernel output.
 _checked_buffers: set[int] = set()
@@ -163,11 +150,3 @@ class _QuantVLLMMegaMoEExperts(QuantModule):
                 f"{self.prefix}: Mega-MoE combine_quantizer needs a calibrated (algorithm: max) or"
                 " constant (constant_amax) global scale."
             )
-
-
-for _experts_cls, _name in (
-    (DeepseekV4MegaMoEExperts, "vllm_DeepseekV4MegaMoEExperts"),
-    (KimiK3MegaMoEExperts, "vllm_KimiK3MegaMoEExperts"),  # overrides forward, so registered too
-):
-    if _experts_cls is not None:
-        QuantModuleRegistry.register({_experts_cls: _name})(_QuantVLLMMegaMoEExperts)

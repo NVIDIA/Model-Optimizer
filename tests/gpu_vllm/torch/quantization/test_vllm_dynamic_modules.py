@@ -31,6 +31,8 @@ import functools
 import gc
 import importlib.util
 import inspect
+import os
+import subprocess
 import sys
 from functools import partial, wraps
 from pathlib import Path
@@ -56,6 +58,8 @@ from vllm.utils.import_utils import has_deep_gemm
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptPTQRecipe
+from modelopt.torch.models.glm5_next import modeling_ptq_vllm as glm5_next_ptq
+from modelopt.torch.models.kimi_k3 import modeling_ptq_vllm as kimi_k3_ptq
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
@@ -65,7 +69,6 @@ from modelopt.torch.quantization.nn import (
     register_quant_backend,
 )
 from modelopt.torch.quantization.plugins import vllm as vllm_plugin
-from modelopt.torch.quantization.plugins import vllm_indexer
 from modelopt.torch.quantization.plugins.vllm import (
     _ATTENTION_TYPES,
     VllmMLAAttention,
@@ -76,10 +79,7 @@ from modelopt.torch.quantization.plugins.vllm import (
     configure_vllm_nvfp4_attention_quantizers,
     disable_compilation,
 )
-from modelopt.torch.quantization.plugins.vllm_indexer import (
-    _QuantVLLMGlm5NextIndexer,
-    _QuantVLLMIndexerBase,
-)
+from modelopt.torch.quantization.plugins.vllm_indexer import _QuantVLLMIndexerBase
 from modelopt.torch.quantization.utils import (
     is_quantized_column_parallel_linear,
     is_quantized_row_parallel_linear,
@@ -483,7 +483,7 @@ def test_kimi_mlp_low_latency_linear_fake_quant_support(
     model = torch.nn.Module()
     setattr(model, parent_name, mlp)
     model.attention_projection = new_linear("down_proj", torch.bfloat16, (4, 4))
-    vllm_plugin.vllm_replace_quant_module_hook(model)
+    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(model)
     for linear in (mlp.gate_up_proj, mlp.down_proj, model.attention_projection):
         linear._setup()
 
@@ -502,7 +502,53 @@ def test_non_kimi_conversion_never_imports_kimi():
     with patch("builtins.__import__", side_effect=reject_kimi_import):
         linear = SimpleNamespace(quant_method=vllm_plugin.vllm_linear.UnquantizedLinearMethod())
         assert vllm_plugin._supports_fake_quant_linear(linear)
-        vllm_plugin.vllm_replace_quant_module_hook(torch.nn.Linear(2, 2))
+        kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(torch.nn.Linear(2, 2))
+
+
+# Runs in a fresh interpreter: this file imports the model packages itself.
+_CHECK_MODEL_PACKAGES_IMPORTED = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+
+import modelopt.torch.quantization
+from modelopt.torch import models
+from modelopt.torch.quantization.plugins.custom import register_custom_model_plugins_on_the_fly
+
+packages = sorted(
+    path.parent.name for path in Path(models.__file__).parent.glob("*/modeling_ptq_vllm.py")
+)
+modules = [f"modelopt.torch.models.{package}.modeling_ptq_vllm" for package in packages]
+assert packages and not set(modules) & sys.modules.keys(), "imported before any conversion"
+for package, module in zip(packages, modules):
+    # A vLLM model keeps its HF config, whose model type names its package.
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(model_type=package)
+    register_custom_model_plugins_on_the_fly(model)
+    assert module in sys.modules, f"converting a {package} model did not import {module}"
+"""
+
+
+# A fresh interpreter importing torch, vLLM and modelopt can outlast the 60 s per-test default.
+@pytest.mark.timeout(300)
+def test_vllm_model_packages_are_imported_on_conversion():
+    """Converting a vLLM model imports its type's ``modeling_ptq_vllm``, and importing modelopt none.
+
+    The vLLM plugin finds ``modelopt/torch/models/<model_type>/modeling_ptq_vllm.py`` by the model
+    type in the model's HF config.
+    """
+    # The child only asserts; tracing its imports for coverage would just slow it down.
+    env = {k: v for k, v in os.environ.items() if k != "COVERAGE_PROCESS_START"}
+    result = subprocess.run(
+        [sys.executable, "-c", _CHECK_MODEL_PACKAGES_IMPORTED],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_kimi_legacy_gemm_rs_routes_by_down_proj_quantizers(fake_parallel_state, monkeypatch):
@@ -532,9 +578,9 @@ def test_kimi_legacy_gemm_rs_routes_by_down_proj_quantizers(fake_parallel_state,
     down_proj.quant_method = object.__new__(kimi_method)
     mlp.down_proj = down_proj
 
-    vllm_plugin.vllm_replace_quant_module_hook(mlp)
+    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(mlp)
     guard = mlp.run_gemm_rs
-    vllm_plugin.vllm_replace_quant_module_hook(mlp)
+    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(mlp)
     assert mlp.run_gemm_rs is guard
     assert vllm_plugin.QuantModuleRegistry.convert(down_proj) is down_proj
     assert guard.down_proj is down_proj
@@ -584,9 +630,9 @@ def test_kimi_gemm_rs_ar_bypasses_enabled_fake_quantizers(quantizer_name):
     gemm_rs_ar.should_run.side_effect = lambda inputs: inputs.shape[0] >= 128
     mlp.gemm_rs_ar = gemm_rs_ar
 
-    vllm_plugin.vllm_replace_quant_module_hook(mlp)
-    vllm_plugin.vllm_replace_quant_module_hook(mlp)
-    assert isinstance(mlp.gemm_rs_ar, vllm_plugin._KimiGemmRsArFakeQuantGuard)
+    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(mlp)
+    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(mlp)
+    assert isinstance(mlp.gemm_rs_ar, kimi_k3_ptq._KimiGemmRsArFakeQuantGuard)
     assert torch.equal(mlp(x), x + 2)
     assert gemm_rs_ar.call_count == 1
     assert down_proj.forward.call_count == 0
@@ -622,7 +668,7 @@ def test_kimi_gemm_rs_guard_tracks_converted_down_projection(fake_parallel_state
     gemm_rs_ar.should_run.return_value = True
     mlp.gemm_rs_ar = gemm_rs_ar
 
-    vllm_plugin.vllm_replace_quant_module_hook(mlp)
+    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(mlp)
     guard = mlp.gemm_rs_ar
     converted = vllm_plugin.QuantModuleRegistry.convert(down_proj)
 
@@ -1367,7 +1413,7 @@ def _calibrate_and_clip_indexer_k(self, cfg):
             if amaxes["k"][name]:
                 module.indexer_k_quantizer.amax = module.indexer_k_quantizer.amax / 8
             self.indexer_k_snapshots[name] = _cache_row_signature(module.k_cache.kv_cache)
-        if isinstance(module, _QuantVLLMGlm5NextIndexer):
+        if isinstance(module, glm5_next_ptq._QuantVLLMGlm5NextIndexer):
             module._score = functools.partial(
                 _record_scorer_call, module._score, name, self.indexer_scorer_calls
             )
@@ -1378,17 +1424,17 @@ def _record_scorer_call(score, name, calls, original, bound, paged):
     """Spy on ``_QuantVLLMGlm5NextIndexer._score``: the layer, the path, what top-k reads and the
     in-kernel numerics passed to DeepGEMM."""
     passed = {}
-    call_scorer = vllm_indexer._call_deep_gemm_scorer
+    call_scorer = glm5_next_ptq._call_deep_gemm_scorer
 
     def spy(deep_gemm_utils, arguments, weights, scorer_kwargs, paged):
         passed.update(scorer_kwargs)
         return call_scorer(deep_gemm_utils, arguments, weights, scorer_kwargs, paged)
 
-    vllm_indexer._call_deep_gemm_scorer = spy
+    glm5_next_ptq._call_deep_gemm_scorer = spy
     try:
         logits = score(original, bound, paged)
     finally:
-        vllm_indexer._call_deep_gemm_scorer = call_scorer
+        glm5_next_ptq._call_deep_gemm_scorer = call_scorer
     numerics = {key: passed[key] for key in ("mma_accum", "post_relu") if key in passed}
     calls.append((name, paged, str(logits.dtype), bool(logits.isnan().any()), numerics))
     return logits

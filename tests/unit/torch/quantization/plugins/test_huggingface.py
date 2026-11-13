@@ -468,7 +468,7 @@ def test_hf_decoder_discoverer_registration_path():
     model = get_tiny_llama()
     assert any(
         is_supported is is_homogeneous_hf_model and discoverer is get_homogeneous_hf_decoder_layers
-        for is_supported, discoverer in LayerActivationCollector._decoder_layer_support
+        for is_supported, discoverer in LayerActivationCollector._decoder_layer_fallbacks
     )
     assert LayerActivationCollector.get_decoder_layers(model) is get_homogeneous_hf_decoder_layers(
         model

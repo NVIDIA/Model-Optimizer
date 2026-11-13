@@ -217,6 +217,8 @@ class LayerActivationCollector:
     """
 
     _decoder_layer_support: list[tuple[Any, Any]] = []
+    # Generic layouts, tried after every pair above (see register_decoder_layer_support).
+    _decoder_layer_fallbacks: list[tuple[Any, Any]] = []
     _LAYER_ATTR = "_layerwise_calib"
 
     def __init__(self, model: nn.Module, status_callback: Callable[[str], None] | None = None):
@@ -243,7 +245,15 @@ class LayerActivationCollector:
     @staticmethod
     def get_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
         """Return decoder layers supported by layerwise calibration."""
-        for is_supported, discoverer in LayerActivationCollector._decoder_layer_support:
+        # A model's own discoverer comes with its PTQ modules, which nothing may have imported yet:
+        # loading a model (FSDP2) asks for its layers before the model is converted.
+        from ..plugins.custom import import_model_ptq_modules
+
+        import_model_ptq_modules(model)
+        for is_supported, discoverer in (
+            *LayerActivationCollector._decoder_layer_support,
+            *LayerActivationCollector._decoder_layer_fallbacks,
+        ):
             if not is_supported(model):
                 continue
             decoder_layers = discoverer(model)
@@ -257,11 +267,18 @@ class LayerActivationCollector:
         return LayerActivationCollector.get_decoder_layers(model) is not None
 
     @classmethod
-    def register_decoder_layer_support(cls, is_supported: Any, discoverer: Any):
-        """Register a (predicate, discoverer) pair for decoder-layer detection."""
+    def register_decoder_layer_support(
+        cls, is_supported: Any, discoverer: Any, fallback: bool = False
+    ):
+        """Register a (predicate, discoverer) pair for decoder-layer detection.
+
+        The first matching pair wins. A ``fallback`` pair, a framework's generic layout, is tried
+        after all the others, so a model's own pair still wins when it is registered later.
+        """
         entry = (is_supported, discoverer)
-        if entry not in cls._decoder_layer_support:
-            cls._decoder_layer_support.append(entry)
+        pairs = cls._decoder_layer_fallbacks if fallback else cls._decoder_layer_support
+        if entry not in pairs:
+            pairs.append(entry)
 
     @staticmethod
     def _extract_output_meta(output):

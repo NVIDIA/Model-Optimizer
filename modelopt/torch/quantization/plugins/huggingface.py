@@ -15,7 +15,6 @@
 
 """Support quantization for huggingface layers."""
 
-import importlib
 import inspect
 import logging
 import warnings
@@ -50,7 +49,7 @@ from ..nn.modules.tensor_quantizer import _try_stacked_fake_quant
 from ..utils import replace_function, sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
 from .attention import register_attention_for_kv_quant
-from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
+from .custom import CUSTOM_MODEL_PLUGINS, MODEL_PTQ_MODULES, _ParallelLinear, _QuantFunctionalMixin
 
 logger = logging.getLogger(__name__)
 
@@ -2010,23 +2009,14 @@ AutoQuantizeGradientSearcher.register_custom_support(
 )
 
 # Model-specific PTQ support lives with its model in
-# ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import. It is
-# imported here: after the generic wrappers and wrapper lists it builds on are defined, and
-# before the homogeneous decoder discoverer below, since the first matching discoverer wins
-# and a model's own (Nemotron-H's) is the more specific one.
-for _model_type in (
-    "falcon",
-    "gpt_oss",
-    "llama4",
-    "nemotron_h",
-    "step3p5",
-    "step3p7",
-    "t5",
-):
-    importlib.import_module(f"modelopt.torch.models.{_model_type}.modeling_ptq")
+# ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import, which
+# happens only when a model of that type is used: converted, or its decoder layers looked up.
+MODEL_PTQ_MODULES.append("modeling_ptq")
 
+# A fallback: a model's own discoverer is the more specific one, and its modeling_ptq registers
+# it only when that model is used, after this one.
 LayerActivationCollector.register_decoder_layer_support(
-    is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers
+    is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers, fallback=True
 )
 
 

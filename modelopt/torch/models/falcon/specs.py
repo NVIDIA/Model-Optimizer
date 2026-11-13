@@ -20,5 +20,6 @@ from ..specs import ModelSpec, register
 __all__: list[str] = []
 
 # Dense, and nothing model-specific for export. Older remote-code Falcon checkpoints
-# (RWForCausalLM) report other model types and are handled by modeling_ptq.py alone.
+# (RWForCausalLM) report model types RefinedWeb and RefinedWebModel, which have no spec: their
+# packages only load this one's modeling_ptq.py.
 register(ModelSpec(model_type="falcon", min_transformers_version="5.5"))
