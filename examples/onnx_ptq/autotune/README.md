@@ -241,6 +241,7 @@ python3 -m modelopt.onnx.quantization.autotune \
     --output_dir ./resnet50_remote_autotuned \
     --schemes_per_region 50 \
     --use_trtexec \
+    --remote_model_path /data/modelopt/engine.trt \
     --trtexec_benchmark_args "--remoteAutoTuningConfig=\"ssh://user@192.0.2.10:22?remote_exec_path=/opt/tensorrt/bin/timing_server&remote_lib_path=/opt/tensorrt/lib\" --safe --skipInference"
 ```
 
@@ -254,7 +255,7 @@ python3 -m modelopt.onnx.quantization.autotune \
 - `--use_trtexec` must be set (benchmarking uses `trtexec` instead of the TensorRT Python API)
 - `--safe --skipInference` must be enabled via `--trtexec_benchmark_args`
 
-The example uses `user` on the reserved documentation address `192.0.2.10`. Replace the user, target address, and TensorRT paths with values for your target (see `trtexec --help` for configuration details). ModelOpt uses the configuration to build the engine with remote autotuning, copies the generated engine to an internal temporary path on the target, and runs `trtexec_safe` there to measure GPU compute time. ModelOpt attempts to remove the temporary engine after each benchmark.
+The example uses `user` on the reserved documentation address `192.0.2.10`. Replace the user, target address, and TensorRT paths with values for your target (see `trtexec --help` for configuration details). ModelOpt uses the configuration to build the engine with remote autotuning, copies the generated engine to the requested target path, and runs `trtexec_safe` there to measure GPU compute time. A custom path accepts only letters, digits, `.`, `_`, `/`, and `-`; `~` is not expanded. It is overwritten and removed after each benchmark, so concurrent runs must use distinct paths. Without `--remote_model_path`, ModelOpt uses a unique temporary filename in the remote user's working directory.
 
 Other TensorRT benchmark options (e.g. `--timing_cache`, `--warmup_runs`, `--timing_runs`, `--plugin_libraries`) are also available; run `--help` for details.
 
