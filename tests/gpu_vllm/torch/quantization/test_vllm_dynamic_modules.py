@@ -527,8 +527,8 @@ assert expected and not missing, f"the vLLM plugin did not import {missing}"
 def test_vllm_plugin_imports_every_model_package():
     """Importing modelopt registers every model package's vLLM wrappers.
 
-    The vLLM plugin imports each ``modelopt/torch/models/<model_type>/modeling_ptq_vllm.py`` from
-    an explicit list, and ``import_plugin`` would hide a missing one.
+    The vLLM plugin finds each ``modelopt/torch/models/<model_type>/modeling_ptq_vllm.py`` by file
+    name, and ``import_plugin`` would hide one that fails to import.
     """
     # The child only asserts; tracing its imports for coverage would just slow it down.
     env = {k: v for k, v in os.environ.items() if k != "COVERAGE_PROCESS_START"}

@@ -15,10 +15,10 @@
 
 """Model-specific PTQ modeling registers on import, whichever module is imported first.
 
-The HF quantization plugin imports every ``<model_type>/modeling_ptq.py`` from an explicit
-list, and those modules import back from the plugin, so registration depends on import
-order. Each first import runs in a fresh interpreter: registration happens once per process,
-so an in-process test would only ever see the import order of whichever test ran first.
+The HF quantization plugin imports every ``<model_type>/modeling_ptq.py``, and those modules
+import back from the plugin, so registration depends on import order. Each first import runs
+in a fresh interpreter: registration happens once per process, so an in-process test would
+only ever see the import order of whichever test ran first.
 """
 
 import os
@@ -46,8 +46,19 @@ FIRST_IMPORTS = [
 CHECK = """
 import importlib
 import sys
+from pathlib import Path
 
 importlib.import_module(sys.argv[1])
+
+from modelopt.torch import models
+
+# The plugin finds every modeling_ptq by file name; check before the imports below load them.
+expected = {
+    f"modelopt.torch.models.{path.parent.name}.modeling_ptq"
+    for path in Path(models.__file__).parent.glob("*/modeling_ptq.py")
+}
+missing = sorted(expected - sys.modules.keys())
+assert expected and not missing, f"the HF plugin did not import {missing}"
 
 from modelopt.torch.models.falcon.modeling_ptq import register_falcon_linears_on_the_fly
 from modelopt.torch.models.nemotron_h.modeling_ptq import is_nemotron_h_model

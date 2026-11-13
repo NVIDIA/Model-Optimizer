@@ -15,7 +15,6 @@
 
 """Support quantization for huggingface layers."""
 
-import importlib
 import inspect
 import logging
 import warnings
@@ -38,6 +37,7 @@ from modelopt.torch.kernels.common.attention import (
     validate_triton_attention_envelope,
 )
 from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
+from modelopt.torch.models import import_model_modules
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState, recorded_distribution_plan
@@ -2010,20 +2010,11 @@ AutoQuantizeGradientSearcher.register_custom_support(
 )
 
 # Model-specific PTQ support lives with its model in
-# ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import. It is
-# imported here: after the generic wrappers and wrapper lists it builds on are defined, and
-# before the homogeneous decoder discoverer below, since the first matching discoverer wins
-# and a model's own (Nemotron-H's) is the more specific one.
-for _model_type in (
-    "falcon",
-    "gpt_oss",
-    "llama4",
-    "nemotron_h",
-    "step3p5",
-    "step3p7",
-    "t5",
-):
-    importlib.import_module(f"modelopt.torch.models.{_model_type}.modeling_ptq")
+# ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import. Every
+# model's is imported here: after the generic wrappers and wrapper lists it builds on are
+# defined, and before the homogeneous decoder discoverer below, since the first matching
+# discoverer wins and a model's own is the more specific one.
+import_model_modules("modeling_ptq")
 
 LayerActivationCollector.register_decoder_layer_support(
     is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers
