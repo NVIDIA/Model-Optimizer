@@ -1438,7 +1438,7 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
 
 
 @torch.no_grad()
-def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) -> nn.Module:
+def initialize_qdq_weights(model: nn.Module) -> nn.Module:
     """Initialize floating latent weights from their configured fake-quantized values.
 
     Call once in the PTQ pipeline after calibration/restoration and before saving an
@@ -1454,7 +1454,6 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
 
     Args:
         model: Calibrated fake-quantized model with uncompressed floating weights.
-        trainable_only: Initialize only weights whose ``requires_grad`` is true.
     """
     if not is_quantized(model):
         raise ValueError("Weight initialization requires a calibrated fake-quantized model.")
@@ -1489,7 +1488,7 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
                 module._initialization_members(quantizer) if isinstance(module, QuantModule) else ()
             )
             selected = isinstance(module, QuantModule) and module._is_selected_for_initialization(
-                weight, quantizer, trainable_only
+                weight, quantizer
             )
             if selected and not validated:
                 module._validate_fold_weight()
@@ -1560,7 +1559,7 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
         initialized = set()
         for module in model.modules():
             if isinstance(module, QuantModule):
-                module._initialize_qdq_weights(trainable_only, initialized)
+                module._initialize_qdq_weights(initialized)
     return model
 
 

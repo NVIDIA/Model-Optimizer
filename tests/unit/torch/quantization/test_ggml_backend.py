@@ -31,7 +31,11 @@ import modelopt.torch.quantization.ggml.q8_0 as q8_0_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.backend import ggml_fake_quant
-from modelopt.torch.quantization.ggml.common import narrow_to_float32
+from modelopt.torch.quantization.ggml.common import (
+    PIN_OVERRIDES_WEIGHT,
+    narrow_to_float32,
+    pin_packed_weight,
+)
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 # Every registered format, paired with its own module. The module -- not the registry -- supplies
@@ -94,6 +98,7 @@ def test_ggml_backend_via_quantize(num_bits, dtype, record_property):
         for name, value in model.weight_quantizer.named_buffers()
         if name.endswith("_qdq_initialization")
     ]
+    assert len(payloads) == 1
     after = model(inputs)
     torch.testing.assert_close(after, output, rtol=0, atol=0)
     torch.testing.assert_close(
@@ -102,6 +107,23 @@ def test_ggml_backend_via_quantize(num_bits, dtype, record_property):
     for payload in payloads:
         assert payload.shape == (2, 256 // codec.block_size, codec.block_bytes)
         assert payload.dtype == torch.uint8
+        # Export splits fused projections; folding quantizes a float32 copy of BF16 weights.
+        for start in range(2):
+            torch.testing.assert_close(
+                codec.pack(model.weight[start : start + 1], model.weight_quantizer),
+                payload[start : start + 1],
+                rtol=0,
+                atol=0,
+            )
+        torch.testing.assert_close(
+            model.weight_quantizer(model.weight.float()).to(dtype),
+            expected_weight,
+            rtol=0,
+            atol=0,
+        )
+    assert any(
+        name.endswith("_qdq_initialization") for name, _ in model.weight_quantizer.named_buffers()
+    )
     record_property("initialization_forward_relative_l2", 0.0)
     for name, value in buffers.items():
         torch.testing.assert_close(
@@ -142,6 +164,35 @@ def test_ggml_backend_via_quantize(num_bits, dtype, record_property):
     model(inputs).float().square().mean().backward()
     assert model.weight.grad is not None and torch.isfinite(model.weight.grad).all()
     assert torch.count_nonzero(model.weight.grad) > 0
+
+
+@pytest.mark.parametrize("num_bits", FORMAT_NAMES)
+def test_new_pin_supersedes_qdq_initialization(num_bits):
+    torch.manual_seed(1234)
+    model = torch.nn.Linear(256, 2, bias=False)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": num_bits, "backend": "ggml"},
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config)
+    mtq.initialize_qdq_weights(model)
+    quantizer = model.weight_quantizer
+    codec = GGML_FORMAT_REGISTRY[num_bits]
+    packed, shape = codec.quantize(model.weight.detach() * 2)
+    expected = codec.dequantize(packed, shape, dtype=model.weight.dtype)
+    assert not torch.equal(model.weight, expected)
+    # AutoQuantize can install a pin while retaining the candidate's source weights.
+    setattr(quantizer, PIN_OVERRIDES_WEIGHT, True)
+    pin_packed_weight(quantizer, num_bits, packed)
+    torch.testing.assert_close(quantizer(model.weight), expected, rtol=0, atol=0)
+    torch.testing.assert_close(codec.pack(model.weight, quantizer), packed, rtol=0, atol=0)
+    assert not any(name.endswith("_qdq_initialization") for name, _ in quantizer.named_buffers())
 
 
 def test_ggml_backend_rejects_unknown_format():

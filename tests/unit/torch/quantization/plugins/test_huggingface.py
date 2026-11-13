@@ -547,6 +547,7 @@ def test_initialize_qdq_weights_hf_roundtrip(tmp_path, num_bits, gptq):
         layer = dict(restored.named_modules())[name]
         torch.testing.assert_close(layer.weight, weight, rtol=0, atol=0)
         assert layer.weight_quantizer.is_enabled
+        torch.testing.assert_close(layer.weight_quantizer(layer.weight), weight, rtol=0, atol=0)
     for name, tensor in buffers.items():
         actual = dict(restored.named_buffers())[name]
         assert actual.dtype == tensor.dtype

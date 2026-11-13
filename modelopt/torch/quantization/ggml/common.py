@@ -193,6 +193,9 @@ def pin_packed_weight(
     bfloat16 or float16, keeps its pinned codes; a block QAD changed is encoded as above, its local
     scales searched again under the pinned scale.
     """
+    initial_name = _initialization_name(format_name)
+    if hasattr(quantizer, initial_name):
+        delattr(quantizer, initial_name)
     quantizer._set_buffer(_pin_name(format_name), packed_weights)
     importance_name = PINNED_IMPORTANCE_PREFIX + format_name
     if importance is not None:
@@ -475,19 +478,13 @@ class GGMLFormat:
         initial_name = _initialization_name(self.name)
         initial = getattr(quantizer, initial_name, None)
         if initial is not None:
-            initial = initial.to(weight.device)
-            initial_shape = (*initial.shape[:-2], initial.shape[-2] * self.block_size)
-            if math.prod(initial_shape) == weight.numel():
-                decoded = self.dequantize(
-                    initial.reshape(-1, self.block_bytes),
-                    torch.tensor(initial_shape, dtype=torch.int64),
-                    dtype=weight.dtype,
-                )
-                if torch.equal(weight.reshape(initial_shape), decoded):
-                    return initial.reshape(*weight.shape[:-1], -1, self.block_bytes), shape
+            packed = self._pinned_rows(quantizer, weight, payload=initial)
+            if packed is not None:
+                return packed, shape
             # A no-op optimizer step may invalidate the cache without changing the weight.
-            # Only a value change retires this payload; ordinary PTQ then predicts new scales.
-            delattr(quantizer, initial_name)
+            # Export slices cannot establish whether the whole weight changed.
+            if weight.numel() == initial.numel() // self.block_bytes * self.block_size:
+                delattr(quantizer, initial_name)
         pinned = pinned_packed_weight(quantizer, self.name)
         keeps_scales = pinned is not None and self.payload_scales is not None
         # Unless the pin stands in for the weight (PIN_OVERRIDES_WEIGHT): AutoQuantize then keeps
@@ -561,7 +558,9 @@ class GGMLFormat:
             quantizer._set_buffer(_source_name(self.name), source)
         return self.dequantize(packed, shape, dtype=dtype)
 
-    def _pinned_rows(self, quantizer, weight: torch.Tensor) -> torch.Tensor | None:
+    def _pinned_rows(
+        self, quantizer, weight: torch.Tensor, *, payload: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
         """The pinned payload of ``weight``, a view of the pinned weight or rows taken from it.
 
         Fake quant hands over the pinned weight itself in 256-value rows; export may hand over row
@@ -570,7 +569,8 @@ class GGMLFormat:
         so a float32 weight also matches the decoding rounded through BF16 or FP16. The comparison
         syncs, but it only runs for weights the identity cache has not seen.
         """
-        pinned = pinned_packed_weight(quantizer, self.name)
+        initialization = payload is not None
+        pinned = payload if initialization else pinned_packed_weight(quantizer, self.name)
         width = weight.shape[-1] // self.block_size
         if (
             pinned is None
@@ -580,7 +580,8 @@ class GGMLFormat:
             return None
         pinned = pinned.to(weight.device).reshape(-1, width, self.block_bytes)
         if (
-            getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
+            not initialization
+            and getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
             and self.full_pin(quantizer, weight) is not None
         ):
             return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
@@ -601,6 +602,8 @@ class GGMLFormat:
             for storage_dtype in storage_dtypes:
                 if torch.equal(rows, decoding(storage_dtype)):
                     return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
+            if initialization:
+                return None
         for storage_dtype in storage_dtypes:
             index = _matching_rows(decoding(storage_dtype), rows)
             if index is not None:
