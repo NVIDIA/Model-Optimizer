@@ -29,7 +29,6 @@ write your own one. Currently, we support plugins for
 - :meth:`transformer_engine<modelopt.torch.quantization.plugins.transformer_engine>`
 """
 
-from modelopt.torch.models import import_model_modules
 from modelopt.torch.utils import import_plugin
 
 with import_plugin("accelerate"):
@@ -75,9 +74,6 @@ with import_plugin("vllm"):
     from .vllm_indexer import *
     from .vllm_layer_scope import *
     from .vllm_mega_moe import *
-
-    # The model-specific vLLM wrappers, after the generic ones above that they build on.
-    import_model_modules("modeling_ptq_vllm")
 
 with import_plugin("trl"):
     from .trl import *

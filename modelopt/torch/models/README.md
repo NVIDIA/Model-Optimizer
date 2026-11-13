@@ -60,11 +60,13 @@ an intra-family detail, not a package API.
 Quantized-module wrappers and registrations that only one model needs (e.g. Llama4's fused
 BMM experts, Step's expert-indexed `MoELinear`) live in `<model_type>/modeling_ptq.py`; generic
 ones (fused/sequential MoE auto-detection, attention, `FP8Linear`) stay in
-`modelopt/torch/quantization/plugins/huggingface.py`. The HF plugin imports every package's
-`modeling_ptq` at its end with `import_model_modules`, which finds them by file name, so a new
-one needs no list entry and the plugins name no model. Leave the model's `__init__.py` importing
-only `specs`: `modeling_ptq` pulls in quantization and transformers, which
-`import modelopt.torch.models` must not.
+`modelopt/torch/quantization/plugins/huggingface.py`. Nothing imports a `modeling_ptq` up front:
+just before converting a model, quantization imports those of its model types with
+`import_model_modules`, which finds them by file name. A model's types are its root
+`config.model_type` and those of the configs nested in it, so a VLM also gets its language
+model's. A new `modeling_ptq` therefore needs no list entry, and the plugins name no model.
+Leave the model's `__init__.py` importing only `specs`: `modeling_ptq` pulls in quantization and
+transformers, which `import modelopt.torch.models` must not.
 
 A `modeling_ptq.py` registers on import — static classes via `QuantModuleRegistry.register`,
 imported from transformers at module scope; remote-code classes via a callback added to
@@ -72,15 +74,16 @@ imported from transformers at module scope; remote-code classes via a callback a
 interface (T5's) by appending it to the plugin's `_QUANT_ATTENTION_WRAPPERS`, which tries it
 after the interface wrapper and before the AST-based fallback — and exports nothing
 (`__all__ = []`). Every package still has a `specs.py`, even when its spec only records
-`model_type` and where the modeling code comes from. A family revision that shares another
-type's PTQ code (`step3p7` uses `step3p5`'s) still gets a `modeling_ptq.py` that imports the
-shared one, so loading it by model type works.
+`model_type` and where the modeling code comes from. A model type that shares another type's
+PTQ code (`step3p7` uses `step3p5`'s, `llama4_text` uses `llama4`'s) still gets a
+`modeling_ptq.py` that imports the shared one, so loading it by model type works. Falcon's
+original remote-code types (`refined_web`, `refined_web_model`) get only that, without a spec.
 
 vLLM's model-specific wrappers follow the same pattern in `<model_type>/modeling_ptq_vllm.py`,
 on top of the generic ones in the vLLM plugin modules
-(`modelopt/torch/quantization/plugins/vllm*.py`): `plugins/__init__.py` imports every
-`modeling_ptq_vllm` the same way, after those. A package that only holds vLLM modeling
-(`glm5_next`) has no `specs.py`.
+(`modelopt/torch/quantization/plugins/vllm*.py`), and a vLLM model's are imported the same way,
+by the model type in its HF config. A package that only holds vLLM modeling (`glm5_next`) has
+no `specs.py`.
 
 ## Sections
 

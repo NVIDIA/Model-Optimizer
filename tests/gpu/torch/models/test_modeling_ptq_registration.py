@@ -13,131 +13,95 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model-specific PTQ modeling registers on import, whichever module is imported first.
+"""A model's ``<model_type>/modeling_ptq.py`` is imported just before it is converted, and only then.
 
-The HF quantization plugin imports every ``<model_type>/modeling_ptq.py``, and those modules
-import back from the plugin, so registration depends on import order. Each first import runs
-in a fresh interpreter: registration happens once per process, so an in-process test would
-only ever see the import order of whichever test ran first.
+The check runs in a fresh interpreter: a module registers once per process, so an in-process
+test would see whatever earlier tests imported.
 """
 
 import os
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 pytest.importorskip("transformers")
 
-FIRST_IMPORTS = [
-    "modelopt.torch.models.falcon.modeling_ptq",
-    "modelopt.torch.models.gpt_oss.modeling_ptq",
-    "modelopt.torch.models.llama4.modeling_ptq",
-    "modelopt.torch.models.nemotron_h.modeling_ptq",
-    "modelopt.torch.models.step3p5.modeling_ptq",
-    "modelopt.torch.models.step3p7.modeling_ptq",
-    "modelopt.torch.models.t5.modeling_ptq",
-    "modelopt.torch.quantization",
-    "modelopt.torch.export",
-]
-
-# Runs in the subprocess after importing ``sys.argv[1]`` first.
 CHECK = """
-import importlib
 import sys
-from pathlib import Path
+from types import SimpleNamespace
 
-importlib.import_module(sys.argv[1])
+from transformers import FalconConfig, FalconForCausalLM
 
-from modelopt.torch import models
-
-# The plugin finds every modeling_ptq by file name; check before the imports below load them.
-expected = {
-    f"modelopt.torch.models.{path.parent.name}.modeling_ptq"
-    for path in Path(models.__file__).parent.glob("*/modeling_ptq.py")
-}
-missing = sorted(expected - sys.modules.keys())
-assert expected and not missing, f"the HF plugin did not import {missing}"
-
-from modelopt.torch.models.falcon.modeling_ptq import register_falcon_linears_on_the_fly
-from modelopt.torch.models.nemotron_h.modeling_ptq import is_nemotron_h_model
-from modelopt.torch.models.step3p5.modeling_ptq import register_moe_linear_on_the_fly
-from modelopt.torch.models.t5.modeling_ptq import _T5QuantAttention
-from modelopt.torch.quantization.nn import QuantModuleRegistry
-from modelopt.torch.quantization.plugins.custom import CUSTOM_MODEL_PLUGINS
-from modelopt.torch.quantization.plugins.huggingface import (
-    _QUANT_ATTENTION_WRAPPERS,
-    _QuantAttention,
-    is_homogeneous_hf_model,
-)
+import modelopt.torch.export
+from modelopt.torch.models import import_model_modules
+from modelopt.torch.quantization.conversion import replace_quant_module
+from modelopt.torch.quantization.nn import QuantModule
+from modelopt.torch.quantization.plugins.huggingface import is_homogeneous_hf_model
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
-try:
-    from transformers.models.falcon.modeling_falcon import FalconLinear
-except ImportError:
-    pass
-else:
-    assert FalconLinear in QuantModuleRegistry, "FalconLinear not registered"
-try:
-    from transformers.models.llama4.modeling_llama4 import Llama4TextExperts
-except ImportError:
-    pass
-else:
-    assert Llama4TextExperts in QuantModuleRegistry, "Llama4TextExperts not registered"
 
-try:
-    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
-except ImportError:
-    pass
-else:
-    assert GptOssExperts in QuantModuleRegistry, "GptOssExperts not registered"
+def loaded():
+    return {
+        name.split(".")[-2]
+        for name in sys.modules
+        if name.startswith("modelopt.torch.models.") and name.endswith(".modeling_ptq")
+    }
 
-try:
-    from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHExperts
-except ImportError:
-    pass
-else:
-    assert NemotronHExperts in QuantModuleRegistry, "NemotronHExperts not registered"
 
-assert register_falcon_linears_on_the_fly in CUSTOM_MODEL_PLUGINS, "Falcon callback missing"
-assert register_moe_linear_on_the_fly in CUSTOM_MODEL_PLUGINS, "Step callback missing"
+assert not loaded(), f"imported before any model was converted: {sorted(loaded())}"
 
-# The attention-interface wrapper is tried first; T5's gets only the classes it rejects.
-assert _QUANT_ATTENTION_WRAPPERS.count(_T5QuantAttention) == 1, _QUANT_ATTENTION_WRAPPERS
-assert _QUANT_ATTENTION_WRAPPERS[0] is _QuantAttention, _QUANT_ATTENTION_WRAPPERS
+# Converting a model imports its own first, so the conversion uses its wrappers: only Falcon's
+# registers FalconLinear.
+config = FalconConfig(vocab_size=32, hidden_size=16, num_hidden_layers=1, num_attention_heads=2)
+model = FalconForCausalLM(config)
+replace_quant_module(model)
+dense = model.transformer.h[0].self_attention.dense
+assert isinstance(dense, QuantModule), type(dense).__mro__
+assert loaded() == {"falcon"}, sorted(loaded())
 
-# The first matching decoder discoverer wins, so Nemotron-H's must precede the generic one.
-predicates = [is_supported for is_supported, _ in LayerActivationCollector._decoder_layer_support]
-assert predicates.count(is_nemotron_h_model) == 1, predicates
-assert predicates.count(is_homogeneous_hf_model) == 1, predicates
+# Types whose PTQ code is another's, Falcon's original remote-code types (whose packages import
+# Falcon's, loaded above), and a VLM's language model, found through its nested config.
+for config, expected in [
+    (SimpleNamespace(model_type="llama4_text"), {"llama4_text", "llama4"}),
+    (SimpleNamespace(model_type="step3p7"), {"step3p7", "step3p5"}),
+    (SimpleNamespace(model_type="RefinedWeb"), {"refined_web"}),
+    (SimpleNamespace(model_type="RefinedWebModel"), {"refined_web_model"}),
+    (
+        SimpleNamespace(
+            model_type="NemotronH_Nano_VL_V2", llm_config=SimpleNamespace(model_type="nemotron_h")
+        ),
+        {"nemotron_h"},
+    ),
+    (SimpleNamespace(model_type="llama"), set()),
+]:
+    before = loaded()
+    import_model_modules(SimpleNamespace(config=config), "modeling_ptq")
+    assert loaded() - before == expected, (config, sorted(loaded() - before))
+
+# The first matching decoder discoverer wins, so Nemotron-H's, registered just now, must still
+# precede the generic one.
+from modelopt.torch.models.nemotron_h.modeling_ptq import is_nemotron_h_model
+
+predicates = [
+    is_supported
+    for is_supported, _ in (
+        *LayerActivationCollector._decoder_layer_support,
+        *LayerActivationCollector._decoder_layer_fallbacks,
+    )
+]
 assert predicates.index(is_nemotron_h_model) < predicates.index(is_homogeneous_hf_model)
 """
 
 
-def _run_check(first_import):
+# A fresh interpreter importing torch and transformers can outlast the default 60 s per-test cap
+# on a small CI runner.
+@pytest.mark.timeout(300)
+def test_modeling_ptq_is_imported_on_conversion():
     # The child only asserts; tracing its heavy imports for coverage (inherited through
     # COVERAGE_PROCESS_START) would just slow it down.
     env = {k: v for k, v in os.environ.items() if k != "COVERAGE_PROCESS_START"}
     result = subprocess.run(
-        [sys.executable, "-c", CHECK, first_import],
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
+        [sys.executable, "-c", CHECK], capture_output=True, text=True, env=env, check=False
     )
-    return first_import, result
-
-
-# Several fresh interpreters each import torch and transformers, which outlasts the default
-# 60 s per-test cap on a small CI runner.
-@pytest.mark.timeout(300)
-def test_registration_is_independent_of_import_order():
-    # Each first import needs its own interpreter; run them in parallel, at most one per CPU,
-    # rather than one after another.
-    with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
-        results = list(pool.map(_run_check, FIRST_IMPORTS))
-    failures = {name: result.stderr for name, result in results if result.returncode != 0}
-    assert not failures, "\n\n".join(
-        f"importing {name} first:\n{err}" for name, err in failures.items()
-    )
+    assert result.returncode == 0, result.stderr

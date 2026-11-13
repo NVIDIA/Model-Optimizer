@@ -37,7 +37,6 @@ from modelopt.torch.kernels.common.attention import (
     validate_triton_attention_envelope,
 )
 from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
-from modelopt.torch.models import import_model_modules
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState, recorded_distribution_plan
@@ -50,7 +49,7 @@ from ..nn.modules.tensor_quantizer import _try_stacked_fake_quant
 from ..utils import replace_function, sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
 from .attention import register_attention_for_kv_quant
-from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
+from .custom import CUSTOM_MODEL_PLUGINS, MODEL_PTQ_MODULES, _ParallelLinear, _QuantFunctionalMixin
 
 logger = logging.getLogger(__name__)
 
@@ -2010,14 +2009,14 @@ AutoQuantizeGradientSearcher.register_custom_support(
 )
 
 # Model-specific PTQ support lives with its model in
-# ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import. Every
-# model's is imported here: after the generic wrappers and wrapper lists it builds on are
-# defined, and before the homogeneous decoder discoverer below, since the first matching
-# discoverer wins and a model's own is the more specific one.
-import_model_modules("modeling_ptq")
+# ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import, which
+# happens only when a model of that type is converted.
+MODEL_PTQ_MODULES.append("modeling_ptq")
 
+# A fallback: a model's own discoverer is the more specific one, and its modeling_ptq registers
+# it only when that model is converted, after this one.
 LayerActivationCollector.register_decoder_layer_support(
-    is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers
+    is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers, fallback=True
 )
 
 

@@ -39,7 +39,7 @@ from ..nn import (
     SequentialQuantizer,
     TensorQuantizer,
 )
-from .custom import CUSTOM_MODEL_PLUGINS
+from .custom import CUSTOM_MODEL_PLUGINS, MODEL_PTQ_MODULES
 
 _NVFP4_ATTENTION_QUANTIZER_CFG = {
     "num_bits": (2, 1),
@@ -352,6 +352,8 @@ def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
 
 
 CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
+# A model's own vLLM wrappers, in ``modelopt/torch/models/<model_type>/modeling_ptq_vllm.py``.
+MODEL_PTQ_MODULES.append("modeling_ptq_vllm")
 
 
 def _set_vllm_attention_kv_default_amax(module, device: torch.device) -> None:
