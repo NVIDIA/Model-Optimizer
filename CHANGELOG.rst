@@ -32,6 +32,8 @@ Changelog
 
 *ONNX*
 
+- Fix ONNX AutoTune benchmarking every candidate with one uniform Q/DQ scale, which let TensorRT skip requantization the calibrated model performs and favored placements that are slower in practice. Candidates now get activation scales that differ wherever the quantized model requantizes, so reported latencies and selected placements can change (code that builds its own AutoTune ``Config`` can restore the previous behavior with ``use_varied_activation_scales=False``).
+
 *Speculative Decoding*
 
 *Megatron Framework (M-LM / M-Bridge)*
