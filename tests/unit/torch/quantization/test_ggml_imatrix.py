@@ -162,19 +162,29 @@ def test_imatrix_leaves_a_tied_weight_of_a_sharded_fsdp2_model_unchanged(cpu_dis
     cpu_dist_workers.run(_tied_fsdp2_weight_job)
 
 
-def test_layerwise_imatrix_leaves_a_weight_tied_across_layers_unchanged():
-    # Layerwise calibration hands imatrix one decoder layer, in which the tie is not visible.
+@pytest.mark.parametrize("tied_use", ["decoder", "outside"])
+def test_layerwise_imatrix_leaves_a_weight_tied_across_layers_unchanged(tied_use):
+    # Layerwise calibration hands imatrix one decoder layer, and its pass over the weights outside
+    # the decoder layers hides them, so neither sees the tie on its own.
     model = get_tiny_llama(
-        dtype=torch.float32, hidden_size=256, intermediate_size=256, num_attention_heads=4
+        dtype=torch.float32,
+        hidden_size=256,
+        intermediate_size=256,
+        num_attention_heads=4,
+        vocab_size=256,
     )
-    layers = model.model.layers
-    layers[1].mlp.gate_proj.weight = layers[0].mlp.gate_proj.weight
-    original = layers[0].mlp.gate_proj.weight.detach().clone()
+    shared = model.model.layers[0].mlp.gate_proj.weight
+    if tied_use == "decoder":
+        model.model.layers[1].mlp.gate_proj.weight = shared
+        pattern = "*layers.0.mlp.gate_proj.weight_quantizer"
+    else:
+        model.lm_head.weight = shared
+        pattern = "*lm_head.weight_quantizer"
+    original = shared.detach().clone()
     input_ids = torch.randint(0, 32, (4, 16), generator=torch.Generator().manual_seed(0))
     algorithm = {"method": "imatrix", "layerwise": {"enable": True}}
-    pattern = "*layers.0.mlp.gate_proj.weight_quantizer"
     mtq.quantize(model, _config(algorithm, pattern), lambda m: m(input_ids))
-    assert torch.equal(layers[0].mlp.gate_proj.weight.detach(), original)
+    assert torch.equal(shared.detach(), original)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float64])
