@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,7 +30,9 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import pytest
+from datasets import Dataset
 from onnx import TensorProto, helper, numpy_helper
+from transformers.models.qwen3_5.tokenization_qwen3_5 import Qwen3_5Tokenizer
 
 _EXAMPLE = Path(__file__).resolve().parents[3] / "examples/windows/onnx_ptq/genai_llm"
 _SPEC = importlib.util.spec_from_file_location("llm_calibration", _EXAMPLE / "llm_calibration.py")
@@ -158,11 +160,64 @@ def test_hybrid_token_input_and_unknown_input(tmp_path):
         )
 
 
+@pytest.mark.parametrize("past_dimension", [None, 0])
+def test_signature_distinguishes_unspecified_and_zero_dimensions(tmp_path, past_dimension):
+    name = "past_key_values.0.key"
+    model = helper.make_model(
+        helper.make_graph(
+            [],
+            "signature",
+            [helper.make_tensor_value_info(name, TensorProto.FLOAT16, [1, 2, past_dimension, 4])],
+            [],
+        )
+    )
+    path = tmp_path / "model.onnx"
+    onnx.save(model, path)
+    if past_dimension is None:
+        with pytest.raises(ValueError, match=name):
+            calibration.read_signature(path)
+    else:
+        signature = calibration.read_signature(path)
+        assert calibration.calibration_feed(signature, [[1]], [[1]])[name].shape == (1, 2, 0, 4)
+
+
 def test_nested_decoder_config_preserves_plain_config():
     plain = SimpleNamespace(hidden_size=4)
     assert calibration.text_config_of(plain) is plain
     assert calibration.text_config_of(SimpleNamespace(text_config=plain)) is plain
     assert calibration.text_config_of(SimpleNamespace(text_config=None)).text_config is None
+
+
+def test_local_hybrid_config_through_calibration_inputs(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen3_5",
+                "text_config": {
+                    "model_type": "qwen3_5_text",
+                    "hidden_size": 4,
+                    "num_hidden_layers": 1,
+                    "num_attention_heads": 2,
+                    "num_key_value_heads": 2,
+                    "vocab_size": 3,
+                },
+            }
+        )
+    )
+    Qwen3_5Tokenizer(vocab={"<|endoftext|>": 0, "h": 1, "i": 2}, merges=[]).save_pretrained(
+        tmp_path
+    )
+    example = importlib.import_module("examples.windows.onnx_ptq.genai_llm.quantize")
+    monkeypatch.setattr(
+        example, "load_dataset", lambda *_a, **_k: Dataset.from_dict({"article": ["hi", "h"]})
+    )
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    feeds = example.get_calib_inputs(
+        "cnn", str(tmp_path), str(tmp_path), 2, 2, 4, "cpu", False, False, False, 2, True, False
+    )
+    assert len(feeds) == 1
+    assert feeds[0]["input_ids"].shape == (2, 2)
+    assert feeds[0]["position_ids"].shape == (2, 2)
 
 
 def _checkpoint(directory, dtype="F16", indexed=False, invalid=False, offset=0, values=None):
@@ -224,6 +279,28 @@ def test_invalid_tensor_leaves_no_cache(tmp_path):
     with pytest.raises(ValueError):
         calibration.embed_table(str(model), cache)
     assert not cache.exists()
+
+
+@pytest.mark.parametrize("corruption", ["shape", "dtype", "nonfinite", "truncated"])
+def test_invalid_embedding_cache_is_rebuilt(tmp_path, corruption):
+    model = tmp_path / "checkpoint"
+    values, _ = _checkpoint(model)
+    cache = tmp_path / "cache" / "embedding.npy"
+    table = calibration.embed_table(str(model), cache)
+    cached_path = Path(table.filename)
+    del table
+    if corruption == "truncated":
+        cached_path.write_bytes(cached_path.read_bytes()[:-2])
+    else:
+        corrupt = values.astype(np.float32 if corruption == "dtype" else np.float16)
+        if corruption == "shape":
+            corrupt = corrupt[:1]
+        elif corruption == "nonfinite":
+            corrupt[0, 0] = np.nan
+        np.save(cached_path, corrupt)
+    recovered = calibration.embed_table(str(model), cache)
+    assert recovered.dtype == np.float16
+    np.testing.assert_array_equal(recovered, values.astype(np.float16))
 
 
 @pytest.mark.parametrize("oversized", [False, True])

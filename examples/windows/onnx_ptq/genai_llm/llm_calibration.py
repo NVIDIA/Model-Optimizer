@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -141,7 +141,16 @@ def read_signature(model_path):
     for i in model.graph.input:
         if i.name in initializers:
             continue
-        dims = [d.dim_param or d.dim_value for d in i.type.tensor_type.shape.dim]
+        dims = [
+            d.dim_param
+            if d.HasField("dim_param")
+            else d.dim_value
+            if d.HasField("dim_value")
+            else None
+            for d in i.type.tensor_type.shape.dim
+        ]
+        if None in dims:
+            raise ValueError(f"Unspecified dimension in ONNX input {i.name!r}")
         elem = onnx.TensorProto.DataType.Name(i.type.tensor_type.elem_type)
         out.append((i.name, dims, _ONNX_ELEM.get(elem, f"tensor({elem.lower()})")))
     return out
@@ -231,6 +240,30 @@ def _read_range(opener, url, first, size, token):
     if len(data) != size:
         raise ValueError("Incomplete checkpoint byte range")
     return data
+
+
+def _cached_embedding(path, shape, chunk_size):
+    try:
+        table = np.load(path, mmap_mode="r", allow_pickle=False)
+        if (
+            not isinstance(table, np.memmap)
+            or table.shape != tuple(shape)
+            or table.dtype != np.float16
+        ):
+            return None
+        # Scan through bounded reads without faulting every mapped cache page into process RSS.
+        with Path(path).open("rb") as stream:
+            stream.seek(table.offset)
+            remaining = table.size
+            while remaining:
+                count = min(remaining, chunk_size // table.dtype.itemsize)
+                values = np.fromfile(stream, dtype=table.dtype, count=count)
+                if values.size != count or not np.isfinite(values).all():
+                    return None
+                remaining -= count
+        return table
+    except (OSError, ValueError, EOFError):
+        return None
 
 
 def embed_table(model_name, cache_file, max_output_bytes=8 * 1024**3):
@@ -338,7 +371,9 @@ def embed_table(model_name, cache_file, max_output_bytes=8 * 1024**3):
     cache_path = Path(cache_file)
     cache_path = cache_path.with_name(f"{cache_path.stem}_{digest}{cache_path.suffix}")
     if cache_path.is_file():
-        return np.load(cache_path, mmap_mode="r", allow_pickle=False)
+        cached = _cached_embedding(cache_path, shape, chunk_size)
+        if cached is not None:
+            return cached
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     # Disk-backed output avoids full-size byte buffers and conversion copies for large vocabularies.
     with tempfile.NamedTemporaryFile(dir=cache_path.parent, suffix=".npy", delete=False) as stream:
