@@ -182,7 +182,9 @@ The quantization script also handles text-only calibration of hybrid decoder exp
 that take `inputs_embeds` or linear-attention `past_key_values.*.conv_state` and
 `recurrent_state` inputs. It reads the ONNX input signature to build calibration
 feeds and TensorRT execution-provider shape profiles. Ordinary token/key/value
-exports retain the existing input preparation path.
+exports retain the existing input preparation path, including unnamed dynamic
+dimensions. Signature-based calibration requires known dimension sizes or
+recognized batch/sequence/cache names; it rejects unspecified dimensions.
 
 For embedding-only exports, `--model_name` must identify the matching Hugging Face
 checkpoint or a local checkpoint directory containing safetensors weights. The
