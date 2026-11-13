@@ -882,7 +882,9 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
     data = [source.get_input() for _ in range(2)]
     formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG]
 
-    def search(checkpoint, format_shard=None, model=None, calib_steps=2, score_steps=2):
+    def search(
+        checkpoint, format_shard=None, model=None, calib_steps=2, score_steps=2, method=method
+    ):
         return mtq.auto_quantize(
             copy.deepcopy(source) if model is None else model,
             constraints={"effective_bits": 6.0},
@@ -948,6 +950,15 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
         del unrecorded["scoring_config"]
         safe_save(unrecorded, tmp_path / "unrecorded.pth")
         search(tmp_path / "unrecorded.pth", (0, 2))
+    if isinstance(method, dict):  # scores taken in another context neither resume nor merge
+        other = {**method, "context": 1 if method["context"] == "lowest" else "lowest"}
+        with pytest.raises(ValueError, match="scoring options"):
+            search(shards[0], (0, 2), method=other)
+        search(tmp_path / "other1.pth", (1, 2), method=other)
+        with pytest.raises(ValueError, match=r"search setups \(scoring_config\)"):
+            model_quant.merge_auto_quantize_checkpoints(
+                [shards[0], tmp_path / "other1.pth"], str(tmp_path / "z.pth")
+            )
 
     merged = tmp_path / "merged.pth"
     merge_states = model_quant.merge_auto_quantize_shards
