@@ -784,6 +784,7 @@ def run_awq_scale_search_per_node(
 ):
     """Method that iterates over each quantizable node for scale search."""
     assert len(awq_lite) == len(wa_pack)
+    reuse_activations = kwargs.get("awqlite_reuse_activations", False)
     cached_activation = None
     cached_activation_name = None
     for i in tqdm(
@@ -861,7 +862,8 @@ def run_awq_scale_search_per_node(
             clip_alphas[weight_tensor.name] = awq_clip.best_alpha
         # Share only the current activation with adjacent consumers; release it before the next input.
         if (
-            not enable_fast_path_using_high_sysram
+            reuse_activations
+            and not enable_fast_path_using_high_sysram
             and i + 1 < len(wa_pack)
             and wa_pack[i + 1][0].name == act_tensor.name
         ):
@@ -1502,6 +1504,13 @@ def quantize(
 
                 - **awqlite_alpha_step** (float): Step size to find best Alpha in awq-lite.Range: [0, 1].
                                               Default: 0.1.
+                - **awqlite_reuse_activations** (bool): Reuse calibration activations across adjacent
+                                              weights sharing an input in per-node AWQ Lite/Full.
+                                              Default: False (collect independently per weight).
+                                              Enable only when sharing activation samples is acceptable;
+                                              this does not change random operators, seeds, or backend determinism.
+                                              For stochastic graphs, reuse changes which samples adjacent
+                                              weights share compared with independent calibration.
                 - **awqclip_alpha_step** (float): Step size to find best Alpha in awq-clip.
                                               Default: 0.05
                 - **awqclip_alpha_min** (float): Minimum threshold for weight-clipping in awq-clip.

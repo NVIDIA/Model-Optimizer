@@ -176,8 +176,14 @@ def test_shape_awq(tmp_path):
 
 
 @pytest.mark.parametrize("calibration_method", ["awq_lite", "awq_full"])
-def test_awq_reuses_adjacent_activations(tmp_path, monkeypatch, calibration_method):
-    """Reuse shared activations without changing the quantized graph or retaining earlier inputs."""
+@pytest.mark.parametrize(
+    ("reuse_activations", "random_activation"),
+    [(None, False), (False, False), (True, False), (None, True), (False, True)],
+)
+def test_awq_reuses_adjacent_activations(
+    tmp_path, monkeypatch, calibration_method, reuse_activations, random_activation
+):
+    """Opt in to reuse while preserving independent stochastic captures by default."""
     rng = np.random.default_rng(37)
     weights = [
         onnx.numpy_helper.from_array(rng.normal(size=(16, 16)).astype(np.float32), name)
@@ -192,6 +198,15 @@ def test_awq_reuses_adjacent_activations(tmp_path, monkeypatch, calibration_meth
         onnx.helper.make_node("Add", ["b", "c"], ["sum"], name="sum"),
         onnx.helper.make_node("Add", ["sum", "d"], ["y"], name="y"),
     ]
+    activation_name = "sample" if random_activation else "x"
+    if random_activation:
+        for node in nodes:
+            if node.input[0] == "x":
+                node.input[0] = activation_name
+        nodes[:0] = [
+            onnx.helper.make_node("RandomNormalLike", ["x"], ["noise"], seed=1.0),
+            onnx.helper.make_node("Add", ["x", "noise"], [activation_name]),
+        ]
     graph = onnx.helper.make_graph(
         nodes,
         "shared_activations",
@@ -211,8 +226,14 @@ def test_awq_reuses_adjacent_activations(tmp_path, monkeypatch, calibration_meth
         "block_size": 8,
         "use_external_data_format": False,
     }
-    reference = quantize_int4(path, enable_fast_path_using_high_sysram=True, **kwargs)
+    reference = quantize_int4(
+        path,
+        awqlite_reuse_activations=False,
+        enable_fast_path_using_high_sysram=not random_activation,
+        **kwargs,
+    )
     session_calls = []
+    captured_samples = []
     create_session = moq.int4.create_inference_session
 
     def counted_session(*args, **kwargs):
@@ -221,15 +242,25 @@ def test_awq_reuses_adjacent_activations(tmp_path, monkeypatch, calibration_meth
 
         def counted_run(names, feed):
             session_calls.append(tuple(names))
-            return run(names, feed)
+            outputs = run(names, feed)
+            if random_activation and names == [activation_name]:
+                captured_samples.append(outputs[0].copy())
+            return outputs
 
         session.run = counted_run
         return session
 
     monkeypatch.setattr(moq.int4, "create_inference_session", counted_session)
+    if reuse_activations is not None:
+        kwargs["awqlite_reuse_activations"] = reuse_activations
     actual = quantize_int4(path, **kwargs)
     assert actual.SerializeToString() == reference.SerializeToString()
-    assert session_calls == [("x",)] * 2 + [("hidden",)] * 2 + [("x",)] * 2
+    first_group_calls = 2 if reuse_activations else 4
+    assert session_calls == (
+        [(activation_name,)] * first_group_calls + [("hidden",)] * 2 + [(activation_name,)] * 2
+    )
+    if random_activation:
+        assert not np.array_equal(captured_samples[0], captured_samples[2])
 
 
 def test_int4_gather(tmp_path):
