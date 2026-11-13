@@ -647,7 +647,7 @@ def _load_batch_on_every_pp_stage() -> None:
 
     Megatron-Bridge's ``get_batch`` loads ``position_ids`` only on the first stage (and MTP
     stages), but models that use mRoPE need them on every stage, so later stages
-    otherwise fail on ``position_ids=None``. Later stages load only these two fields, not the
+    otherwise fail on ``position_ids=None``. Later stages also load these two fields, but not the
     full batch.
     """
     if not hasattr(gpt_step, "_middle_pp_stage_needs_batch") or (
@@ -655,18 +655,17 @@ def _load_batch_on_every_pp_stage() -> None:
         not in inspect.signature(gpt_step.get_batch_from_iterator).parameters
     ):
         raise ValueError(
-            "Pipeline-parallel distillation of an mRoPE model needs a newer Megatron-Bridge; "
-            "see the README."
+            "Pipeline-parallel distillation of an mRoPE model needs a newer Megatron-Bridge, "
+            "such as the one in nvcr.io/nvidia/nemo:26.10."
         )
     get_batch_from_iterator = gpt_step.get_batch_from_iterator
 
     def _get_batch_from_iterator(*args, **kwargs):
-        # The first stage already loads ``tokens`` and ``position_ids``; leave its call unchanged.
-        if not kwargs.get("is_first_pp_stage"):
-            kwargs["is_first_pp_stage"] = True
-            kwargs["include_full_batch_fields"] = False
+        kwargs["is_first_pp_stage"] = True
+        kwargs["include_full_batch_fields"] = False
         return get_batch_from_iterator(*args, **kwargs)
 
+    # TODO: remove once Megatron-Bridge's gpt_step loads position_ids on every PP stage for mRoPE.
     gpt_step._middle_pp_stage_needs_batch = lambda cfg: True
     gpt_step.get_batch_from_iterator = _get_batch_from_iterator
 
