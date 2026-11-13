@@ -174,3 +174,67 @@ def test_selection_requires_restored_student_state(vlm_root_state):
     configure_trainable_parameters(student, ["1.weight"])
     assert mto.ModeloptStateManager.is_converted(root)
     assert [n for n, p in student.named_parameters() if p.requires_grad] == ["1.weight"]
+
+
+class _Router(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(2, 2))
+        self.register_buffer("expert_bias", torch.zeros(2))
+
+
+def _toy_moe_student(final_norm: str | None = "final_norm") -> nn.Module:
+    """Module tree with Megatron's names: grouped routed experts, router, shared expert, norms."""
+    root, layer, mlp, experts = nn.Module(), nn.Module(), nn.Module(), nn.Module()
+    experts.linear_fc1 = nn.Module()
+    experts.linear_fc1.weight0 = nn.Parameter(torch.ones(2, 2))
+    mlp.experts, mlp.router, mlp.shared_experts = experts, _Router(), nn.Linear(2, 2)
+    layer.mlp = mlp
+    root.decoder = nn.Module()
+    root.decoder.layers = nn.ModuleList([layer])
+    if final_norm:
+        setattr(root.decoder, final_norm, nn.LayerNorm(2))
+    root.mtp = nn.Module()
+    root.mtp.final_layernorm = nn.LayerNorm(2)  # an MTP head's own norm must not match
+    return root
+
+
+def test_router_bias_update_follows_router_weight():
+    frozen_router = _toy_moe_student()
+    frozen_router.requires_grad_(False)
+    assert trainable_params.freeze_router_bias_updates(frozen_router) == 1
+    assert frozen_router.decoder.layers[0].mlp.router.frozen_expert_bias
+
+    trained_router = _toy_moe_student()
+    assert trainable_params.freeze_router_bias_updates(trained_router) == 0
+    assert not hasattr(trained_router.decoder.layers[0].mlp.router, "frozen_expert_bias")
+
+
+@pytest.mark.parametrize("norm_name", ["final_norm", "final_layernorm"])
+def test_expert_only_selection_keeps_final_norm_trainable(norm_name):
+    model = _toy_moe_student(norm_name)
+    model.requires_grad_(False)
+    model.decoder.layers[0].mlp.experts.linear_fc1.weight0.requires_grad_(True)
+    kept = trainable_params.keep_dense_optimizer_non_empty(model)
+    assert kept == [f"decoder.{norm_name}.weight", f"decoder.{norm_name}.bias"]
+    assert {n for n, p in model.named_parameters() if p.requires_grad} == {
+        "decoder.layers.0.mlp.experts.linear_fc1.weight0",
+        *kept,
+    }
+
+
+def test_selection_with_a_dense_parameter_is_left_alone():
+    model = _toy_moe_student()
+    model.requires_grad_(False)
+    model.decoder.layers[0].mlp.experts.linear_fc1.weight0.requires_grad_(True)
+    model.decoder.layers[0].mlp.shared_experts.weight.requires_grad_(True)
+    assert trainable_params.keep_dense_optimizer_non_empty(model) == []
+    assert not model.decoder.final_norm.weight.requires_grad
+
+
+def test_expert_only_selection_without_final_norm_is_refused():
+    model = _toy_moe_student(final_norm=None)
+    model.requires_grad_(False)
+    model.decoder.layers[0].mlp.experts.linear_fc1.weight0.requires_grad_(True)
+    with pytest.raises(ValueError, match="no decoder final norm"):
+        trainable_params.keep_dense_optimizer_non_empty(model)
