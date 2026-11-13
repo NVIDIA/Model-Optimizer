@@ -8,6 +8,8 @@ Changelog
 
 *Quantization - ONNX*
 
+- Add opt-in ``awqlite_reuse_activations`` (default: False) to share calibration activations across adjacent weights with the same input in per-node ONNX AWQ Lite/Full. For stochastic graphs, enabling reuse shares captured samples across those weights.
+
 *Quantization - Algorithms*
 
 *Quantization - QAT / QAD*

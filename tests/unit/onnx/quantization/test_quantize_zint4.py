@@ -178,7 +178,7 @@ def test_shape_awq(tmp_path):
 @pytest.mark.parametrize("calibration_method", ["awq_lite", "awq_full"])
 @pytest.mark.parametrize(
     ("reuse_activations", "random_activation"),
-    [(None, False), (False, False), (True, False), (None, True), (False, True)],
+    [(None, False), (False, False), (True, False), (None, True), (False, True), (True, True)],
 )
 def test_awq_reuses_adjacent_activations(
     tmp_path, monkeypatch, calibration_method, reuse_activations, random_activation
@@ -226,15 +226,23 @@ def test_awq_reuses_adjacent_activations(
         "block_size": 8,
         "use_external_data_format": False,
     }
-    reference = quantize_int4(
-        path,
-        awqlite_reuse_activations=False,
-        enable_fast_path_using_high_sysram=not random_activation,
-        **kwargs,
-    )
+    reference = None
+    if not (random_activation and reuse_activations):
+        reference = quantize_int4(
+            path,
+            awqlite_reuse_activations=False,
+            enable_fast_path_using_high_sysram=not random_activation,
+            **kwargs,
+        )
     session_calls = []
     captured_samples = []
+    weight_samples = []
     create_session = moq.int4.create_inference_session
+    awq_init = moq.int4.AWQLiteHelper.__init__
+
+    def capture_weight_samples(self, x, *args, **kwargs):
+        weight_samples.append(x.copy())
+        awq_init(self, x, *args, **kwargs)
 
     def counted_session(*args, **kwargs):
         session = create_session(*args, **kwargs)
@@ -251,16 +259,25 @@ def test_awq_reuses_adjacent_activations(
         return session
 
     monkeypatch.setattr(moq.int4, "create_inference_session", counted_session)
+    if random_activation:
+        monkeypatch.setattr(moq.int4.AWQLiteHelper, "__init__", capture_weight_samples)
     if reuse_activations is not None:
         kwargs["awqlite_reuse_activations"] = reuse_activations
     actual = quantize_int4(path, **kwargs)
-    assert actual.SerializeToString() == reference.SerializeToString()
+    if reference is not None:
+        assert actual.SerializeToString() == reference.SerializeToString()
     first_group_calls = 2 if reuse_activations else 4
     assert session_calls == (
         [(activation_name,)] * first_group_calls + [("hidden",)] * 2 + [(activation_name,)] * 2
     )
     if random_activation:
         assert not np.array_equal(captured_samples[0], captured_samples[2])
+        assert len(weight_samples) == 4
+        if reuse_activations:
+            np.testing.assert_array_equal(weight_samples[0], weight_samples[1])
+        else:
+            assert not np.array_equal(weight_samples[0], weight_samples[1])
+        assert not np.array_equal(weight_samples[0], weight_samples[3])
 
 
 def test_int4_gather(tmp_path):

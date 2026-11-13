@@ -86,7 +86,9 @@ python quantize.py --help
 Activation reuse is opt-in: pass `--awqlite_reuse_activations` or set
 `awqlite_reuse_activations=True` in the INT4 Python API. It does not modify random operators,
 seeds, or backend determinism. With stochastic graphs, enabling reuse shares a captured
-activation sample across adjacent weights; leave it disabled to retain independent calibration.
+activation sample across adjacent weights. Independent per-weight captures require reuse to
+remain disabled in per-node mode with `enable_fast_path_using_high_sysram=False`; disabling
+reuse alone does not guarantee independent captures in other modes.
 
 Note:
 
