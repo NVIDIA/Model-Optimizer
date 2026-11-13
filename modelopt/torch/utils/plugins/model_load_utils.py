@@ -2377,9 +2377,11 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
     else derived), then crop to the weight shape -- correct for both full and partial last blocks,
     2-D dense linears and (leading-dim-broadcast) per-expert tensors. Idempotent.
 
-    The override takes block-FP8 weights only. Any other weight goes to transformers' own dequant,
-    which from 5.9 unpacks packed FP4 (``float4_e2m1fn_x2``, or ``int8``) itself: DeepSeek-V4 declares
-    block FP8 but stores its routed experts that way, with ``[1, 32]`` scales.
+    A block-FP8 weight reaches the dequant in fp8, or already in the model dtype: transformers loads
+    a tensor that no converter renames in that dtype, taking safetensors' "F8_E4M3" for a float, as
+    it does DeepSeek-V3's ``kv_a_proj_with_mqa``. Packed FP4 (``float4_e2m1fn_x2``, or ``int8``) goes
+    to transformers' own dequant, which unpacks it from 5.9: DeepSeek-V4 declares block FP8 but
+    stores its routed experts that way, with ``[1, 32]`` scales.
 
     transformers >= 5.10.1 keeps its own dequant. Upstream fixed two of the show-stoppers there -- the
     loader's expert ``tensor_idx`` check became ``any(op is MergeModulelist ...)`` (bug 1) and
@@ -2404,10 +2406,8 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
     if _FINEGRAINED_FP8_PATCHED:
         return
 
-    fp8_dtypes = {
-        getattr(torch, name)
-        for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
-        if hasattr(torch, name)
+    packed_fp4 = {
+        getattr(torch, name) for name in ("int8", "float4_e2m1fn_x2") if hasattr(torch, name)
     }
     if parse(transformers.__version__) >= parse("5.10.1"):
         # Re-importing this module loses its flag, and the wrapper calls the method it replaces:
@@ -2418,7 +2418,7 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         _stock_dequantize_one = _fp8.Fp8Dequantize._dequantize_one
 
         def _dequantize_partial_blocks(self, quantized, scales, *args, **kwargs):
-            if quantized.dim() < 2 or scales.dim() < 2 or quantized.dtype not in fp8_dtypes:
+            if quantized.dim() < 2 or scales.dim() < 2 or quantized.dtype in packed_fp4:
                 return _stock_dequantize_one(self, quantized, scales, *args, **kwargs)
             rows, cols = quantized.shape[-2:]
             block = getattr(
@@ -2430,11 +2430,14 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
             ):
                 return _stock_dequantize_one(self, quantized, scales, *args, **kwargs)
             pad_rows, pad_cols = ceil_grid[0] * block[0] - rows, ceil_grid[1] * block[1] - cols
-            # Padded in its own fp8 dtype, through a same-size uint8 view (pad has no fp8 kernel), so
-            # transformers' dequant gets the input it is written for, without an fp32 copy.
-            padded = torch.nn.functional.pad(
-                quantized.view(torch.uint8), (0, pad_cols, 0, pad_rows)
-            ).view(quantized.dtype)
+            # Padded in its own dtype, so transformers' dequant gets the input it is written for,
+            # without an fp32 copy; fp8 through a same-size uint8 view, as pad has no fp8 kernel.
+            if quantized.element_size() == 1:
+                padded = torch.nn.functional.pad(
+                    quantized.view(torch.uint8), (0, pad_cols, 0, pad_rows)
+                ).view(quantized.dtype)
+            else:
+                padded = torch.nn.functional.pad(quantized, (0, pad_cols, 0, pad_rows))
             out = _stock_dequantize_one(self, padded, scales, *args, **kwargs)
             return out[..., :rows, :cols]
 
@@ -2457,9 +2460,9 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         out_dtype = (
             output_dtype or getattr(type(self), "_modelopt_dequant_dtype", None) or torch.bfloat16
         )
-        if quantized.dtype not in fp8_dtypes:
-            # Block FP8 only: read as fp8, packed FP4 (two values a byte) would come out at half its
-            # width and wrong. transformers' own dequant unpacks it.
+        if quantized.dtype in packed_fp4:
+            # Read as block FP8, packed FP4 (two values a byte) would come out at half its width and
+            # wrong. transformers' own dequant unpacks it.
             if stock is None:
                 raise ValueError(f"block-FP8 dequant: a {quantized.dtype} weight is not block FP8.")
             return stock(self, quantized, scales).to(out_dtype)
