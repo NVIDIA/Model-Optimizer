@@ -108,7 +108,6 @@ repos:
         # Instead, we should manually add the license header to those files *after* the original header.
         exclude: >
           (?x)^(
-              modelopt/torch/quantization/residue.py|
               modelopt/torch/quantization/utils/calib_utils.py|
               modelopt/torch/quantization/ggml/codebooks.py|
               modelopt/onnx/quantization/operators.py|

@@ -1,7 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
-# SPDX-FileCopyrightText: Copyright (c) 2023 MIT HAN Lab (get_act_scale)
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -65,7 +63,7 @@ def _set_residue_indices(quantizer: TensorQuantizer, indices: torch.Tensor):
 
 
 class ResidueHelper:
-    """Collect the donor's raw-input salience statistics without quantized Linear output."""
+    """Collect raw-input salience statistics without quantized Linear output."""
 
     def __init__(self, module, salience_metric):
         """Initialize per-layer statistics."""
@@ -101,7 +99,7 @@ class ResidueHelper:
             flat_error = (inputs.float() - quantized_input.float()).reshape(-1, inputs.shape[-1])
             self.act_scale += flat_error.square().sum(dim=0)
         else:
-            # Average each batch first, preserving the donor's equal batch weighting.
+            # Average each batch first, so every batch has equal weight.
             self.act_scale += inputs.abs().reshape(-1, inputs.shape[-1]).mean(0).float()
         self.num_cache_steps += 1
         if self.is_input_quantized and self._saved_awq_amax is None:
