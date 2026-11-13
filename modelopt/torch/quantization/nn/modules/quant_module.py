@@ -146,17 +146,16 @@ class QuantModule(DynamicModule):
         return tuple(quantizer) if isinstance(quantizer, SequentialQuantizer) else (quantizer,)
 
     @classmethod
-    def _is_selected_for_initialization(cls, weight, quantizer, trainable_only):
+    def _is_selected_for_initialization(cls, weight, quantizer):
         return (
             isinstance(weight, torch.Tensor)
             and weight.numel() > 0
-            and (not trainable_only or weight.requires_grad)
             and any(q.is_enabled and q._if_quant for q in cls._initialization_members(quantizer))
         )
 
-    def _iter_weights_for_initialization(self, trainable_only):
+    def _iter_weights_for_initialization(self):
         for weight, quantizer in self.iter_weights_for_calibration():
-            if self._is_selected_for_initialization(weight, quantizer, trainable_only):
+            if self._is_selected_for_initialization(weight, quantizer):
                 yield weight, quantizer
 
     @staticmethod
@@ -172,11 +171,11 @@ class QuantModule(DynamicModule):
         )
 
     @torch.no_grad()
-    def _initialize_qdq_weights(self, trainable_only, initialized):
+    def _initialize_qdq_weights(self, initialized):
         # Imported here: ggml/__init__ imports its backend, which imports these modules.
         from ...ggml.common import drop_search_scales
 
-        for weight, quantizer in self._iter_weights_for_initialization(trainable_only):
+        for weight, quantizer in self._iter_weights_for_initialization():
             key = self._weight_initialization_key(weight)
             if key in initialized:
                 continue

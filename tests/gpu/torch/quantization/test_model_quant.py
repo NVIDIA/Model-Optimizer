@@ -16,6 +16,7 @@
 """CUDA-only latent initialization formats and initialization memory/time."""
 
 import copy
+import time
 from contextlib import nullcontext
 
 import pytest
@@ -35,10 +36,35 @@ from modelopt.torch.quantization.utils import enable_weight_cache, weight_cache_
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
 
-@pytest.fixture(scope="module", autouse=True)
-def compiled_quantization_extensions():
+@pytest.fixture(autouse=True)
+def compiled_quantization_extensions(request):
     # Cold JIT builds belong in setup, outside the numerical tests' call-only timeout.
-    for loader in (get_cuda_ext, get_cuda_ext_fp8, get_cuda_ext_mx, get_cuda_ext_ggml):
+    params = request.node.callspec.params if hasattr(request.node, "callspec") else {}
+    config = params.get("config")
+    if config is None:
+        num_bits = params.get("num_bits")
+        config = (
+            mtq.NVFP4_DEFAULT_CFG
+            if num_bits == "nvfp4"
+            else {"quant_cfg": [{"cfg": {"backend": "ggml"}}]}
+            if num_bits == "iq2_xxs"
+            else mtq.INT8_WEIGHT_ONLY_CFG
+        )
+    loaders = set()
+    for rule in config["quant_cfg"]:
+        if rule.get("enable") is False:
+            continue
+        attributes = rule.get("cfg", {})
+        for attr in attributes if isinstance(attributes, list) else [attributes]:
+            if attr.get("backend") == "ggml":
+                loaders.add(get_cuda_ext_ggml)
+            elif (attr.get("block_sizes") or {}).get("type") == "dynamic":
+                loaders.add(get_cuda_ext_mx)
+            elif attr.get("num_bits") == (4, 3):
+                loaders.add(get_cuda_ext_fp8)
+            else:
+                loaders.add(get_cuda_ext)
+    for loader in loaders:
         assert loader(raise_if_failed=True) is not None
 
 
@@ -176,6 +202,28 @@ def test_initialize_weight_memory_and_time(record_property, capsys, cache_enable
         if name.endswith("_qdq_initialization")
     )
     record_property("retained_initialization_payload_bytes", packed_bytes)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0)
+    model(inputs)  # Populate normal forward caches before forcing cache misses.
+    for phase in ("unchanged", "first_change", "subsequent_change"):
+        if phase != "unchanged":
+            with torch.no_grad():
+                for parameter in model.parameters():
+                    parameter.add_(0.001)
+        optimizer.step()  # Invalidates GGML caches even at zero LR.
+        torch.cuda.synchronize()
+        baseline = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        start.record()
+        wall_start = time.perf_counter()
+        with torch.no_grad():
+            model(inputs)
+        end.record()
+        torch.cuda.synchronize()
+        record_property(f"{phase}_forward_ms", start.elapsed_time(end))
+        record_property(f"{phase}_forward_wall_ms", (time.perf_counter() - wall_start) * 1000)
+        record_property(
+            f"{phase}_forward_extra_peak_bytes", torch.cuda.max_memory_allocated() - baseline
+        )
     with capsys.disabled():
         print(
             f"QDQ initialization: device={torch.cuda.get_device_name()}, "
