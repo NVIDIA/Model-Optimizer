@@ -26,7 +26,6 @@ Covers:
 
 import contextlib
 import os
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -242,7 +241,7 @@ def test_trtexec_remote_config_is_validated_before_version_fallback(tmp_path):
     run_mock.assert_not_called()
 
 
-@pytest.mark.parametrize("remote_model_path", [None, "/data/models/custom engine.trt"])
+@pytest.mark.parametrize("remote_model_path", [None, "/data/models/custom_engine.trt"])
 def test_trtexec_run_returns_remote_safety_latency(tmp_path, remote_model_path):
     """Remote safety autotuning benchmarks the built engine on the target."""
     remote_url = (
@@ -303,9 +302,9 @@ def test_trtexec_run_returns_remote_safety_latency(tmp_path, remote_model_path):
         remote_engine_path = uploaded_remote_engine_path
     else:
         remote_engine_path = remote_model_path
-        assert uploaded_remote_engine_path == shlex.quote(remote_engine_path)
-    assert shlex.quote(f"--loadEngine={remote_engine_path}") in remote_command[-1]
-    assert cleanup_command[-1] == f"rm -f -- {shlex.quote(remote_engine_path)}"
+        assert uploaded_remote_engine_path == remote_engine_path
+    assert f"--loadEngine={remote_engine_path}" in remote_command[-1]
+    assert cleanup_command[-1] == f"rm -f -- {remote_engine_path}"
     assert "/opt/trt/bin/trtexec_safe" in remote_command[-1]
     assert "--useCudaGraph" in remote_command[-1]
     assert "--warmUp=2" in remote_command[-1]

@@ -90,6 +90,21 @@ class _RemoteBenchmarkConfig:
     library_path: str
 
 
+def _validate_remote_model_path(remote_model_path: str | None) -> None:
+    """Reject paths that SCP protocols interpret differently."""
+    if remote_model_path is None:
+        return
+    if (
+        not re.fullmatch(r"[A-Za-z0-9._/-]+", remote_model_path)
+        or remote_model_path.startswith("-")
+        or remote_model_path.endswith("/")
+    ):
+        raise ValueError(
+            "Invalid remote_model_path: use only letters, digits, '.', '_', '/', and '-'; "
+            "the path must not start with '-' or end with '/', and '~' is not expanded"
+        )
+
+
 def _parse_remote_benchmark_config(
     trtexec_args: list[str],
 ) -> _RemoteBenchmarkConfig | None:
@@ -300,8 +315,11 @@ class TrtExecBenchmark(Benchmark):
                          These are appended after the standard arguments.
                          Example: ['--fp16', '--workspace=4096', '--verbose']
             remote_model_path: Path for the engine on the remote device. By default, a unique
-                filename is created in the remote user's working directory.
+                filename is created in the remote user's working directory. A custom path is
+                overwritten and removed after each benchmark; concurrent runs must use distinct
+                paths.
         """
+        _validate_remote_model_path(remote_model_path)
         super().__init__(timing_cache_file, warmup_runs, timing_runs, plugin_libraries)
         self.trtexec_args = trtexec_args if trtexec_args is not None else []
         self.temp_dir = tempfile.mkdtemp(prefix="trtexec_benchmark_")
@@ -368,6 +386,10 @@ class TrtExecBenchmark(Benchmark):
                             "Adding it to trtexec arguments."
                         )
                         self.trtexec_args.append("--skipInference")
+        if remote_model_path is not None and self._remote_benchmark_config is None:
+            self.logger.warning(
+                "remote_model_path is ignored because remote safety benchmarking is not enabled"
+            )
         self._base_cmd.extend(trtexec_args)
 
         self.logger.debug(f"Base command template: {' '.join(self._base_cmd)}")
@@ -399,7 +421,7 @@ class TrtExecBenchmark(Benchmark):
                 "-P",
                 str(config.port),
                 self.engine_path,
-                f"{config.destination}:{shlex.quote(remote_engine_path)}",
+                f"{config.destination}:{remote_engine_path}",
             ]
             upload_result = _run_network_command(upload_command)
             remote_log.append(

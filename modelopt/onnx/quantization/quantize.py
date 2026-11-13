@@ -691,7 +691,8 @@ def quantize(
             Example: --autotune_trtexec_args '--fp16 --workspace=4096'
         autotune_remote_model_path:
             Path for the engine on the remote device. By default, a unique filename is created
-            in the remote user's working directory.
+            in the remote user's working directory. A custom path is overwritten and removed after
+            each benchmark; concurrent runs must use distinct paths.
         kwargs:
             Additional keyword arguments for int4 quantization, including:
             - awqlite_alpha_step (float): Alpha step for lite, range [0, 1].

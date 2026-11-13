@@ -486,7 +486,9 @@ def get_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Path for the engine on the remote device. By default, a unique filename is created "
-            "in the remote user's working directory."
+            "in the remote user's working directory. Custom paths are overwritten and removed "
+            "after each benchmark; concurrent runs must use distinct paths. Only letters, digits, "
+            "'.', '_', '/', and '-' are accepted; '~' is not expanded."
         ),
     )
     return argparser

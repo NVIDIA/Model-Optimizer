@@ -111,7 +111,9 @@ def init_benchmark_instance(
         trtexec_args: Additional command-line arguments to pass to trtexec as a string (only used if use_trtexec=True).
                      Example: '--fp16 --workspace=4096 --verbose'
         remote_model_path: Path for the engine on the remote device. By default, a unique
-                           filename is created in the remote user's working directory.
+                           filename is created in the remote user's working directory. A custom
+                           path is overwritten and removed after each benchmark; concurrent runs
+                           must use distinct paths.
     """
     global _benchmark_instance
     try:
@@ -126,6 +128,8 @@ def init_benchmark_instance(
             )
             logger.info("Trtexec benchmark initialized")
         else:
+            if remote_model_path is not None:
+                logger.warning("remote_model_path is ignored when use_trtexec is False")
             _benchmark_instance = TensorRTPyBenchmark(
                 timing_cache_file=timing_cache_file,
                 warmup_runs=warmup_runs,
