@@ -21,15 +21,19 @@ shared experts. Only the language model is exported; the vision tower is copied 
 Routed experts are written one entry per expert, exported from either expert layout.
 """
 
-from .mcore_custom import (
+from modelopt.torch.export.plugins.mcore_custom import (
     GatedDeltaNetSlicing,
     GatedMLPSlicing,
     GroupedGatedMLPSlicing,
     GroupedMLPSlicing,
     NameRemapping,
+    register_mcore_hf_mapping,
     with_language_model_prefix,
 )
-from .mcore_qwen import qwen3_causal_lm_export
+
+from ..qwen3.mcore_hf_mapping import qwen3_causal_lm_export
+
+__all__: list[str] = []
 
 # Vision-tower weights copied straight from the HF checkpoint (never quantized).
 QWEN3_5_VL_VISION_PREFIXES = ("model.visual.",)
@@ -60,4 +64,10 @@ _qwen3_5_extra_export: dict = {
 
 qwen3_5_vl_causal_lm_export = with_language_model_prefix(
     {**qwen3_causal_lm_export, **_qwen3_5_extra_export}
+)
+
+register_mcore_hf_mapping(
+    "Qwen3_5ForConditionalGeneration",
+    export_mapping=qwen3_5_vl_causal_lm_export,
+    vision_passthrough_prefixes=QWEN3_5_VL_VISION_PREFIXES,
 )

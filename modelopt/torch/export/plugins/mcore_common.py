@@ -15,85 +15,40 @@
 
 """Custom mapping from Megatron Core models to their Hugging Face counter part."""
 
-from typing import Any
+import importlib
 
-from .mcore_deepseek import deepseek_causal_lm_export, deepseek_causal_lm_import
-from .mcore_glm import (
-    GLM5_NEXT_VISION_PREFIXES,
-    glm5_next_causal_lm_export,
-    glm_moe_dsa_causal_lm_export,
+from .mcore_custom import (
+    all_mcore_hf_export_mapping,
+    all_mcore_hf_import_mapping,
+    all_mcore_hf_vision_passthrough_mapping,
 )
-from .mcore_gptoss import gptoss_causal_lm_export, gptoss_causal_lm_import
-from .mcore_llama import (
-    eagle3_deep_llama_causal_lm_export,
-    eagle3_llama_causal_lm_export,
-    eagle_llama_causal_lm_export,
-    llama4_causal_lm_export,
-    llama4_causal_lm_import,
-    llama_causal_lm_export,
-    llama_causal_lm_import,
-)
-from .mcore_nemotron import (
-    nemotron_causal_lm_export,
-    nemotron_h_causal_lm_export,
-    nemotron_h_causal_lm_import,
-)
-from .mcore_nemotron_omni import NEMOTRON_H_OMNI_VISION_PREFIXES, nemotron_h_omni_causal_lm_export
-from .mcore_qwen import (
-    qwen3_causal_lm_export,
-    qwen3_causal_lm_import,
-    qwen25_causal_lm_export,
-    qwen25_causal_lm_import,
-)
-from .mcore_qwen3vl import (
-    QWEN3VL_VISION_PREFIXES,
-    qwen3vl_causal_lm_export,
-    qwen3vl_causal_lm_import,
-)
-from .mcore_qwen35vl import QWEN3_5_VL_VISION_PREFIXES, qwen3_5_vl_causal_lm_export
 
-all_mcore_hf_export_mapping: dict[str, Any] = {
-    "DeepseekV2ForCausalLM": deepseek_causal_lm_export,
-    "DeepseekV3ForCausalLM": deepseek_causal_lm_export,
-    "LlamaForCausalLM": llama_causal_lm_export,
-    "Llama4ForConditionalGeneration": llama4_causal_lm_export,
-    "NemotronForCausalLM": nemotron_causal_lm_export,
-    "NemotronHForCausalLM": nemotron_h_causal_lm_export,
-    "NemotronH_Omni_Reasoning_V3": nemotron_h_omni_causal_lm_export,
-    "LlamaForCausalLMEagle": eagle_llama_causal_lm_export,
-    "LlamaForCausalLMEagle3": eagle3_llama_causal_lm_export,
-    "LlamaForCausalLMEagle3Deep": eagle3_deep_llama_causal_lm_export,
-    "Qwen3ForCausalLM": qwen3_causal_lm_export,
-    "Qwen3MoeForCausalLM": qwen3_causal_lm_export,
-    "Qwen2ForCausalLM": qwen25_causal_lm_export,
-    "GptOssForCausalLM": gptoss_causal_lm_export,
-    "Qwen3VLForConditionalGeneration": qwen3vl_causal_lm_export,
-    "Qwen3_5ForConditionalGeneration": qwen3_5_vl_causal_lm_export,
-    "Qwen3_5MoeForConditionalGeneration": qwen3_5_vl_causal_lm_export,
-    "Glm5NextForConditionalGeneration": glm5_next_causal_lm_export,
-    "GlmMoeDsaForCausalLM": glm_moe_dsa_causal_lm_export,
-}
+__all__ = [
+    "all_mcore_hf_export_mapping",
+    "all_mcore_hf_import_mapping",
+    "all_mcore_hf_vision_passthrough_mapping",
+]
 
-# VLM architectures whose Megatron export covers the language model only: the vision tower is copied
-# verbatim from the HF checkpoint under these key prefixes. Architectures absent here fall back to
-# ``LLAVA_VISION_PREFIXES`` when the model is an MCore ``LLaVAModel``, and to no copy otherwise.
-all_mcore_hf_vision_passthrough_mapping: dict[str, tuple[str, ...]] = {
-    "Qwen3VLForConditionalGeneration": QWEN3VL_VISION_PREFIXES,
-    "Qwen3_5ForConditionalGeneration": QWEN3_5_VL_VISION_PREFIXES,
-    "Qwen3_5MoeForConditionalGeneration": QWEN3_5_VL_VISION_PREFIXES,
-    "NemotronH_Omni_Reasoning_V3": NEMOTRON_H_OMNI_VISION_PREFIXES,
-    "Glm5NextForConditionalGeneration": GLM5_NEXT_VISION_PREFIXES,
-}
+# The mappings live with their model in ``modelopt/torch/models/<model_type>/mcore_hf_mapping.py``
+# and register themselves on import; add a new model type here.
+MCORE_MODEL_TYPES = (
+    "deepseek_v2",
+    "deepseek_v3",
+    "glm5_next",
+    "glm_moe_dsa",
+    "gpt_oss",
+    "llama",
+    "llama4",
+    "nemotron",
+    "nemotron_h",
+    "nemotron_h_omni",
+    "qwen2",
+    "qwen3",
+    "qwen3_5",
+    "qwen3_5_moe",
+    "qwen3_moe",
+    "qwen3_vl",
+)
 
-all_mcore_hf_import_mapping: dict[str, Any] = {
-    "LlamaForCausalLM": llama_causal_lm_import,
-    "Llama4ForConditionalGeneration": llama4_causal_lm_import,
-    "DeepseekV2ForCausalLM": deepseek_causal_lm_import,
-    "DeepseekV3ForCausalLM": deepseek_causal_lm_import,
-    "NemotronHForCausalLM": nemotron_h_causal_lm_import,
-    "Qwen3ForCausalLM": qwen3_causal_lm_import,
-    "Qwen3MoeForCausalLM": qwen3_causal_lm_import,
-    "Qwen2ForCausalLM": qwen25_causal_lm_import,
-    "GptOssForCausalLM": gptoss_causal_lm_import,
-    "Qwen3VLForConditionalGeneration": qwen3vl_causal_lm_import,
-}
+for _model_type in MCORE_MODEL_TYPES:
+    importlib.import_module(f"modelopt.torch.models.{_model_type}.mcore_hf_mapping")

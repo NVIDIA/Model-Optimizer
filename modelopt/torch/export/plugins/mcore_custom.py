@@ -296,6 +296,33 @@ def with_language_model_prefix(
     return result
 
 
+# Per Hugging Face architecture, filled in by each model's ``mcore_hf_mapping.py`` under
+# ``modelopt/torch/models/<model_type>/`` (imported by ``mcore_common``).
+all_mcore_hf_export_mapping: dict[str, Any] = {}
+all_mcore_hf_import_mapping: dict[str, Any] = {}
+# VLM architectures whose Megatron export covers the language model only: the vision tower is copied
+# verbatim from the HF checkpoint under these key prefixes. Architectures absent here fall back to
+# ``LLAVA_VISION_PREFIXES`` when the model is an MCore ``LLaVAModel``, and to no copy otherwise.
+all_mcore_hf_vision_passthrough_mapping: dict[str, tuple[str, ...]] = {}
+
+
+def register_mcore_hf_mapping(
+    architecture: str,
+    *,
+    export_mapping: dict[str, Any],
+    import_mapping: dict[str, Any] | None = None,
+    vision_passthrough_prefixes: tuple[str, ...] | None = None,
+) -> None:
+    """Register the Megatron Core mappings of a Hugging Face architecture (``architectures[0]``)."""
+    if architecture in all_mcore_hf_export_mapping:
+        raise ValueError(f"Megatron Core mappings for {architecture!r} are already registered")
+    all_mcore_hf_export_mapping[architecture] = export_mapping
+    if import_mapping is not None:
+        all_mcore_hf_import_mapping[architecture] = import_mapping
+    if vision_passthrough_prefixes is not None:
+        all_mcore_hf_vision_passthrough_mapping[architecture] = vision_passthrough_prefixes
+
+
 def save_safetensors(state_dict, save_directory: str | os.PathLike):
     """Save safetensors with pipeline model parallel support."""
     pp_rank = get_pipeline_model_parallel_rank()

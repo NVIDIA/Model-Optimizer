@@ -21,11 +21,25 @@ root, so the mappings are derived from Qwen3's. The visual encoder is copied ver
 supported: its 3-D fused expert weights cannot reuse the dense Qwen3 rules.
 """
 
-from .mcore_custom import with_language_model_prefix
-from .mcore_qwen import qwen3_causal_lm_export, qwen3_causal_lm_import
+from modelopt.torch.export.plugins.mcore_custom import (
+    register_mcore_hf_mapping,
+    with_language_model_prefix,
+)
+
+from ..qwen3.mcore_hf_mapping import qwen3_causal_lm_export, qwen3_causal_lm_import
+
+__all__: list[str] = []
 
 # Vision-tower weights copied straight from the HF checkpoint (never quantized).
 QWEN3VL_VISION_PREFIXES = ("model.visual.",)
 
 qwen3vl_causal_lm_import = with_language_model_prefix(qwen3_causal_lm_import)
+
 qwen3vl_causal_lm_export = with_language_model_prefix(qwen3_causal_lm_export)
+
+register_mcore_hf_mapping(
+    "Qwen3VLForConditionalGeneration",
+    export_mapping=qwen3vl_causal_lm_export,
+    import_mapping=qwen3vl_causal_lm_import,
+    vision_passthrough_prefixes=QWEN3VL_VISION_PREFIXES,
+)

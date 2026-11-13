@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Custom mapping from DeepSeek Hugging Face models to Megatron Core models.
 
-"""Custom mapping from DeepSeek Hugging Face models to Megatron Core models."""
+Shared by DeepSeek-V2 and, as the base of its own mapping, GLM-5 (``glm_moe_dsa``).
+"""
 
-from .mcore_custom import (
+from modelopt.torch.export.plugins.mcore_custom import (
     COL_ETP,
     COL_TP,
     REPLICATE,
@@ -26,7 +28,10 @@ from .mcore_custom import (
     GatedMLPMerging,
     GatedMLPSlicing,
     NameRemapping,
+    register_mcore_hf_mapping,
 )
+
+__all__: list[str] = []
 
 deepseek_causal_lm_export: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("model.embed_tokens."),
@@ -61,7 +66,6 @@ deepseek_causal_lm_export: dict[str, CustomModuleMapping] = {
     "local_experts.linear_fc2": NameRemapping("model.layers.{}.mlp.experts.{}.down_proj."),
 }
 
-
 eagle_mtp_deepseek_causal_lm_export: dict[str, CustomModuleMapping] = {
     "fc": NameRemapping("eh_proj."),
     "enorm": NameRemapping("enorm."),
@@ -85,14 +89,13 @@ eagle_mtp_deepseek_causal_lm_export: dict[str, CustomModuleMapping] = {
     "local_experts.linear_fc2": NameRemapping("layers.{}.mlp.experts.{}.down_proj."),
 }
 
-
 deepseek_causal_lm_import = {
     "word_embeddings": NameRemapping("model.embed_tokens.", COL_TP),
     "final_layernorm": NameRemapping("model.norm.", REPLICATE),
     "output_layer": NameRemapping("lm_head.", COL_TP),
     # Per-layer
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm.", REPLICATE),
-    # Fused TE spec (TELayerNormColumnParallelLinear) — see mcore_qwen.py for rationale.
+    # Fused TE spec (TELayerNormColumnParallelLinear) — see qwen3/mcore_hf_mapping.py for rationale.
     # MLA has no linear_qkv so fused_input_layernorm is inert for DeepSeek today; included
     # for parity in case a future spec fuses the layernorm into a Q/KV projection.
     "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
@@ -123,7 +126,6 @@ deepseek_causal_lm_import = {
     "local_experts.linear_fc2": NameRemapping("model.layers.{}.mlp.experts.{}.down_proj.", ROW_ETP),
 }
 
-
 eagle_mtp_deepseek_causal_lm_import: dict[str, CustomModuleMapping] = {
     "fc": NameRemapping("model.layers.{}.eh_proj.", REPLICATE),
     "enorm": NameRemapping("model.layers.{}.enorm.", REPLICATE),
@@ -150,3 +152,9 @@ eagle_mtp_deepseek_causal_lm_import: dict[str, CustomModuleMapping] = {
     "local_experts.linear_fc1": GatedMLPMerging("model.layers.{}.mlp.experts.{}.", COL_ETP),
     "local_experts.linear_fc2": NameRemapping("model.layers.{}.mlp.experts.{}.down_proj.", ROW_ETP),
 }
+
+register_mcore_hf_mapping(
+    "DeepseekV3ForCausalLM",
+    export_mapping=deepseek_causal_lm_export,
+    import_mapping=deepseek_causal_lm_import,
+)

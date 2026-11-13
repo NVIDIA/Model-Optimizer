@@ -15,7 +15,7 @@
 
 """Custom mapping from GPT-OSS Hugging Face models to Megatron Core models."""
 
-from .mcore_custom import (
+from modelopt.torch.export.plugins.mcore_custom import (
     COL_TP,
     PACK_EP,
     REPLICATE,
@@ -26,7 +26,10 @@ from .mcore_custom import (
     QKVMerging,
     QKVSlicing,
     UnpackNameRemappingGPT,
+    register_mcore_hf_mapping,
 )
+
+__all__: list[str] = []
 
 gptoss_causal_lm_export: dict[str, CustomModuleMapping | bool] = {
     "word_embeddings": NameRemapping("model.embed_tokens."),
@@ -54,7 +57,7 @@ gptoss_causal_lm_export: dict[str, CustomModuleMapping | bool] = {
 gptoss_causal_lm_import: dict[str, CustomModuleMapping | bool] = {
     "word_embeddings": NameRemapping("model.embed_tokens.", COL_TP),
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm.", REPLICATE),
-    # Fused TE spec (TELayerNormColumnParallelLinear) — see mcore_qwen.py for rationale.
+    # Fused TE spec (TELayerNormColumnParallelLinear) — see qwen3/mcore_hf_mapping.py for rationale.
     # gpt-oss is MoE-only on the MLP side (no layer.mlp.linear_fc1), so the importer's
     # fused_pre_mlp_layernorm path is unreachable; only fused_input_layernorm is wired.
     "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
@@ -75,3 +78,9 @@ gptoss_causal_lm_import: dict[str, CustomModuleMapping | bool] = {
     "final_layernorm": NameRemapping("model.norm.", REPLICATE),
     "output_layer": NameRemapping("lm_head.", COL_TP),
 }
+
+register_mcore_hf_mapping(
+    "GptOssForCausalLM",
+    export_mapping=gptoss_causal_lm_export,
+    import_mapping=gptoss_causal_lm_import,
+)
