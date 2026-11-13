@@ -24,6 +24,49 @@ from torch.nn.attention.flex_attention import BlockMask
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import EAGLE3_DEFAULT_CFG
+from modelopt.torch.speculative.losses import masked_lk_lambda_loss
+
+
+def test_eagle_lk_preserves_full_teacher_distribution_with_reduced_vocab():
+    model = get_tiny_llama(dtype=torch.float32)
+    draft_vocab_size = model.config.vocab_size // 2
+    config = deepcopy(EAGLE3_DEFAULT_CFG["config"])
+    config["eagle_architecture_config"].update(
+        draft_vocab_size=draft_vocab_size,
+        intermediate_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+    )
+    config.update(
+        eagle_ttt_steps=1,
+        eagle_use_torch_compile=False,
+        eagle_loss_type="lk_lambda",
+        eagle_lk_eta=1.7,
+    )
+    mtsp.convert(model, mode=[("eagle", config)])
+    indices = 2 * torch.arange(draft_vocab_size) + 1
+    model.eagle_module.d2t.copy_(indices - torch.arange(draft_vocab_size))
+    draft_logits = []
+    handle = model.eagle_module.lm_head.register_forward_hook(
+        lambda _module, _inputs, output: draft_logits.append(output)
+    )
+    input_ids = torch.randint(0, model.config.vocab_size, (2, 8))
+    loss_mask = torch.ones_like(input_ids)
+    loss_mask[:, :3] = 0
+    output = model(input_ids=input_ids, loss_mask=loss_mask)
+    handle.remove()
+    expected = masked_lk_lambda_loss(
+        output.logits[:, 1:],
+        draft_logits[0][:, :-1],
+        loss_mask[:, 1:],
+        eta=1.7,
+        draft_vocab_indices=indices,
+    )
+    torch.testing.assert_close(output.loss, expected)
+    output.loss.backward()
+    assert model.eagle_module.lm_head.weight.grad is not None
+    assert model._base_model_lm_head.weight.grad is None
 
 
 @pytest.mark.parametrize("context_change", ["dtype", "device"])

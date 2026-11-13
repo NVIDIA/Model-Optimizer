@@ -21,6 +21,8 @@ from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from megatron.core.parallel_state import get_tensor_model_parallel_group
 
 import modelopt.torch.speculative as mtsp
+from modelopt.torch.speculative.config import EagleConfig
+from modelopt.torch.speculative.eagle.conversion import convert_to_eagle_model
 from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTModel
 
 ALGO_TO_CONFIG = {
@@ -59,6 +61,21 @@ def _test_speculative_gpt_model(
         attention_dropout=0.0,
     )
     model = create_model(initialize_megatron=True, sequence_parallel=sequence_parallel).cuda()
+
+    # Reject unsupported objectives before changing the model class or freezing parameters.
+    original_class = type(model)
+    original_parameters = {name: param.detach().clone() for name, param in model.named_parameters()}
+    original_grad_flags = {name: param.requires_grad for name, param in model.named_parameters()}
+    with pytest.raises(ValueError):
+        convert_to_eagle_model(model, EagleConfig(eagle_loss_type="lk_lambda"))
+    assert type(model) is original_class
+    assert dict(model.named_parameters()).keys() == original_parameters.keys()
+    for name, param in model.named_parameters():
+        torch.testing.assert_close(param, original_parameters[name], rtol=0, atol=0)
+    assert {
+        name: param.requires_grad for name, param in model.named_parameters()
+    } == original_grad_flags
+    del original_parameters
 
     if algo in ("eagle1", "eagle3"):
         mtsp_config = deepcopy(ALGO_TO_CONFIG["eagle3"])

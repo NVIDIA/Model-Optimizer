@@ -34,6 +34,11 @@ def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertRetu
 
     EagleDMRegistry.register_subclass(type(model), "base_model_class")
 
+    if config.eagle_loss_type not in EagleDMRegistry[type(model)]._supported_loss_types:
+        raise ValueError(
+            f"eagle_loss_type={config.eagle_loss_type!r} is not supported for {type(model).__name__}"
+        )
+
     # merge custom config with default config
     default_arch_config = {
         "llama": eagle3_default_config,

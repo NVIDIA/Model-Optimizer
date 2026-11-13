@@ -101,6 +101,10 @@ The saved modelopt checkpoint is similar in architecture to HF models. It can be
 
 For large models, you can export intermediate hidden states to disk and train only the draft model. This significantly reduces GPU memory requirements, but requires several to tens of terabytes of disk storage depending on dataset size.
 
+Offline `.pt` files are discovered recursively in lexical path order before applying
+`data.sample_size`. Keep the file set unchanged when resuming. Unreadable or incomplete
+dumps raise an error identifying the file; they are not replaced with another sample.
+
 ### Dumping Hidden States to Disk
 
 We support two backends for generating base model hidden states. For better efficiency, it is recommended to use TRT-LLM:
@@ -422,6 +426,15 @@ trainer.save_model("<output_dir>")
 ```
 
 See `main.py` for the full example including tokenizer setup, dataset loading, and checkpoint handling.
+
+### Native MTP Boosting
+
+Native multi-token prediction (MTP) boosting fine-tunes a model's existing MTP
+module using target-model supervision. Only the MTP module is trained. LK lambda
+is the default loss; set `mtp_loss_type="soft_target_ce"` to use cross-entropy.
+
+The [Python API](../../modelopt/torch/speculative/mtp/adapter.py) currently requires
+a custom model adapter.
 
 ## Support Matrix
 

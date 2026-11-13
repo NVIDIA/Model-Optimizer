@@ -35,6 +35,7 @@
 
 """Eagle model utils."""
 
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -112,6 +113,8 @@ class OfflineSupervisedDataset(Dataset):
             ``--no-aux-hidden-states``, yielding an empty ``(seq_len, 0)`` plane in
             their place. Only modes that never read the aux planes may set this; for
             the others a missing key must still raise.
+        feature_key_mapping: Optional mapping from dump feature names to returned
+            names. Defaults to the EAGLE hidden-state schema.
     """
 
     def __init__(
@@ -120,6 +123,8 @@ class OfflineSupervisedDataset(Dataset):
         answer_only_loss: bool = False,
         tokenizer=None,
         aux_hidden_states_optional: bool = False,
+        *,
+        feature_key_mapping: Mapping[str, str] | None = None,
     ):
         """Initialize with a list of .pt file paths."""
         super().__init__()
@@ -127,6 +132,14 @@ class OfflineSupervisedDataset(Dataset):
         self.answer_only_loss = answer_only_loss
         self.tokenizer = tokenizer
         self.aux_hidden_states_optional = aux_hidden_states_optional
+        self.feature_key_mapping = (
+            dict(feature_key_mapping)
+            if feature_key_mapping is not None
+            else {
+                "hidden_states": "base_model_hidden_states",
+                "aux_hidden_states": "aux_hidden_states",
+            }
+        )
 
     def __len__(self):
         return len(self.dumped_files)
@@ -143,7 +156,15 @@ class OfflineSupervisedDataset(Dataset):
         return offline_data["hidden_states"].new_zeros((offline_data["hidden_states"].shape[0], 0))
 
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
-        offline_data = torch.load(self.dumped_files[i], weights_only=True)
+        path = self.dumped_files[i]
+        try:
+            return self._load_item(path)
+        except Exception as exc:
+            exc.add_note(f"Offline feature dump: {path}")
+            raise
+
+    def _load_item(self, path) -> dict[str, torch.Tensor]:
+        offline_data = torch.load(path, weights_only=True)
 
         labels = torch.full_like(offline_data["input_ids"], IGNORE_TOKEN_ID)
         labels[..., :-1] = offline_data["input_ids"][..., 1:]
@@ -161,7 +182,7 @@ class OfflineSupervisedDataset(Dataset):
             else:
                 raise ValueError(
                     f"answer_only_loss=True requires a 'loss_mask' entry in the offline "
-                    f".pt file, but {self.dumped_files[i]} does not have one. Re-dump "
+                    f".pt file, but {path} does not have one. Re-dump "
                     f"with --answer-only-loss in compute_hidden_states_*.py, or pass a "
                     f"tokenizer with a registered loss-mask recovery."
                 )
@@ -170,24 +191,45 @@ class OfflineSupervisedDataset(Dataset):
 
         ret = {
             "input_ids": offline_data["input_ids"],
-            "base_model_hidden_states": offline_data["hidden_states"],
-            "aux_hidden_states": self._aux_hidden_states(offline_data),
             "attention_mask": torch.ones_like(offline_data["input_ids"]),
             "loss_mask": loss_mask,
             "labels": labels,
-            # Whether the dumped hidden is pre-(final-)norm (the consumer re-applies the base
-            # norm if so). Read from the dump; default False = post-norm, the prior behavior.
-            "base_hidden_prenorm": bool(offline_data.get("hidden_states_prenorm", False)),
         }
+        sequence_length = offline_data["input_ids"].shape[0]
+        for input_key, output_key in self.feature_key_mapping.items():
+            feature = (
+                self._aux_hidden_states(offline_data)
+                if input_key == "aux_hidden_states"
+                else offline_data[input_key]
+            )
+            if feature.ndim == 0 or feature.shape[0] != sequence_length:
+                raise ValueError(
+                    f"{input_key} must have sequence length {sequence_length} to match input_ids, "
+                    f"got shape {tuple(feature.shape)}"
+                )
+            ret[output_key] = feature
+        # Pre-norm metadata describes the base-model output, not arbitrary native-MTP state.
+        if "base_model_hidden_states" in self.feature_key_mapping.values():
+            ret["base_hidden_prenorm"] = bool(offline_data.get("hidden_states_prenorm", False))
         return ret
 
 
 class EagleOfflineDataCollator:
     """Data collator that truncates or pads data for offline training."""
 
-    def __init__(self, train_len):
-        """Initialize with the target sequence length for truncation/padding."""
+    def __init__(
+        self,
+        train_len,
+        *,
+        batch_keys: tuple[str, ...] = ("input_ids", "attention_mask", "loss_mask", "labels"),
+        feature_keys: tuple[str, ...] = ("base_model_hidden_states", "aux_hidden_states"),
+        feature_output_key: str = "base_model_outputs",
+    ):
+        """Configure sequence length and batch/feature fields; defaults preserve EAGLE batches."""
         self.train_len = train_len
+        self.batch_keys = batch_keys
+        self.feature_keys = feature_keys
+        self.feature_output_key = feature_output_key
 
     def _pad_or_truncate(self, x: torch.Tensor, length: int, dim: int = 0):
         """Pad or truncate a tensor to length along a given dimension."""
@@ -210,12 +252,12 @@ class EagleOfflineDataCollator:
         """Collate a list of feature dicts into a single padded/truncated batch."""
         base_batch = {
             k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
-            for k in ["input_ids", "attention_mask", "loss_mask", "labels"]
+            for k in self.batch_keys
         }
 
         base_model_outputs = {
             k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
-            for k in ["base_model_hidden_states", "aux_hidden_states"]
+            for k in self.feature_keys
         }
         # Propagate the producer's pre-norm declaration. DFlash honors it to decide whether to
         # re-apply the base final norm; other heads ignore it. It must be constant across the
@@ -233,6 +275,6 @@ class EagleOfflineDataCollator:
 
         batch = {
             **base_batch,
-            "base_model_outputs": base_model_outputs,
+            self.feature_output_key: base_model_outputs,
         }
         return batch

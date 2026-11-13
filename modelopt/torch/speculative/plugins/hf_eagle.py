@@ -32,6 +32,7 @@ from ...export.plugins.hf_spec_export import EagleExporter, SpeculativeDecodingE
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
 from ..eagle.utils import expand_mask, make_causal_mask
+from ..losses import masked_lk_lambda_loss, masked_soft_target_cross_entropy
 from ..utils import (
     AcceptanceRateValidation,
     _setup_kimi_k2_decoder,
@@ -66,6 +67,8 @@ def default_eagle_aux_layer_ids(num_layers: int) -> list[int]:
 @EagleDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
 class HFEagleModel(EagleModel):
     """Eagle Model Class for huggingface models."""
+
+    _supported_loss_types = ("soft_target_ce", "lk_lambda")
 
     # EAGLE returns a microbatch-mean loss; Trainer must apply accumulation scaling.
     accepts_loss_kwargs = False
@@ -493,12 +496,7 @@ class HFEagleModel(EagleModel):
                 eagle_input_embeds = base_outputs.input_embeds.roll(-1, 1)
 
         # Prepare eagle_input_hiddens
-        if self.eagle_config.use_aux_hidden_state:
-            # concat base model intermediate (pre-norm) hiddens
-            eagle_input_hiddens = self.eagle_module.fc(base_outputs.aux_hiddens)
-        else:
-            # use base model output (post-norm)hiddens
-            eagle_input_hiddens = base_outputs.out_hiddens
+        eagle_input_hiddens = self.eagle_module.prepare_initial_hidden_states(base_outputs)
 
         # Prepare attention_mask
         if attention_mask is None:
@@ -535,7 +533,11 @@ class HFEagleModel(EagleModel):
         if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
             base_model_logits = self._map_logits_to_draft_vocab(base_model_logits)
         base_output_predict_tok = base_model_logits.argmax(dim=-1).detach()
-        base_output_softmax_logits = torch.softmax(base_model_logits, dim=2)
+        base_output_targets = (
+            base_outputs.logits
+            if self.eagle_loss_type == "lk_lambda"
+            else torch.softmax(base_model_logits, dim=2)
+        )
         # After LoRA warmup, stochastically detach logits — acts as dropout
         # regularization on the eagle-loss-to-LoRA gradient path, preventing
         # LoRA from degenerating to maximize EAGLE acc at cost of base quality.
@@ -544,7 +546,7 @@ class HFEagleModel(EagleModel):
         if lora_active and torch.rand(1).item() >= self.eagle_base_lora_logits_detach_prob:
             pass  # keep gradients flowing through logits to LoRA
         else:
-            base_output_softmax_logits = base_output_softmax_logits.detach()
+            base_output_targets = base_output_targets.detach()
 
         return (
             eagle_input_embeds,
@@ -552,7 +554,7 @@ class HFEagleModel(EagleModel):
             eagle_attention_mask,
             eagle_position_ids,
             base_output_predict_tok,
-            base_output_softmax_logits,
+            base_output_targets,
         )
 
     def _compute_ttt_attention_mask(
@@ -656,6 +658,7 @@ class HFEagleModel(EagleModel):
         attention_mask,
         position_ids,
         eagle_cache=None,
+        input_ids=None,
     ):
         eagle_postnorm_h, eagle_prenorm_h, eagle_cache = self.eagle_module(
             eagle_input_hidden_states,
@@ -664,6 +667,7 @@ class HFEagleModel(EagleModel):
             position_ids=position_ids,
             use_cache=True,
             past_key_values=eagle_cache,
+            input_ids=input_ids,
         )
         eagle_lm_head = (
             self.eagle_module.lm_head
@@ -755,7 +759,7 @@ class HFEagleModel(EagleModel):
                 eagle_attn_mask_0,
                 eagle_position_ids,
                 base_output_predict_tok,
-                base_output_softmax_logits,
+                base_output_targets,
             ) = self._prepare_eagle_inputs(
                 input_ids,
                 attention_mask,
@@ -770,6 +774,7 @@ class HFEagleModel(EagleModel):
 
         # ====Run eagle forward with extra training-time-test steps====
         num_ttt_steps = self.eagle_ttt_steps if self.training else 1
+        eagle_input_ids = input_ids.roll(-1, 1)
         aligned_hidden_states_history = (
             [eagle_input_hiddens]
             if self.eagle_mix_hidden_states
@@ -805,6 +810,7 @@ class HFEagleModel(EagleModel):
                     eagle_attention_mask,
                     eagle_position_ids,
                     None if self.eagle_mix_hidden_states else eagle_cache,
+                    input_ids=eagle_input_ids,
                 )
             eagle_output_hiddens = eagle_output_hiddens.roll(1, 1)
 
@@ -842,7 +848,7 @@ class HFEagleModel(EagleModel):
                     # base model predict +1 tok, while eagle predict +2
                     # so we shift base model outputs compared to eagle outputs
                     # additionally, we mask the first n tok of eagle outputs at nth TTT step
-                    base_output_softmax_logits[:, 1 + ttt_step :],
+                    base_output_targets[:, 1 + ttt_step :],
                     base_output_predict_tok[:, 1 + ttt_step :],
                     eagle_logits[:, ttt_step:-1],
                     loss_mask[:, 1 + ttt_step :],
@@ -880,20 +886,32 @@ class HFEagleModel(EagleModel):
 
     def _eagle_loss(
         self,
-        base_output_softmax_logits,
+        base_output_targets,
         base_output_predict_tok,
         eagle_logits,
         loss_mask,
     ):
         """Function for EAGLE loss computing."""
-        loss_mask = loss_mask[:, : eagle_logits.shape[1], None]
-        eagle_logsoft = torch.log_softmax(eagle_logits, dim=2)
-        classification_loss = -torch.sum(
-            torch.sum(loss_mask * base_output_softmax_logits * eagle_logsoft, 2)
-        ) / (loss_mask.sum() + 1e-5)
+        if self.eagle_loss_type == "lk_lambda":
+            draft_indices = None
+            if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
+                draft_indices = self.eagle_module.d2t + torch.arange(
+                    len(self.eagle_module.d2t), device=self.eagle_module.d2t.device
+                )
+            classification_loss = masked_lk_lambda_loss(
+                base_output_targets,
+                eagle_logits,
+                loss_mask,
+                eta=self.eagle_lk_eta,
+                draft_vocab_indices=draft_indices,
+            )
+        else:
+            classification_loss = masked_soft_target_cross_entropy(
+                base_output_targets, eagle_logits, loss_mask
+            )
         # Compute accuracy (returned as tensor to avoid sync; .item() called after TTT loop)
         eagle_predict_tok = eagle_logits.detach().argmax(dim=-1)
-        valid = loss_mask[:, :, 0].bool()
+        valid = loss_mask[:, : eagle_logits.shape[1]].bool()
         correct = (base_output_predict_tok == eagle_predict_tok) & valid
         denom = valid.sum().clamp_min(1).float()
         accuracy = correct.sum().float() / denom
