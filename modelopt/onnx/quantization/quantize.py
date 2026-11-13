@@ -696,6 +696,9 @@ def quantize(
         kwargs:
             Additional keyword arguments for int4 quantization, including:
             - awqlite_alpha_step (float): Alpha step for lite, range [0, 1].
+            - awqlite_reuse_activations (bool): Default False. Share captured activations
+              across adjacent same-input weights in per-node AWQ Lite/Full when
+              enable_fast_path_using_high_sysram=False. Stochastic graphs share samples.
             - awqclip_alpha_step (float): Min alpha step for clip, range [awqclip_alpha_step, 1].
             - awqclip_alpha_min (float): Alpha step to find best alpha for clip.
             - awqclip_bsz_col (int): Batch size for processing the column dimension in clip.
