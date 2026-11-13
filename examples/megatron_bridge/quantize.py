@@ -60,6 +60,7 @@ See `README.md` in this directory for more details.
 import argparse
 import copy
 import gc
+import os
 from pathlib import Path
 
 import torch
@@ -276,7 +277,8 @@ def get_args() -> argparse.Namespace:
     if args.lora_rank and args.compress:
         parser.error("--lora_rank requires fake quantization; cannot be combined with --compress")
 
-    print_args(masked_args(args))
+    if int(os.environ.get("RANK", "0")) == 0:
+        print_args(masked_args(args))
 
     # Flipped by main() once the Megatron checkpoint is on disk. The MLflow provenance
     # pointer is gated on it rather than on --export_megatron_path existing, which proves
@@ -538,8 +540,8 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    dist.setup()
     args = get_args()
+    dist.setup()
     try:
         # Entered inside the try: opening the run is fatal by design, and the peers of a rank
         # that exits without dist.abort() stay blocked on the first collective.

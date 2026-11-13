@@ -15,6 +15,7 @@
 
 """ModelOpt plugin for enabling automatic save/restore of ModelOpt state for HuggingFace models."""
 
+import argparse
 import dataclasses
 import fnmatch
 import gc
@@ -288,6 +289,26 @@ class ModelOptArgParser(HfArgumentParser):
         super().__init__(*args, **kwargs)
         self._docs_header_extra = docs_header_extra
 
+    def format_help(self):
+        """Include options consumed before HuggingFace's dataclass parsing."""
+        options = argparse.ArgumentParser(add_help=False)
+        options.add_argument(
+            "--config",
+            metavar="PATH",
+            help="Load YAML defaults; command-line arguments override them.",
+        )
+        options.add_argument(
+            "--generate_docs",
+            nargs="?",
+            metavar="PATH",
+            help="Generate argument documentation and exit (default: ARGUMENTS.md).",
+        )
+        formatter = self._get_formatter()
+        formatter.start_section("ModelOpt options")
+        formatter.add_arguments(options._actions)
+        formatter.end_section()
+        return super().format_help() + "\n" + formatter.format_help()
+
     def parse_args_into_dataclasses(self, args=None, **kwargs):
         """Parse args with optional YAML config defaults and doc generation."""
         if args is None:
@@ -408,7 +429,7 @@ class ModelOptArgParser(HfArgumentParser):
                 default_str = self._format_default(f.default, f.default_factory)
                 help_text = dict(f.metadata).get("help", "")
                 # Collapse multi-line help into single line
-                help_text = " ".join(help_text.split())
+                help_text = " ".join(help_text.split()).replace("%%", "%")
                 lines.append(f"| {name} | {type_str} | {default_str} | {help_text} |")
 
             lines.append("")
