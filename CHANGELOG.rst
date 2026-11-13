@@ -99,7 +99,7 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
-- Add ``--output_qdq_weight`` to the HF and Megatron-Bridge PTQ examples to save floating QDQ weights with ModelOpt state for QAD. This replaces the training-time ``--qdq_student_weight`` flag; QAD and native resumes load the prepared weights without reinitializing them.
+- Add ``--output_qdq_weight`` to the Megatron-Bridge PTQ example to save floating QDQ weights with ModelOpt state for QAD. This replaces the training-time ``--qdq_student_weight`` flag; QAD and native resumes load the prepared weights without reinitializing them.
 - Add ``--trainable_params`` (alias ``--trainable_parameter_patterns``) to ``examples/megatron_bridge/distill.py`` to train selected student weights, including full-rank routed-expert QAD. Reuse the selection on native resume.
 - Add ``--sft_in_batch_packing``, ``--moe_aux_loss_coeff`` and ``--dsa_kernel_backend`` to ``examples/megatron_bridge/distill.py`` (``--dsa_kernel_backend`` also to ``quantize.py``): pack ``--sft_hf_dataset`` conversations per micro-batch instead of padding each to ``--seq_length``, override the MoE load-balancing loss weight (e.g. 0 for padded SFT data), and select fused DeepSeek sparse-attention kernels for long sequences.
 - Add opt-in revision-pinned chat-blend preparation with indexed programming-question recovery, complete-record deduplication, question-isolated validation, and source shortfall/provenance reports.
