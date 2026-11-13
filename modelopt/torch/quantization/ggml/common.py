@@ -780,6 +780,9 @@ def _derived_scales(
     weights = (x.square().mean(dim=-1, keepdim=True) + x.square()).sqrt()
     if columns is not None:
         weights = weights * _block_rows(columns, start, start + len(x)).sqrt()
+        # Scaled like the values, so a statistic near the float32 maximum cannot overflow the
+        # scores: the fit is the same whatever common factor a block's weights share.
+        weights = weights * _unit_powers_of_two(weights)[0]
     group = ggml_format.block_size // ggml_format.choice_groups
     values = (x if fit.signed else x.abs()).reshape(len(x), -1, group)
     scale = _fit_sub_blocks(values, weights.reshape(values.shape), fit.levels)
@@ -854,7 +857,10 @@ def _energy_factors(
     ).reshape(x.shape)
     to_unit, _ = _unit_powers_of_two(x)
     x, decoded = x * to_unit, decoded * to_unit
-    weights = 1.0 if columns is None else _block_rows(columns, start, start + len(x))
+    weights = 1.0
+    if columns is not None:
+        weights = _block_rows(columns, start, start + len(x))
+        weights = weights * _unit_powers_of_two(weights)[0]  # the ratio below is the same
     target = (weights * x.square()).sum(dim=-1)
     energy = (weights * decoded.square()).sum(dim=-1)
     return torch.where(energy > 0, (target / energy.clamp_min(1e-30)).sqrt(), 1.0)
