@@ -155,7 +155,7 @@ def _test_speculative_gpt_model(
 
         assert eagle_loss.shape[0] == batch_size
         assert eagle_loss.shape[1] == max_sequence_length
-        if mix_hidden_states_mode is not None:
+        if True:  # DIAG: check grads for every mode
             assert torch.isfinite(eagle_loss).all()
             eagle_loss.mean().backward()
             # EAGLE1 carries gradients through TTT outputs; EAGLE3 detaches them.
@@ -178,6 +178,13 @@ def _test_speculative_gpt_model(
                     prompt_tokens, position_ids, attention_mask, labels=labels
                 )
                 reference_loss.mean().backward()
+                print(
+                    f"DIAG-LOSS rank={rank} algo={algo} mode={mix_hidden_states_mode} "
+                    f"loss_maxabs={(eagle_loss - reference_loss).abs().max().item():.3e} "
+                    f"loss_mean={eagle_loss.float().mean().item():.5f} ref_mean={reference_loss.float().mean().item():.5f} "
+                    f"rng_hash={hash(mixing_rng_state.cpu().numpy().tobytes()) % 10**8}",
+                    flush=True,
+                )
                 torch.testing.assert_close(eagle_loss, reference_loss, rtol=1e-2, atol=1e-3)
 
                 # Match Megatron's sum for replicated SP parameters; QKV weights are TP-sharded.
