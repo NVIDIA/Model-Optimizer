@@ -18,6 +18,7 @@
 import torch
 
 from ..qtensor.base_qtensor import BaseQuantizedTensor, _refuse_dtensor
+from ..utils import reduce_block_padding
 
 __all__ = ["MXFP4QTensor"]
 
@@ -68,16 +69,28 @@ class MXFP4QTensor(BaseQuantizedTensor):
 
         original_shape = input.shape
         original_dtype = input.dtype
-        input = input.view(-1, block_size)
+        # ponytail: pad the last dim up to a block_size multiple like the other block-quantized
+        # QTensor types (INT4QTensor, NVFP4QTensor, MXFP8QTensor) instead of assuming the caller
+        # already guarantees divisibility -- this used to crash on the view() below for shapes
+        # (e.g. MoE/TP-sharded weights) whose last dim isn't a multiple of block_size.
+        input = reduce_block_padding(input, block_sizes={-1: block_size})
+        padded_shape = input.shape
+        blocked = input.reshape(-1, block_size)
         # get scales
         # Casting scales to float yields better match with fakequant kernel (needs further investigation)
-        input_amax = input.float().abs().max(dim=-1, keepdim=True).values
+        input_amax = blocked.float().abs().max(dim=-1, keepdim=True).values
         descale = input_amax / cls.E2M1_max
         min_value = torch.tensor(-127.0, device=descale.device)
         e8m0_scale = torch.ceil(torch.maximum(torch.log2(descale), min_value))
 
-        input = (input / torch.exp2(e8m0_scale)).view(original_shape)
+        input = (blocked / torch.exp2(e8m0_scale)).view(padded_shape)
         input_q = cast_fp4(input)
+        # keep the packed tensor at the padded (block-aligned) width, matching
+        # NVFP4QTensor: dequantize() re-pads before unpacking and trims the final
+        # dequantized float output down to the true shape, so the packed storage
+        # doesn't need cropping -- and shard_cast_utils' quantize_mxfp4_to_nvfp4*
+        # helpers assume exactly num_blocks * 16 packed bytes per row, which a
+        # crop to the unpadded size would violate for non-block-divisible shapes.
         input_q = fuse_uint4_to_uint8(input_q)
         e8m0_scale = (e8m0_scale + 127).to(torch.uint8)
         return cls(original_shape, original_dtype, input_q), e8m0_scale
@@ -114,6 +127,10 @@ class MXFP4QTensor(BaseQuantizedTensor):
 
         # Unfuse the uint8 values back to uint4
         x_unfused = unfuse_uint8_to_uint4(self._quantized_data)
+        # quantize() keeps the packed data at the padded width already, so this is a
+        # no-op in that case; kept defensively for any other caller that constructs
+        # this class directly from possibly-unpadded packed data.
+        x_unfused = reduce_block_padding(x_unfused, block_sizes={-1: block_size})
         # Extract sign and magnitude
         sign = 1 - 2 * ((x_unfused & 0b1000) >> 3).to(
             torch.float32
@@ -126,8 +143,8 @@ class MXFP4QTensor(BaseQuantizedTensor):
 
         # Use gather to index the values tensor properly
         # We need to reshape magnitude to match the dimensions we want to gather along
-        original_shape = magnitude.shape
-        x_float = values[magnitude.reshape(-1)].reshape(original_shape)
+        padded_shape = magnitude.shape
+        x_float = values[magnitude.reshape(-1)].reshape(padded_shape)
 
         # Apply sign and scale
         x_float = sign.float() * x_float
@@ -139,8 +156,9 @@ class MXFP4QTensor(BaseQuantizedTensor):
         scale_factor = torch.exp2(e8m0_scale.float() - 127)
         scale_factor = scale_factor.reshape(-1, 1)  # Reshape for proper broadcasting
 
-        # Apply scaling and reshape back to original shape
+        # Apply scaling and reshape back to the padded shape
         x_float = x_float * scale_factor
+        x_float = x_float.reshape(padded_shape)
 
-        # Reshape back to the original shape
-        return x_float.reshape(original_shape).to(dtype)
+        # quantize() pads the last dim up to a block_size multiple; crop it back off here.
+        return x_float[..., : self.metadata["shape"][-1]].reshape(self.metadata["shape"]).to(dtype)
