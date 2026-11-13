@@ -197,37 +197,34 @@ def test_run_with_dict_inputs(reference_runner):
 class TestPerNodeReferenceRunner:
     """Tests for memory-bounded per-node reference execution."""
 
-    def test_single_node_model_uses_size_aware_shape_inference(self, monkeypatch, reference_runner):
-        infer_shapes = Mock(side_effect=lambda model: model)
-        monkeypatch.setattr(onnx_utils, "infer_shapes", infer_shapes)
-        monkeypatch.setattr(
-            onnx.shape_inference,
-            "infer_shapes",
-            Mock(side_effect=AssertionError("in-memory shape inference was used")),
-        )
-        node = reference_runner.model.graph.node[0]
-        runtime_values = {
-            "X1": np.ones((1, 3), dtype=np.float32),
-            "X2": np.ones((1, 3), dtype=np.float32),
-        }
-        value_info_map = {
-            value_info.name: value_info
-            for value_info in [
-                *reference_runner.model.graph.input,
-                *reference_runner.model.graph.output,
-                *reference_runner.model.graph.value_info,
-            ]
-        }
+    def test_oversized_single_node_uses_file_backed_inference_and_execution(self, monkeypatch):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 32])
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 32])
+        weight = numpy_helper.from_array(np.eye(32, dtype=np.float32), name="weight")
+        node = helper.make_node("MatMul", ["X", "weight"], ["Y"], name="matmul")
+        graph = helper.make_graph([node], "matmul", [x], [y], [weight])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+        infer_shapes_path_calls = []
+        original_infer_shapes_path = onnx.shape_inference.infer_shapes_path
 
-        reference_runner._make_single_node_model(
-            node,
-            reference_runner._get_node_dependencies(node),
-            value_info_map,
-            {},
-            runtime_values,
-        )
+        def record_infer_shapes_path(*args, **kwargs):
+            infer_shapes_path_calls.append(args)
+            return original_infer_shapes_path(*args, **kwargs)
 
-        infer_shapes.assert_called_once()
+        monkeypatch.setattr(onnx.shape_inference, "infer_shapes_path", record_infer_shapes_path)
+        monkeypatch.setattr(onnx.checker, "MAXIMUM_PROTOBUF", 1)
+        inputs = {"X": np.arange(32, dtype=np.float32).reshape(1, 32)}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            monkeypatch.setattr(tempfile, "tempdir", temp_dir)
+            results = ReferenceRunner(model).run(inputs, calibrate_per_node=True)
+
+            assert os.listdir(temp_dir) == []
+
+        assert len(infer_shapes_path_calls) == 1
+        assert results["Y"].shape == (1, 32)
+        assert results["Y"].min_val == 0.0
+        assert results["Y"].max_val == 31.0
 
     def test_single_node_model_copies_initializers_without_repeated_field_extend(self, monkeypatch):
         x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 2])
@@ -353,6 +350,8 @@ class TestPerNodeReferenceRunner:
 
         assert per_node["random_output"].min_val == per_node["random_output"].max_val
         assert default["random_output"].min_val != default["random_output"].max_val
+        assert per_node["Y"].min_val == per_node["Y"].max_val
+        assert default["Y"].min_val != default["Y"].max_val
 
     def test_disables_cpu_memory_arena(self, monkeypatch, reference_runner):
         session_options = []
