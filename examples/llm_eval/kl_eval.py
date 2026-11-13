@@ -17,6 +17,7 @@
 
 import argparse
 import copy
+import inspect
 import json
 import os
 import sys
@@ -34,14 +35,17 @@ EVALUATION_REVISION = "c211674f78e43ecd5aa487b3d3539499efafce78"
 
 
 @torch.inference_mode()
-def mean_kl(reference_logits, quantized_logits, top_k=128, chunk_size=32):
-    """Return mean forward KL in nats over [generated positions, vocabulary] logits."""
+def mean_kl(reference_logits, quantized_logits, top_k=1024, chunk_size=32):
+    """Return full and conditional top-k forward KL in nats; top_k=None skips the head metric."""
     if reference_logits.ndim != 2 or reference_logits.shape != quantized_logits.shape:
         raise ValueError("Expected matching [generated positions, vocabulary] logits.")
     num_tokens, vocab_size = reference_logits.shape
-    if num_tokens == 0 or chunk_size < 1 or not 1 <= top_k <= vocab_size:
-        raise ValueError("Require generated positions, a positive chunk size, and 1 <= top_k <= V.")
-    totals = torch.zeros(2, dtype=torch.float32, device=reference_logits.device)
+    if num_tokens == 0 or chunk_size < 1:
+        raise ValueError("Require generated positions and a positive chunk size.")
+    if top_k is not None and (not isinstance(top_k, int) or not 1 <= top_k <= vocab_size):
+        raise ValueError("Require integer 1 <= top_k <= V when conditional KL is requested.")
+    names = ["full_vocab_kl"] + (["conditional_topk_kl"] if top_k is not None else [])
+    totals = torch.zeros(len(names), dtype=torch.float32, device=reference_logits.device)
     for start in range(0, num_tokens, chunk_size):
         reference = reference_logits[start : start + chunk_size].float()
         quantized = quantized_logits[start : start + chunk_size].to(
@@ -49,91 +53,159 @@ def mean_kl(reference_logits, quantized_logits, top_k=128, chunk_size=32):
         )
         log_p = F.log_softmax(reference, dim=-1)
         log_q = F.log_softmax(quantized, dim=-1)
-        full_kl = F.kl_div(log_q, log_p, log_target=True, reduction="none").sum(-1)
-        # Both conditional distributions must use the reference's token IDs, not rank slots.
-        ids = reference.topk(top_k, dim=-1).indices
-        log_p_head = F.log_softmax(reference.gather(-1, ids), dim=-1)
-        log_q_head = F.log_softmax(quantized.gather(-1, ids), dim=-1)
-        head_kl = F.kl_div(log_q_head, log_p_head, log_target=True, reduction="none").sum(-1)
-        totals += torch.stack((full_kl, head_kl), dim=-1).sum(0)
+        values = [F.kl_div(log_q, log_p, log_target=True, reduction="none").sum(-1)]
+        if top_k is not None:
+            # Both conditional distributions use the reference's token IDs, not rank slots.
+            ids = reference.topk(top_k, dim=-1).indices
+            log_p_head = F.log_softmax(reference.gather(-1, ids), dim=-1)
+            log_q_head = F.log_softmax(quantized.gather(-1, ids), dim=-1)
+            values.append(
+                F.kl_div(log_q_head, log_p_head, log_target=True, reduction="none").sum(-1)
+            )
+        totals += torch.stack(values, dim=-1).sum(0)
     means = totals / num_tokens
     if not torch.isfinite(means).all():
         raise ValueError("Non-finite KL: inspect the model logits instead of dropping positions.")
-    full_kl, head_kl = means.cpu().tolist()
-    return {"full_vocab_kl": full_kl, "conditional_topk_kl": head_kl}
+    return dict(zip(names, means.cpu().tolist()))
 
 
 @torch.inference_mode()
-def score_continuation(reference, quantized, token_ids, prompt_tokens, top_k=128):
+def _score_batch(reference, quantized, sequences, prompt_lengths, pad_token_id, top_k):
+    generated_lengths = [
+        len(sequence) - length for sequence, length in zip(sequences, prompt_lengths)
+    ]
+    if any(length < 1 for length in generated_lengths):
+        raise ValueError("Require a nonempty continuation for each prompt.")
+    width = max(len(sequence) - 1 for sequence in sequences)
+    scores = []
+    for model in (reference, quantized):
+        device = model.get_input_embeddings().weight.device
+        inputs = torch.full((len(sequences), width), pad_token_id, dtype=torch.long, device=device)
+        attention_mask = torch.zeros_like(inputs)
+        for index, sequence in enumerate(sequences):
+            length = len(sequence) - 1
+            inputs[index, -length:] = torch.tensor(sequence[:-1], device=device)
+            attention_mask[index, -length:] = 1
+        position_ids = (attention_mask.cumsum(-1) - 1).clamp_min(0)
+        # Project continuation rows only on models supporting the Transformers optimization.
+        kwargs = {}
+        if "logits_to_keep" in inspect.signature(model.forward).parameters:
+            kwargs["logits_to_keep"] = max(generated_lengths)
+        outputs = model(
+            input_ids=inputs,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            use_cache=False,
+            **kwargs,
+        )
+        # Left padding aligns the final prediction in every row. Clone to release prompt logits.
+        scores.append(
+            [outputs.logits[i, -length:].clone() for i, length in enumerate(generated_lengths)]
+        )
+        del outputs
+    return [mean_kl(p, q, top_k) for p, q in zip(*scores)]
+
+
+@torch.inference_mode()
+def score_continuation(reference, quantized, token_ids, prompt_tokens, top_k=1024):
     """Score only continuation predictions, including the first generated token and EOS."""
     if token_ids.ndim != 2 or token_ids.shape[0] != 1:
         raise ValueError("Expected one prompt and its continuation.")
     if not 0 < prompt_tokens < token_ids.shape[1]:
         raise ValueError("Require a nonempty prompt and continuation.")
-    logits = []
-    for model in (reference, quantized):
-        inputs = token_ids[:, :-1].to(model.get_input_embeddings().weight.device)
-        outputs = model(input_ids=inputs, attention_mask=torch.ones_like(inputs), use_cache=False)
-        # Position prompt_tokens - 1 predicts the first continuation token.
-        logits.append(outputs.logits[0, prompt_tokens - 1 :])
-    return mean_kl(logits[0], logits[1], top_k)
+    return _score_batch(reference, quantized, token_ids.cpu().tolist(), [prompt_tokens], 0, top_k)[
+        0
+    ]
 
 
 @torch.inference_mode()
 def evaluate(
-    reference, quantized, tokenizer, prompts, max_new_tokens=512, top_k=128, detailed_results=False
+    reference,
+    quantized,
+    tokenizer,
+    prompts,
+    max_new_tokens=2048,
+    top_k=1024,
+    detailed_results=False,
+    eval_batch_size=8,
 ):
-    """Return overall KL means, optionally with per-example details, on shared BF16 continuations."""
-    if not prompts:
-        raise ValueError("No evaluation prompts.")
+    """Generate and score shared continuations in batches, averaging prompt scores equally."""
+    if not prompts or eval_batch_size < 1:
+        raise ValueError("Require evaluation prompts and a positive evaluation batch size.")
     reference.eval()
     quantized.eval()
     eos = reference.generation_config.eos_token_id
     if eos is None:
         eos = tokenizer.eos_token_id
+    eos_ids = set(eos if isinstance(eos, list) else ([] if eos is None else [eos]))
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        pad_token_id = next(iter(eos_ids), None)
+    if pad_token_id is None:
+        raise ValueError("Batched evaluation requires a padding or EOS token ID.")
     generation = GenerationConfig(
         do_sample=False,
         num_beams=1,
         max_new_tokens=max_new_tokens,
         eos_token_id=eos,
-        pad_token_id=tokenizer.pad_token_id,
+        pad_token_id=pad_token_id,
         use_cache=True,
     )
-    totals = {"full_vocab_kl": 0.0, "conditional_topk_kl": 0.0}
+    totals = {"full_vocab_kl": 0.0}
+    if top_k is not None:
+        totals["conditional_topk_kl"] = 0.0
     results = []
-    for index, prompt in enumerate(prompts):
-        inputs = torch.tensor(
-            [prompt["input_ids"]], device=reference.get_input_embeddings().weight.device
+    for start in range(0, len(prompts), eval_batch_size):
+        batch = prompts[start : start + eval_batch_size]
+        lengths = [len(prompt["input_ids"]) for prompt in batch]
+        width = max(lengths)
+        inputs = torch.full(
+            (len(batch), width),
+            pad_token_id,
+            dtype=torch.long,
+            device=reference.get_input_embeddings().weight.device,
         )
-        # Transformers 5 removed use_model_defaults=False. Isolate checkpoint decoding settings.
+        attention_mask = torch.zeros_like(inputs)
+        for index, prompt in enumerate(batch):
+            inputs[index, -lengths[index] :] = torch.tensor(
+                prompt["input_ids"], device=inputs.device
+            )
+            attention_mask[index, -lengths[index] :] = 1
+        # Isolate checkpoint decoding settings from this evaluation's greedy policy.
         model_generation = reference.generation_config
         try:
             reference.generation_config = generation
-            sequence = reference.generate(
+            sequences = reference.generate(
                 input_ids=inputs,
-                attention_mask=torch.ones_like(inputs),
+                attention_mask=attention_mask,
                 generation_config=generation,
             )
         finally:
             reference.generation_config = model_generation
-        generated_tokens = sequence.shape[1] - inputs.shape[1]
-        metrics = score_continuation(reference, quantized, sequence, inputs.shape[1], top_k)
-        for name, value in metrics.items():
-            totals[name] += value
-        if detailed_results:
-            results.append(
-                {
-                    "example": index,
-                    "id": prompt["id"],
-                    "source": prompt["source"],
-                    "cohort_rank": prompt["cohort_rank"],
-                    "prompt_ids": prompt["input_ids"],
-                    "generated_ids": sequence[0, inputs.shape[1] :].cpu().tolist(),
-                    "generated_tokens": generated_tokens,
-                    **metrics,
-                }
-            )
-        print(f"{index + 1}/{len(prompts)}: {generated_tokens} tokens; {metrics}", flush=True)
+        continuations = []
+        for tokens in sequences[:, width:].cpu().tolist():
+            end = next((i + 1 for i, token in enumerate(tokens) if token in eos_ids), len(tokens))
+            continuations.append(tokens[:end])
+        del sequences
+        histories = [prompt["input_ids"] + tokens for prompt, tokens in zip(batch, continuations)]
+        metrics = _score_batch(reference, quantized, histories, lengths, pad_token_id, top_k)
+        for index, (prompt, tokens, values) in enumerate(zip(batch, continuations, metrics), start):
+            for name, value in values.items():
+                totals[name] += value
+            if detailed_results:
+                results.append(
+                    {
+                        "example": index,
+                        "id": prompt["id"],
+                        "source": prompt["source"],
+                        "cohort_rank": prompt["cohort_rank"],
+                        "prompt_ids": prompt["input_ids"],
+                        "generated_ids": tokens,
+                        "generated_tokens": len(tokens),
+                        **values,
+                    }
+                )
+            print(f"{index + 1}/{len(prompts)}: {len(tokens)} tokens; {values}", flush=True)
     summary = {name: total / len(prompts) for name, total in totals.items()}
     return {"summary": summary, "examples": results} if detailed_results else summary
 
@@ -179,8 +251,16 @@ def _parse_args():
         "--num_examples", type=int, default=300, help="Evaluate this many rows in dataset order."
     )
     parser.add_argument("--eval_revision", default=EVALUATION_REVISION)
-    parser.add_argument("--max_new_tokens", type=int, default=512)
-    parser.add_argument("--top_k", type=int, default=128)
+    parser.add_argument("--max_new_tokens", type=int, default=2048)
+    parser.add_argument(
+        "--eval_batch_size", type=int, default=8, help="Prompts per generation and scoring batch."
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=1024,
+        help="Reference top tokens for conditional KL (default: 1024); full KL is always computed.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=Path, default=Path("kl_results.json"))
     parser.add_argument(
@@ -199,9 +279,11 @@ def _parse_args():
     parser.add_argument("--attn_implementation")
     parser.add_argument("--trust_remote_code", action="store_true")
     args = parser.parse_args()
-    for name in ("num_examples", "max_new_tokens", "top_k"):
+    for name in ("num_examples", "max_new_tokens", "eval_batch_size"):
         if getattr(args, name) < 1:
             parser.error(f"--{name} must be positive.")
+    if args.top_k is not None and args.top_k < 1:
+        parser.error("--top_k must be positive when supplied.")
     if args.calib_seq is not None and args.calib_seq < 1:
         parser.error("--calib_seq must be positive.")
     if args.batch_size is not None and args.batch_size < 0:
@@ -268,7 +350,7 @@ def main():
             raise ValueError("This prototype requires text-only calibration and generation.")
         config = getattr(reference.config, "text_config", reference.config)
         context_length = getattr(config, "max_position_embeddings", None)
-        if args.top_k > config.vocab_size:
+        if args.top_k is not None and args.top_k > config.vocab_size:
             raise ValueError("--top_k exceeds the model vocabulary.")
 
         prompts, fingerprint = _blended_prompts(
@@ -289,6 +371,7 @@ def main():
             args.max_new_tokens,
             args.top_k,
             detailed_results=args.detailed_results,
+            eval_batch_size=args.eval_batch_size,
         )
         if args.detailed_results:
             report["settings"] = {
@@ -311,6 +394,7 @@ def main():
                 "num_examples": args.num_examples,
                 "prompt_tokens": [len(prompt["input_ids"]) for prompt in prompts],
                 "max_new_tokens": args.max_new_tokens,
+                "evaluation_batch_size": args.eval_batch_size,
                 "top_k": args.top_k,
                 "seed": args.seed,
                 "generation": "greedy_until_eos_or_token_cap",

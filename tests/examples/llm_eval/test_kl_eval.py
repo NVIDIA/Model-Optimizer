@@ -93,12 +93,18 @@ def test_scores_all_and_only_continuation_predictions(kl_eval):
 
 
 @pytest.mark.parametrize("detailed_results", [False, True])
-def test_real_generation_stops_at_eos_and_scores_it(kl_eval, monkeypatch, detailed_results):
+@pytest.mark.parametrize("top_k", [None, 4])
+def test_real_generation_stops_at_eos_and_scores_it(kl_eval, monkeypatch, detailed_results, top_k):
     argv = ["kl_eval.py", "--model", "local-test-model", "--recipe", "local-test-recipe"]
+    if top_k is not None:
+        argv.extend(["--top_k", str(top_k)])
     if detailed_results:
         argv.append("--detailed_results")
     monkeypatch.setattr(sys, "argv", argv)
     args = kl_eval._parse_args()
+    assert args.eval_batch_size == 8
+    assert args.max_new_tokens == 2048
+    assert args.top_k == (1024 if top_k is None else top_k)
     assert args.num_examples == 300
     assert args.eval_revision == kl_eval.EVALUATION_REVISION
     reference = _tiny_model()
@@ -119,11 +125,13 @@ def test_real_generation_stops_at_eos_and_scores_it(kl_eval, monkeypatch, detail
         tokenizer,
         prompts,
         max_new_tokens=4,
-        top_k=4,
+        top_k=top_k,
         detailed_results=args.detailed_results,
     )
     assert reference.generation_config == original_generation
-    expected = {"full_vocab_kl": 0, "conditional_topk_kl": 0}
+    expected = {"full_vocab_kl": 0}
+    if top_k is not None:
+        expected["conditional_topk_kl"] = 0
     if detailed_results:
         assert result["examples"] == [
             {
@@ -195,3 +203,105 @@ def test_blended_prompts_refuse_short_banks_and_context_overflow(
     tokenizer, _ = blended_fixture
     with pytest.raises(ValueError, match=error):
         kl_eval._blended_prompts(tokenizer, num_examples, "revision", context_limit, 4)
+
+
+def test_full_vocab_only_skips_topk(kl_eval, monkeypatch):
+    def unexpected_topk(*_args, **_kwargs):
+        pytest.fail("Full-vocabulary evaluation must not calculate a conditional head")
+
+    monkeypatch.setattr(torch.Tensor, "topk", unexpected_topk)
+    logits = torch.randn(3, 16)
+    result = kl_eval.mean_kl(logits, logits.clone(), top_k=None)
+    assert result == pytest.approx({"full_vocab_kl": 0}, abs=1e-7)
+
+
+@pytest.mark.parametrize("top_k", [None, 4])
+def test_batched_scoring_excludes_padding_and_matches_single_rows(kl_eval, top_k):
+    reference = _tiny_model()
+    quantized = copy.deepcopy(reference)
+    with torch.no_grad():
+        quantized.lm_head.weight[3, 0].add_(3)
+    sequences = [[4, 5, 6, 7, 8], [4, 5, 0], [4, 5, 6, 7, 8, 9]]
+    lengths = [3, 2, 2]
+    actual = kl_eval._score_batch(reference, quantized, sequences, lengths, 0, top_k)
+    for sequence, prompt_length, metrics in zip(sequences, lengths, actual):
+        # Independent unpadded forwards verify alignment, EOS inclusion, and per-row means.
+        inputs = torch.tensor([sequence[:-1]])
+        with torch.inference_mode():
+            p = reference(inputs, use_cache=False).logits[0, prompt_length - 1 :]
+            q = quantized(inputs, use_cache=False).logits[0, prompt_length - 1 :]
+        expected = kl_eval.mean_kl(p, q, top_k)
+        assert metrics == pytest.approx(expected, abs=1e-6)
+
+
+def test_generation_and_scoring_use_eight_rows_then_partial_batch(kl_eval):
+    reference = _tiny_model()
+    quantized = copy.deepcopy(reference)
+    with torch.no_grad():
+        for parameter in reference.parameters():
+            parameter.zero_()
+    prompts = [
+        {"id": str(i), "source": "fixture", "cohort_rank": i, "input_ids": [4, 5] + [6] * (i % 3)}
+        for i in range(10)
+    ]
+    tokenizer = SimpleNamespace(eos_token_id=0, pad_token_id=0)
+    sizes = {"reference": [], "candidate": []}
+
+    def record(name):
+        def hook(_module, _args, kwargs):
+            sizes[name].append(kwargs["input_ids"].shape[0])
+
+        return hook
+
+    hooks = [
+        reference.register_forward_pre_hook(record("reference"), with_kwargs=True),
+        quantized.register_forward_pre_hook(record("candidate"), with_kwargs=True),
+    ]
+    try:
+        batched = kl_eval.evaluate(
+            reference,
+            quantized,
+            tokenizer,
+            prompts,
+            max_new_tokens=4,
+            top_k=4,
+            detailed_results=True,
+        )
+    finally:
+        for hook in hooks:
+            hook.remove()
+    assert set(sizes["reference"]) == {8, 2}
+    assert sizes["candidate"] == [8, 2]
+    singles = kl_eval.evaluate(
+        reference,
+        quantized,
+        tokenizer,
+        prompts,
+        max_new_tokens=4,
+        detailed_results=True,
+        eval_batch_size=1,
+        top_k=4,
+    )
+    assert batched["summary"] == pytest.approx(singles["summary"], abs=1e-6)
+    for actual, expected in zip(batched["examples"], singles["examples"]):
+        assert actual["generated_ids"] == expected["generated_ids"] == [0]
+        assert actual["full_vocab_kl"] == pytest.approx(expected["full_vocab_kl"], abs=1e-6)
+
+
+def test_default_conditional_kl_uses_1024_tokens(kl_eval):
+    reference = torch.tensor([[0.0] * 1024 + [-10.0]])
+    candidate = torch.tensor([[0.0] * 512 + [math.log(2)] * 512 + [8.0]])
+    actual = kl_eval.mean_kl(reference, candidate)
+    p_normalizer = 1024 + math.exp(-10)
+    q_normalizer = 1536 + math.exp(8)
+    p = 1 / p_normalizer
+    p_tail = math.exp(-10) / p_normalizer
+    expected_full = (
+        512 * p * math.log(q_normalizer / p_normalizer)
+        + 512 * p * math.log(q_normalizer / (2 * p_normalizer))
+        + p_tail * math.log(p_tail / (math.exp(8) / q_normalizer))
+    )
+    expected_head = 0.5 * math.log(1.5) + 0.5 * math.log(0.75)
+    assert actual == pytest.approx(
+        {"full_vocab_kl": expected_full, "conditional_topk_kl": expected_head}, abs=1e-6
+    )
