@@ -256,9 +256,10 @@ class IORangeRule(NodeRuleBase):
 
 
 class NormVarianceRule(NodeRuleBase):
-    """Rule for keeping the variance of decomposed LayerNorm/RMSNorm in high precision.
+    """Rule for keeping the variance of decomposed RMSNorm in high precision.
 
-    ``x * x`` overflows fp16 once ``|x|`` exceeds about 256, which LLM residual streams with
+    It also covers decomposed LayerNorm that ``GraphSanitizer`` did not fuse into
+    ``LayerNormalization``. ``x * x`` overflows fp16 once ``|x|`` exceeds about 256, which LLM residual streams with
     outlier channels routinely reach. Random reference inputs rarely produce such values, so the
     I/O range rule alone can leave ``Pow -> ReduceMean -> Add -> Sqrt`` in fp16. Low-precision
     EPs then normalize those rows with an infinite variance and zero them; the CPU EP hides the
@@ -277,19 +278,19 @@ class NormVarianceRule(NodeRuleBase):
             initializer_map: Mapping from initializer names to initializers.
         """
         constants = {
-            name: onnx.numpy_helper.to_array(init) for name, init in initializer_map.items()
+            node.output[0]: node.attribute[0].t
+            for node in model.graph.node
+            if node.op_type == "Constant" and node.attribute and node.attribute[0].name == "value"
         }
-        for node in model.graph.node:
-            if node.op_type == "Constant" and node.attribute and node.attribute[0].name == "value":
-                constants[node.output[0]] = onnx.numpy_helper.to_array(node.attribute[0].t)
 
         def exponent_is(node, values):
-            exponent = constants.get(node.input[1]) if len(node.input) > 1 else None
-            return (
-                exponent is not None
-                and exponent.size == 1
-                and any(np.isclose(float(exponent.item()), value) for value in values)
-            )
+            # Only scalar exponents are read, so weights are never converted to numpy.
+            name = node.input[1] if len(node.input) > 1 else ""
+            tensor = initializer_map.get(name, constants.get(name))
+            if tensor is None or np.prod(tensor.dims) != 1:
+                return False
+            exponent = float(onnx.numpy_helper.to_array(tensor).item())
+            return any(np.isclose(exponent, value) for value in values)
 
         producer = {out: node for node in model.graph.node for out in node.output}
         consumers: dict[str, list[onnx.NodeProto]] = {}
