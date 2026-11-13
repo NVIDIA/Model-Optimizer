@@ -30,7 +30,8 @@ general model data, and export is only its first consumer.
 
 A package may also hold ``modeling_ptq.py`` and ``modeling_ptq_vllm.py``, the model-specific PTQ
 wrappers for transformers and vLLM. They are not imported here: quantization imports a model's
-own with ``import_model_modules`` just before converting it (see ``README.md``).
+own with ``import_model_modules`` when it first needs them, to convert the model or find its
+decoder layers (see ``README.md``).
 """
 
 import importlib
@@ -135,9 +136,9 @@ def import_model_modules(model, module_name: str) -> None:
 
     The model types are the root ``model.config.model_type``, then those of the configs nested in
     it, so a composite model (a VLM, say) also gets its language model's modules. Quantization
-    loads a model's PTQ wrappers this way just before converting it (``modeling_ptq`` for
-    transformers, ``modeling_ptq_vllm`` for vLLM): such a module registers them on import, so no
-    model's wrappers are loaded until a model of its type is converted.
+    loads a model's PTQ wrappers this way before converting it or finding its decoder layers
+    (``modeling_ptq`` for transformers, ``modeling_ptq_vllm`` for vLLM): such a module registers
+    them on import, so no model's wrappers are loaded until a model of its type is used.
     """
     models_dir = os.path.dirname(__file__)
     for model_type in _model_types(model):

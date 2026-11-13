@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A model's ``<model_type>/modeling_ptq.py`` is imported just before it is converted, and only then.
+"""A model's ``<model_type>/modeling_ptq.py`` is imported when the model is used, not with modelopt.
+
+Using it means converting it or looking up its decoder layers.
 
 The check runs in a fresh interpreter: a module registers once per process, so an in-process
 test would see whatever earlier tests imported.
@@ -31,7 +33,8 @@ CHECK = """
 import sys
 from types import SimpleNamespace
 
-from transformers import FalconConfig, FalconForCausalLM
+from torch import nn
+from transformers import FalconConfig, FalconForCausalLM, PretrainedConfig, PreTrainedModel
 
 import modelopt.torch.export
 from modelopt.torch.models import import_model_modules
@@ -51,6 +54,30 @@ def loaded():
 
 assert not loaded(), f"imported before any model was converted: {sorted(loaded())}"
 
+
+# Loading a model with FSDP2 asks for its decoder layers before converting it, so finding them
+# imports the model's own discoverer. Remote-code Nemotron-H keeps them at backbone.layers.
+class NemotronHConfig(PretrainedConfig):
+    model_type = "nemotron_h"
+
+
+class NemotronHBlock(nn.Module):
+    block_type = "mamba"
+
+
+class NemotronHForCausalLM(PreTrainedModel):
+    config_class = NemotronHConfig
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.backbone = nn.Module()
+        self.backbone.layers = nn.ModuleList([NemotronHBlock(), NemotronHBlock()])
+
+
+model = NemotronHForCausalLM(NemotronHConfig())
+assert LayerActivationCollector.get_decoder_layers(model) is model.backbone.layers
+assert loaded() == {"nemotron_h"}, sorted(loaded())
+
 # Converting a model imports its own first, so the conversion uses its wrappers: only Falcon's
 # registers FalconLinear.
 config = FalconConfig(vocab_size=32, hidden_size=16, num_hidden_layers=1, num_attention_heads=2)
@@ -58,7 +85,7 @@ model = FalconForCausalLM(config)
 replace_quant_module(model)
 dense = model.transformer.h[0].self_attention.dense
 assert isinstance(dense, QuantModule), type(dense).__mro__
-assert loaded() == {"falcon"}, sorted(loaded())
+assert loaded() == {"nemotron_h", "falcon"}, sorted(loaded())
 
 # Types whose PTQ code is another's, Falcon's original remote-code types (whose packages import
 # Falcon's, loaded above), and a VLM's language model, found through its nested config.
@@ -67,20 +94,15 @@ for config, expected in [
     (SimpleNamespace(model_type="step3p7"), {"step3p7", "step3p5"}),
     (SimpleNamespace(model_type="RefinedWeb"), {"refined_web"}),
     (SimpleNamespace(model_type="RefinedWebModel"), {"refined_web_model"}),
-    (
-        SimpleNamespace(
-            model_type="NemotronH_Nano_VL_V2", llm_config=SimpleNamespace(model_type="nemotron_h")
-        ),
-        {"nemotron_h"},
-    ),
+    (SimpleNamespace(model_type="blip-2", text_config=SimpleNamespace(model_type="t5")), {"t5"}),
     (SimpleNamespace(model_type="llama"), set()),
 ]:
     before = loaded()
     import_model_modules(SimpleNamespace(config=config), "modeling_ptq")
     assert loaded() - before == expected, (config, sorted(loaded() - before))
 
-# The first matching decoder discoverer wins, so Nemotron-H's, registered just now, must still
-# precede the generic one.
+# The first matching decoder discoverer wins, so Nemotron-H's, registered after the generic one,
+# must still precede it.
 from modelopt.torch.models.nemotron_h.modeling_ptq import is_nemotron_h_model
 
 predicates = [

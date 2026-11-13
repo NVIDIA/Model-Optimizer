@@ -245,6 +245,11 @@ class LayerActivationCollector:
     @staticmethod
     def get_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
         """Return decoder layers supported by layerwise calibration."""
+        # A model's own discoverer comes with its PTQ modules, which nothing may have imported yet:
+        # loading a model (FSDP2) asks for its layers before the model is converted.
+        from ..plugins.custom import import_model_ptq_modules
+
+        import_model_ptq_modules(model)
         for is_supported, discoverer in (
             *LayerActivationCollector._decoder_layer_support,
             *LayerActivationCollector._decoder_layer_fallbacks,
