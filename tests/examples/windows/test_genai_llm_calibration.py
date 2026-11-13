@@ -97,30 +97,47 @@ def _signature(tmp_path, hybrid):
 
 
 @pytest.mark.parametrize("hybrid", [False, True])
-def test_signature_calibration_and_profiles(tmp_path, hybrid):
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_signature_calibration_and_profiles(tmp_path, hybrid, batch_size):
     signature = _signature(tmp_path, hybrid)
     assert calibration.needs_signature_inputs(signature) == hybrid
-    ids = np.array([[1, 2, 0], [2, 1, 2]])
-    mask = np.array([[1, 1, 0], [1, 1, 1]])
+    ids = np.array([[1, 2, 0], [2, 1, 2]])[:batch_size]
+    mask = np.array([[1, 1, 0], [1, 1, 1]])[:batch_size]
     embeddings = np.arange(16, dtype=np.float16).reshape(4, 4)
     feed = calibration.calibration_feed(signature, ids, mask, embeddings if hybrid else None)
     assert set(feed) == {name for name, _, _ in signature}
     np.testing.assert_array_equal(
         feed["inputs_embeds"] if hybrid else feed["input_ids"], embeddings[ids] if hybrid else ids
     )
-    positions = np.array([[0, 1, 1], [0, 1, 2]])
+    positions = np.array([[0, 1, 1], [0, 1, 2]])[:batch_size]
     np.testing.assert_array_equal(
-        feed["position_ids"], np.broadcast_to(positions, (3, 2, 3)) if hybrid else positions
+        feed["position_ids"],
+        np.broadcast_to(positions, (3, batch_size, 3)) if hybrid else positions,
     )
     if hybrid:
-        assert feed["past_key_values.0.conv_state"].shape == (2, 4, 3)
-        assert feed["past_key_values.0.recurrent_state"].shape == (2, 2, 4, 4)
+        assert feed["past_key_values.0.conv_state"].shape == (batch_size, 4, 3)
+        assert feed["past_key_values.0.recurrent_state"].shape == (batch_size, 2, 4, 4)
     else:
-        assert feed["past_key_values.0.key"].shape == (2, 2, 0, 4)
-    profiles = calibration.ep_profiles(signature, ["NvTensorRtRtx", "cpu"])
-    assert profiles[1] == {}
-    for value in profiles[0].values():
-        assert {part.split(":")[0] for part in value.split(",")} == set(feed)
+        assert feed["past_key_values.0.key"].shape == (batch_size, 2, 0, 4)
+    profiles = calibration.ep_profiles(signature, ["NvTensorRtRtx", "trt", "cpu"], batch_size)
+    assert profiles[2] == {}
+    for profile, prefix in zip(profiles, ["nv", "trt"]):
+        shapes = {
+            kind: {
+                name: tuple(map(int, dims.split("x")))
+                for name, dims in (
+                    part.split(":")
+                    for part in profile[f"{prefix}_profile_{kind}_shapes"].split(",")
+                )
+            }
+            for kind in ["min", "opt", "max"]
+        }
+        assert set(shapes["min"]) == set(feed)
+        for name, value in feed.items():
+            assert all(
+                low <= actual <= high
+                for low, actual, high in zip(shapes["min"][name], value.shape, shapes["max"][name])
+            )
 
 
 def test_hybrid_token_input_and_unknown_input(tmp_path):
@@ -188,6 +205,8 @@ def test_embedding_tensor_from_local_checkpoint_and_cache(tmp_path, dtype, index
     np.testing.assert_array_equal(got, values.astype(np.float16))
     cached = calibration.embed_table(str(model), cache)
     assert cached.filename == got.filename
+    with pytest.raises(ValueError):
+        calibration.embed_table(str(model), cache, max_output_bytes=values.size * 2 - 1)
     shard = next(model.glob("*.safetensors"))
     stat = shard.stat()
     updated, _ = _checkpoint(model, dtype, indexed, offset=2)
@@ -207,13 +226,14 @@ def test_invalid_tensor_leaves_no_cache(tmp_path):
     assert not cache.exists()
 
 
-def test_hub_embedding_is_downloaded_in_bounded_ranges(tmp_path, monkeypatch):
+@pytest.mark.parametrize("oversized", [False, True])
+def test_hub_embedding_is_downloaded_in_bounded_ranges(tmp_path, monkeypatch, oversized):
     values = np.ones((4096, 1024), dtype="<f4")
     metadata = {
         "model.embed_tokens.weight": {
             "dtype": "F32",
-            "shape": list(values.shape),
-            "data_offsets": [0, values.nbytes],
+            "shape": [2**30, 1024] if oversized else list(values.shape),
+            "data_offsets": [0, 2**41 if oversized else values.nbytes],
         }
     }
     header = json.dumps(metadata).encode()
@@ -265,6 +285,16 @@ def test_hub_embedding_is_downloaded_in_bounded_ranges(tmp_path, monkeypatch):
         ),
         raising=False,
     )
+    if oversized:
+
+        def reject_allocation(*_args, **_kwargs):
+            pytest.fail("Oversized checkpoint must be rejected before cache allocation")
+
+        monkeypatch.setattr(calibration.np.lib.format, "open_memmap", reject_allocation)
+        with pytest.raises(ValueError):
+            calibration.embed_table("test/model", tmp_path / "cache" / "embedding.npy")
+        assert not (tmp_path / "cache").exists()
+        return
     table = calibration.embed_table("test/model", tmp_path / "embedding.npy")
     np.testing.assert_array_equal(table, values)
     assert max(last - first + 1 for first, last in ranges) <= 8 * 1024 * 1024

@@ -154,12 +154,12 @@ def needs_signature_inputs(inputs):
     )
 
 
-def ep_profiles(inputs, calibration_eps):
+def ep_profiles(inputs, calibration_eps, batch_size=1):
     """Return min/opt/max options in calibration EP order, using the ONNX signature."""
     shapes = {
         "min": shapes_profile(inputs, 1, 1, 0),
-        "opt": shapes_profile(inputs, 1, 512, 512),
-        "max": shapes_profile(inputs, 1, 1024, 1024),
+        "opt": shapes_profile(inputs, batch_size, 512, 512),
+        "max": shapes_profile(inputs, batch_size, 1024, 1024),
     }
     profiles = []
     for ep in calibration_eps:
@@ -233,11 +233,12 @@ def _read_range(opener, url, first, size, token):
     return data
 
 
-def embed_table(model_name, cache_file):
+def embed_table(model_name, cache_file, max_output_bytes=8 * 1024**3):
     """Load only the checkpoint's embedding tensor, caching float16 rows on disk.
 
     Local cache identities hash the embedding bytes; Hub identities pin an immutable commit.
     Hub weights are read with bounded byte ranges, never as an entire model shard.
+    The float16 cache is limited to 8 GiB by default, configurable via max_output_bytes.
     """
     local = Path(model_name).is_dir()
     opener = urllib.request.build_opener(_HubRedirectHandler)
@@ -316,6 +317,8 @@ def embed_table(model_name, cache_file):
         or last - first != math.prod(shape) * itemsize
     ):
         raise ValueError("Invalid embedding tensor byte offsets")
+    if math.prod(shape) * np.dtype(np.float16).itemsize > max_output_bytes:
+        raise ValueError("Embedding tensor exceeds the configured maximum cache size")
 
     identity = {
         "model": str(Path(model_name).resolve()) if local else model_name,
