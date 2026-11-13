@@ -1059,6 +1059,32 @@ def test_load_recipe_dflash_builtin():
     assert recipe.training.training_seq_len == 4096
 
 
+@pytest.mark.parametrize(
+    ("recipe_type", "section", "offline_attr"),
+    [
+        ("speculative_dflash", "dflash", "dflash_offline"),
+        ("speculative_eagle", "eagle", "eagle_offline"),
+    ],
+)
+def test_packed_data_mode_is_not_offline(tmp_path, recipe_type, section, offline_attr):
+    """packed is an online mode: the base runs forward, so *_offline must stay False.
+
+    Deriving offline as ``mode != "online"`` wrongly caught packed, which makes main.py
+    load the fake base built for pre-dumped hidden states and train the draft against a
+    model that is not there.
+    """
+    recipe_path = tmp_path / "packed.yml"
+    recipe_path.write_text(
+        f"metadata:\n  recipe_type: {recipe_type}\n"
+        "model:\n  model_name_or_path: TinyLlama/TinyLlama-1.1B-Chat-v1.0\n"
+        "data:\n  packed_data_path: /tmp/packed_blocks\n"
+        f"{section}: {{}}\n"
+    )
+    recipe = load_recipe(recipe_path)
+    assert recipe.data.mode == "packed"
+    assert getattr(getattr(recipe, section), offline_attr) is False
+
+
 def test_load_recipe_dflash_missing_section_raises(tmp_path):
     """load_recipe raises ValueError when 'dflash' is absent for a SPECULATIVE_DFLASH recipe."""
     bad = tmp_path / "bad.yml"
