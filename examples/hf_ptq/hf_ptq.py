@@ -15,6 +15,7 @@
 
 import argparse
 import contextlib
+import math
 import os
 import random
 import time
@@ -107,6 +108,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_dataset_dataloader,
     get_max_batch_size,
     get_supported_datasets,
+    shared_sample_reader,
 )
 from modelopt.torch.utils.distributed import (
     distributed_forward_loop,
@@ -130,6 +132,8 @@ from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 RAND_SEED = 1234
 # Most tokens per calibration batch when layerwise calibration picks the batch size (64 x 512).
 LAYERWISE_CALIB_TOKENS = 32768
+# Seconds a multi-rank run waits for rank 0's next calibration sample before it fails.
+CALIB_STALL_TIMEOUT = 300
 _PREVIEW_STOPS_THE_RUN = (
     "The preview after quantization failed, which stops the run before the export, so no "
     "checkpoint is written; --skip_generate exports without the preview."
@@ -229,6 +233,29 @@ def _shard_calib_dataloader(calib_dataloader, rank: int, world_size: int):
     )
 
 
+def _calib_sample_reader(world_size: int):
+    """Read the calibration text on rank 0 alone, for every rank.
+
+    ``MODELOPT_CALIB_CACHE_DIR`` keeps the samples for later runs. In a run of several ranks, all
+    waiting on rank 0, ``MODELOPT_CALIB_DATA_PREPARE_TIMEOUT`` seconds without a new sample fail the
+    run (default ``CALIB_STALL_TIMEOUT``; 0 waits indefinitely).
+    """
+    timeout = os.environ.get("MODELOPT_CALIB_DATA_PREPARE_TIMEOUT") or str(CALIB_STALL_TIMEOUT)
+    try:
+        seconds = float(timeout)
+    except ValueError:
+        seconds = math.nan
+    if not 0 <= seconds < math.inf:
+        raise ValueError(
+            f"MODELOPT_CALIB_DATA_PREPARE_TIMEOUT={timeout!r} is not a number of seconds (0 waits "
+            "indefinitely)."
+        )
+    return shared_sample_reader(
+        cache_dir=os.environ.get("MODELOPT_CALIB_CACHE_DIR") or None,
+        stall_timeout=seconds if world_size > 1 and seconds > 0 else None,
+    )
+
+
 def make_calib_dataloader(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
@@ -315,6 +342,7 @@ def make_calib_dataloader(
             max_sample_length=args.calib_seq,
             device=device,
             include_labels=include_labels,
+            sample_reader=_calib_sample_reader(world_size),
         )
     if world_size > 1 and calib_dataloader is not None and not args.calib_with_images:
         calib_dataloader = _shard_calib_dataloader(
@@ -563,6 +591,7 @@ def sparsity_main(
         num_samples=args.calib_size,
         max_sample_length=args.calib_seq,
         device=device,
+        sample_reader=_calib_sample_reader(args.dist_state.world_size),
     )
     full_model = mts.sparsify(
         full_model,

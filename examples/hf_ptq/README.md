@@ -666,6 +666,8 @@ ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for 
 
 > *On more than one GPU, with `--use_fsdp2` or in any other `torchrun` launch of several ranks, a calibration batch that runs out of memory is not retried in smaller pieces, since a rank that runs out of memory partway through a forward would leave the others waiting in its collectives. With `--batch_size 0`, each rank estimates the batch size from one forward and the ranks use the smallest, which is not probed for out-of-memory either: set `--batch_size` if calibration runs out of memory.*
 
+> *In a `torchrun` launch of several ranks, rank 0 reads the calibration text (`--dataset`) and sends it to the other ranks, so the dataset is read once rather than once per rank. If no new sample arrives for `MODELOPT_CALIB_DATA_PREPARE_TIMEOUT` seconds (default 300; `0` waits indefinitely), the run fails on every rank instead of waiting. Set `MODELOPT_CALIB_CACHE_DIR` to a directory where rank 0 keeps the text of the registered datasets for later runs, of any model. Image-text calibration (`--calib_with_images`) and Whisper's audio are still read on every rank.*
+
 ### Usage
 
 #### Slurm (recommended)
