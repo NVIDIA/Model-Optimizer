@@ -352,15 +352,14 @@ class _CompressedTensorsExperts(PackedFormat):
     def decompress(self, name, stored, dtype):
         shape = {"weight_shape": torch.tensor(self.shapes[name])}
         extra = shape if "weight_shape" in self.param_names else {}
-        return torch.stack(
-            [
-                self.compressor.decompress(
-                    {**{pn: stored[_PACKED_SUFFIX[pn]][e] for pn in self.layouts[name]}, **extra},
-                    self.scheme,
-                )["weight"].to(dtype)
-                for e in range(len(stored[""]))
-            ]
+        weight = torch.empty(
+            len(stored[""]), *self.shapes[name], dtype=dtype, device=stored[""].device
         )
+        # One expert at a time, as a cache holds it, written in place rather than stacked after.
+        for e in range(len(weight)):
+            expert = {pn: stored[_PACKED_SUFFIX[pn]][e] for pn in self.layouts[name]}
+            weight[e] = self.compressor.decompress({**expert, **extra}, self.scheme)["weight"]
+        return weight
 
 
 def _pack_rewritten_experts(model, rewritten, layouts, compression) -> int:
