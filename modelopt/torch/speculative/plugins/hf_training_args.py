@@ -29,7 +29,7 @@ The module is pure Pydantic schema with no runtime dependencies on ``transformer
 
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, StrictInt, field_validator, model_validator
 
 __all__ = ["DataArguments", "ModelArguments", "TrainingArguments"]
 
@@ -74,6 +74,8 @@ class DataArguments(BaseModel):
     vlm_img_dir: str | None = None
     vlm_processor: str | None = None
     sample_size: int = -1
+    # Offline/streaming features are truncated at the training cap, then right-padded.
+    padding_buckets: list[StrictInt] | None = None
     streaming_server_url: str | None = None
     streaming_model_name: str | None = None
     # Set for a draft whose top aux layer already is the base's last layer (e.g. the released
@@ -81,6 +83,17 @@ class DataArguments(BaseModel):
     # vLLM captures each layer once, so there is no distinct extra plane for the base hidden
     # and the final plane must serve both roles.
     final_aux_is_base_hidden: bool = False
+
+    @field_validator("padding_buckets")
+    @classmethod
+    def _check_padding_buckets(cls, value: list[int] | None) -> list[int] | None:
+        if value is not None and (
+            not 1 <= len(value) <= 2
+            or any(length <= 0 for length in value)
+            or value != sorted(set(value))
+        ):
+            raise ValueError("padding_buckets must contain one or two increasing positive integers")
+        return value
 
     @field_validator("sample_size")
     @classmethod

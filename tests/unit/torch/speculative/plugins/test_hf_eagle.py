@@ -66,8 +66,7 @@ def test_ttt_attention_mask_cache_with_variable_lengths(tmp_path, context_change
             model.save_pretrained(tmp_path)
             restored_output = model(input_ids=input_ids, labels=input_ids)
             assert all(
-                model._cached_attn_blk_masks[step] is mask
-                for step, mask in masks_before_save.items()
+                model._cached_attn_blk_masks[key] is mask for key, mask in masks_before_save.items()
             )
             torch.testing.assert_close(projected_logits, expected_logits)
             torch.testing.assert_close(restored_output.loss, output.loss)
@@ -90,7 +89,12 @@ def test_ttt_attention_mask_cache_with_variable_lengths(tmp_path, context_change
             )
             if previous_length == seq_length:
                 assert mask is previous_masks[step]
-        previous_masks = dict(model._cached_attn_blk_masks)
+        previous_masks = {
+            step: model._get_ttt_attention_mask(
+                batch_size, seq_length, step, device=input_ids.device, dtype=torch.float32
+            )
+            for step in (1, 2)
+        }
         previous_length = seq_length
         projected_logits.clear()
 
@@ -106,8 +110,8 @@ def test_ttt_attention_mask_cache_with_variable_lengths(tmp_path, context_change
         assert all(mask.dtype == torch.bfloat16 for mask in masks_before_cast.values())
         assert torch.isfinite(model(input_ids=input_ids, labels=input_ids).loss)
         assert all(
-            mask.dtype == torch.float32 and mask is not masks_before_cast[step]
-            for step, mask in model._cached_attn_blk_masks.items()
+            mask.dtype == torch.float32 and mask is not masks_before_cast[key]
+            for key, mask in model._cached_attn_blk_masks.items()
         )
     else:
         # A split base must not place draft masks on its first parameter's device.
@@ -118,3 +122,26 @@ def test_ttt_attention_mask_cache_with_variable_lengths(tmp_path, context_change
     )
     assert isinstance(block_mask, BlockMask)
     assert block_mask.kv_num_blocks.device == model.eagle_module.fc.weight.device
+
+    first_bucket_masks = {}
+    for seq_length in (8, 4, 8, 12):
+        for step in (1, 2):
+            mask = model._get_ttt_attention_mask(
+                2, seq_length, step, device=input_ids.device, dtype=torch.float32
+            )
+            if seq_length == 8:
+                if step in first_bucket_masks:
+                    assert mask is first_bucket_masks[step]
+                else:
+                    first_bucket_masks[step] = mask
+            fresh_mask = model._compute_ttt_attention_mask(
+                1, seq_length, step, device=input_ids.device, dtype=torch.float32
+            )
+            query = torch.arange(seq_length).view(-1, 1)
+            key = torch.arange(seq_length * (step + 1)).view(1, -1)
+            torch.testing.assert_close(
+                mask.mask_mod(None, None, query, key),
+                fresh_mask.mask_mod(None, None, query, key),
+            )
+        assert len(model._cached_attn_blk_masks) <= 4
+    assert {length for length, _step in model._cached_attn_blk_masks} == {4, 12}

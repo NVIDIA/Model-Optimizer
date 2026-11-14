@@ -1216,6 +1216,69 @@ def test_typed_data_sample_size_validator(tmp_path):
         load_recipe(recipe_path)
 
 
+@pytest.mark.parametrize(
+    "buckets",
+    [
+        [],
+        [8, 4],
+        [4, 4],
+        [2, 4, 8],
+        [4.0, 8],
+        [True, 8],
+        [4, 7],
+    ],
+)
+def test_recipe_rejects_invalid_padding_buckets(buckets):
+    """Reject invalid shapes and a mismatched training maximum."""
+    data = {"padding_buckets": buckets, "offline_data_path": "/hidden"}
+    with pytest.raises(ValidationError):
+        ModelOptEagleRecipe.model_validate(
+            {"metadata": {}, "data": data, "training": {"training_seq_len": 8}}
+        )
+
+
+@pytest.mark.parametrize(
+    "data_override",
+    ["data.offline_data_path=/hidden", "data.streaming_server_url=http://localhost:8000"],
+)
+def test_recipe_padding_buckets_dotlist_override(tmp_path, data_override):
+    """Validate buckets after CLI overrides supply the data source and sequence length."""
+    recipe_path = tmp_path / "buckets.yaml"
+    recipe_path.write_text(
+        "# modelopt-schema: modelopt.recipe.config.ModelOptEagleRecipe\nmetadata: {}\neagle: {}\n"
+        "data:\n  mode: streaming\n  padding_buckets: [4, 8]\n  streaming_model_name: tiny\n"
+    )
+    recipe = load_recipe(
+        recipe_path,
+        overrides=[
+            data_override,
+            "training.training_seq_len=8",
+        ],
+    )
+    assert recipe.data.padding_buckets == [4, 8]
+    assert recipe.data.mode == (
+        "streaming" if "streaming_server_url" in data_override else "offline"
+    )
+
+
+@pytest.mark.parametrize("projector_type", ["dflash", "dspark", "domino"])
+def test_recipe_dflash_padding_buckets_block_alignment(projector_type):
+    """Reject a smaller bucket that the selected block-wise training forward cannot use."""
+    data = {
+        "metadata": {},
+        "data": {"offline_data_path": "/hidden", "padding_buckets": [4, 16]},
+        "training": {"training_seq_len": 16},
+        "dflash": {
+            "dflash_block_size": 8,
+            "dflash_architecture_config": {"projector_type": projector_type},
+        },
+    }
+    with pytest.raises(ValidationError):
+        ModelOptDFlashRecipe.model_validate(data)
+    data["data"]["padding_buckets"] = [8, 16]
+    assert ModelOptDFlashRecipe.model_validate(data).data.padding_buckets == [8, 16]
+
+
 def test_load_recipe_dflash_field_validation_raises(tmp_path):
     """Invalid DFlash field values must fail Pydantic validation at load time."""
     bad = tmp_path / "bad.yml"

@@ -90,6 +90,9 @@ def make_speculative_data_module(
         print_rank_0(f"Loaded chat template from {template_path}")
 
     mode = getattr(data_args, "mode", "online")
+    padding_buckets = getattr(data_args, "padding_buckets", None)
+    if padding_buckets is not None and mode not in ("offline", "streaming"):
+        raise ValueError("data.padding_buckets requires offline or streaming features")
     if mode == "streaming":
         # ``train_len`` right-truncates during tokenization and is also the collator's
         # pad target; caller must ensure ``train_len <= vllm.max_model_len``.
@@ -137,7 +140,9 @@ def make_speculative_data_module(
             tokenizer=tokenizer,
             config=streaming_cfg,
         )
-        data_collator = EagleOfflineDataCollator(train_len=train_len)
+        data_collator = EagleOfflineDataCollator(
+            train_len=train_len, padding_buckets=padding_buckets
+        )
 
     elif mode == "online":
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)
@@ -215,7 +220,9 @@ def make_speculative_data_module(
             tokenizer=tokenizer,
             aux_hidden_states_optional=aux_hidden_states_optional,
         )
-        data_collator = EagleOfflineDataCollator(train_len=train_len)
+        data_collator = EagleOfflineDataCollator(
+            train_len=train_len, padding_buckets=padding_buckets
+        )
 
     return {
         "train_dataset": train_dataset,
