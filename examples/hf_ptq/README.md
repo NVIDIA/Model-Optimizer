@@ -882,6 +882,20 @@ After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build c
 - Deployable on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang)
 - More models coming soon!
 
+## Reproducible PTQ
+
+Repeating a run with the same model, data, recipe, batch size, hardware and software gives identical scales. What moves them is what a sample is batched with. The default SDPA attention runs a sample with a different kernel when another sample in its batch is padded, and with yet another when the batch holds that sample alone, so the sample's activations differ in their last bits and the calibrated scales follow: by up to a few percent on the models we measured, more where a Mixture-of-Experts router sends a token to another expert. Which samples share a batch depends on the order of the calibration data and on `--batch_size`, and the default `--batch_size 0` probes the latter from free GPU memory, so another GPU or memory state silently calibrates differently.
+
+`--deterministic` removes the dependence on the batch. It calibrates with eager attention, which gives a sample the same activations in any batch, or with `--attn_implementation modelopt_sdpa_efficient`, SDPA pinned to PyTorch's memory-efficient kernel with a mask for every batch, which does the same without building the attention matrix (it needs a GPU, and raises for a model that uses attention softcapping or sinks, such as Gemma 2 and GPT-OSS: use eager there). Any other `--attn_implementation` falls back to eager with a warning. It also seeds every random number generator and selects deterministic torch kernels (an op without one only warns). The scales that are maxima over the samples (`input_scale`, `k_scale`, `v_scale`) then depend on which samples are used, not on their order in the dataset or on the batch size. So do the results of the algorithms that add statistics up over the batches, which sum in float64 while deterministic algorithms are on: `awq_lite`, the NVFP4 clip search of `awq_clip` and `awq_full`, and the Hessians of `local_hessian` and GPTQ (GPTQ's is also rounded to the precision of a covariance, because one flipped float32 bit of a Hessian can change its weights). The block-wise clip search of `awq_clip` (static block quantizers, which no shipped preset uses) picks its tokens per batch and is not covered. That holds on the same GPU architecture and software versions, since another one runs other kernels, and for the same padded length. Eager attention takes more memory than SDPA, so it is not the default.
+
+```bash
+python hf_ptq.py ... --deterministic --export_path run_a
+python hf_ptq.py ... --deterministic --export_path run_b  # the same samples in another order, or another --batch_size
+python -m modelopt.torch.quantization.utils.scale_compare run_a run_b
+```
+
+`scale_compare` lists, per scale kind (`input_scale`, `weight_scale`, ...), how many tensors differ and by how much, and exits non-zero when a scale differs by more than `--rtol` / `--atol` (default 0: identical). Run it on checkpoints that differ in GPU layout to see how far the scales move.
+
 ## Tracking runs with MLflow
 
 Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to record a PTQ

@@ -101,7 +101,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import deterministic_attn_implementation, enable_determinism, print_rank_0
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -1331,6 +1331,21 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=512,
     )
+    parser.add_argument(
+        "--deterministic",
+        help=(
+            "Reproducible PTQ: calibrate with an attention implementation whose result for a "
+            "sample does not depend on the other samples in its batch (that of the default SDPA "
+            "does): eager, which takes more memory than SDPA, or modelopt_sdpa_efficient, SDPA's "
+            "memory-efficient kernel for every batch, if passed as --attn_implementation. Any "
+            "other --attn_implementation falls back to eager. Also seed every random number "
+            "generator and use deterministic torch kernels (an op without one only warns). The "
+            "scales then depend on which samples are used, not on their order in the dataset or "
+            "on the batch size."
+        ),
+        default=False,
+        action="store_true",
+    )
     parser.add_argument("--export_path", default="exported_model")
     parser.add_argument(
         "--dataset",
@@ -1460,7 +1475,8 @@ def parse_args() -> argparse.Namespace:
         "--attn_implementation",
         help=(
             "Specify the attention implementation to use. "
-            "This arg will be passed to the HF model loading if specified."
+            "This arg will be passed to the HF model loading if specified. "
+            "With --deterministic, only eager and modelopt_sdpa_efficient are used."
         ),
         default=None,
         type=str,
@@ -1597,6 +1613,9 @@ def parse_args() -> argparse.Namespace:
     if args.calib_seq <= 0:
         parser.error("--calib_seq must be positive.")
 
+    if args.deterministic:
+        args.attn_implementation = deterministic_attn_implementation(args.attn_implementation)
+
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")
 
@@ -1670,6 +1689,10 @@ def main(args: argparse.Namespace):
 
 
 def _main_inner(args: argparse.Namespace):
+    if args.deterministic:
+        # Once the group is up, so only rank 0 reports it; still before the first CUDA matmul.
+        enable_determinism(RAND_SEED)
+
     with mlflow_run(args):
         # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
         # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
@@ -1693,6 +1716,10 @@ def _main_inner(args: argparse.Namespace):
             tokenizer,
             device,
         ) = load_model(args)
+
+        if args.deterministic:
+            attn = getattr(getattr(full_model, "config", None), "_attn_implementation", None)
+            print_rank_0(f"Deterministic mode: the model loaded with {attn} attention.")
 
         if args.sparsity_fmt != "dense":
             # Sparse
