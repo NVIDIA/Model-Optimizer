@@ -29,11 +29,13 @@ install the Hugging Face dependencies and the example-specific requirements:
 
 ```bash
 pip install -U nvidia-modelopt[hf]
-pip install --no-build-isolation -r examples/llm_qat/requirements.txt
+pip install -r examples/llm_qat/requirements.txt
 ```
 
-`--no-build-isolation` lets FlashAttention build against the PyTorch installed by
-the first command.
+FlashAttention must be compatible with the installed PyTorch/CUDA build. If these
+commands change PyTorch, reinstall a compatible FlashAttention build or rebuild
+it against the installed PyTorch. Verify that `python -c "import torch, flash_attn"`
+succeeds before running the example.
 
 The Qwen3-8B example below requires a minimum of **2 x 80GB GPUs**.
 

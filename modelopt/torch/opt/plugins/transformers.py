@@ -282,26 +282,36 @@ def _translate_warmup_keys(config: dict, actions) -> None:
 
 
 class ModelOptArgParser(HfArgumentParser):
-    """HfArgumentParser with ``--config`` YAML support and ``--generate_docs`` for ARGUMENTS.md."""
+    """HfArgumentParser with YAML defaults and Markdown argument documentation.
+
+    ``--config`` and ``--generate_docs`` require ``parse_args_into_dataclasses``.
+    The inherited ``parse_args`` and ``parse_known_args`` retain argparse behavior.
+    """
 
     def __init__(self, *args, docs_header_extra: str | None = None, **kwargs):
         """Store an optional verbatim markdown block to inject into generated docs."""
         super().__init__(*args, **kwargs)
         self._docs_header_extra = docs_header_extra
+        self._parsing_dataclasses = False
 
     def format_help(self):
         """Include options consumed before HuggingFace's dataclass parsing."""
+        if not self._parsing_dataclasses:
+            return super().format_help()
         options = argparse.ArgumentParser(add_help=False)
         options.add_argument(
             "--config",
+            type=str,
             metavar="PATH",
             help="Load YAML defaults; command-line arguments override them.",
         )
         options.add_argument(
             "--generate_docs",
+            type=str,
             nargs="?",
             metavar="PATH",
-            help="Generate argument documentation and exit (default: ARGUMENTS.md).",
+            default="ARGUMENTS.md",
+            help="Generate argument documentation and exit.",
         )
         formatter = self._get_formatter()
         formatter.start_section("ModelOpt options")
@@ -351,7 +361,11 @@ class ModelOptArgParser(HfArgumentParser):
                         )
                 self.set_defaults(**applicable)
 
-        return super().parse_args_into_dataclasses(args=args, **kwargs)
+        self._parsing_dataclasses = True
+        try:
+            return super().parse_args_into_dataclasses(args=args, **kwargs)
+        finally:
+            self._parsing_dataclasses = False
 
     @staticmethod
     def _all_modelopt_fields():

@@ -15,6 +15,7 @@
 
 """Unit tests for ModelOptArgParser."""
 
+import argparse
 from dataclasses import field
 from pathlib import Path
 
@@ -71,14 +72,28 @@ def test_yaml_warmup_spelling_follows_transformers(tmp_path, arg_type, yaml, exp
 class TestModelOptArgParser:
     """Tests for ModelOptArgParser --config and --generate_docs features."""
 
-    def test_help_includes_wrapper_options(self, capsys):
-        parser = ModelOptArgParser((_ModelArgs, _TrainArgs))
+    @pytest.mark.parametrize(
+        "formatter_class",
+        [argparse.ArgumentDefaultsHelpFormatter, argparse.MetavarTypeHelpFormatter],
+    )
+    @pytest.mark.parametrize(
+        "entry_point", ["parse_args_into_dataclasses", "parse_args", "parse_known_args"]
+    )
+    def test_help_matches_entry_point(self, capsys, formatter_class, entry_point):
+        parser = ModelOptArgParser((_ModelArgs, _TrainArgs), formatter_class=formatter_class)
         with pytest.raises(SystemExit) as exc_info:
-            parser.parse_args_into_dataclasses(args=["--help"])
+            getattr(parser, entry_point)(args=["--help"])
         assert exc_info.value.code == 0
         help_text = capsys.readouterr().out
-        assert "--config PATH" in help_text
-        assert "--generate_docs [PATH]" in help_text
+        dataclass_help = entry_point == "parse_args_into_dataclasses"
+        assert ("--config PATH" in help_text) == dataclass_help
+        assert ("--generate_docs [PATH]" in help_text) == dataclass_help
+        if dataclass_help and formatter_class is argparse.ArgumentDefaultsHelpFormatter:
+            docs_help = " ".join(help_text.split("--generate_docs [PATH]")[-1].split())
+            assert "(default: ARGUMENTS.md)" in docs_help
+            assert "(default: None)" not in docs_help
+        assert "--config" not in parser.format_help()
+        assert "--generate_docs" not in parser.format_help()
 
     def test_distill_help_formats_loss_percentages(self, capsys):
         parser = ModelOptArgParser((DistillArguments,))
