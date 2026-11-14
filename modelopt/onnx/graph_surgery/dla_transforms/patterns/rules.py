@@ -28,7 +28,13 @@ from ..common import constant_array, static_shape
 if TYPE_CHECKING:
     from ..context import DlaGraph
 
-__all__ = ["ReshapeQDQReduceSum", "ReshapeReduceSum", "ReshapeTransposeReshape", "TopKVectorGather"]
+__all__ = [
+    "ReshapeQDQReduceSum",
+    "ReshapeReduceSum",
+    "ReshapeTransposeReshape",
+    "TerminalProjection",
+    "TopKVectorGather",
+]
 
 
 class ReshapeTransposeReshape(pattern.RewriteRuleClassBase):
@@ -261,6 +267,103 @@ class TopKVectorGather(pattern.RewriteRuleClassBase):
         gathered = op.Gather(data, vector, axis=axis)
         gathered.type, gathered.shape = result.type, result.shape
         return gathered
+
+
+class TerminalProjection(pattern.RewriteRuleClassBase):
+    """Split a private terminal Conv projection into at most 8192-channel chunks.
+
+    The recognized Conv/Transpose/singleton-Concat/ReduceSum/Cast/Squeeze tail
+    becomes chunked Conv -> Reshape -> FP32 Cast outputs concatenated on axis 2.
+    Supports private FP16 or scalar-dequantized UINT8 kernels with singleton spatial
+    output; this rule runs late, after the FP16 policy has established those types.
+    """
+
+    def __init__(self, graph: DlaGraph):
+        """Bind graph state while retaining the established SDK rule name."""
+        super().__init__(name="DlaTerminalProjection")
+        self.graph = graph
+
+    def pattern(self, op, source, weight, reduce_axes, squeeze_axes):
+        """Capture the terminal singleton-concat reduction and layout adapters."""
+        projected = op.Conv(source, weight, _outputs=["projected"])
+        transposed = op.Transpose(projected)
+        reduced = op.ReduceSum(op.Concat(transposed), reduce_axes)
+        return op.Squeeze(
+            op.Cast(op.Concat(reduced), to=int(ir.DataType.FLOAT)), squeeze_axes, _outputs=["value"]
+        )
+
+    def check(self, context, source, weight, reduce_axes, squeeze_axes, projected, value):
+        """Require private fixed weights, singleton spatial output and exact adapters."""
+        conv = projected.producer()
+        squeeze = value.producer()
+        cast = squeeze.inputs[0].producer()
+        final = cast.inputs[0].producer()
+        reduction = final.inputs[0].producer()
+        transpose = reduction.inputs[0].producer().inputs[0].producer()
+        axes, removed_axes = constant_array(reduce_axes), constant_array(squeeze_axes)
+        dq = weight.producer()
+        if dq is not None and (
+            dq.op_type != "DequantizeLinear" or dq.domain not in {"", "com.microsoft"}
+        ):
+            return False
+        original = dq.inputs[0] if dq is not None else weight
+        raw = constant_array(original)
+        if (
+            not value.is_graph_output()
+            or value.dtype != ir.DataType.FLOAT
+            or axes is None
+            or removed_axes is None
+            or axes.tolist() != [0]
+            or removed_axes.tolist() != [0]
+            or reduction.attributes.get_int("keepdims", 1) != 1
+            or tuple(transpose.attributes.get_ints("perm", [])) != (0, 3, 2, 1)
+            or conv.attributes.get_int("group", 1) != 1
+            or raw is None
+            or raw.ndim != 4
+            or raw.shape[0] <= 8192
+            or original.dtype != (ir.DataType.UINT8 if dq is not None else ir.DataType.FLOAT16)
+            or static_shape(value) != (1, 1, raw.shape[0])
+            or static_shape(projected) != (1, raw.shape[0], 1, 1)
+        ):
+            return False
+        if dq is not None and any(
+            (array := constant_array(parameter)) is None or array.size != 1
+            for parameter in dq.inputs[1:]
+            if parameter is not None
+        ):
+            return False
+        if dq is not None and (weight.is_graph_output() or len(weight.uses()) != 1):
+            return False
+        chain = {conv, transpose, reduction, final, cast, squeeze, reduction.inputs[0].producer()}
+        if dq is not None:
+            chain.add(dq)
+        return not any(
+            owner.is_graph_output() or any(consumer not in chain for consumer, _ in owner.uses())
+            for owner in (original, reduce_axes, squeeze_axes)
+        )
+
+    def rewrite(self, op, source, weight, projected, value, **_):
+        """Slice the output-channel dimension and keep each bounded result in FP32."""
+        conv, dq = projected.producer(), weight.producer()
+        raw = constant_array(dq.inputs[0] if dq is not None else weight)
+        assert raw is not None
+        outputs = []
+        for start in range(0, raw.shape[0], 8192):
+            kernel = raw[start : start + 8192].copy()
+            weights = self.graph.add_initializer(op, kernel, "projection_weight")
+            if dq is not None:
+                weights = op.call_op(
+                    "DequantizeLinear",
+                    [weights, *dq.inputs[1:]],
+                    dict(dq.attributes),
+                    domain=dq.domain,
+                )
+            chunk = op.call_op("Conv", [source, weights], dict(conv.attributes))
+            shape = self.graph.add_initializer(
+                op, np.asarray([1, 1, kernel.shape[0]], np.int64), "projection_shape"
+            )
+            outputs.append(op.Cast(op.Reshape(chunk, shape), to=int(ir.DataType.FLOAT)))
+        return op.Concat(*outputs, axis=2)
 
 
 def _resolved_shape(value, source, *, allowzero=0):
