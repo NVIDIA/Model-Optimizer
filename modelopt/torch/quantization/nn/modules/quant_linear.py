@@ -32,7 +32,7 @@ from .quant_module import (
 )
 from .tensor_quantizer import TensorQuantizer
 
-__all__ = ["Linear", "QuantLinear", "RealQuantLinear", "SVDQuantLinear"]
+__all__ = ["Linear", "QuantLinear", "RealQuantLinear", "ResidueQuantLinear", "SVDQuantLinear"]
 
 
 @QuantModuleRegistry.register({nn.Linear: "nn.Linear"})
@@ -316,3 +316,132 @@ class RealQuantLinear(QuantModule):
         else:
             # Process the function normally
             return super()._apply(fn, recurse=recurse)
+
+
+class ResidueQuantLinear(QuantLinearConvBase):
+    """QDQ Linear with temporary copied weight channels and native quantizer gradients."""
+
+    def _setup(self):
+        """Keep the existing native quantizers when promoting a quantized Linear."""
+
+    def _apply_pre_quant_scale(self, input: torch.Tensor) -> torch.Tensor:
+        pre_quant_scale = self.input_quantizer.pre_quant_scale
+        if pre_quant_scale is None:
+            return input
+        return input * pre_quant_scale.to(device=input.device, dtype=input.dtype)
+
+    def _input_qdq_without_pre_quant_scale(self, input: torch.Tensor) -> torch.Tensor:
+        """Run input quantizer QDQ after caller has already applied pre_quant_scale."""
+        with self.input_quantizer.disable_pre_quant_scale():
+            return self.input_quantizer(input)
+
+    def _make_residue_input_qdq(
+        self,
+        input: torch.Tensor,
+        salient_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        input_for_quant = self._apply_pre_quant_scale(input)
+        salient_indices = salient_indices.to(device=input.device, dtype=torch.long)
+
+        input_base = self._input_qdq_without_pre_quant_scale(input_for_quant)
+        input_residue = input_for_quant.index_select(-1, salient_indices) - input_base.index_select(
+            -1, salient_indices
+        )
+        del input_for_quant
+        input_residue_q = self._input_qdq_without_pre_quant_scale(input_residue)
+
+        return torch.cat([input_base, input_residue_q], dim=-1)
+
+    def _make_residue_weight(
+        self,
+        input: torch.Tensor,
+        salient_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        weight = self.weight
+        if weight.shape[-1] != input.shape[-1]:
+            raise RuntimeError(
+                "Residue weight/input shape mismatch: "
+                f"weight K={weight.shape[-1]}, input K={input.shape[-1]}."
+            )
+        weight_indices = salient_indices.to(device=weight.device)
+        return torch.cat([weight, weight.index_select(-1, weight_indices)], dim=-1)
+
+    def _apply_weight_pre_quant_scale(
+        self,
+        weight: torch.Tensor,
+        salient_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        pre_quant_scale = self.weight_quantizer.pre_quant_scale
+        if pre_quant_scale is None:
+            return weight
+
+        scale = pre_quant_scale.to(device=weight.device, dtype=weight.dtype)
+        if scale.ndim == 0 or scale.shape[-1] == 1:
+            return weight * scale
+        if scale.ndim == 1:
+            scale = scale.unsqueeze(0)
+        if scale.shape[-1] == weight.shape[-1]:
+            return weight * scale
+        original_width = self.in_features
+        if scale.shape[-1] == original_width:
+            scale_indices = salient_indices.to(device=scale.device, dtype=torch.long)
+            scale = torch.cat([scale, scale.index_select(-1, scale_indices)], dim=-1)
+            scale = F.pad(scale, (0, weight.shape[-1] - scale.shape[-1]), value=1)
+            return weight * scale
+        raise RuntimeError(
+            "weight_quantizer.pre_quant_scale shape does not match residue weight: "
+            f"scale K={scale.shape[-1]}, weight K={weight.shape[-1]}, "
+            f"salient={salient_indices.numel()}."
+        )
+
+    def _forward_residue_qdq(self, input: torch.Tensor) -> torch.Tensor:
+        salient_indices = getattr(self.input_quantizer, "_salient_indices", None)
+        assert salient_indices is not None and salient_indices.numel() > 0
+
+        input_ext_q = self._make_residue_input_qdq(input, salient_indices)
+        weight = self._make_residue_weight(input, salient_indices)
+        weight = self._apply_weight_pre_quant_scale(weight, salient_indices)
+        with self.weight_quantizer.disable_pre_quant_scale():
+            weight_q = self.weight_quantizer(weight)
+        del weight  # Release the temporary extended weight before allocating the output.
+
+        output = F.linear(input_ext_q, weight_q, self.bias)
+        return self.output_quantizer(output) if hasattr(self, "output_quantizer") else output
+
+    def forward(self, input, *args, **kwargs):
+        """Apply residue QDQ, or collect statistics before channel selection."""
+        salient_indices = getattr(self.input_quantizer, "_salient_indices", None)
+        if not getattr(self.input_quantizer, "_enable_salient_indices", True):
+            salient_indices = None
+        has_salient_indices = salient_indices is not None and salient_indices.numel() > 0
+
+        if not has_salient_indices:
+            active_fake_quant = (
+                self.input_quantizer.is_enabled
+                and getattr(self.input_quantizer, "_if_quant", True)
+                and self.input_quantizer.fake_quant
+            ) or (
+                self.weight_quantizer.is_enabled
+                and getattr(self.weight_quantizer, "_if_quant", True)
+                and self.weight_quantizer.fake_quant
+            )
+            if active_fake_quant and salient_indices is not None:
+                return super().forward(input, *args, **kwargs)
+            if active_fake_quant:
+                raise RuntimeError(
+                    "Residue fake-quant forward requires salient_indices. "
+                    "This fallback is only valid for calibration collect / normal forward."
+                )
+            # Keep the normal ModelOpt QuantLinear path for residue calibration's
+            # statistics-collection forward. Before postprocess there is no
+            # salience metadata or K extension to apply.
+            return super().forward(input, *args, **kwargs)
+
+        return self._forward_residue_qdq(input)
+
+    def _validate_fold_weight(self):
+        raise NotImplementedError("Residue weight folding requires paired activation/weight QDQ.")
+
+    def fold_weight(self, keep_attrs: bool = False):
+        """Reject folding until paired residue weight folding is supported."""
+        self._validate_fold_weight()

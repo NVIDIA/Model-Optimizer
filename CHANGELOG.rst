@@ -37,6 +37,7 @@ Changelog
 - Speed up Hugging Face QAT and QAD with ``QATTrainer``, ``QADTrainer`` or ``--manual_gc``: the ``gc.collect()`` run before each training step now skips the model and optimizer state, saving about 1 s per step (30%) on Qwen3-30B-A3B.
 - Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` moves each tensor once, to the one rank that writes it, instead of all-gathering each FSDP2 unit on every rank as the default export does. Fused MoE experts stay sharded, each rank writing its own, and a conversion mapping that splits or merges tensors, which the default export refuses, is reversed as a single-process export reverses it.
 - Add expert-parallel PTQ for HuggingFace MoE models to ``examples/hf_ptq/hf_ptq.py``: under ``torchrun``, each rank holds only its share of the routed experts, tokens reach them by all-to-all, and every rank calibrates on its own slice of the data. ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` override the automatic choice of expert-parallel degree and of FSDP2-sharding the dense layers, and the quantized checkpoint is written by every rank in parallel without gathering the model.
+- Add ``residue_max`` calibration for dense NVFP4/MXFP4 Linear layers, with shared channel selection, QDQ forward/backward, ModelOpt save/restore, and HF checkpoint export with metadata for residue-aware runtimes.
 
 *Speculative Decoding*
 

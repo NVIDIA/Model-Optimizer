@@ -1226,8 +1226,11 @@ class _WeightInputHook:
     def __init__(self, hook: Callable):
         self.hook = hook
 
-    def __call__(self, module, args):
-        self.hook(module, args)
+    def __call__(self, module, args, kwargs=None):
+        if kwargs is None:
+            self.hook(module, args)
+        else:
+            self.hook(module, args, kwargs)
 
 
 def _register_weight_input_hooks(model, names, capture, on_weight=None):
@@ -1284,11 +1287,14 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
                 if on_weight is not None:
                     on_weight(name, weight, module.weight_quantizer)
 
-            def _dense_hook(linear, args):
-                if args:
-                    capture(linear.weight_quantizer, linear.weight, args[0])
+            def _dense_hook(linear, args, kwargs):
+                inputs = args[0] if args else kwargs.get("input")
+                if inputs is not None:
+                    capture(linear.weight_quantizer, linear.weight, inputs)
 
-            handles.append(module.register_forward_pre_hook(_WeightInputHook(_dense_hook)))
+            handles.append(
+                module.register_forward_pre_hook(_WeightInputHook(_dense_hook), with_kwargs=True)
+            )
         elif _is_quant_fused_experts(module):
             with enable_weight_access_and_writeback(module, model, names):
                 for weight_name, weight, quantizers, input_quantizer in _fused_expert_projections(

@@ -34,7 +34,7 @@ from modelopt.torch.quantization.qtensor import (
 )
 from modelopt.torch.quantization.utils import quantizer_attr_names, representative_weight_quantizer
 
-from ..quantization.nn import SequentialQuantizer, TensorQuantizer
+from ..quantization.nn import ResidueQuantLinear, SequentialQuantizer, TensorQuantizer
 from .convert_hf_config import convert_hf_quant_config_format
 from .quant_format import (
     KV_CACHE_FP8,
@@ -335,6 +335,11 @@ def _resolve_quantized_weight_export_inputs(
     ]
     | None
 ):
+    if isinstance(module, ResidueQuantLinear):
+        raise NotImplementedError(
+            "Residue weights require layout metadata. Use export_hf_checkpoint() "
+            "to export weights and residue metadata together."
+        )
     weight = getattr(module, weight_name)
     if isinstance(weight, QTensorWrapper):
         raise NotImplementedError("Functional export requires an uncompressed source weight")
