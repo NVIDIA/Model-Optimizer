@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>autotune - Model Optimizer 0.0.1.dev1+gb22a07571</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="calib_utils" href="modelopt.onnx.quantization.calib_utils.html" /><link rel="prev" title="quantization" href="modelopt.onnx.quantization.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>autotune - Model Optimizer 0.0.1.dev1+gea2a8d8f4</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="calib_utils" href="modelopt.onnx.quantization.calib_utils.html" /><link rel="prev" title="quantization" href="modelopt.onnx.quantization.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -2274,7 +2274,7 @@ inference latency. It is the most straightforward method and closely
 mirrors standard TensorRT workflows.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.TrtExecBenchmark.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">timing_cache_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">warmup_runs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timing_runs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plugin_libraries</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trtexec_args</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.TrtExecBenchmark.__init__" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">timing_cache_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">warmup_runs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timing_runs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plugin_libraries</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trtexec_args</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remote_model_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.TrtExecBenchmark.__init__" title="Link to this definition">#</a></dt>
 <dd><p>Initialize the trtexec benchmark.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -2286,6 +2286,10 @@ mirrors standard TensorRT workflows.</p>
 <li><p><strong>trtexec_args</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – Additional command-line arguments to pass to trtexec.
 These are appended after the standard arguments.
 Example: [’–fp16’, ‘–workspace=4096’, ‘–verbose’]</p></li>
+<li><p><strong>remote_model_path</strong> (<em>str</em><em> | </em><em>None</em>) – Path for the engine on the remote device. By default, a unique
+filename is created in the remote user’s working directory. A custom path is
+overwritten and removed after each benchmark; concurrent runs must use distinct
+paths.</p></li>
 </ul>
 </dd>
 </dl>

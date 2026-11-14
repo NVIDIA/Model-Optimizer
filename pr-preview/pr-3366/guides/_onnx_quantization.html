@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ONNX Quantization - Linux (Beta) - Model Optimizer 0.0.1.dev1+gb22a07571</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="ONNX Quantization - Windows" href="windows_guides/_ONNX_PTQ_guide.html" /><link rel="prev" title="Compress quantized models" href="_compress_quantized_models.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ONNX Quantization - Linux (Beta) - Model Optimizer 0.0.1.dev1+gea2a8d8f4</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="ONNX Quantization - Windows" href="windows_guides/_ONNX_PTQ_guide.html" /><link rel="prev" title="Compress quantized models" href="_compress_quantized_models.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
@@ -593,6 +593,7 @@ For real speedup, the generated ONNX should be compiled into TensorRT engine.</p
 </span><span data-line="43">                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_warmup_runs</span> <span class="n">AUTOTUNE_WARMUP_RUNS</span><span class="p">]</span>
 </span><span data-line="44">                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_timing_runs</span> <span class="n">AUTOTUNE_TIMING_RUNS</span><span class="p">]</span>
 </span><span data-line="45">                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_trtexec_args</span> <span class="n">AUTOTUNE_TRTEXEC_ARGS</span><span class="p">]</span>
+</span><span data-line="46">                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_remote_model_path</span> <span class="n">AUTOTUNE_REMOTE_MODEL_PATH</span><span class="p">]</span>
 </span></pre></div>
 </div>
 <section id="python-m-modelopt.onnx.quantization-named-arguments">
@@ -779,6 +780,9 @@ For real speedup, the generated ONNX should be compiled into TensorRT engine.</p
 </dd>
 <dt><kbd>--autotune_trtexec_args</kbd></dt>
 <dd><p>Additional ‘trtexec’ arguments as a single quoted string. Only relevant when ‘–autotune_use_trtexec’ is set. Example: ‘–fp16 –workspace=4096’</p>
+</dd>
+<dt><kbd>--autotune_remote_model_path</kbd></dt>
+<dd><p>Path for the engine on the remote device. By default, a unique filename is created in the remote user’s working directory. Custom paths are overwritten and removed after each benchmark; concurrent runs must use distinct paths. Only letters, digits, ‘.’, ‘_’, ‘/’, and ‘-’ are accepted; ‘~’ is not expanded.</p>
 </dd>
 </dl>
 </section>

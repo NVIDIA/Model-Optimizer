@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Autotune (ONNX) - Model Optimizer 0.0.1.dev1+gb22a07571</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Recipes" href="10_recipes.html" /><link rel="prev" title="AutoCast (ONNX)" href="8_autocast.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Autotune (ONNX) - Model Optimizer 0.0.1.dev1+gea2a8d8f4</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Recipes" href="10_recipes.html" /><link rel="prev" title="AutoCast (ONNX)" href="8_autocast.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
@@ -783,7 +783,8 @@ data-aria-dark="Switch to auto color mode">
 </span><span data-line="3"><span class="w">    </span>--output_dir<span class="w"> </span>./model_remote_autotuned<span class="w"> </span><span class="se">\</span>
 </span><span data-line="4"><span class="w">    </span>--schemes_per_region<span class="w"> </span><span class="m">50</span><span class="w"> </span><span class="se">\</span>
 </span><span data-line="5"><span class="w">    </span>--use_trtexec<span class="w"> </span><span class="se">\</span>
-</span><span data-line="6"><span class="w">    </span>--trtexec_benchmark_args<span class="w"> </span><span class="s2">"--remoteAutoTuningConfig=\"ssh://user@192.0.2.10:22?remote_exec_path=/opt/tensorrt/bin/timing_server&amp;remote_lib_path=/opt/tensorrt/lib\" --safe --skipInference"</span>
+</span><span data-line="6"><span class="w">    </span>--remote_model_path<span class="w"> </span>/data/modelopt/engine.trt<span class="w"> </span><span class="se">\</span>
+</span><span data-line="7"><span class="w">    </span>--trtexec_benchmark_args<span class="w"> </span><span class="s2">"--remoteAutoTuningConfig=\"ssh://user@192.0.2.10:22?remote_exec_path=/opt/tensorrt/bin/timing_server&amp;remote_lib_path=/opt/tensorrt/lib\" --safe --skipInference"</span>
 </span></pre></div>
 </div>
 <p><strong>Requirements:</strong></p>
@@ -796,7 +797,7 @@ data-aria-dark="Switch to auto color mode">
 <li><p><code class="docutils literal notranslate"><span class="pre">--use_trtexec</span></code> must be set (benchmarking uses <code class="docutils literal notranslate"><span class="pre">trtexec</span></code> instead of the TensorRT Python API)</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">--safe</span> <span class="pre">--skipInference</span></code> must be enabled via <code class="docutils literal notranslate"><span class="pre">--trtexec_benchmark_args</span></code></p></li>
 </ul>
-<p>The example uses <code class="docutils literal notranslate"><span class="pre">user</span></code> on the reserved documentation address <code class="docutils literal notranslate"><span class="pre">192.0.2.10</span></code>. Replace the user, target address, and TensorRT paths with values for your target (see <code class="docutils literal notranslate"><span class="pre">trtexec</span> <span class="pre">--help</span></code> for configuration details). ModelOpt uses the configuration to build the engine with remote autotuning, copies the generated engine to an internal temporary path on the target, and runs <code class="docutils literal notranslate"><span class="pre">trtexec_safe</span></code> there to measure GPU compute time. ModelOpt attempts to remove the temporary engine after each benchmark.</p>
+<p>The example uses <code class="docutils literal notranslate"><span class="pre">user</span></code> on the reserved documentation address <code class="docutils literal notranslate"><span class="pre">192.0.2.10</span></code>. Replace the user, target address, and TensorRT paths with values for your target (see <code class="docutils literal notranslate"><span class="pre">trtexec</span> <span class="pre">--help</span></code> for configuration details). ModelOpt uses the configuration to build the engine with remote autotuning, copies the generated engine to the requested target path, and runs <code class="docutils literal notranslate"><span class="pre">trtexec_safe</span></code> there to measure GPU compute time. A custom path accepts only letters, digits, <code class="docutils literal notranslate"><span class="pre">.</span></code>, <code class="docutils literal notranslate"><span class="pre">_</span></code>, <code class="docutils literal notranslate"><span class="pre">/</span></code>, and <code class="docutils literal notranslate"><span class="pre">-</span></code>; <code class="docutils literal notranslate"><span class="pre">~</span></code> is not expanded. It is overwritten and removed after each benchmark, so concurrent runs must use distinct paths. Without <code class="docutils literal notranslate"><span class="pre">--remote_model_path</span></code>, ModelOpt uses a unique temporary filename in the remote user’s working directory.</p>
 <p>Other TensorRT benchmark options (e.g. <code class="docutils literal notranslate"><span class="pre">--timing_cache</span></code>, <code class="docutils literal notranslate"><span class="pre">--warmup_runs</span></code>, <code class="docutils literal notranslate"><span class="pre">--timing_runs</span></code>, <code class="docutils literal notranslate"><span class="pre">--plugin_libraries</span></code>) are also available; run <code class="docutils literal notranslate"><span class="pre">--help</span></code> for details.</p>
 <p><code class="docutils literal notranslate"><span class="pre">--plugin_libraries</span></code> applies to the host-side engine build only. ModelOpt does not transfer or load custom plugin libraries on the remote target, so this workflow does not support plugin-dependent remote safety engines.</p>
 </section>
@@ -995,7 +996,8 @@ export must switch to the bytes-only call or consume the saved model by path.</p
 </span><span data-line="15">                                                     <span class="p">[</span><span class="o">--</span><span class="n">timing_runs</span> <span class="n">TIMING_RUNS</span><span class="p">]</span>
 </span><span data-line="16">                                                     <span class="p">[</span><span class="o">--</span><span class="n">plugin_libraries</span> <span class="n">PLUGIN_LIBRARIES</span> <span class="p">[</span><span class="n">PLUGIN_LIBRARIES</span> <span class="o">...</span><span class="p">]]</span>
 </span><span data-line="17">                                                     <span class="p">[</span><span class="o">--</span><span class="n">trtexec_benchmark_args</span> <span class="n">TRTEXEC_BENCHMARK_ARGS</span><span class="p">]</span>
-</span><span data-line="18">                                                     <span class="p">[</span><span class="o">--</span><span class="n">verbose</span><span class="p">]</span>
+</span><span data-line="18">                                                     <span class="p">[</span><span class="o">--</span><span class="n">remote_model_path</span> <span class="n">REMOTE_MODEL_PATH</span><span class="p">]</span>
+</span><span data-line="19">                                                     <span class="p">[</span><span class="o">--</span><span class="n">verbose</span><span class="p">]</span>
 </span></pre></div>
 </div>
 <section id="python-m-modelopt.onnx.quantization.autotune-named-arguments">
@@ -1083,6 +1085,9 @@ export must switch to the bytes-only call or consume the saved model by path.</p
 </dd>
 <dt><kbd>--trtexec_benchmark_args</kbd></dt>
 <dd><p>Additional command-line arguments to pass to trtexec as a single quoted string. Example: –trtexec_benchmark_args ‘–fp16 –workspace=4096 –verbose’</p>
+</dd>
+<dt><kbd>--remote_model_path</kbd></dt>
+<dd><p>Path for the engine on the remote device. By default, a unique filename is created in the remote user’s working directory. Custom paths are overwritten and removed after each benchmark; concurrent runs must use distinct paths. Only letters, digits, ‘.’, ‘_’, ‘/’, and ‘-’ are accepted; ‘~’ is not expanded.</p>
 </dd>
 </dl>
 </section>
