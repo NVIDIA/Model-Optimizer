@@ -27,6 +27,7 @@ from modelopt.torch.utils import restore_training_modes, unwrap_model
 
 from .attention_sparsity.config import (
     CalibrationConfig,
+    SolAttnAttributeConfig,
     SparseAttentionAttributeConfig,
     SparseAttentionConfig,
     VSAAttributeConfig,
@@ -139,8 +140,10 @@ def _check_attention_config(config: SparseAttentionConfig, has_data: bool) -> No
                 )
         else:
             attribute_cfg = {k: v for k, v in cfg.items() if k != "calibration"}
-            is_vsa = attribute_cfg.get("method") == "vsa"
-            config_class = VSAAttributeConfig if is_vsa else SparseAttentionAttributeConfig
+            config_class = {
+                "vsa": VSAAttributeConfig,
+                "sol_attn": SolAttnAttributeConfig,
+            }.get(attribute_cfg.get("method", "flash_skip_softmax"), SparseAttentionAttributeConfig)
             get_sparse_method(config_class(**attribute_cfg).method)  # raises if not registered
 
 
