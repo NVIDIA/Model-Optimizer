@@ -37,6 +37,10 @@ THIRD_PARTY = (
     "#\n"
     "# Permission is hereby granted, free of charge, to any person obtaining a copy\n"
 )
+# Third-party notice in the REUSE format, without a standalone "Copyright"
+THIRD_PARTY_REUSE = (
+    "# SPDX-FileCopyrightText: 2023 Example Authors\n# SPDX-License-Identifier: MIT\n"
+)
 
 
 @pytest.mark.parametrize(
@@ -46,6 +50,7 @@ THIRD_PARTY = (
         ("#!/bin/bash\nset -e\n", f"#!/bin/bash\n{NVIDIA}\n\nset -e\n", 1),
         # Third-party header without the NVIDIA header: inserted below it
         (f'{THIRD_PARTY}\n"""Doc."""\n', f'{THIRD_PARTY}\n{NVIDIA}\n\n"""Doc."""\n', 1),
+        (f"{THIRD_PARTY_REUSE}\nimport os\n", f"{THIRD_PARTY_REUSE}\n{NVIDIA}\n\nimport os\n", 1),
         # Past year and a mixed SPDX expression, below the third-party header: accepted
         (f"{THIRD_PARTY}\n{NVIDIA_OLD_MIT}\n\nimport os\n", None, 0),
         # NVIDIA header above the third-party header: flagged, not changed
