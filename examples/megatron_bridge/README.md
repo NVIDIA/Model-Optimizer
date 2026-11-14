@@ -463,7 +463,7 @@ PTQ prepares all enabled quantized weights; choose trainable parameters during Q
 - **GPTQ:** keep super-block scales and FP32 importance fixed.
 
 Megatron retains compact initialization data for checkpointing—about 13.1% of BF16 weight
-storage for IQ2_XXS. Keep the saved tensor-parallel layout while any shard uses its initial codes.
+storage for IQ2_XXS. GGML checkpoints require the saved tensor-parallel layout, even after updates.
 Shared or sequential GGML PTQ quantizers are unsupported. Some formats and BF16 transforms
 may still change the effective weights during initialization.
 

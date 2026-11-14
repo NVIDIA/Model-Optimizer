@@ -24,6 +24,7 @@ import torch
 
 from modelopt.torch.utils.distributed import ParallelState
 
+from ..ggml import GGML_FORMAT_REGISTRY
 from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
 from ..nn import (
     GroupedQuantizer,
@@ -174,6 +175,27 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
         if self.weight is None:
             return
 
+        if getattr(self, "_retain_qdq_initialization", False):
+            # Metadata exists before checkpoint values: validate shapes without decoding buffers.
+            for weight, weight_quantizer in self.iter_weights_for_calibration():
+                for member in self._initialization_members(weight_quantizer):
+                    if member.backend != "ggml":
+                        continue
+                    codec = GGML_FORMAT_REGISTRY[member.num_bits]
+                    blocks = (*weight.shape[:-1], weight.shape[-1] // codec.block_size)
+                    for name, buffer in member.named_buffers(recurse=False):
+                        mismatch = (
+                            name.startswith(PINNED_PAYLOAD_PREFIX)
+                            and tuple(buffer.shape[: len(blocks)]) != blocks
+                        ) or (
+                            name.startswith(PINNED_IMPORTANCE_PREFIX)
+                            and tuple(buffer.shape) != (weight.shape[-1],)
+                        )
+                        if mismatch:
+                            raise NotImplementedError(
+                                "GGML checkpoint layout changes are unsupported; "
+                                "restore with the saved tensor-parallel layout."
+                            )
         for quantizer in [self.weight_quantizer, self.input_quantizer, self.output_quantizer]:
             _check_unsupported_states(
                 quantizer if isinstance(quantizer, TensorQuantizer) else quantizer[0]

@@ -36,7 +36,8 @@ from modelopt.torch.quantization.ggml.common import (
     narrow_to_float32,
     pin_packed_weight,
 )
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.quantization.plugins.custom import _ParallelLinear
 
 # Every registered format, paired with its own module. The module -- not the registry -- supplies
 # what a test expects, so a mis-wired registry entry cannot make both sides of an assertion agree.
@@ -45,6 +46,27 @@ FORMAT_MODULES = [
     (name, importlib.import_module(f"modelopt.torch.quantization.ggml.{name}"))
     for name in FORMAT_NAMES
 ]
+
+
+class _CPUParallelLinear(torch.nn.Linear):
+    def forward(self, inputs):
+        return torch.nn.functional.linear(inputs, self.weight, self.bias)
+
+
+class _QuantCPUParallelLinear(_ParallelLinear):
+    _retain_qdq_initialization = True
+    _functionals_to_replace = [(torch.nn.functional, "linear")]
+
+
+@pytest.fixture
+def parallel_linear():
+    QuantModuleRegistry.register({_CPUParallelLinear: "test_qdq_parallel_linear"})(
+        _QuantCPUParallelLinear
+    )
+    try:
+        yield _CPUParallelLinear
+    finally:
+        QuantModuleRegistry.unregister(_CPUParallelLinear)
 
 
 def _substitute(monkeypatch, name, **changes):
@@ -61,9 +83,12 @@ def _substitute(monkeypatch, name, **changes):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("num_bits", FORMAT_NAMES)
 @pytest.mark.parametrize("retain_initialization", [False, True])
-def test_ggml_backend_via_quantize(num_bits, dtype, retain_initialization, record_property):
+def test_ggml_backend_via_quantize(
+    num_bits, dtype, retain_initialization, record_property, parallel_linear
+):
     torch.manual_seed(1234)
-    model = torch.nn.Linear(256, 2, bias=False, dtype=dtype)
+    linear = parallel_linear if retain_initialization else torch.nn.Linear
+    model = linear(256, 2, bias=False, dtype=dtype)
     inputs = torch.randn(2, 256, dtype=dtype)
     unquantized_output = model(inputs).detach()
     config = {
@@ -90,7 +115,6 @@ def test_ggml_backend_via_quantize(num_bits, dtype, retain_initialization, recor
     parameter = model.weight
     expected_weight = model.weight_quantizer(parameter).detach().clone()
     buffers = {name: value.clone() for name, value in model.weight_quantizer.named_buffers()}
-    model.weight_quantizer._ggml_retain_initialization = retain_initialization
     mtq.initialize_qdq_weights(model)
     checkpoint_keys = set(model.state_dict())
     assert model.weight is parameter and model.weight_quantizer.is_enabled
@@ -141,7 +165,7 @@ def test_ggml_backend_via_quantize(num_bits, dtype, retain_initialization, recor
     checkpoint = io.BytesIO()
     mto.save(model, checkpoint)
     checkpoint.seek(0)
-    restored = mto.restore(torch.nn.Linear(256, 2, bias=False, dtype=dtype), checkpoint)
+    restored = mto.restore(linear(256, 2, bias=False, dtype=dtype), checkpoint)
     torch.testing.assert_close(restored(inputs), output, rtol=0, atol=0)
     # A same-valued copy invalidates the cache but must not retire initialization state.
     with torch.no_grad():
@@ -178,7 +202,7 @@ def test_ggml_backend_via_quantize(num_bits, dtype, retain_initialization, recor
         after_update = io.BytesIO()
         mto.save(model, after_update)
         after_update.seek(0)
-        resumed = mto.restore(torch.nn.Linear(256, 2, bias=False, dtype=dtype), after_update)
+        resumed = mto.restore(linear(256, 2, bias=False, dtype=dtype), after_update)
         torch.testing.assert_close(
             resumed.weight_quantizer(resumed.weight), expected_after_update, rtol=0, atol=0
         )
@@ -235,6 +259,55 @@ def test_new_pin_supersedes_qdq_initialization(num_bits):
     torch.testing.assert_close(quantizer(model.weight), expected, rtol=0, atol=0)
     torch.testing.assert_close(codec.pack(model.weight, quantizer), packed, rtol=0, atol=0)
     assert not any(name.endswith("_qdq_initialization") for name, _ in quantizer.named_buffers())
+
+
+@pytest.mark.parametrize("preparation", ["ptq", "ptq_updated", "gptq"])
+@pytest.mark.parametrize("shape", [(2, 256), (4, 256), (2, 512)])
+def test_parallel_ggml_checkpoint_restore(preparation, shape, parallel_linear, monkeypatch):
+    torch.manual_seed(1234)
+    model = parallel_linear(256, 2, bias=False)
+    inputs = torch.randn(32, 256)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "backend": "ggml"},
+            },
+        ],
+        "algorithm": {"method": "gptq", "block_size": 256, "importance_weighted": True}
+        if preparation == "gptq"
+        else "max",
+    }
+    mtq.quantize(model, config, lambda m: m(inputs))
+    mtq.initialize_qdq_weights(model)
+    if preparation == "ptq_updated":
+        with torch.no_grad():
+            model.weight.add_(0.125)
+    expected = model(inputs).detach()
+    checkpoint = io.BytesIO()
+    mto.save(model, checkpoint)
+    checkpoint.seek(0)
+    reset = TensorQuantizer._reset_pytorch_state_from_metadata
+
+    def poison_placeholders(quantizer, metadata):
+        reset(quantizer, metadata)
+        for name, buffer in quantizer.named_buffers(recurse=False):
+            if name.startswith("_ggml_pinned_"):
+                buffer.zero_()
+            if name.endswith("_qdq_initialization_active"):
+                buffer[0].fill_(True)  # Not checkpoint data: metadata placeholders are unreadable.
+
+    monkeypatch.setattr(TensorQuantizer, "_reset_pytorch_state_from_metadata", poison_placeholders)
+    target = parallel_linear(shape[1], shape[0], bias=False)
+    if shape != (2, 256):
+        with pytest.raises(NotImplementedError):
+            mto.restore(target, checkpoint)
+    else:
+        restored = mto.restore(target, checkpoint)
+        torch.testing.assert_close(restored(inputs), expected, rtol=0, atol=0)
+        for name, buffer in model.named_buffers():
+            torch.testing.assert_close(dict(restored.named_buffers())[name], buffer, rtol=0, atol=0)
 
 
 def test_ggml_backend_rejects_unknown_format():
