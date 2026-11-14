@@ -61,6 +61,16 @@ This script rewrites the 96-shard release in place-for-place fashion:
    ``shared_experts.*`` (~24GB), both of which are replicated rather than
    sharded under expert parallelism.
 
+3. **Recipe-driven layouts** (``--recipe``). The recipe's ``quant_cfg`` is
+   resolved against every module name in the source index, exactly as
+   ModelOpt would apply it (entries in order, later ones win), so a recipe can
+   scope formats per layer -- e.g. MXFP8 on the KDA layers only, with the MLA
+   layers left BF16. Supported per-module formats: block FP8 (weight-only) on
+   attention projections, and MXFP8 (W8A8, dynamic) on attention projections
+   and ``shared_experts.{gate,up,down}_proj``. Members of one fused runtime
+   linear (``in_proj_qkvgfab``, ``fused_qkv_a_proj``, ``gate_up_proj``) must
+   resolve to one format.
+
 **No calibration anywhere.** Expert ``input_scale`` is pinned to
 ``--input_scale`` (default 1.0) rather than derived from an amax dump, so the
 whole conversion is a closed-form tensor transform: no forward pass, no
@@ -77,6 +87,7 @@ Usage (CPU partition, no GPU needed; ``--jobs`` shards convert in parallel):
 """
 
 import argparse
+import fnmatch
 import json
 import math
 import multiprocessing
@@ -84,7 +95,7 @@ import os
 import re
 import shutil
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -110,6 +121,7 @@ from modelopt.torch.export.shard_cast_utils import (
     validate_paths,
 )
 from modelopt.torch.export.shard_cast_utils import log as _log
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.qtensor import FP8QTensor, MXFP8QTensor
 from modelopt.torch.quantization.utils.numeric_utils import E2M1_MAX, E4M3_MAX
 
@@ -154,12 +166,40 @@ _ATTN_QUANT_PROJ = frozenset(
 # for 128x128 block FP8 and the prior standalone-FP8 recipe found it safe.
 _ATTN_FP8_PB_PROJ = _ATTN_QUANT_PROJ | {"f_b_proj"}
 _ATTN_WEIGHT_RE = re.compile(rf"^(?P<base>{_LM}\.self_attn\.(?P<proj>[a-z_0-9]+))\.weight$")
+# Shared experts, one set per MoE layer; vLLM fuses gate/up into ``gate_up_proj``.
+_SHARED_WEIGHT_RE = re.compile(
+    rf"^(?P<base>{_LM}\.block_sparse_moe\.shared_experts\.(?:gate|up|down)_proj)\.weight$"
+)
+# Per-module formats a recipe may assign, and their manifest names.
+_FORMAT_ALGO = {"fp8_pb": "FP8_PB_WO", "mxfp8": "MXFP8"}
 
 _FP8_MAX = 448.0
 _FP8_PB_BLOCK = 128
 _NVFP4_BLOCK = 16  # NVFP4 block size (elements)
+_NVFP4_BLOCK_SIZES = {-1: _NVFP4_BLOCK, "type": "dynamic", "scale_bits": (4, 3)}
 
 _PUBLISHED_RECIPE = "models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention"
+_EXPERT_WEIGHT_QUANTIZER = "*block_sparse_moe.experts.*weight_quantizer"
+_EXPERT_INPUT_QUANTIZER = "*block_sparse_moe.experts.*input_quantizer"
+# Quantizer attributes that change the numerics. The converter reproduces only
+# their defaults, so e.g. a rotated or per-channel MXFP8 entry is rejected.
+_DEFAULT_NUMERICS = {
+    k: v
+    for k, v in QuantizerAttributeConfig().model_dump().items()
+    if k
+    in (
+        "axis",
+        "unsigned",
+        "narrow_range",
+        "type",
+        "bias",
+        "rotate",
+        "backend",
+        "backend_extra_args",
+        "use_constant_amax",
+        "constant_amax",
+    )
+}
 
 
 def _conversion_settings_from_recipe(recipe_path: str) -> dict[str, Any]:
@@ -181,30 +221,6 @@ def _conversion_settings_from_quantize_config(quantize: dict[str, Any]) -> dict[
         raise ValueError("recipe must use the calibration-free max algorithm")
 
     quant_cfg = quantize["quant_cfg"]
-    by_name = {
-        entry["quantizer_name"]: entry
-        for entry in quant_cfg
-        if isinstance(entry, dict) and "quantizer_name" in entry
-    }
-
-    expert_weight_name = "*block_sparse_moe.experts.*weight_quantizer"
-    expert_input_name = "*block_sparse_moe.experts.*input_quantizer"
-    expected_enabled = {
-        expert_weight_name,
-        expert_input_name,
-        *(f"*self_attn.{projection}*weight_quantizer" for projection in _ATTN_FP8_PB_PROJ),
-    }
-    enabled = {
-        entry["quantizer_name"]
-        for entry in quant_cfg
-        if isinstance(entry, dict) and entry.get("enable") is True
-    }
-    unexpected_enabled = enabled - expected_enabled
-    if unexpected_enabled:
-        raise ValueError(
-            "recipe enables quantizers the streaming converter does not support: "
-            f"{sorted(unexpected_enabled)}"
-        )
     if not any(
         entry.get("quantizer_name") == "*"
         and entry.get("parent_class") is None
@@ -214,44 +230,186 @@ def _conversion_settings_from_quantize_config(quantize: dict[str, Any]) -> dict[
     ):
         raise ValueError("recipe must disable all quantizers by default")
 
-    try:
-        expert_weight = by_name[expert_weight_name]["cfg"]
-        expert_input = by_name[expert_input_name]["cfg"]
-    except KeyError as exc:
-        raise ValueError("recipe must configure Kimi-K3 routed experts") from exc
-
-    if (
-        expert_weight.get("num_bits") != (2, 1)
-        or expert_weight.get("block_sizes", {}).get(-1) != _NVFP4_BLOCK
+    expert_weight, expert_input = _expert_cfgs(quant_cfg)
+    # The cast writes E2M1 weights with E4M3 block scales, and input_scale assumes
+    # the same layout for the inputs, so both must be exactly block-16 NVFP4.
+    if any(
+        cfg.get("num_bits") != (2, 1) or cfg.get("block_sizes") != _NVFP4_BLOCK_SIZES
+        for cfg in (expert_weight, expert_input)
+    ) or (
+        _nondefault_numerics(expert_weight) or _nondefault_numerics(expert_input, "constant_amax")
     ):
-        raise ValueError("recipe routed-expert weights must use block-16 NVFP4")
+        raise ValueError("recipe routed experts must use plain block-16 NVFP4")
 
     constant_amax = expert_input.get("constant_amax")
     if constant_amax is None:
         raise ValueError("recipe routed-expert inputs must set constant_amax")
     input_scale = float(constant_amax) / (E2M1_MAX * E4M3_MAX)
 
-    if enabled != expected_enabled:
-        raise ValueError(
-            f"recipe is missing required quantizers: {sorted(expected_enabled - enabled)}"
-        )
-
-    for projection in _ATTN_FP8_PB_PROJ:
-        name = f"*self_attn.{projection}*weight_quantizer"
-        try:
-            cfg = by_name[name]["cfg"]
-        except KeyError as exc:
-            raise ValueError(f"recipe must configure {projection} attention weights") from exc
-        if cfg.get("num_bits") != (4, 3) or cfg.get("block_sizes") != {-1: 128, -2: 128}:
-            raise ValueError(f"recipe {projection} weights must use 128x128 block FP8")
-
+    # Attention and shared-expert formats depend on the module names, so they
+    # are resolved against the source index by _recipe_module_formats().
     return {
         "cast_mxfp4_to_nvfp4": True,
         "attn_fp8": False,
         "attn_mxfp8": False,
-        "attn_fp8_pb": True,
+        "attn_fp8_pb": False,
         "input_scale": input_scale,
+        "quant_cfg": quant_cfg,
     }
+
+
+def _expert_cfgs(quant_cfg: list[Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The routed-expert weight and input configs the converter applies to every expert."""
+    by_name = {
+        entry["quantizer_name"]: entry
+        for entry in quant_cfg
+        if isinstance(entry, dict) and "quantizer_name" in entry
+    }
+    weight = by_name.get(_EXPERT_WEIGHT_QUANTIZER, {}).get("cfg")
+    inputs = by_name.get(_EXPERT_INPUT_QUANTIZER, {}).get("cfg")
+    if not (isinstance(weight, dict) and isinstance(inputs, dict)):
+        raise ValueError("recipe must configure Kimi-K3 routed experts")
+    return weight, inputs
+
+
+def _nondefault_numerics(cfg: dict[str, Any], *allowed: str) -> list[str]:
+    return [k for k, v in _DEFAULT_NUMERICS.items() if k not in allowed and cfg.get(k, v) != v]
+
+
+def _resolve_quantizers(
+    quant_cfg: list[Any], names: list[str], matched: set[int]
+) -> dict[str, dict[str, Any] | None]:
+    """Final config of each quantizer, or None when disabled.
+
+    Mirrors ModelOpt: entries apply in list order and later ones win; ``enable``
+    alone only toggles, ``cfg`` without ``enable`` enables. Indices of the
+    entries that matched are added to ``matched``.
+    """
+    state: dict[str, tuple[bool, Any]] = dict.fromkeys(names, (False, None))
+    for i, entry in enumerate(quant_cfg):
+        if not isinstance(entry, dict) or entry.get("parent_class") is not None:
+            continue
+        pattern = entry["quantizer_name"]
+        # A match contains every literal piece of the pattern. Filtering on those
+        # with substring tests first keeps the ~500k routed-expert quantizers
+        # to about a second instead of 20 s of fnmatch.
+        hits = list(state)
+        if "[" not in pattern:
+            for literal in filter(None, re.split(r"[*?]", pattern)):
+                hits = [name for name in hits if literal in name]
+        hits = fnmatch.filter(hits, pattern)
+        if hits:
+            matched.add(i)
+        for name in hits:
+            cfg = entry["cfg"] if entry.get("cfg") is not None else state[name][1]
+            state[name] = (entry.get("enable", True), cfg)
+    # ModelOpt enables a never-configured quantizer with default attributes,
+    # which no supported format has, so that resolves to {} and is rejected.
+    return {
+        name: (cfg if cfg is not None else {}) if enabled else None
+        for name, (enabled, cfg) in state.items()
+    }
+
+
+def _quantizer_format(cfg: dict[str, Any] | None) -> str | None:
+    if cfg is None:
+        return None
+    if not isinstance(cfg, dict) or _nondefault_numerics(cfg):
+        return "unsupported"
+    if cfg.get("num_bits") == (4, 3) and cfg.get("block_sizes") == {-1: 128, -2: 128}:
+        return "fp8_pb"
+    if cfg.get("num_bits") == (4, 3) and cfg.get("block_sizes") == {
+        -1: 32,
+        "type": "dynamic",
+        "scale_bits": (8, 0),
+    }:
+        return "mxfp8"
+    return "unsupported"
+
+
+def _recipe_module_formats(quant_cfg: list[Any], weight_keys) -> dict[str, str]:
+    """Resolve the recipe to one format per quantized BF16 linear in the source.
+
+    Block FP8 is weight-only and MXFP8 quantizes weights and inputs, which is what
+    the serving kernels implement; any other combination, module or quantizer
+    type the recipe enables is rejected rather than silently written as BF16.
+    """
+    formats: dict[str, str] = {}
+    candidates: list[str] = []
+    matched: set[int] = set()
+    experts = [m.group("base") for key in weight_keys if (m := _EXPERT_PACKED_RE.match(key))]
+    linears = [key[: -len(".weight")] for key in weight_keys if key.endswith(".weight")]
+    resolved = _resolve_quantizers(
+        quant_cfg,
+        [
+            f"{base}.{q}"
+            for base in experts + linears
+            for q in ("weight_quantizer", "input_quantizer")
+        ],
+        matched,
+    )
+    # Every routed expert is cast with the same settings, so a later entry
+    # that changes or disables some of them cannot be written.
+    expert_cfgs = _expert_cfgs(quant_cfg)
+    for base in experts:
+        if (
+            resolved[base + ".weight_quantizer"],
+            resolved[base + ".input_quantizer"],
+        ) != expert_cfgs:
+            raise ValueError(f"recipe must quantize every routed expert alike: {base}")
+    for base in linears:
+        key = base + ".weight"
+        weight = resolved[base + ".weight_quantizer"]
+        inputs = resolved[base + ".input_quantizer"]
+        attn = _ATTN_WEIGHT_RE.match(key)
+        proj = attn.group("proj") if attn else None
+        shared = _SHARED_WEIGHT_RE.match(key) is not None
+        if proj in _ATTN_FP8_PB_PROJ or shared:
+            candidates.append(base)
+        if weight is None and inputs is None:
+            continue
+        w_fmt, a_fmt = _quantizer_format(weight), _quantizer_format(inputs)
+        fmt = (
+            "fp8_pb"
+            if w_fmt == "fp8_pb" and a_fmt is None
+            else "mxfp8"
+            if w_fmt == a_fmt == "mxfp8"
+            else None
+        )
+        supported = (fmt == "fp8_pb" and proj in _ATTN_FP8_PB_PROJ) or (
+            fmt == "mxfp8" and (proj in _ATTN_QUANT_PROJ or shared)
+        )
+        if not supported:
+            raise ValueError(
+                "recipe enables quantizers the streaming converter does not support: "
+                f"{base} (weight {w_fmt}, input {a_fmt})"
+            )
+        formats[base] = fmt
+
+    unused = sorted(
+        entry["quantizer_name"]
+        for i, entry in enumerate(quant_cfg)
+        if isinstance(entry, dict)
+        and entry.get("enable", True)
+        and entry.get("quantizer_name") not in (_EXPERT_WEIGHT_QUANTIZER, _EXPERT_INPUT_QUANTIZER)
+        and (i not in matched or entry.get("parent_class") is not None)
+    )
+    if unused:
+        raise ValueError(
+            f"recipe enables quantizers the streaming converter does not support: {unused}"
+        )
+
+    # Fused runtime linears hold one weight format.
+    groups: dict[tuple[str, int], dict[str, str | None]] = defaultdict(dict)
+    for base in candidates:
+        parent, proj = base.rsplit(".", 1)
+        for i, group in enumerate((*_FUSED_ATTN_GROUPS, ("gate_proj", "up_proj"))):
+            if proj in group:
+                groups[parent, i][proj] = formats.get(base)
+    for (parent, _), members in sorted(groups.items()):
+        if len(set(members.values())) > 1:
+            raise ValueError(f"{parent}: fused projections must share one format, got {members}")
+    return formats
 
 
 # --------------------------------------------------------------------------
@@ -358,12 +516,19 @@ def convert_shard(
     fused_attn_amax: dict[str, torch.Tensor] | None = None,
     attn_mxfp8: bool = False,
     attn_fp8_pb: bool = False,
+    module_formats: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Rewrite one HF-style shard and return its conversion report."""
+    """Rewrite one HF-style shard and return its conversion report.
+
+    ``module_formats`` (from a recipe) replaces the attention format flags.
+    """
+    if module_formats is not None and (attn_fp8 or attn_mxfp8 or attn_fp8_pb):
+        raise ValueError("module_formats cannot be combined with the attention format flags")
     out: dict[str, torch.Tensor] = {}
     stats: dict[str, int] = defaultdict(int)
     banks: set[str] = set()
     attn_modules: set[str] = set()
+    shared_modules: set[str] = set()
 
     input_scale = torch.tensor(input_scale_value, dtype=torch.float32).reshape(())
 
@@ -444,6 +609,21 @@ def convert_shard(
                 banks.add(bank.group("bank"))
                 continue
 
+            fmt = (
+                module_formats.get(key[: -len(".weight")])
+                if module_formats and key.endswith(".weight")
+                else None
+            )
+            if fmt is not None:
+                base = key[: -len(".weight")]
+                quantize = _quantize_weight_fp8_pb if fmt == "fp8_pb" else _quantize_weight_mxfp8
+                q, weight_scale = quantize(f.get_tensor(key), device)
+                out[key] = q.cpu()
+                out[base + ".weight_scale"] = weight_scale.cpu()
+                stats[f"{fmt}_converted"] += 1
+                (shared_modules if _SHARED_WEIGHT_RE.match(key) else attn_modules).add(base)
+                continue
+
             attn = _ATTN_WEIGHT_RE.match(key)
             if attn_fp8_pb and attn and attn.group("proj") in _ATTN_FP8_PB_PROJ:
                 base = attn.group("base")
@@ -487,6 +667,7 @@ def convert_shard(
         "stats": dict(stats),
         "banks": sorted(banks),
         "attn_modules": sorted(attn_modules),
+        "shared_modules": sorted(shared_modules),
     }
 
 
@@ -503,6 +684,7 @@ def _convert_shard_task(job: dict[str, Any]) -> dict[str, Any]:
         job.get("fused_attn_amax"),
         job.get("attn_mxfp8", False),
         job.get("attn_fp8_pb", False),
+        job.get("module_formats"),
     )
     _log(f"[shard] {result['shard']} done: {result['stats']}")
     return result
@@ -607,6 +789,8 @@ def _fused_attention_module_names(attn_modules: list[str]) -> set[str]:
         if proj in {"q_a_proj", "kv_a_proj_with_mqa"}:
             fused.add(parent + ".fused_qkv_a_proj_with_mqa")  # SGLang MLA
             fused.add(parent + ".fused_qkv_a_proj")  # vLLM MLA
+        if proj in {"gate_proj", "up_proj"} and parent.endswith(".shared_experts"):
+            fused.add(parent + ".gate_up_proj")
     return fused
 
 
@@ -616,30 +800,38 @@ def _build_hf_quant_config(
     attn_fp8: bool,
     attn_mxfp8: bool = False,
     attn_fp8_pb: bool = False,
+    module_formats: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    """``module_formats`` (from a recipe) replaces ``attn_modules`` and the format flags."""
     quantized_layers: dict[str, dict[str, Any]] = {}
     for name in expert_banks:
         for alias in _module_name_aliases(name):
             quantized_layers[alias] = {"quant_algo": "NVFP4", "group_size": _NVFP4_BLOCK}
-    attention_algo = (
-        "FP8" if attn_fp8 else "MXFP8" if attn_mxfp8 else "FP8_PB_WO" if attn_fp8_pb else None
-    )
-    if attention_algo:
-        for name in attn_modules:
-            for alias in _module_name_aliases(name):
-                quantized_layers[alias] = {"quant_algo": attention_algo}
-        # vLLM's K3 model names these packed modules directly. Its mixed
-        # resolver does not currently infer either K3-specific fused name from
-        # the individual HF projection policies.
-        for name in _fused_attention_module_names(attn_modules):
-            for alias in _module_name_aliases(name):
-                quantized_layers[alias] = {"quant_algo": attention_algo}
+    if module_formats is None:
+        attention_algo = (
+            "FP8" if attn_fp8 else "MXFP8" if attn_mxfp8 else "FP8_PB_WO" if attn_fp8_pb else None
+        )
+        module_algos = dict.fromkeys(attn_modules, attention_algo) if attention_algo else {}
+    else:
+        module_algos = {name: _FORMAT_ALGO[fmt] for name, fmt in sorted(module_formats.items())}
+    for name, algo in module_algos.items():
+        for alias in _module_name_aliases(name):
+            quantized_layers[alias] = {"quant_algo": algo}
+    # vLLM's K3 model names these packed modules directly. Its mixed resolver
+    # does not currently infer either K3-specific fused name from the individual
+    # HF projection policies. Members of a fused group share one format.
+    for name, algo in module_algos.items():
+        for fused in _fused_attention_module_names([name]):
+            for alias in _module_name_aliases(fused):
+                quantized_layers[alias] = {"quant_algo": algo}
 
+    # An exclude must never hit a module the manifest declares quantized.
     exclude_modules: list[str] = []
     for pattern in _EXCLUDE_MODULES:
-        if attn_fp8_pb and pattern == "*self_attn.f_b_proj*":
+        aliases = _module_name_aliases(pattern)
+        if any(fnmatch.fnmatch(name, a) for name in quantized_layers for a in aliases):
             continue
-        exclude_modules.extend(_module_name_aliases(pattern))
+        exclude_modules.extend(aliases)
 
     return {
         "producer": {"name": "modelopt", "version": modelopt_version},
@@ -688,6 +880,7 @@ def _write_index_and_manifest(
     attn_fp8: bool,
     attn_mxfp8: bool = False,
     attn_fp8_pb: bool = False,
+    module_formats: dict[str, str] | None = None,
 ) -> None:
     converted_shards = {r["shard"] for r in results}
     weight_map: dict[str, str] = {}
@@ -704,6 +897,10 @@ def _write_index_and_manifest(
             continue
 
         weight_map[key] = shard
+        if module_formats is not None:
+            if key.endswith(".weight") and key[: -len(".weight")] in module_formats:
+                weight_map[key[: -len(".weight")] + ".weight_scale"] = shard
+            continue
         attn = _ATTN_WEIGHT_RE.match(key)
         attention_projections = _ATTN_FP8_PB_PROJ if attn_fp8_pb else _ATTN_QUANT_PROJ
         if (
@@ -734,7 +931,9 @@ def _write_json_atomic(path: Path, value: Any) -> None:
     os.replace(tmp, path)
 
 
-def _conversion_fingerprint(args: argparse.Namespace, shards: list[Path]) -> dict[str, Any]:
+def _conversion_fingerprint(
+    args: argparse.Namespace, shards: list[Path], module_formats: dict[str, str] | None
+) -> dict[str, Any]:
     """Return the settings that must match across every conversion rank."""
     return {
         "source_ckpt": str(args.source_ckpt.resolve()),
@@ -745,6 +944,8 @@ def _conversion_fingerprint(args: argparse.Namespace, shards: list[Path]) -> dic
         "attn_mxfp8": args.attn_mxfp8,
         "attn_fp8_pb": args.attn_fp8_pb,
         "input_scale": args.input_scale,
+        "recipe": args.recipe,
+        "module_formats": module_formats,
     }
 
 
@@ -820,18 +1021,20 @@ def _rank_report_ready(
 
 def _merge_rank_reports(
     rank_reports: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, int], set[str], set[str]]:
+) -> tuple[list[dict[str, Any]], dict[str, int], set[str], set[str], set[str]]:
     results: list[dict[str, Any]] = []
     totals: dict[str, int] = defaultdict(int)
     banks: set[str] = set()
     attn_modules: set[str] = set()
+    shared_modules: set[str] = set()
     for report in rank_reports:
         results.extend(report["results"])
         for k, v in report["stats"].items():
             totals[k] += v
         banks.update(report["banks"])
         attn_modules.update(report["attn_modules"])
-    return results, dict(totals), banks, attn_modules
+        shared_modules.update(report["shared_modules"])
+    return results, dict(totals), banks, attn_modules, shared_modules
 
 
 def main():
@@ -926,8 +1129,11 @@ def main():
             settings = _conversion_settings_from_recipe(args.recipe)
         except (OSError, ValueError) as exc:
             p.error(f"invalid Kimi-K3 recipe: {exc}")
+        quant_cfg = settings.pop("quant_cfg")
         for name, value in settings.items():
             setattr(args, name, value)
+    else:
+        quant_cfg = None
     if args.input_scale is None:
         args.input_scale = 1.0
 
@@ -957,6 +1163,12 @@ def main():
     )
     src_config_path = resolve_checkpoint_file(args.source_ckpt, "config.json")
     src_index = json.loads(src_index_path.read_text())
+    module_formats = None
+    if quant_cfg is not None:
+        try:
+            module_formats = _recipe_module_formats(quant_cfg, src_index["weight_map"])
+        except ValueError as exc:
+            p.error(f"invalid Kimi-K3 recipe: {exc}")
 
     shards = sorted(args.source_ckpt.glob("model-*-of-*.safetensors"))
     assert shards, f"no HF-style shards in {args.source_ckpt}"
@@ -968,7 +1180,7 @@ def main():
         skip_dir_names=_SKIP_SUBDIR_NAMES | _SKIP_TOP_LEVEL,
         skip_file=lambda path: path.suffix == ".safetensors",
     )
-    fingerprint = _conversion_fingerprint(args, shards)
+    fingerprint = _conversion_fingerprint(args, shards, module_formats)
 
     marker_dir = args.output_ckpt / ".kimi_k3_conversion"
     ready_path = marker_dir / "ready.json"
@@ -1004,6 +1216,8 @@ def main():
         f"attn_mxfp8={args.attn_mxfp8}  attn_fp8_pb={args.attn_fp8_pb}  "
         f"input_scale={args.input_scale}"
     )
+    if module_formats is not None:
+        _log(f"[recipe] {args.recipe}: {dict(Counter(module_formats.values()))} modules")
 
     # Members of a fused attention group may live in different shards, so the
     # shared amax is derived in a pass over all shards before any conversion.
@@ -1021,6 +1235,7 @@ def main():
             "input_scale": args.input_scale,
             "threads": args.threads_per_job,
             "fused_attn_amax": fused_attn_amax,
+            "module_formats": module_formats,
         }
         for s in assigned_shards
     ]
@@ -1041,11 +1256,13 @@ def main():
     local_totals: dict[str, int] = defaultdict(int)
     local_banks: set[str] = set()
     local_attn_modules: set[str] = set()
+    local_shared_modules: set[str] = set()
     for r in results:
         for k, v in r["stats"].items():
             local_totals[k] += v
         local_banks.update(r["banks"])
         local_attn_modules.update(r["attn_modules"])
+        local_shared_modules.update(r["shared_modules"])
 
     rank_report = {
         "run_id": args.run_id,
@@ -1055,6 +1272,7 @@ def main():
         "stats": dict(local_totals),
         "banks": sorted(local_banks),
         "attn_modules": sorted(local_attn_modules),
+        "shared_modules": sorted(local_shared_modules),
     }
     rank_path = marker_dir / f"rank-{args.rank:05d}.json"
     _write_json_atomic(rank_path, rank_report)
@@ -1077,7 +1295,13 @@ def main():
         if report.get("run_id") != args.run_id or report.get("rank") != rank:
             raise RuntimeError(f"rank {rank} report changed after rendezvous validation")
         _validate_fingerprint(report.get("fingerprint"), fingerprint, f"rank {rank} report")
-    results, totals, banks, attn_modules = _merge_rank_reports(rank_reports)
+    results, totals, banks, attn_modules, shared_modules = _merge_rank_reports(rank_reports)
+    # --limit_shards converts a subset, so the manifest lists converted modules only.
+    converted_formats = (
+        None
+        if module_formats is None
+        else {m: module_formats[m] for m in attn_modules | shared_modules}
+    )
     if len(results) != len(shards):
         raise RuntimeError(f"expected {len(shards)} converted shards, got {len(results)}")
 
@@ -1098,6 +1322,7 @@ def main():
         args.attn_fp8,
         args.attn_mxfp8,
         args.attn_fp8_pb,
+        module_formats=converted_formats,
     )
     _write_index_and_manifest(
         args.output_ckpt,
@@ -1107,16 +1332,21 @@ def main():
         args.attn_fp8,
         args.attn_mxfp8,
         args.attn_fp8_pb,
+        module_formats=converted_formats,
     )
-    attention_algo = (
-        "FP8"
-        if args.attn_fp8
-        else "MXFP8"
-        if args.attn_mxfp8
-        else "FP8_PB_WO"
-        if args.attn_fp8_pb
-        else "BF16"
-    )
+    if converted_formats is not None:
+        counts = Counter(_FORMAT_ALGO[converted_formats[m]] for m in attn_modules)
+        attention_algo = "+".join(sorted(counts)) or "BF16"
+    else:
+        attention_algo = (
+            "FP8"
+            if args.attn_fp8
+            else "MXFP8"
+            if args.attn_mxfp8
+            else "FP8_PB_WO"
+            if args.attn_fp8_pb
+            else "BF16"
+        )
     _log(
         f"[config] rewriting config.json "
         f"(MIXED_PRECISION: NVFP4 experts + {attention_algo} attention)"
@@ -1141,6 +1371,7 @@ def main():
             "stats": totals,
             "expert_banks": len(banks),
             "attention_modules": len(attn_modules),
+            "shared_expert_modules": len(shared_modules),
             "cast_mxfp4_to_nvfp4": args.cast_mxfp4_to_nvfp4,
             "attn_fp8": args.attn_fp8,
             "attn_mxfp8": args.attn_mxfp8,

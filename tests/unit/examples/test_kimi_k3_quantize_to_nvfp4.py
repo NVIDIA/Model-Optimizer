@@ -41,30 +41,117 @@ k3_cast = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(k3_cast)
 
 
+_K31_PRO_RECIPE = "models/moonshotai/Kimi-K3.1-Pro/ptq/nvfp4_experts-mxfp8_shared-mxfp8_kda"
+_KDA_PROJ = ("q_proj", "k_proj", "v_proj", "g_proj", "b_proj", "f_a_proj", "f_b_proj", "o_proj")
+_NVFP4 = {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}
+_MXFP8 = {"num_bits": (4, 3), "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}}
+_MLA_PROJ = ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "g_proj", "o_proj")
+
+
+def _layer(i: int) -> str:
+    return f"language_model.model.layers.{i}"
+
+
+# Layer 1 is KDA and layer 3 is MLA, as in the K3 layer pattern; the rest stay BF16.
+_WEIGHT_KEYS = [
+    *(f"{_layer(1)}.self_attn.{p}.weight" for p in _KDA_PROJ),
+    *(f"{_layer(3)}.self_attn.{p}.weight" for p in _MLA_PROJ),
+    *(
+        f"{_layer(i)}.block_sparse_moe.shared_experts.{p}.weight"
+        for i in (1, 3)
+        for p in ("gate_proj", "up_proj", "down_proj")
+    ),
+    f"{_layer(3)}.self_attn.indexer.wq_b.weight",
+    f"{_layer(1)}.block_sparse_moe.gate.weight",
+    f"{_layer(1)}.block_sparse_moe.routed_expert_up_proj.weight",
+    f"{_layer(1)}.block_sparse_moe.experts.0.w1.weight_packed",
+    f"{_layer(0)}.mlp.gate_proj.weight",
+    "language_model.lm_head.weight",
+]
+
+
+def _module_formats(recipe: str, quantize=None) -> dict[str, str]:
+    quantize = quantize or k3_cast.load_recipe(recipe).quantize.model_dump()
+    settings = k3_cast._conversion_settings_from_quantize_config(quantize)
+    return k3_cast._recipe_module_formats(settings["quant_cfg"], _WEIGHT_KEYS)
+
+
 def test_published_recipe_resolves_to_streaming_conversion_settings():
     settings = k3_cast._conversion_settings_from_recipe(k3_cast._PUBLISHED_RECIPE)
+    settings.pop("quant_cfg")
 
     assert settings == {
         "cast_mxfp4_to_nvfp4": True,
         "attn_fp8": False,
         "attn_mxfp8": False,
-        "attn_fp8_pb": True,
+        "attn_fp8_pb": False,
         "input_scale": 1.0,
+    }
+    # Block FP8 on every KDA and MLA projection, as the --attn_fp8_pb layout.
+    assert _module_formats(k3_cast._PUBLISHED_RECIPE) == {
+        **{f"{_layer(1)}.self_attn.{p}": "fp8_pb" for p in _KDA_PROJ},
+        **{f"{_layer(3)}.self_attn.{p}": "fp8_pb" for p in _MLA_PROJ},
     }
 
 
-def test_recipe_rejects_unknown_enabled_quantizer():
-    quantize = copy.deepcopy(k3_cast.load_recipe(k3_cast._PUBLISHED_RECIPE).quantize.model_dump())
-    quantize["quant_cfg"].append(
-        {
-            "quantizer_name": "*block_sparse_moe.shared_experts*weight_quantizer",
-            "enable": True,
-            "cfg": {},
-        }
-    )
+def test_k31_pro_recipe_scopes_mxfp8_to_kda_layers_and_shared_experts():
+    assert _module_formats(_K31_PRO_RECIPE) == {
+        **{f"{_layer(1)}.self_attn.{p}": "mxfp8" for p in _KDA_PROJ if p != "f_b_proj"},
+        **{
+            f"{_layer(i)}.block_sparse_moe.shared_experts.{p}": "mxfp8"
+            for i in (1, 3)
+            for p in ("gate_proj", "up_proj", "down_proj")
+        },
+    }
 
-    with pytest.raises(ValueError, match="does not support"):
-        k3_cast._conversion_settings_from_quantize_config(quantize)
+
+@pytest.mark.parametrize(
+    ("entry", "match"),
+    [
+        (
+            {"quantizer_name": "*routed_expert_up_proj*weight_quantizer", "cfg": {"num_bits": 8}},
+            "does not support",
+        ),
+        ({"quantizer_name": "*k_bmm_quantizer", "cfg": {"num_bits": (4, 3)}}, "does not support"),
+        # ModelOpt would enable it with default (INT8) attributes.
+        ({"quantizer_name": "*lm_head*", "enable": True}, "does not support"),
+        (
+            {
+                "quantizer_name": "*shared_experts.*weight_quantizer",
+                "cfg": {**_MXFP8, "rotate": True},
+            },
+            "does not support",
+        ),
+        (
+            {"quantizer_name": "*.layers.1.block_sparse_moe.experts.*", "enable": False},
+            "every routed expert alike",
+        ),
+        (
+            {
+                "quantizer_name": "*block_sparse_moe.experts.*weight_quantizer",
+                "cfg": {"num_bits": (2, 1), "block_sizes": {**_NVFP4, "scale_bits": (8, 0)}},
+            },
+            "plain block-16 NVFP4",
+        ),
+        (
+            {
+                "quantizer_name": "*block_sparse_moe.experts.*input_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 448.0},
+            },
+            "plain block-16 NVFP4",
+        ),
+        (
+            {"quantizer_name": "*.layers.1.self_attn.b_proj*", "enable": False},
+            "must share one format",
+        ),
+    ],
+)
+def test_recipe_rejects_layouts_the_converter_cannot_write(entry, match):
+    quantize = copy.deepcopy(k3_cast.load_recipe(_K31_PRO_RECIPE).quantize.model_dump())
+    quantize["quant_cfg"].append(entry)
+
+    with pytest.raises(ValueError, match=match):
+        _module_formats(_K31_PRO_RECIPE, quantize)
 
 
 def test_recipe_rejects_algorithm_drift():
@@ -176,6 +263,7 @@ def _write_source_checkpoint(tmp_path: Path) -> tuple[Path, str, dict[str, torch
     f_a_proj = torch.randn(8, 64, dtype=torch.bfloat16)
     f_b_proj = torch.randn(16, 8, dtype=torch.bfloat16)
     passthrough = torch.randn(4, 4, dtype=torch.bfloat16)
+    shared_gate = torch.randn(16, 64, dtype=torch.bfloat16)
 
     state: dict[str, torch.Tensor] = {
         "language_model.model.layers.1.self_attn.q_proj.weight": q_proj,
@@ -183,6 +271,9 @@ def _write_source_checkpoint(tmp_path: Path) -> tuple[Path, str, dict[str, torch
         "language_model.model.layers.1.self_attn.f_a_proj.weight": f_a_proj,
         "language_model.model.layers.1.self_attn.f_b_proj.weight": f_b_proj,
         "language_model.model.layers.1.input_layernorm.weight": passthrough,
+        "language_model.model.layers.1.block_sparse_moe.shared_experts.gate_proj.weight": (
+            shared_gate
+        ),
     }
     for proj, weight in (("w1", w1), ("w2", w2), ("w3", w3)):
         packed, scale = _mxfp4(weight)
@@ -393,6 +484,60 @@ def test_convert_shard_quantizes_attention_to_block_fp8(tmp_path):
         "quant_algo": "FP8_PB_WO"
     }
     assert "*self_attn.f_b_proj*" not in quantization["exclude_modules"]
+
+
+def test_convert_shard_applies_recipe_module_formats(tmp_path):
+    source, shard_name, source_state = _write_source_checkpoint(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    attn = [f"{_layer(1)}.self_attn.{p}" for p in ("b_proj", "f_a_proj", "q_proj")]
+    shared = f"{_layer(1)}.block_sparse_moe.shared_experts.gate_proj"
+    module_formats = dict.fromkeys([*attn, shared], "mxfp8")
+
+    report = k3_cast.convert_shard(
+        source / shard_name,
+        output / shard_name,
+        device="cpu",
+        cast=True,
+        attn_fp8=False,
+        input_scale_value=1.0,
+        module_formats=module_formats,
+    )
+
+    with safe_open(output / shard_name, framework="pt", device="cpu") as f:
+        keys = set(f.keys())
+        for base in (*attn, shared):
+            expected, scale = MXFP8QTensor.quantize(source_state[base + ".weight"])
+            assert torch.equal(f.get_tensor(base + ".weight"), expected._quantized_data)
+            assert torch.equal(f.get_tensor(base + ".weight_scale"), scale)
+            assert base + ".input_scale" not in keys
+        f_b = f"{_layer(1)}.self_attn.f_b_proj.weight"
+        assert torch.equal(f.get_tensor(f_b), source_state[f_b])
+
+    assert report["stats"]["mxfp8_converted"] == 4
+    assert report["attn_modules"] == attn
+    assert report["shared_modules"] == [shared]
+
+    config = k3_cast._build_hf_quant_config(
+        report["banks"], [], attn_fp8=False, module_formats=module_formats
+    )
+    quantization = config["quantization"]
+    for name in (
+        shared,
+        "layers.1.mlp.shared_experts.gate_up_proj",
+        "layers.1.self_attn.in_proj_qkvgfab",
+    ):
+        assert quantization["quantized_layers"][name] == {"quant_algo": "MXFP8"}
+    assert "*block_sparse_moe.shared_experts*" not in quantization["exclude_modules"]
+    assert "*self_attn.f_b_proj*" in quantization["exclude_modules"]
+
+    source_index = json.loads((source / "model.safetensors.index.json").read_text())
+    k3_cast._write_index_and_manifest(
+        output, source_index, [report], config, attn_fp8=False, module_formats=module_formats
+    )
+    weight_map = json.loads((output / "model.safetensors.index.json").read_text())["weight_map"]
+    assert weight_map[shared + ".weight_scale"] == shard_name
+    assert f"{_layer(1)}.self_attn.f_b_proj.weight_scale" not in weight_map
 
 
 def test_manifest_and_index_replace_source_mxfp4_schema(tmp_path):
