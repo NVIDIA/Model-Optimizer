@@ -16,3 +16,4 @@
 """Four-dimensional layout rule definitions and direct IR passes."""
 
 from .passes import *
+from .rules import *

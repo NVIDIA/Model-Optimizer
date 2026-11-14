@@ -21,6 +21,8 @@ from onnxscript.rewriter import pattern
 
 from . import cleanup as _cleanup
 from .context import DlaGraph
+from .layout import passes as layout_passes
+from .layout import rules as layout_rules
 from .operators import rules as operator_rules
 from .preprocessing import passes as preprocessing_passes
 from .preprocessing import rules as preprocessing_rules
@@ -69,6 +71,22 @@ def preprocessing(graph: DlaGraph, *, quantized_dtypes=None, remove_all_qdq=Fals
     return count
 
 
+def layout(graph: DlaGraph) -> int:
+    """Apply coordinated layout rules and commit shared control/public boundaries."""
+    graph.begin_layout()
+    try:
+        count = apply_rules(graph, layout_rules.SHAPE_RULES, controls={})
+        split = layout_passes.SplitAxisLayout(graph)
+        graph.apply_pass(split)
+        count += split.transformed_nodes
+        count += apply_rules(graph, layout_rules.RANK_ADAPTER_RULES)
+        boundaries = layout_passes.LayoutBoundaryCommit(graph)
+        graph.apply_pass(boundaries)
+        return count + boundaries.adapter_count
+    finally:
+        graph.end_layout()
+
+
 def individual_op_rewrites(graph: DlaGraph) -> int:
     """Lower native operators, coordinate layouts, then lower logical arithmetic."""
     count = 0
@@ -78,6 +96,7 @@ def individual_op_rewrites(graph: DlaGraph) -> int:
     ):
         count += apply_rules(graph, definitions, views={})
     graph.apply_pass(ir.passes.common.RemoveUnusedNodesPass())
+    count += layout(graph)
     return count
 
 
