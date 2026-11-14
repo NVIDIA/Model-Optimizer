@@ -66,7 +66,10 @@ def test_third_party_list(tmp_path, monkeypatch):
     # A source link without a copyright notice also marks copied code
     link = "# Adapted from https://github.com/example/project/blob/0123abc/module.py\n"
     Path("copied.py").write_text(f"{link}\nimport os\n")
-    Path("own.py").write_text(f"{NVIDIA}\n\nimport os\n")
+    # A documentation link after the NVIDIA header is not a source link
+    Path("own.py").write_text(
+        f"{NVIDIA}\n# See https://docs.python.org/3/library/os.html\nimport os\n"
+    )
     Path("files.txt").write_text("deleted.py\nown.py\n")
     argv = ["--third-party-list", "files.txt", "copied.py", "own.py"]
     assert insert_license.main(argv) == 1

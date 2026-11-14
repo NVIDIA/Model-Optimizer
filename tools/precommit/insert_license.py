@@ -45,9 +45,12 @@ _LICENSE_HEADER = Path(__file__).resolve().parents[2] / "LICENSE_HEADER"
 # A year, list or range ("2024", "2023-2025", "2021, 2023-2024"), ignored like --allow-past-years does
 _YEARS = re.compile(r"\b\d{4}([ ,-]+\d{2,4})*\b")
 _SPDX_APACHE = re.compile(r"(SPDX-License-Identifier: Apache-2\.0)\b.*")
-# A copyright notice or a link to copied code's source, not NVIDIA's and not the Apache license URL
+# A copyright notice, or a source link such as "Adapted from <url>", that doesn't name NVIDIA. A link
+# without such a word, e.g. to documentation, doesn't count.
 _THIRD_PARTY = re.compile(
-    r"^(?!.*NVIDIA).*(\bcopyright\b|https?://(?!www\.apache\.org/licenses/))", re.IGNORECASE
+    r"^(?!.*NVIDIA).*(\bcopyright\b"
+    r"|\b(adapted|copied|derived|modified|ported|borrowed|taken|inspired)\b.*https?://)",
+    re.IGNORECASE,
 )
 _LIST_NOTE = (
     "# Python and shell files with code copied from other sources: their leading comments have a\n"
