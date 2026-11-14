@@ -133,6 +133,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    guides/0_support_matrix
    guides/1_quantization
    guides/quantization_aware_training_and_distillation
+   guides/evaluation/index
    guides/2_save_load
    guides/3_pruning
    guides/4_distillation
