@@ -117,11 +117,14 @@ def test_initialize_cuda_weight_formats(config, record_property):
     weight = model.weight
     output_before = model(inputs).detach()
     expected = model.weight_quantizer(weight).detach().clone()
-    reference = copy.deepcopy(model)
-    with torch.no_grad():
-        reference.weight.copy_(expected)
-    expected_output = reference(inputs).detach()
-    del reference
+    # GGML retains its original payload; an uninitialized reference would re-encode it.
+    expected_output = output_before
+    if getattr(model.weight_quantizer, "backend", None) != "ggml":
+        reference = copy.deepcopy(model)
+        with torch.no_grad():
+            reference.weight.copy_(expected)
+        expected_output = reference(inputs).detach()
+        del reference
     buffers = {name: value.clone() for name, value in model.named_buffers()}
     mtq.initialize_qdq_weights(model)
     torch.testing.assert_close(model.weight, expected, rtol=0, atol=0)
@@ -136,7 +139,6 @@ def test_initialize_cuda_weight_formats(config, record_property):
     record_property("effective_weight_changed_elements", (effective_after != expected).sum().item())
     if getattr(model.weight_quantizer, "backend", None) == "ggml":
         torch.testing.assert_close(effective_after, expected, rtol=0, atol=0)
-        torch.testing.assert_close(output_after, output_before, rtol=0, atol=0)
     for name, value in buffers.items():
         torch.testing.assert_close(dict(model.named_buffers())[name], value, rtol=0, atol=0)
     model(inputs).float().square().mean().backward()
