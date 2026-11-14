@@ -64,9 +64,11 @@ Example usage:
     ... )
 """
 
+from . import make_dla_compatible
 from .dq_transpose import transpose_dequantize_linear_weights
 from .encoder_cross_kv import add_cross_kv_to_encoder
 from .gqa_replacement import replace_attention_with_gqa
+from .make_dla_compatible import *
 from .utils.dtype_conversion import convert_fp16_to_bf16
 
 _SURGERY_REGISTRY = {
@@ -74,6 +76,7 @@ _SURGERY_REGISTRY = {
     "add-cross-kv": add_cross_kv_to_encoder,
     "convert-bf16": convert_fp16_to_bf16,
     "transpose-dq": transpose_dequantize_linear_weights,
+    "make-dla-compatible": make_dla_compatible.dla_make_dla_compatible,
 }
 
 
@@ -136,3 +139,4 @@ __all__ = [
     "run_graph_surgery",
     "transpose_dequantize_linear_weights",
 ]
+__all__ += make_dla_compatible.__all__

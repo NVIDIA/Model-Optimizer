@@ -68,6 +68,8 @@ Changelog
 
 *Misc*
 
+- Add ``dla_make_dla_compatible`` and the ``make-dla-compatible`` graph-surgery command to rewrite supported ONNX graphs for DLA deployment, with optional FP16 internal computation and native public interfaces.
+
 - ModelOpt MCP can track launcher jobs in MLflow and archive terminal status and task logs.
 - Launcher pipelines can prepare declared assets through an optional provider before submission, mount resolved inputs read-only, and record their versions in experiment metadata.
 - The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
