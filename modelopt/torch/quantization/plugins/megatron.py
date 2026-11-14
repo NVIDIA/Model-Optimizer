@@ -527,13 +527,8 @@ class _MegatronParallelLinear(_ParallelLinear):
 
         super()._setup()
 
-    def _initialize_qdq_weights(self, initialized):
-        # TP-local updates must not remove only some shards of a checkpoint tensor.
-        for quantizer in self.iter_weight_quantizers():
-            for member in self._initialization_members(quantizer):
-                if member.backend == "ggml":
-                    member._ggml_retain_initialization = True
-        super()._initialize_qdq_weights(initialized)
+    # TP-local updates must not remove only some shards of a checkpoint tensor.
+    _retain_qdq_initialization = True
 
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):
         if v.ndim == 4:

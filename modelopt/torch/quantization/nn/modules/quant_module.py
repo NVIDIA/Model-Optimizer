@@ -179,6 +179,8 @@ class QuantModule(DynamicModule):
             local = weight.to_local() if hasattr(weight, "to_local") else weight
             members = self._initialization_members(quantizer)
             for member in members:
+                if member.backend == "ggml" and getattr(self, "_retain_qdq_initialization", False):
+                    member._ggml_retain_initialization = True
                 member._qdq_initialization_shape = tuple(local.shape)
             try:
                 decoded = quantizer(local).detach().clone()

@@ -1450,7 +1450,7 @@ def initialize_qdq_weights(model: nn.Module) -> nn.Module:
     calibration or GPTQ. Never call on a resumed training checkpoint. Unpinned GGML PTQ keeps its
     initialization payload until the weight changes, then resumes its ordinary scale/code search.
     Megatron retains the inactive packed buffer and a sharded activity flag for checkpoint-key
-    stability. Combining active and retired shards by changing TP topology is unsupported.
+    stability. GGML checkpoint restores require the saved tensor-parallel layout.
     Other dynamic quantizers and low-precision inverse transforms can change the effective weight;
     this API does not guarantee bitwise-identical forwards.
 

@@ -75,7 +75,7 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
 )
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
-from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
+from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
     _initialize_grouped_weight_quantizer_state,
@@ -1793,7 +1793,17 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
         save_distributed_checkpoint(checkpoint, model_ref)
         save_sharded_modelopt_state([model_ref], checkpoint)
         model_test = create_model()
-        restore_sharded_modelopt_state([model_test], checkpoint)
+        reset = TensorQuantizer._reset_pytorch_state_from_metadata
+
+        def poison_activity(quantizer, metadata):
+            reset(quantizer, metadata)
+            for name, buffer in quantizer.named_buffers(recurse=False):
+                if name.endswith("_qdq_initialization_active") and buffer.numel() > 1:
+                    buffer.zero_()
+                    buffer.reshape(-1)[0] = True
+
+        with patch.object(TensorQuantizer, "_reset_pytorch_state_from_metadata", poison_activity):
+            restore_sharded_modelopt_state([model_test], checkpoint)
         model_test = load_distributed_checkpoint(checkpoint, model_test)
         restored = model_test.state_dict()
         matches = torch.tensor(

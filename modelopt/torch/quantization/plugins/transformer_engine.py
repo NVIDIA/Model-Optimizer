@@ -195,6 +195,8 @@ class _QuantTEGroupedLinear(_ParallelLinear):
                 continue  # export loads weights on CPU; the fp4 dry-run needs CUDA — keep loaded amax
             wq_i = self.weight_quantizer[i]
             q = wq_i[0] if isinstance(wq_i, SequentialQuantizer) else wq_i
+            if any(member.backend == "ggml" for member in self._initialization_members(wq_i)):
+                continue  # Payloads and activity flags are still uninitialized before tensor load.
             if not hasattr(q, "_amax") or q._amax is None:
                 continue
             prev_fake = getattr(q, "_fake_quant", True)
