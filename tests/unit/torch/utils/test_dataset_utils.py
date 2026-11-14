@@ -458,6 +458,34 @@ def test_registered_dataset_paths_are_namespaced():
     assert not bare, f"Registered datasets without an org/name Hub ID: {bare}"
 
 
+@pytest.mark.parametrize(
+    ("dataset_name", "expected_kwargs"),
+    [
+        ("c4", {"path": "allenai/c4", "name": "en"}),
+        ("wikipedia", {"path": "wikimedia/wikipedia", "name": "20231101.en"}),
+        # monology/pile-uncopyrighted only has the ``default`` config, so no ``name``.
+        ("pile", {"path": "monology/pile-uncopyrighted"}),
+    ],
+    ids=["c4", "wikipedia", "pile"],
+)
+def test_registered_dataset_load_kwargs(monkeypatch, dataset_name, expected_kwargs):
+    # tests/unit must stay offline, so pin the exact ``load_dataset`` call that
+    # ``get_dataset_samples`` makes for each entry instead of hitting the Hub.
+    datasets = pytest.importorskip("datasets")
+    calls = []
+
+    def _fake_load_dataset(*args, **kwargs):
+        calls.append((args, kwargs))
+        return [{"text": f"{dataset_name} sample"}]
+
+    monkeypatch.setattr(datasets, "load_dataset", _fake_load_dataset)
+
+    samples = get_dataset_samples(dataset_name, num_samples=1)
+
+    assert calls == [((), {**expected_kwargs, "split": "train", "streaming": True})]
+    assert samples == [f"{dataset_name} sample"]
+
+
 # ---------------------------------------------------------------------------
 # Local JSONL loading — must flow through the same auto-preprocess path as a
 # downloaded HF dataset, so chat / prompt / text columns are all handled.
