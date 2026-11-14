@@ -577,10 +577,11 @@ def test_norm_variance_stays_high_precision_without_reference_data(square):
         initializers,
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
-    _, initializer_map, node_to_init_map = setup_mappings(model)
+    _, _, node_to_init_map = setup_mappings(model)
 
     def classify(**kwargs):
-        return NodeClassifier(model, node_to_init_map, initializer_map, **kwargs).run()
+        # initializer_map is optional; the rule must still find initializer exponents without it.
+        return NodeClassifier(model, node_to_init_map, **kwargs).run()
 
     variance = {"square", "reduce", "add_eps", "sqrt"}
     fp16_nodes, fp32_nodes = classify()

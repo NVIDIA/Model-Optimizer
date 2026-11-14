@@ -268,18 +268,18 @@ class NormVarianceRule(NodeRuleBase):
     ``op_types_to_include`` still force these nodes to low precision.
     """
 
-    def __init__(self, model, initializer_map):
+    def __init__(self, model):
         """Initialize the rule.
 
         Args:
             model: The ONNX model to scan for variance subgraphs.
-            initializer_map: Mapping from initializer names to initializers.
         """
-        constants = {
-            node.output[0]: node.attribute[0].t
+        constants = {init.name: init for init in model.graph.initializer}
+        constants.update(
+            (node.output[0], node.attribute[0].t)
             for node in model.graph.node
             if node.op_type == "Constant" and node.attribute and node.attribute[0].name == "value"
-        }
+        )
 
         def is_squared(node):
             if node.op_type == "Mul":
@@ -287,7 +287,7 @@ class NormVarianceRule(NodeRuleBase):
             if node.op_type != "Pow":
                 return False
             # Only scalar exponents are read, so weights are never converted to numpy.
-            tensor = initializer_map.get(node.input[1], constants.get(node.input[1]))
+            tensor = constants.get(node.input[1])
             if tensor is None or np.prod(tensor.dims) != 1:
                 return False
             return np.isclose(float(onnx.numpy_helper.to_array(tensor).item()), 2.0)
@@ -526,7 +526,7 @@ class NodeClassifier:
             block_node_rules.append(DisabledOpTypes(self.op_types_to_exclude))
         if self.init_max is not None:
             block_node_rules.append(InitializerRangeRule(self.init_max, self.node_to_init_map))
-        block_node_rules.append(NormVarianceRule(self.model, self.initializer_map or {}))
+        block_node_rules.append(NormVarianceRule(self.model))
         if reference_data:
             block_node_rules.append(
                 IORangeRule(self.data_max, reference_data, self.node_to_init_map)
