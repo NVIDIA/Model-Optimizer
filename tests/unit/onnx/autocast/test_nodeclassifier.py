@@ -588,5 +588,5 @@ def test_norm_variance_stays_high_precision_without_reference_data(square):
     assert set(fp32_nodes) == variance
     assert set(fp16_nodes) == {node.name for node in nodes} - variance
 
-    fp16_nodes, fp32_nodes = classify(op_types_to_include=[square_op, "ReduceMean", "Add", "Sqrt"])
+    fp16_nodes, fp32_nodes = classify(nodes_to_include=["square|reduce|add_eps|sqrt"])
     assert fp32_nodes == []

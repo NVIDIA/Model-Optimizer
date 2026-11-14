@@ -264,8 +264,8 @@ class NormVarianceRule(NodeRuleBase):
     such values, so the I/O range rule alone can leave ``Pow -> ReduceMean -> Add -> Sqrt`` in
     fp16. Low-precision EPs then normalize those rows with an infinite variance and zero them; the
     CPU EP hides the problem because it computes these ops in fp32. The final ``Div``/``Mul`` only
-    sees values within fp16 range, so it stays eligible for low precision. ``nodes_to_include`` or
-    ``op_types_to_include`` still force these nodes to low precision.
+    sees values within fp16 range, so it stays eligible for low precision. The rule also runs for
+    bf16 and with calibration data, for precision. ``nodes_to_include`` opts specific nodes out.
     """
 
     def __init__(self, model):
