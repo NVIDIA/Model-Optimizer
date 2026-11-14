@@ -61,7 +61,10 @@ def _load_checkpoint_tensors(
 # TODO: drop this probe once the minimum Megatron-Bridge carries both.
 try:
     from megatron.bridge.training.checkpointing import _param_group_lr_bounds  # noqa: F401
-    from megatron.bridge.training.post_training.lsq import freeze_all_but_lsq_scales  # noqa: F401
+    from megatron.bridge.training.post_training.lsq import (  # noqa: F401
+        LSQOptimizerConfigOverrideProvider,
+        freeze_all_but_lsq_scales,
+    )
 
     HAS_BRIDGE_LSQ = True
 except ImportError:
