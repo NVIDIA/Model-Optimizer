@@ -118,6 +118,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _refuse_unquantizable_experts,
     _resolve_target,
     _seed_parallel_states,
+    _shard_sources,
     _transformers_mesh_builder,
     build_meta_causal_lm,
     load_and_prepare_ep,
@@ -228,6 +229,30 @@ def test_checkpoint_key_converter_multisource_expert_fusion():
     for e in range(n_exp):
         assert _resolve_target(plan, f"{prefix}mlp.experts.{e}.gate_proj.weight")[0] == gname
         assert _resolve_target(plan, f"{prefix}mlp.experts.{e}.up_proj.weight")[0] == gname
+
+
+@pytest.mark.parametrize("rows", [slice(0, 8), slice(5, 13), slice(8, 16)])
+def test_a_shard_of_a_concatenated_weight_reads_only_the_rows_it_spans(rows):
+    """A shard of a weight Transformers concatenates from several tensors along dim 0 (as
+    GLM-5.3-Flash fuses its q/k/v convolutions) is built from just the rows of them it spans."""
+    model = nn.Module()
+    model.fused = nn.Linear(3, 16, bias=False)
+    concat = WeightConverter(
+        ["a.weight", "b.weight", "c.weight"], "fused.weight", operations=[Concatenate(dim=0)]
+    )
+    plan = _conversion_plan(model, [concat])
+    stored = {
+        key: torch.randn(n, 3) for key, n in (("a.weight", 7), ("b.weight", 5), ("c.weight", 4))
+    }
+
+    reads, cut = _shard_sources(
+        plan, list(stored), rows, model.fused.weight, lambda key: list(stored[key].shape)
+    )
+    block = _convert_keys(plan, {key: stored[key][part] for key, part in reads.items()})
+
+    assert not cut
+    assert torch.equal(block["fused.weight"], torch.cat(list(stored.values()))[rows])
+    assert sum(part.stop - part.start for part in reads.values()) == rows.stop - rows.start
 
 
 @pytest.mark.parametrize("factory", [get_tiny_qwen3_5_vl, get_tiny_qwen3_5_moe_vl])
@@ -402,6 +427,30 @@ def test_tied_lm_head_without_stored_tie_map_loads(tmp_path, gloo_group, monkeyp
     assert torch.equal(model.lm_head.weight.full_tensor(), ref.model.embed_tokens.weight)
 
 
+def test_a_stored_non_persistent_buffer_keeps_the_computed_value(tmp_path, gloo_group):
+    """A checkpoint storing a buffer the model does not save, a rotary inv_freq, does not replace
+    the value the model computed, as from_pretrained does not."""
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+    )
+    config.architectures = ["LlamaForCausalLM"]
+    config.dtype = torch.float32
+    ref = LlamaForCausalLM(config)
+    state = {k: v.clone() for k, v in ref.state_dict().items()}
+    state["model.rotary_emb.inv_freq"] = torch.full_like(ref.model.rotary_emb.inv_freq, 7.0)
+    save_file(state, str(tmp_path / "model.safetensors"), metadata={"format": "pt"})
+    (tmp_path / "config.json").write_text(json.dumps(config.to_dict()))
+
+    model = _fsdp2_load(tmp_path)
+
+    assert torch.equal(model.model.rotary_emb.inv_freq, ref.model.rotary_emb.inv_freq)
+
+
 def test_keep_in_fp32_tensors_load_in_fp32(tmp_path, gloo_group, monkeypatch):
     """A tensor the model keeps in fp32 loads as from_pretrained loads it, not rounded to bf16."""
     monkeypatch.setattr(LlamaPreTrainedModel, "_keep_in_fp32_modules_strict", ["input_layernorm"])
@@ -431,6 +480,103 @@ def test_keep_in_fp32_tensors_load_in_fp32(tmp_path, gloo_group, monkeypatch):
         assert weight.dtype == torch.float32
         assert torch.equal(weight, state[f"model.layers.{i}.input_layernorm.weight"])
     assert model.model.layers[0].mlp.up_proj.weight.dtype == torch.bfloat16
+
+
+class _CountedReads:
+    """A safetensors file whose tensor reads, whole or in part, add their bytes to
+    ``counts["bytes"]``, and which counts itself in ``counts["open"]`` until it closes."""
+
+    def __init__(self, opened, counts):
+        self.opened, self.counts = opened, counts
+        counts["open"] += 1
+        counts["most_open"] = max(counts["most_open"], counts["open"])
+
+    def __enter__(self):
+        self.opened.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        self.counts["open"] -= 1
+        return self.opened.__exit__(*exc)
+
+    def _counted(self, tensor):
+        self.counts["bytes"] += tensor.numel() * tensor.element_size()
+        return tensor
+
+    def get_tensor(self, key):
+        return self._counted(self.opened.get_tensor(key))
+
+    def get_slice(self, key):
+        part, counted = self.opened.get_slice(key), self._counted
+
+        class _Rows:
+            def __getitem__(self, rows):
+                return counted(part[rows])
+
+            def get_shape(self):
+                return part.get_shape()
+
+        return _Rows()
+
+
+def _shard_reads_job(rank, size, ckpt_dir, expected_path):
+    counts = {"bytes": 0, "open": 0, "most_open": 0}
+    opened = model_load_utils.safe_open
+    with mock.patch.object(
+        model_load_utils, "safe_open", lambda *a, **k: _CountedReads(opened(*a, **k), counts)
+    ):
+        model = parallel_load_and_prepare_fsdp2(ckpt_dir, torch.device("cpu"), rank, size)
+    expected = load_file(expected_path)
+    held = 0
+    for name, param in model.named_parameters():
+        assert isinstance(param, DTensor), name
+        local = param.to_local()
+        held += local.numel() * local.element_size()
+        assert torch.equal(param.full_tensor(), expected[name]), name
+    assert counts["bytes"] == held
+    # The weights' sources span at most two files, so no more are open together.
+    assert counts["open"] == 0
+    assert counts["most_open"] <= 2
+
+
+@pytest.mark.skipif(torch.cuda.is_available(), reason="with a GPU, FSDP2 shards onto it")
+def test_each_rank_reads_only_its_own_shards(cpu_dist_workers, tmp_path):
+    """Each rank reads from the checkpoint exactly the bytes its FSDP2 shards hold: its rows of a
+    weight, and its experts of a fused one stored one tensor per expert, and every weight loads as
+    stored. The sizes split unevenly over two ranks: 5 experts, 67 rows of embeddings, 33 of o_proj.
+    A rank closes each of the checkpoint's files after its last read rather than holding them all
+    open, since the pages a read touches stay resident while their file is open."""
+    config = Qwen3MoeConfig(
+        vocab_size=67,
+        hidden_size=33,
+        intermediate_size=48,
+        moe_intermediate_size=12,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        num_experts=5,
+        num_experts_per_tok=2,
+        tie_word_embeddings=False,
+    )
+    config.dtype = torch.float32
+    model = Qwen3MoeForCausalLM(config)
+    model.save_pretrained(tmp_path / "ckpt", max_shard_size="30KB")
+    index = json.loads((tmp_path / "ckpt" / "model.safetensors.index.json").read_text())
+    stored_in = index["weight_map"]
+    assert "model.layers.0.mlp.experts.4.down_proj.weight" in stored_in, (
+        "the checkpoint was to store its experts one tensor per expert"
+    )
+    assert len(set(stored_in.values())) > 2, "the checkpoint was to span several files"
+    save_file(
+        {name: tensor.contiguous() for name, tensor in model.state_dict().items()},
+        tmp_path / "expected.safetensors",
+    )
+    cpu_dist_workers.run(
+        _shard_reads_job,
+        ckpt_dir=str(tmp_path / "ckpt"),
+        expected_path=str(tmp_path / "expected.safetensors"),
+    )
 
 
 @pytest.mark.skipif(
@@ -2671,10 +2817,10 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
         (
             DistributionPlan(2, ep_size=2),
             "causal-lm",
-            {"broadcast_chunk_size": None},
+            {"cpu_offload": True},
             TypeError,
             (
-                r"\['broadcast_chunk_size'\] only apply to the FSDP2 load, and the "
+                r"\['cpu_offload'\] only apply to the FSDP2 load, and the "
                 r"expert-parallel load .*; drop them, or pass a plan with ep_size=1 and dense='fsdp'"
             ),
         ),
@@ -2688,7 +2834,7 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
         "fsdp2-option-on-a-whole-load",
         "ep-option-on-a-whole-load",
         "ep-option-on-the-fsdp2-load",
-        "fsdp2-chunking-as-none-on-the-ep-load",
+        "fsdp2-option-on-the-ep-load",
     ],
 )
 def test_a_load_refuses_what_it_cannot_load(
