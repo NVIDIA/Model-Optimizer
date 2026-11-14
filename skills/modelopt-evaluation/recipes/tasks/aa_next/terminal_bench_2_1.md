@@ -48,11 +48,9 @@ agent/task timeouts and sandbox/SLURM lifetimes separate; record them for baseli
 | scope | 89 tasks × `repeats: 8` |
 
 Except for the ModelOpt timeout/lifetime overrides below, these values follow
-the canonical TB2.1 config — re-check it before a scored run:
-`configs/benchmarks/terminal-bench-2.1/bench.yaml` (+ `manifest.yaml`) in
-nvidia-eval-factory-benchmarking (`dl/JoC/competitive_evaluation/…`), with the image pin in
-`configs/shared/nel_next_containers.yaml`. See `references/nel-next.md` + the eval-config
-"source of truth" note. The sibling `bench_direct.yaml` is a different backend (Gym-native)
+the canonical TB2.1 config published by the benchmark owners (benchmark config,
+manifest and image pin) — re-check it before a scored run. See `references/nel-next.md` + the
+eval-config "source of truth" note. A Gym-native variant of this benchmark is a different backend
 — don't mix its values in. The `benchmarks:` block (drop into the example template):
 
 ```yaml
