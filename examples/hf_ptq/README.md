@@ -141,7 +141,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>12.</sup>For VLMs, `int8_smoothquant` only supports TensorRT-LLM checkpoint export and is not compatible with the TensorRT-LLM torch backend.* \
 > *<sup>13.</sup>The Nemotron VL model types `NemotronH_Nano_VL_V2`, `NemotronH_Nano_Omni_Reasoning_V3`, `nemotron_h_omni`, `Llama_Nemotron_Nano_VL` and `nemotron_parse` calibrate with image-text pairs by default; other VLMs need `--calib_with_images`. The default does not apply with `--use_fsdp2`, where these types need the flag too, or with an AutoQuantize recipe, whose calibration is text-only. See [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).* \
 > *<sup>14.</sup>Qwen3-VL and dense Qwen3.5 VLM checkpoints support opt-in FP8 vision encoder quantization through model-specific recipes. Vision Linear layers, including primary and deepstack merger Linears where present, are quantized; patch embedding and vision-attention BMMs remain in high precision. MoE variants are not validated by these recipes.* \
-> *<sup>15.</sup>Kimi K3 uses the calibration-free [streaming converter](../kimi/README.md) because its routed experts are released as packed MXFP4 tensors; it does not use the in-memory `hf_ptq.py` flow.*
+> *<sup>15.</sup>Kimi K3's routed experts are released as packed MXFP4 tensors. The calibration-free [streaming converter](../kimi/README.md) casts them to NVFP4 without loading the model; `hf_ptq.py` quantizes Kimi K3 expert-parallel under `torchrun` (see [Kimi K3](#kimi-k3)).*
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP/expert layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
 
@@ -265,9 +265,25 @@ The cast pins each NVFP4 block's `scale_2 = 2^(k_max - 8)` and `_amax = 6 * 2^k_
 
 #### Kimi K3
 
-[PTQ for Kimi K3](../kimi/README.md) shows how to cast the source MXFP4 routed
-experts to NVFP4 and quantize KDA/MLA attention weights to 128x128 block FP8
-without loading the full model or running calibration.
+Kimi K3's routed experts ship packed as MXFP4. There are two ways to quantize it:
+
+- [PTQ for Kimi K3](../kimi/README.md) shows how to cast the source MXFP4 routed
+  experts to NVFP4 and quantize KDA/MLA attention weights to 128x128 block FP8
+  without loading the full model or running calibration. This is the layout of
+  `nvidia/Kimi-K3-NVFP4`.
+- Under `torchrun`, `hf_ptq.py` runs Kimi K3
+  [expert-parallel](#expert-parallel-post-training-quantization-for-moe-models).
+  Each rank decompresses only its own routed experts to bf16 as they load; the
+  model is then calibrated with the `--recipe` you pass, and each rank writes
+  its share of the checkpoint. The experts are quantized again from bf16, not
+  cast from MXFP4. This flow needs:
+  - `--trust_remote_code`, since Kimi K3 runs the checkpoint's own modeling
+    code, which ModelOpt patches for expert parallelism;
+  - transformers 5.13 or newer, compressed-tensors 0.16 or newer to decompress
+    the experts, and flash-linear-attention for the KDA layers;
+  - an expert-parallel degree that divides the 896 routed experts, on enough
+    GPUs to hold each rank's share in bf16: about 85 GB per GPU at EP64. The
+    dense part is FSDP2-sharded when it is large (`MODELOPT_FSDP_SIZE`).
 
 #### VLM quantization
 

@@ -474,8 +474,11 @@ checkpoint's** quant config verbatim:
   128x128 block FP8. Attention activations are dynamic; shared and latent
   experts, routers, convolutions, norms, the vision tower, `lm_head`, and KV
   cache remain BF16. Because the 2.8T source uses packed MXFP4 expert tensors,
-  use the calibration-free streaming converter in `examples/kimi/` rather than
-  the in-memory `hf_ptq.py` flow.
+  the calibration-free streaming converter in `examples/kimi/` applies this
+  recipe shard by shard, casting the experts without loading the model. For
+  calibrated PTQ instead, `hf_ptq.py` loads Kimi-K3 expert-parallel under
+  `torchrun`, each rank decompressing its own experts to bf16; its prerequisites
+  are in the Kimi K3 section of `examples/hf_ptq/README.md`.
 - **`models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only`** mirrors
   `nvidia/DeepSeek-V4-Pro-0813-NVFP4`: the source MXFP4 routed experts are cast to
   NVFP4 (weights and activations, block 16), while shared experts, attention,
