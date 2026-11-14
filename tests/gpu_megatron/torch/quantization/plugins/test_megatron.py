@@ -1731,13 +1731,13 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
         seed=SEED,
     )
 
-    def create_model():
+    def create_model(tp_size=size):
         return _gpt_model_provider(
-            tp_size=size,
+            tp_size=tp_size,
             hidden_size=512,
             num_moe_experts=2 if grouped else None,
             moe_grouped_gemm=grouped,
-            etp_size=size if grouped else None,
+            etp_size=tp_size if grouped else None,
             transformer_impl="transformer_engine" if grouped else "local",
         )
 
@@ -1786,6 +1786,8 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
         if preparation == "ptq":
             active = [v for k, v in pinned.items() if k.endswith("_qdq_initialization_active")]
             checks.append(bool(active))
+            if phase == "initial":
+                checks.append(all(v.all() for v in active))
             if phase == "rank_local_update":
                 checks.append(any(not v.any() for v in active) == (rank == 0))
             if grouped:
@@ -1835,12 +1837,57 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
         assert matches.item(), "GGML effective weights changed after native resume"
         del model_test
 
+    if preparation == "ptq":
+        # Retire every local payload, not just the first weight on one TP rank.
+        for module in model_ref.modules():
+            if not hasattr(module, "iter_weights_for_calibration"):
+                continue
+            for weight, quantizer in module.iter_weights_for_calibration():
+                if any(
+                    name.endswith("_qdq_initialization_active")
+                    for name, _ in quantizer.named_buffers()
+                ):
+                    with torch.no_grad():
+                        weight.add_(0.125)
+                    quantizer(weight)
+        active = [
+            buffer
+            for name, buffer in model_ref.named_buffers()
+            if name.endswith("_qdq_initialization_active")
+        ]
+        retired = torch.tensor(bool(active) and all(not v.any() for v in active), device="cuda")
+        torch.distributed.all_reduce(retired, op=torch.distributed.ReduceOp.MIN)
+        assert retired.item(), "All TP shards must retire initialization before saving"
+        checkpoint = tmp_path / "retired"
+        save_distributed_checkpoint(checkpoint, model_ref)
+        save_sharded_modelopt_state([model_ref], checkpoint)
+        torch.distributed.barrier()
+        del model_ref
+        destroy_model_parallel()
+        initialize_for_megatron(
+            tensor_model_parallel_size=1,
+            expert_tensor_parallel_size=1 if grouped else None,
+            seed=SEED,
+        )
+        for phase in ("initial", "retired"):
+            target = [create_model(tp_size=1)]
+            error = None
+            try:
+                # Metadata restore must reject TP=2 -> TP=1 before loading weight tensors.
+                restore_sharded_modelopt_state(target, tmp_path / phase)
+            except Exception as exc:
+                error = exc
+            rejected = torch.tensor(isinstance(error, NotImplementedError), device="cuda")
+            torch.distributed.all_reduce(rejected, op=torch.distributed.ReduceOp.MIN)
+            assert rejected.item(), f"Expected an early GGML layout rejection ({phase}): {error!r}"
+            del target
+
 
 @pytest.mark.parametrize(
     ("preparation", "grouped"), [("gptq", False), ("ptq", False), ("ptq", True)]
 )
 def test_ggml_payload_sharded_state_dict(dist_workers_size_2, tmp_path, preparation, grouped):
-    """Dense/grouped payloads survive native checkpoints before and after TP-local retirement."""
+    """Dense/grouped payloads restore at the same TP size and reject active/retired TP changes."""
     dist_workers_size_2.run(
         partial(_test_ggml_payload_sharded_state_dict, tmp_path, preparation, grouped)
     )
