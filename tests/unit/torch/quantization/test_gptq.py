@@ -127,6 +127,46 @@ def test_update_hessian_zero_token_input_noops():
     torch.testing.assert_close(hessian, expected_hessian)
 
 
+def test_round_to_covariance_precision_absorbs_summation_noise():
+    """Another batching's float64 sums differ by about 1e-15 of sqrt(H_ii H_jj) in the elements that
+    cancel; rounded to a covariance's precision both give the same matrix, exact in float32."""
+    torch.manual_seed(0)
+    x = torch.randn(512, 32, dtype=torch.float64) * torch.logspace(-3, 3, 32, dtype=torch.float64)
+    hessian = x.T @ x
+    std = hessian.diagonal().sqrt()
+    noisy = hessian + 1e-15 * std[:, None] * std[None, :] * torch.randn_like(hessian)
+    assert not torch.equal(hessian, noisy)
+    rounded = calib_utils.round_to_covariance_precision_(hessian.clone())
+    assert torch.equal(rounded, calib_utils.round_to_covariance_precision_(noisy))
+    assert torch.equal(rounded.float().double(), rounded)
+    assert ((rounded - hessian).abs() <= 2.0**-20 * std[:, None] * std[None, :]).all()
+
+
+def test_hessians_under_deterministic_algorithms_do_not_depend_on_the_batching():
+    """The same tokens, batched or ordered otherwise, give the same Hessians bit for bit: float32
+    sums differ with the batching, float64 sums of bfloat16 products are mostly exact."""
+    torch.manual_seed(0)
+    tokens = (torch.randn(96, 64) * torch.logspace(-2, 2, 64)).bfloat16()
+    layouts = [tokens.split(32), tokens.flip(0).split(24), tokens[torch.randperm(96)].split(8)]
+    was = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        results = []
+        for batches in layouts:
+            helper = GPTQHelper(torch.nn.Linear(64, 8), "linear")
+            local = model_calib._LocalHessianAccumulator(8, 64, 16)
+            for batch in batches:
+                helper.accumulate(batch)
+                local.accumulate(batch)
+            helper.sync_hessian_across_dp()
+            results.append((helper.hessian, local.normalized_hessian()))
+    finally:
+        torch.use_deterministic_algorithms(was)
+    for gptq_hessian, local_hessian in results[1:]:
+        assert torch.equal(gptq_hessian, results[0][0])
+        assert torch.equal(local_hessian, results[0][1])
+
+
 @pytest.mark.parametrize(("input_quantized", "forwards"), [(False, 1), (True, 2)])
 def test_gptq_runs_a_max_calibration_forward_only_for_activation_amax(input_quantized, forwards):
     """Weight amax comes from the weights; only an input quantizer needs a forward before GPTQ's."""
