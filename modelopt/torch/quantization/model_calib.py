@@ -1801,8 +1801,10 @@ def awq_lite(
             self.weight_scale = (
                 get_weight_scale(module.weight, self.block_size) if use_weight_scale else None
             )
+            # float64 here and in the sums below: the order the batches are summed in moves an fp32 sum by
+            # ~1e-7, enough to flip the alpha of a module whose loss curve is flat
             self.loss = {
-                k.item(): torch.zeros((), device=module.weight.device, dtype=torch.float32)
+                k.item(): torch.zeros((), device=module.weight.device, dtype=torch.float64)
                 for k in torch.arange(0, 1.0 + alpha_step, alpha_step)
             }
             self.best_scale = None
@@ -1846,8 +1848,8 @@ def awq_lite(
         scale = scale.mean(0).to(torch.float32)
         return scale
 
-    def get_act_scale(x):
-        return x.abs().contiguous().view(-1, x.shape[-1]).mean(0).to(torch.float32)
+    def get_act_scale_sum(x):
+        return x.abs().reshape(-1, x.shape[-1]).sum(0, dtype=torch.float64)
 
     def get_scale(x_max, w_max, alpha, tensor_parallel_group=None):
         scales = x_max.pow(alpha)
@@ -1860,14 +1862,14 @@ def awq_lite(
         if tensor_parallel_group and tensor_parallel_group.is_initialized():
             dist.all_reduce(scales, op=dist.ReduceOp.SUM, group=tensor_parallel_group.group)
             scales /= tensor_parallel_group.world_size()
-        return scales
+        return scales.to(torch.float32)
 
     def update_loss(self, out, out_actual, alpha):
         out_actual = out_actual[0] if isinstance(out_actual, tuple) else out_actual
         out = out[0] if isinstance(out, tuple) else out
         out = out.to_local() if hasattr(out, "to_local") else out
         out_actual = out_actual.to_local() if hasattr(out_actual, "to_local") else out_actual
-        loss = (out - out_actual).float().pow(2).mean()
+        loss = (out - out_actual).double().pow(2).sum()
         self.awq_lite.loss[alpha] += loss.to(self.awq_lite.loss[alpha].device)
 
     def update_best_params(self):
@@ -1904,9 +1906,9 @@ def awq_lite(
             # Get local tensor from Dtensor
             input = input.to_local() if hasattr(input, "to_local") else input
 
-            self.awq_lite.act_scale += get_act_scale(self.input_quantizer(input))
+            self.awq_lite.act_scale += get_act_scale_sum(self.input_quantizer(input))
             self.awq_lite.num_cache_steps += 1
-            self.awq_lite.num_tokens += input.numel() / input.shape[-1]
+            self.awq_lite.num_tokens += input.numel() // input.shape[-1]
             if self.awq_lite.is_input_quantized:
                 with set_quantizer_by_cfg_context(
                     self.input_quantizer, [{"quantizer_name": "*", "enable": True}]
@@ -1976,7 +1978,7 @@ def awq_lite(
         ):
             # Hack: MoEs forward all tokens through all experts if _if_calib is True
             module._if_calib = True
-            module.awq_lite.act_scale = module.awq_lite.act_scale / module.awq_lite.num_cache_steps
+            module.awq_lite.act_scale = module.awq_lite.act_scale / module.awq_lite.num_tokens
 
             has_nan_local = torch.any(torch.isnan(module.awq_lite.act_scale))
             if use_weight_scale:
@@ -2099,6 +2101,10 @@ def awq_lite(
                 delattr(module, "awq_lite")
 
 
+# Rows of the output error awq_clip squares in float64 at a time, bounding that copy.
+_CLIP_ROW_CHUNK = 1024
+
+
 @torch.no_grad()
 def awq_clip(
     model: nn.Module,
@@ -2139,7 +2145,10 @@ def awq_clip(
             ] + [1.0]
             shape = () if self.is_per_tensor_clip(module) else (co, math.ceil(ci / self.block_size))
             # One buffer for every candidate's loss, which the data-parallel sync reduces in place.
-            self.loss_buffer = torch.zeros(len(clip_ratios), *shape, device=module.weight.device)
+            # Float64, so the sum over batches does not depend on their order.
+            self.loss_buffer = torch.zeros(
+                len(clip_ratios), *shape, dtype=torch.float64, device=module.weight.device
+            )
             self.loss = dict(zip(clip_ratios, self.loss_buffer))
             self.best_clip_val = None
             self.best_loss = None
@@ -2198,8 +2207,11 @@ def awq_clip(
             for shrink in self.awq_clip.loss:
                 self.weight_quantizer.amax = original_amax * shrink
                 out = inputs @ self.weight_quantizer(self.weight).T
-                loss = (out - out_actual).float().pow(2).mean()
-                self.awq_clip.loss[shrink] += loss
+                # Summed over every token, so a batch weighs what its tokens do, not the batch
+                # layout; float64 for the order of the sum, a chunk at a time for its copy.
+                error = out - out_actual
+                for rows in error.reshape(-1, error.shape[-1]).split(_CLIP_ROW_CHUNK):
+                    self.awq_clip.loss[shrink] += rows.double().square().sum()
         else:
             # weight  [co, ci] -> [co, 1, n_block, block_size]
             # inputs  [..., ci] -> [1, max_tokens, n_block, block_size]

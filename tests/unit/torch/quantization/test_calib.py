@@ -360,8 +360,12 @@ def test_awq_full(use_weight_scale):
     assert torch.allclose(out, out_ref, atol=1e-6)
 
 
-def test_awq_multi_batch():
-    """Test awq multibatch."""
+@pytest.mark.parametrize("batch_sizes", [(2, 2, 2, 2), (1, 3, 4)])
+def test_awq_multi_batch(batch_sizes):
+    """The batch split must not change the awq result, also when the batches differ in size.
+
+    Bit for bit: the sums behind the scale are float64, so the order they are added in cannot move it.
+    """
     # awq test
     model = _SimpleMLP()
     states = model.state_dict()
@@ -369,8 +373,9 @@ def test_awq_multi_batch():
     # Multi batch test
     config = get_awq_config("awq_full")
 
-    dataloader = [torch.randn(2, 16, 16) for _ in range(4)]
-    dataloader_sb = [torch.cat(dataloader, dim=0)]
+    data = torch.randn(sum(batch_sizes), 16, 16)
+    dataloader = list(data.split(batch_sizes))
+    dataloader_sb = [data]
 
     model_s = _SimpleMLP()
     model_s.load_state_dict(states)
@@ -380,9 +385,9 @@ def test_awq_multi_batch():
     model_m.load_state_dict(states)
     model_m = mtq.quantize(model_m, config, partial(forward_loop, dataloader=dataloader))
 
-    assert torch.allclose(model_s.net[0].awq_lite.best_scale, model_m.net[0].awq_lite.best_scale)
-    assert torch.allclose(model_s.net[2].awq_lite.best_scale, model_m.net[2].awq_lite.best_scale)
-    assert torch.allclose(model_s.net[4].awq_lite.best_scale, model_m.net[4].awq_lite.best_scale)
+    assert torch.equal(model_s.net[0].awq_lite.best_scale, model_m.net[0].awq_lite.best_scale)
+    assert torch.equal(model_s.net[2].awq_lite.best_scale, model_m.net[2].awq_lite.best_scale)
+    assert torch.equal(model_s.net[4].awq_lite.best_scale, model_m.net[4].awq_lite.best_scale)
 
 
 def test_padded_awq():
