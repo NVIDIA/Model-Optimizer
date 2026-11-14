@@ -1,0 +1,7 @@
+aiperf==0.13.0
+datasets==5.0.1
+huggingface-hub==1.33.0
+lm_eval[api]==0.4.12
+pyarrow==22.0.0
+tokenizers==0.23.3
+transformers==5.22.2
