@@ -1,0 +1,393 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>quant_rnn &mdash; Model Optimizer 0.0.1.dev1+g2cfe65c6d</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="tensor_quantizer" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html" />
+    <link rel="prev" title="quant_pooling" href="modelopt.torch.quantization.nn.modules.quant_pooling.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4 current"><a class="reference internal" href="modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.triton.html">triton</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.quantization.html">quantization</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.quantization.nn.html">nn</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.quantization.nn.modules.html">modules</a></li>
+      <li class="breadcrumb-item active">quant_rnn</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.quantization.nn.modules.quant_rnn.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="quant-rnn">
+<h1>quant_rnn<a class="headerlink" href="#quant-rnn" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.quantization.nn.modules.quant_rnn">Quantized RNN.</p>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase" title="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantRNNBase</span></code></a></p></td>
+<td><p>Base class for quantized RNN modules.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNFullBase" title="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNFullBase"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantRNNFullBase</span></code></a></p></td>
+<td><p>Quantized RNN with input quantizer.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.quant_rnn.RNNLayerForward" title="modelopt.torch.quantization.nn.modules.quant_rnn.RNNLayerForward"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RNNLayerForward</span></code></a></p></td>
+<td><p>A single layer of rnn modules.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.quant_rnn.VFRNNForward" title="modelopt.torch.quantization.nn.modules.quant_rnn.VFRNNForward"><code class="xref py py-obj docutils literal notranslate"><span class="pre">VFRNNForward</span></code></a></p></td>
+<td><p>Reimplement the _VF rnn calls with python to enable input quantizers.</p></td>
+</tr>
+</tbody>
+</table>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_forward" title="modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_forward"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_quantized_rnn_layer_forward</span></code></a></p></td>
+<td><p>Construct the forward call for different rnn cells.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_variable_len_forward" title="modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_variable_len_forward"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_quantized_rnn_layer_variable_len_forward</span></code></a></p></td>
+<td><p>Construct the forward call for packed sequence.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_variable_len_reverse_forward" title="modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_variable_len_reverse_forward"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_quantized_rnn_layer_variable_len_reverse_forward</span></code></a></p></td>
+<td><p>Construct the forward call for packed sequence in the reversed direction.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.quant_rnn.lstm_cell_with_proj" title="modelopt.torch.quantization.nn.modules.quant_rnn.lstm_cell_with_proj"><code class="xref py py-obj docutils literal notranslate"><span class="pre">lstm_cell_with_proj</span></code></a></p></td>
+<td><p>Currently the _VF.lstm_cell doesn't accept projected inputs.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.quant_rnn.quantized_cell_forward" title="modelopt.torch.quantization.nn.modules.quant_rnn.quantized_cell_forward"><code class="xref py py-obj docutils literal notranslate"><span class="pre">quantized_cell_forward</span></code></a></p></td>
+<td><p>Call input quantizer before calling cell.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">QuantRNNBase</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.quantization.nn.modules.quant_module.html#modelopt.torch.quantization.nn.modules.quant_module.QuantModule" title="modelopt.torch.quantization.nn.modules.quant_module.QuantModule"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantModule</span></code></a></p>
+<p>Base class for quantized RNN modules.</p>
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.all_input_quantizers_disabled">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">all_input_quantizers_disabled</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.all_input_quantizers_disabled" title="Link to this definition"></a></dt>
+<dd><p>Check if all input quantizer are disabled.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.default_quant_desc_input">
+<span class="sig-name descname"><span class="pre">default_quant_desc_input</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">QuantizerAttributeConfig(enable=True,</span> <span class="pre">num_bits=8,</span> <span class="pre">axis=None,</span> <span class="pre">fake_quant=True,</span> <span class="pre">unsigned=False,</span> <span class="pre">narrow_range=False,</span> <span class="pre">learn_amax=False,</span> <span class="pre">type='static',</span> <span class="pre">block_sizes=None,</span> <span class="pre">bias=None,</span> <span class="pre">trt_high_precision_dtype='Float',</span> <span class="pre">calibrator='max',</span> <span class="pre">rotate=False,</span> <span class="pre">pass_through_bwd=True,</span> <span class="pre">backend=None,</span> <span class="pre">backend_extra_args=None,</span> <span class="pre">use_constant_amax=False)</span></em><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.default_quant_desc_input" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.default_quant_desc_weight">
+<span class="sig-name descname"><span class="pre">default_quant_desc_weight</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">QuantizerAttributeConfig(enable=True,</span> <span class="pre">num_bits=8,</span> <span class="pre">axis=None,</span> <span class="pre">fake_quant=True,</span> <span class="pre">unsigned=False,</span> <span class="pre">narrow_range=False,</span> <span class="pre">learn_amax=False,</span> <span class="pre">type='static',</span> <span class="pre">block_sizes=None,</span> <span class="pre">bias=None,</span> <span class="pre">trt_high_precision_dtype='Float',</span> <span class="pre">calibrator='max',</span> <span class="pre">rotate=False,</span> <span class="pre">pass_through_bwd=True,</span> <span class="pre">backend=None,</span> <span class="pre">backend_extra_args=None,</span> <span class="pre">use_constant_amax=False)</span></em><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.default_quant_desc_weight" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.forward">
+<span class="sig-name descname"><span class="pre">forward</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">input</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.forward" title="Link to this definition"></a></dt>
+<dd><p>Quantize the input and the weight before calling the original forward method.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.functionals_to_replace">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">functionals_to_replace</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Iterator</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">ModuleType</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Callable</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.functionals_to_replace" title="Link to this definition"></a></dt>
+<dd><p>Replace functions of packages on the fly.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.quantize_weight">
+<span class="sig-name descname"><span class="pre">quantize_weight</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.quantize_weight" title="Link to this definition"></a></dt>
+<dd><p>Context in which <code class="docutils literal notranslate"><span class="pre">self.weight</span></code> is quantized.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.weight_quantizer">
+<span class="sig-name descname"><span class="pre">weight_quantizer</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><span class="pre">TensorQuantizer</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer"><span class="pre">SequentialQuantizer</span></a></em><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.weight_quantizer" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNFullBase">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">QuantRNNFullBase</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNFullBase" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase" title="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantRNNBase</span></code></a></p>
+<p>Quantized RNN with input quantizer.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.RNNLayerForward">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">RNNLayerForward</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.RNNLayerForward" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>A single layer of rnn modules.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.RNNLayerForward.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">cell</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reverse</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">variable_len</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.RNNLayerForward.__init__" title="Link to this definition"></a></dt>
+<dd><p>Init the layer forward for different cells, directions, and inputs.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.VFRNNForward">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">VFRNNForward</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.VFRNNForward" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Reimplement the _VF rnn calls with python to enable input quantizers.</p>
+<p>It’s less efficient compared to original calls.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.VFRNNForward.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">mode</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bidirectional</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_layers</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">has_proj</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">has_bias</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_quantizers</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">proj_input_quantizers</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">batch_first</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.VFRNNForward.__init__" title="Link to this definition"></a></dt>
+<dd><p>Pre-construct necessary parameters for vf calls to reduce overhead.</p>
+<p>Refer to torch RNN modules for parameter information.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>mode</strong> (<em>str</em>)</p></li>
+<li><p><strong>bidirectional</strong> (<em>bool</em>)</p></li>
+<li><p><strong>num_layers</strong> (<em>int</em>)</p></li>
+<li><p><strong>has_proj</strong> (<em>bool</em>)</p></li>
+<li><p><strong>has_bias</strong> (<em>bool</em>)</p></li>
+<li><p><strong>input_quantizers</strong> (<em>list</em><em>[</em><a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><em>TensorQuantizer</em></a><em>]</em>)</p></li>
+<li><p><strong>proj_input_quantizers</strong> (<em>list</em><em>[</em><a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><em>TensorQuantizer</em></a><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>batch_first</strong> (<em>bool</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.VFRNNForward.forward">
+<span class="sig-name descname"><span class="pre">forward</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_forwards</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">flat_weights</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hidden</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dropout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">training</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">batch_sizes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.VFRNNForward.forward" title="Link to this definition"></a></dt>
+<dd><p>This this the core implementation of vf rnn calls.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>layer_forwards</strong> (<em>tuple</em><em>[</em><em>Callable</em><em>]</em>)</p></li>
+<li><p><strong>input</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>flat_weights</strong> (<em>list</em><em>[</em><em>Tensor</em><em>]</em>)</p></li>
+<li><p><strong>hidden</strong> (<em>Tensor</em><em> | </em><em>tuple</em><em>[</em><em>Tensor</em><em>]</em>)</p></li>
+<li><p><strong>dropout</strong> (<em>float</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>training</strong> (<em>bool</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>batch_sizes</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_forward">
+<span class="sig-name descname"><span class="pre">get_quantized_rnn_layer_forward</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">cell</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reverse</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_forward" title="Link to this definition"></a></dt>
+<dd><p>Construct the forward call for different rnn cells.</p>
+<p>Note that batch_sizes is here for keeping a consistent signature with the forward of variable length.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_variable_len_forward">
+<span class="sig-name descname"><span class="pre">get_quantized_rnn_layer_variable_len_forward</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">cell</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_variable_len_forward" title="Link to this definition"></a></dt>
+<dd><p>Construct the forward call for packed sequence.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_variable_len_reverse_forward">
+<span class="sig-name descname"><span class="pre">get_quantized_rnn_layer_variable_len_reverse_forward</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">cell</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.get_quantized_rnn_layer_variable_len_reverse_forward" title="Link to this definition"></a></dt>
+<dd><p>Construct the forward call for packed sequence in the reversed direction.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.lstm_cell_with_proj">
+<span class="sig-name descname"><span class="pre">lstm_cell_with_proj</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hidden</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">weights</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">proj_input_quantizer</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.lstm_cell_with_proj" title="Link to this definition"></a></dt>
+<dd><p>Currently the _VF.lstm_cell doesn’t accept projected inputs. i.e. h_n and c_n must be same shape.</p>
+<p>This implementation is not optimized for cuda compared to _VF.lstm_cell, so we only use it when projection exists.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.quantized_cell_forward">
+<span class="sig-name descname"><span class="pre">quantized_cell_forward</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">cell</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hidden</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weights</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_quantizer</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">proj_input_quantizer</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.quantized_cell_forward" title="Link to this definition"></a></dt>
+<dd><p>Call input quantizer before calling cell.</p>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.quantization.nn.modules.quant_pooling.html" class="btn btn-neutral float-left" title="quant_pooling" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html" class="btn btn-neutral float-right" title="tensor_quantizer" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,329 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>modelopt.onnx.quantization.quantize &mdash; Model Optimizer 0.0.1.dev1+gd5292df7b</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="trt_utils" href="modelopt.onnx.trt_utils.html" />
+    <link rel="prev" title="quant_utils" href="modelopt.onnx.quantization.quant_utils.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.graph_utils.html">graph_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.torch.html">torch</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.onnx.html">onnx</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.onnx.quantization.html">quantization</a></li>
+      <li class="breadcrumb-item active">modelopt.onnx.quantization.quantize</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.onnx.quantization.quantize.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="modelopt-onnx-quantization-quantize">
+<h1>modelopt.onnx.quantization.quantize<a class="headerlink" href="#modelopt-onnx-quantization-quantize" title="Link to this heading"></a></h1>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.quantize">
+<span class="sig-name descname"><span class="pre">quantize</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantize_mode</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'int8'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_data</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_method</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_cache_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_data_reader</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_shapes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_eps</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">['cpu',</span> <span class="pre">'cuda:0',</span> <span class="pre">'trt']</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">override_shapes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_types_to_quantize</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_types_to_exclude</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_types_to_exclude_fp16</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nodes_to_quantize</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nodes_to_exclude</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_external_data_format</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">keep_intermediate_files</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_level</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'INFO'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trt_plugins</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trt_plugins_precision</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">high_precision_dtype</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'fp16'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mha_accumulation_dtype</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'fp16'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">disable_mha_qdq</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dq_only</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_zero_point</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">passes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">['concat_elimination']</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">simplify</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibrate_per_node</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_shapes_profile</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">direct_io_types</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">opset</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_output_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_num_schemes_per_region</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">50</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_pattern_cache_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_state_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_qdq_baseline</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_node_filter_list</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_verbose</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_use_trtexec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_timing_cache</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_warmup_runs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">50</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_timing_runs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">100</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autotune_trtexec_args</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.quantize" title="Link to this definition"></a></dt>
+<dd><p>Quantizes the provided ONNX model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_path</strong> (<em>str</em>) – Path to the input ONNX model.</p></li>
+<li><p><strong>quantize_mode</strong> (<em>str</em>) – Quantization mode. One of ‘int8’ (default), ‘int4’ and ‘fp8’.</p></li>
+<li><p><strong>calibration_data</strong> (<em>ndarray</em><em> | </em><em>dict</em><em>[</em><em>str</em><em>, </em><em>ndarray</em><em>]</em>) – Calibration data, either a numpy array or list/dict of numpy arrays.</p></li>
+<li><p><strong>calibration_method</strong> (<em>str</em><em> | </em><em>None</em>) – Calibration method choices. Options are int8/fp8: {‘entropy’ (default), ‘max’}
+and int4: {‘awq_clip’ (default), ‘awq_lite’, ‘awq_full’, ‘rtn_dq’}.</p></li>
+<li><p><strong>calibration_cache_path</strong> (<em>str</em><em> | </em><em>None</em>) – Path to pre-calculated activation tensor ranges, also known as calibration cache.</p></li>
+<li><p><strong>calibration_data_reader</strong> (<em>CalibrationDataReader</em><em> | </em><em>None</em>) – Instance of a CalibrationDataReader object to provide calibration data.</p></li>
+<li><p><strong>calibration_shapes</strong> (<em>str</em><em> | </em><em>None</em>) – Input shapes used for calibration process.
+It should be provided as a string representing the shape of each input tensors for one calibration step.
+Example input shapes spec: input0:1x3x256x256,input1:1x3x128x128</p></li>
+<li><p><strong>calibration_eps</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – <p>Priority order for the execution providers (EP) to calibrate the model.
+Any subset of [‘NvTensorRtRtx’, ‘trt’, ‘cuda:x’, ‘dml:x’, ‘cpu’], where ‘x’ is the device id.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>If a custom op is detected in the model, ‘trt’ will automatically be added to the EP list.</p>
+</div>
+</p></li>
+<li><p><strong>override_shapes</strong> (<em>str</em><em> | </em><em>None</em>) – Override model input shapes with static shapes.</p></li>
+<li><p><strong>op_types_to_quantize</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List of op types to quantize. If None (default), all supported operators are quantized.
+This flag does not support regular expression.</p></li>
+<li><p><strong>op_types_to_exclude</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List of op types to exclude from quantization. This flag does not support regular expression.</p></li>
+<li><p><strong>op_types_to_exclude_fp16</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List of op types to exclude from FP16 conversion.
+This is only relevant if ‘–high_precision_dtype != fp32’.</p></li>
+<li><p><strong>nodes_to_quantize</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List of node names to quantize. If None (default), all supported nodes are quantized.
+This flag supports regular expression.</p></li>
+<li><p><strong>nodes_to_exclude</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List of node names to exclude from quantization. This flag supports regular expression.</p></li>
+<li><p><strong>use_external_data_format</strong> (<em>bool</em>) – If True, separate data path will be used to store the weights of the quantized model.</p></li>
+<li><p><strong>keep_intermediate_files</strong> (<em>bool</em>) – If True, keep all intermediate files generated during the ONNX model’s conversion/calibration.</p></li>
+<li><p><strong>output_path</strong> (<em>str</em><em> | </em><em>None</em>) – Output filename to save the quantized ONNX model.
+If None, save in the same directory as the original ONNX model with .quant suffix.</p></li>
+<li><p><strong>log_level</strong> (<em>str</em>) – Log level. One of ‘DEBUG’, ‘INFO’, ‘WARNING’, ‘ERROR’.</p></li>
+<li><p><strong>log_file</strong> (<em>str</em><em> | </em><em>None</em>) – Path to the log file for the quantization process.</p></li>
+<li><p><strong>trt_plugins</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – A space-separated list with the custom TensorRT plugin library paths in .so format (compiled shared
+library). If this is not None or the model has custom ops, TensorrtExecutionProvider becomes the first
+choice as calibration execution provider, meaning that the TensorRT is a requirement.</p></li>
+<li><p><strong>trt_plugins_precision</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – A space-separated list indicating the precision for each custom op.
+Each item should have the format &lt;op_type&gt;:&lt;precision&gt;, where precision can be fp32 (default) or fp16.
+For example: op_type_1:fp16 op_type_2:fp32.</p></li>
+<li><p><strong>high_precision_dtype</strong> (<em>str</em>) – High precision data type of the output model. If high_precision_dtype is ‘fp16’ or ‘bf16’
+and the input model is of dtype fp32, model’s weight and activation will be converted to
+‘fp16’ or ‘bf16’.</p></li>
+<li><p><strong>mha_accumulation_dtype</strong> (<em>str</em>) – MHA accumulation dtype. One of [‘fp32’, ‘fp16’]. ‘fp16’ by default. If quantize_mode == ‘fp8’ and
+mha_accumulation_dtype == ‘fp32’, Cast nodes will be added to MHA’s bmm1 and bmm2’s input
+and output tensors.</p></li>
+<li><p><strong>disable_mha_qdq</strong> (<em>bool</em>) – Don’t add Q/DQ layers to MatMuls in MHA pattern.</p></li>
+<li><p><strong>dq_only</strong> (<em>bool</em>) – If True, only add DQ nodes to the model. If False (default), add Q/DQ nodes to the model.</p></li>
+<li><p><strong>block_size</strong> (<em>int</em><em> | </em><em>None</em>) – Block size parameter for int4 quantization.</p></li>
+<li><p><strong>use_zero_point</strong> (<em>bool</em>) – Use zero-point based quantization, if True.</p></li>
+<li><p><strong>passes</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – List of optimization passes name, if set, appropriate pre/post-processing passes will be invoked.</p></li>
+<li><p><strong>simplify</strong> (<em>bool</em>) – Simplify the given model before quantization.</p></li>
+<li><p><strong>calibrate_per_node</strong> (<em>bool</em>) – Calibrate the model node by node instead of calibrating the entire model. This allows calibration with
+a lower system memory with the cost of longer calibration time.</p></li>
+<li><p><strong>input_shapes_profile</strong> (<em>Sequence</em><em>[</em><em>dict</em><em>[</em><em>str</em><em>, </em><em>str</em><em>]</em><em>] </em><em>| </em><em>None</em>) – <p>This is a sequence of shapes-profile for each EP in calibration_eps. Some EPs like NvTensorRtRtx use these
+shapes profile for optimized engine generation for those input shapes. Length of this parameters should
+equal length of calibration_eps (i.e. one profile data per EP in calibration_eps, in that order).
+A shapes-profile comprises of “min”, “max”, and “opt” values for the shapes of model inputs
+(esp. dynamic shapes). Consider following example snippets for shape-profile data-format of some EPs.</p>
+<blockquote>
+<div><dl>
+<dt>input_shape_profile_for_NvTensorRtrRtx_EP = {</dt><dd><p>“nv_profile_min_shapes”:  “input1:dim1xdim2…,input2:dim1xdim2…,…”,</p>
+<p>”nv_profile_max_shapes”:  “input1:dim1xdim2…,input2:dim1xdim2…,…”,</p>
+<p>”nv_profile_opt_shapes”:  “input1:dim1xdim2…,input2:dim1xdim2…,…”,</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>input_shape_profile_for_TensorRT_EP = {</dt><dd><p>“trt_profile_min_shapes”:  “input1:dim1xdim2…,input2:dim1xdim2…,…”,</p>
+<p>”trt_profile_max_shapes”:  “input1:dim1xdim2…,input2:dim1xdim2…,…”,</p>
+<p>”trt_profile_opt_shapes”:  “input1:dim1xdim2…,input2:dim1xdim2…,…”,</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>For EPs that don’t require such shapes profile (e.g. CPU EP, CUDA EP, DML EP), empty profile {} can be used.
+For example, if calibration_eps are [“NvTensorRtRtx”, “cpu”], then input_shapes_profile can be set to:</p>
+<ul>
+<li><p>[input_shapes_profile_for_NvTensorRtRtx_EP, {}]</p></li>
+</ul>
+<p>If None of the calibration_eps require any such shapes profile for model inputs, then nothing needs to be
+set for this “input_shapes_profile” parameter.
+Default value is None.</p>
+</p></li>
+<li><p><strong>direct_io_types</strong> (<em>bool</em>) – If True, modify the I/O types in the quantized ONNX model to be lower precision whenever possible.
+If False, keep the I/O types in the quantized ONNX model the same as in the given ONNX model.</p></li>
+<li><p><strong>opset</strong> (<em>int</em><em> | </em><em>None</em>) – Target ONNX opset version for the quantized model. If None, uses required minimum opset
+(19 for int8/fp8, 21 for int4, 23 for nvfp4). If the specified opset is lower than the required minimum,
+a warning will be issued and the opset will be upgraded to the required minimum.</p></li>
+<li><p><strong>autotune</strong> (<em>bool</em>) – If True, detect optimal Q/DQ node placements according to the TensorRT version and platform available.
+If False, use the default pattern-based quantization approach.</p></li>
+<li><p><strong>autotune_output_dir</strong> (<em>str</em><em> | </em><em>None</em>) – Output directory for autotune results (state file, logs). Default: temp directory.</p></li>
+<li><p><strong>autotune_num_schemes_per_region</strong> (<em>int</em>) – Number of Q/DQ schemes to test per region.</p></li>
+<li><p><strong>autotune_pattern_cache_file</strong> (<em>str</em><em> | </em><em>None</em>) – Path to pattern cache YAML for warm-start.</p></li>
+<li><p><strong>autotune_qdq_baseline</strong> (<em>str</em><em> | </em><em>None</em>) – Path to a pre-quantized ONNX model to import Q/DQ patterns as warm-start.</p></li>
+<li><p><strong>autotune_state_file</strong> (<em>str</em><em> | </em><em>None</em>) – State file path for crash recovery and resume capability (default: &lt;output_dir&gt;/autotuner_state.yaml).</p></li>
+<li><p><strong>autotune_node_filter_list</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – Path to a file containing wildcard patterns to filter ONNX nodes (one pattern per line). Regions without
+any matching nodes are skipped during autotuning.</p></li>
+<li><p><strong>autotune_verbose</strong> (<em>bool</em>) – Enable verbose logging in the autotuner.</p></li>
+<li><p><strong>autotune_use_trtexec</strong> (<em>bool</em>) – Use trtexec for benchmarking instead of the TensorRT Python API.</p></li>
+<li><p><strong>autotune_timing_cache</strong> (<em>str</em><em> | </em><em>None</em>) – TensorRT timing cache file for faster engine builds.</p></li>
+<li><p><strong>autotune_warmup_runs</strong> (<em>int</em>) – Number of warmup runs before timing.</p></li>
+<li><p><strong>autotune_timing_runs</strong> (<em>int</em>) – Number of timed runs for latency measurement.</p></li>
+<li><p><strong>autotune_trtexec_args</strong> (<em>str</em><em> | </em><em>None</em>) – Additional trtexec arguments as a single quoted string.
+Example: –autotune_trtexec_args ‘–fp16 –workspace=4096’</p></li>
+<li><p><strong>kwargs</strong> (<em>Any</em>) – Additional keyword arguments for int4 quantization, including:
+- awqlite_alpha_step (float): Alpha step for lite, range [0, 1].
+- awqclip_alpha_step (float): Min alpha step for clip, range [awqclip_alpha_step, 1].
+- awqclip_alpha_min (float): Alpha step to find best alpha for clip.
+- awqclip_bsz_col (int): Batch size for processing the column dimension in clip.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>None, writes the quantized onnx model in the supplied output_path
+or writes to the same directory with filename like “&lt;model_name&gt;.quant.onnx”.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.onnx.quantization.quant_utils.html" class="btn btn-neutral float-left" title="quant_utils" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.onnx.trt_utils.html" class="btn btn-neutral float-right" title="trt_utils" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

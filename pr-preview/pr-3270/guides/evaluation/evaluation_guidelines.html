@@ -1,0 +1,1106 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="green" data-content_root="../../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Guidelines for Evaluating Models Optimized with NVIDIA Model Optimizer - Model Optimizer 0.0.1.dev1+g4d199861b</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="Reproducibility notes" href="reproducibility/index.html" /><link rel="prev" title="Evaluation" href="index.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../../_static/shibuya.css?v=2ceb65ce" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+    <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+    <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+    <link media="print" rel="stylesheet" type="text/css" href="../../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=948f803c" />
+    <link rel="stylesheet" type="text/css" href="../../_static/announcements.css?v=7f656fee" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Guidelines for Evaluating Models Optimized with NVIDIA Model Optimizer"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../../index.html">
+      
+      
+      <strong>Model Optimizer</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials"></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="1"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_windows_arm64.html">Install ModelOpt on Windows on Arm</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../quantization_aware_training_and_distillation.html">Quick Start: QAT and QAD</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1 _expand"><a class="reference internal" href="../0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../1_quantization.html">Quantization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_distributed_loading.html">Loading Hugging Face models across ranks</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../quantization_aware_training_and_distillation.html">Quantization-Aware Training and Distillation</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Evaluation</a><ul class="current">
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Evaluation guidelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="reproducibility/index.html">Reproducibility notes</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../3_pruning.html">Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../4_distillation.html">Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../7_nas.html">NAS</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../9_autotune.html">Autotune (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../11_config_system.html">ModelOpt Config System</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../reference/1_modelopt_api.html">modelopt API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../reference/generated/modelopt.deploy.html">deploy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.deploy.llm.html">llm</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.deploy.llm.generate.html">generate</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../reference/generated/modelopt.env.html">env</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../reference/generated/modelopt.onnx.html">onnx</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.onnx.autocast.html">autocast</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.autocast.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.autocast.graphsanitizer.html">graphsanitizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.autocast.logging_config.html">logging_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.autocast.nodeclassifier.html">nodeclassifier</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.autocast.precisionconverter.html">precisionconverter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.autocast.referencerunner.html">referencerunner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.autocast.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.onnx.llm_export_utils.html">llm_export_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.llm_export_utils.export_utils.html">export_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.llm_export_utils.quantization_utils.html">quantization_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.llm_export_utils.surgeon_utils.html">surgeon_utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.graph_indexing.html">graph_indexing</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.graph_rewrites.html">graph_rewrites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.graph_selection.html">graph_selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.ort_calibration.html">ort_calibration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.ort_calibration_per_node.html">ort_calibration_per_node</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.ort_patches.html">ort_patches</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.ort_quantization.html">ort_quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.ort_session.html">ort_session</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.qdq_graph.html">qdq_graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../reference/generated/modelopt.torch.html">torch</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.distill.html">distill</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.distill.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.distill.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.distill.distillation_model.html">distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.distill.layerwise_distillation_model.html">layerwise_distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.distill.loss_balancers.html">loss_balancers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.distill.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.distill.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.distill.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.distill.registry.html">registry</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.html">export</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.distributed_writer.html">distributed_writer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.layerwise_export.html">layerwise_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.quant_format.html">quant_format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.trtllm.html">trtllm</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.html">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.discriminators.html">discriminators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.ema.html">ema</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.factory.html">factory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.loader.html">loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.methods.html">methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.pipeline.html">pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.fastgen.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.kernels.html">kernels</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.kernels.common.html">common</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.kernels.quantization.html">quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.kernels.sparsity.html">sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.models.html">models</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.html">nas</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.nas.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.opt.html">opt</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.opt.config_loader.html">config_loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.peft.html">peft</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.peft.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.peft.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.peft.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.peft.custom.html">custom</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.peft.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.peft.mode.html">mode</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.prune.html">prune</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.html">puzzletron</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.build_library_and_stats.html">build_library_and_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.entrypoint.html">entrypoint</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.puzzletron_nas_plugin.html">puzzletron_nas_plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.sewing_kit.html">sewing_kit</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.ggml.html">ggml</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.kv_cache_auto_quant.html">kv_cache_auto_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.linear_attention.html">linear_attention</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.sparsity.html">sparsity</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.sparsity.attention_sparsity.html">attention_sparsity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.sparsity.sparsification.html">sparsification</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.sparsity.weight_sparsity.html">weight_sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.speculative.html">speculative</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.speculative.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.speculative.dflash.html">dflash</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.speculative.external.html">external</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.speculative.medusa.html">medusa</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.speculative.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.speculative.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.speculative.speculative_decoding.html">speculative_decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.speculative.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.trace.html">trace</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.trace.analyzer.html">analyzer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.trace.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.trace.symbols.html">symbols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.trace.tracer.html">tracer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.html">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.dataset_utils.html">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.fsdp2_utils.html">fsdp2_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.moe.html">moe</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../reference/generated/modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#introduction">Introduction</a></li>
+<li><a class="reference internal" href="#what-should-you-measure-and-how">What should you measure, and how?</a><ul>
+<li><a class="reference internal" href="#show-where-the-model-improves-or-worsens">Show where the model improves or worsens</a></li>
+<li><a class="reference internal" href="#check-for-regressions">Check for regressions</a></li>
+<li><a class="reference internal" href="#assess-model-reliability">Assess model reliability</a><ul>
+<li><a class="reference internal" href="#doomed-reasoning-loops">Doomed reasoning loops</a></li>
+<li><a class="reference internal" href="#missing-final-answers">Missing final answers</a></li>
+<li><a class="reference internal" href="#abstention">Abstention</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#measure-inference-efficiency">Measure inference efficiency</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#how-can-you-evaluate-faster">How can you evaluate faster?</a><ul>
+<li><a class="reference internal" href="#choose-between-question-level-and-repetition-level-analysis">Choose between question-level and repetition-level analysis</a></li>
+<li><a class="reference internal" href="#collect-as-much-evaluation-data-as-you-need">Collect as much evaluation data as you need</a></li>
+<li><a class="reference internal" href="#test-known-weaknesses-on-a-focused-subset">Test known weaknesses on a focused subset</a></li>
+</ul>
+</li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../../index.html"><span itemprop="name">Model Optimizer</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="index.html"><span itemprop="name">Evaluation</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="2" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Guidelines for Evaluating Models Optimized with NVIDIA Model Optimizer</strong>
+        <meta itemprop="position" content="3" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue dark-code" role="main">
+          <section id="guidelines-for-evaluating-models-optimized-with-nvidia-model-optimizer">
+<h1>Guidelines for Evaluating Models Optimized with NVIDIA Model Optimizer<a class="headerlink" href="#guidelines-for-evaluating-models-optimized-with-nvidia-model-optimizer" title="Link to this heading">#</a></h1>
+<nav class="contents local" id="contents">
+<p class="topic-title">Contents</p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#introduction" id="id1">Introduction</a></p></li>
+<li><p><a class="reference internal" href="#what-should-you-measure-and-how" id="id2">What should you measure, and how?</a></p>
+<ul>
+<li><p><a class="reference internal" href="#show-where-the-model-improves-or-worsens" id="id3">Show where the model improves or worsens</a></p></li>
+<li><p><a class="reference internal" href="#check-for-regressions" id="id4">Check for regressions</a></p></li>
+<li><p><a class="reference internal" href="#assess-model-reliability" id="id5">Assess model reliability</a></p></li>
+<li><p><a class="reference internal" href="#measure-inference-efficiency" id="id6">Measure inference efficiency</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#how-can-you-evaluate-faster" id="id7">How can you evaluate faster?</a></p>
+<ul>
+<li><p><a class="reference internal" href="#choose-between-question-level-and-repetition-level-analysis" id="id8">Choose between question-level and repetition-level analysis</a></p></li>
+<li><p><a class="reference internal" href="#collect-as-much-evaluation-data-as-you-need" id="id9">Collect as much evaluation data as you need</a></p></li>
+<li><p><a class="reference internal" href="#test-known-weaknesses-on-a-focused-subset" id="id10">Test known weaknesses on a focused subset</a></p></li>
+</ul>
+</li>
+</ul>
+</nav>
+<section id="introduction">
+<h2><a class="toc-backref" href="#id1" role="doc-backlink">Introduction</a><a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
+<p>When you optimize a reasoning model with NVIDIA Model Optimizer, how do you verify improvements
+without overlooking regressions? Average accuracy can hide doomed reasoning loops (repetitive
+reasoning that continues until the output-token limit is reached), missing answers, inappropriate
+guessing, or excessive output length.</p>
+<p>You may assume that reliable evaluation requires many repetitions. But could repeating by default
+waste time? How many questions and repetitions do you need to measure improvements and rule out
+regressions?</p>
+<p>This guide helps you evaluate models quickly and reliably during optimization experiments.</p>
+<p>For standardized evaluation and acceptance checks before releasing optimized models, follow the
+<a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/main/plugins/modelopt/skills/evaluation/SKILL.md" rel="noopener noreferrer" target="_blank">ModelOpt evaluation
+skill</a>
+and <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/main/plugins/modelopt/skills/compare-results/SKILL.md" rel="noopener noreferrer" target="_blank">ModelOpt results-comparison
+skill</a>.
+For benchmark commands, see the <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/llm_eval/README.md" rel="noopener noreferrer" target="_blank">LLM evaluation
+examples</a>.</p>
+<p><strong>What should you measure, and how?</strong></p>
+<ul class="simple">
+<li><p><strong>Show where the model improves or worsens:</strong> use paired statistical tests to distinguish model
+differences from evaluation noise.</p></li>
+<li><p><strong>Check for regressions:</strong> use confidence intervals and non-inferiority tests to rule out
+unacceptable regression, even if the baseline is not shown to be better.</p></li>
+<li><p><strong>Assess model reliability:</strong> measure doomed reasoning loops, missing answers, and whether the
+model abstains appropriately.</p></li>
+<li><p><strong>Measure inference efficiency:</strong> compare output length, including reasoning tokens.</p></li>
+</ul>
+<p><strong>How can you evaluate faster?</strong></p>
+<ul class="simple">
+<li><p><strong>Choose between question-level and repetition-level analysis:</strong> match the approach to your goal
+and evaluation budget.</p></li>
+<li><p><strong>Collect as much evaluation data as you need:</strong> use pilot results to choose enough questions or
+repetitions to assess regression.</p></li>
+<li><p><strong>Test known weaknesses on a focused subset:</strong> failure-prone questions can reveal targeted
+improvements with fewer responses; check broader performance separately.</p></li>
+</ul>
+</section>
+<section id="what-should-you-measure-and-how">
+<h2><a class="toc-backref" href="#id2" role="doc-backlink">What should you measure, and how?</a><a class="headerlink" href="#what-should-you-measure-and-how" title="Link to this heading">#</a></h2>
+<p>We compare two NVFP4 Qwen3.6-35B-A3B checkpoints. Baseline underwent <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md" rel="noopener noreferrer" target="_blank">post-training quantization
+(PTQ) and quantization-aware distillation
+(QAD)</a>,
+preserving accuracy but increasing doomed reasoning loops. Candidate was trained directly from
+Baseline using Kahneman–Tversky Optimization (KTO), which learns from desirable and undesirable
+responses, aiming to reduce those loops while preserving accuracy. We use MMLU-Pro, SciCode and
+AA-Omniscience to illustrate these evaluation guidelines. See the <a class="reference internal" href="reproducibility/index.html"><span class="doc">reproducibility notes</span></a>.</p>
+<p>Prefer Candidate if it improves at least one metric and meets your non-inferiority criteria for the
+others. Regressions highlight areas to improve.</p>
+<section id="show-where-the-model-improves-or-worsens">
+<h3><a class="toc-backref" href="#id3" role="doc-backlink">Show where the model improves or worsens</a><a class="headerlink" href="#show-where-the-model-improves-or-worsens" title="Link to this heading">#</a></h3>
+<p>We first average each model’s correctness across repetitions of each question, then compute
+<strong>Candidate − Baseline</strong> for each question. We calculate t-based 95% confidence intervals across
+these paired question-level differences. Changes are reported in percentage points (pp), not
+relative percentages. For simplicity, this example treats questions and SciCode subtasks as
+independent.</p>
+<p>Our primary question is whether Candidate is better than Baseline. A one-sided paired t-test can
+detect improvement with less data than a two-sided test for any difference. “Yes” marks p &lt; 0.05;
+“no evidence” means improvement was not established. Reverse-direction p-values are reported for
+context.</p>
+<p>Choose test directions before inspecting results. We use p &lt; 0.05 for each test, without a stricter
+threshold for testing multiple metrics. Testing more metrics gives noise more opportunities to
+appear as an improvement.</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Benchmark</p></th>
+<th class="head"><p>Baseline</p></th>
+<th class="head"><p>Candidate</p></th>
+<th class="head"><p>Difference [95%
+CI], pp</p></th>
+<th class="head"><p>Candidate
+higher, p-value</p></th>
+<th class="head"><p>Baseline higher,
+p-value
+(context)</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>MMLU-Pro</p></td>
+<td><p>84.51%</p></td>
+<td><p>84.26%</p></td>
+<td><p>−0.26 [−0.61,
++0.10]</p></td>
+<td><p>0.920 — no
+evidence</p></td>
+<td><p>0.080</p></td>
+</tr>
+<tr class="row-odd"><td><p>SciCode</p></td>
+<td><p>43.52%</p></td>
+<td><p>44.90%</p></td>
+<td><p>+1.38 [+0.08,
++2.67]</p></td>
+<td><p>0.019 — yes</p></td>
+<td><p>0.981</p></td>
+</tr>
+<tr class="row-even"><td><p>AA-Omniscience</p></td>
+<td><p>21.80%</p></td>
+<td><p>21.92%</p></td>
+<td><p>+0.12 [−0.64,
++0.88]</p></td>
+<td><p>0.381 — no
+evidence</p></td>
+<td><p>0.619</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>On SciCode, the candidate is more accurate than the baseline (+1.38 pp; p = 0.019).</p>
+</section>
+<section id="check-for-regressions">
+<h3><a class="toc-backref" href="#id4" role="doc-backlink">Check for regressions</a><a class="headerlink" href="#check-for-regressions" title="Link to this heading">#</a></h3>
+<p>No evidence of a difference does not establish no regression. Choose an acceptable accuracy-loss
+margin, then use a non-inferiority test to assess whether the loss is smaller. The checks below use
+one-sided paired t-tests.</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Rule out an accuracy loss of</p></th>
+<th class="head"><p>MMLU-Pro p-value</p></th>
+<th class="head"><p>SciCode p-value</p></th>
+<th class="head"><p>AA-Omniscience p-value</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>2.0 pp</p></td>
+<td><p>&lt;0.001 — yes</p></td>
+<td><p>&lt;0.001 — yes</p></td>
+<td><p>&lt;0.001 — yes</p></td>
+</tr>
+<tr class="row-odd"><td><p>1.0 pp</p></td>
+<td><p>&lt;0.001 — yes</p></td>
+<td><p>&lt;0.001 — yes</p></td>
+<td><p>0.002 — yes</p></td>
+</tr>
+<tr class="row-even"><td><p>0.5 pp</p></td>
+<td><p>0.088 — no evidence</p></td>
+<td><p>0.002 — yes</p></td>
+<td><p>0.056 — no evidence</p></td>
+</tr>
+<tr class="row-odd"><td><p>0.1 pp</p></td>
+<td><p>0.804 — no evidence</p></td>
+<td><p>0.013 — yes</p></td>
+<td><p>0.288 — no evidence</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="assess-model-reliability">
+<h3><a class="toc-backref" href="#id5" role="doc-backlink">Assess model reliability</a><a class="headerlink" href="#assess-model-reliability" title="Link to this heading">#</a></h3>
+<p>Average accuracy alone does not show whether a model behaves reliably: also measure doomed reasoning
+loops, missing answers, and whether it abstains when appropriate.</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Measure</p></th>
+<th class="head"><p>Recommendation</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Doomed reasoning loops</p></td>
+<td><p>Use cap-hit rates to screen for potential loops, then inspect the text to
+confirm repetition. A cap hit reaches the configured response-token limit
+(131,072 here).</p></td>
+</tr>
+<tr class="row-odd"><td><p>Missing final answers</p></td>
+<td><p>Report how often responses contain no final answer.</p></td>
+</tr>
+<tr class="row-even"><td><p>Abstention</p></td>
+<td><p>Report intentional abstentions separately from incorrect or missing
+answers;
+<a class="reference external" href="https://artificialanalysis.ai/evaluations/omniscience" rel="noopener noreferrer" target="_blank">AA-Omniscience</a>
+is an example benchmark.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Rare failures can make t-based approximations unreliable, so we use paired-bootstrap 95% confidence
+intervals and one-sided paired permutation tests for the rates below.</p>
+<section id="doomed-reasoning-loops">
+<h4>Doomed reasoning loops<a class="headerlink" href="#doomed-reasoning-loops" title="Link to this heading">#</a></h4>
+<p>The candidate has fewer cap hits on both SciCode and AA-Omniscience (p &lt; 0.001).</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Benchmark</p></th>
+<th class="head"><p>Baseline cap
+rate</p></th>
+<th class="head"><p>Candidate cap
+rate</p></th>
+<th class="head"><p>Difference
+[95% CI], pp</p></th>
+<th class="head"><p>Candidate
+lower,
+p-value</p></th>
+<th class="head"><p>Candidate
+higher,
+p-value
+(context)</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>MMLU-Pro</p></td>
+<td><p>0.05%
+(10/20,000)</p></td>
+<td><p>0.03%
+(6/20,000)</p></td>
+<td><p>−0.02 [−0.07,
++0.02]</p></td>
+<td><p>0.244 — no
+evidence</p></td>
+<td><p>0.878</p></td>
+</tr>
+<tr class="row-odd"><td><p>SciCode</p></td>
+<td><p>1.29%
+(76/5,880)</p></td>
+<td><p>0.00%
+(0/5,880)</p></td>
+<td><p>−1.29 [−1.70,
+−0.92]</p></td>
+<td><p>&lt;0.001 — yes</p></td>
+<td><p>1.000</p></td>
+</tr>
+<tr class="row-even"><td><p>AA-Omniscience</p></td>
+<td><p>1.77%
+(106/6,000)</p></td>
+<td><p>0.85%
+(51/6,000)</p></td>
+<td><p>−0.92 [−1.38,
+−0.48]</p></td>
+<td><p>&lt;0.001 — yes</p></td>
+<td><p>1.000</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="missing-final-answers">
+<h4>Missing final answers<a class="headerlink" href="#missing-final-answers" title="Link to this heading">#</a></h4>
+<p>The candidate also reduced missing final answers on SciCode and AA-Omniscience (p &lt; 0.001).</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Benchmark</p></th>
+<th class="head"><p>Baseline</p></th>
+<th class="head"><p>Candidate</p></th>
+<th class="head"><p>Difference
+[95% CI], pp</p></th>
+<th class="head"><p>Candidate
+lower,
+p-value</p></th>
+<th class="head"><p>Candidate
+higher,
+p-value
+(context)</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>MMLU-Pro</p></td>
+<td><p>0.05%
+(10/20,000)</p></td>
+<td><p>0.03%
+(6/20,000)</p></td>
+<td><p>−0.02 [−0.07,
++0.02]</p></td>
+<td><p>0.244 — no
+evidence</p></td>
+<td><p>0.878</p></td>
+</tr>
+<tr class="row-odd"><td><p>SciCode</p></td>
+<td><p>1.31%
+(77/5,880)</p></td>
+<td><p>0.00%
+(0/5,880)</p></td>
+<td><p>−1.31 [−1.72,
+−0.94]</p></td>
+<td><p>&lt;0.001 — yes</p></td>
+<td><p>1.000</p></td>
+</tr>
+<tr class="row-even"><td><p>AA-Omniscience</p></td>
+<td><p>1.77%
+(106/6,000)</p></td>
+<td><p>0.85%
+(51/6,000)</p></td>
+<td><p>−0.92 [−1.38,
+−0.48]</p></td>
+<td><p>&lt;0.001 — yes</p></td>
+<td><p>1.000</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="abstention">
+<h4>Abstention<a class="headerlink" href="#abstention" title="Link to this heading">#</a></h4>
+<p><a class="reference external" href="https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public" rel="noopener noreferrer" target="_blank">AA-Omniscience public
+v1</a> distinguishes
+abstention from incorrect guessing. The Codex assistant graded responses against reference answers,
+blinded to checkpoint identity. The reported configuration was GPT-6.1 Sol (xhigh); a pinned judge
+snapshot was not independently verified. Deliberate abstentions exclude empty answers and uncertain
+guesses.</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Measure</p></th>
+<th class="head"><p>Baseline</p></th>
+<th class="head"><p>Candidate</p></th>
+<th class="head"><p>Difference
+[95% CI], pp</p></th>
+<th class="head"><p>Candidate
+higher,
+p-value</p></th>
+<th class="head"><p>Candidate
+lower,
+p-value
+(context)</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Deliberate
+abstention</p></td>
+<td><p>13.30%
+(798/6,000)</p></td>
+<td><p>14.55%
+(873/6,000)</p></td>
+<td><p>+1.25 [+0.23,
++2.27]</p></td>
+<td><p>0.009 — yes</p></td>
+<td><p>0.993</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Measure</p></th>
+<th class="head"><p>Baseline</p></th>
+<th class="head"><p>Candidate</p></th>
+<th class="head"><p>Difference
+[95% CI], pp</p></th>
+<th class="head"><p>Candidate
+lower,
+p-value</p></th>
+<th class="head"><p>Candidate
+higher,
+p-value
+(context)</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Incorrect
+answers</p></td>
+<td><p>62.03%
+(3,722/6,000)</p></td>
+<td><p>61.72%
+(3,703/6,000)</p></td>
+<td><p>−0.32 [−1.57,
++0.97]</p></td>
+<td><p>0.322 — no
+evidence</p></td>
+<td><p>0.696</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The candidate abstained more often (p = 0.009), with no evidence of fewer incorrect answers (p =
+0.322).</p>
+</section>
+</section>
+<section id="measure-inference-efficiency">
+<h3><a class="toc-backref" href="#id6" role="doc-backlink">Measure inference efficiency</a><a class="headerlink" href="#measure-inference-efficiency" title="Link to this heading">#</a></h3>
+<p>Compare mean and median completion tokens, including reasoning, to assess how much generation each
+answer requires.</p>
+<p>For mean length, we use the same question-level paired t-tests and t-based 95% confidence intervals
+as accuracy.</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Benchmark</p></th>
+<th class="head"><p>Baseline:
+mean /
+median</p></th>
+<th class="head"><p>Candidate:
+mean /
+median</p></th>
+<th class="head"><p>Change:
+mean /
+median, %</p></th>
+<th class="head"><p>Mean change
+[95% CI],
+tokens</p></th>
+<th class="head"><p>Candidate
+shorter,
+p-value</p></th>
+<th class="head"><p>Candidate
+longer,
+p-value
+(context)</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>MMLU-Pro</p></td>
+<td><p>2,803 /
+2,157</p></td>
+<td><p>2,759 /
+2,145</p></td>
+<td><p>−1.6% /
+−0.6%</p></td>
+<td><p>−44 [−99,
++11]</p></td>
+<td><p>0.057 — no
+evidence</p></td>
+<td><p>0.943</p></td>
+</tr>
+<tr class="row-odd"><td><p>SciCode</p></td>
+<td><p>6,188 /
+3,205</p></td>
+<td><p>3,048 /
+1,802</p></td>
+<td><p>−50.7% /
+−43.8%</p></td>
+<td><p>−3,140
+[−3,666,
+−2,614]</p></td>
+<td><p>&lt;0.001 —
+yes</p></td>
+<td><p>1.000</p></td>
+</tr>
+<tr class="row-even"><td><p>AA-Omniscience</p></td>
+<td><p>4,280 /
+1,756</p></td>
+<td><p>3,097 /
+1,705</p></td>
+<td><p>−27.6% /
+−2.9%</p></td>
+<td><p>−1,183
+[−1,764,
+−602]</p></td>
+<td><p>&lt;0.001 —
+yes</p></td>
+<td><p>1.000</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The candidate uses fewer tokens on average on SciCode and AA-Omniscience (p &lt; 0.001).</p>
+</section>
+</section>
+<section id="how-can-you-evaluate-faster">
+<h2><a class="toc-backref" href="#id7" role="doc-backlink">How can you evaluate faster?</a><a class="headerlink" href="#how-can-you-evaluate-faster" title="Link to this heading">#</a></h2>
+<p>When reducing question coverage, choose a representative subset before inspecting results and use
+the same question IDs for both models. See <a class="reference internal" href="reproducibility/index.html#evaluation-data-preparation"><span class="std std-ref">Data preparation</span></a>
+for how we selected the benchmark questions.</p>
+<section id="choose-between-question-level-and-repetition-level-analysis">
+<span id="evaluation-choose-questions-and-repetitions"></span><span id="evaluation-prioritize-question-coverage"></span><h3><a class="toc-backref" href="#id8" role="doc-backlink">Choose between question-level and repetition-level analysis</a><a class="headerlink" href="#choose-between-question-level-and-repetition-level-analysis" title="Link to this heading">#</a></h3>
+<p>Both approaches are valid. Choose based on your goal and the balance between precision and
+evaluation speed:</p>
+<ul class="simple">
+<li><p><strong>Estimate accuracy on a fixed benchmark.</strong> Treat its question set as a black box: compute one average
+score per complete run, then estimate uncertainty across independent runs. Multiple complete
+passes can be expensive.</p></li>
+<li><p><strong>Get accurate results quickly for the domain represented by a benchmark.</strong> Use representative questions:
+compute an average score per question across repetitions, then estimate uncertainty across
+questions. With sufficiently independent questions, this approach can support faster experimentation.</p></li>
+</ul>
+<p>Is question-level analysis reliable on real benchmarks compared with repetition-level analysis?
+We compare the two approaches by spending the same response budget on more unique questions or
+more repetitions per question, then measuring how much the resulting scores vary. Each allocation
+produces 20 observed scores, using 1,000
+responses per model for MMLU-Pro and 280 for SciCode. In the plots below, solid lines show means;
+shading shows ±1 observed standard deviation (SD). Means stay fixed because every allocation
+uses the same saved response pool: 1,000 questions × 20 repetitions for MMLU-Pro (20,000 responses
+per model) and 280 subtasks × 20 repetitions for SciCode (5,600 responses per model).
+Lower observed SD means more consistent score estimates across these groups for the same response budget.</p>
+<figure class="align-default">
+<a class="reference internal image-reference" href="../../_images/budget-allocation-accuracy.svg"><img alt="Candidate mean accuracy with plus or minus one observed standard deviation. At fixed response budgets, using more unique questions gives less spread for MMLU-Pro and SciCode." src="../../_images/budget-allocation-accuracy.svg" style="width: 720px;" />
+</a>
+</figure>
+<p>For both MMLU-Pro and SciCode, greater question coverage gives more reliable Candidate accuracy
+estimates, with lower observed SD.
+Along the x-axis, more repetitions mean fewer unique questions or subtasks within the same
+response budget.</p>
+<p>Comparing Candidate and Baseline on the same questions can reduce variation caused by question
+difficulty. MMLU-Pro’s accuracy difference has slightly less
+observed spread with more repetitions; SciCode’s accuracy and cap-hit-rate differences have less
+spread with more subtask coverage. Check the metric you intend to use for the comparison.</p>
+<figure class="align-default">
+<a class="reference internal image-reference" href="../../_images/budget-allocation-differences.svg"><img alt="Mean Candidate minus Baseline differences with plus or minus one observed standard deviation. More repetitions slightly reduce spread for MMLU-Pro accuracy differences, while more subtask coverage gives less spread for SciCode accuracy and cap-hit-rate differences." src="../../_images/budget-allocation-differences.svg" style="width: 720px;" />
+</a>
+</figure>
+<p>The useful budget allocation can differ for absolute scores and paired model differences.</p>
+<p>Future benchmarks could make experimentation faster by providing representative, approximately
+independent questions sampled from their intended domain, and documenting dependencies between
+related tasks.</p>
+</section>
+<section id="collect-as-much-evaluation-data-as-you-need">
+<span id="evaluation-collect-data"></span><h3><a class="toc-backref" href="#id9" role="doc-backlink">Collect as much evaluation data as you need</a><a class="headerlink" href="#collect-as-much-evaluation-data-as-you-need" title="Link to this heading">#</a></h3>
+<p>You may not need the full evaluation budget to detect an improvement or rule out an unacceptable
+regression. The data needed depends on the model pair, metric, acceptable regression margin, and
+statistical target.</p>
+<p><strong>How many responses show fewer cap hits on SciCode?</strong></p>
+<p>We first compare random subsets of 10–294 subtasks with one repetition, then add repetitions on all
+294 subtasks. Among the tested sizes, the p-value first fell below 0.05 at 588 responses, and below
+0.001 at 882 per model. The full 5,880 responses were unnecessary to establish evidence of fewer
+candidate cap hits at those thresholds.</p>
+<a class="reference internal image-reference" href="../../_images/scicode-cap-data-volume.svg"><img alt="SciCode cap-hit rate evidence excluding the 44 recovery-training subtasks: blue points increase coverage from ten to 294 subtasks with one repetition; green points add repetitions on all 294 subtasks, reaching 5,880 responses per model. Subsets of ten to 150 subtasks observe no cap hits and have no informative bootstrap interval. The lower panel shows permutation p-values." src="../../_images/scicode-cap-data-volume.svg" style="width: 640px;" />
+</a>
+<p><strong>How many responses rule out a 1 pp accuracy loss on MMLU-Pro?</strong></p>
+<p>We first compare subsets of 50–1,000 questions with one repetition, keeping approximately the same
+subject proportions, then add repetitions on all 1,000 questions. To rule out a 1 pp accuracy loss,
+the non-inferiority test first reached p &lt; 0.05 with one repetition on 750 questions. It first reached
+p &lt; 0.01 at 3,000 responses and p &lt; 0.001 at 12,000 per model among the tested sizes.</p>
+<a class="reference internal image-reference" href="../../_images/mmlu-accuracy-data-volume.svg"><img alt="MMLU-Pro paired accuracy differences with t-based 95% confidence intervals. Blue points increase question coverage from 50 to 1,000 with one evaluation each; green points add repetitions on all 1,000 questions up to 20,000 responses per model. The lower panel shows one-sided non-inferiority p-values for a loss below 1 pp, with a dashed line at p = 0.05." src="../../_images/mmlu-accuracy-data-volume.svg" style="width: 640px;" />
+</a>
+</section>
+<section id="test-known-weaknesses-on-a-focused-subset">
+<h3><a class="toc-backref" href="#id10" role="doc-backlink">Test known weaknesses on a focused subset</a><a class="headerlink" href="#test-known-weaknesses-on-a-focused-subset" title="Link to this heading">#</a></h3>
+<p>Freeze a subset from earlier baseline failures to screen for targeted improvements. We report the 11
+held-out subtasks, with ten matched repetitions—110 responses per model.</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Benchmark</p></th>
+<th class="head"><p>Baseline cap
+rate</p></th>
+<th class="head"><p>Candidate cap
+rate</p></th>
+<th class="head"><p>Difference
+[95% CI], pp</p></th>
+<th class="head"><p>Candidate
+lower,
+p-value</p></th>
+<th class="head"><p>Candidate
+higher,
+p-value
+(context)</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>SciCode</p></td>
+<td><p>1.29%
+(76/5,880)</p></td>
+<td><p>0.00%
+(0/5,880)</p></td>
+<td><p>−1.29 [−1.70,
+−0.92]</p></td>
+<td><p>&lt;0.001 — yes</p></td>
+<td><p>1.000</p></td>
+</tr>
+<tr class="row-odd"><td><p>Focused subset</p></td>
+<td><p>10.91%
+(12/110)</p></td>
+<td><p>0.00% (0/110)</p></td>
+<td><p>−10.91
+[−18.18,
+−5.45]</p></td>
+<td><p>0.004 — yes</p></td>
+<td><p>1.000</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The focused held-out subset detects fewer candidate cap hits with 110 responses per model. Use it
+for a quick check of known weaknesses, then evaluate broader accuracy and reliability separately.</p>
+</section>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="index.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Evaluation</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="reproducibility/index.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Reproducibility notes</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2023-2025, NVIDIA Corporation</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials"></div>
+    </div>
+  </div>
+</footer>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../../_static/shibuya.js?v=50760d75"></script>
+      <script src="../../_static/announcements.js?v=d94b986f"></script></body>
+</html>

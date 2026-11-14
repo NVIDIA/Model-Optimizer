@@ -1,0 +1,1298 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="green" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX - Model Optimizer 0.0.1.dev1+gd8e1b820b</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=2ceb65ce" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+    <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+    <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=948f803c" />
+    <link rel="stylesheet" type="text/css" href="../_static/announcements.css?v=7f656fee" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      
+      
+      <strong>Model Optimizer</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials"></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="1"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_windows_arm64.html">Install ModelOpt on Windows on Arm</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/quantization_aware_training_and_distillation.html">Quick Start: QAT and QAD</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/1_quantization.html">Quantization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_distributed_loading.html">Loading Hugging Face models across ranks</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/quantization_aware_training_and_distillation.html">Quantization-Aware Training and Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/9_autotune.html">Autotune (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/11_config_system.html">ModelOpt Config System</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.deploy.html">deploy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.deploy.llm.html">llm</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.deploy.llm.generate.html">generate</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.env.html">env</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.onnx.html">onnx</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.html">autocast</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.graphsanitizer.html">graphsanitizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.logging_config.html">logging_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.nodeclassifier.html">nodeclassifier</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.precisionconverter.html">precisionconverter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.referencerunner.html">referencerunner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.html">llm_export_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.export_utils.html">export_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.quantization_utils.html">quantization_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.surgeon_utils.html">surgeon_utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.graph_indexing.html">graph_indexing</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.graph_rewrites.html">graph_rewrites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.graph_selection.html">graph_selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_calibration.html">ort_calibration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_calibration_per_node.html">ort_calibration_per_node</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_patches.html">ort_patches</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_quantization.html">ort_quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_session.html">ort_session</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.qdq_graph.html">qdq_graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.torch.html">torch</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.html">distill</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.distillation_model.html">distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.layerwise_distillation_model.html">layerwise_distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.loss_balancers.html">loss_balancers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.registry.html">registry</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.export.html">export</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.distributed_writer.html">distributed_writer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.layerwise_export.html">layerwise_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_format.html">quant_format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.trtllm.html">trtllm</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.html">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.discriminators.html">discriminators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.ema.html">ema</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.factory.html">factory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.loader.html">loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.methods.html">methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.pipeline.html">pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.html">kernels</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.common.html">common</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.quantization.html">quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.sparsity.html">sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.models.html">models</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.html">nas</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.html">opt</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.config_loader.html">config_loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.html">peft</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.custom.html">custom</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.mode.html">mode</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.html">prune</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.html">puzzletron</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.build_library_and_stats.html">build_library_and_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.entrypoint.html">entrypoint</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.puzzletron_nas_plugin.html">puzzletron_nas_plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.sewing_kit.html">sewing_kit</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.ggml.html">ggml</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.kv_cache_auto_quant.html">kv_cache_auto_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.linear_attention.html">linear_attention</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.html">sparsity</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.attention_sparsity.html">attention_sparsity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.sparsification.html">sparsification</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.weight_sparsity.html">weight_sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.html">speculative</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.dflash.html">dflash</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.external.html">external</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.medusa.html">medusa</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.speculative_decoding.html">speculative_decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.html">trace</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.analyzer.html">analyzer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.symbols.html">symbols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.tracer.html">tracer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.html">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.dataset_utils.html">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.fsdp2_utils.html">fsdp2_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.moe.html">moe</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#introduction">Introduction</a></li>
+<li><a class="reference internal" href="#lpx-pipelined-speculative-decoding-system">LPX Pipelined Speculative Decoding System</a></li>
+<li><a class="reference internal" href="#results">Results</a></li>
+<li><a class="reference internal" href="#the-draft-models">The Draft Models</a></li>
+<li><a class="reference internal" href="#draft-training-process">Draft Training Process</a><ul>
+<li><a class="reference internal" href="#vocabulary-swap">Vocabulary Swap</a></li>
+<li><a class="reference internal" href="#the-training-corpus">The Training Corpus</a></li>
+<li><a class="reference internal" href="#training">Training</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#deployment">Deployment</a></li>
+<li><a class="reference internal" href="#conclusion">Conclusion</a></li>
+<li><a class="reference internal" href="#resources">Resources</a></li>
+<li><a class="reference internal" href="#appendix">Appendix</a><ul>
+<li><a class="reference internal" href="#draft-length-unbounded">Draft length unbounded</a></li>
+<li><a class="reference internal" href="#draft-length-16">Draft length 16</a></li>
+<li><a class="reference internal" href="#draft-length-11">Draft length 11</a></li>
+<li><a class="reference internal" href="#draft-length-7">Draft length 7</a></li>
+</ul>
+</li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Model Optimizer</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue dark-code" role="main">
+          <section id="training-standalone-speculative-decoding-drafts-for-fast-inference-on-groq-3-lpx">
+<h1>Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX<a class="headerlink" href="#training-standalone-speculative-decoding-drafts-for-fast-inference-on-groq-3-lpx" title="Link to this heading">#</a></h1>
+<dl class="field-list simple">
+<dt class="field-odd">Author<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Peter Hicks, Bear Xiong, Arash Taheri-Dezfouli, Charlie Wang, Seth Weidman, Andrew Ling</p>
+</dd>
+<dt class="field-even">Date<span class="colon">:</span></dt>
+<dd class="field-even"><p>November 12, 2026</p>
+</dd>
+<dt class="field-odd">Tags<span class="colon">:</span></dt>
+<dd class="field-odd"><p>speculative-decoding, external-draft, groq-lpx, qwen3.8, distillation</p>
+</dd>
+</dl>
+<section id="introduction">
+<h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
+<p>Speculative decoding is an important approach for achieving low-latency inference with large
+language models. In traditional speculative decoding, a small, fast draft model produces tokens to
+be verified by a larger, slower target model. Recent work has moved away from small standalone draft
+architectures and has been focussed extensively on tail-augmented low-latency drafts, such as EAGLE
+and MTP heads. These drafts are attached to the target model and conditioned on its hidden states.
+These designs are driven by the need to minimize drafting latency via model architecture choices in
+traditional GPU systems. In such systems, small parameter count, multilayer, standalone draft
+architectures do not necessarily execute proportionally fast enough relative to the target model,
+and can incur a significant latency. When drafting and verification run sequentially, this latency
+is incurred for every drafted token, leading to a tradeoff between acceptance length and latency.</p>
+<p>The introduction of NVIDIA Groq 3 LPX has shifted this tradeoff by lowering the latency of larger,
+multi-layer standalone drafts. By deploying these larger draft models, along with the target models,
+on NVIDIA Groq 3 LPX, acceptance lengths similar to, and in some cases better than, tail-augmented
+drafts can be achieved without sacrificing system latency. Standalone drafts also need only the
+target’s tokens and probabilities, not its hidden states, which suits a disaggregated system where
+the draft and target run on separate hardware. Coupled with pipelined verification and parallel
+drafting, drafting time can be largely hidden behind verification time, resulting in SOTA
+performance in minimum-latency scenarios (see Figure 1).</p>
+<a class="reference internal image-reference" href="../_images/qwen38-27b-external-drafts-lpx-speed.png"><img alt="Output speed of Groq 3 LPX at 100K input tokens, as measured by Artificial Analysis and NVIDIA" src="../_images/qwen38-27b-external-drafts-lpx-speed.png" style="width: 100%;" />
+</a>
+<p><strong>Figure 1. Speed of Groq 3 LPX with 100K input tokens of context length, as measured by Artificial
+Analysis and NVIDIA.</strong></p>
+<p>In this report we outline the ultra-low latency NVIDIA Groq 3 LPX speculative decoding system in
+more detail. We also describe the process of training standalone drafts from existing small model
+architectures using the ModelOpt library. Further, today we release three new standalone draft models,
+trained for the <code class="docutils literal notranslate"><span class="pre">Qwen/Qwen3.8-27B</span></code> target:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">nvidia/Qwen3.5-0.8B-Qwen3.8-27B-Draft</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">nvidia/Llama-3.2-1B-Qwen3.8-27B-Draft</span></code></p></li>
+</ul>
+<p>These models have been distilled using ModelOpt to align the drafts with the target.</p>
+</section>
+<section id="lpx-pipelined-speculative-decoding-system">
+<h2>LPX Pipelined Speculative Decoding System<a class="headerlink" href="#lpx-pipelined-speculative-decoding-system" title="Link to this heading">#</a></h2>
+<p>The LPX speculative decoding system processes tokens in a pipeline parallel fashion. This pipelining
+allows for a unique approach to speculative decoding (see Figure 2). The draft runs as a disaggregated
+system, constantly streaming a pool of tokens to be verified. Rather than verifying tokens as a
+block in prefill mode, they are verified by streaming through the target model’s pipeline
+partitions. The draft streams tokens continuously until the target rejects a token, in which case
+the draft system is stopped and continues from the new verification token. This system has two
+unique qualities:</p>
+<ul class="simple">
+<li><p><strong>Fully Dynamic Unbounded Drafting</strong>. The draft length is not fixed, which allows long streaks on
+high-acceptance workloads such as coding.</p></li>
+<li><p><strong>Parallel Drafting and Verification</strong>. The drafting latency is hidden behind the target’s
+verification time.</p></li>
+</ul>
+<a class="reference internal image-reference" href="../_images/qwen38-27b-external-drafts-lpx-streaming-verify.webp"><img alt="Animation of the drafter streaming tokens through a live draft pool into the pipelined LPU target model, which stops the drafter on a rejection" src="../_images/qwen38-27b-external-drafts-lpx-streaming-verify.webp" style="width: 100%;" />
+</a>
+<p><strong>Figure 2. Parallel, fully dynamic unbounded speculative decoding on LPX.</strong></p>
+<p>The fully dynamic unbounded drafting in particular is well suited to standalone drafts, where it is
+observed that the acceptance lengths at longer draft lengths are generally better than
+tail-augmented methods. The <em>Results</em> section below presents a case study comparing standalone
+drafts for deployment on Groq 3 LPX to the model’s stock MTP head.</p>
+</section>
+<section id="results">
+<h2>Results<a class="headerlink" href="#results" title="Link to this heading">#</a></h2>
+<p>In our study we investigate a Qwen/Qwen3.8-27B target. Against this target we measure acceptance
+lengths across three trained standalone drafts, comparing against the model’s native MTP as a
+baseline. We measure the acceptance length for each draft at various draft lengths. Acceptance
+length is the mean number of tokens accepted per target step, at a given draft length, including the
+free verification token. All models are measured on the qualitative subset of <a class="reference external" href="https://huggingface.co/datasets/nvidia/SPEED-Bench" rel="noopener noreferrer" target="_blank">nvidia/SPEED-Bench</a> (all 880 conversations, first turn of each)
+with the same sampling policy (temperature=1, top-k=20, top-p=0.95), under a rejection sampling
+acceptance criterion. The MTP head is measured live, and the standalone drafts are scored offline on
+the token sequences the target generated in a live MTP run on the same benchmark. The “Unbounded”
+line refers to the fully dynamic unbounded drafting technique described in the above section.</p>
+<a class="reference internal image-reference" href="../_images/qwen38-27b-external-drafts-lpx-acceptance-length.png"><img alt="Acceptance length against draft length for the 4B, 0.8B and 1B standalone drafts and the stock MTP head, with dashed lines for unbounded acceptance length" src="../_images/qwen38-27b-external-drafts-lpx-acceptance-length.png" style="width: 100%;" />
+</a>
+<p><strong>Figure 3. Acceptance length against draft length.</strong> Solid lines are directly measured at draft
+lengths 7, 11 and 16. The dashed line for each model is its unbounded acceptance length.</p>
+<p>Typically, the acceptance length of MTP drafts is judged at small fixed draft lengths between 1 and
+7. For this case study we also measure draft lengths of 11 and 16, and the unbounded case. Figure 3
+shows that <code class="docutils literal notranslate"><span class="pre">nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft</span></code> outperforms the native MTP at every draft length.
+<code class="docutils literal notranslate"><span class="pre">nvidia/Qwen3.5-0.8B-Qwen3.8-27B-Draft</span></code> is slightly behind the MTP at a draft length of 7 and
+ahead of it from 11 onward. <code class="docutils literal notranslate"><span class="pre">nvidia/Llama-3.2-1B-Qwen3.8-27B-Draft</span></code> trails the MTP at fixed draft
+lengths. The MTP gains little beyond a draft length of 16, while the standalone drafts keep
+improving. The picture shifts at unbounded draft length where <code class="docutils literal notranslate"><span class="pre">nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft</span></code>
+accepts 6.13 tokens against the MTP’s 3.85, an increase of 59%. Qwen3.5-0.8B, at a fifth of the 4B’s
+parameters, is 6% better than the MTP head. The 1B draft, built from a model with a different
+tokenizer, comes within 9% of the MTP at 3.52.</p>
+<p>Because the draft and target run on separate hardware in the Groq 3 LPX system, a tail-augmented
+head such as MTP would also have to receive the target’s hidden states at every step. A standalone
+draft with a somewhat lower acceptance length, such as the 1B, can therefore still be the better
+trade.</p>
+</section>
+<section id="the-draft-models">
+<h2>The Draft Models<a class="headerlink" href="#the-draft-models" title="Link to this heading">#</a></h2>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Draft</p></th>
+<th class="head"><p>Shape (layers x hidden x FFN)</p></th>
+<th class="head"><p>Parameters</p></th>
+<th class="head"><p>Tokenizer</p></th>
+<th class="head"><p>Loss</p></th>
+<th class="head"><p>Learning Rate</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft" rel="noopener noreferrer" target="_blank">nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft</a></p></td>
+<td><p>32 x 2560 x 9216</p></td>
+<td><p>4.21B (3.57B non-emb.)</p></td>
+<td><p>native</p></td>
+<td><p>tvd_deploy</p></td>
+<td><p>1.0e-5</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/nvidia/Qwen3.5-0.8B-Qwen3.8-27B-Draft" rel="noopener noreferrer" target="_blank">nvidia/Qwen3.5-0.8B-Qwen3.8-27B-Draft</a></p></td>
+<td><p>24 x 1024 x 3584</p></td>
+<td><p>0.75B (0.50B non-emb.)</p></td>
+<td><p>native</p></td>
+<td><p>tvd_deploy</p></td>
+<td><p>3.0e-5</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/nvidia/Llama-3.2-1B-Qwen3.8-27B-Draft" rel="noopener noreferrer" target="_blank">nvidia/Llama-3.2-1B-Qwen3.8-27B-Draft</a></p></td>
+<td><p>16 x 2048 x 8192</p></td>
+<td><p>1.48B (0.97B non-emb.)</p></td>
+<td><p>rebuilt (vocabulary swap)</p></td>
+<td><p>tvd_ce</p></td>
+<td><p>5.0e-5</p></td>
+</tr>
+<tr class="row-odd"><td><p>Stock MTP head</p></td>
+<td><p>1 x 5120 x 17408</p></td>
+<td><p>0.42B (shares target embed/lm_head); ~2.96B in disaggregated draft-target serving, which needs its own copy of the target’s untied embedding and output head (1.27B each)</p></td>
+<td><p>native</p></td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The two Qwen3.5 drafts are trained with a deployment-matched total variation distance loss
+(<code class="docutils literal notranslate"><span class="pre">tvd_deploy</span></code>), and the Llama-3.2-1B draft with TVD plus cross entropy (<code class="docutils literal notranslate"><span class="pre">tvd_ce</span></code>). All three
+index the target’s 248,320-token vocabulary. The loss and learning rate were chosen per draft from a
+sweep scored on measured acceptance length. The model checkpoints are provided as standard
+HuggingFace checkpoints. Drafting with standalone Gated DeltaNet (GDN) based drafts is generally
+unsupported in inference frameworks today but is supported in the Groq 3 LPX runtime.</p>
+</section>
+<section id="draft-training-process">
+<h2>Draft Training Process<a class="headerlink" href="#draft-training-process" title="Link to this heading">#</a></h2>
+<p>Draft models must be aligned with target models to achieve high acceptance lengths. ModelOpt now
+supports training of standalone drafts for deployment on NVIDIA Groq 3 LPX. All three standalone
+drafts presented in the results section were trained using ModelOpt’s <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/speculative_decoding/doc/external_draft.md" rel="noopener noreferrer" target="_blank">external draft training
+flow</a>.
+The complete commands for the Llama-3.2-1B draft are given at the end of this section. The following
+sections provide a high level overview of the draft alignment process.</p>
+<section id="vocabulary-swap">
+<h3>Vocabulary Swap<a class="headerlink" href="#vocabulary-swap" title="Link to this heading">#</a></h3>
+<p>In general, standalone draft models have to share the same vocabulary/embedding space as their
+target model. This allows for both the proposal of tokens in the target’s native vocabulary, and for
+direct alignment of the draft via logit distillation. The target model we used for this
+investigation <code class="docutils literal notranslate"><span class="pre">Qwen/Qwen3.8-27B</span></code> has existing small Qwen models that share its vocabulary space.
+However, this is not always the case, and sometimes a standalone draft must be produced from another
+source. Instead of a costly process of training a standalone draft from scratch, we propose a
+“vocab-swap”. This is a process of taking an existing draft model candidate and transplanting the
+target model’s vocabulary and embeddings onto it, in a way that is not totally destructive. The
+<code class="docutils literal notranslate"><span class="pre">nvidia/Llama-3.2-1B-Qwen3.8-27B-Draft</span></code> mentioned in the previous section has undergone this
+process.</p>
+<p>The full vocab-swap implementation can be found in the ModelOpt repo. On a high level the process is
+to:</p>
+<ol class="arabic simple">
+<li><p><strong>Create new embedding tables</strong> for the draft at the target’s vocabulary size, filled with random
+rows drawn from the draft’s original embedding statistics (per-dimension mean and standard
+deviation).</p></li>
+<li><p><strong>Carry over every token that both tokenizers spell identically</strong>, copying the draft’s trained
+embedding row to the token’s position in the target’s vocabulary.</p></li>
+<li><p><strong>Leave the remaining rows at those random values.</strong> Draft-target alignment then trains them.</p></li>
+<li><p><strong>Rebuild the output head the same way</strong> when it is not tied to the embeddings.</p></li>
+<li><p><strong>Point the special tokens</strong> (BOS, EOS, padding) at the target tokenizer’s ids.</p></li>
+</ol>
+<p>After the swap the new resulting draft model undergoes the same draft-target alignment process as an
+in-family draft would.</p>
+</section>
+<section id="the-training-corpus">
+<h3>The Training Corpus<a class="headerlink" href="#the-training-corpus" title="Link to this heading">#</a></h3>
+<p>Standalone draft models are aligned via logit distillation against the target model. The required
+training data is a set of target model prompts and responses, with saved top-k logprobs for each
+response token.</p>
+<p>The training corpus used for the experiments in the results section is a 199,998-conversation sample
+of <code class="docutils literal notranslate"><span class="pre">nvidia/Nemotron-Post-Training-Dataset-v2</span></code>, drawn evenly across nine categories (22,222 each):
+STEM, chat, code, math, and five multilingual splits covering German, Spanish, French, Italian and
+Japanese. Each prompt is the first user turn of a source conversation, and each response was
+generated by <code class="docutils literal notranslate"><span class="pre">Qwen/Qwen3.8-27B</span></code> at reasoning effort xhigh. This balance was used to create a broad,
+general draft model.</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Property</p></th>
+<th class="head"><p>Value</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Conversations</p></td>
+<td><p>199,998</p></td>
+</tr>
+<tr class="row-odd"><td><p>Total tokens</p></td>
+<td><p>1,078,580,992</p></td>
+</tr>
+<tr class="row-even"><td><p>Response tokens</p></td>
+<td><p>1,019,711,082</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>As can be seen in the table, the training corpus contains 199,998 conversations and approximately
+1.08 billion tokens, with a maximum sequence length of 12,288. The saved target policy uses
+temperature 1.0, top-k 20, and top-p 0.95, matching our evaluation settings. We used this corpus for
+all three standalone drafts presented in the results section. We recommend adapting the data mixture
+to the intended production traffic or the target model’s training distribution.</p>
+</section>
+<section id="training">
+<h3>Training<a class="headerlink" href="#training" title="Link to this heading">#</a></h3>
+<p>The drafts are trained against the logit distillation targets with losses based on total variation
+distance (TVD), which directly measures the probability of rejection in a rejection sampling
+speculative decoding setup. The ModelOpt standalone draft alignment code supports plain TVD, a
+deployment-matched variant (<code class="docutils literal notranslate"><span class="pre">tvd_deploy</span></code>) that applies the serving top-k and top-p filter to both
+distributions before comparing them, and TVD combined with cross entropy (<code class="docutils literal notranslate"><span class="pre">tvd_ce</span></code>). The best
+choice depended on the draft: <code class="docutils literal notranslate"><span class="pre">tvd_deploy</span></code> for the two Qwen3.5 drafts and <code class="docutils literal notranslate"><span class="pre">tvd_ce</span></code> for the
+vocabulary-swapped Llama. We recommend testing each of them for your own draft-target pairing.</p>
+<p>To produce the three standalone drafts presented in the results section, we trained the 0.8B and 1B
+drafts for two epochs over the corpus and the 4B draft for one epoch, all with an effective batch
+size of 16, sweeping the learning rate and loss function for each draft. Learning rate had by far
+the largest effect, worth around 10% in unbounded acceptance length for the two small drafts. Loss
+choice, learning rate schedule and batch size each moved results by about 1% or less. For a
+production draft we recommend a similar sweep, with training data matched to the intended traffic.
+The following table shows the hyperparameters used for training
+<code class="docutils literal notranslate"><span class="pre">nvidia/Llama-3.2-1B-Qwen3.8-27B-Draft</span></code>.</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Hyperparameter</p></th>
+<th class="head"><p>Value</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Objective</p></td>
+<td><p>tvd_ce</p></td>
+</tr>
+<tr class="row-odd"><td><p>Vocabulary Swap</p></td>
+<td><p>Yes (Llama tokenizer onto Qwen’s)</p></td>
+</tr>
+<tr class="row-even"><td><p>Sequence Length</p></td>
+<td><p>12,288</p></td>
+</tr>
+<tr class="row-odd"><td><p>Effective Batch</p></td>
+<td><p>16 (1 per device × 2 accumulation × 8 GPUs)</p></td>
+</tr>
+<tr class="row-even"><td><p>Learning Rate</p></td>
+<td><p>5.0e-5</p></td>
+</tr>
+<tr class="row-odd"><td><p>Warmup Steps</p></td>
+<td><p>250</p></td>
+</tr>
+<tr class="row-even"><td><p>Epochs</p></td>
+<td><p>2</p></td>
+</tr>
+<tr class="row-odd"><td><p>Serving Policy</p></td>
+<td><p>top-k 20, top-p 0.95, temperature 1.0</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The commands below run the full 1B recipe. Step 1 writes a random 100K-prompt sample of the dataset;
+the drafts in the results section used the balanced 200K sample described above, which can be
+swapped in at step 2.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="2"><span class="c1"># 0. Environment. The [hf] extra brings the datasets package, which stages 1 and 4 import.</span>
+</span><span data-line="3"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="4">git<span class="w"> </span>clone<span class="w"> </span>https://github.com/NVIDIA/Model-Optimizer.git
+</span><span data-line="5"><span class="nb">cd</span><span class="w"> </span>Model-Optimizer<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">".[hf]"</span><span class="w"> </span>vllm<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>examples/speculative_decoding
+</span><span data-line="6">
+</span><span data-line="7"><span class="nb">export</span><span class="w"> </span><span class="nv">TARGET</span><span class="o">=</span>Qwen/Qwen3.8-27B
+</span><span data-line="8"><span class="nb">export</span><span class="w"> </span><span class="nv">DRAFT</span><span class="o">=</span>meta-llama/Llama-3.2-1B-Instruct
+</span><span data-line="9"><span class="nb">export</span><span class="w"> </span><span class="nv">SEQ_LEN</span><span class="o">=</span><span class="m">12288</span><span class="w">              </span><span class="c1"># training.training_seq_len; every stage reads it</span>
+</span><span data-line="10"><span class="nb">export</span><span class="w"> </span><span class="nv">WORK</span><span class="o">=</span>/data/q38-llama1b
+</span><span data-line="11"><span class="nb">export</span><span class="w"> </span><span class="nv">CHAT_TEMPLATE</span><span class="o">=</span>/path/to/target_chat_template_with_generation_tags.jinja<span class="w">  </span><span class="c1"># see stage 3</span>
+</span><span data-line="12">
+</span><span data-line="13"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="14"><span class="c1"># 1. Prompts from Nemotron-Post-Training-Dataset-v2 with the final assistant</span>
+</span><span data-line="15"><span class="c1">#    turn stripped. Writes the full pool plus random 1K/10K/100K subsets.</span>
+</span><span data-line="16"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="17">python<span class="w"> </span>../dataset/make_nemotron_ptv2_dataset.py<span class="w"> </span>--output-dir<span class="w"> </span><span class="nv">$WORK</span>/prompts
+</span><span data-line="18">
+</span><span data-line="19"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="20"><span class="c1"># 2. Target-generated responses at the serving policy. --reasoning-parser keeps</span>
+</span><span data-line="21"><span class="c1">#    the thinking in reasoning_content, where the chat template expects it.</span>
+</span><span data-line="22"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="23">vllm<span class="w"> </span>serve<span class="w"> </span><span class="nv">$TARGET</span><span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span><span class="w"> </span>--generation-config<span class="w"> </span>vllm<span class="w"> </span><span class="se">\</span>
+</span><span data-line="24"><span class="w">  </span>--reasoning-parser<span class="w"> </span>qwen3<span class="w"> </span>--tensor-parallel-size<span class="w"> </span><span class="m">8</span><span class="w"> </span><span class="p">&amp;</span>
+</span><span data-line="25"><span class="k">until</span><span class="w"> </span>curl<span class="w"> </span>-sf<span class="w"> </span>localhost:8000/v1/models<span class="w"> </span>&gt;<span class="w"> </span>/dev/null<span class="p">;</span><span class="w"> </span><span class="k">do</span><span class="w"> </span>sleep<span class="w"> </span><span class="m">10</span><span class="p">;</span><span class="w"> </span><span class="k">done</span>
+</span><span data-line="26">
+</span><span data-line="27">python<span class="w"> </span>scripts/server_generate.py<span class="w"> </span><span class="se">\</span>
+</span><span data-line="28"><span class="w">  </span>--data_path<span class="w"> </span><span class="nv">$WORK</span>/prompts/sample-100K.jsonl<span class="w"> </span><span class="se">\</span>
+</span><span data-line="29"><span class="w">  </span>--output_path<span class="w"> </span><span class="nv">$WORK</span>/conversations/train.jsonl<span class="w"> </span><span class="se">\</span>
+</span><span data-line="30"><span class="w">  </span>--model<span class="w"> </span><span class="nv">$TARGET</span><span class="w"> </span>--temperature<span class="w"> </span><span class="m">1</span>.0<span class="w"> </span>--max_tokens<span class="w"> </span><span class="m">9216</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="31"><span class="w">  </span>--extra_body<span class="w"> </span><span class="s1">'{"top_p":0.95,"top_k":20,"chat_template_kwargs":{"reasoning_effort":"xhigh"}}'</span>
+</span><span data-line="32"><span class="nb">kill</span><span class="w"> </span>%1<span class="p">;</span><span class="w"> </span><span class="nb">wait</span>
+</span><span data-line="33">
+</span><span data-line="34"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="35"><span class="c1"># 3. Dump the target's top-k deployment policy over the responses.</span>
+</span><span data-line="36"><span class="c1">#    --answer-only-loss needs the target's chat template with the assistant</span>
+</span><span data-line="37"><span class="c1">#    reply wrapped in {% generation %} / {% endgeneration %} tags; see</span>
+</span><span data-line="38"><span class="c1">#    doc/external_draft.md for how to add them.</span>
+</span><span data-line="39"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="40">python<span class="w"> </span>collect_hidden_states/compute_sparse_policy_hf.py<span class="w"> </span><span class="se">\</span>
+</span><span data-line="41"><span class="w">  </span>--model<span class="w"> </span><span class="nv">$TARGET</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="42"><span class="w">  </span>--input-data<span class="w"> </span><span class="nv">$WORK</span>/conversations<span class="w"> </span><span class="se">\</span>
+</span><span data-line="43"><span class="w">  </span>--output-dir<span class="w"> </span><span class="nv">$WORK</span>/policy<span class="w"> </span><span class="se">\</span>
+</span><span data-line="44"><span class="w">  </span>--top-k<span class="w"> </span><span class="m">20</span><span class="w"> </span>--top-p<span class="w"> </span><span class="m">0</span>.95<span class="w"> </span><span class="se">\</span>
+</span><span data-line="45"><span class="w">  </span>--max-seq-len<span class="w"> </span><span class="nv">$SEQ_LEN</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="46"><span class="w">  </span>--answer-only-loss<span class="w"> </span><span class="se">\</span>
+</span><span data-line="47"><span class="w">  </span>--chat-template<span class="w"> </span><span class="s2">"</span><span class="nv">$CHAT_TEMPLATE</span><span class="s2">"</span>
+</span><span data-line="48">
+</span><span data-line="49"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="50"><span class="c1"># 4. Build the memmap cache once, in a single process, before torchrun.</span>
+</span><span data-line="51"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="52">python<span class="w"> </span>-<span class="w"> </span><span class="s">&lt;&lt;PY</span>
+</span><span data-line="53"><span class="s">from modelopt.torch.speculative.external.sparse_data import SparsePolicyDataset, discover_shards</span>
+</span><span data-line="54">
+</span><span data-line="55"><span class="s">ds = SparsePolicyDataset(discover_shards("$WORK/policy"), max_length=$SEQ_LEN, cache_dir="$WORK/cache")</span>
+</span><span data-line="56"><span class="s">print(len(ds), "records, top_k", ds.top_k)</span>
+</span><span data-line="57"><span class="s">PY</span>
+</span><span data-line="58">
+</span><span data-line="59"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="60"><span class="c1"># 5. Train. Effective batch 16 = 1 per device x 2 accumulation x 8 GPUs.</span>
+</span><span data-line="61"><span class="c1"># ---------------------------------------------------------------------------</span>
+</span><span data-line="62">torchrun<span class="w"> </span>--nproc_per_node<span class="o">=</span><span class="m">8</span><span class="w"> </span>main.py<span class="w"> </span><span class="se">\</span>
+</span><span data-line="63"><span class="w">  </span>--config<span class="w"> </span>../../modelopt_recipes/general/speculative_decoding/external_draft.yaml<span class="w"> </span><span class="se">\</span>
+</span><span data-line="64"><span class="w">  </span>model.model_name_or_path<span class="o">=</span><span class="nv">$TARGET</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="65"><span class="w">  </span><span class="nv">draft_model_name_or_path</span><span class="o">=</span><span class="nv">$DRAFT</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="66"><span class="w">  </span>data.sparse_data_path<span class="o">=</span><span class="nv">$WORK</span>/policy<span class="w"> </span><span class="se">\</span>
+</span><span data-line="67"><span class="w">  </span>data.sparse_cache_dir<span class="o">=</span><span class="nv">$WORK</span>/cache<span class="w"> </span><span class="se">\</span>
+</span><span data-line="68"><span class="w">  </span>external.external_loss<span class="o">=</span>tvd_ce<span class="w"> </span><span class="se">\</span>
+</span><span data-line="69"><span class="w">  </span>external.external_vocab_swap<span class="o">=</span><span class="nb">true</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="70"><span class="w">  </span>external.external_top_k<span class="o">=</span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="71"><span class="w">  </span>external.external_top_p<span class="o">=</span><span class="m">0</span>.95<span class="w"> </span><span class="se">\</span>
+</span><span data-line="72"><span class="w">  </span>training.output_dir<span class="o">=</span><span class="nv">$WORK</span>/ckpt<span class="w"> </span><span class="se">\</span>
+</span><span data-line="73"><span class="w">  </span>training.training_seq_len<span class="o">=</span><span class="nv">$SEQ_LEN</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="74"><span class="w">  </span>training.per_device_train_batch_size<span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="75"><span class="w">  </span>training.gradient_accumulation_steps<span class="o">=</span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="76"><span class="w">  </span>training.learning_rate<span class="o">=</span><span class="m">5</span>.0e-5<span class="w"> </span><span class="se">\</span>
+</span><span data-line="77"><span class="w">  </span>training.warmup_steps<span class="o">=</span><span class="m">250</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="78"><span class="w">  </span>training.max_grad_norm<span class="o">=</span><span class="m">1</span>.0<span class="w"> </span><span class="se">\</span>
+</span><span data-line="79"><span class="w">  </span>training.num_train_epochs<span class="o">=</span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="80"><span class="w">  </span>training.seed<span class="o">=</span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="81"><span class="w">  </span>training.bf16<span class="o">=</span><span class="nb">true</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="82"><span class="w">  </span>training.logging_steps<span class="o">=</span><span class="m">10</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="83"><span class="w">  </span>training.save_steps<span class="o">=</span><span class="m">3125</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="deployment">
+<h2>Deployment<a class="headerlink" href="#deployment" title="Link to this heading">#</a></h2>
+<p>The intended deployment of the standalone drafts is on Groq LPX hardware. Models are compiled for
+Groq 3 LPX and run with the LPX runtime. <strong>LPX customers will receive a compiler SDK letting them
+take advantage of the deterministic execution model to generate pre-compiled schedules for the
+models to run on their racks.</strong> LPX’s deterministic execution model means that compiled performance
+is exactly what will be achieved, minus some runtime overhead. Coupled with measuring the individual
+models’ acceptance lengths, developers will be able to predict how their speculative decoding system
+will perform before deployment, without detailed hardware profiling.</p>
+</section>
+<section id="conclusion">
+<h2>Conclusion<a class="headerlink" href="#conclusion" title="Link to this heading">#</a></h2>
+<p>In this blog post, we have presented the viability of using standalone drafts for speculative
+decoding in Groq 3 LPX systems. Further, we release three standalone draft models that have been
+aligned for Qwen/Qwen3.8-27B. In a fully dynamic unbounded drafting regime the 4B and 0.8B drafts
+achieve higher acceptance lengths than the model’s native MTP head, and the 1B draft comes within 9%
+of it. Finally, we provide an overview of ModelOpt’s training process and best practices for these
+drafts.</p>
+</section>
+<section id="resources">
+<h2>Resources<a class="headerlink" href="#resources" title="Link to this heading">#</a></h2>
+<ul class="simple">
+<li><p>ModelOpt external draft mode: PRs <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/pull/2635" rel="noopener noreferrer" target="_blank">#2635</a>, <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/pull/2790" rel="noopener noreferrer" target="_blank">#2790</a>,
+<a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/pull/2637" rel="noopener noreferrer" target="_blank">#2637</a>, <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/pull/2638" rel="noopener noreferrer" target="_blank">#2638</a>,
+<a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/pull/2639" rel="noopener noreferrer" target="_blank">#2639</a>, <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/pull/2640" rel="noopener noreferrer" target="_blank">#2640</a>,
+<a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/pull/2687" rel="noopener noreferrer" target="_blank">#2687</a>, <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/pull/2688" rel="noopener noreferrer" target="_blank">#2688</a></p></li>
+<li><p>Recipe: <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/general/speculative_decoding/external_draft.yaml" rel="noopener noreferrer" target="_blank">modelopt_recipes/general/speculative_decoding/external_draft.yaml</a></p></li>
+<li><p>Worked example: <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/speculative_decoding/doc/external_draft.md" rel="noopener noreferrer" target="_blank">examples/speculative_decoding/doc/external_draft.md</a></p></li>
+<li><p>Teacher-policy dumper:
+<a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/speculative_decoding/collect_hidden_states/compute_sparse_policy_hf.py" rel="noopener noreferrer" target="_blank">examples/speculative_decoding/collect_hidden_states/compute_sparse_policy_hf.py</a></p></li>
+</ul>
+</section>
+<section id="appendix">
+<h2>Appendix<a class="headerlink" href="#appendix" title="Link to this heading">#</a></h2>
+<p>Category mean at each draft length, which is what the figure plots, followed by the per-category
+breakdown at each draft length. MTP figures are live measurements; standalone drafts are scored offline
+on target sequences from a live MTP run.</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>model</p></th>
+<th class="head"><p>AL &#64;7</p></th>
+<th class="head"><p>AL &#64;11</p></th>
+<th class="head"><p>AL &#64;16</p></th>
+<th class="head"><p>AL &#64;unbounded</p></th>
+<th class="head"><p>gain 7 to unbounded</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Qwen3.5-4B</p></td>
+<td><p>4.47</p></td>
+<td><p>5.16</p></td>
+<td><p>5.58</p></td>
+<td><p>6.13</p></td>
+<td><p>+37%</p></td>
+</tr>
+<tr class="row-odd"><td><p>Qwen3.5-0.8B</p></td>
+<td><p>3.48</p></td>
+<td><p>3.77</p></td>
+<td><p>3.92</p></td>
+<td><p>4.09</p></td>
+<td><p>+18%</p></td>
+</tr>
+<tr class="row-even"><td><p>Llama-3.2-1B</p></td>
+<td><p>3.13</p></td>
+<td><p>3.33</p></td>
+<td><p>3.42</p></td>
+<td><p>3.52</p></td>
+<td><p>+13%</p></td>
+</tr>
+<tr class="row-odd"><td><p>MTP head</p></td>
+<td><p>3.57</p></td>
+<td><p>3.74</p></td>
+<td><p>3.81</p></td>
+<td><p>3.85</p></td>
+<td><p>+8%</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="draft-length-unbounded">
+<h3>Draft length unbounded<a class="headerlink" href="#draft-length-unbounded" title="Link to this heading">#</a></h3>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>category</p></th>
+<th class="head"><p>Qwen3.5-4B</p></th>
+<th class="head"><p>Qwen3.5-0.8B</p></th>
+<th class="head"><p>Llama-3.2-1B</p></th>
+<th class="head"><p>MTP head</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>coding</p></td>
+<td><p>5.69</p></td>
+<td><p>3.96</p></td>
+<td><p>3.40</p></td>
+<td><p>3.83</p></td>
+</tr>
+<tr class="row-odd"><td><p>humanities</p></td>
+<td><p>5.78</p></td>
+<td><p>3.90</p></td>
+<td><p>3.36</p></td>
+<td><p>3.63</p></td>
+</tr>
+<tr class="row-even"><td><p>math</p></td>
+<td><p>6.11</p></td>
+<td><p>3.92</p></td>
+<td><p>3.15</p></td>
+<td><p>3.62</p></td>
+</tr>
+<tr class="row-odd"><td><p>multilingual</p></td>
+<td><p>7.59</p></td>
+<td><p>5.03</p></td>
+<td><p>3.69</p></td>
+<td><p>4.40</p></td>
+</tr>
+<tr class="row-even"><td><p>qa</p></td>
+<td><p>5.77</p></td>
+<td><p>3.99</p></td>
+<td><p>3.73</p></td>
+<td><p>3.70</p></td>
+</tr>
+<tr class="row-odd"><td><p>rag</p></td>
+<td><p>7.64</p></td>
+<td><p>5.15</p></td>
+<td><p>4.43</p></td>
+<td><p>4.91</p></td>
+</tr>
+<tr class="row-even"><td><p>reasoning</p></td>
+<td><p>6.61</p></td>
+<td><p>4.29</p></td>
+<td><p>3.58</p></td>
+<td><p>4.00</p></td>
+</tr>
+<tr class="row-odd"><td><p>roleplay</p></td>
+<td><p>4.62</p></td>
+<td><p>3.17</p></td>
+<td><p>3.09</p></td>
+<td><p>3.22</p></td>
+</tr>
+<tr class="row-even"><td><p>stem</p></td>
+<td><p>5.85</p></td>
+<td><p>3.83</p></td>
+<td><p>3.15</p></td>
+<td><p>3.61</p></td>
+</tr>
+<tr class="row-odd"><td><p>summarization</p></td>
+<td><p>6.88</p></td>
+<td><p>4.46</p></td>
+<td><p>4.19</p></td>
+<td><p>4.08</p></td>
+</tr>
+<tr class="row-even"><td><p>writing</p></td>
+<td><p>4.85</p></td>
+<td><p>3.31</p></td>
+<td><p>2.97</p></td>
+<td><p>3.37</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>CATEGORY MEAN</strong></p></td>
+<td><p><strong>6.13</strong></p></td>
+<td><p><strong>4.09</strong></p></td>
+<td><p><strong>3.52</strong></p></td>
+<td><p><strong>3.85</strong></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="draft-length-16">
+<h3>Draft length 16<a class="headerlink" href="#draft-length-16" title="Link to this heading">#</a></h3>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>category</p></th>
+<th class="head"><p>Qwen3.5-4B</p></th>
+<th class="head"><p>Qwen3.5-0.8B</p></th>
+<th class="head"><p>Llama-3.2-1B</p></th>
+<th class="head"><p>MTP head</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>coding</p></td>
+<td><p>5.22</p></td>
+<td><p>3.79</p></td>
+<td><p>3.29</p></td>
+<td><p>3.78</p></td>
+</tr>
+<tr class="row-odd"><td><p>humanities</p></td>
+<td><p>5.39</p></td>
+<td><p>3.79</p></td>
+<td><p>3.29</p></td>
+<td><p>3.61</p></td>
+</tr>
+<tr class="row-even"><td><p>math</p></td>
+<td><p>5.61</p></td>
+<td><p>3.79</p></td>
+<td><p>3.10</p></td>
+<td><p>3.63</p></td>
+</tr>
+<tr class="row-odd"><td><p>multilingual</p></td>
+<td><p>6.55</p></td>
+<td><p>4.67</p></td>
+<td><p>3.55</p></td>
+<td><p>4.38</p></td>
+</tr>
+<tr class="row-even"><td><p>qa</p></td>
+<td><p>5.39</p></td>
+<td><p>3.88</p></td>
+<td><p>3.65</p></td>
+<td><p>3.75</p></td>
+</tr>
+<tr class="row-odd"><td><p>rag</p></td>
+<td><p>6.58</p></td>
+<td><p>4.78</p></td>
+<td><p>4.19</p></td>
+<td><p>4.68</p></td>
+</tr>
+<tr class="row-even"><td><p>reasoning</p></td>
+<td><p>5.98</p></td>
+<td><p>4.12</p></td>
+<td><p>3.50</p></td>
+<td><p>3.93</p></td>
+</tr>
+<tr class="row-odd"><td><p>roleplay</p></td>
+<td><p>4.41</p></td>
+<td><p>3.10</p></td>
+<td><p>3.02</p></td>
+<td><p>3.16</p></td>
+</tr>
+<tr class="row-even"><td><p>stem</p></td>
+<td><p>5.44</p></td>
+<td><p>3.72</p></td>
+<td><p>3.10</p></td>
+<td><p>3.61</p></td>
+</tr>
+<tr class="row-odd"><td><p>summarization</p></td>
+<td><p>6.19</p></td>
+<td><p>4.26</p></td>
+<td><p>4.03</p></td>
+<td><p>4.13</p></td>
+</tr>
+<tr class="row-even"><td><p>writing</p></td>
+<td><p>4.59</p></td>
+<td><p>3.22</p></td>
+<td><p>2.91</p></td>
+<td><p>3.29</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>CATEGORY MEAN</strong></p></td>
+<td><p><strong>5.58</strong></p></td>
+<td><p><strong>3.92</strong></p></td>
+<td><p><strong>3.42</strong></p></td>
+<td><p><strong>3.81</strong></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="draft-length-11">
+<h3>Draft length 11<a class="headerlink" href="#draft-length-11" title="Link to this heading">#</a></h3>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>category</p></th>
+<th class="head"><p>Qwen3.5-4B</p></th>
+<th class="head"><p>Qwen3.5-0.8B</p></th>
+<th class="head"><p>Llama-3.2-1B</p></th>
+<th class="head"><p>MTP head</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>coding</p></td>
+<td><p>4.88</p></td>
+<td><p>3.66</p></td>
+<td><p>3.21</p></td>
+<td><p>3.73</p></td>
+</tr>
+<tr class="row-odd"><td><p>humanities</p></td>
+<td><p>5.02</p></td>
+<td><p>3.67</p></td>
+<td><p>3.22</p></td>
+<td><p>3.55</p></td>
+</tr>
+<tr class="row-even"><td><p>math</p></td>
+<td><p>5.19</p></td>
+<td><p>3.67</p></td>
+<td><p>3.04</p></td>
+<td><p>3.57</p></td>
+</tr>
+<tr class="row-odd"><td><p>multilingual</p></td>
+<td><p>5.91</p></td>
+<td><p>4.41</p></td>
+<td><p>3.43</p></td>
+<td><p>4.18</p></td>
+</tr>
+<tr class="row-even"><td><p>qa</p></td>
+<td><p>5.02</p></td>
+<td><p>3.75</p></td>
+<td><p>3.55</p></td>
+<td><p>3.64</p></td>
+</tr>
+<tr class="row-odd"><td><p>rag</p></td>
+<td><p>5.92</p></td>
+<td><p>4.50</p></td>
+<td><p>4.00</p></td>
+<td><p>4.57</p></td>
+</tr>
+<tr class="row-even"><td><p>reasoning</p></td>
+<td><p>5.48</p></td>
+<td><p>3.95</p></td>
+<td><p>3.40</p></td>
+<td><p>3.85</p></td>
+</tr>
+<tr class="row-odd"><td><p>roleplay</p></td>
+<td><p>4.22</p></td>
+<td><p>3.04</p></td>
+<td><p>2.97</p></td>
+<td><p>3.11</p></td>
+</tr>
+<tr class="row-even"><td><p>stem</p></td>
+<td><p>5.06</p></td>
+<td><p>3.61</p></td>
+<td><p>3.04</p></td>
+<td><p>3.59</p></td>
+</tr>
+<tr class="row-odd"><td><p>summarization</p></td>
+<td><p>5.65</p></td>
+<td><p>4.08</p></td>
+<td><p>3.88</p></td>
+<td><p>4.06</p></td>
+</tr>
+<tr class="row-even"><td><p>writing</p></td>
+<td><p>4.37</p></td>
+<td><p>3.15</p></td>
+<td><p>2.86</p></td>
+<td><p>3.30</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>CATEGORY MEAN</strong></p></td>
+<td><p><strong>5.16</strong></p></td>
+<td><p><strong>3.77</strong></p></td>
+<td><p><strong>3.33</strong></p></td>
+<td><p><strong>3.74</strong></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="draft-length-7">
+<h3>Draft length 7<a class="headerlink" href="#draft-length-7" title="Link to this heading">#</a></h3>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>category</p></th>
+<th class="head"><p>Qwen3.5-4B</p></th>
+<th class="head"><p>Qwen3.5-0.8B</p></th>
+<th class="head"><p>Llama-3.2-1B</p></th>
+<th class="head"><p>MTP head</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>coding</p></td>
+<td><p>4.30</p></td>
+<td><p>3.39</p></td>
+<td><p>3.03</p></td>
+<td><p>3.59</p></td>
+</tr>
+<tr class="row-odd"><td><p>humanities</p></td>
+<td><p>4.38</p></td>
+<td><p>3.40</p></td>
+<td><p>3.05</p></td>
+<td><p>3.40</p></td>
+</tr>
+<tr class="row-even"><td><p>math</p></td>
+<td><p>4.50</p></td>
+<td><p>3.40</p></td>
+<td><p>2.89</p></td>
+<td><p>3.41</p></td>
+</tr>
+<tr class="row-odd"><td><p>multilingual</p></td>
+<td><p>4.97</p></td>
+<td><p>3.95</p></td>
+<td><p>3.21</p></td>
+<td><p>3.96</p></td>
+</tr>
+<tr class="row-even"><td><p>qa</p></td>
+<td><p>4.39</p></td>
+<td><p>3.46</p></td>
+<td><p>3.32</p></td>
+<td><p>3.45</p></td>
+</tr>
+<tr class="row-odd"><td><p>rag</p></td>
+<td><p>4.97</p></td>
+<td><p>4.02</p></td>
+<td><p>3.65</p></td>
+<td><p>4.23</p></td>
+</tr>
+<tr class="row-even"><td><p>reasoning</p></td>
+<td><p>4.70</p></td>
+<td><p>3.63</p></td>
+<td><p>3.20</p></td>
+<td><p>3.68</p></td>
+</tr>
+<tr class="row-odd"><td><p>roleplay</p></td>
+<td><p>3.84</p></td>
+<td><p>2.90</p></td>
+<td><p>2.85</p></td>
+<td><p>3.07</p></td>
+</tr>
+<tr class="row-even"><td><p>stem</p></td>
+<td><p>4.42</p></td>
+<td><p>3.36</p></td>
+<td><p>2.90</p></td>
+<td><p>3.42</p></td>
+</tr>
+<tr class="row-odd"><td><p>summarization</p></td>
+<td><p>4.81</p></td>
+<td><p>3.73</p></td>
+<td><p>3.58</p></td>
+<td><p>3.91</p></td>
+</tr>
+<tr class="row-even"><td><p>writing</p></td>
+<td><p>3.94</p></td>
+<td><p>2.99</p></td>
+<td><p>2.74</p></td>
+<td><p>3.19</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>CATEGORY MEAN</strong></p></td>
+<td><p><strong>4.47</strong></p></td>
+<td><p><strong>3.48</strong></p></td>
+<td><p><strong>3.13</strong></p></td>
+<td><p><strong>3.57</strong></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2023-2025, NVIDIA Corporation</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials"></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../_static/shibuya.js?v=50760d75"></script>
+      <script src="../_static/announcements.js?v=d94b986f"></script></body>
+</html>

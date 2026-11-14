@@ -1,0 +1,778 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NVIDIA Model Optimizer Changelog &mdash; Model Optimizer 0.0.1.dev1+geda193996</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=1ae7504c"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="modelopt API" href="1_modelopt_api.html" />
+    <link rel="prev" title="All GitHub Examples" href="../examples/0_all_examples.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">NVIDIA Model Optimizer Changelog</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#xx">0.44 (2026-05-xx)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id1">0.43 (2026-04-09)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id2">0.42 (2026-03-10)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id3">0.41 (2026-01-19)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id4">0.40 (2025-12-12)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id5">0.39 (2025-11-11)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id6">0.37 (2025-10-08)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id8">0.35 (2025-09-04)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id9">0.33 (2025-07-14)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id10">0.31 (2025-06-04)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id11">0.29 (2025-05-08)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id12">0.27 (2025-04-03)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id13">0.25 (2025-03-03)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id14">0.23 (2025-01-29)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id15">0.21 (2024-12-03)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id16">0.19 (2024-10-23)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id17">0.17 (2024-09-11)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id18">0.15 (2024-07-25)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id19">0.13 (2024-06-14)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id21">0.11 (2024-05-07)</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">NVIDIA Model Optimizer Changelog</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/reference/0_changelog.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="nvidia-model-optimizer-changelog">
+<h1>NVIDIA Model Optimizer Changelog<a class="headerlink" href="#nvidia-model-optimizer-changelog" title="Link to this heading"></a></h1>
+<p>0.44 (2026-04-xx)</p>
+<p><strong>New Features</strong>
+- Added iterator interface using CalibrationDataReader in ONNX quantization workflow.</p>
+<section id="xx">
+<h2>0.44 (2026-05-xx)<a class="headerlink" href="#xx" title="Link to this heading"></a></h2>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Support full Transformer Engine spec for Minitron pruning (<code class="docutils literal notranslate"><span class="pre">mcore_minitron</span></code>). Now we no longer need to use custom ModelOpt spec. Note that this does not affect the usage of the pruning workflow but makes pruning slightly faster and may result in slightly different pruned model because of different kernel and numerics.</p></li>
+</ul>
+<p><strong>Bug Fixes</strong></p>
+<ul class="simple">
+<li><p>Fix Minitron pruning (<code class="docutils literal notranslate"><span class="pre">mcore_minitron</span></code>) for MoE models. Importance estimation hooks were incorrectly registered for MoE modules and NAS step was hanging before this.</p></li>
+</ul>
+</section>
+<section id="id1">
+<h2>0.43 (2026-04-09)<a class="headerlink" href="#id1" title="Link to this heading"></a></h2>
+<p><strong>Bug Fixes</strong></p>
+<ul class="simple">
+<li><p>ONNX Runtime dependency upgraded to 1.24 to solve missing graph outputs when using the TensorRT Execution Provider.</p></li>
+</ul>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><p>Default <code class="docutils literal notranslate"><span class="pre">--kv_cache_qformat</span></code> in <code class="docutils literal notranslate"><span class="pre">hf_ptq.py</span></code> changed from <code class="docutils literal notranslate"><span class="pre">fp8</span></code> to <code class="docutils literal notranslate"><span class="pre">fp8_cast</span></code>. Existing scripts that rely on the default will now skip KV cache calibration and use a constant amax instead. To restore the previous calibrated behavior, explicitly pass <code class="docutils literal notranslate"><span class="pre">--kv_cache_qformat</span> <span class="pre">fp8</span></code>.</p></li>
+<li><p>Removed KV cache scale clamping (<code class="docutils literal notranslate"><span class="pre">clamp_(min=1.0)</span></code>) in the HF checkpoint export path. Calibrated KV cache scales below 1.0 are now exported as-is. If you observe accuracy degradation with calibrated KV cache (<code class="docutils literal notranslate"><span class="pre">--kv_cache_qformat</span> <span class="pre">fp8</span></code> or <code class="docutils literal notranslate"><span class="pre">nvfp4</span></code>), consider using the casting methods (<code class="docutils literal notranslate"><span class="pre">fp8_cast</span></code> or <code class="docutils literal notranslate"><span class="pre">nvfp4_cast</span></code>) instead.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">fp8_cast</span></code> and <code class="docutils literal notranslate"><span class="pre">nvfp4_cast</span></code> modes for <code class="docutils literal notranslate"><span class="pre">--kv_cache_qformat</span></code> in <code class="docutils literal notranslate"><span class="pre">hf_ptq.py</span></code>. These use a constant amax (FP8 E4M3 max, 448.0) without data-driven calibration, since the downstream engine uses FP8 attention math for both FP8 and NVFP4 quantization. A new <code class="docutils literal notranslate"><span class="pre">use_constant_amax</span></code> field in <a class="reference internal" href="generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a> controls this behavior.</p></li>
+<li><p>User does not need to manually register MOE modules to cover experts calibration coverage in PTQ workflow.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">hf_ptq.py</span></code> now saves the quantization summary and moe expert token count table to the export directory.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">--moe_calib_experts_ratio</span></code> flag in <code class="docutils literal notranslate"><span class="pre">hf_ptq.py</span></code> to specify the ratio of experts to calibrate during forward pass to improve expert coverage during calibration. Default to None (not enabled).</p></li>
+<li><p>Add sparse attention optimization for transformer models (<code class="docutils literal notranslate"><span class="pre">modelopt.torch.sparsity.attention_sparsity</span></code>). This reduces computational cost by skipping attention computation. Supports calibration for threshold selection on HuggingFace models. See <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity/attention_sparsity" rel="noopener noreferrer" target="_blank">examples/llm_sparsity/attention_sparsity/README.md</a> for usage.</p></li>
+<li><p>Add support for rotating the input before quantization for RHT.</p></li>
+<li><p>Add support for advanced weight scale search for NVFP4 quantization and its export path.</p></li>
+<li><p>Enable PTQ workflow for Qwen3.5 MoE models.</p></li>
+<li><p>Enable PTQ workflow for the Kimi-K2.5 model.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">nvfp4_omlp_only</span></code> quantization format for NVFP4 quantization. This is similar to <code class="docutils literal notranslate"><span class="pre">nvfp4_mlp_only</span></code> but also quantizes the output projection layer in attention.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">nvfp4_experts_only</span></code> quantization config that targets only MoE routed expert layers (excluding shared) with NVFP4 quantization.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pass_through_bwd</span></code> in the quantization config is now default to True. Please set it to False if you want to use STE with zeroed outlier gradients for potentially better QAT accuracy.</p></li>
+<li><p>Add <a class="reference internal" href="generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.compute_quantization_mse" title="modelopt.torch.quantization.model_quant.compute_quantization_mse"><code class="xref py py-meth docutils literal notranslate"><span class="pre">compute_quantization_mse</span></code></a> API to measure per-quantizer mean-squared quantization error, with flexible wildcard and callable filtering.</p></li>
+<li><p><strong>Autotune</strong>: New tool for automated Q/DQ (Quantize/Dequantize) placement optimization for ONNX models. Uses TensorRT latency measurements to choose insertion schemes that minimize inference time. Discovers regions automatically, groups them by structural pattern, and tests multiple Q/DQ schemes per pattern. Supports INT8 and FP8 quantization, pattern cache for warm-start on similar models, checkpoint/resume, and importing patterns from an existing QDQ baseline. CLI: <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">modelopt.onnx.quantization.autotune</span></code>. See the Autotune guide in the documentation.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">get_auto_quantize_config</span></code> API to extract a flat quantization config from <code class="docutils literal notranslate"><span class="pre">auto_quantize</span></code> search results, enabling re-quantization at different effective bit targets without re-running calibration.</p></li>
+<li><p>Improve <code class="docutils literal notranslate"><span class="pre">auto_quantize</span></code> checkpoint/resume: calibration state is now saved and restored across runs, avoiding redundant calibration when resuming a search.</p></li>
+<li><p>Add support for Nemotron-3 (NemotronHForCausalLM) model quantization and support for NemotronH MoE expert support in <code class="docutils literal notranslate"><span class="pre">auto_quantize</span></code> grouping and scoring rules.</p></li>
+<li><p>Add support for block-granular RHT for non-power-of-2 dimensions.</p></li>
+<li><p>Replace modelopt FP8 QDQ nodes with native ONNX QDQ nodes.</p></li>
+</ul>
+<p><strong>Deprecations</strong></p>
+<ul class="simple">
+<li><p>Remove deprecated NeMo-2.0 Framework references.</p></li>
+</ul>
+<p><strong>Misc</strong></p>
+<ul class="simple">
+<li><p>Migrated project metadata from <code class="docutils literal notranslate"><span class="pre">setup.py</span></code> to a fully declarative <code class="docutils literal notranslate"><span class="pre">pyproject.toml</span></code>.</p></li>
+<li><p>Enable experimental Python 3.13 wheel support and unit tests in CI/CD.</p></li>
+</ul>
+</section>
+<section id="id2">
+<h2>0.42 (2026-03-10)<a class="headerlink" href="#id2" title="Link to this heading"></a></h2>
+<p><strong>Bug Fixes</strong></p>
+<ul class="simple">
+<li><p>Fix calibration data generation with multiple samples in the ONNX workflow.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Add standalone type inference option (<code class="docutils literal notranslate"><span class="pre">--use_standalone_type_inference</span></code>) in ONNX AutoCast as an alternative to ONNX’s <code class="docutils literal notranslate"><span class="pre">infer_shapes</span></code>. This experimental feature performs type-only inference without shape inference, useful as a workaround when shape inference fails or to avoid unnecessary shape inference overhead.</p></li>
+<li><p>Add support for Kimi K2 Thinking model quantization from the original int4 checkpoint.</p></li>
+<li><p>Add support for <code class="docutils literal notranslate"><span class="pre">params</span></code> constraint based automatic neural architecture search in Minitron pruning (<code class="docutils literal notranslate"><span class="pre">mcore_minitron</span></code>) as an alternative to manual pruning (using <code class="docutils literal notranslate"><span class="pre">export_config</span></code>). See <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">examples/pruning/README.md</a> for more details on its usage.</p></li>
+<li><p>New example for Minitron pruning with Megatron-Bridge framework along with advanced pruning usage with new <code class="docutils literal notranslate"><span class="pre">params</span></code> constraint based pruning. Also add example for distillation with Megatron-Bridge framework. Check <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge" rel="noopener noreferrer" target="_blank">examples/megatron_bridge/README.md</a> for example scripts.</p></li>
+<li><p>Add support for calibration data with multiple samples in <code class="docutils literal notranslate"><span class="pre">npz</span></code> format in the ONNX Autocast workflow.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">--opset</span></code> option to ONNX quantization CLI to specify the target opset version for the quantized model.</p></li>
+<li><p>Add support for context parallelism in Eagle speculative decoding for huggingface and megatron core models.</p></li>
+<li><p>Add unified Hugging Face export support for diffusers pipelines/components.</p></li>
+<li><p>Add LTX-2 and Wan2.2 (T2V) support in the diffusers quantization workflow.</p></li>
+<li><p>Add PTQ support for GLM-4.7, including loading MTP layer weights from a separate <code class="docutils literal notranslate"><span class="pre">mtp.safetensors</span></code> file and export as-is.</p></li>
+<li><p>Add support for image-text data calibration in PTQ for Nemotron VL models.</p></li>
+<li><p>Add support for advanced weight scale search for NVFP4 quantization and its export path.</p></li>
+<li><p>Add PTQ support for Nemotron Parse.</p></li>
+<li><p>Add distillation support for LTX-2. See <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/distillation" rel="noopener noreferrer" target="_blank">examples/diffusers/distillation/README.md</a> for more details.</p></li>
+</ul>
+</section>
+<section id="id3">
+<h2>0.41 (2026-01-19)<a class="headerlink" href="#id3" title="Link to this heading"></a></h2>
+<p><strong>Bug Fixes</strong></p>
+<ul class="simple">
+<li><p>Fix Megatron KV Cache quantization checkpoint restore for QAT/QAD (device placement, amax sync across DP/TP, flash_decode compatibility).</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Add support for Transformer Engine quantization for Megatron Core models.</p></li>
+<li><p>Add support for Qwen3-Next model quantization.</p></li>
+<li><p>Add support for dynamically linked TensorRT plugins in the ONNX quantization workflow.</p></li>
+<li><p>Add support for KV Cache Quantization for vLLM FakeQuant PTQ script. See <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/vllm_serve#Calibrate-and-serve-fake-quant-model-in-vLLM" rel="noopener noreferrer" target="_blank">examples/vllm_serve/README.md</a> for more details.</p></li>
+<li><p>Add support for subgraphs in ONNX autocast.</p></li>
+<li><p>Add support for parallel draft heads in Eagle speculative decoding.</p></li>
+<li><p>Add support to enable custom emulated quantization backend. See <code class="xref py py-meth docutils literal notranslate"><span class="pre">register_quant_backend</span> <span class="pre">&lt;modelopt.torch.quantization.nn.modules.tensor_quantizer.register_quant_backend&gt;`()</span></code> for more details. See an example in <code class="docutils literal notranslate"><span class="pre">tests/unit/torch/quantization/test_custom_backend.py</span></code>.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">examples/llm_qad</span></code> for QAD training with Megatron-LM.</p></li>
+</ul>
+<p><strong>Deprecations</strong></p>
+<ul class="simple">
+<li><p>Deprecate <code class="docutils literal notranslate"><span class="pre">num_query_groups</span></code> parameter in Minitron pruning (<code class="docutils literal notranslate"><span class="pre">mcore_minitron</span></code>). You can use ModelOpt 0.40.0 or earlier instead if you need to prune it.</p></li>
+</ul>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><p>Remove <code class="docutils literal notranslate"><span class="pre">torchprofile</span></code> as a default dependency from ModelOpt as its used only for flops-based FastNAS pruning (computer vision models). It can be installed separately if needed.</p></li>
+</ul>
+<p><strong>Windows Support</strong></p>
+<ul class="simple">
+<li><p>Fix ONNX 1.19 compatibility issues with CuPy during ONNX INT4 AWQ quantization. ONNX 1.19 uses ml_dtypes.int4 instead of numpy.int8 which caused CuPy failures.</p></li>
+<li><p>Add support for ONNX Mixed Precision Weight-only quantization using INT4 and INT8 precisions. Refer quantization <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq/genai_llm" rel="noopener noreferrer" target="_blank">example for GenAI LLMs</a>.</p></li>
+<li><p>Add support for some diffusion models’ quantization on Windows. Refer <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/torch_onnx/diffusers" rel="noopener noreferrer" target="_blank">example script</a> for details.</p></li>
+<li><p>Add <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/accuracy_benchmark/perplexity_metrics" rel="noopener noreferrer" target="_blank">Perplexity</a> and <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/accuracy_benchmark/kl_divergence_metrics" rel="noopener noreferrer" target="_blank">KL-Divergence</a> accuracy benchmarks.</p></li>
+</ul>
+</section>
+<section id="id4">
+<h2>0.40 (2025-12-12)<a class="headerlink" href="#id4" title="Link to this heading"></a></h2>
+<p><strong>Bug Fixes</strong></p>
+<ul class="simple">
+<li><p>Fix a bug in FastNAS pruning (computer vision models) where the model parameters were sorted twice messing up the ordering.</p></li>
+<li><p>Fix Q/DQ/Cast node placements in ‘FP32 required’ tensors in custom ops in the ONNX quantization workflow.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Add MoE (e.g. Qwen3-30B-A3B, gpt-oss-20b) pruning support for <code class="docutils literal notranslate"><span class="pre">num_moe_experts</span></code>, <code class="docutils literal notranslate"><span class="pre">moe_ffn_hidden_size</span></code> and <code class="docutils literal notranslate"><span class="pre">moe_shared_expert_intermediate_size</span></code> parameters in Minitron pruning (<code class="docutils literal notranslate"><span class="pre">mcore_minitron</span></code>).</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">specdec_bench</span></code> example to benchmark speculative decoding performance. See <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/specdec_bench#speculative-decoding-benchmark" rel="noopener noreferrer" target="_blank">examples/specdec_bench/README.md</a> for more details.</p></li>
+<li><p>Add FP8/NVFP4 KV cache quantization support for Megatron Core models.</p></li>
+<li><p>Add KL Divergence loss based auto_quantize method. See <a class="reference external" href="https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize" rel="noopener noreferrer" target="_blank">auto_quantize API docs</a> for more details.</p></li>
+<li><p>Add support for saving and resuming auto_quantize search state. This speeds up the auto_quantize process by skipping the score estimation step if the search state is provided.</p></li>
+<li><p>Add flag <code class="docutils literal notranslate"><span class="pre">trt_plugins_precision</span></code> in ONNX autocast to indicate custom ops precision. This is similar to the flag already existing in the quantization workflow.</p></li>
+<li><p>Add support for PyTorch Geometric quantization.</p></li>
+<li><p>Add per tensor and per channel MSE calibrator support.</p></li>
+<li><p>Added support for PTQ/QAT checkpoint export and loading for running fakequant evaluation in vLLM. See <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/vllm_serve#load-qatptq-model-and-serve-in-vllm-wip" rel="noopener noreferrer" target="_blank">examples/vllm_serve/README.md</a> for more details.</p></li>
+</ul>
+<p><strong>Documentation</strong></p>
+<ul class="simple">
+<li><p>Deprecate <code class="docutils literal notranslate"><span class="pre">examples/megatron-lm</span></code> in favor of more detailed documentation in <a class="reference external" href="https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt" rel="noopener noreferrer" target="_blank">Megatron-LM/examples/post_training/modelopt</a>.</p></li>
+</ul>
+<p><strong>Misc</strong></p>
+<ul class="simple">
+<li><p>NVIDIA TensorRT Model Optimizer is now officially rebranded as NVIDIA Model Optimizer. GitHub will automatically redirect the old repository path (<code class="docutils literal notranslate"><span class="pre">NVIDIA/TensorRT-Model-Optimizer</span></code>) to the new one (<code class="docutils literal notranslate"><span class="pre">NVIDIA/Model-Optimizer</span></code>). Documentation URL is also changed to <a class="reference external" href="https://nvidia.github.io/Model-Optimizer" rel="noopener noreferrer" target="_blank">nvidia.github.io/Model-Optimizer</a>.</p></li>
+<li><p>Bump TensorRT-LLM docker to 1.2.0rc4.</p></li>
+<li><p>Bump minimum recommended transformers version to 4.53.</p></li>
+<li><p>Replace ONNX simplification package from <code class="docutils literal notranslate"><span class="pre">onnxsim</span></code> to <code class="docutils literal notranslate"><span class="pre">onnxslim</span></code>.</p></li>
+</ul>
+</section>
+<section id="id5">
+<h2>0.39 (2025-11-11)<a class="headerlink" href="#id5" title="Link to this heading"></a></h2>
+<p><strong>Deprecations</strong></p>
+<ul class="simple">
+<li><p>Deprecated <code class="docutils literal notranslate"><span class="pre">modelopt.torch._deploy.utils.get_onnx_bytes</span></code> API. Please use <code class="docutils literal notranslate"><span class="pre">modelopt.torch._deploy.utils.get_onnx_bytes_and_metadata</span></code> instead to access the ONNX model bytes with external data. see <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq/download_example_onnx.py" rel="noopener noreferrer" target="_blank">examples/onnx_ptq/download_example_onnx.py</a> for example usage.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Add flag <code class="docutils literal notranslate"><span class="pre">op_types_to_exclude_fp16</span></code> in ONNX quantization to exclude ops from being converted to FP16/BF16. Alternatively, for custom TensorRT ops, this can also be done by indicating <code class="docutils literal notranslate"><span class="pre">'fp32'</span></code> precision in <code class="docutils literal notranslate"><span class="pre">trt_plugins_precision</span></code>.</p></li>
+<li><p>Add LoRA mode support for MCore in a new peft submodule: <code class="docutils literal notranslate"><span class="pre">modelopt.torch.peft.update_model(model,</span> <span class="pre">LORA_CFG)</span></code>.</p></li>
+<li><p>Support PTQ and fakequant in vLLM for fast evaluation of arbitrary quantization formats. See <code class="docutils literal notranslate"><span class="pre">examples/vllm_serve</span></code> for more details.</p></li>
+<li><p>Add support for <code class="docutils literal notranslate"><span class="pre">nemotron-post-training-dataset-v2</span></code> and <code class="docutils literal notranslate"><span class="pre">nemotron-post-training-dataset-v1</span></code> in <code class="docutils literal notranslate"><span class="pre">examples/llm_ptq</span></code>. Default to a mix of <code class="docutils literal notranslate"><span class="pre">cnn_dailymail</span></code> and <code class="docutils literal notranslate"><span class="pre">nemotron-post-training-dataset-v2</span></code> (gated dataset accessed using <code class="docutils literal notranslate"><span class="pre">HF_TOKEN</span></code> environment variable) if no dataset is specified.</p></li>
+<li><p>Allow specifying <code class="docutils literal notranslate"><span class="pre">calib_seq</span></code> in <code class="docutils literal notranslate"><span class="pre">examples/llm_ptq</span></code> to set the maximum sequence length for calibration.</p></li>
+<li><p>Add support for MCore MoE PTQ/QAT/QAD.</p></li>
+<li><p>Add support for multi-node PTQ and export with FSDP2 in <code class="docutils literal notranslate"><span class="pre">examples/llm_ptq/multinode_ptq.py</span></code>. See <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#multi-node-post-training-quantization-with-fsdp2" rel="noopener noreferrer" target="_blank">examples/llm_ptq/README.md</a> for more details.</p></li>
+<li><p>Add support for Nemotron Nano VL v1 &amp; v2 models in FP8/NVFP4 PTQ workflow.</p></li>
+<li><p>Add flags <code class="docutils literal notranslate"><span class="pre">nodes_to_include</span></code> and <code class="docutils literal notranslate"><span class="pre">op_types_to_include</span></code> in AutoCast to force-include nodes in low precision, even if they would otherwise be excluded by other rules.</p></li>
+<li><p>Add support for <code class="docutils literal notranslate"><span class="pre">torch.compile</span></code> and benchmarking in <code class="docutils literal notranslate"><span class="pre">examples/diffusers/quantization/diffusion_trt.py</span></code>.</p></li>
+<li><p>Enabled native Modelopt quantization support for FP8 and NVFP4 formats in SGLang. See <a class="reference external" href="https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/quantization.md#using-nvidia-modelopt" rel="noopener noreferrer" target="_blank">SGLang quantization documentation</a> for more details.</p></li>
+<li><p>Added modelopt quantized checkpoints in vLLM/SGLang CI/CD pipelines (PRs are under review).</p></li>
+<li><p>Add support for exporting QLoRA checkpoint fintuned using ModelOpt.</p></li>
+<li><p>Update NVFP4 AWQ checkpoint export. It now fuses scaling factors of o_proj and down_proj layers into the model when possible to facilitate deployment.</p></li>
+</ul>
+<p><strong>Documentation</strong></p>
+<ul class="simple">
+<li><p>Add general guidelines for Minitron pruning and distillation. See <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#pruning-guidelines" rel="noopener noreferrer" target="_blank">pruning guidelines</a> for more details.</p></li>
+<li><p>Added example for exporting QLoRA checkpoint for vLLM deployment. Refer to <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/79ef31bc7269ba4da0cfab446da5b64509cbfcef/examples/llm_qat/README.md#qlora-deployment" rel="noopener noreferrer" target="_blank">examples/llm_qat/README.md</a> for more details</p></li>
+</ul>
+</section>
+<section id="id6">
+<h2>0.37 (2025-10-08)<a class="headerlink" href="#id6" title="Link to this heading"></a></h2>
+<p><strong>Deprecations</strong></p>
+<ul class="simple">
+<li><p>Deprecated ModelOpt’s custom docker images. Please use the PyTorch, TensorRT-LLM or TensorRT docker image directly or refer to the <a class="reference external" href="https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html" rel="noopener noreferrer" target="_blank">installation guide</a> for more details.</p></li>
+<li><p>Deprecated <code class="docutils literal notranslate"><span class="pre">quantize_mode</span></code> argument in <code class="docutils literal notranslate"><span class="pre">examples/onnx_ptq/evaluate.py</span></code> to support strongly typing. Use <code class="docutils literal notranslate"><span class="pre">engine_precision</span></code> instead.</p></li>
+<li><p>Deprecated TRT-LLM’s TRT backend in <code class="docutils literal notranslate"><span class="pre">examples/llm_ptq</span></code> and <code class="docutils literal notranslate"><span class="pre">examples/vlm_ptq</span></code>. Tasks <code class="docutils literal notranslate"><span class="pre">build</span></code> and <code class="docutils literal notranslate"><span class="pre">benchmark</span></code> support are removed and replaced with <code class="docutils literal notranslate"><span class="pre">quant</span></code>. <code class="docutils literal notranslate"><span class="pre">engine_dir</span></code> is replaced with <code class="docutils literal notranslate"><span class="pre">checkpoint_dir</span></code> in <code class="docutils literal notranslate"><span class="pre">examples/llm_ptq</span></code> and <code class="docutils literal notranslate"><span class="pre">examples/vlm_ptq</span></code>. For performance evaluation, please use <code class="docutils literal notranslate"><span class="pre">trtllm-bench</span></code> directly.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--export_fmt</span></code> flag in <code class="docutils literal notranslate"><span class="pre">examples/llm_ptq</span></code> is removed. By default we export to the unified Hugging Face checkpoint format.</p></li>
+<li><p>Deprecated <code class="docutils literal notranslate"><span class="pre">examples/vlm_eval</span></code> as it depends on the deprecated TRT-LLM’s TRT backend.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">high_precision_dtype</span></code> default to fp16 in ONNX quantization, i.e. quantized output model weights are now FP16 by default.</p></li>
+<li><p>Upgrade TensorRT-LLM dependency to 1.1.0rc2.</p></li>
+<li><p>Support Phi-4-multimodal and Qwen2.5-VL quantized HF checkpoint export in <code class="docutils literal notranslate"><span class="pre">examples/vlm_ptq</span></code>.</p></li>
+<li><p>Support storing and restoring Minitron pruning activations and scores for re-pruning without running the forward loop again.</p></li>
+<li><p>Add Minitron pruning example for Megatron-LM framework. See <a class="reference external" href="https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt" rel="noopener noreferrer" target="_blank">Megatron-LM/examples/post_training/modelopt</a> for more details.</p></li>
+</ul>
+</section>
+<section id="id8">
+<h2>0.35 (2025-09-04)<a class="headerlink" href="#id8" title="Link to this heading"></a></h2>
+<p><strong>Deprecations</strong></p>
+<ul class="simple">
+<li><p>Deprecate <code class="docutils literal notranslate"><span class="pre">torch&lt;2.6</span></code> support.</p></li>
+<li><p>Deprecate NeMo 1.0 model support.</p></li>
+</ul>
+<p><strong>Bug Fixes</strong></p>
+<ul class="simple">
+<li><p>Fix attention head ranking logic for pruning Megatron Core GPT models.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>ModelOpt now supports PTQ and QAT for GPT-OSS models. See <code class="docutils literal notranslate"><span class="pre">examples/gpt_oss</span></code> for end-to-end PTQ/QAT example.</p></li>
+<li><p>Add support for QAT with HuggingFace + DeepSpeed. See <code class="docutils literal notranslate"><span class="pre">examples/gpt_oss</span></code> for an example.</p></li>
+<li><p>Add support for QAT with LoRA. The LoRA adapters can be folded into the base model after QAT and deployed just like a regular PTQ model. See <code class="docutils literal notranslate"><span class="pre">examples/gpt_oss</span></code> for an example.</p></li>
+<li><p>ModelOpt provides convenient trainers such as <code class="xref py py-class docutils literal notranslate"><span class="pre">QATTrainer</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">QADTrainer</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">KDTrainer</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">QATSFTTrainer</span></code> which inherits from Huggingface trainers.
+ModelOpt trainers can be used as drop in replacement of the corresponding Huggingface trainer. See usage examples in <code class="docutils literal notranslate"><span class="pre">examples/gpt_oss</span></code>, <code class="docutils literal notranslate"><span class="pre">examples/llm_qat</span></code> or <code class="docutils literal notranslate"><span class="pre">examples/llm_distill</span></code>.</p></li>
+<li><p>(Experimental) Add quantization support for custom TensorRT op in ONNX models.</p></li>
+<li><p>Add support for Minifinetuning (MFT; <a class="reference external" href="https://arxiv.org/abs/2506.15702" rel="noopener noreferrer" target="_blank">https://arxiv.org/abs/2506.15702</a>) self-corrective distillation, which enables training on small datasets with severely mitigated catastrophic forgetting.</p></li>
+<li><p>Add tree decoding support for Megatron Eagle models.</p></li>
+<li><p>For most VLMs, we now explicitly disable quant on the vision part so we add them to the excluded_modules during HF export.</p></li>
+<li><p>Add support for <code class="docutils literal notranslate"><span class="pre">mamba_num_heads</span></code>, <code class="docutils literal notranslate"><span class="pre">mamba_head_dim</span></code>, <code class="docutils literal notranslate"><span class="pre">hidden_size</span></code> and <code class="docutils literal notranslate"><span class="pre">num_layers</span></code> pruning for Megatron Core Mamba or Hybrid Transformer Mamba models in <code class="docutils literal notranslate"><span class="pre">mcore_minitron</span></code> (previously <code class="docutils literal notranslate"><span class="pre">mcore_gpt_minitron</span></code>) mode.</p></li>
+<li><p>Add example for QAT/QAD training with <a class="reference external" href="https://github.com/hiyouga/LLaMA-Factory/tree/main" rel="noopener noreferrer" target="_blank">LLaMA Factory</a>. See <code class="docutils literal notranslate"><span class="pre">examples/llm_qat/llama_factory</span></code> for more details.</p></li>
+<li><p>Upgrade TensorRT-LLM dependency to 1.0.0rc6.</p></li>
+<li><p>Add unified HuggingFace model export support for quantized NVFP4 GPT-OSS models.</p></li>
+</ul>
+</section>
+<section id="id9">
+<h2>0.33 (2025-07-14)<a class="headerlink" href="#id9" title="Link to this heading"></a></h2>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><p>PyTorch dependencies for <code class="docutils literal notranslate"><span class="pre">modelopt.torch</span></code> features are no longer optional and <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">nvidia-modelopt</span></code> is now same as <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">nvidia-modelopt[torch]</span></code>.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Upgrade TensorRT-LLM dependency to 0.20.</p></li>
+<li><p>Add new CNN QAT example to demonstrate how to use ModelOpt for QAT.</p></li>
+<li><p>Add support for ONNX models with custom TensorRT ops in Autocast.</p></li>
+<li><p>Add quantization aware distillation (QAD) support in <code class="docutils literal notranslate"><span class="pre">llm_qat</span></code> example.</p></li>
+<li><p>Add support for BF16 in ONNX quantization.</p></li>
+<li><p>Add per node calibration support in ONNX quantization.</p></li>
+<li><p>ModelOpt now supports quantization of tensor-parallel sharded Huggingface transformer models. This requires <code class="docutils literal notranslate"><span class="pre">transformers&gt;=4.52.0</span></code>.</p></li>
+<li><p>Support quantization of FSDP2 wrapped models and add FSDP2 support in the <code class="docutils literal notranslate"><span class="pre">llm_qat</span></code> example.</p></li>
+<li><p>Add NeMo 2 Simplified Flow examples for quantization aware training/distillation (QAT/QAD), speculative decoding, pruning &amp; distillation.</p></li>
+<li><p>Fix a Qwen3 MOE model export issue.</p></li>
+</ul>
+<p><strong>Windows Support</strong></p>
+<ul class="simple">
+<li><p>Model Optimizer for Windows now supports <a class="reference external" href="https://onnxruntime.ai/docs/execution-providers/TensorRTRTX-ExecutionProvider.html" rel="noopener noreferrer" target="_blank">NvTensorRtRtx</a> execution-provider.</p></li>
+</ul>
+</section>
+<section id="id10">
+<h2>0.31 (2025-06-04)<a class="headerlink" href="#id10" title="Link to this heading"></a></h2>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><dl class="simple">
+<dt>NeMo and Megatron-LM distributed checkpoint (<code class="docutils literal notranslate"><span class="pre">torch-dist</span></code>) stored with legacy version can no longer be loaded. The remedy is to load the legacy distributed checkpoint with 0.29 and store a <code class="docutils literal notranslate"><span class="pre">torch</span></code> checkpoint and resume with 0.31 to convert to a new format. The following changes only apply to storing and resuming distributed checkpoint.</dt><dd><ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">quantizer_state</span></code> of <code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code> is now stored in <code class="docutils literal notranslate"><span class="pre">extra_state</span></code> of <code class="xref py py-class docutils literal notranslate"><span class="pre">QuantModule</span></code> where it used to be stored in the sharded <code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code>.</p></li>
+<li><p>The dtype and shape of <code class="docutils literal notranslate"><span class="pre">amax</span></code> and <code class="docutils literal notranslate"><span class="pre">pre_quant_scale</span></code> stored in the distributed checkpoint are now restored. Some dtype and shape are previously changed to make all decoder layers to have homogeneous structure in the checkpoint.</p></li>
+<li><p>Together with megatron.core-0.13, quantized model will store and resume distributed checkpoint in a heterogenous format.</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>auto_quantize API now accepts a list of quantization config dicts as the list of quantization choices.</dt><dd><ul>
+<li><p>This API previously accepts a list of strings of quantization format names. It was therefore limited to only pre-defined quantization formats unless through some hacks.</p></li>
+<li><p>With this change, now user can easily use their own custom quantization formats for auto_quantize.</p></li>
+<li><p>In addition, the <code class="docutils literal notranslate"><span class="pre">quantization_formats</span></code> now exclude <code class="docutils literal notranslate"><span class="pre">None</span></code> (indicating “do not quantize”) as a valid format because the auto_quantize internally always add “do not quantize” as an option anyway.</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>Model export config is refactored. The quant config in <code class="docutils literal notranslate"><span class="pre">hf_quant_config.json</span></code> is converted and saved to <code class="docutils literal notranslate"><span class="pre">config.json</span></code>. <code class="docutils literal notranslate"><span class="pre">hf_quant_config.json</span></code> will be deprecated soon.</p></li>
+</ul>
+<p><strong>Deprecations</strong></p>
+<ul class="simple">
+<li><p>Deprecate <code class="docutils literal notranslate"><span class="pre">Python</span> <span class="pre">3.9</span></code> support.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Upgrade LLM examples to use TensorRT-LLM 0.19.</p></li>
+<li><p>Add new model support in the <code class="docutils literal notranslate"><span class="pre">llm_ptq</span></code> example: Qwen3 MoE.</p></li>
+<li><p>ModelOpt now supports advanced quantization algorithms such as AWQ, SVDQuant and SmoothQuant for cpu-offloaded Huggingface models.</p></li>
+<li><p>Add AutoCast tool to convert ONNX models to FP16 or BF16.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">--low_memory_mode</span></code> flag in the llm_ptq example support to initialize HF models with compressed weights and reduce peak memory of PTQ and quantized checkpoint export.</p></li>
+<li><p>Support <code class="docutils literal notranslate"><span class="pre">NemotronHForCausalLM</span></code>, <code class="docutils literal notranslate"><span class="pre">Qwen3ForCausalLM</span></code>, <code class="docutils literal notranslate"><span class="pre">Qwen3MoeForCausalLM</span></code> Megatron Core model import/export (from/to HuggingFace).</p></li>
+</ul>
+</section>
+<section id="id11">
+<h2>0.29 (2025-05-08)<a class="headerlink" href="#id11" title="Link to this heading"></a></h2>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><p>Refactor <code class="docutils literal notranslate"><span class="pre">SequentialQuantizer</span></code> to improve its implementation and maintainability while preserving its functionality.</p></li>
+</ul>
+<p><strong>Deprecations</strong></p>
+<ul class="simple">
+<li><p>Deprecate <code class="docutils literal notranslate"><span class="pre">torch&lt;2.4</span></code> support.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Upgrade LLM examples to use TensorRT-LLM 0.18.</p></li>
+<li><p>Add new model support in the <code class="docutils literal notranslate"><span class="pre">llm_ptq</span></code> example: Gemma-3, Llama-Nemotron.</p></li>
+<li><p>Add INT8 real quantization support.</p></li>
+<li><p>Add an FP8 GEMM per-tensor quantization kernel for real quantization. After PTQ, you can leverage the <a class="reference internal" href="generated/modelopt.torch.quantization.compress.html#modelopt.torch.quantization.compress" title="modelopt.torch.quantization.compress"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.compress</span></code></a> API to accelerate evaluation of quantized models.</p></li>
+<li><p>Use the shape of Pytorch parameters and buffers of <code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code> to initialize them during restore. This makes quantized model restoring more robust.</p></li>
+<li><p>Support adding new custom quantization calibration algorithms. Please refer to <a class="reference internal" href="generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.calibrate" title="modelopt.torch.quantization.model_quant.calibrate"><code class="xref py py-func docutils literal notranslate"><span class="pre">mtq.calibrate</span></code></a> or <a class="reference internal" href="../guides/_pytorch_quantization.html#custom-calibration-algorithm"><span class="std std-ref">custom calibration algorithm</span></a> for more details.</p></li>
+<li><p>Add EAGLE3 (<code class="docutils literal notranslate"><span class="pre">LlamaForCausalLMEagle3</span></code>) training and unified ModelOpt checkpoint export support for Megatron-LM.</p></li>
+<li><dl class="simple">
+<dt>Add support for <code class="docutils literal notranslate"><span class="pre">--override_shapes</span></code> flag to ONNX quantization.</dt><dd><ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">--calibration_shapes</span></code> is reserved for the input shapes used for calibration process.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--override_shapes</span></code> is used to override the input shapes of the model with static shapes.</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>Add support for UNet ONNX quantization.</p></li>
+<li><p>Enable <code class="docutils literal notranslate"><span class="pre">concat_elimination</span></code> pass by default to improve the performance of quantized ONNX models.</p></li>
+<li><p>Enable Redundant Cast elimination pass by default in <a class="reference internal" href="generated/modelopt.onnx.quantization.quantize.html#modelopt.onnx.quantization.quantize" title="modelopt.onnx.quantization.quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">moq.quantize</span></code></a>.</p></li>
+<li><p>Add new attribute <code class="docutils literal notranslate"><span class="pre">parallel_state</span></code> to <a class="reference internal" href="generated/modelopt.torch.quantization.nn.modules.quant_module.html#modelopt.torch.quantization.nn.modules.quant_module.QuantModule" title="modelopt.torch.quantization.nn.modules.quant_module.QuantModule"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantModule</span></code></a> to support distributed parallelism such as data parallel and tensor parallel.</p></li>
+<li><p>Add MXFP8, NVFP4 quantized ONNX export support.</p></li>
+<li><p>Add new example for torch quantization to ONNX for MXFP8, NVFP4 precision.</p></li>
+</ul>
+</section>
+<section id="id12">
+<h2>0.27 (2025-04-03)<a class="headerlink" href="#id12" title="Link to this heading"></a></h2>
+<p><strong>Deprecations</strong></p>
+<ul class="simple">
+<li><p>Deprecate real quantization configs, please use <a class="reference internal" href="generated/modelopt.torch.quantization.compress.html#modelopt.torch.quantization.compress" title="modelopt.torch.quantization.compress"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.compress</span></code></a> API for model compression after quantization.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Add new model support in the <code class="docutils literal notranslate"><span class="pre">llm_ptq</span></code> example: OpenAI Whisper. Experimental support: Llama4, QwQ, Qwen MOE.</p></li>
+<li><p>Add blockwise FP8 quantization support in unified model export.</p></li>
+<li><p>Add quantization support to the Transformer Engine Linear module.</p></li>
+<li><p>Add support for SVDQuant. Currently, only simulation is available; real deployment (for example, TensorRT deployment) support is coming soon.</p></li>
+<li><p>Store <code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code> in Megatron Core distributed checkpoint (used in NeMo and Megatron-LM) differently to support distributed checkpoint resume expert-parallel (EP). The legacy <code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code> in the distributed checkpoint generated by previous modelopt version can still be loaded in 0.27 and 0.29 but will need to be stored in the new format.</p></li>
+<li><p>Add triton-based NVFP4 quantization kernel that delivers approximately 40% performance improvement over the previous implementation.</p></li>
+<li><p>Add a new API <a class="reference internal" href="generated/modelopt.torch.quantization.compress.html#modelopt.torch.quantization.compress" title="modelopt.torch.quantization.compress"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.compress</span></code></a> for model compression for weights after quantization.</p></li>
+<li><p>Add option to simplify ONNX model before quantization is performed.</p></li>
+<li><p>Add FP4 KV cache support for unified HF and TensorRT-LLM export.</p></li>
+<li><p>Add speculative decoding support to Multi-Token Prediction (MTP) in Megatron Core models.</p></li>
+<li><dl class="simple">
+<dt>(Experimental) Improve support for ONNX models with custom TensorRT op:</dt><dd><ul>
+<li><p>Add support for <code class="docutils literal notranslate"><span class="pre">--calibration_shapes</span></code> flag.</p></li>
+<li><p>Add automatic type and shape tensor propagation for full ORT support with TensorRT EP.</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+<p><strong>Windows Support</strong></p>
+<ul class="simple">
+<li><p>New LLM models like DeepSeek etc. are supported with ONNX INT4 AWQ quantization on Windows. Refer <a class="reference external" href="https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html" rel="noopener noreferrer" target="_blank">Windows Support Matrix</a> for details about supported features and models.</p></li>
+<li><p>Model Optimizer for Windows now supports ONNX INT8 and FP8 quantization (W8A8) of SAM2 and Whisper models. Check <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq" rel="noopener noreferrer" target="_blank">example scripts</a> for getting started with quantizing these models.</p></li>
+</ul>
+<p><strong>Known Issues</strong></p>
+<ul class="simple">
+<li><p>Quantization of T5 models is broken. Please use <code class="docutils literal notranslate"><span class="pre">nvidia-modelopt==0.25.0</span></code> with <code class="docutils literal notranslate"><span class="pre">transformers&lt;4.50</span></code> meanwhile.</p></li>
+</ul>
+</section>
+<section id="id13">
+<h2>0.25 (2025-03-03)<a class="headerlink" href="#id13" title="Link to this heading"></a></h2>
+<p><strong>Deprecations</strong></p>
+<ul class="simple">
+<li><p>Deprecate Torch 2.1 support.</p></li>
+<li><p>Deprecate <code class="docutils literal notranslate"><span class="pre">humaneval</span></code> benchmark in <code class="docutils literal notranslate"><span class="pre">llm_eval</span></code> examples. Please use the newly added <code class="docutils literal notranslate"><span class="pre">simple_eval</span></code> instead.</p></li>
+<li><p>Deprecate <code class="docutils literal notranslate"><span class="pre">fp8_naive</span></code> quantization format in <code class="docutils literal notranslate"><span class="pre">llm_ptq</span></code> examples. Please use <code class="docutils literal notranslate"><span class="pre">fp8</span></code> instead.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Support fast hadamard transform in <code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code>.
+It can be used for rotation based quantization methods, e.g. QuaRot. Users need to install the package <a class="reference external" href="https://github.com/Dao-AILab/fast-hadamard-transform" rel="noopener noreferrer" target="_blank">fast_hadamard_transform</a> to use this feature.</p></li>
+<li><p>Add affine quantization support for the KV cache, resolving the low accuracy issue in models such as Qwen2.5 and Phi-3/3.5.</p></li>
+<li><p>Add FSDP2 support. FSDP2 can now be used for QAT.</p></li>
+<li><p>Add <a class="reference external" href="https://livecodebench.github.io/" rel="noopener noreferrer" target="_blank">LiveCodeBench</a>  and <a class="reference external" href="https://github.com/openai/simple-evals" rel="noopener noreferrer" target="_blank">Simple Evals</a> to the <code class="docutils literal notranslate"><span class="pre">llm_eval</span></code> examples.</p></li>
+<li><p>Disabled saving modelopt state in unified hf export APIs by default, i.e., added <code class="docutils literal notranslate"><span class="pre">save_modelopt_state</span></code> flag in <code class="docutils literal notranslate"><span class="pre">export_hf_checkpoint</span></code> API and by default set to False.</p></li>
+<li><p>Add FP8 and NVFP4 real quantization support with LLM QLoRA example.</p></li>
+<li><p>The <code class="xref py py-class docutils literal notranslate"><span class="pre">modelopt.deploy.llm.LLM</span></code> now support use the <code class="xref py py-class docutils literal notranslate"><span class="pre">tensorrt_llm._torch.LLM</span></code> backend for the quantized HuggingFace checkpoints.</p></li>
+<li><p>Add <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/deepseek" rel="noopener noreferrer" target="_blank">NVFP4 PTQ example for DeepSeek-R1</a>.</p></li>
+<li><p>Add end-to-end <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_autodeploy" rel="noopener noreferrer" target="_blank">AutoDeploy example for AutoQuant LLM models</a>.</p></li>
+</ul>
+</section>
+<section id="id14">
+<h2>0.23 (2025-01-29)<a class="headerlink" href="#id14" title="Link to this heading"></a></h2>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><p>Support TensorRT-LLM to 0.17. Examples (e.g. benchmark task in llm_ptq) may not be fully compatible with TensorRT-LLM 0.15.</p></li>
+<li><p>Nvidia Model Optimizer has changed its LICENSE from NVIDIA Proprietary (library wheel) and MIT (examples) to Apache 2.0 in this first full OSS release.</p></li>
+<li><p>Deprecate Python 3.8, Torch 2.0, and Cuda 11.x support.</p></li>
+<li><p>ONNX Runtime dependency upgraded to 1.20 which no longer supports Python 3.9.</p></li>
+<li><p>In the Huggingface examples, the <code class="docutils literal notranslate"><span class="pre">trust_remote_code</span></code> is by default set to false and require users to explicitly turning it on with <code class="docutils literal notranslate"><span class="pre">--trust_remote_code</span></code> flag.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Added OCP Microscaling Formats (MX) for fake quantization support, including FP8 (E5M2, E4M3), FP6 (E3M2, E2M3), FP4, INT8.</p></li>
+<li><p>Added NVFP4 quantization support for NVIDIA Blackwell GPUs along with updated examples.</p></li>
+<li><p>Allows export lm_head quantized TensorRT-LLM checkpoint. Quantize lm_head could benefit smaller sized models at a potential cost of additional accuracy loss.</p></li>
+<li><p>TensorRT-LLM now supports Moe FP8 and w4a8_awq inference on SM89 (Ada) GPUs.</p></li>
+<li><p>New models support in the <code class="docutils literal notranslate"><span class="pre">llm_ptq</span></code> example: Llama 3.3, Phi 4.</p></li>
+<li><p>Added Minitron pruning support for NeMo 2.0 GPT models.</p></li>
+<li><p>Exclude modules in TensorRT-LLM export configs are now wildcards</p></li>
+<li><p>The unified llama3.1 FP8 huggingface checkpoints can be deployed on <a class="reference external" href="https://github.com/sgl-project/sglang/pull/2535" rel="noopener noreferrer" target="_blank">SGLang</a>.</p></li>
+</ul>
+</section>
+<section id="id15">
+<h2>0.21 (2024-12-03)<a class="headerlink" href="#id15" title="Link to this heading"></a></h2>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><p>Support TensorRT-LLM to 0.15. Examples (e.g. benchmark task in llm_ptq) may not be fully compatible with TensorRT-LLM 0.14.</p></li>
+<li><p>Remove the deprecated arg <code class="docutils literal notranslate"><span class="pre">export_npz</span></code> from the <code class="xref py py-meth docutils literal notranslate"><span class="pre">mt.export.export_tensorrt_llm_checkpoint</span></code> API</p></li>
+<li><p>Deprecate <code class="xref py py-meth docutils literal notranslate"><span class="pre">mt.export.export_to_vllm</span></code> API for <code class="xref py py-meth docutils literal notranslate"><span class="pre">mt.export.export_hf_checkpoint</span></code></p></li>
+<li><p>Rename decoder type <code class="docutils literal notranslate"><span class="pre">gptnext</span></code> to <code class="docutils literal notranslate"><span class="pre">gpt</span></code> in <code class="docutils literal notranslate"><span class="pre">llm_ptq</span></code> to align with TensorRT-LLM model definition.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Added new tutorial notebooks for Minitron pruning and distillation in NVIDIA NeMo framework.</p></li>
+<li><p>New models support in the <code class="docutils literal notranslate"><span class="pre">llm_ptq</span></code> example: Minitron, Phi3.5 MOE.</p></li>
+<li><p>New models support in the <code class="docutils literal notranslate"><span class="pre">vlm_ptq</span></code> example: Llama3.2(Mllama)</p></li>
+<li><p><code class="xref py py-meth docutils literal notranslate"><span class="pre">mt.export.export_tensorrt_llm_checkpoint</span></code> and <code class="xref py py-meth docutils literal notranslate"><span class="pre">mt.export.export_hf_checkpoint</span></code> no longer requires the <code class="docutils literal notranslate"><span class="pre">dtype</span></code> arg.</p></li>
+<li><p>Added an example to deploy and run quantized fp8 llama3.1 8B instruct model from HuggingFace modelopt model hub on both TensorRT and vLLM.</p></li>
+</ul>
+<p><strong>Bug Fixes</strong></p>
+<ul class="simple">
+<li><p>Improve Minitron pruning quality by avoiding possible bf16 overflow in importance calculation and minor change in <code class="docutils literal notranslate"><span class="pre">hidden_size</span></code> importance ranking.</p></li>
+</ul>
+<p><strong>Misc</strong></p>
+<ul class="simple">
+<li><p>Added deprecation warnings for Python 3.8, torch 2.0, and CUDA 11.x. Support will be dropped in the next release.</p></li>
+</ul>
+</section>
+<section id="id16">
+<h2>0.19 (2024-10-23)<a class="headerlink" href="#id16" title="Link to this heading"></a></h2>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><p>Deprecated the summarize task in the <code class="docutils literal notranslate"><span class="pre">llm_ptq</span></code> example.</p></li>
+<li><p>Deprecated the <code class="docutils literal notranslate"><span class="pre">type</span></code> flag in the <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq/scripts/huggingface_example.sh" rel="noopener noreferrer" target="_blank">huggingface_example.sh</a></p></li>
+<li><p>Deprecated Python plugin support in ONNX.</p></li>
+<li><p>Support TensorRT-LLM 0.13. Examples not compatible with TensorRT-LLM 0.12.</p></li>
+<li><p><a class="reference internal" href="generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize" title="modelopt.torch.quantization.model_quant.auto_quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.auto_quantize</span></code></a> API has been updated. The API now
+accepts <code class="docutils literal notranslate"><span class="pre">forward_step</span></code> and <code class="docutils literal notranslate"><span class="pre">forward_backward_step</span></code> as arguments instead of <code class="docutils literal notranslate"><span class="pre">loss_func</span></code> and <code class="docutils literal notranslate"><span class="pre">collect_func</span></code>.
+Please see the API documentation for more details.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>ModelOpt is compatible for SBSA aarch64 (e.g. GH200) now!
+Except ONNX PTQ with plugins is not supported.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">effective_bits</span></code> as a constraint for <a class="reference internal" href="generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize" title="modelopt.torch.quantization.model_quant.auto_quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.auto_qauntize</span></code></a>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lm_evaluation_harness</span></code> is fully integrated to modelopt backed by TensorRT-LLM.
+<code class="docutils literal notranslate"><span class="pre">lm_evaluation_harness</span></code> benchmarks are now available in the examples for LLM accuracy evaluation.</p></li>
+<li><p>A new <code class="docutils literal notranslate"><span class="pre">--perf</span></code> flag is introduced in the <code class="docutils literal notranslate"><span class="pre">modelopt_to_tensorrt_llm.py</span></code> example to build engines with max perf.</p></li>
+<li><p>Users can choose the execution provider to run the calibration in ONNX quantization.</p></li>
+<li><p>Added automatic detection of custom ops in ONNX models using TensorRT plugins.
+This requires the <code class="docutils literal notranslate"><span class="pre">tensorrt</span></code> python package to be installed.</p></li>
+<li><p>Replaced <code class="docutils literal notranslate"><span class="pre">jax</span></code> with <code class="docutils literal notranslate"><span class="pre">cupy</span></code> for faster INT4 ONNX quantization.</p></li>
+<li><p><a class="reference internal" href="generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize" title="modelopt.torch.quantization.model_quant.auto_quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.auto_quantize</span></code></a> now supports search based automatic
+quantization for NeMo &amp; MCore models (in addition to HuggingFace models).</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">num_layers</span></code> and <code class="docutils literal notranslate"><span class="pre">hidden_size</span></code> pruning support for NeMo / Megatron-core models.</p></li>
+</ul>
+<p><strong>Windows Support</strong></p>
+<ul class="simple">
+<li><p>This is the first official release of Model Optimizer for Windows</p></li>
+<li><p><strong>ONNX INT4 Quantization:</strong> <a class="reference internal" href="generated/modelopt.onnx.quantization.int4.html#modelopt.onnx.quantization.int4.quantize" title="modelopt.onnx.quantization.int4.quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.quantize_int4</span></code></a> now supports ONNX INT4 quantization for DirectML and TensorRT* deployment. See <a class="reference internal" href="../guides/0_support_matrix.html#support-matrix"><span class="std std-ref">Support Matrix</span></a> for details about supported features and models.</p></li>
+<li><p><strong>LLM Quantization with Olive:</strong> Enabled LLM quantization through Olive, streamlining model optimization workflows. Refer <a class="reference external" href="https://github.com/microsoft/Olive/tree/main/examples/phi3#quantize-models-with-nvidia-Model-Optimizer" rel="noopener noreferrer" target="_blank">Olive example</a>.</p></li>
+<li><p><strong>DirectML Deployment Guide:</strong> Added DML deployment guide. Refer <a class="reference internal" href="../deployment/2_onnxruntime.html#onnxruntime-deployment"><span class="std std-ref">Onnxruntime</span></a> deployment guide for details.</p></li>
+<li><p><strong>MMLU Benchmark for Accuracy Evaluations:</strong> Introduced <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/accuracy_benchmark/README.md" rel="noopener noreferrer" target="_blank">MMLU benchmarking</a> for accuracy evaluation of ONNX models on DirectML (DML).</p></li>
+<li><p><strong>Published quantized ONNX models collection:</strong> Published quantized ONNX models at HuggingFace <a class="reference external" href="https://huggingface.co/collections/nvidia/optimized-onnx-models-for-nvidia-rtx-gpus" rel="noopener noreferrer" target="_blank">NVIDIA collections</a>.</p></li>
+</ul>
+<p>* <em>This version includes experimental features such as TensorRT deployment of ONNX INT4 models, PyTorch quantization and sparsity. These are currently unverified on Windows.</em></p>
+</section>
+<section id="id17">
+<h2>0.17 (2024-09-11)<a class="headerlink" href="#id17" title="Link to this heading"></a></h2>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><p>Deprecated <code class="docutils literal notranslate"><span class="pre">torch&lt;2.0</span></code> support.</p></li>
+<li><p><a class="reference internal" href="generated/modelopt.torch.utils.dataset_utils.html#modelopt.torch.utils.dataset_utils.get_dataset_dataloader" title="modelopt.torch.utils.dataset_utils.get_dataset_dataloader"><code class="xref py py-meth docutils literal notranslate"><span class="pre">modelopt.torch.utils.dataset_utils.get_dataset_dataloader()</span></code></a> now returns a key value pair instead of the tensor.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>New APIs and examples: <a class="reference internal" href="generated/modelopt.torch.prune.html#module-modelopt.torch.prune" title="modelopt.torch.prune"><code class="xref py py-mod docutils literal notranslate"><span class="pre">modelopt.torch.prune</span></code></a> for pruning Conv, Linear, and Attention heads for
+NVIDIA Megatron-core GPT-style models (e.g. Llama 3), PyTorch Computer Vision models, and HuggingFace Bert/GPT-J models.</p></li>
+<li><p>New API: <a class="reference internal" href="generated/modelopt.torch.distill.html#module-modelopt.torch.distill" title="modelopt.torch.distill"><code class="xref py py-mod docutils literal notranslate"><span class="pre">modelopt.torch.distill</span></code></a> for knowledge distillation, along with guides and example.</p></li>
+<li><p>New Example: <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/chained_optimizations" rel="noopener noreferrer" target="_blank">HF BERT Prune, Distill &amp; Quantize</a>
+showcasing how to chain pruning, distillation, and quantization to achieve the best performance on a given model.</p></li>
+<li><p>Added INT8/FP8 DQ-only support for ONNX model.</p></li>
+<li><p>New API: <a class="reference internal" href="generated/modelopt.torch.speculative.html#module-modelopt.torch.speculative" title="modelopt.torch.speculative"><code class="xref py py-mod docutils literal notranslate"><span class="pre">modelopt.torch.speculative</span></code></a> for end-to-end support of Medusa models.</p></li>
+<li><p>Added Medusa QAT and End-to-end examples.</p></li>
+<li><p>Modelopt now supports automatic save/restore of <code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code> with the <code class="docutils literal notranslate"><span class="pre">.save_pretrained</span></code> and <code class="docutils literal notranslate"><span class="pre">.from_pretrained</span></code> APIs
+from Huggingface libraries, such as <code class="docutils literal notranslate"><span class="pre">transformers</span></code> and <code class="docutils literal notranslate"><span class="pre">diffusers</span></code>. This feature can be enabled by calling
+<a class="reference internal" href="generated/modelopt.torch.opt.plugins.huggingface.html#modelopt.torch.opt.plugins.huggingface.enable_huggingface_checkpointing" title="modelopt.torch.opt.plugins.huggingface.enable_huggingface_checkpointing"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.enable_huggingface_checkpointing()</span></code></a>.</p></li>
+<li><p>ONNX FP8 quantization support with amax calibration.</p></li>
+<li><p>TensorRT-LLM dependency upgraded to 0.12.0. Huggingface tokenizer files are now also stored in the engine dir.</p></li>
+<li><p>The unified model export API <a class="reference internal" href="generated/modelopt.torch.export.unified_export_hf.html#modelopt.torch.export.unified_export_hf.export_hf_checkpoint" title="modelopt.torch.export.unified_export_hf.export_hf_checkpoint"><code class="xref py py-meth docutils literal notranslate"><span class="pre">modelopt.torch.export.export_hf_checkpoint</span></code></a>
+supports exporting <code class="docutils literal notranslate"><span class="pre">fp8</span></code> and <code class="docutils literal notranslate"><span class="pre">int4_awq</span></code> quantized checkpoints with packed weights for
+Hugging Face models with namings aligned with its original checkpoints. The exported <code class="docutils literal notranslate"><span class="pre">fp8</span></code> checkpoints can be deployed with both TensorRT-LLM and VLLM.</p></li>
+<li><p>Add int8 and fp8 quantization support for the FLUX.1-dev model.</p></li>
+<li><p>Add a Python-friendly TensorRT inference pipeline for diffusion models.</p></li>
+</ul>
+<p><strong>Misc</strong></p>
+<ul class="simple">
+<li><p>Added deprecation warning for <code class="xref py py-meth docutils literal notranslate"><span class="pre">set_data_parallel_group</span></code>
+and <code class="xref py py-meth docutils literal notranslate"><span class="pre">set_tensor_parallel_group</span></code>. These APIs are
+no longer needed for supporting distributed data and tensor parallelism in quantization. They will be removed in
+a future release.</p></li>
+</ul>
+</section>
+<section id="id18">
+<h2>0.15 (2024-07-25)<a class="headerlink" href="#id18" title="Link to this heading"></a></h2>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><p>Deprecated <code class="xref py py-class docutils literal notranslate"><span class="pre">QuantDescriptor</span></code>.
+Use <a class="reference internal" href="generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a> to
+configure <code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code>.
+<code class="xref py py-meth docutils literal notranslate"><span class="pre">set_from_attribute_config</span></code>
+can be used to set the quantizer attributes from the config class or attribute dictionary. This change applies only
+to backend APIs. The change is backward compatible if you are using
+only the <a class="reference internal" href="generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize" title="modelopt.torch.quantization.model_quant.quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.quantize</span></code></a> API.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Added quantization support for torch <code class="docutils literal notranslate"><span class="pre">RNN,</span> <span class="pre">LSTM,</span> <span class="pre">GRU</span></code> modules. Only available for <code class="docutils literal notranslate"><span class="pre">torch&gt;=2.0</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">modelopt.torch.quantization</span></code> now supports module class based quantizer attribute setting for
+<a class="reference internal" href="generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize" title="modelopt.torch.quantization.model_quant.quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.quantize</span></code></a> API.</p></li>
+<li><p>Added new LLM PTQ example for DBRX model.</p></li>
+<li><p>Added new LLM (Gemma 2) PTQ and TensorRT-LLM checkpoint export support.</p></li>
+<li><p>Added new LLM QAT example for NVIDIA NeMo framework.</p></li>
+<li><p>TensorRT-LLM dependency upgraded to 0.11.0.</p></li>
+<li><p>(Experimental): <a class="reference internal" href="generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize" title="modelopt.torch.quantization.model_quant.auto_quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.auto_quantize</span></code></a> API which quantizes a model
+by searching for the best per-layer quantization formats.</p></li>
+<li><p>(Experimental): Added new LLM QLoRA example with NF4 and INT4_AWQ quantization.</p></li>
+<li><p>(Experimental): <code class="docutils literal notranslate"><span class="pre">modelopt.torch.export</span></code> now supports exporting quantized checkpoints with packed weights for
+Hugging Face models with namings aligned with its original checkpoints.</p></li>
+<li><p>(Experimental) Added support for quantization of ONNX models with TensorRT plugin.</p></li>
+</ul>
+<p><strong>Misc</strong></p>
+<ul class="simple">
+<li><p>Added deprecation warning for <code class="docutils literal notranslate"><span class="pre">torch&lt;2.0</span></code>. Support will be dropped in next release.</p></li>
+</ul>
+</section>
+<section id="id19">
+<h2>0.13 (2024-06-14)<a class="headerlink" href="#id19" title="Link to this heading"></a></h2>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><p><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">PTQ examples</a> have been
+upgraded to use TensorRT-LLM 0.10.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p>Adding TensorRT-LLM checkpoint export support for Medusa decoding (official <code class="docutils literal notranslate"><span class="pre">MedusaModel</span></code> and Megatron Core <code class="docutils literal notranslate"><span class="pre">GPTModel</span></code>).</p></li>
+<li><p>Enable support for mixtral, recurrentgemma, starcoder, qwen in <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">PTQ examples</a>.</p></li>
+<li><p>Adding TensorRT-LLM checkpoint export and engine building support for sparse models.</p></li>
+<li><p>Import scales from TensorRT calibration cache and use them for quantization.</p></li>
+<li><p>(Experimental) Enable low GPU memory FP8 calibration for the Hugging Face models when the original model size does not fit into the GPU memory.</p></li>
+<li><p>(Experimental) Support exporting FP8 calibrated model to VLLM deployment.</p></li>
+<li><p>(Experimental) Python 3.12 support added.</p></li>
+</ul>
+</section>
+<section id="id21">
+<h2>0.11 (2024-05-07)<a class="headerlink" href="#id21" title="Link to this heading"></a></h2>
+<p><strong>Backward Breaking Changes</strong></p>
+<ul class="simple">
+<li><p>[!!!] The package was renamed from <code class="docutils literal notranslate"><span class="pre">ammo</span></code> to <code class="docutils literal notranslate"><span class="pre">modelopt</span></code>. The new full product
+name is <em>Nvidia Model Optimizer</em>. PLEASE CHANGE ALL YOUR REFERENCES FROM <code class="docutils literal notranslate"><span class="pre">ammo</span></code> to
+<code class="docutils literal notranslate"><span class="pre">modelopt</span></code> including any paths and links!</p></li>
+<li><p>Default installation <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">nvidia-modelopt</span></code> will now only install minimal core
+dependencies. Following optional dependencies are available depending on the features that are
+being used: <code class="docutils literal notranslate"><span class="pre">[deploy],</span> <span class="pre">[onnx],</span> <span class="pre">[torch],</span> <span class="pre">[hf]</span></code>. To install all dependencies, use
+<code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">&quot;nvidia-modelopt[all]&quot;</span></code>.</p></li>
+<li><p>Deprecated <code class="docutils literal notranslate"><span class="pre">inference_gpus</span></code> arg in <code class="docutils literal notranslate"><span class="pre">modelopt.torch.export.model_config_export.torch_to_tensorrt_llm_checkpoint</span></code>. User should use <code class="docutils literal notranslate"><span class="pre">inference_tensor_parallel</span></code> instead.</p></li>
+<li><p>Experimental <code class="docutils literal notranslate"><span class="pre">modelopt.torch.deploy</span></code> module is now available as <code class="docutils literal notranslate"><span class="pre">modelopt.torch._deploy</span></code>.</p></li>
+</ul>
+<p><strong>New Features</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">modelopt.torch.sparsity</span></code> now supports sparsity-aware training (SAT). Both SAT and post-training
+sparsification supports chaining with other modes, e.g. SAT + QAT.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">modelopt.torch.quantization</span></code> natively support distributed data and tensor parallelism while estimating quantization parameters.
+The data and tensor parallel groups needs to be registered with <code class="docutils literal notranslate"><span class="pre">modelopt.torch.utils.distributed.set_data_parallel_group</span></code> and <code class="docutils literal notranslate"><span class="pre">modelopt.torch.utils.distributed.set_tensor_parallel_group</span></code> APIs.
+By default, the data parallel group is set as the default distributed group and the tensor parallel group is disabled.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">modelopt.torch.opt</span></code> now supports chaining multiple optimization techniques that each require
+modifications to the same model, e.g., you can now sparsify and quantize a model at the same time.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">modelopt.onnx.quantization</span></code> supports FLOAT8 quantization format with Distribution calibration algorithm.</p></li>
+<li><p>Native support of <code class="docutils literal notranslate"><span class="pre">modelopt.torch.opt</span></code> with FSDP (Fully Sharded Data Parallel) for <code class="docutils literal notranslate"><span class="pre">torch&gt;=2.1</span></code>. This includes
+sparsity, quantization, and any other model modification &amp; optimization.</p></li>
+<li><p>Added FP8 ONNX quantization support in <code class="docutils literal notranslate"><span class="pre">modelopt.onnx.quantization</span></code>.</p></li>
+<li><p>Added Windows (<code class="docutils literal notranslate"><span class="pre">win_amd64</span></code>) support for ModelOpt released wheels. Currently supported for <code class="docutils literal notranslate"><span class="pre">modelopt.onnx</span></code> submodule only.</p></li>
+</ul>
+<p><strong>Bug Fixes</strong></p>
+<ul class="simple">
+<li><p>Fixed the compatibility issue of <code class="docutils literal notranslate"><span class="pre">modelopt.torch.sparsity</span></code> with FSDP.</p></li>
+<li><p>Fixed an issue in dynamic dim handling in <code class="docutils literal notranslate"><span class="pre">modelopt.onnx.quantization</span></code> with random calibration data.</p></li>
+<li><p>Fixed graph node naming issue after opset conversion operation.</p></li>
+<li><p>Fixed an issue in negative dim handling like dynamic dim in <code class="docutils literal notranslate"><span class="pre">modelopt.onnx.quantization</span></code> with random calibration data.</p></li>
+<li><p>Fixed allowing to accept <code class="docutils literal notranslate"><span class="pre">.pb</span></code> file for input file.</p></li>
+<li><p>Fixed copy extra data to tmp folder issue for ONNX PTQ.</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../examples/0_all_examples.html" class="btn btn-neutral float-left" title="All GitHub Examples" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="1_modelopt_api.html" class="btn btn-neutral float-right" title="modelopt API" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
