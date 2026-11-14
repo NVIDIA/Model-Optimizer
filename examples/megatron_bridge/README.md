@@ -462,10 +462,13 @@ PTQ prepares all enabled quantized weights; choose trainable parameters during Q
 - **GGML PTQ:** reuse initial codes until weights change, then recompute scales and codes.
 - **GPTQ:** keep super-block scales and FP32 importance fixed.
 
-Megatron retains compact initialization data for checkpointing—about 13.1% of BF16 weight
-storage for IQ2_XXS. GGML checkpoints require the saved tensor-parallel layout, even after updates.
-Shared or sequential GGML PTQ quantizers are unsupported. Some formats and BF16 transforms
-may still change the effective weights during initialization.
+Restore GGML QDQ checkpoints with the same tensor-parallel layout used when saving.
+Shared or sequential GGML PTQ quantizers are unsupported.
+
+> **Note:** Initial encoding retention applies to GGML. Other formats retain their existing
+> quantization behavior; for example, dynamic NVFP4 reuses its calibrated global scale but
+> recomputes local scales for each 16-weight block. Exact round-trip equality is not guaranteed
+> for these formats or BF16 transforms.
 
 For custom PTQ, call `mtq.initialize_qdq_weights(model)` once after calibration or restoration,
 before saving the checkpoint. Do not repeat it during training or resume.
