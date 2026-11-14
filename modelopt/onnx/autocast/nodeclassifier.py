@@ -255,6 +255,72 @@ class IORangeRule(NodeRuleBase):
             super()._log_skipped(node, **kwargs)
 
 
+class NormVarianceRule(NodeRuleBase):
+    """Rule for keeping the variance of decomposed RMSNorm in high precision.
+
+    It also covers decomposed LayerNorm that ``GraphSanitizer`` did not fuse into
+    ``LayerNormalization``. ``x * x`` overflows fp16 once ``|x|`` exceeds about 256, which LLM
+    residual streams with outlier channels routinely reach. Random reference inputs rarely produce
+    such values, so the I/O range rule alone can leave ``Pow -> ReduceMean -> Add -> Sqrt`` in
+    fp16. Low-precision EPs then normalize those rows with an infinite variance and zero them; the
+    CPU EP hides the problem because it computes these ops in fp32. The final ``Div``/``Mul`` only
+    sees values within fp16 range, so it stays eligible for low precision. The rule also runs for
+    bf16 and with calibration data, for precision. ``nodes_to_include`` opts specific nodes out.
+    """
+
+    def __init__(self, model):
+        """Initialize the rule.
+
+        Args:
+            model: The ONNX model to scan for variance subgraphs.
+        """
+        constants = {init.name: init for init in model.graph.initializer}
+        constants.update(
+            (node.output[0], node.attribute[0].t)
+            for node in model.graph.node
+            if node.op_type == "Constant" and node.attribute and node.attribute[0].name == "value"
+        )
+
+        def is_squared(node):
+            if node.op_type == "Mul":
+                return node.input[0] == node.input[1]
+            if node.op_type != "Pow":
+                return False
+            # Only scalar exponents are read, so weights are never converted to numpy.
+            tensor = constants.get(node.input[1])
+            if tensor is None or np.prod(tensor.dims) != 1:
+                return False
+            return np.isclose(float(onnx.numpy_helper.to_array(tensor).item()), 2.0)
+
+        producer = {out: node for node in model.graph.node for out in node.output}
+        consumers: dict[str, list[onnx.NodeProto]] = {}
+        for node in model.graph.node:
+            for name in node.input:
+                consumers.setdefault(name, []).append(node)
+
+        self.variance_nodes: set[str] = set()
+        for reduce in model.graph.node:
+            if reduce.op_type != "ReduceMean":
+                continue
+            square = producer.get(reduce.input[0])
+            if square is None or not is_squared(square):
+                continue
+            chain = [square, reduce]
+            node = reduce
+            while len(next_nodes := consumers.get(node.output[0], [])) == 1:
+                node = next_nodes[0]
+                if node.op_type == "Add":
+                    chain.append(node)
+                    continue
+                if node.op_type == "Sqrt":
+                    chain.append(node)
+                break
+            self.variance_nodes.update(n.name for n in chain)
+
+    def _check_inner(self, node):
+        return node.name in self.variance_nodes
+
+
 class DepthOfReductionRule(NodeRuleBase):
     """Rule for keeping nodes with high depth of reduction in high precision."""
 
@@ -460,6 +526,7 @@ class NodeClassifier:
             block_node_rules.append(DisabledOpTypes(self.op_types_to_exclude))
         if self.init_max is not None:
             block_node_rules.append(InitializerRangeRule(self.init_max, self.node_to_init_map))
+        block_node_rules.append(NormVarianceRule(self.model))
         if reference_data:
             block_node_rules.append(
                 IORangeRule(self.data_max, reference_data, self.node_to_init_map)
