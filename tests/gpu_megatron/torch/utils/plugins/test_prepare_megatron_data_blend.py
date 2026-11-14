@@ -24,11 +24,13 @@ from unittest.mock import Mock
 import huggingface_hub
 import pytest
 import yaml
+from datasets import Dataset, load_dataset
 
 from modelopt.torch.utils.plugins.prepare_megatron_data_blend import main
 
 # The plugins package re-exports the function under the module's name, so import the module itself.
 blend_module = importlib.import_module("modelopt.torch.utils.plugins.prepare_megatron_data_blend")
+chat_blend_module = importlib.import_module("modelopt.torch.utils.plugins._chat_blend")
 
 
 def _setup_test(
@@ -293,6 +295,19 @@ def test_chat_blend_reuses_and_rebuilds_cached_parts(tmp_path: Path, chat_blend)
     assert (tmp_path / "blend" / "train.jsonl").read_text(encoding="utf-8") == first
 
 
+def test_chat_blend_reuses_legacy_part_cache(tmp_path: Path, chat_blend):
+    write_config, calls = chat_blend
+    config_path = write_config(sources=[_source("a")])
+    parts = tmp_path / "blend" / "parts"
+    parts.mkdir(parents=True)
+    # Filename produced before revision and shuffle_buffer_size became optional cache inputs.
+    part = parts / "org--a_train_9b3cb5db67345cd3.jsonl"
+    blend_module._write_jsonl(part, [_chat(i) for i in range(100)])
+    assert blend_module.prepare_chat_data_blend(config_path) == {"train": 95, "validation": 5}
+    assert not calls
+    assert len(list(parts.glob("*.jsonl"))) == 1
+
+
 @pytest.mark.parametrize(
     ("first", "second"),
     [
@@ -305,8 +320,25 @@ def test_chat_blend_reuses_and_rebuilds_cached_parts(tmp_path: Path, chat_blend)
         ({"shuffle": True, "seed": 0}, {"shuffle": True, "seed": 1}),
         ({}, {"reasoning_content": "inline"}),
         ({}, {"loss_mode": "full"}),
+        (
+            {"sources": [_source("a", revision="a" * 40)]},
+            {"sources": [_source("a", revision="b" * 40)]},
+        ),
+        (
+            {"sources": [_source("a", shuffle_buffer_size=64)]},
+            {"sources": [_source("a", shuffle_buffer_size=128)]},
+        ),
     ],
-    ids=["split", "files", "shuffle", "seed", "reasoning_content", "loss_mode"],
+    ids=[
+        "split",
+        "files",
+        "shuffle",
+        "seed",
+        "reasoning_content",
+        "loss_mode",
+        "revision",
+        "buffer",
+    ],
 )
 def test_chat_blend_reselects_after_a_selection_change(chat_blend, first, second):
     write_config, calls = chat_blend
@@ -335,13 +367,20 @@ def test_chat_blend_reselects_after_a_selection_change(chat_blend, first, second
         ({"reasoning_content": "drop"}, "reasoning_content must be one of"),
         # A row with both columns must not silently be read from ``text``.
         ({"sources": [_source("a", content_field="conversations")]}, "messages or text"),
+        ({"group_split": True}, "full dataset revision"),
+        ({"group_split": True, "shuffle": "yes"}, "must be a boolean"),
+        (
+            {"group_split": True, "sources": [_source("a", revision="a" * 40)] * 2},
+            "Duplicate source",
+        ),
     ],
 )
-def test_chat_blend_rejects_invalid_configs(chat_blend, overrides, match):
+def test_chat_blend_rejects_invalid_configs(tmp_path: Path, chat_blend, overrides, match):
     write_config, calls = chat_blend
     with pytest.raises(ValueError, match=match):
         blend_module.prepare_chat_data_blend(write_config(**overrides))
     assert not calls
+    assert not (tmp_path / "blend").exists()
 
 
 @pytest.mark.parametrize(
@@ -385,13 +424,16 @@ def test_write_jsonl_is_atomic(tmp_path: Path):
 @pytest.mark.parametrize("grouped", [False, True])
 def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch, grouped):
     plain, packed = tmp_path / "a.jsonl", tmp_path / "b.jsonl.gz"
-    lines = [json.dumps(_chat(i)) for i in range(20)]
+    lines = [
+        json.dumps({**_chat(i), "chat_template_kwargs": {"enable_thinking": i % 2 == 0}})
+        for i in range(40)
+    ]
     # Malformed records, unparseable or unconvertible, are skipped with a warning as in the
     # tokenizing reader.
     bad = ['{"messages": [', '{"messages": ["hello"]}']
-    plain.write_text("\n".join([*lines[:10], *bad, *lines[10:]]) + "\n", "utf-8")
+    plain.write_text("\n".join([*lines[:10], *bad, *lines[10:20]]) + "\n", "utf-8")
     with gzip.open(packed, "wt", encoding="utf-8") as f:
-        f.writelines(json.dumps(_chat(i)) + "\n" for i in range(20, 40))
+        f.writelines(line + "\n" for line in lines[20:])
     paths = {"data/a.jsonl": str(plain), "data/b.jsonl.gz": str(packed)}
     monkeypatch.setattr(
         huggingface_hub, "hf_hub_download", lambda repo_id, filename, **kwargs: paths[filename]
@@ -417,9 +459,16 @@ def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch, grouped):
     out = tmp_path / "blend"
     rows = _read_jsonl(out / "train.jsonl") + _read_jsonl(out / "validation.jsonl")
     if grouped:
+        assert not (out / "parts").exists()
+        assert all(
+            r["chat_template_kwargs"]
+            == {"enable_thinking": int(r["messages"][0]["content"][1:]) % 2 == 0}
+            for r in rows
+        )
         assert len({r["messages"][0]["content"] for r in rows}) == 20
         assert max(int(r["messages"][0]["content"][1:]) for r in rows) >= 20
     else:
+        assert all("chat_template_kwargs" not in r for r in rows)
         assert sorted(r["messages"][0]["content"] for r in rows) == sorted(
             f"q{i}" for i in range(40)
         )
@@ -473,6 +522,9 @@ def test_pair_rows_pairs_long_with_short_under_the_cap():
 
 def test_grouped_blend_refills_filters_and_isolates_questions(tmp_path: Path, monkeypatch):
     """Different answers survive, exact duplicates refill, and whole questions stay held out."""
+    # Interrupted package installs can leave dist-info directories without Name metadata.
+    (tmp_path / "unnamed.dist-info").mkdir()
+    monkeypatch.syspath_prepend(str(tmp_path))
     a = [_chat(i) for i in range(70)]
     a[1]["messages"][-1]["reasoning_content"] = "Different reasoning"
     a.insert(
@@ -574,18 +626,40 @@ def test_grouped_blend_reports_exhaustion_but_does_not_swallow_reader_failure(
         blend_module.prepare_chat_data_blend(path)
 
 
-def test_grouped_blend_restores_pinned_questions(tmp_path: Path, monkeypatch):
-    grouped = importlib.import_module("modelopt.torch.utils.plugins._chat_blend")
+@pytest.mark.parametrize("kind", ["apps", "taco", "code_contests", "open-r1/codeforces"])
+def test_grouped_blend_restores_pinned_questions(tmp_path: Path, monkeypatch, kind):
     # Only the remote reader is replaced; exercise restoration, alias grouping and selection.
-    grouped._questions.cache_clear()
-    monkeypatch.setattr(
-        grouped,
-        "load_dataset",
-        lambda *args, **kwargs: [{"question": f"Solve problem {i}."} for i in range(30)],
-    )
+    chat_blend_module._questions.cache_clear()
+    questions = [
+        {
+            "question": f"Solve problem {i}.",
+            "description": f"Solve problem {i}.",
+            "input_format": "Read an integer.",
+            "output_format": "Print the result.",
+            "note": "Example explanation.",
+            "examples": [{"input": str(i), "output": str(i + 1)}],
+            "unused_solutions": ["large unused solution"],
+        }
+        for i in range(30)
+    ]
+    question_path = tmp_path / ("questions.jsonl" if kind == "apps" else "questions.parquet")
+    if kind == "apps":
+        blend_module._write_jsonl(question_path, questions)
+    else:
+        Dataset.from_list(questions).to_parquet(question_path)
+    loaded_columns = []
+
+    def load_questions(*args, **kwargs):
+        kwargs.pop("revision", None)
+        kwargs.update(data_files=str(question_path), split="train")
+        dataset = load_dataset("json" if kind == "apps" else "parquet", **kwargs)
+        loaded_columns.append(set(dataset.column_names))
+        return dataset
+
+    monkeypatch.setattr(chat_blend_module, "load_dataset", load_questions)
     raw = [
         {
-            "dataset": "apps",
+            "dataset": kind,
             "split": "train",
             "index": i,
             "messages": [
@@ -602,7 +676,7 @@ def test_grouped_blend_restores_pinned_questions(tmp_path: Path, monkeypatch):
         "target_samples": 20,
         "validation_samples": 2,
         "group_split": True,
-        "question_sources": {"apps": {"hf_dataset": "codeparrot/apps", "revision": "c" * 40}},
+        "question_sources": {kind: {"hf_dataset": "org/questions", "revision": "c" * 40}},
         "sources": [_source("cp", split="competitive_coding_python_part00", revision="a" * 40)],
     }
     path = tmp_path / "config.yaml"
@@ -611,8 +685,20 @@ def test_grouped_blend_restores_pinned_questions(tmp_path: Path, monkeypatch):
     records = _read_jsonl(tmp_path / "out/train.jsonl") + _read_jsonl(
         tmp_path / "out/validation.jsonl"
     )
+    if kind in ("code_contests", "open-r1/codeforces"):
+        expected_columns = {"description"}
+        if kind == "open-r1/codeforces":
+            expected_columns.update(("input_format", "output_format", "note", "examples"))
+        assert loaded_columns == [expected_columns]
     for row in records:
         a = row["messages"][-1]
-        assert f"Solve problem {a['content']}." in row["messages"][0]["content"]
+        expected = f"Solve problem {a['content']}."
+        if kind == "open-r1/codeforces":
+            expected += (
+                "\n\ninput_format\n\nRead an integer.\n\noutput_format\n\nPrint the result."
+                "\n\nnote\n\nExample explanation."
+                f"\n\nInput\n\n{a['content']}\n\nOutput\n\n{int(a['content']) + 1}"
+            )
+        assert row["messages"][0]["content"].endswith(expected)
         assert a["reasoning_content"] == "reason"
-    grouped._questions.cache_clear()
+    chat_blend_module._questions.cache_clear()

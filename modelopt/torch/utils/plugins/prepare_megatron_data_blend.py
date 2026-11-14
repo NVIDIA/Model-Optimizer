@@ -18,6 +18,7 @@
 import argparse
 import gzip
 import hashlib
+import inspect
 import json
 import math
 import multiprocessing as mp
@@ -25,7 +26,6 @@ import os
 import random
 import re
 import shutil
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -191,13 +191,16 @@ def _to_chat(
     content_field: str,
     reasoning_content: ReasoningContentMode = "native",
     loss_mode: str = "assistant",
+    *,
+    preserve_chat_template_kwargs: bool = False,
 ) -> dict[str, Any] | None:
     """Convert a source row to ``{"messages": [...]}``, or ``None`` if it has nothing to train on.
 
     ``messages`` go through :func:`prepare_messages_for_chat_template` with ``reasoning_content``,
-    and non-empty ``tools`` and ``system`` fields are kept for the chat path. A ``text`` row in the NeMo chat
-    format (``<extra_id_1>User`` / ``Assistant`` markers) is split into turns; any other ``text``
-    row becomes one assistant turn, so all of it is trained.
+    and non-empty ``tools`` and ``system`` fields are kept for the chat path. Grouped selection
+    also preserves ``chat_template_kwargs`` when ``preserve_chat_template_kwargs`` is enabled.
+    A ``text`` row in the NeMo chat format (``<extra_id_1>User`` / ``Assistant`` markers) is split
+    into turns; any other ``text`` row becomes one assistant turn, so all of it is trained.
     """
     if content_field == "messages":
         messages = row.get("messages")
@@ -207,9 +210,11 @@ def _to_chat(
         chat: dict[str, Any] = {"messages": messages}
         # As in the tokenizing mode, the chat template renders the tool definitions into the prompt;
         # Megatron-Bridge turns a top-level system prompt into the leading system message.
-        for key in ("tools", "system", "chat_template_kwargs"):
+        for key in ("tools", "system"):
             if row.get(key):
                 chat[key] = row[key]
+        if preserve_chat_template_kwargs and row.get("chat_template_kwargs"):
+            chat["chat_template_kwargs"] = row["chat_template_kwargs"]
     else:
         text = row.get("text")
         if not text or not isinstance(text, str):
@@ -372,10 +377,10 @@ def _part_path(parts_dir: Path, source: dict[str, Any], settings: dict[str, Any]
 
     A part holds the first usable rows of the source, so it serves any budget it covers.
     """
-    selection = {
-        key: source.get(key)
-        for key in ("hf_dataset", "revision", "config", "split", "files", "shuffle_buffer_size")
-    }
+    selection = {key: source.get(key) for key in ("hf_dataset", "config", "split", "files")}
+    selection.update(
+        (key, source[key]) for key in ("revision", "shuffle_buffer_size") if key in source
+    )
     selection.update(settings, content_field=source["content_field"])
     digest = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()[:16]
     label = source.get("split") or Path(source["files"][0]).name.split(".")[0]
@@ -524,6 +529,19 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
     if grouped_options.intersection(config) and not config.get("group_split"):
         raise ValueError("Question isolation and filtering options require group_split: true.")
     budgets = _chat_budgets(config)
+    if config.get("group_split"):
+        pipeline_code = Path(__file__).read_bytes()
+        pipeline_code += Path(inspect.getfile(prepare_messages_for_chat_template)).read_bytes()
+        return prepare_grouped_blend(
+            config_path,
+            config,
+            iter_rows=_iter_rows,
+            to_chat=_to_chat,
+            read_jsonl=_read_jsonl,
+            write_jsonl=_write_jsonl,
+            copy_config=_copy_config,
+            pipeline_code=pipeline_code,
+        )
     output_dir = Path(config["output_dir"])
     parts_dir = output_dir / "parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
@@ -536,9 +554,6 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
     loss_mode = config.get("loss_mode", "assistant")
     if loss_mode == "full":  # keeps rows without an assistant turn
         settings["loss_mode"] = loss_mode
-
-    if config.get("group_split"):
-        return prepare_grouped_blend(config_path, config, sys.modules[__name__])
 
     rows: list[dict[str, Any]] = []
     for source, want in zip(config["sources"], budgets):

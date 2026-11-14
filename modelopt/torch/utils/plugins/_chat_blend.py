@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Deterministic selection and question-isolated splits for chat blends."""
 
 import collections
@@ -43,6 +40,11 @@ def _digest(value):
     return hashlib.sha256(data.encode()).hexdigest()
 
 
+def _sha256_file(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
 @lru_cache(maxsize=8)
 def _questions(dataset, revision, split, kind):
     base = f"hf://datasets/{dataset}@{revision}"
@@ -57,7 +59,12 @@ def _questions(dataset, revision, split, kind):
             "json", data_files=f"{base}/{split}.jsonl", split="train", streaming=True
         )
     else:
-        rows = load_dataset(dataset, revision=revision, split=split, streaming=True)
+        columns = ["description"]
+        if kind == "open-r1/codeforces":
+            columns.extend(("input_format", "output_format", "note", "examples"))
+        rows = load_dataset(
+            dataset, revision=revision, split=split, streaming=True, columns=columns
+        )
     result = []
     for row in rows:
         text = row["question"] if kind in ("taco", "apps") else row["description"]
@@ -174,7 +181,17 @@ def _allocate(counts, total):
     return quotas
 
 
-def prepare_grouped_blend(config_path, config, api):
+def prepare_grouped_blend(
+    config_path,
+    config,
+    *,
+    iter_rows,
+    to_chat,
+    read_jsonl,
+    write_jsonl,
+    copy_config,
+    pipeline_code,
+):
     """Select unique records, reserve whole validation question groups, and refill source budgets."""
     # Bridge is optional outside the chat SFT path.
     from megatron.bridge.data.conversation_processing import is_text_only_chat_example
@@ -205,41 +222,43 @@ def prepare_grouped_blend(config_path, config, api):
     ):
         raise ValueError("Require positive shuffle_buffer_size and nonnegative validation_samples.")
     output = Path(config["output_dir"])
-    output.mkdir(parents=True, exist_ok=True)
     sources = sorted(config["sources"], key=_digest)
     if len({_digest(s) for s in sources}) != len(sources):
         raise ValueError("Duplicate source configuration.")
     budgets = _allocate([Fraction(str(s["weight"])) for s in sources], config["target_samples"])
     seed = int(config.get("seed", 1234))
-    versions = {d.metadata["Name"]: d.version for d in importlib.metadata.distributions()}
+    versions = {}
+    for distribution in importlib.metadata.distributions():
+        metadata = distribution.metadata
+        if "Name" in metadata and (name := metadata["Name"]):
+            versions[name] = distribution.version
     versions["python"] = platform.python_version()
     recipe = {k: v for k, v in config.items() if k != "output_dir"}
-    code = Path(__file__).read_bytes() + Path(api.__file__).read_bytes()
-    code += Path(inspect.getfile(api.prepare_messages_for_chat_template)).read_bytes()
+    code = Path(__file__).read_bytes() + pipeline_code
     code += Path(inspect.getfile(is_text_only_chat_example)).read_bytes()
     fingerprint = _digest([recipe, versions, hashlib.sha256(code).hexdigest()])
+    output.mkdir(parents=True, exist_ok=True)
     report_path = output / "report.json"
     if report_path.exists():
-        cached = api._read_jsonl(report_path)
+        cached = read_jsonl(report_path)
         previous = cached[0] if cached and isinstance(cached[0], dict) else {}
         if (
             previous.get("fingerprint") == fingerprint
             and set(previous.get("output_sha256", {}))
             == {"train.jsonl", "validation.jsonl", "manifest.jsonl"}
             and all(
-                (output / name).exists()
-                and hashlib.file_digest((output / name).open("rb"), "sha256").hexdigest() == sha
+                (output / name).exists() and _sha256_file(output / name) == sha
                 for name, sha in previous["output_sha256"].items()
             )
         ):
             for source in previous["sources"]:
                 if source["shortfall"]:
                     print(f"[WARN] Cached source shortfall: {source}", flush=True)
-            api._copy_config(config_path, output / "config.yaml")
+            copy_config(config_path, output / "config.yaml")
             return previous["sizes"]
     streams = [
         iter(
-            api._iter_rows(
+            iter_rows(
                 {**s, "shuffle_buffer_size": buffer_size},
                 output,
                 bool(config.get("shuffle", True)),
@@ -274,8 +293,11 @@ def prepare_grouped_blend(config_path, config, api):
             original = raw
             raw, keys = _restore(raw, source, config.get("question_sources", {}))
             try:
-                chat = api._to_chat(
-                    raw, source["content_field"], config.get("reasoning_content", "native")
+                chat = to_chat(
+                    raw,
+                    source["content_field"],
+                    config.get("reasoning_content", "native"),
+                    preserve_chat_template_kwargs=True,
                 )
                 reason = (
                     "invalid_chat"
@@ -387,12 +409,12 @@ def prepare_grouped_blend(config_path, config, api):
     manifest = []
     for name, indices in splits.items():
         random.Random(seed).shuffle(indices)
-        api._write_jsonl(output / f"{name}.jsonl", [rows[i] for i in indices])
+        write_jsonl(output / f"{name}.jsonl", [rows[i] for i in indices])
         manifest.extend(
             {**provenance[i], "split": name, "row": j, "group_id": root(i)}
             for j, i in enumerate(indices)
         )
-    api._write_jsonl(output / "manifest.jsonl", manifest)
+    write_jsonl(output / "manifest.jsonl", manifest)
     source_report = []
     split_sets = {name: set(indices) for name, indices in splits.items()}
     for source, pool, budget, count in zip(sources, pools, budgets, stats):
@@ -430,11 +452,11 @@ def prepare_grouped_blend(config_path, config, api):
         "versions": versions,
         "config": recipe,
         "output_sha256": {
-            name: hashlib.file_digest((output / name).open("rb"), "sha256").hexdigest()
+            name: _sha256_file(output / name)
             for name in ("train.jsonl", "validation.jsonl", "manifest.jsonl")
         },
     }
-    api._copy_config(config_path, output / "config.yaml")
-    api._write_jsonl(output / "report.tmp.jsonl", [report])
+    copy_config(config_path, output / "config.yaml")
+    write_jsonl(output / "report.tmp.jsonl", [report])
     (output / "report.tmp.jsonl").replace(report_path)
     return sizes
