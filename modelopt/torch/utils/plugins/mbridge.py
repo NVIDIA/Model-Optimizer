@@ -15,7 +15,7 @@
 """Megatron-Bridge plugins for using with Model-Optimizer."""
 
 import re
-from functools import cache
+from functools import cache, partial
 from typing import Any
 
 import torch
@@ -42,7 +42,10 @@ from transformers import AutoConfig, AutoTokenizer
 
 from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.utils import print_rank_0, warn_rank_0
-from modelopt.torch.utils.plugins.megatron_layer_specs import te_hybrid_stack_spec_sequential_mlp
+from modelopt.torch.utils.plugins.megatron_layer_specs import (
+    hybrid_stack_spec_sequential_mlp,
+    te_hybrid_stack_spec_sequential_mlp,
+)
 
 # ``set_moe_expert_layout`` records ``te_hybrid_stack_spec_sequential_mlp`` in a SequentialMLP
 # checkpoint's ``run_config.yaml``, and rebuilding that config resolves the target against this
@@ -136,6 +139,21 @@ def set_moe_expert_layout(provider, moe_grouped_gemm: bool) -> None:
     provider calls the factory at build time, so behavior is unchanged.
     """
     if isinstance(provider, HybridModelProvider):
+        factory = provider.hybrid_stack_spec
+        if isinstance(factory, partial) and factory.func is hybrid_stack_spec_sequential_mlp:
+            factory = factory.args[0]
+        if factory is not None and factory not in (
+            transformer_engine_hybrid_stack_spec,
+            te_hybrid_stack_spec_sequential_mlp,
+        ):
+            if not callable(factory):
+                raise ValueError("A custom hybrid stack must be a serializable factory function")
+            if not moe_grouped_gemm:
+                provider.hybrid_stack_spec = partial(hybrid_stack_spec_sequential_mlp, factory)
+            else:
+                provider.hybrid_stack_spec = factory
+            provider.moe_grouped_gemm = moe_grouped_gemm
+            return
         # The grouped-GEMM factory is Megatron-Bridge's, and returns Megatron-Core's
         # ``hybrid_stack_spec`` unchanged -- the layer composition is identical either way. It is
         # named from the bridge so stock tooling resolves the target without importing ModelOpt.

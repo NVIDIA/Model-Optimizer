@@ -13,11 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+
 import pytest
 import yaml
 from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
 from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.bridge.utils.yaml_utils import dump_dataclass_to_yaml
+from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_stack_spec
+from megatron.core.transformer.enums import AttnMaskType
 
 from modelopt.torch.utils.plugins.mbridge import set_moe_expert_layout
 
@@ -72,3 +76,28 @@ def test_set_moe_expert_layout_survives_run_config_round_trip(
     assert moe.experts is not None
     # Experts are built through a partial for the grouped-GEMM layout.
     assert getattr(moe.experts, "func", moe.experts).__name__ == expected_experts
+
+
+def _custom_hybrid_stack_spec():
+    spec = copy.deepcopy(hybrid_stack_spec)
+    spec.submodules.attention_layer.submodules.self_attention.params["attn_mask_type"] = (
+        AttnMaskType.padding
+    )
+    return spec
+
+
+def test_custom_hybrid_stack_survives_layout_changes_and_run_config_round_trip():
+    provider = HybridModelProvider(num_layers=2, hidden_size=64, num_attention_heads=4)
+    provider.hybrid_stack_spec = _custom_hybrid_stack_spec
+    original = _custom_hybrid_stack_spec()
+    for grouped in (False, False, True, False):
+        set_moe_expert_layout(provider, moe_grouped_gemm=grouped)
+        _, factory = _round_trip(provider.hybrid_stack_spec)
+        provider.hybrid_stack_spec = factory
+        spec = provider._resolve_hybrid_stack_spec()
+        assert spec.submodules.mamba_layer == original.submodules.mamba_layer
+        assert spec.submodules.attention_layer == original.submodules.attention_layer
+        moe = spec.submodules.moe_layer.submodules.mlp.keywords["submodules"]
+        assert getattr(moe.experts, "func", moe.experts).__name__ == (
+            "TEGroupedMLP" if grouped else "SequentialMLP"
+        )

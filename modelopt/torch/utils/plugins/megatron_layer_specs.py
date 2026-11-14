@@ -16,6 +16,7 @@
 """Megatron-Core layer specs used to build models for ModelOpt workflows."""
 
 import copy
+from collections.abc import Callable
 
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.models.hybrid.hybrid_layer_specs import (
@@ -23,7 +24,7 @@ from megatron.core.models.hybrid.hybrid_layer_specs import (
 )
 from megatron.core.transformer.spec_utils import ModuleSpec
 
-__all__ = ["te_hybrid_stack_spec_sequential_mlp"]
+__all__ = ["hybrid_stack_spec_sequential_mlp", "te_hybrid_stack_spec_sequential_mlp"]
 
 
 def te_hybrid_stack_spec_sequential_mlp() -> ModuleSpec:
@@ -44,3 +45,12 @@ def te_hybrid_stack_spec_sequential_mlp() -> ModuleSpec:
         use_te=True, num_experts=8, moe_grouped_gemm=False
     )
     return te_hybrid_stack_spec
+
+
+def hybrid_stack_spec_sequential_mlp(stack_spec_factory: Callable[[], ModuleSpec]) -> ModuleSpec:
+    """Replace only the experts in a model-specific hybrid stack."""
+    stack_spec = copy.deepcopy(stack_spec_factory())
+    stack_spec.submodules.moe_layer.submodules.mlp = get_moe_module_spec(
+        use_te=True, num_experts=8, moe_grouped_gemm=False
+    )
+    return stack_spec
