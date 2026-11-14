@@ -1799,6 +1799,7 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
         assert matches.item(), "GGML payload checkpoint keys or activity state are incorrect"
 
         checkpoint = tmp_path / phase
+        checkpoint.mkdir(exist_ok=True)
         save_distributed_checkpoint(checkpoint, model_ref)
         save_sharded_modelopt_state([model_ref], checkpoint)
         model_test = create_model()
@@ -1859,6 +1860,7 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
         torch.distributed.all_reduce(retired, op=torch.distributed.ReduceOp.MIN)
         assert retired.item(), "All TP shards must retire initialization before saving"
         checkpoint = tmp_path / "retired"
+        checkpoint.mkdir(exist_ok=True)
         save_distributed_checkpoint(checkpoint, model_ref)
         save_sharded_modelopt_state([model_ref], checkpoint)
         torch.distributed.barrier()
