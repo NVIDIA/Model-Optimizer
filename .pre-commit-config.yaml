@@ -88,75 +88,30 @@ repos:
         language: system
         files: ^(modelopt|examples)/.*\.py$
 
+  # Apache 2.0 header in python and shell files, below any third-party header (see CONTRIBUTING.md).
+  # It keeps the id and alias of the Lucas-C hook it replaces, so `pre-commit run` and `SKIP` still match.
+  - repo: local
+    hooks:
+      - id: insert-license
+        alias: insert-license-py
+        name: Insert license in python and shell comments
+        entry: python tools/precommit/insert_license.py
+        # Lists the files with code copied from other sources, for the Open Source Review Board.
+        # Every run updates that list, so batches must not run in parallel.
+        args: [--third-party-list, tools/precommit/third_party_files.txt]
+        require_serial: true
+        language: python
+        types_or: [python, shell]
+        # Files the hook must skip, as "path|" lines. Files with a third-party header need no entry.
+        exclude: >
+          (?x)^(
+          )$
+
   # Instructions to change license file if ever needed:
   # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
   - repo: https://github.com/Lucas-C/pre-commit-hooks
     rev: v1.5.6
     hooks:
-      # Default hook for Apache 2.0 in python and shell files
-      - id: insert-license
-        alias: insert-license-py
-        args:
-          - --license-filepath
-          - ./LICENSE_HEADER
-          - --comment-style
-          - "#"
-          - --allow-past-years
-        types_or: [python, shell]
-        # NOTE: Exclude files that have copyright or license headers from another company or individual
-        # since we want to keep those above the license header added by this hook.
-        # Instead, we should manually add the license header to those files *after* the original header.
-        exclude: >
-          (?x)^(
-              modelopt/torch/quantization/utils/calib_utils.py|
-              modelopt/torch/quantization/ggml/codebooks.py|
-              modelopt/onnx/quantization/operators.py|
-              modelopt/onnx/quantization/ort_calibration.py|
-              modelopt/onnx/quantization/ort_calibration_per_node.py|
-              modelopt/onnx/quantization/ort_quantization.py|
-              modelopt/onnx/quantization/ort_session.py|
-              modelopt/torch/_deploy/utils/onnx_utils.py|
-              modelopt/torch/export/transformer_engine.py|
-              modelopt/torch/fastgen/plugins/qwen_image_pdd.py|
-              modelopt/torch/kernels/quantization/linear_attention/fla_chunk_delta_h.py|
-              modelopt/torch/kernels/quantization/linear_attention/fla_chunk_gated_delta_rule.py|
-              modelopt/torch/puzzletron/anymodel/models/gpt_oss/gpt_oss_pruned_to_mxfp4.py|
-              modelopt/torch/quantization/export_onnx.py|
-              modelopt/torch/quantization/plugins/attention.py|
-              modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|
-              modelopt/torch/speculative/eagle/utils.py|
-              modelopt/torch/speculative/plugins/hf_domino.py|
-              modelopt/torch/speculative/plugins/modeling_domino.py|
-              modelopt/torch/speculative/plugins/hf_dflash.py|
-              modelopt/torch/speculative/plugins/modeling_dflash.py|
-              modelopt/torch/speculative/plugins/hf_dflash2.py|
-              modelopt/torch/speculative/plugins/modeling_dflash2.py|
-              modelopt/torch/speculative/plugins/hf_dspark.py|
-              modelopt/torch/speculative/plugins/modeling_dspark.py|
-              modelopt/torch/speculative/plugins/hf_lilicorr.py|
-              modelopt/torch/speculative/plugins/modeling_lilicorr.py|
-              modelopt/torch/speculative/plugins/hf_medusa.py|
-              modelopt/torch/utils/plugins/megatron_mmlu.py|
-              examples/deepseek/deepseek_v3/quantize_to_nvfp4.py|
-              examples/deepseek/deepseek_v3/ptq.py|
-              examples/diffusers/quantization/onnx_utils/export.py|
-              examples/llm_eval/lm_eval_hf.py|
-              examples/llm_eval/mmlu.py|
-              examples/llm_eval/modeling.py|
-              examples/onnx_ptq/bevformer/prepare_calibration.py|
-              examples/onnx_ptq/far3d/evaluate.py|
-              examples/onnx_ptq/petr/evaluate.py|
-              examples/onnx_ptq/trt_runner.py|
-              examples/llm_qat/train.py|
-              examples/llm_sparsity/weight_sparsity/finetune.py|
-              examples/specdec_bench/specdec_bench/models/specbench_medusa.py|
-              examples/speculative_decoding/main.py|
-              examples/speculative_decoding/medusa_utils.py|
-              examples/speculative_decoding/scripts/server_generate.py|
-              experimental/dms/models/qwen3/configuration_qwen3_dms.py|
-              experimental/dms/models/qwen3/modeling_qwen3_dms.py|
-          )$
-
       # Default hook for Apache 2.0 in c/c++/cuda files
       - id: insert-license
         alias: insert-license-c
