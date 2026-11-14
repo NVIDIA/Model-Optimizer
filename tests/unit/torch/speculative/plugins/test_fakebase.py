@@ -16,10 +16,13 @@
 """Unit tests for FakeBaseModel and the fake-base / offline paths in load_vlm_or_llm."""
 
 import json
+import shutil
+import stat
 
 import pytest
 import safetensors.torch
 import torch
+from _test_utils.torch.transformers_models import get_tiny_tokenizer
 
 pytest.importorskip("transformers")
 import transformers
@@ -33,6 +36,12 @@ from modelopt.torch.speculative.utils import load_vlm_or_llm
 
 _HIDDEN_SIZE = 16
 _VOCAB_SIZE = 32
+
+
+class BinaryVocabTokenizer(transformers.BertTokenizer):
+    """A registered tokenizer whose declared vocabulary has a weight-like extension."""
+
+    vocab_files_names = {"vocab_file": "assets/vocab.bin"}
 
 
 @pytest.fixture
@@ -111,6 +120,301 @@ def test_fakebase_missing_lm_head_without_tying_raises(tmp_path, fake_config):
     )
     with pytest.raises(RuntimeError, match="lm_head"):
         FakeBaseModel.from_source(str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "flat",
+        "tied",
+        "text_config",
+        "llm_config",
+        "unknown_norm",
+        "hub_cache",
+        "binary_tokenizer",
+        "remote_tokenizer",
+        "optional_remote_tokenizer",
+        "legacy_remote_tokenizer",
+    ],
+)
+def test_export_source_slice_preserves_source_and_loader_parity(tmp_path, monkeypatch, layout):
+    source, destination = tmp_path / "source", tmp_path / "slice"
+    if layout == "hub_cache":
+        source = tmp_path / "models--org--model" / "snapshots" / "revision"
+    source.mkdir(parents=True)
+    if layout == "flat":
+        source.chmod(0o700)
+    config = transformers.LlamaConfig(
+        hidden_size=_HIDDEN_SIZE,
+        vocab_size=_VOCAB_SIZE,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        intermediate_size=32,
+        tie_word_embeddings=layout == "tied",
+        dtype=torch.bfloat16,
+    )
+    embedding_key, head_key, norm_key = (
+        "model.embed_tokens.weight",
+        "lm_head.weight",
+        "model.norm.weight",
+    )
+    if layout == "text_config":
+        config = transformers.LlavaConfig(text_config=config.to_dict())
+    elif layout == "llm_config":
+        remote_code = (
+            "from transformers import PretrainedConfig, LlamaConfig\n"
+            "class SliceConfig(PretrainedConfig):\n"
+            "    model_type = 'slice_test'\n"
+            "    def __init__(self, llm_config=None, **kwargs):\n"
+            "        super().__init__(**kwargs)\n"
+            "        self.llm_config = LlamaConfig(**(llm_config or {}))\n"
+        )
+        (source / "configuration_slice.py").write_text(remote_code)
+        config = transformers.PretrainedConfig(
+            llm_config=config.to_dict(),
+            auto_map={"AutoConfig": "configuration_slice.SliceConfig"},
+        )
+        config.model_type = "slice_test"
+    elif layout == "unknown_norm":
+        config = transformers.GPT2Config(n_embd=_HIDDEN_SIZE, vocab_size=_VOCAB_SIZE)
+    config.save_pretrained(source)
+    if layout == "llm_config":
+        raw = json.loads((source / "config.json").read_text())
+        raw["model_type"] = "slice_test"
+        (source / "config.json").write_text(json.dumps(raw))
+    if layout in ("text_config", "llm_config"):
+        embedding_key, head_key, norm_key = (
+            "language_model.model.embed_tokens.weight",
+            "language_model.lm_head.weight",
+            "language_model.model.norm.weight",
+        )
+    generator = torch.Generator().manual_seed(0)
+    tensors = {
+        embedding_key: torch.randn(_VOCAB_SIZE, _HIDDEN_SIZE, generator=generator).to(
+            torch.bfloat16
+        )
+    }
+    if layout != "tied":
+        tensors[head_key] = torch.randn(_VOCAB_SIZE, _HIDDEN_SIZE, generator=generator)
+    if layout != "unknown_norm":
+        tensors[norm_key] = torch.linspace(0.8, 1.2, _HIDDEN_SIZE)
+    shard = "model-00001-of-00002.safetensors"
+    safetensors.torch.save_file(tensors, source / shard)
+    unused = "model.layers.0.unused.weight"
+    safetensors.torch.save_file(
+        {unused: torch.ones(16, 16)}, source / "model-00002-of-00002.safetensors"
+    )
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    **dict.fromkeys(tensors, shard),
+                    unused: "model-00002-of-00002.safetensors",
+                }
+            }
+        )
+    )
+    tokenizer = get_tiny_tokenizer()
+    tokenizer.save_pretrained(source)
+    binary_tokenizer = layout in (
+        "binary_tokenizer",
+        "remote_tokenizer",
+        "optional_remote_tokenizer",
+        "legacy_remote_tokenizer",
+    )
+    trusted_tokenizer = layout in ("remote_tokenizer", "legacy_remote_tokenizer")
+    if binary_tokenizer:
+        (source / "tokenizer.json").unlink()
+        (source / "assets").mkdir()
+        (source / "assets/vocab.bin").write_text("[UNK]\n[CLS]\n[SEP]\n[PAD]\n[MASK]\nhello\n")
+        metadata = {"tokenizer_class": "BinaryVocabTokenizer"}
+        if trusted_tokenizer:
+            (source / "tokenization_binary.py").write_text(
+                "from transformers import BertTokenizer\n"
+                "class BinaryVocabTokenizer(BertTokenizer):\n"
+                "    vocab_files_names = {'vocab_file': 'assets/vocab.bin'}\n"
+            )
+            mapping = ["tokenization_binary.BinaryVocabTokenizer", None]
+            metadata["auto_map"] = (
+                mapping if layout == "legacy_remote_tokenizer" else {"AutoTokenizer": mapping}
+            )
+        else:
+            monkeypatch.setattr(
+                transformers, "BinaryVocabTokenizer", BinaryVocabTokenizer, raising=False
+            )
+            if layout == "optional_remote_tokenizer":
+                (source / "tokenization_unused.py").write_text(
+                    "raise AssertionError('optional remote tokenizer code executed')\n"
+                )
+                metadata["auto_map"] = {
+                    "AutoTokenizer": ["tokenization_unused.UnusedTokenizer", None]
+                }
+        (source / "tokenizer_config.json").write_text(json.dumps(metadata))
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            source, trust_remote_code=trusted_tokenizer, local_files_only=True
+        )
+    (source / "modeling_custom.py").write_text(
+        "# Custom model code remains part of the snapshot.\n"
+    )
+    if layout == "hub_cache":
+        blobs = source.parent.parent / "blobs"
+        blobs.mkdir()
+        for path in source.iterdir():
+            path.rename(blobs / path.name)
+            path.symlink_to("../../blobs/" + path.name)
+    original_config = (source / "config.json").read_bytes()
+
+    assert (
+        FakeBaseModel.export_source_slice(
+            source, destination, trust_remote_code=layout == "llm_config" or trusted_tokenizer
+        )
+        == destination
+    )
+
+    actual = safetensors.torch.load_file(destination / "model.safetensors")
+    assert set(actual) == set(tensors)
+    for key, weight in tensors.items():
+        assert actual[key].dtype == weight.dtype
+        torch.testing.assert_close(actual[key], weight, rtol=0, atol=0)
+    assert (destination / "config.json").read_bytes() == original_config
+    assert stat.S_IMODE(destination.stat().st_mode) == stat.S_IMODE(source.stat().st_mode)
+    assert not (destination / "model.safetensors.index.json").exists()
+    assert list(destination.glob("*.safetensors")) == [destination / "model.safetensors"]
+    for path in source.glob("*.py"):
+        assert (destination / path.name).read_bytes() == path.read_bytes()
+    if binary_tokenizer:
+        assert (destination / "assets/vocab.bin").read_bytes() == (
+            source / "assets/vocab.bin"
+        ).read_bytes()
+    assert transformers.AutoTokenizer.from_pretrained(
+        destination, trust_remote_code=trusted_tokenizer, local_files_only=True
+    ).encode("Hello") == tokenizer.encode("Hello")
+    original = FakeBaseModel.from_source(str(source), trust_remote_code=layout == "llm_config")
+    restored = FakeBaseModel.from_source(str(destination), trust_remote_code=layout == "llm_config")
+    for key, weight in original.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[key], weight, rtol=0, atol=0)
+    with pytest.raises(FileExistsError):
+        FakeBaseModel.export_source_slice(source, destination)
+    assert (destination / "config.json").read_bytes() == original_config
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "shape",
+        "parent_shard",
+        "absolute_shard",
+        "escaping_shard",
+        "escaping_index",
+        "escaping_single",
+        "sidecar_copy",
+        "tokenizer_missing",
+        "tokenizer_untrusted",
+        "tokenizer_escape",
+        "tokenizer_model_collision",
+        "tokenizer_alternate_weights",
+        "tokenizer_auto_map_container",
+        "tokenizer_auto_map_mapping",
+        "tokenizer_auto_map_legacy",
+        "tokenizer_auto_map_reference",
+        "tokenizer_auto_map_empty",
+    ],
+)
+def test_export_source_slice_rejects_invalid_source(
+    fake_checkpoint, fake_config, tmp_path, monkeypatch, invalid
+):
+    fake_config.save_pretrained(fake_checkpoint)
+    shard = fake_checkpoint / "model-00001-of-00001.safetensors"
+    tensors = {
+        "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+        "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+        "norm.weight": torch.ones(_HIDDEN_SIZE),
+    }
+    if invalid == "shape":
+        tensors["embed_tokens.weight"] = torch.zeros(1, _HIDDEN_SIZE)
+    safetensors.torch.save_file(tensors, shard)
+    if invalid.startswith("tokenizer_"):
+        monkeypatch.setattr(
+            transformers, "BinaryVocabTokenizer", BinaryVocabTokenizer, raising=False
+        )
+        metadata = {"tokenizer_class": "BinaryVocabTokenizer"}
+        if invalid.startswith("tokenizer_auto_map_"):
+            (fake_checkpoint / "assets").mkdir()
+            (fake_checkpoint / "assets/vocab.bin").write_bytes(b"vocabulary")
+            metadata["auto_map"] = {
+                "tokenizer_auto_map_container": 42,
+                "tokenizer_auto_map_mapping": {"AutoTokenizer": "module.Tokenizer"},
+                "tokenizer_auto_map_legacy": ["module.Tokenizer"],
+                "tokenizer_auto_map_reference": {"AutoTokenizer": ["module.Tokenizer", 5]},
+                "tokenizer_auto_map_empty": {"AutoTokenizer": [None, None]},
+            }[invalid]
+        elif invalid == "tokenizer_untrusted":
+            metadata["tokenizer_class"] = "UnregisteredRemoteTokenizer"
+            metadata["auto_map"] = {
+                "AutoTokenizer": ["tokenization_binary.BinaryVocabTokenizer", None]
+            }
+            (fake_checkpoint / "tokenization_binary.py").write_text(
+                "raise AssertionError('untrusted tokenizer code executed')\n"
+            )
+        elif invalid == "tokenizer_escape":
+            outside = tmp_path.parent / f"{tmp_path.name}-vocab.bin"
+            outside.write_text("private vocabulary")
+            (fake_checkpoint / "assets").mkdir()
+            (fake_checkpoint / "assets/vocab.bin").symlink_to(outside)
+        elif invalid == "tokenizer_model_collision":
+            monkeypatch.setattr(
+                BinaryVocabTokenizer, "vocab_files_names", {"vocab_file": shard.name}
+            )
+        elif invalid == "tokenizer_alternate_weights":
+            weights = fake_checkpoint / "original/pytorch_model.bin"
+            weights.parent.mkdir()
+            weights.write_bytes(b"alternate full model weights")
+            (fake_checkpoint / "assets").mkdir()
+            (fake_checkpoint / "assets/vocab.bin").symlink_to(weights)
+        (fake_checkpoint / "tokenizer_config.json").write_text(json.dumps(metadata))
+    elif invalid == "sidecar_copy":
+        (fake_checkpoint / "tokenizer.json").write_text("{}")
+        copy2 = shutil.copy2
+
+        def fail_tokenizer(path, *args, **kwargs):
+            if str(path).endswith("tokenizer.json"):
+                raise PermissionError("unreadable tokenizer")
+            return copy2(path, *args, **kwargs)
+
+        monkeypatch.setattr(shutil, "copy2", fail_tokenizer)
+    elif invalid != "shape":
+        index_path = fake_checkpoint / "model.safetensors.index.json"
+        outside = tmp_path.parent / f"{tmp_path.name}-outside"
+        if invalid == "escaping_index":
+            outside.write_bytes(index_path.read_bytes())
+            index_path.unlink()
+            index_path.symlink_to(outside)
+        else:
+            outside.write_bytes(shard.read_bytes())
+            if invalid == "escaping_shard":
+                shard.unlink()
+                shard.symlink_to(outside)
+            elif invalid == "escaping_single":
+                index_path.unlink()
+                (fake_checkpoint / "model.safetensors").symlink_to(outside)
+            else:
+                index = json.loads(index_path.read_text())
+                name = "../" + outside.name if invalid == "parent_shard" else str(outside)
+                index["weight_map"] = dict.fromkeys(tensors, name)
+                index_path.write_text(json.dumps(index))
+    if invalid not in ("shape", "sidecar_copy") and not invalid.startswith("tokenizer_"):
+        # Loading retains compatibility with user-created views of externally cached weights.
+        model = FakeBaseModel.from_source(str(fake_checkpoint))
+        torch.testing.assert_close(model.embed_tokens.weight, tensors["embed_tokens.weight"])
+        torch.testing.assert_close(model.lm_head.weight, tensors["lm_head.weight"])
+    destination = tmp_path / "slice"
+    with pytest.raises(
+        PermissionError if invalid == "sidecar_copy" else ValueError,
+        match="auto_map" if invalid.startswith("tokenizer_auto_map_") else None,
+    ):
+        FakeBaseModel.export_source_slice(fake_checkpoint, destination)
+    assert not destination.exists()
 
 
 def test_load_vlm_or_llm_returns_fakebase(fake_checkpoint):

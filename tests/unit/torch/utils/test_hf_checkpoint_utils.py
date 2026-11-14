@@ -95,7 +95,8 @@ def test_copy_non_safetensor_files_from_ckpt_continues_after_copy_failure(tmp_pa
     assert copied_files == ["good.py"]
 
 
-def test_copy_non_model_files_continues_after_copy_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize("strict", [False, True])
+def test_copy_non_model_files_continues_after_copy_failure(tmp_path, monkeypatch, strict):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     (src_dir / "bad.py").write_text("bad")
@@ -109,6 +110,10 @@ def test_copy_non_model_files_continues_after_copy_failure(tmp_path, monkeypatch
         return original_copy2(source, *args, **kwargs)
 
     monkeypatch.setattr(hf_checkpoint_utils.shutil, "copy2", copy2)
+    if strict:
+        with pytest.raises(PermissionError):
+            hf_checkpoint_utils.copy_non_model_files(src_dir, tmp_path / "dst", strict=True)
+        return
     with pytest.warns(UserWarning, match="bad.py"):
         copied_files = hf_checkpoint_utils.copy_non_model_files(src_dir, tmp_path / "dst")
 

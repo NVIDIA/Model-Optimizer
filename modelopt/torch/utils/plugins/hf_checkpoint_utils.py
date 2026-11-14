@@ -948,7 +948,13 @@ def ensure_local_checkpoint(
     return hub_model_id, local_checkpoint_path
 
 
-def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLike) -> list[str]:
+def copy_non_model_files(
+    source: str | os.PathLike,
+    export_dir: str | os.PathLike,
+    *,
+    strict: bool = False,
+    tokenizer_files: Iterable[str] = (),
+) -> list[str]:
     """Copy the source checkpoint's non-model files into an export, verbatim.
 
     See "Model files vs non-model files" at the top of this module: the export writes the model
@@ -964,12 +970,15 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
     * files under hidden directories (``.git``, ``.cache``), which are version-control or download
       state rather than part of the checkpoint;
     * links that resolve outside the checkpoint (or, for a Hub snapshot, its ``blobs/``), and
-      dangling links, each with a warning.
+      dangling links, each with a warning by default.
 
     Args:
         source: Local checkpoint directory. Download a Hub model first with
             :func:`ensure_local_checkpoint`.
         export_dir: Export directory; created if missing.
+        strict: Raise instead of warning when a source file is invalid or cannot be copied.
+        tokenizer_files: Declared tokenizer assets exempt from the weight filename filter.
+            Exempt files must exist and pass the same containment checks as other sidecars.
 
     Returns:
         The copied paths, relative to the checkpoint root and ``/``-separated on every platform.
@@ -982,6 +991,15 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
         )
     export_dir = Path(export_dir)
     source_root, export_root = source_dir.resolve(), export_dir.resolve()
+    tokenizer_assets = {
+        Path(name)
+        for name in tokenizer_files
+        if _matches_any_pattern(Path(name).name, _WEIGHT_FILE_PATTERNS)
+    }
+    for rel in tokenizer_assets:
+        if rel.is_absolute() or ".." in rel.parts:
+            raise ValueError("Tokenizer asset paths must be relative without '..'")
+        resolve_checkpoint_file(source_dir, rel, max_bytes=None)
     copied = []
     for src in sorted(source_dir.rglob("*")):
         rel = src.relative_to(source_dir)
@@ -990,7 +1008,10 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
             or (source_root / rel).is_relative_to(export_root)
             or any(part.startswith(".") for part in rel.parts[:-1])
             or (len(rel.parts) == 1 and rel.name in _EXPORT_OWNED_FILES)
-            or _matches_any_pattern(rel.name, _WEIGHT_FILE_PATTERNS)
+            or (
+                rel not in tokenizer_assets
+                and _matches_any_pattern(rel.name, _WEIGHT_FILE_PATTERNS)
+            )
         ):
             continue
         dst = export_dir / rel
@@ -1002,6 +1023,8 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
         try:
             resolved = resolve_checkpoint_file(source_dir, rel, max_bytes=None)
         except ValueError as error:
+            if strict:
+                raise
             warnings.warn(f"Skipping {rel}: {error}")
             continue
         try:
@@ -1009,6 +1032,8 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
             shutil.copy2(resolved, dst)
         except OSError as error:
             dst.unlink(missing_ok=True)  # or a rerun would keep the partial file
+            if strict:
+                raise
             warnings.warn(f"Failed to copy checkpoint file {rel}: {error}")
             continue
         copied.append(rel.as_posix())
