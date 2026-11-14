@@ -124,6 +124,8 @@ def shapes_profile(inputs, batch, seq, past):
     """Build an EP profile string naming every declared model input."""
     parts = []
     for name, shape, _dtype in inputs:
+        if None in shape:
+            raise ValueError(f"Unspecified dimension in ONNX input {name!r}")
         parts.append(f"{name}:{'x'.join(str(d) for d in resolve_shape(shape, batch, seq, past))}")
     return ",".join(parts)
 

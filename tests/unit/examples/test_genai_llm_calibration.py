@@ -182,6 +182,8 @@ def test_signature_distinguishes_unspecified_and_zero_dimensions(
     if past_dimension is None:
         with pytest.raises(ValueError, match=name):
             calibration.calibration_feed(signature, [[1]], [[1]])
+        with pytest.raises(ValueError, match=name):
+            calibration.ep_profiles(signature, ["trt"])
     else:
         assert calibration.calibration_feed(signature, [[1]], [[1]])[name].shape == (1, 2, 0, 4)
 
