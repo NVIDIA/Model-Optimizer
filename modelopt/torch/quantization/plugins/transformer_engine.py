@@ -195,6 +195,8 @@ class _QuantTEGroupedLinear(_ParallelLinear):
                 continue  # export loads weights on CPU; the fp4 dry-run needs CUDA — keep loaded amax
             wq_i = self.weight_quantizer[i]
             q = wq_i[0] if isinstance(wq_i, SequentialQuantizer) else wq_i
+            if any(member.backend == "ggml" for member in self._initialization_members(wq_i)):
+                continue  # Payloads and activity flags are still uninitialized before tensor load.
             if not hasattr(q, "_amax") or q._amax is None:
                 continue
             prev_fake = getattr(q, "_fake_quant", True)
@@ -438,14 +440,12 @@ class _QuantTELayerNormLinear(_ParallelLinear):
             self.weight.data[rows] = unquantized.to(self.weight.dtype)
 
     @torch.no_grad()
-    def _initialize_qdq_weights(self, trainable_only, initialized):
-        if not self._is_selected_for_initialization(
-            self.weight, self.weight_quantizer, trainable_only
-        ):
+    def _initialize_qdq_weights(self, initialized):
+        if not self._is_selected_for_initialization(self.weight, self.weight_quantizer):
             return
         rows = getattr(self, "_modelopt_unquantized_output_rows", None)
         original = self.weight[rows].detach().clone() if rows is not None else None
-        super()._initialize_qdq_weights(trainable_only, initialized)
+        super()._initialize_qdq_weights(initialized)
         if original is not None:
             self.weight[rows] = original
 

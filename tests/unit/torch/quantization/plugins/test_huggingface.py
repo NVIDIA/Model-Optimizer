@@ -28,6 +28,7 @@ from _test_utils.torch.transformers_models import (
     get_tiny_gpt_oss,
     get_tiny_llama,
     get_tiny_nemotron_h,
+    get_tiny_qwen3,
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
@@ -37,6 +38,7 @@ from modelopt.recipe.loader import load_recipe
 from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.config import LayerwiseConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml.common import pinned_importance, pinned_packed_weight
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
     _QuantHFParallelLinear,
@@ -473,3 +475,86 @@ def test_hf_decoder_discoverer_registration_path():
     assert LayerActivationCollector.get_decoder_layers(model) is get_homogeneous_hf_decoder_layers(
         model
     )
+
+
+@pytest.mark.parametrize(("num_bits", "gptq"), [(8, False), ("iq2_xxs", False), ("iq2_xxs", True)])
+def test_initialize_qdq_weights_hf_roundtrip(tmp_path, num_bits, gptq):
+    """The shared API retains QDQ weights and quantizer state through HF save/restore."""
+    model = get_tiny_qwen3(
+        num_hidden_layers=1,
+        hidden_size=256,
+        intermediate_size=256,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+    ).eval()
+    inputs = torch.arange(8).reshape(1, -1)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "enable": True,
+                "cfg": {
+                    "num_bits": num_bits,
+                    **(
+                        {"backend": "ggml", "block_sizes": {-1: 256}}
+                        if isinstance(num_bits, str)
+                        else {"axis": 0}
+                    ),
+                },
+            },
+        ],
+        "algorithm": {
+            "method": "gptq",
+            "block_size": 256,
+            "perc_damp": 0.3,
+            "importance_weighted": True,
+        }
+        if gptq
+        else "max",
+    }
+    mtq.quantize(model, config, lambda m: m(inputs))
+    if gptq:
+        # Embeddings are fake-quantized, but GPTQ only calibrates supported linear layers.
+        assert pinned_packed_weight(model.model.embed_tokens.weight_quantizer, num_bits) is None
+        linears = [layer for layer in model.modules() if isinstance(layer, torch.nn.Linear)]
+        assert linears
+        for layer in linears:
+            assert pinned_packed_weight(layer.weight_quantizer, num_bits) is not None
+            assert pinned_importance(layer.weight_quantizer, num_bits).dtype == torch.float32
+    expected = {
+        name: layer.weight_quantizer(layer.weight).detach().clone()
+        for name, layer in model.named_modules()
+        if hasattr(layer, "weight_quantizer")
+    }
+    assert any(
+        not torch.equal(dict(model.named_modules())[name].weight, weight)
+        for name, weight in expected.items()
+    )
+    before = model(inputs).logits.detach()
+    buffers = {
+        name: tensor.clone()
+        for name, tensor in model.named_buffers()
+        if ".weight_quantizer." in name
+    }
+    mtq.initialize_qdq_weights(model)
+    output = tmp_path / "qdq"
+    model.save_pretrained(output)
+    assert (output / "modelopt_state.pth").is_file()
+    restored = AutoModelForCausalLM.from_pretrained(output).eval()
+    for name, weight in expected.items():
+        layer = dict(restored.named_modules())[name]
+        torch.testing.assert_close(layer.weight, weight, rtol=0, atol=0)
+        assert layer.weight_quantizer.is_enabled
+        torch.testing.assert_close(layer.weight_quantizer(layer.weight), weight, rtol=0, atol=0)
+    for name, tensor in buffers.items():
+        actual = dict(restored.named_buffers())[name]
+        assert actual.dtype == tensor.dtype
+        torch.testing.assert_close(actual, tensor, rtol=0, atol=0)
+    torch.testing.assert_close(restored(inputs).logits, before, rtol=0, atol=0)
+    optimizer = torch.optim.SGD(restored.parameters(), lr=0)
+    for parameter in restored.parameters():
+        parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    torch.testing.assert_close(restored(inputs).logits, before, rtol=0, atol=0)

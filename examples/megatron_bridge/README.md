@@ -442,18 +442,36 @@ selection fails if that state has not been restored before wrapping. Native chec
 restores FP32 masters, Adam state, and training counters afterward.
 Use Bridge/Core versions with HybridModel support.
 
-### Student latent-weight initialization
+### QDQ weights from PTQ
 
-By default, the student keeps its checkpoint's floating latent weights. Add
-`--qdq_student_weight` to initialize trainable weights from the restored quantizers' Q→DQ
-output. This is format-independent and supports mixed quantization.
+Prepare QDQ-initialized weights during PTQ, before QAD starts:
 
-Use an uncompressed, adapter-free student checkpoint. GPTQ, if desired, runs during PTQ;
-initialization reuses its saved state. Native resumes skip initialization. With a fresh output
-directory, the flag rejects trained sources identified by Bridge metadata or a nonzero Megatron
-iteration path. Omit the flag to retain trained latents; use the original output directory for an optimizer resume.
-Dynamic quantizers and BF16 inverse transforms can change forward values after initialization.
-The observed loss-spike benefit is specific to the IQ2 experiments; other formats are not established.
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --recipe general/ptq/fp8_default-kv_fp8 \
+    --tp_size 2 --output_qdq_weight \
+    --export_megatron_path /output/qwen3_qdq
+```
+
+`--output_qdq_weight` saves decoded floating-point weights and quantization state for QAD.
+Use an uncompressed, adapter-free checkpoint and load it with
+`distill.py --student_megatron_path /output/qwen3_qdq`.
+PTQ prepares all enabled quantized weights; choose trainable parameters during QAD.
+
+- **GGML PTQ:** reuse initial codes until weights change, then recompute scales and codes.
+- **GPTQ:** keep super-block scales and FP32 importance fixed.
+
+Restore GGML QDQ checkpoints with the same tensor-parallel layout used when saving.
+Shared or sequential GGML PTQ quantizers are unsupported.
+
+> **Note:** Initial encoding retention applies to GGML. Other formats retain their existing
+> quantization behavior; for example, dynamic NVFP4 reuses its calibrated global scale but
+> recomputes local scales for each 16-weight block. Exact round-trip equality is not guaranteed
+> for these formats or BF16 transforms.
+
+For custom PTQ, call `mtq.initialize_qdq_weights(model)` once after calibration or restoration,
+before saving the checkpoint. Do not repeat it during training or resume.
 
 ### LoRA QAD
 

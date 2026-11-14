@@ -527,6 +527,9 @@ class _MegatronParallelLinear(_ParallelLinear):
 
         super()._setup()
 
+    # TP-local updates must not remove only some shards of a checkpoint tensor.
+    _retain_qdq_initialization = True
+
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):
         if v.ndim == 4:
             quantizer_state_dict[k] = v.squeeze(1).squeeze(-1)
@@ -947,7 +950,11 @@ class _QuantMegatronTEGroupedLinear(_QuantTEGroupedLinear, _MegatronParallelLine
                 self._process_quantizer_amax(k, v, quantizer_state_dict)
             elif k == "input_quantizer._pre_quant_scale":
                 self._process_activation_quantizer_pre_quant_scale(k, v, quantizer_state_dict)
-            elif self._parameter_to_keep_in_quantizer_state_dict(k):
+            elif (
+                self._parameter_to_keep_in_quantizer_state_dict(k)
+                or PINNED_PAYLOAD_PREFIX in k
+                or PINNED_IMPORTANCE_PREFIX in k
+            ):
                 quantizer_state_dict[k] = v
             elif "quantizer" in k:
                 warn_rank_0(

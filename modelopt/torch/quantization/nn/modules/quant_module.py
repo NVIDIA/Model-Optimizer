@@ -146,17 +146,16 @@ class QuantModule(DynamicModule):
         return tuple(quantizer) if isinstance(quantizer, SequentialQuantizer) else (quantizer,)
 
     @classmethod
-    def _is_selected_for_initialization(cls, weight, quantizer, trainable_only):
+    def _is_selected_for_initialization(cls, weight, quantizer):
         return (
             isinstance(weight, torch.Tensor)
             and weight.numel() > 0
-            and (not trainable_only or weight.requires_grad)
             and any(q.is_enabled and q._if_quant for q in cls._initialization_members(quantizer))
         )
 
-    def _iter_weights_for_initialization(self, trainable_only):
+    def _iter_weights_for_initialization(self):
         for weight, quantizer in self.iter_weights_for_calibration():
-            if self._is_selected_for_initialization(weight, quantizer, trainable_only):
+            if self._is_selected_for_initialization(weight, quantizer):
                 yield weight, quantizer
 
     @staticmethod
@@ -172,14 +171,22 @@ class QuantModule(DynamicModule):
         )
 
     @torch.no_grad()
-    def _initialize_qdq_weights(self, trainable_only, initialized):
-        for weight, quantizer in self._iter_weights_for_initialization(trainable_only):
+    def _initialize_qdq_weights(self, initialized):
+        for weight, quantizer in self._iter_weights_for_initialization():
             key = self._weight_initialization_key(weight)
             if key in initialized:
                 continue
             local = weight.to_local() if hasattr(weight, "to_local") else weight
-            decoded = quantizer(local).detach().clone()
             members = self._initialization_members(quantizer)
+            for member in members:
+                if member.backend == "ggml" and getattr(self, "_retain_qdq_initialization", False):
+                    member._ggml_retain_initialization = True
+                member._qdq_initialization_shape = tuple(local.shape)
+            try:
+                decoded = quantizer(local).detach().clone()
+            finally:
+                for member in members:
+                    del member._qdq_initialization_shape
             # Return from the quantizer's transformed coordinates to the latent weight domain.
             for member in reversed(members):
                 if member.rotate_is_enabled and not member.rotate_back_is_enabled:

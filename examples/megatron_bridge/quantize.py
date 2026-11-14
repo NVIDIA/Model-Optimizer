@@ -209,6 +209,11 @@ def get_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--output_qdq_weight",
+        action="store_true",
+        help="Save floating QDQ weights with ModelOpt state for QAD, instead of latent weights.",
+    )
+    parser.add_argument(
         "--compress",
         action="store_true",
         help="Compress weights to a real low-bit representation (instead of fake quantization).",
@@ -270,6 +275,9 @@ def get_args() -> argparse.Namespace:
 
     args = parser.parse_args()
     resolve_mlflow_args(args, parser, QUANTIZE)
+
+    if args.output_qdq_weight and (args.compress or args.lora_rank):
+        parser.error("--output_qdq_weight requires uncompressed, adapter-free weights.")
 
     if args.lora_rank < 0:
         parser.error("--lora_rank must be non-negative")
@@ -470,6 +478,9 @@ def main(args: argparse.Namespace):
         unwrapped_model.calibration_mode = False
     else:
         mtq.quantize(unwrapped_model, mtq_config, forward_loop)
+
+    if args.output_qdq_weight:
+        mtq.initialize_qdq_weights(unwrapped_model)
 
     if args.lora_rank:
         mtq.enable_quant_lora(

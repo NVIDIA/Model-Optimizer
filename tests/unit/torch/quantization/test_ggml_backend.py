@@ -15,12 +15,14 @@
 
 import dataclasses
 import importlib
+import io
 import re
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.ggml as ggml
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
@@ -29,8 +31,13 @@ import modelopt.torch.quantization.ggml.q8_0 as q8_0_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.backend import ggml_fake_quant
-from modelopt.torch.quantization.ggml.common import narrow_to_float32
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.ggml.common import (
+    PIN_OVERRIDES_WEIGHT,
+    narrow_to_float32,
+    pin_packed_weight,
+)
+from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.quantization.plugins.custom import _ParallelLinear
 
 # Every registered format, paired with its own module. The module -- not the registry -- supplies
 # what a test expects, so a mis-wired registry entry cannot make both sides of an assertion agree.
@@ -39,6 +46,27 @@ FORMAT_MODULES = [
     (name, importlib.import_module(f"modelopt.torch.quantization.ggml.{name}"))
     for name in FORMAT_NAMES
 ]
+
+
+class _CPUParallelLinear(torch.nn.Linear):
+    def forward(self, inputs):
+        return torch.nn.functional.linear(inputs, self.weight, self.bias)
+
+
+class _QuantCPUParallelLinear(_ParallelLinear):
+    _retain_qdq_initialization = True
+    _functionals_to_replace = [(torch.nn.functional, "linear")]
+
+
+@pytest.fixture
+def parallel_linear():
+    QuantModuleRegistry.register({_CPUParallelLinear: "test_qdq_parallel_linear"})(
+        _QuantCPUParallelLinear
+    )
+    try:
+        yield _CPUParallelLinear
+    finally:
+        QuantModuleRegistry.unregister(_CPUParallelLinear)
 
 
 def _substitute(monkeypatch, name, **changes):
@@ -54,9 +82,13 @@ def _substitute(monkeypatch, name, **changes):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("num_bits", FORMAT_NAMES)
-def test_ggml_backend_via_quantize(num_bits, dtype, record_property):
+@pytest.mark.parametrize("retain_initialization", [False, True])
+def test_ggml_backend_via_quantize(
+    num_bits, dtype, retain_initialization, record_property, parallel_linear
+):
     torch.manual_seed(1234)
-    model = torch.nn.Linear(256, 2, bias=False, dtype=dtype)
+    linear = parallel_linear if retain_initialization else torch.nn.Linear
+    model = linear(256, 2, bias=False, dtype=dtype)
     inputs = torch.randn(2, 256, dtype=dtype)
     unquantized_output = model(inputs).detach()
     config = {
@@ -84,24 +116,198 @@ def test_ggml_backend_via_quantize(num_bits, dtype, record_property):
     expected_weight = model.weight_quantizer(parameter).detach().clone()
     buffers = {name: value.clone() for name, value in model.weight_quantizer.named_buffers()}
     mtq.initialize_qdq_weights(model)
+    checkpoint_keys = set(model.state_dict())
     assert model.weight is parameter and model.weight_quantizer.is_enabled
     torch.testing.assert_close(model.weight, expected_weight, rtol=0, atol=0)
-    # Unpinned formats search scales/codes again: the next forward applies QDQ a second time.
     codec = GGML_FORMAT_REGISTRY[num_bits]
-    packed, shape = codec.quantize(expected_weight)
-    effective_weight = codec.dequantize(packed, shape, dtype=dtype)
+    payloads = [
+        value
+        for name, value in model.weight_quantizer.named_buffers()
+        if name.endswith("_qdq_initialization")
+    ]
+    assert len(payloads) == 1
     after = model(inputs)
+    torch.testing.assert_close(after, output, rtol=0, atol=0)
     torch.testing.assert_close(
-        after, torch.nn.functional.linear(inputs, effective_weight), rtol=0, atol=0
+        model.weight_quantizer(model.weight), expected_weight, rtol=0, atol=0
     )
-    relative_error = (after.float() - output.float()).norm() / output.float().norm()
-    record_property("initialization_forward_relative_l2", relative_error.item())
-    if num_bits == "q8_0":
-        torch.testing.assert_close(after, output, rtol=0, atol=0)
-    elif num_bits == "iq2_xxs":
-        assert not torch.equal(after, output)
-    for name, value in model.weight_quantizer.named_buffers():
-        torch.testing.assert_close(value, buffers[name], rtol=0, atol=0)
+    for payload in payloads:
+        assert payload.shape == (2, 256 // codec.block_size, codec.block_bytes)
+        assert payload.dtype == torch.uint8
+        # Export splits fused projections; folding quantizes a float32 copy of BF16 weights.
+        for start in range(2):
+            torch.testing.assert_close(
+                codec.pack(model.weight[start : start + 1], model.weight_quantizer),
+                payload[start : start + 1],
+                rtol=0,
+                atol=0,
+            )
+        torch.testing.assert_close(
+            model.weight_quantizer(model.weight.float()).to(dtype),
+            expected_weight,
+            rtol=0,
+            atol=0,
+        )
+    assert any(
+        name.endswith("_qdq_initialization") for name, _ in model.weight_quantizer.named_buffers()
+    )
+    record_property("initialization_forward_relative_l2", 0.0)
+    for name, value in buffers.items():
+        torch.testing.assert_close(
+            dict(model.weight_quantizer.named_buffers())[name], value, rtol=0, atol=0
+        )
+
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+    model.weight.grad = torch.ones_like(model.weight)
+    optimizer.step()
+    torch.testing.assert_close(model(inputs), output, rtol=0, atol=0)
+
+    checkpoint = io.BytesIO()
+    mto.save(model, checkpoint)
+    checkpoint.seek(0)
+    restored = mto.restore(linear(256, 2, bias=False, dtype=dtype), checkpoint)
+    torch.testing.assert_close(restored(inputs), output, rtol=0, atol=0)
+    # A same-valued copy invalidates the cache but must not retire initialization state.
+    with torch.no_grad():
+        restored.weight.copy_(restored.weight.detach().clone())
+    torch.testing.assert_close(restored(inputs), output, rtol=0, atol=0)
+
+    # Shared-buffer optimizer writes need not increment the parameter's version counter.
+    with torch.no_grad():
+        model.weight.data.add_(0.125)
+    optimizer.step()
+    packed, shape = codec.quantize(model.weight)
+    expected_after_update = codec.dequantize(packed, shape, dtype=dtype)
+    torch.testing.assert_close(
+        model.weight_quantizer(model.weight), expected_after_update, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        model(inputs), torch.nn.functional.linear(inputs, expected_after_update), rtol=0, atol=0
+    )
+    assert (
+        any(
+            name.endswith("_qdq_initialization")
+            for name, _ in model.weight_quantizer.named_buffers()
+        )
+        == retain_initialization
+    )
+    if retain_initialization:
+        assert set(model.state_dict()) == checkpoint_keys
+        active = next(
+            buffer
+            for name, buffer in model.weight_quantizer.named_buffers()
+            if name.endswith("_qdq_initialization_active")
+        )
+        assert active.dtype == torch.bool and not active.any()
+        after_update = io.BytesIO()
+        mto.save(model, after_update)
+        after_update.seek(0)
+        resumed = mto.restore(linear(256, 2, bias=False, dtype=dtype), after_update)
+        torch.testing.assert_close(
+            resumed.weight_quantizer(resumed.weight), expected_after_update, rtol=0, atol=0
+        )
+        # Retirement must survive a reload even if weights later return to their initial values.
+        with torch.no_grad():
+            resumed.weight.copy_(expected_weight)
+        packed, shape = codec.quantize(expected_weight)
+        torch.testing.assert_close(
+            resumed.weight_quantizer(resumed.weight),
+            codec.dequantize(packed, shape, dtype=dtype),
+            rtol=0,
+            atol=0,
+        )
+        resumed_active = next(
+            buffer
+            for name, buffer in resumed.weight_quantizer.named_buffers()
+            if name.endswith("_qdq_initialization_active")
+        )
+        resumed_active[0].fill_(True)
+        with torch.no_grad():
+            resumed.weight.copy_(resumed.weight.detach().clone())
+        with pytest.raises(NotImplementedError):
+            resumed.weight_quantizer(resumed.weight)
+    model.weight.grad = None
+    model(inputs).float().square().mean().backward()
+    assert model.weight.grad is not None and torch.isfinite(model.weight.grad).all()
+    assert torch.count_nonzero(model.weight.grad) > 0
+
+
+@pytest.mark.parametrize("num_bits", FORMAT_NAMES)
+def test_new_pin_supersedes_qdq_initialization(num_bits):
+    torch.manual_seed(1234)
+    model = torch.nn.Linear(256, 2, bias=False)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": num_bits, "backend": "ggml"},
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config)
+    mtq.initialize_qdq_weights(model)
+    quantizer = model.weight_quantizer
+    codec = GGML_FORMAT_REGISTRY[num_bits]
+    packed, shape = codec.quantize(model.weight.detach() * 2)
+    expected = codec.dequantize(packed, shape, dtype=model.weight.dtype)
+    assert not torch.equal(model.weight, expected)
+    # AutoQuantize can install a pin while retaining the candidate's source weights.
+    setattr(quantizer, PIN_OVERRIDES_WEIGHT, True)
+    pin_packed_weight(quantizer, num_bits, packed)
+    torch.testing.assert_close(quantizer(model.weight), expected, rtol=0, atol=0)
+    torch.testing.assert_close(codec.pack(model.weight, quantizer), packed, rtol=0, atol=0)
+    assert not any(name.endswith("_qdq_initialization") for name, _ in quantizer.named_buffers())
+
+
+@pytest.mark.parametrize("preparation", ["ptq", "ptq_updated", "gptq"])
+@pytest.mark.parametrize("shape", [(2, 256), (4, 256), (2, 512)])
+def test_parallel_ggml_checkpoint_restore(preparation, shape, parallel_linear, monkeypatch):
+    torch.manual_seed(1234)
+    model = parallel_linear(256, 2, bias=False)
+    inputs = torch.randn(32, 256)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "backend": "ggml"},
+            },
+        ],
+        "algorithm": {"method": "gptq", "block_size": 256, "importance_weighted": True}
+        if preparation == "gptq"
+        else "max",
+    }
+    mtq.quantize(model, config, lambda m: m(inputs))
+    mtq.initialize_qdq_weights(model)
+    if preparation == "ptq_updated":
+        with torch.no_grad():
+            model.weight.add_(0.125)
+    expected = model(inputs).detach()
+    checkpoint = io.BytesIO()
+    mto.save(model, checkpoint)
+    checkpoint.seek(0)
+    reset = TensorQuantizer._reset_pytorch_state_from_metadata
+
+    def poison_placeholders(quantizer, metadata):
+        reset(quantizer, metadata)
+        for name, buffer in quantizer.named_buffers(recurse=False):
+            if name.startswith("_ggml_pinned_"):
+                buffer.zero_()
+            if name.endswith("_qdq_initialization_active"):
+                buffer[0].fill_(True)  # Not checkpoint data: metadata placeholders are unreadable.
+
+    monkeypatch.setattr(TensorQuantizer, "_reset_pytorch_state_from_metadata", poison_placeholders)
+    target = parallel_linear(shape[1], shape[0], bias=False)
+    if shape != (2, 256):
+        with pytest.raises(NotImplementedError):
+            mto.restore(target, checkpoint)
+    else:
+        restored = mto.restore(target, checkpoint)
+        torch.testing.assert_close(restored(inputs), expected, rtol=0, atol=0)
+        for name, buffer in model.named_buffers():
+            torch.testing.assert_close(dict(restored.named_buffers())[name], buffer, rtol=0, atol=0)
 
 
 def test_ggml_backend_rejects_unknown_format():
@@ -327,3 +533,31 @@ def test_format_fake_quant_rejects_another_formats_quantizer(num_bits):
         GGML_FORMAT_REGISTRY[num_bits].fake_quant(
             torch.ones(1, block_size), SimpleNamespace(num_bits=other)
         )
+
+
+@pytest.mark.parametrize("sharing", ["shared", "sequential"])
+def test_ggml_initialization_refuses_ambiguous_ptq_quantizers_before_writing(sharing):
+    model = torch.nn.Sequential(torch.nn.Linear(256, 256), torch.nn.Linear(256, 2))
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "backend": "ggml"},
+                "enable": True,
+            },
+        ],
+        "algorithm": "max",
+    }
+    if sharing == "sequential":
+        config["quant_cfg"][1]["cfg"] = [
+            {"num_bits": name, "backend": "ggml"} for name in ["iq2_xxs", "q8_0"]
+        ]
+    mtq.quantize(model, config, lambda m: m(torch.randn(2, 256)))
+    if sharing == "shared":
+        model[1].weight_quantizer = model[0].weight_quantizer
+    before = [m.weight.detach().clone() for m in model]
+    with pytest.raises(ValueError):
+        mtq.initialize_qdq_weights(model)
+    for m, expected in zip(model, before):
+        torch.testing.assert_close(m.weight, expected, rtol=0, atol=0)

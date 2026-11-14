@@ -459,7 +459,8 @@ def test_pin_outlives_the_weight_tensor():
     assert not torch.equal(IQ1_S.quantize(model.weight.detach())[0], _pin(model))
 
 
-def test_folding_a_bf16_weight_decodes_the_pinned_payload():
+@pytest.mark.parametrize("algorithm", [GPTQ, "max"])
+def test_folding_a_bf16_weight_decodes_the_pinned_payload(algorithm):
     """Folding fake-quantizes a float32 copy of the weight; it must still decode GPTQ's codes.
 
     GPTQ leaves a BF16 model its unrounded weight, and ``mtq.fold_weight`` and the vLLM fake-quant
@@ -468,9 +469,13 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
     torch.manual_seed(0)
     model = torch.nn.Linear(512, 8, bias=False, dtype=torch.bfloat16)
     inputs = _inputs().to(torch.bfloat16)
-    mtq.quantize(model, _iq_config(GPTQ), forward_loop=lambda m: m(inputs))
-    decoded = _decoded(_pin(model), model.weight).to(torch.bfloat16)
-    assert not torch.equal(model.weight, decoded)
+    mtq.quantize(model, _iq_config(algorithm), forward_loop=lambda m: m(inputs))
+    if algorithm == "max":
+        mtq.initialize_qdq_weights(model)
+        decoded = model.weight.detach().clone()
+    else:
+        decoded = _decoded(_pin(model), model.weight).to(torch.bfloat16)
+        assert not torch.equal(model.weight, decoded)
 
     # The vLLM fake-quant export folds this way.
     assert torch.equal(model.weight_quantizer(model.weight.float()).to(torch.bfloat16), decoded)
@@ -487,11 +492,22 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
     ("num_bits", "algorithm"),
     [
         ("q8_0", {**GPTQ, "importance_weighted": True}),
+        ("iq1_s", {**GPTQ, "importance_weighted": True}),
+        ("iq1_m", {**GPTQ, "importance_weighted": True}),
         ("iq2_xs", {**GPTQ, "importance_weighted": True}),
         ("iq2_xxs", {**GPTQ, "importance_weighted": True}),
+        ("iq2_s", {**GPTQ, "importance_weighted": True}),
         ("iq2_xs", {"method": "local_hessian"}),
     ],
-    ids=["q8_0-gptq", "iq2_xs-gptq", "iq2_xxs-gptq", "iq2_xs-local_hessian"],
+    ids=[
+        "q8_0-gptq",
+        "iq1_s-gptq",
+        "iq1_m-gptq",
+        "iq2_xs-gptq",
+        "iq2_xxs-gptq",
+        "iq2_s-gptq",
+        "iq2_xs-local_hessian",
+    ],
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_pin_survives_save_and_restore(num_bits, algorithm, dtype):
@@ -510,7 +526,28 @@ def test_pin_survives_save_and_restore(num_bits, algorithm, dtype):
     # Initialization uses the loaded PTQ result; no calibration data is supplied.
     expected = ggml_format.dequantize(pinned, torch.tensor(restored.weight.shape), dtype=dtype)
     output_before = restored(inputs).detach()
+    importance = pinned_importance(restored.weight_quantizer, num_bits)
+    importance_before = importance.clone() if importance is not None else None
     mtq.initialize_qdq_weights(restored)
+    if importance_before is not None:
+        assert pinned_importance(restored.weight_quantizer, num_bits).dtype == torch.float32
+        torch.testing.assert_close(
+            pinned_importance(restored.weight_quantizer, num_bits),
+            importance_before,
+            rtol=0,
+            atol=0,
+        )
+    if ggml_format.payload_scales is not None:
+        torch.testing.assert_close(
+            ggml_format.payload_scales(
+                ggml_format.pack(restored.weight, restored.weight_quantizer).reshape(
+                    -1, ggml_format.block_bytes
+                )
+            ),
+            ggml_format.payload_scales(pinned.reshape(-1, ggml_format.block_bytes)),
+            rtol=0,
+            atol=0,
+        )
     torch.testing.assert_close(restored(inputs), output_before, rtol=0, atol=0)
     torch.testing.assert_close(restored.weight, expected, rtol=0, atol=0)
     assert restored.weight.dtype == dtype and restored.weight_quantizer.is_enabled
@@ -560,10 +597,23 @@ def _megatron_exporter(dtype, num_bits):
     return exporter
 
 
-def _pinned_export(rows, num_bits):
-    """A GPTQ'd float32 weight, its quantizer, and its pinned payload."""
-    model, _ = _gptq_model(rows, num_bits)
-    pinned = pinned_packed_weight(model.weight_quantizer, num_bits)
+def _pinned_export(rows, num_bits, qdq_ptq=False):
+    """A prepared weight, its quantizer, and its evaluated payload."""
+    model, _ = _gptq_model(
+        rows,
+        num_bits,
+        algorithm="max" if qdq_ptq else GPTQ,
+        dtype=torch.bfloat16 if qdq_ptq else torch.float32,
+    )
+    if qdq_ptq:
+        mtq.initialize_qdq_weights(model)
+        pinned = next(
+            buffer
+            for name, buffer in model.weight_quantizer.named_buffers()
+            if name.endswith("_qdq_initialization")
+        )
+    else:
+        pinned = pinned_packed_weight(model.weight_quantizer, num_bits)
     return model.weight.detach(), model.weight_quantizer, pinned
 
 
@@ -575,8 +625,9 @@ EXPORT_FORMATS = pytest.mark.parametrize("num_bits", ["q8_0", "iq2_xs"])
 
 @EXPORT_DTYPES
 @EXPORT_FORMATS
-def test_megatron_gated_mlp_export_writes_the_pinned_rows(dtype, num_bits):
-    weight, quantizer, pinned = _pinned_export(8, num_bits)
+@pytest.mark.parametrize("qdq_ptq", [False, True])
+def test_megatron_gated_mlp_export_writes_the_pinned_rows(dtype, num_bits, qdq_ptq):
+    weight, quantizer, pinned = _pinned_export(8, num_bits, qdq_ptq)
     module = SimpleNamespace(
         config=SimpleNamespace(ffn_hidden_size=4), weight=weight, weight_quantizer=quantizer
     )
