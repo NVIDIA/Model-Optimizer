@@ -23,6 +23,7 @@ import torch
 
 pytest.importorskip("transformers")
 import transformers
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from modelopt.torch.speculative.plugins.modeling_fakebase import (
     FakeBaseConfig,
@@ -65,10 +66,44 @@ def fake_checkpoint(tmp_path, fake_config):
     return tmp_path
 
 
-def test_fakebase_local_happy_path(fake_checkpoint):
-    model = FakeBaseModel.from_source(str(fake_checkpoint))
+@pytest.mark.parametrize("config_attr", [None, "text_config", "llm_config"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_fakebase_local_happy_path(tmp_path, fake_config, monkeypatch, config_attr, dtype):
+    fake_config.dtype = dtype
+    fake_config.layer_norm_epsilon = 1e-5
+    if config_attr is not None:
+        fake_config.model_type = "nemotron_h"
+        config = transformers.PretrainedConfig(layer_norm_epsilon=1e-3, rms_norm_eps=1e-3)
+        setattr(config, config_attr, fake_config)
+        monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw: config)
+        embed_key = "language_model.backbone.embeddings.weight"
+        head_key = "language_model.lm_head.weight"
+        norm_key = "language_model.backbone.norm_f.weight"
+        eps = fake_config.layer_norm_epsilon
+    else:
+        fake_config.rms_norm_eps = 1e-4
+        embed_key, head_key, norm_key = "embed_tokens.weight", "lm_head.weight", "norm.weight"
+        eps = fake_config.rms_norm_eps
+    generator = torch.Generator().manual_seed(0)
+    tensors = {
+        embed_key: torch.randn(_VOCAB_SIZE, _HIDDEN_SIZE, generator=generator).to(dtype),
+        head_key: torch.randn(_VOCAB_SIZE, _HIDDEN_SIZE, generator=generator).to(dtype),
+        norm_key: torch.linspace(0.8, 1.2, _HIDDEN_SIZE).to(dtype),
+    }
+    safetensors.torch.save_file(tensors, tmp_path / "model.safetensors")
+
+    model = FakeBaseModel.from_source(str(tmp_path))
     assert model.lm_head.weight.shape == torch.Size([_VOCAB_SIZE, _HIDDEN_SIZE])
     assert model.embed_tokens.weight.shape == torch.Size([_VOCAB_SIZE, _HIDDEN_SIZE])
+    torch.testing.assert_close(model.embed_tokens.weight, tensors[embed_key], rtol=0, atol=0)
+    reference_norm = LlamaRMSNorm(_HIDDEN_SIZE, eps=eps).to(dtype)
+    reference_norm.weight.data.copy_(tensors[norm_key])
+    # Small residuals make an incorrect epsilon materially change the reconstructed logits.
+    hidden = (torch.randn(2, 4, _HIDDEN_SIZE, generator=generator) * 0.003).to(dtype)
+    actual_logits = model.lm_head(model.norm(hidden))
+    expected_logits = torch.nn.functional.linear(reference_norm(hidden), tensors[head_key])
+    torch.testing.assert_close(actual_logits, expected_logits, rtol=0, atol=0)
+    assert model.config.rms_norm_eps == eps
 
 
 def test_fakebase_missing_index_raises(tmp_path, fake_config):
@@ -247,7 +282,8 @@ class TestFakeBaseRopeTheta:
         assert not getattr(config, "rope_parameters", None)
 
 
-def test_find_final_norm_path_resolves_a_shared_norm_instance():
+@pytest.mark.parametrize("path", ["model.norm", "language_model.backbone.norm_f"])
+def test_find_final_norm_path_resolves_a_shared_norm_instance(path):
     """A norm instance also registered under an earlier path must still be found.
 
     ``named_modules()`` de-duplicates by default and yields a shared module only under
@@ -263,12 +299,17 @@ def test_find_final_norm_path_resolves_a_shared_norm_instance():
             # "aaa" sorts before "model", so traversal reaches the alias first.
             self.aaa = torch.nn.Module()
             self.aaa.norm = shared
-            self.model = torch.nn.Module()
-            self.model.norm = shared
+            parent = self
+            *parents, name = path.split(".")
+            for part in parents:
+                child = torch.nn.Module()
+                setattr(parent, part, child)
+                parent = child
+            setattr(parent, name, shared)
 
     model = _Aliased()
-    assert "model.norm" not in dict(model.named_modules()), "alias no longer shadows"
-    assert find_final_norm_path(model) == "model.norm"
+    assert path not in dict(model.named_modules()), "alias no longer shadows"
+    assert find_final_norm_path(model) == path
 
 
 def test_find_final_norm_path_returns_none_without_a_norm():
