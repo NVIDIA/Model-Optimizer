@@ -59,3 +59,18 @@ def test_insert_license(tmp_path, before, after, exit_code):
     assert path.read_text() == (after or before)
     if after:
         assert insert_license.main([str(path)]) == 0
+
+
+def test_third_party_list(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # A source link without a copyright notice also marks copied code
+    link = "# Adapted from https://github.com/example/project/blob/0123abc/module.py\n"
+    Path("copied.py").write_text(f"{link}\nimport os\n")
+    Path("own.py").write_text(f"{NVIDIA}\n\nimport os\n")
+    Path("files.txt").write_text("deleted.py\nown.py\n")
+    argv = ["--third-party-list", "files.txt", "copied.py", "own.py"]
+    assert insert_license.main(argv) == 1
+    assert Path("copied.py").read_text() == f"{link}\n{NVIDIA}\n\nimport os\n"
+    listed = [line for line in Path("files.txt").read_text().splitlines() if line[:1] != "#"]
+    assert listed == ["copied.py"]
+    assert insert_license.main(argv) == 0

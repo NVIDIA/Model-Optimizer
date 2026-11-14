@@ -96,6 +96,10 @@ repos:
         alias: insert-license-py
         name: Insert license in python and shell comments
         entry: python tools/precommit/insert_license.py
+        # Lists the files with code copied from other sources, for the Open Source Review Board.
+        # Every run updates that list, so batches must not run in parallel.
+        args: [--third-party-list, tools/precommit/third_party_files.txt]
+        require_serial: true
         language: python
         types_or: [python, shell]
         # Files the hook must skip, as "path|" lines. Files with a third-party header need no entry.
