@@ -46,6 +46,9 @@ Changelog
 - Add support for the `SPEED-Bench v1.1 <https://huggingface.co/datasets/nvidia/SPEED-Bench>`_ dataset.
 - With ``training.dataloader_num_workers`` > 0, ``examples/speculative_decoding/main.py`` now yields each training batch as soon as a worker finishes it, so one slow sample, such as a slow hidden-state fetch in streaming training, no longer stalls every DDP rank. Sample order within the prefetch window is then no longer deterministic; set ``training.dataloader_in_order=true`` to restore it (context-parallel and ``full_determinism`` runs always keep it).
 - The ``general/speculative_decoding/dflash2`` recipe now enables ``dflash_use_torch_compile`` and ``dflash_use_flex_attention``, and turns ``tf32`` off, which compilation needs on PyTorch 2.9 and 2.10. To train eagerly as before, start the run with ``dflash.dflash_use_torch_compile=false dflash.dflash_use_flex_attention=false``; a run resumed from a checkpoint keeps the checkpoint's DFlash settings.
+- Add ``dflash_base_lm_loss_alpha`` (default ``0.0``, off): weight of a language-modelling cross-entropy on the base model's own next-token prediction, added to the draft loss. With a trainable base the only gradient otherwise comes from the draft objective, so the base drifts toward whatever is easiest to draft rather than toward predicting text. Requires ``dflash_freeze_base_model=False`` and labels in the batch; both are checked rather than silently ignored.
+- Add ``data.packed_data_path``: a ``datasets.save_to_disk`` directory of fixed-length pre-tokenized blocks, selecting a new ``packed`` data mode. This is the pretraining-style path -- raw corpus text has no conversation structure, so the chat-template collator the online path uses cannot express it. Packing stays the caller's job, so it can be done once and shared byte-identically by runs being compared. ``labels`` is optional and defaults to ``input_ids``.
+- Add ``dflash_draft_loss_alpha`` (default ``1.0``): weight of the draft objective in the total loss. Setting it to ``0.0`` alongside ``dflash_base_lm_loss_alpha`` trains the base on language modelling alone while every other code path stays identical, which is what makes a control arm expressible for experiments measuring what a drafter costs the base. Setting both weights to zero is refused.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
@@ -108,6 +111,7 @@ Changelog
 
 **Bug Fixes**
 
+- ``dflash_freeze_base_model=False`` now actually trains the base model. The base forward ran under an unconditional ``torch.no_grad()``, so the flag was honoured on the parameters while no autograd graph was built and no gradient ever reached them; the base stayed at its initial weights for the whole run. Training with the base unfrozen now also costs the activation memory that implies.
 - Fix gradients propagated between TTT steps being multiplied by the tensor-parallel size in Megatron EAGLE training with ``use_aux_hidden_state=False`` and ``sequence_parallel=True``. This also corrects runs with hidden-state mixing disabled; reported losses are unchanged.
 - Fix gradient accumulation averaging for Hugging Face EAGLE, Medusa and external draft training. Logged loss and gradient norms now use the corrected scale.
 - Fix EAGLE3 training to normalize raw draft hidden states independently of token embeddings, matching the exported architecture. Re-train drafts trained before this fix if acceptance rate is lower than expected.
