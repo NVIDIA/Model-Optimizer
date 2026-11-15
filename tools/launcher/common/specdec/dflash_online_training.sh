@@ -111,12 +111,19 @@ if [[ "$NUM_NODES" != "1" ]]; then
     GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
     TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
     echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
+    # Derive the rendezvous port from the job id instead of hardcoding one. Every
+    # multi-node job on a cluster otherwise rendezvouses on 29500, so two of them whose
+    # head nodes collide -- or any unrelated listener on that port -- take each other out
+    # with a RendezvousConnectionError that names neither job. SLURM_JOB_ID is identical
+    # across a job's nodes and differs between jobs, which is exactly the property needed.
+    MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-$((29500 + ${SLURM_JOB_ID:-0} % 1000))}
+    echo "Rendezvous: $HEAD_NODE_IP:$MAIN_PROCESS_PORT (job ${SLURM_JOB_ID:-unset})"
     MULTI_NODE_ARGS="--num_processes $TOTAL_GPU \
                      --num_machines $NUM_NODES \
                      --machine_rank $SLURM_PROCID \
                      --rdzv_backend c10d \
                      --main_process_ip $HEAD_NODE_IP \
-                     --main_process_port 29500"
+                     --main_process_port $MAIN_PROCESS_PORT"
 else
     TOTAL_GPU=$(python3 -c "import torch; print(torch.cuda.device_count())")
     echo "Total GPUs: $TOTAL_GPU (single node)"
