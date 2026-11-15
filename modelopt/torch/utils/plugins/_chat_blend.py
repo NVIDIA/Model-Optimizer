@@ -79,16 +79,17 @@ def _questions(dataset, revision, split, kind):
 
 
 def _restore(row, source, question_sources):
+    messages = row.get("messages")
+    if not isinstance(messages, list):
+        messages = []
     missing = [
         i
-        for i, m in enumerate(row.get("messages") or [])
+        for i, m in enumerate(messages)
         if isinstance(m, dict)
         and m.get("role") == "user"
         and isinstance(m.get("content"), str)
         and m["content"].strip() == "-"
     ]
-    if not missing:
-        return row, []
     try:
         kind, split, raw_index = row["dataset"], row["split"], row["index"]
         if (
@@ -98,9 +99,18 @@ def _restore(row, source, question_sources):
         ):
             raise ValueError("unsupported problem location")
         index = int(raw_index)
-        spec = question_sources[kind]
-        if len(missing) != 1 or index < 0 or split not in ("train", "test", "valid", "validation"):
+        if index < 0 or split not in ("train", "test", "valid", "validation"):
             raise ValueError("ambiguous problem location")
+        spec = question_sources.get(kind)
+        key = (
+            ("problem", spec["hf_dataset"], spec["revision"], split, index)
+            if spec is not None
+            else ("problem", kind, split, index)
+        )
+        if not missing:
+            return row, [key]
+        if len(missing) != 1 or spec is None:
+            raise ValueError("ambiguous or unpinned problem location")
         question = _questions(spec["hf_dataset"], spec["revision"], split, kind)[index]
         if not isinstance(question, str) or not question.strip() or question.strip() == "-":
             raise ValueError("empty original question")
@@ -118,12 +128,23 @@ def _restore(row, source, question_sources):
             f"format:\n```{lang}\n{comment}\n```\n\n{question}"
         )
         keys = [
-            ("problem", spec["hf_dataset"], spec["revision"], split, index),
+            key,
             ("problem_text", _digest(question)),
         ]
         return {**row, "messages": messages}, keys
     except (KeyError, IndexError, TypeError, ValueError) as e:
+        if not missing:
+            return row, []
         raise RuntimeError(f"Cannot restore {source['hf_dataset']}: uuid={row.get('uuid')}") from e
+
+
+def _unbalanced_reasoning(text):
+    depth = 0
+    for delimiter in re.finditer(r"</?think>", text):
+        depth += 1 if delimiter[0] == "<think>" else -1
+        if depth < 0:
+            return True
+    return depth != 0
 
 
 def _reject(chat, config):
@@ -144,7 +165,7 @@ def _reject(chat, config):
     ):
         return "tool_calling"
     if config.get("filter_invalid_reasoning") and any(
-        (m.get("content") or "").count("<think>") != (m.get("content") or "").count("</think>")
+        _unbalanced_reasoning(m.get("content") or "")
         for m in messages
         if m.get("role") == "assistant"
     ):

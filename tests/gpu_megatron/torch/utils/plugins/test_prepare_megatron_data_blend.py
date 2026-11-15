@@ -527,6 +527,7 @@ def test_grouped_blend_refills_filters_and_isolates_questions(tmp_path: Path, mo
     monkeypatch.syspath_prepend(str(tmp_path))
     a = [_chat(i) for i in range(70)]
     a[1]["messages"][-1]["reasoning_content"] = "Different reasoning"
+    a[2]["messages"][-1]["content"] = "<think>reason</think>answer"
     a.insert(
         2, {"messages": [a[1]["messages"][0], {"role": "assistant", "content": "another answer"}]}
     )
@@ -537,8 +538,10 @@ def test_grouped_blend_refills_filters_and_isolates_questions(tmp_path: Path, mo
     ]
     a[:0] = [
         42,
+        {"messages": 1},
         {**_chat(98), "images": b"image bytes"},
         {"messages": [{"role": "assistant", "content": "<think>unfinished"}]},
+        {"messages": [{"role": "assistant", "content": "</think>answer<think>"}]},
     ]
     sources = [_source("a", revision="a" * 40), _source("b", revision="b" * 40)]
     b = [_chat(0)] + [_chat(i) for i in range(200, 270)]
@@ -575,6 +578,7 @@ def test_grouped_blend_refills_filters_and_isolates_questions(tmp_path: Path, mo
     assert groups["train"].isdisjoint(groups["validation"])
     all_rows = _read_jsonl(out / "train.jsonl") + _read_jsonl(out / "validation.jsonl")
     assert len({json.dumps(r, sort_keys=True) for r in all_rows}) == 80
+    assert any(r["messages"][-1]["content"] == "<think>reason</think>answer" for r in all_rows)
     assert (
         sum(r["messages"][-1].get("reasoning_content") == "Different reasoning" for r in all_rows)
         == 1
@@ -582,6 +586,8 @@ def test_grouped_blend_refills_filters_and_isolates_questions(tmp_path: Path, mo
     report = json.loads((out / "report.json").read_text())
     assert all(s["train"] + s["validation"] == s["target"] for s in report["sources"])
     assert sum(s["counts"].get("exact_duplicate", 0) for s in report["sources"]) >= 1
+    assert sum(s["counts"].get("invalid_chat", 0) for s in report["sources"]) == 2
+    assert sum(s["counts"].get("unbalanced_reasoning", 0) for s in report["sources"]) == 2
     # A fresh output and a warm cache must produce the same record order and provenance.
     blend_module.prepare_chat_data_blend(path)
     (out / "train.jsonl").write_text("corrupt\n")
@@ -624,6 +630,61 @@ def test_grouped_blend_reports_exhaustion_but_does_not_swallow_reader_failure(
     path.write_text(yaml.safe_dump(config))
     with pytest.raises(OSError, match="network interrupted"):
         blend_module.prepare_chat_data_blend(path)
+
+
+@pytest.mark.parametrize("prompt_mode", ["populated", "mixed", "unconfigured"])
+def test_grouped_blend_isolates_populated_problem_identities(
+    tmp_path: Path, monkeypatch, prompt_mode
+):
+    chat_blend_module._questions.cache_clear()
+    question_path = tmp_path / "questions.jsonl"
+    blend_module._write_jsonl(question_path, [{"question": "Add two integers."}])
+
+    def load_questions(*args, **kwargs):
+        return load_dataset("json", data_files=str(question_path), split="train", streaming=True)
+
+    monkeypatch.setattr(chat_blend_module, "load_dataset", load_questions)
+    rows = {
+        language: {
+            "dataset": "apps",
+            "split": "train",
+            "index": "0" if language == "python" else 0,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "-"
+                    if language == "python" and prompt_mode == "mixed"
+                    else f"Add two integers in {language}.",
+                },
+                {"role": "assistant", "content": f"{language} solution"},
+            ],
+        }
+        for language in ("python", "cpp")
+    }
+    monkeypatch.setattr(
+        blend_module,
+        "_iter_rows",
+        lambda source, *args: iter([rows[source["split"]]]),
+    )
+    config = {
+        "output_dir": str(tmp_path / "out"),
+        "output_format": "chat_jsonl",
+        "target_samples": 2,
+        "validation_samples": 1,
+        "group_split": True,
+        "sources": [
+            _source("cp", split=language, revision="a" * 40) for language in ("python", "cpp")
+        ],
+    }
+    if prompt_mode != "unconfigured":
+        config["question_sources"] = {"apps": {"hf_dataset": "org/questions", "revision": "c" * 40}}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    # Holding out either language also holds out the other representation of the same problem.
+    assert blend_module.prepare_chat_data_blend(path) == {"train": 0, "validation": 1}
+    assert not _read_jsonl(tmp_path / "out/train.jsonl")
+    assert len(_read_jsonl(tmp_path / "out/validation.jsonl")) == 1
+    chat_blend_module._questions.cache_clear()
 
 
 @pytest.mark.parametrize("kind", ["apps", "taco", "code_contests", "open-r1/codeforces"])
