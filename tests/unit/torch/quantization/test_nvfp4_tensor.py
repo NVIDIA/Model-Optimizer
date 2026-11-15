@@ -176,3 +176,24 @@ def test_cutlass_fp4_scale_to_modelopt_fp4_scale_undoes_the_swizzle(weight_shape
     assert restored.dtype == torch.float8_e4m3fn
     assert restored.is_contiguous()  # consumers index it flatly
     assert torch.equal(restored.view(torch.uint8), scale)
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+        ),
+    ],
+)
+def test_activation_scale_bytes_match_cpu_reference_without_mutating_range(device):
+    amax = torch.linspace(1e-5, 100000, 4096, dtype=torch.float32, device=device)
+    before = amax.clone()
+    quantizer = SimpleNamespace(is_enabled=True, maxbound=6.0, export_amax=lambda: amax)
+    actual = NVFP4QTensor.get_activation_scaling_factor(quantizer)
+    expected = before.cpu() / (6.0 * 448.0)
+    assert actual.device == amax.device
+    assert actual.dtype == torch.float32
+    assert torch.equal(actual.cpu().view(torch.uint8), expected.view(torch.uint8))
+    assert torch.equal(amax, before)

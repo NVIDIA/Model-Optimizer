@@ -240,7 +240,11 @@ class NVFP4QTensor(BaseQuantizedTensor):
         if amax is None:
             return None
 
-        activation_scaling_factor = amax.float() / (quantizer.maxbound * E4M3_MAX)
+        # Round once to FP32 after higher-precision division so export metadata
+        # is unchanged by CUDA's FP32 reciprocal rounding.
+        activation_scaling_factor = (
+            amax.float().double() / (quantizer.maxbound * E4M3_MAX)
+        ).float()
 
         assert torch.all(activation_scaling_factor > 0), (
             f" activation scaling factor {activation_scaling_factor} not positive."
