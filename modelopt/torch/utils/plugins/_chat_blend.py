@@ -250,9 +250,13 @@ def prepare_grouped_blend(
     seed = int(config.get("seed", 1234))
     versions = {}
     for distribution in importlib.metadata.distributions():
-        metadata = distribution.metadata
-        if "Name" in metadata and (name := metadata["Name"]):
-            versions[name] = distribution.version
+        try:
+            metadata = distribution.metadata
+            if "Name" in metadata and (name := metadata["Name"]):
+                versions[name] = distribution.version
+        except FileNotFoundError:
+            # The importlib_metadata backport raises this for missing package metadata.
+            continue
     versions["python"] = platform.python_version()
     recipe = {k: v for k, v in config.items() if k != "output_dir"}
     code = Path(__file__).read_bytes() + pipeline_code
