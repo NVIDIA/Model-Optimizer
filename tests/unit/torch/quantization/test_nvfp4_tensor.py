@@ -187,13 +187,28 @@ def test_cutlass_fp4_scale_to_modelopt_fp4_scale_undoes_the_swizzle(weight_shape
         ),
     ],
 )
-def test_activation_scale_bytes_match_cpu_reference_without_mutating_range(device):
+@pytest.mark.parametrize("path", ["activation", "dynamic_weight", "static_weight", "weight_tensor"])
+def test_global_scale_bytes_match_cpu_reference_without_mutating_range(device, path):
     amax = torch.linspace(1e-5, 100000, 4096, dtype=torch.float32, device=device)
     before = amax.clone()
-    quantizer = SimpleNamespace(is_enabled=True, maxbound=6.0, export_amax=lambda: amax)
-    actual = NVFP4QTensor.get_activation_scaling_factor(quantizer)
+    quantizer = SimpleNamespace(
+        is_enabled=True,
+        maxbound=6.0,
+        export_amax=lambda: amax,
+        _amax=amax,
+        global_amax=amax if path == "static_weight" else None,
+    )
     expected = before.cpu() / (6.0 * 448.0)
+    if path == "activation":
+        actual = NVFP4QTensor.get_activation_scaling_factor(quantizer)
+    elif path == "weight_tensor":
+        actual = NVFP4QTensor.get_weights_scaling_factor_2(amax.reshape(64, 64))
+        expected = before.cpu().abs().max() / (6.0 * 448.0)
+    else:
+        actual = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(quantizer)
     assert actual.device == amax.device
     assert actual.dtype == torch.float32
-    assert torch.equal(actual.cpu().view(torch.uint8), expected.view(torch.uint8))
+    assert torch.equal(
+        actual.cpu().reshape(-1).view(torch.uint8), expected.reshape(-1).view(torch.uint8)
+    )
     assert torch.equal(amax, before)

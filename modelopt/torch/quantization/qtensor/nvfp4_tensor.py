@@ -120,12 +120,12 @@ class NVFP4QTensor(BaseQuantizedTensor):
         m_fp8 = fp8_max_for_normalization(weight_quantizer)
         global_amax = cls._get_static_global_amax(weight_quantizer)
         if global_amax is not None:
-            return global_amax.float() / (E2M1_MAX * m_fp8)
+            return (global_amax.float().double() / (E2M1_MAX * m_fp8)).float()
         else:
             assert hasattr(weight_quantizer, "_amax"), (
                 "Weight quantizer does not have attribute amax"
             )
-            return weight_quantizer._amax.float() / (E2M1_MAX * m_fp8)
+            return (weight_quantizer._amax.float().double() / (E2M1_MAX * m_fp8)).float()
 
     @classmethod
     def get_weights_scaling_factor_from_quantizer(
@@ -226,7 +226,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
     @classmethod
     def get_weights_scaling_factor_2(cls, input: torch.Tensor):
         """Returns per tensor weight scaling factor."""
-        return reduce_amax(input).float() / (E2M1_MAX * E4M3_MAX)
+        return (reduce_amax(input).float().double() / (E2M1_MAX * E4M3_MAX)).float()
 
     @classmethod
     def get_activation_scaling_factor(cls, quantizer):
