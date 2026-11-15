@@ -48,6 +48,7 @@ def create_benchmark_model(
     generation_seq_len: int,
     block_config: BlockConfig | None,
     repeat_block_n_times: int = 10,
+    head_dim: int | None = None,
 ) -> LlamaForCausalLM:
     """Build a small Llama model with repeated subblocks for latency benchmarking."""
     block_configs = [_make_standard_block_config(num_key_value_heads)]
@@ -61,7 +62,7 @@ def create_benchmark_model(
         hidden_size=hidden_size,
         num_attention_heads=num_attention_heads,
         num_hidden_layers=len(block_configs),
-        head_dim=None,  # Compute from hidden_size // num_attention_heads instead of using default 128
+        head_dim=head_dim,
         # this is required for trt-llm convertion to know which model classes to use to the checkpoint
         auto_map={
             "AutoConfig": "transformers.models.llama.configuration_llama.LlamaConfig",
@@ -123,6 +124,7 @@ def calc_subblock_runtime(
         runtime_config.generation_seq_len,
         block_config=block_config,
         repeat_block_n_times=runtime_config.repeat_block_n_times,
+        head_dim=runtime_config.head_dim,
     )
     return calc_model_runtime(model, runtime_config)
 
@@ -172,6 +174,7 @@ def calc_runtime_for_subblocks(
     prefill_seq_len: int,
     generation_seq_len: int,
     batch_size: int,
+    head_dim: int | None = None,
 ) -> tuple[dict[SubblockConfig, float], float]:
     """Benchmark each unique subblock and return per-subblock runtimes and no-block overhead."""
     repeat_block_n_times = 10
@@ -189,6 +192,7 @@ def calc_runtime_for_subblocks(
         runtime_stats_config.get("num_iters", 30),
         runtime_stats_config.get("num_warmup_iters", 10),
         runtime_stats_config.get("gpu_memory_utilization", 0.5),
+        head_dim=head_dim,
     )
 
     runtime_by_subblock_dict = {}

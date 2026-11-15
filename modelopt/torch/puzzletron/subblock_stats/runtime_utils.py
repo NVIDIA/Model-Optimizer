@@ -57,6 +57,7 @@ class RuntimeConfig:
     # GPU during benchmarking; requesting too much fails vLLM's startup
     # free-memory check.
     gpu_memory_utilization: float = 0.5
+    head_dim: int | None = None
 
 
 def save_model(model: LlamaForCausalLM, tokenizer_path: Path, output_path: Path) -> None:
