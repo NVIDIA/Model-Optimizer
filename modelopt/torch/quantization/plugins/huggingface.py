@@ -31,7 +31,6 @@ from torch import Tensor
 from torch.distributed.tensor import DTensor, Shard
 from torch.nn.functional import linear
 from transformers.integrations.finegrained_fp8 import FP8Experts, FP8Linear
-from transformers.models.t5.modeling_t5 import T5Attention
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_FA_AVAILABLE
 from modelopt.torch.kernels.common.attention import (
@@ -45,7 +44,7 @@ from modelopt.torch.utils.distributed import ParallelState, recorded_distributio
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
-from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import _QuantLinear
 from ..nn.modules.tensor_quantizer import _try_stacked_fake_quant
 from ..utils import replace_function, sync_moe_expert_amax
@@ -376,38 +375,12 @@ class _QuantAttention(QuantModule):
         )
 
 
-class _T5QuantAttention(QuantModule):
-    """Attention class for KV Cache quantization compatible with T5 Model."""
-
-    def _quantized_matmul(self, batch1, batch2):
-        # T5Attention has two matmul operations, one for the query and key and one for the attention and value.
-        # The first matmul is quantized with the q_bmm_quantizer and k_bmm_quantizer. The second matmul is
-        # quantized with the v_bmm_quantizer.
-        if self.qk_quant_matmul:
-            self.qk_quant_matmul = False
-            q, k = batch1, batch2
-            return torch._matmul(
-                self.q_bmm_quantizer(q), self.k_bmm_quantizer(k.transpose(3, 2)).transpose(3, 2)
-            )
-        else:
-            self.qk_quant_matmul = True
-            attn, v = batch1, batch2
-            return torch._matmul(attn, self.v_bmm_quantizer(v))
-
-    def _setup(self):
-        self.q_bmm_quantizer = TensorQuantizer(QuantInputBase.default_quant_desc_input)
-        self.k_bmm_quantizer = TensorQuantizer(QuantInputBase.default_quant_desc_input)
-        self.v_bmm_quantizer = TensorQuantizer(QuantInputBase.default_quant_desc_input)
-
-    @staticmethod
-    def is_compatible_attention(attn):
-        return issubclass(attn, T5Attention)
-
-    def forward(self, *args, **kwargs):
-        # self.qk_quant_matmul is used to alternate between the two matmul operations for T5Attention
-        self.qk_quant_matmul = True
-        with replace_function(torch, "matmul", self._quantized_matmul):
-            return super().forward(*args, **kwargs)
+# The KV-cache wrappers register_hf_attentions_on_the_fly tries on each attention class, in order:
+# the first whose is_compatible_attention accepts the class gets it, and a class none accepts falls
+# back to the AST-based quantized class. A model whose attention needs a wrapper of its own (T5's)
+# appends it from its modeling_ptq. Each entry must define the staticmethod
+# is_compatible_attention(attention_type) -> bool, which QuantModule does not declare.
+_QUANT_ATTENTION_WRAPPERS: list[type[QuantModule]] = [_QuantAttention]
 
 
 def _wraps_nested_attention(module):
@@ -450,19 +423,15 @@ def register_hf_attentions_on_the_fly(model):
                 QuantModuleRegistry.get(attention_type) is None
                 and attention_type not in attention_cls
             ):
-                if _QuantAttention.is_compatible_attention(attention_type):
-                    # Lets register the attention class for KV Cache quantization
-                    register(attention_type, _QuantAttention)
-                    registered_attn_module = True
-                    print(
-                        f"Registered {attention_type} to {_QuantAttention.__name__} for KV Cache quantization"
-                    )
-                elif _T5QuantAttention.is_compatible_attention(attention_type):
-                    register(attention_type, _T5QuantAttention)
-                    registered_attn_module = True
-                    print(
-                        f"Registered {attention_type} to {_T5QuantAttention.__name__} for KV Cache quantization"
-                    )
+                for wrapper in _QUANT_ATTENTION_WRAPPERS:
+                    if wrapper.is_compatible_attention(attention_type):
+                        # Lets register the attention class for KV Cache quantization
+                        register(attention_type, wrapper)
+                        registered_attn_module = True
+                        print(
+                            f"Registered {attention_type} to {wrapper.__name__} for KV Cache quantization"
+                        )
+                        break
                 else:
                     attention_cls.add(attention_type)
                     print(
@@ -548,6 +517,16 @@ class _QuantHFParallelLinear(_ParallelLinear):
     def fold_weight(self, keep_attrs: bool = False):
         with self.enable_weight_access_and_writeback():
             super().fold_weight(keep_attrs)
+
+    def _initialize_qdq_weights(self, trainable_only, initialized):
+        requires_grad = self.weight.requires_grad
+        if not self._is_selected_for_initialization(
+            self.weight, self.weight_quantizer, trainable_only
+        ):
+            return
+        with self.enable_weight_access_and_writeback():
+            self.weight.requires_grad_(requires_grad)
+            super()._initialize_qdq_weights(trainable_only, initialized)
 
     @contextmanager
     def enable_weight_access_and_writeback(self):
@@ -1241,11 +1220,22 @@ class _QuantFP8Experts(_QuantFusedExperts):
             raise NotImplementedError("Only FP8 E4M3 native expert weights are supported")
         super()._setup()
 
+    def _materialized_dtype(self) -> torch.dtype:
+        """The dtype of the checkpoint's other weights, which the forward casts each expert to.
+
+        Experts unpacked, or dequantized with no dtype asked for, take it, so calibration encodes
+        the weights the fake-quantized forward runs on. The default dtype without a config dtype.
+        """
+        dtype = getattr(self.config, "dtype", None)
+        if isinstance(dtype, torch.dtype) and dtype.is_floating_point and dtype.itemsize > 1:
+            return dtype
+        return torch.get_default_dtype()
+
     def get_expert_weight(self, name, idx, dtype=None):
         weight = self._local_experts(getattr(self, name))[idx]
         if weight.element_size() > 1:
             return weight if dtype is None else weight.to(dtype)
-        dtype = dtype or torch.get_default_dtype()
+        dtype = dtype or self._materialized_dtype()
         scales = self._local_experts(getattr(self, f"{name}_scale_inv"))[idx].float()
         rows, cols = self.block_size or (weight.shape[0] // scales.shape[0], weight.shape[1])
         scales = scales.repeat_interleave(rows, 0).repeat_interleave(cols, 1)
@@ -1278,11 +1268,12 @@ class _QuantFP8Experts(_QuantFusedExperts):
                 f"{type(self).__name__} cannot unpack native FP8 expert weights sharded over the "
                 "experts. Quantize the model without expert parallelism."
             )
+        dtype = self._materialized_dtype()
         for name in names:
             weight = getattr(self, name)
-            unpacked = torch.empty_like(weight, dtype=torch.get_default_dtype())
+            unpacked = torch.empty_like(weight, dtype=dtype)
             for idx in range(self.num_experts):
-                unpacked[idx].copy_(self.get_expert_weight(name, idx))
+                unpacked[idx].copy_(self.get_expert_weight(name, idx, dtype))
             setattr(self, name, nn.Parameter(unpacked, requires_grad=False))
 
 
@@ -1943,10 +1934,6 @@ def _is_supported_hf_model(model):
 
 
 def is_homogeneous_hf_model(model: nn.Module) -> bool:
-    from modelopt.torch.models.nemotron_h.modeling_ptq import is_nemotron_h_model
-
-    if is_nemotron_h_model(model):
-        return False
     decoder_layers = get_homogeneous_hf_decoder_layers(model)
     if decoder_layers is None or len(decoder_layers) == 0:
         return False
@@ -2024,9 +2011,9 @@ AutoQuantizeGradientSearcher.register_custom_support(
 
 # Model-specific PTQ support lives with its model in
 # ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import. It is
-# imported here: after the generic wrappers it builds on are defined, and before the
-# homogeneous decoder discoverer below, since the first matching discoverer wins and
-# Nemotron-H's is the more specific one.
+# imported here: after the generic wrappers and wrapper lists it builds on are defined, and
+# before the homogeneous decoder discoverer below, since the first matching discoverer wins
+# and a model's own (Nemotron-H's) is the more specific one.
 for _model_type in (
     "falcon",
     "gpt_oss",
@@ -2034,6 +2021,7 @@ for _model_type in (
     "nemotron_h",
     "step3p5",
     "step3p7",
+    "t5",
 ):
     importlib.import_module(f"modelopt.torch.models.{_model_type}.modeling_ptq")
 

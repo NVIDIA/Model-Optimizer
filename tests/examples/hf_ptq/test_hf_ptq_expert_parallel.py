@@ -699,7 +699,7 @@ def test_only_an_expert_parallel_run_calibrates_through_the_distributed_forward_
         model_type="qwen3_moe",
         calibration_only=False,
         calib_dataloader=object(),
-        is_nemotron_vl_model=False,
+        vlm_wrapper=False,
     )
 
     assert len(quantized) == 1
@@ -763,7 +763,7 @@ def test_an_expert_parallel_run_replants_the_all_to_all_forwards_after_quantizin
         model_type="qwen3_moe",
         calibration_only=False,
         calib_dataloader=object(),
-        is_nemotron_vl_model=False,
+        vlm_wrapper=False,
     )
 
     assert events == ["quantize"] + ([("replant", full_model, ep_mesh)] if replanted else [])
@@ -876,7 +876,7 @@ def test_a_vlm_calibrated_on_text_gets_its_experts_all_to_all_forwards_back(
         model_type="qwen3_vl_moe",
         calibration_only=False,
         calib_dataloader=[batch],
-        is_nemotron_vl_model=False,
+        vlm_wrapper=False,
     )
 
     assert language_model.layers[0].mlp.experts.down_proj_input_quantizer.amax is not None
@@ -928,7 +928,7 @@ def test_a_failed_preview_of_an_expert_parallel_model_stops_the_run(
     set_distribution_plan(model, plan)
     exported = []
     monkeypatch.setattr(hf_ptq, "export_quantized", lambda *args, **kwargs: exported.append(True))
-    monkeypatch.setattr(hf_ptq, "run_nemotron_vl_preview", fail)  # as vlm_utils raises in lockstep
+    monkeypatch.setattr(hf_ptq, "run_vlm_preview", fail)  # as vlm_utils raises in lockstep
     ids = torch.zeros(1, 4, dtype=torch.long)
     args = SimpleNamespace(
         specdec_offline_dataset=None,

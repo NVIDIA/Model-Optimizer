@@ -22,7 +22,8 @@ from typing import Any, ClassVar, Literal, Self
 from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
-from modelopt.torch.quantization.config import QuantizeConfig
+from modelopt.torch.quantization.config import QuantizeAlgoCfgType, QuantizeConfig
+from modelopt.torch.quantization.mode import CalibrateModeRegistry, get_modelike_from_algo_cfg
 from modelopt.torch.speculative.config import (
     DFlashConfig,
     EagleConfig,
@@ -322,6 +323,29 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         description="QuantizeConfig applied as a uniform post-step; falls back to "
         "the --kv_cache_qformat CLI flag when omitted.",
     )
+    finalize_algorithm: QuantizeAlgoCfgType = ModeloptField(
+        default=None,
+        title="Calibration of the frozen assignment (optional)",
+        description="If set, the search only scores and saves its checkpoint; a run that finds "
+        "the scores in the checkpoint re-solves for the constraints and quantizes the source "
+        "weights with the selected per-layer formats and this algorithm. Use it for layerwise "
+        "algorithms such as sequential GPTQ, whose result for a layer depends on the formats "
+        "chosen for earlier layers; candidates are searched with their own (e.g. local) "
+        "algorithms.",
+    )
+
+    @field_validator("finalize_algorithm")
+    @classmethod
+    def _validate_finalize_algorithm(cls, v):
+        # Each calibration's own schema, so a typo fails at load rather than after the search.
+        for mode, options in get_modelike_from_algo_cfg(v) if v is not None else []:
+            algorithm = CalibrateModeRegistry[mode].config_class.model_validate(options)
+            if getattr(getattr(algorithm, "layerwise", None), "export_dir", None) is not None:
+                raise ValueError(
+                    "finalize_algorithm cannot set layerwise.export_dir: the AutoQuantize "
+                    "recipe exports after finalizing."
+                )
+        return v
 
     @property
     def uses_predicted_damage_target(self) -> bool:
@@ -345,6 +369,14 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
             raise ValueError(
                 "A damage-bound AutoQuantize recipe must omit constraints.effective_bits; "
                 "max_predicted_damage supplies the search target."
+            )
+        if self.finalize_algorithm is not None and (
+            self.uses_predicted_damage_target or self.constraints.cost_model == "kv_cache"
+        ):
+            # Finalizing re-solves the weight formats for constraints.effective_bits.
+            raise ValueError(
+                "finalize_algorithm needs a weight search for constraints.effective_bits, not a "
+                "max_predicted_damage or KV-cache search."
             )
         if not self.candidate_formats and not self.module_search_spaces:
             raise ValueError(

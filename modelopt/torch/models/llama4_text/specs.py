@@ -24,8 +24,8 @@ MoE section would change how text-only Llama-4 checkpoints match MoE blocks in q
 export, which belongs with tests of those paths, not with its expert-parallel refusal.
 """
 
-from ..llama4.specs import EP_UNSUPPORTED
-from ..specs import EPSpec, ModelSpec, register
+from ..llama4.specs import EP_UNSUPPORTED, POST_PTQ_GENERATION_UNSUPPORTED
+from ..specs import EPSpec, ModelSpec, PTQSpec, register
 
 __all__: list[str] = []
 
@@ -34,5 +34,6 @@ register(
         model_type="llama4_text",
         min_transformers_version="5.5",
         ep_spec=EPSpec(unsupported=EP_UNSUPPORTED),
+        ptq_spec=PTQSpec(post_ptq_generation_unsupported=POST_PTQ_GENERATION_UNSUPPORTED),
     )
 )

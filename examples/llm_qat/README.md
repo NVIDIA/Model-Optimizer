@@ -4,6 +4,8 @@ This tutorial shows how to run QAT and QAD with Hugging Face Transformers: set u
 
 For background on QAT and QAD and help choosing between Hugging Face, Megatron Bridge, and Megatron-LM, start with the [QAT/QAD guide](https://nvidia.github.io/Model-Optimizer/guides/quantization_aware_training_and_distillation.html).
 
+For an experimental native NeMo AutoModel expert integration, see the [NVFP4 adapter](nemo_automodel/README.md).
+
 <div align="center">
 
 | **Section** | **Description** | **Link** |

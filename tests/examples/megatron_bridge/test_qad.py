@@ -37,6 +37,9 @@ from _test_utils.torch.transformers_models import (
 )
 from torch.distributed.checkpoint import FileSystemReader
 
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import TensorQuantizer
+
 
 def _load_checkpoint_tensors(
     checkpoint_path: Path, *, include_optimizer: bool = False
@@ -145,7 +148,9 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
     distill_cmd = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"]
         + ([] if lora_rank else ["--fake_quant_weight_cache"])
-        + (["--trainable_params", *trainable_patterns] if full_rank else []),
+        + (
+            ["--trainable_params", *trainable_patterns, "--qdq_student_weight"] if full_rank else []
+        ),
         student_hf_path=hf_model_path,
         student_megatron_path=quantized_megatron_path,
         teacher_hf_path=hf_model_path,
@@ -188,6 +193,27 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
         }
         frozen = parameters - selected
         assert selected and any(".self_attention." in name for name in frozen)
+        # Warmup starts at zero LR: the first saved weights expose initialization before updates.
+        initialized = _load_checkpoint_tensors(distilled_megatron_path / "iter_0000001")
+        changed = False
+        for name in selected:
+            quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), axis=None))
+            quantizer.amax = initial[name.removesuffix("weight") + "weight_quantizer._amax"]
+            expected = quantizer(initial[name])
+            torch.testing.assert_close(initialized[name], expected, rtol=0, atol=0, msg=name)
+            changed |= not torch.equal(initial[name], expected)
+        assert changed, "The fresh run did not replace floating latents with QDQ values"
+        reinitialize_cmd = distill_cmd.copy()
+        reinitialize_cmd[reinitialize_cmd.index("--student_megatron_path") + 1] = str(
+            distilled_megatron_path / f"iter_{early_exit_iter:07d}"
+        )
+        reinitialize_cmd[reinitialize_cmd.index("--output_dir") + 1] = str(
+            tmp_path / "fresh_output"
+        )
+        with pytest.raises(ValueError, match="trained student checkpoint"):
+            run_example_command(
+                reinitialize_cmd, example_path="megatron_bridge", setup_free_port=True
+            )
         for name in frozen:
             assert torch.equal(initial[name].view(torch.uint8), trained[name].view(torch.uint8)), (
                 name

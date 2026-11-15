@@ -38,6 +38,8 @@ at::Tensor iq1_m_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
                            std::optional<at::Tensor> importance, std::optional<at::Tensor> choices,
                            bool every_choice);
 at::Tensor q8_0_pack_cuda(at::Tensor input);
+at::Tensor search_choices_cuda(at::Tensor errors, at::Tensor hessian, int64_t groups,
+                               int64_t sweeps);
 at::Tensor iq1_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
 at::Tensor iq1_m_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
 at::Tensor iq2_xxs_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
@@ -128,6 +130,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              pybind11::arg("input"), pybind11::arg("grid"), pybind11::arg("scales"),
              pybind11::arg("importance") = pybind11::none(),
              pybind11::arg("choices") = pybind11::none(), pybind11::arg("every_choice") = false);
+  module.def("search_choices", &search_choices_cuda,
+             "Each group's choice minimizing e H e^T for every row of one 256-column block, given "
+             "every choice's float32 decoding error [choices, rows, 256] and the symmetric float32 "
+             "[256, 256] H: the least-error choice per group under its diagonal block of H, then "
+             "sweeps passes revisiting the groups in turn. Returns int64 [rows, groups].",
+             pybind11::arg("errors"), pybind11::arg("hessian"), pybind11::arg("groups"),
+             pybind11::arg("sweeps"));
   module.def("q8_0_pack", &q8_0_pack,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
              "dimension is a multiple of 32. Returns uint8 [numel / 32, 34] on the input device. "
