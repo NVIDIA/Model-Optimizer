@@ -27,12 +27,17 @@ For an experimental native NeMo AutoModel expert integration, see the [NVFP4 ada
 
 Please refer to [hf_ptq/README.md](../hf_ptq/README.md#pre-requisites) for container
 recommendations and base ModelOpt installation guidance. For this QAT/QAD example,
-install the Hugging Face dependencies and the example-specific requirements:
+run the following commands from the Model-Optimizer repository root:
 
 ```bash
 pip install -U nvidia-modelopt[hf]
+pip install packaging psutil ninja wheel
+pip install --no-build-isolation "flash-attn>=2.6.0"
 pip install -r examples/llm_qat/requirements.txt
 ```
+
+FlashAttention is installed separately with `--no-build-isolation` so its build
+can use the installed PyTorch.
 
 FlashAttention must be compatible with the installed PyTorch/CUDA build. If these
 commands change PyTorch, reinstall a compatible FlashAttention build or rebuild
