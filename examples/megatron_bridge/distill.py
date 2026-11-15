@@ -53,6 +53,7 @@ from megatron.bridge.training.post_training.checkpointing import (
 )
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
+from megatron.core.transformer.enums import AttnBackend
 from trainable_params import (
     configure_trainable_parameters,
     initialize_student_weights,
@@ -222,6 +223,17 @@ def get_args():
         type=_positive_int,
         default=None,
         help="Number of decoder layers on the last pipeline stage (default: even split).",
+    )
+    parser.add_argument(
+        "--flash_attention_version",
+        type=int,
+        choices=[2, 3, 4],
+        default=None,
+        help=(
+            "Run attention on Transformer Engine's FlashAttention backend at this version instead "
+            "of letting it choose a backend. A p_bmm_quantizer (quantized attention probabilities) "
+            "needs 4."
+        ),
     )
     parser.add_argument(
         "--dsa_kernel_backend",
@@ -728,6 +740,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         provider.seq_length = args.seq_length
         if args.dsa_kernel_backend is not None:
             provider.dsa_kernel_backend = args.dsa_kernel_backend
+        if args.flash_attention_version is not None:
+            # Process-wide in Transformer Engine, so the student and the teacher share it.
+            provider.attention_backend = AttnBackend.flash
+            provider.flash_attention_version = args.flash_attention_version
         set_moe_expert_layout(provider, moe_grouped_gemm)
         if args.moe_aux_loss_coeff is not None:
             provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff

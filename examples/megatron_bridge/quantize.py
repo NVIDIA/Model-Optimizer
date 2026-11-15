@@ -64,6 +64,7 @@ from pathlib import Path
 
 import torch
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
+from megatron.core.transformer.enums import AttnBackend
 from mlflow_utils import NON_PARAMS, add_mlflow_args, mlflow_run, resolve_mlflow_args
 from transformers import AutoProcessor
 
@@ -153,6 +154,17 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
     parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
+    parser.add_argument(
+        "--flash_attention_version",
+        type=int,
+        choices=[2, 3, 4],
+        default=None,
+        help=(
+            "Run attention on Transformer Engine's FlashAttention backend at this version instead "
+            "of letting it choose a backend. A p_bmm_quantizer (quantized attention probabilities) "
+            "needs 4."
+        ),
+    )
     parser.add_argument(
         "--dsa_kernel_backend",
         choices=["none", "tilelang", "cudnn"],
@@ -363,6 +375,14 @@ def main(args: argparse.Namespace):
             **(
                 {"dsa_kernel_backend": args.dsa_kernel_backend}
                 if args.dsa_kernel_backend is not None
+                else {}
+            ),
+            **(
+                {
+                    "attention_backend": AttnBackend.flash,
+                    "flash_attention_version": args.flash_attention_version,
+                }
+                if args.flash_attention_version is not None
                 else {}
             ),
         },
