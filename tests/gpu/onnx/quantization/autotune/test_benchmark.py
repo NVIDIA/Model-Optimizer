@@ -40,6 +40,7 @@ from onnx import TensorProto, helper
 
 import modelopt.onnx.quantization.autotune.benchmark as bm
 from modelopt.onnx.quantization.autotune import TensorRTPyBenchmark, TrtExecBenchmark
+from modelopt.onnx.quantization.autotune.autotuner_base import QDQAutotunerBase
 from modelopt.onnx.quantization.autotune.benchmark import _validate_shape_range
 
 # --- fixtures ---
@@ -240,7 +241,8 @@ def test_trtexec_remote_config_is_validated_before_version_fallback(tmp_path):
     run_mock.assert_not_called()
 
 
-def test_trtexec_run_returns_remote_safety_latency(tmp_path):
+@pytest.mark.parametrize("remote_model_path", [None, "/data/models/custom_engine.trt"])
+def test_trtexec_run_returns_remote_safety_latency(tmp_path, remote_model_path):
     """Remote safety autotuning benchmarks the built engine on the target."""
     remote_url = (
         '"ssh://alice@10.0.0.5:2222?'
@@ -256,6 +258,7 @@ def test_trtexec_run_returns_remote_safety_latency(tmp_path):
                 "--safe",
                 "--skipInference",
             ],
+            remote_model_path=remote_model_path,
         )
 
     model_path = tmp_path / "model.onnx"
@@ -294,7 +297,12 @@ def test_trtexec_run_returns_remote_safety_latency(tmp_path):
     assert upload_command[0] == "scp"
     assert remote_command[0] == "ssh"
     assert cleanup_command[0] == "ssh"
-    remote_engine_path = upload_command[-1].rsplit(":", 1)[1]
+    uploaded_remote_engine_path = upload_command[-1].rsplit(":", 1)[1]
+    if remote_model_path is None:
+        remote_engine_path = uploaded_remote_engine_path
+    else:
+        remote_engine_path = remote_model_path
+        assert uploaded_remote_engine_path == remote_engine_path
     assert f"--loadEngine={remote_engine_path}" in remote_command[-1]
     assert cleanup_command[-1] == f"rm -f -- {remote_engine_path}"
     assert "/opt/trt/bin/trtexec_safe" in remote_command[-1]
@@ -625,8 +633,28 @@ class TestTensorRTPyBenchmark:
         assert latency_ms > 0
         assert latency_ms != float("inf")
 
-    def test_run_with_path(self, simple_conv_model_path):
+    @pytest.mark.parametrize("storage", ["inline", "external_absolute", "external_relative"])
+    def test_run_with_path(self, simple_conv_model_path, tmp_path, monkeypatch, storage):
         """TensorRTPyBenchmark accepts model path and returns finite latency."""
+        if storage != "inline":
+            output_dir = tmp_path / "exports"
+            output_dir.mkdir()
+            working_dir = tmp_path / "working"
+            working_dir.mkdir()
+            model = onnx.load(simple_conv_model_path)
+            for weight in model.graph.initializer:
+                weight.CopyFrom(
+                    onnx.numpy_helper.from_array(onnx.numpy_helper.to_array(weight), weight.name)
+                )
+            autotuner = QDQAutotunerBase(model)
+            autotuner.initialize()
+            path = output_dir / "baseline.onnx"
+            autotuner.export_onnx(str(path), insert_qdq=False)
+            assert (output_dir / "baseline.onnx_data").is_file()
+            monkeypatch.chdir(working_dir)
+            simple_conv_model_path = (
+                os.path.relpath(path) if storage == "external_relative" else str(path)
+            )
         benchmark = TensorRTPyBenchmark(warmup_runs=1, timing_runs=2)
         latency_ms = benchmark.run(simple_conv_model_path)
         assert isinstance(latency_ms, float)

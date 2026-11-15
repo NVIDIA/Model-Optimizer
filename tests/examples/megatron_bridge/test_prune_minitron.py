@@ -47,6 +47,8 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
                 return_model=True,
                 num_nextn_predict_layers=1,
                 mtp_hybrid_override_pattern="*E",
+                # FlashAttention-4 (used by TE on sm_120) cannot compile the default head_dim=8
+                head_dim=64,
             ),
             {"n_shared_experts": 1},
             id="nemotron_h",

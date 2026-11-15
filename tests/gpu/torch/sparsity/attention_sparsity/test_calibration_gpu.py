@@ -20,7 +20,7 @@ import torch
 from _test_utils.torch.sparsity.sparse_attention_common import SimpleTransformerEncoderLayer
 
 import modelopt.torch.opt as mto
-from modelopt.torch.sparsity.attention_sparsity import sparsify
+from modelopt.torch.sparsity import sparsify
 from modelopt.torch.sparsity.attention_sparsity.calibration import RulerDatasetBuilder
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 

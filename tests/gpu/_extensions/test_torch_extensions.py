@@ -54,7 +54,8 @@ class _IqFormat(NamedTuple):
     packer: str
     entries: int
     payload_bytes: int
-    needs_scales: bool
+    # IQ1 layout: a ternary grid shifted by +/-1/8. Otherwise IQ2's: magnitudes plus sign bits.
+    iq1: bool
     # Value alphabet the codebook is built from, as GGML defines it: signed ternary bytes
     # {0x00, 0x01, 0xff} for IQ1_S, and the non-negative magnitudes {0x08, 0x19, 0x2b} for
     # IQ2_XS, whose signs live in the packed code instead.
@@ -64,9 +65,9 @@ class _IqFormat(NamedTuple):
 
 
 _IQ_EXTENSIONS = (
-    pytest.param(_IqFormat("iq1_s_pack", 2048, 50, False, (-1.0, 0.0, 1.0), 16.875), id="iq1_s"),
+    pytest.param(_IqFormat("iq1_s_pack", 2048, 50, True, (-1.0, 0.0, 1.0), 16.875), id="iq1_s"),
     pytest.param(
-        _IqFormat("iq2_xs_pack", 512, 74, True, (8.0, 25.0, 43.0), 166.625),
+        _IqFormat("iq2_xs_pack", 512, 74, False, (8.0, 25.0, 43.0), 166.625),
         id="iq2_xs",
     ),
 )
@@ -84,12 +85,9 @@ def _grid(fmt: _IqFormat, zero: bool = False) -> torch.Tensor:
 
 
 def _pack(fmt: _IqFormat, extension, weight, grid, scales=None):
-    pack = getattr(extension, fmt.packer)
-    if not fmt.needs_scales:
-        return pack(weight, grid)
     if scales is None:
         scales = torch.zeros(weight.numel() // 256, device=weight.device, dtype=torch.float16)
-    return pack(weight, grid, scales)
+    return getattr(extension, fmt.packer)(weight, grid, scales)
 
 
 @pytest.mark.parametrize("fmt", _IQ_EXTENSIONS)
@@ -113,12 +111,9 @@ def test_cuda_ext_iq_encodes_non_zero_block(fmt):
     packed = _pack(fmt, extension, weight, _grid(fmt), scales=scales)
 
     assert packed.shape == (2, fmt.payload_bytes)
-    # The fp16 block scale lands in the first two payload bytes, and the caller supplies it
-    # verbatim for IQ2_XS.
+    # The caller's fp16 block scale lands verbatim in the first two payload bytes.
     block_scale = packed[:, :2].contiguous().view(torch.float16).flatten()
-    assert (block_scale > 0).all()
-    if fmt.needs_scales:
-        assert torch.equal(block_scale, scales)
+    assert torch.equal(block_scale, scales)
     # Codebook indices, signs, and local scales are written past the block scale, and two
     # different blocks must not encode identically.
     assert packed[:, 2:].any()
@@ -143,27 +138,27 @@ def test_cuda_ext_iq_rejects_row_straddling_input(fmt):
         _pack(fmt, extension, weight, _grid(fmt, zero=True))
 
 
+@pytest.mark.parametrize("fmt", _IQ_EXTENSIONS)
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -1.0, -1e-4])
-def test_cuda_ext_iq2_xs_rejects_invalid_scales(bad):
+def test_cuda_ext_iq_rejects_invalid_scales(fmt, bad):
     """A non-finite scale decodes to garbage; a negative one inverts every decoded element."""
     extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
-    fmt = _IQ_EXTENSIONS[1].values[0]
     weight = torch.ones((1, 256), device="cuda", dtype=torch.bfloat16)
     scales = torch.full((1,), bad, device="cuda", dtype=torch.float16)
 
     with pytest.raises(RuntimeError, match="scales must be finite and non-negative"):
-        extension.iq2_xs_pack(weight, _grid(fmt), scales)
+        _pack(fmt, extension, weight, _grid(fmt), scales=scales)
 
 
-def test_cuda_ext_iq2_xs_negative_zero_scale_packs_as_zero():
+@pytest.mark.parametrize("fmt", _IQ_EXTENSIONS)
+def test_cuda_ext_iq_negative_zero_scale_packs_as_zero(fmt):
     """Negative zero is a zero scale: it must take the zero-payload branch, not search."""
     extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
-    fmt = _IQ_EXTENSIONS[1].values[0]
     weight = torch.randn((2, 256), device="cuda", dtype=torch.bfloat16, generator=_generator())
     grid = _random_grid(fmt)
     scales = torch.tensor([-0.0, 0.0], device="cuda", dtype=torch.float16)
 
-    packed = extension.iq2_xs_pack(weight, grid, scales)
+    packed = _pack(fmt, extension, weight, grid, scales=scales)
 
     assert not packed.any()
 
@@ -176,9 +171,9 @@ def _random_grid(fmt: _IqFormat) -> torch.Tensor:
     IQ2_XS additionally requires non-negative magnitudes, since it carries signs separately.
     """
     shape = (fmt.entries, 8)
-    if fmt.needs_scales:
-        return torch.rand(shape, device="cuda", generator=_generator()) * fmt.grid_values[-1]
-    return torch.randn(shape, device="cuda", generator=_generator())
+    if fmt.iq1:
+        return torch.randn(shape, device="cuda", generator=_generator())
+    return torch.rand(shape, device="cuda", generator=_generator()) * fmt.grid_values[-1]
 
 
 def _decode(fmt: _IqFormat, packed: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
@@ -191,7 +186,7 @@ def _decode(fmt: _IqFormat, packed: torch.Tensor, grid: torch.Tensor) -> torch.T
     # The fp16 block scale occupies the first two bytes of every IQ payload.
     d = payload[:, :2].contiguous().view(torch.float16).float()
 
-    if not fmt.needs_scales:  # IQ1_S: 32 index bytes, then 8 uint16 of per-group metadata.
+    if fmt.iq1:  # IQ1_S: 32 index bytes, then 8 uint16 of per-group metadata.
         qs = payload[:, 2:34].int().view(blocks, 8, 4)
         qh = payload[:, 34:50:2].int() | (payload[:, 35:50:2].int() << 8)
         local = (qh >> 12) & 7
@@ -220,7 +215,7 @@ def _oracle_group_error(
     Reproduces the kernels' objective by brute force: every local scale (and, for IQ1_S, every
     delta sign) against every codebook entry, minimised per vector and summed over the group.
     """
-    vectors, choices = (4, 16) if not fmt.needs_scales else (2, 16)
+    vectors, choices = (4, 16) if fmt.iq1 else (2, 16)
     groups = 32 // vectors
     x = values.cpu().float().reshape(-1, groups, vectors, 8)
     grid, d = grid.cpu(), d.cpu()
@@ -228,8 +223,8 @@ def _oracle_group_error(
 
     errors = []
     for choice in range(choices):
-        local = choice & 7 if not fmt.needs_scales else choice
-        if not fmt.needs_scales:
+        local = choice & 7 if fmt.iq1 else choice
+        if fmt.iq1:
             delta = 0.125 if choice < 8 else -0.125
             shifted = grid + delta
             scale = (d * (2 * local + 1)).reshape(-1, 1, 1, 1)
@@ -258,14 +253,14 @@ def test_cuda_ext_iq_encoding_is_optimal(fmt):
     extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     weight = torch.randn((4, 256), device="cuda", dtype=torch.float32, generator=_generator())
     grid = _random_grid(fmt)
-    scales = (weight.abs().amax(dim=-1) / fmt.native_max).half() if fmt.needs_scales else None
+    scales = (weight.abs().amax(dim=-1) / fmt.native_max).half()
 
     packed = _pack(fmt, extension, weight, grid, scales=scales)
     decoded = _decode(fmt, packed, grid)
 
     # The block scale is a fixed heuristic, so compare the search at the scale actually stored.
     d = packed[:, :2].contiguous().view(torch.float16).float()
-    group_size = 8 * (2 if fmt.needs_scales else 4)
+    group_size = 8 * (4 if fmt.iq1 else 2)
     achieved = (weight.cpu() - decoded).square().reshape(4, -1, group_size).sum(-1)
     optimal = _oracle_group_error(fmt, weight, grid, d)
 
@@ -283,7 +278,7 @@ def test_cuda_ext_iq_input_dtype_equivalence(fmt):
     # Multiples of 1/16 in [-4, 4) are exact in float16 and bfloat16 as well as the wider types.
     weight = torch.randint(-64, 64, (2, 256), device="cuda", generator=_generator()).float() / 16
     grid = _random_grid(fmt)
-    scales = (weight.abs().amax(dim=-1) / fmt.native_max).half() if fmt.needs_scales else None
+    scales = (weight.abs().amax(dim=-1) / fmt.native_max).half()
 
     payloads = [
         _pack(fmt, extension, weight.to(dtype), grid, scales=scales)
@@ -300,7 +295,7 @@ def test_cuda_ext_iq_non_finite_inputs_are_zeroed(fmt):
     extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     clean = torch.randn((2, 256), device="cuda", dtype=torch.float32, generator=_generator())
     grid = _random_grid(fmt)
-    scales = (clean.abs().amax(dim=-1) / fmt.native_max).half() if fmt.needs_scales else None
+    scales = (clean.abs().amax(dim=-1) / fmt.native_max).half()
 
     spoiled = clean.clone()
     spoiled[0, 5], spoiled[0, 200], spoiled[1, 17] = float("nan"), float("inf"), float("-inf")

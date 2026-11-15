@@ -69,6 +69,20 @@ FUSION_FREE_FORMATS = GGML_FORMATS | frozenset(
     }
 )
 
+# Formats whose checkpoint declares a static input_scale, which export takes from calibration.
+STATIC_INPUT_SCALE_FORMATS = frozenset(
+    {
+        QUANTIZATION_FP8,
+        QUANTIZATION_INT8_SQ,
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_W4A8_AWQ,
+        QUANTIZATION_W4A8_NVFP4_FP8,
+        QUANTIZATION_W4A8_MXFP4_FP8,
+    }
+)
+
 KV_CACHE_FP8 = "FP8"
 KV_CACHE_FP8_K_NVFP4_V = "FP8_K_NVFP4_V"
 KV_CACHE_INT8 = "INT8"

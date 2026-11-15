@@ -16,7 +16,6 @@
 """Support quantization for Transformer Engine layers."""
 
 import inspect
-import os
 import warnings
 
 import torch
@@ -25,13 +24,12 @@ import transformer_engine.pytorch.module.grouped_linear as te_grouped_linear
 import transformer_engine.pytorch.module.layernorm_linear as te_layernorm_linear
 import transformer_engine.pytorch.module.linear as te_linear
 
+from modelopt import env
 from modelopt.torch.quantization.utils import replace_function
 from modelopt.torch.quantization.utils.core_utils import apply_without_qdq
 
 from ..nn import GroupedQuantizer, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from .custom import _ParallelLinear
-
-_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV = "MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP"
 
 
 def _assert_te_fp8_enabled():
@@ -155,7 +153,7 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
         # Compile only the per-expert quantizer loop. The surrounding TE grouped GEMM remains
         # eager, and the opt-in flag leaves the default execution path unchanged.
-        if os.getenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, "0") == "1":
+        if env.tegrouped_compile_weight_loop():
             quantizers = tuple(self.weight_quantizer)
 
             def quantize_weights(*weights):
@@ -438,6 +436,18 @@ class _QuantTELayerNormLinear(_ParallelLinear):
         super().fold_weight(keep_attrs)
         if unquantized is not None:
             self.weight.data[rows] = unquantized.to(self.weight.dtype)
+
+    @torch.no_grad()
+    def _initialize_qdq_weights(self, trainable_only, initialized):
+        if not self._is_selected_for_initialization(
+            self.weight, self.weight_quantizer, trainable_only
+        ):
+            return
+        rows = getattr(self, "_modelopt_unquantized_output_rows", None)
+        original = self.weight[rows].detach().clone() if rows is not None else None
+        super()._initialize_qdq_weights(trainable_only, initialized)
+        if original is not None:
+            self.weight[rows] = original
 
     def forward(self, *args, **kwargs):
         """Call ModelOpt patch for _LayerNormLinear functional."""

@@ -7,9 +7,8 @@ These instructions apply to AI-assisted work in this repository.
 - Start with `README.md` for project overview and install.
 - Use `modelopt/` for source, `tests/` for focused test coverage, and
   `examples/` or `docs/` for usage patterns.
-- **Agent skills live under `plugins/modelopt/skills/`**, the installable
-  plugin's canonical skill tree. `.agents/skills` and `.claude/skills` expose
-  those skills through relative symlinks. Shared agent config and scripts
+- **Agent skills live under root `skills/`**, inside the repository-root plugin.
+  `.agents/skills` and `.claude/skills` expose them through relative symlinks. Shared agent config and scripts
   remain under `.agents/`. See `.agents/README.md` for the convention.
 
 ## Coding guidelines
@@ -88,16 +87,34 @@ below, tell the user and offer to address it before pushing; do not push as-is.
 
 ## Sizing and splitting PRs
 
-- **Keep each PR that goes up for review under ~500 added lines of source.**
-  Large PRs stall in review; exceed the budget only when the change genuinely
-  cannot be split — a mechanical rename, generated files, or a self-contained
-  drop such as a new example or a new model/backend that has no working
-  intermediate state. Deletions, tests, and docs don't count; check the
-  insertions from `git diff --shortstat <base>...HEAD -- . ':!tests' ':!docs'`
-  before opening.
+- **Keep each PR that goes up for review around or under ~500 added lines of
+  source; this is a guideline, not a hard limit.** Large PRs stall in review, so
+  split a PR that is clearly over it unless the change genuinely cannot be
+  split — a mechanical rename, generated files, or a self-contained drop such as
+  a new example or a new model/backend that has no working intermediate state.
+  A PR a little over needs no split. Deletions, tests, docs, config, comments,
+  and blank lines don't count; before opening, get a rough upper bound from the
+  command below (it keeps comments and docstrings, so subtract those by eye
+  when the result is close to the line):
+
+  ```bash
+  git diff --no-color --no-ext-diff --no-textconv \
+    --src-prefix=a/ --dst-prefix=b/ -U0 <base>...HEAD | awk '
+    /^diff --git/ { hdr = 1; skip = 0; next }
+    /^@@/ { hdr = 0; next }
+    hdr && /^\+\+\+ / {
+      f = $0; sub(/^\+\+\+ "?b\//, "", f); sub(/[\t"]+$/, "", f)
+      skip = f ~ /(^|\/)(tests|docs)\//
+      skip = skip || f ~ /(^|\/)test_[^\/]*\.py$|_test\.go$|\.spec\.[^\/]+$/
+      skip = skip || f ~ /\.(ya?ml|json|toml|ini|xml|lock|md|rst|txt|ipynb)$/
+      next }
+    !hdr && !skip && /^\+/ && !/^\+[ \t]*$/ { n++ }
+    END { print n + 0 }'
+  ```
+
 - **Propose the split before opening an oversized PR.** When the work in flight
-  is already over budget, offer a series of smaller PRs and, once the user
-  agrees, do the split — don't open the big one and ask afterwards.
+  is already clearly over budget, offer a series of smaller PRs and, once the
+  user agrees, do the split — don't open the big one and ask afterwards.
 - **Split on structure first, features second.** Look for a file, directory, or
   module boundary that carves the change into independent pieces. Only when no
   such boundary exists, split by feature: land the enabling refactor or

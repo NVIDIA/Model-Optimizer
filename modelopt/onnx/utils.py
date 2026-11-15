@@ -21,6 +21,7 @@ import os
 import sys
 import tempfile
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -28,11 +29,86 @@ import onnx
 import onnx_graphsurgeon as gs
 from onnx.helper import get_attribute_value
 from onnx_graphsurgeon import Constant, Node, Variable
+from onnx_graphsurgeon.exporters.onnx_exporter import OnnxExporter
+from onnx_graphsurgeon.ir.tensor import SparseValues
 
 from modelopt.onnx.logging_config import logger
 
 # Base minimum opset for quantization (opset 19 is the first to support fp16 scales)
 BASE_MIN_OPSET = 19
+
+_GraphPath = tuple[tuple[int, str], ...]
+
+
+def _graph_paths(graph: gs.Graph) -> Iterator[tuple[_GraphPath, gs.Graph]]:
+    """Yield graphs with root-relative (node position, graph attribute name) path steps.
+
+    The root path is empty. Copy/export must preserve node order; no sorting occurs here.
+    GraphSurgeon supports single-Graph attributes (If/Loop/Scan), not lists of Graphs.
+    """
+    yield (), graph
+    for node_index, node in enumerate(graph.nodes):
+        for name, value in node.attrs.items():
+            if isinstance(value, gs.Graph):
+                for path, subgraph in _graph_paths(value):
+                    yield ((node_index, name), *path), subgraph
+
+
+# Upstream: https://github.com/NVIDIA/TensorRT/issues/4899
+# https://github.com/onnx/onnx/issues/8681
+def export_onnx(graph: gs.Graph, **kwargs) -> onnx.ModelProto:
+    """Export a GraphSurgeon graph without serializing oversized initializers during copying.
+
+    Remove this guard when minimum supported GraphSurgeon/ONNX versions pass the real
+    >2 GiB export regression without it, including nested graphs and external-data saving.
+    """
+    originals = {path: subgraph.tensors() for path, subgraph in _graph_paths(graph)}
+    large = {
+        path: {
+            name: tensor
+            for name, tensor in tensors.items()
+            if isinstance(tensor, gs.Constant)
+            and not isinstance(tensor._values, SparseValues)
+            and tensor._values.nbytes >= onnx.checker.MAXIMUM_PROTOBUF
+        }
+        for path, tensors in originals.items()
+    }
+    if not any(large.values()):
+        return gs.export_onnx(graph, **kwargs)
+
+    graph = graph.copy()
+    for path, subgraph in _graph_paths(graph):
+        original_tensors = originals[path]
+        for name, tensor in subgraph.tensors().items():
+            original = original_tensors[name]
+            if hasattr(original, "explicit_dtype"):
+                tensor.explicit_dtype = original.explicit_dtype
+            if isinstance(original, gs.Variable):
+                tensor.type = original.type
+            if isinstance(tensor, gs.Constant):
+                tensor.data_location = original.data_location
+            if name in large[path]:
+                tensor.to_variable(dtype=tensor.dtype, shape=tensor.shape)
+                tensor.type = "tensor_type"
+
+    model = gs.export_onnx(graph, **kwargs)
+    for path, tensors in large.items():
+        if not tensors:
+            continue
+        exported_graph = model.graph
+        for node_index, name in path:
+            attr = next(a for a in exported_graph.node[node_index].attribute if a.name == name)
+            exported_graph = attr.g
+        for name, tensor in tensors.items():
+            # Captures still need placeholders above: Graph.copy may duplicate constants.
+            if any(tensor is originals[path[:depth]].get(name) for depth in range(len(path))):
+                continue
+            # Repeated-field extend serializes each message; CopyFrom avoids that size limit.
+            exported_graph.initializer.add().CopyFrom(OnnxExporter.export_tensor_proto(tensor))
+        for value_info in list(exported_graph.value_info):
+            if value_info.name in tensors:
+                exported_graph.value_info.remove(value_info)
+    return model
 
 
 def get_input_names_from_bytes(model_bytes: bytes, external_inputs_only: bool = True) -> list[str]:
@@ -734,21 +810,32 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
     # Set ir_version to 10, remove it once ORT supports ir_version 11
     model.ir_version = 10
     if save_as_external_data:
-        external_data_path = os.path.basename(onnx_path) + "_data"
-        if os.path.exists(external_data_path):
+        external_data_name = os.path.basename(onnx_path) + "_data"
+        external_data_path = os.path.join(os.path.dirname(onnx_path), external_data_name)
+        # Unloaded weights still need their existing offsets; new weights can append safely.
+        sidecar_is_referenced = any(
+            onnx.external_data_helper.uses_external_data(tensor)
+            and not tensor.HasField("raw_data")
+            and os.path.realpath(
+                os.path.join(
+                    os.path.dirname(onnx_path),
+                    onnx.external_data_helper.ExternalDataInfo(tensor).location,
+                )
+            )
+            == os.path.realpath(external_data_path)
+            for tensor in onnx.external_data_helper._get_all_tensors(model)
+        )
+        if os.path.exists(external_data_path) and not sidecar_is_referenced:
             logger.warning(f"Removing existing external data file: {external_data_path}")
             os.remove(external_data_path)
 
         # Copy so the onnx.ModelProto object will not be modified
         model_copy = copy.deepcopy(model)
-        onnx.save_model(
-            model_copy,
-            onnx_path,
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location=external_data_path,
-            size_threshold=1024,
-        )
+        # ONNX's converter checks location in cwd, even when the model is saved elsewhere.
+        for tensor in onnx.external_data_helper._get_initializer_tensors(model_copy):
+            if tensor.HasField("raw_data") and len(tensor.raw_data) >= 1024:
+                onnx.external_data_helper.set_external_data(tensor, external_data_name)
+        onnx.save_model(model_copy, onnx_path)
     else:
         onnx.save(model, onnx_path)
 
@@ -915,7 +1002,7 @@ def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
             gs_graph = gs.import_onnx(temp_model)
             gs_graph.toposort()
             # Convert back to ONNX to get topologically sorted nodes
-            sorted_model = gs.export_onnx(gs_graph)
+            sorted_model = export_onnx(gs_graph)
             sorted_graph = sorted_model.graph
         except Exception as e:
             logger.debug(

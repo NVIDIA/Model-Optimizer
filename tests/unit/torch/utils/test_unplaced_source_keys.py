@@ -25,11 +25,14 @@ import json
 
 import pytest
 import torch
+from packaging.version import Version
 from safetensors.torch import load_file, save_file
 
 pytest.importorskip("accelerate")
 pytest.importorskip("transformers")
 
+import transformers.core_model_loading as cml
+import transformers.modeling_utils as mu
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -40,12 +43,41 @@ from transformers import (
     LlamaForCausalLM,
     Mxfp4Config,
 )
+from transformers import __version__ as transformers_version
 
+from modelopt.torch.models import _onfly_decompress
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
     load_pretrained,
     parallel_load_and_prepare_fsdp2,
 )
+
+
+def test_a_two_argument_unplaced_source_keys_still_records_the_keys(monkeypatch, tmp_path):
+    """The map a load already read reaches ``unplaced_source_keys`` by keyword, and only when there is
+    one, so a caller that replaced the function with its two-argument form still records keys."""
+    seen = []
+
+    def two_arguments(model, ckpt_path):
+        seen.append(ckpt_path)
+        return ["mtp.fc.weight"]
+
+    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", two_arguments)
+    model = LlamaForCausalLM(_tiny_llama_config())
+
+    assert model_load_utils.record_unplaced_source_keys(model, str(tmp_path)) == ["mtp.fc.weight"]
+    assert seen == [str(tmp_path)]
+    read = {"mtp.fc.weight": "model.safetensors"}
+    monkeypatch.setattr(
+        model_load_utils,
+        "unplaced_source_keys",
+        lambda model, ckpt_path, tensor_files=None: sorted(tensor_files),
+    )
+    assert model_load_utils.record_unplaced_source_keys(
+        model, str(tmp_path), tensor_files=read
+    ) == ["mtp.fc.weight"]
+
 
 # A layer past ``num_hidden_layers``: genuinely stray, so it must always be recorded.
 STRAY = "model.layers.1.input_layernorm.weight"
@@ -105,6 +137,7 @@ def test_records_the_stray_tensors_and_the_checkpoint(tmp_path, extra, subfolder
     assert model._modelopt_unplaced_source_keys == sorted(extra), "sorted, for a stable export"
     assert model._modelopt_source_checkpoint == str(checkpoint)
     assert model.dtype == torch.bfloat16, "from_pretrained kwargs must pass through"
+    assert distribution_plan(model) == DistributionPlan(), "a single process holds it whole"
 
 
 class _Recorder:
@@ -192,17 +225,65 @@ def test_an_option_it_cannot_honor_is_refused_before_anything_loads(option, refu
         load_pretrained("no/such/checkpoint", **option)
 
 
-def test_a_config_passed_for_the_load_needs_none_on_disk(tmp_path):
-    """The load uses the config it is passed, as ``from_pretrained`` does, and so does the choice of
-    its loading hook: a directory without a config.json loads."""
-    config = _tiny_llama_config()
-    _save(tmp_path, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
-    (tmp_path / "config.json").unlink()
-    (tmp_path / "generation_config.json").write_text("{}")  # from_pretrained reads it instead
+class _OwnConfig(LlamaConfig):
+    """A config class of the caller's own, which AutoConfig has no mapping for."""
 
-    model = _load(tmp_path, config=config)
+    model_type = "modelopt_test_own_llama"
+
+
+class _OwnModel(LlamaForCausalLM):
+    config_class = _OwnConfig
+
+
+@pytest.mark.parametrize(
+    ("as_path", "model_type", "model_class"),
+    [
+        (False, None, None),
+        (True, None, LlamaForCausalLM),
+        (True, "llama", LlamaForCausalLM),
+        (True, None, _OwnModel),
+    ],
+    ids=["config", "config-path", "config-path-and-model-type", "own-config-class-path"],
+)
+def test_a_config_passed_for_the_load_needs_none_on_disk(
+    tmp_path, as_path, model_type, model_class
+):
+    """The load uses the config it is passed, or reads it from the directory it is passed, as
+    ``from_pretrained`` does, through the model class's own config class, and so do its plan and the
+    choice of its loading hook: a checkpoint directory without a config.json loads, through a model
+    class of the caller's own too."""
+    config = _tiny_llama_config()
+    if model_class is _OwnModel:
+        config = _OwnConfig(**config.to_diff_dict())
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    _save(weights, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
+    if as_path:
+        (tmp_path / "config").mkdir()
+        (weights / "config.json").rename(tmp_path / "config" / "config.json")
+        passed = {"auto_class": model_class, "config": str(tmp_path / "config")}
+    else:
+        (weights / "config.json").unlink()
+        passed = {"config": config}
+    (weights / "generation_config.json").write_text("{}")  # from_pretrained reads it instead
+
+    model = _load(weights, model_type=model_type, **passed)
 
     assert model._modelopt_unplaced_source_keys == [STRAY]
+
+
+@pytest.mark.parametrize("model_type", [_OwnConfig.model_type, None], ids=["given", "read"])
+def test_a_model_class_of_the_callers_own_reads_its_config_itself(tmp_path, model_type):
+    """A single process plans nothing for a model class of the caller's own, and a model type left
+    to read is read as the class reads its config, through its own config class, which AutoConfig
+    need not know: the plan of a single process is the same whatever the model."""
+    config = _OwnConfig(**_tiny_llama_config().to_diff_dict())
+    _save(tmp_path, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
+
+    model = _load(tmp_path, _OwnModel, model_type=model_type)
+
+    assert model._modelopt_unplaced_source_keys == [STRAY]
+    assert distribution_plan(model) == DistributionPlan()
 
 
 def test_an_ignore_rule_does_not_hide_an_unplaced_tensor(tmp_path):
@@ -341,3 +422,76 @@ def test_mxfp4_expert_blocks_folded_in_at_load_are_placed(tmp_path):
     model = _load(tmp_path, quantization_config=Mxfp4Config(dequantize=True), dtype=torch.bfloat16)
 
     assert model._modelopt_unplaced_source_keys == [STRAY]
+
+
+def test_compressed_experts_decompressed_at_load_are_placed(tmp_path, monkeypatch):
+    """The on-the-fly decompressor feeds each expert's stored ``weight_packed``/``weight_scale``/
+    ``weight_shape`` into the fused weights. A built layer's are placed, through the converters
+    ``from_pretrained`` recorded (the stock mapping places none of them), so the expert-parallel load
+    passes them; only a layer the model does not build (an MTP layer) keeps its own, which that load
+    refuses to carry."""
+    pytest.importorskip(
+        "compressed_tensors",
+        minversion="0.16",
+        reason="needs compressed-tensors (CI's unit session installs it)",
+    )
+    if Version(transformers_version) < Version("5.8"):
+        pytest.skip("the on-the-fly decompression needs transformers >= 5.8")
+    # The decompressor's hooks are process-wide: undone after the test.
+    for owner, name in ((cml, "spawn_materialize"), (mu, "get_model_conversion_mapping")):
+        monkeypatch.setattr(owner, name, getattr(owner, name))
+    monkeypatch.setattr(_onfly_decompress, "_LOAD", {"decompressing": False})
+    hidden, inter, experts = 64, 32, 2
+    config = AutoConfig.for_model(
+        "qwen3_moe",
+        vocab_size=64,
+        hidden_size=hidden,
+        intermediate_size=64,
+        moe_intermediate_size=inter,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        num_experts=experts,
+        num_experts_per_tok=1,
+        tie_word_embeddings=False,
+        architectures=["Qwen3MoeForCausalLM"],
+    )
+    group = {"num_bits": 4, "type": "int", "symmetric": True, "strategy": "group", "group_size": 32}
+    config.quantization_config = {
+        "quant_method": "compressed-tensors",
+        "format": "pack-quantized",
+        "config_groups": {"experts": {"targets": ["re:.*experts.*"], "weights": group}},
+    }
+    compressor, scheme, stored_as, _ = _onfly_decompress._read_compression(config)
+    shapes = {
+        "gate_proj": (inter, hidden),
+        "up_proj": (inter, hidden),
+        "down_proj": (hidden, inter),
+    }
+    state, mtp = {}, []
+    for layer in (0, 1):  # layer 1 is past num_hidden_layers: an MTP layer, say
+        for e in range(experts):
+            for proj, (rows, cols) in shapes.items():
+                weight = {
+                    "weight": torch.ones(rows, cols),
+                    "weight_scale": torch.ones(rows, cols // 32),
+                }
+                stem = f"model.layers.{layer}.mlp.experts.{e}.{proj}."
+                for name, tensor in compressor.compress(weight, scheme).items():
+                    state[stem + name] = tensor
+                    if layer:
+                        mtp.append(stem + name)
+    for name, tensor in AutoModelForCausalLM.from_config(config).state_dict().items():
+        if ".experts." not in name:
+            state[name] = tensor.to(torch.bfloat16)
+    _save(tmp_path, config, state, config.quantization_config)
+    _onfly_decompress.install_onfly_decompress(config)
+    del config.quantization_config  # as the expert-parallel load does once the hooks are in
+
+    model = AutoModelForCausalLM.from_pretrained(str(tmp_path), config=config, dtype=torch.bfloat16)
+    if getattr(model, "_weight_conversions", None) is None:
+        pytest.skip("this transformers does not record the conversions from_pretrained ran")
+
+    assert sorted(stored_as) == ["weight_packed", "weight_scale", "weight_shape"]
+    assert model_load_utils.unplaced_source_keys(model, str(tmp_path)) == sorted(mtp)

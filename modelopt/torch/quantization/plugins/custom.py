@@ -24,7 +24,7 @@ import torch
 
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..ggml.common import PINNED_PAYLOAD_PREFIX
+from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
 from ..nn import (
     GroupedQuantizer,
     NVFP4StaticQuantizer,
@@ -133,9 +133,10 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
 
         def _check_unsupported_states(quantizer: TensorQuantizer):
             for k in quantizer.state_dict():
-                # GGML payloads pinned by GPTQ are loaded with the weights from the sharded checkpoint.
+                # GGML payloads pinned by GPTQ, and their importance, are loaded with the weights from
+                # the sharded checkpoint.
                 if k not in ["_amax", "_pre_quant_scale", "_global_amax"] and not k.startswith(
-                    PINNED_PAYLOAD_PREFIX
+                    (PINNED_PAYLOAD_PREFIX, PINNED_IMPORTANCE_PREFIX)
                 ):
                     warnings.warn(
                         f"Restore of {k} for {prefix} is not supported. The restore of this layer might be "

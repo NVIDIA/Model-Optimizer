@@ -128,12 +128,21 @@ def _update_room(helper, weight, block_size) -> int:
     dtype-conversion temporary (a projection much wider than its input makes the weight the larger
     part); the block's errors and up to four temporaries of a group no wider than the block, each
     as large as the weight when the input is no wider than a block; and the codec's tables and
-    scratch, about 35 MiB on a GPU's first update.
+    scratch, about 35 MiB on a GPU's first update. Logging the error afterwards holds the original
+    in its own dtype and up to five float32 weight-sized tensors: the result, the original, the
+    error and two products. Through both, a GGML format that keeps its scales holds the unrounded
+    weight in its own dtype, counted for every format. On top comes the helper's own scratch
+    (:meth:`GPTQHelper.update_scratch`), such as a search over each block's local scales.
     """
     columns = weight.shape[-1]
     rows = weight.numel() // columns
     block = min(block_size, columns)
-    return 2**26 + 4 * (8 * helper.hessian.numel() + rows * (2 * columns + 5 * block))
+    weights = 4 * rows * (2 * columns + 5 * block)
+    if helper.log_mse:
+        weights = max(weights, (5 * 4 + weight.element_size()) * weight.numel())
+    unrounded = weight.element_size() * weight.numel()
+    scratch = helper.update_scratch(weight)
+    return 2**26 + 32 * helper.hessian.numel() + weights + unrounded + scratch
 
 
 def update_expert_weights(work, block_size, perc_damp):
@@ -359,6 +368,7 @@ class GPTQHelper:
         weight=None,
         log_mse=True,
         hessian_input_dtype="float32",
+        local_hessian_scales=False,
     ):
         """Initialize GPTQHelper with module state and Hessian storage.
 
@@ -372,6 +382,7 @@ class GPTQHelper:
         self.name = name
         self.fused = fused
         self.importance_weighted = importance_weighted
+        self.local_hessian_scales = local_hessian_scales
         self.hessian_input_dtype = getattr(torch, hessian_input_dtype)
         self._weight_quantizer = weight_quantizer
         self.log_mse = log_mse
@@ -458,6 +469,10 @@ class GPTQHelper:
         device, and fits the room :func:`update_expert_weights` checks for.
         """
         return False
+
+    def update_scratch(self, weight) -> int:
+        """Bytes the update of ``weight`` holds beyond the GPTQ solve's, such as a format's search."""
+        return 0
 
     def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run GPTQ blockwise weight update on this helper's weight.
@@ -615,26 +630,32 @@ def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
     _GPTQ_HELPER_REGISTRY[backend] = factory
 
 
-class ImatrixEncoder:
-    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
-
-    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
-    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
-    """
+class _WeightEncoder:
+    """An encoder a one-pass calibration hands each weight whose quantizer it accepts."""
 
     def accepts(self, quantizer) -> bool:
         """Whether this encoder handles ``quantizer``; decided before calibration runs."""
         raise NotImplementedError
 
     def validate(self, weight: torch.Tensor, quantizer) -> None:
-        """Raise if :meth:`encode` would refuse ``weight``; checked before calibration runs."""
+        """Raise if ``encode`` would refuse ``weight``; checked before calibration runs."""
+
+
+class ImatrixEncoder(_WeightEncoder):
+    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
+
+    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
+    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
+    """
 
     def encode(
         self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
     ) -> torch.Tensor:
-        """Return ``weight`` fake-quantized by ``quantizer``, weighted by ``second_moments``.
+        """Encode ``weight`` weighted by ``second_moments`` and return the weight to keep.
 
-        ``second_moments`` is ``None`` when no calibration input reached the weight.
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``second_moments`` is ``None`` when no calibration input
+        reached the weight.
         """
         raise NotImplementedError
 
@@ -649,3 +670,38 @@ def register_imatrix_encoder(backend: str, encoder: ImatrixEncoder) -> None:
     ``weight_quantizer.backend`` has a registered encoder.
     """
     _IMATRIX_ENCODER_REGISTRY[backend] = encoder
+
+
+class LocalHessianEncoder(_WeightEncoder):
+    """Encodes a weight once, its search guided by its inputs' local Hessian.
+
+    :func:`modelopt.torch.quantization.model_calib.local_hessian_calibrate` collects ``E[x x^T]``
+    over each ``block_size`` input columns of every weight whose quantizer an encoder accepts, then
+    calls :meth:`encode` with it instead of searching an amax.
+    """
+
+    block_size: int
+
+    def encode(
+        self, weight: torch.Tensor, quantizer, hessian: torch.Tensor | None, perc_damp: float
+    ) -> torch.Tensor:
+        """Encode ``weight`` guided by ``hessian`` and return the weight to keep.
+
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``hessian`` is ``[in_features // block_size, block_size,
+        block_size]``, or ``None`` when no calibration input reached the weight. ``perc_damp`` is
+        the fraction of its mean diagonal to add to its diagonal where the encoder scores by it.
+        """
+        raise NotImplementedError
+
+
+_LOCAL_HESSIAN_ENCODER_REGISTRY: dict[str, LocalHessianEncoder] = {}
+
+
+def register_local_hessian_encoder(backend: str, encoder: LocalHessianEncoder) -> None:
+    """Register the :class:`LocalHessianEncoder` for a quantizer backend.
+
+    :func:`modelopt.torch.quantization.model_calib.local_hessian_calibrate` encodes the weights
+    whose ``weight_quantizer.backend`` has one, and searches an amax for the rest.
+    """
+    _LOCAL_HESSIAN_ENCODER_REGISTRY[backend] = encoder

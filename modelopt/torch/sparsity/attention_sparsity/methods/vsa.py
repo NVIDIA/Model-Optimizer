@@ -22,7 +22,7 @@ VSA implements a two-branch sparse attention architecture:
 Uses the optimized Triton kernel from fastvideo_kernel.
 
 Integration:
-    After ``mtsa.sparsify(model, VSA_DEFAULT)``, each attention layer's
+    After ``mts.sparsify(model, VSA_DEFAULT)``, each attention layer's
     ``F.scaled_dot_product_attention`` call is intercepted and replaced by the VSA
     kernel.  Cross-attention (Q/K have different seq_len) is automatically skipped.
     This works with HF transformers and diffusers.

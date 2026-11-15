@@ -38,6 +38,7 @@ KV_SCALE_EXPORT_PREFIXES = {
     "Qwen3_5ForConditionalGeneration": "model.language_model.layers.{}.self_attn.",
     "Qwen3_5MoeForConditionalGeneration": "model.language_model.layers.{}.self_attn.",
     "NemotronH_Omni_Reasoning_V3": "language_model.backbone.layers.{}.mixer.",
+    "Glm5NextForConditionalGeneration": "model.language_model.layers.{}.self_attn.",
     "GlmMoeDsaForCausalLM": "model.layers.{}.self_attn.",
 }
 
@@ -60,6 +61,7 @@ PER_EXPERT_MOE_ARCHS = {
     "Qwen3MoeForCausalLM": "model.layers.{}.mlp.experts.{}",
     "NemotronHForCausalLM": "backbone.layers.{}.mixer.experts.{}",
     "NemotronH_Omni_Reasoning_V3": "language_model.backbone.layers.{}.mixer.experts.{}",
+    "Glm5NextForConditionalGeneration": "model.language_model.layers.{}.mlp.experts.{}",
     "GlmMoeDsaForCausalLM": "model.layers.{}.mlp.experts.{}",
 }
 
