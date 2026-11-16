@@ -19,6 +19,11 @@ python examples/llm_eval/ear_eval.py \
     --top_ks 10 32 128 512 1024 2048 --output ear_results.json
 ```
 
+The CLI enables ModelOpt Hugging Face checkpoint restoration before loading
+weights, and rejects missing, unused, mismatched, or uninitialized weights.
+It uses `AutoModelForCausalLM`; for other model wrappers, restore the model with
+the appropriate loader and call `score_frozen` through the Python API.
+
 Both distributions normalize over the full vocabulary in FP64. Full EAR is
 `sum(min(p, q)) = 1 - TV(p, q)`; top-k EAR sums the same overlap only on the
 reference's top-k token IDs, without renormalization. Higher is better. The

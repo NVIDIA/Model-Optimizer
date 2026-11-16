@@ -17,11 +17,26 @@
 
 import copy
 import importlib
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 import torch
-from transformers import GPT2Config, GPT2LMHeadModel
+from safetensors import safe_open
+from safetensors.torch import load_file, save_file
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import (
+    AutoModelForCausalLM,
+    GPT2Config,
+    GPT2LMHeadModel,
+    LlamaConfig,
+    LlamaForCausalLM,
+    PreTrainedTokenizerFast,
+)
 
 
 @pytest.fixture
@@ -146,3 +161,153 @@ def test_unsupported_transforms_and_invalid_tolerances_fail(ear_eval, setting, v
         else:
             setattr(reference.config, setting, value)
             ear_eval.score_frozen(reference, candidate, rows, [0])
+
+
+@pytest.mark.parametrize("corruption", ["unexpected_quantizer", "missing_weight"])
+def test_checkpoint_loader_refuses_ignored_or_missing_weights(ear_eval, tmp_path, corruption):
+    original, _ = _models()
+    original.save_pretrained(tmp_path, safe_serialization=True)
+    loaded, info = ear_eval._load_checkpoint(AutoModelForCausalLM, tmp_path, local_files_only=True)
+    assert isinstance(info, dict)
+    assert json.loads(json.dumps(info, allow_nan=False)) == info
+    assert all(
+        not info.get(key)
+        for key in (
+            "missing_keys",
+            "unexpected_keys",
+            "mismatched_keys",
+            "error_msgs",
+            "conversion_errors",
+        )
+    )
+    assert torch.equal(
+        loaded.transformer.h[0].mlp.c_fc.weight, original.transformer.h[0].mlp.c_fc.weight
+    )
+    checkpoint = tmp_path / "model.safetensors"
+    with safe_open(checkpoint, framework="pt") as stream:
+        metadata = stream.metadata()
+    state = load_file(checkpoint)
+    if corruption == "unexpected_quantizer":
+        state["unrestored_quantizer._amax"] = torch.tensor(1.0)
+    else:
+        del state["transformer.h.0.mlp.c_fc.weight"]
+    save_file(state, checkpoint, metadata=metadata)
+    with pytest.raises(ValueError):
+        ear_eval._load_checkpoint(AutoModelForCausalLM, tmp_path, local_files_only=True)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Native checkpoint integration requires CUDA."
+)
+def test_cli_restores_native_quantization_in_a_fresh_process(ear_eval, tmp_path):
+    # ModelOpt calibration imports require the optional CUDA integration dependencies.
+    import modelopt.torch.opt as mto
+    import modelopt.torch.quantization as mtq
+
+    torch.manual_seed(11)
+    config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+        attn_implementation="eager",
+    )
+    reference = LlamaForCausalLM(config).to(device="cuda:0", dtype=torch.bfloat16).eval()
+    candidate = copy.deepcopy(reference)
+    mto.enable_huggingface_checkpointing()
+    calibration = torch.tensor(
+        [[1, 4, 5, 6, 7, 8, 9, 2], [1, 10, 11, 12, 13, 14, 15, 2]], device="cuda:0"
+    )
+    with torch.no_grad():
+        mtq.quantize(
+            candidate,
+            copy.deepcopy(mtq.INT8_DEFAULT_CFG),
+            lambda model: model(calibration, use_cache=False),
+        )
+    paths = [tmp_path / "reference", tmp_path / "candidate"]
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(
+            WordLevel({f"token{i}": i for i in range(32)}, unk_token="token3")
+        ),
+        eos_token="token2",
+        pad_token="token0",
+        bos_token="token1",
+        unk_token="token3",
+    )
+    for model, path in zip((reference, candidate), paths, strict=True):
+        model.save_pretrained(path, safe_serialization=True)
+        tokenizer.save_pretrained(path)
+    assert (paths[1] / "modelopt_state.pth").is_file()
+    rows = [
+        {"id": "first", "prompt_ids": [1, 4, 5], "generated_ids": [7, 8, 2, 0, 0]},
+        {"id": "second", "prompt_ids": [1, 6], "generated_ids": [9, 2, 0]},
+    ]
+    expected = ear_eval.score_frozen(reference, candidate, rows, [2], pad_token_id=0, top_ks=[10])
+    assert any(value < 1 - 1e-8 for row in expected for value in row["values"]["full"])
+    trajectories, output = tmp_path / "trajectories.json", tmp_path / "scores.json"
+    trajectories.write_text(json.dumps(rows))
+    environment = {
+        **os.environ,
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "PYTHONPATH": os.pathsep.join(
+            [str(Path(ear_eval.__file__).resolve().parents[2]), os.environ.get("PYTHONPATH", "")]
+        ),
+    }
+    # A fresh interpreter cannot inherit the parent's globally enabled restoration hook.
+    completed = subprocess.run(
+        [
+            sys.executable,
+            ear_eval.__file__,
+            "--reference",
+            str(paths[0]),
+            "--candidate",
+            str(paths[1]),
+            "--trajectories",
+            str(trajectories),
+            "--output",
+            str(output),
+            "--eos_token_ids",
+            "2",
+            "--top_ks",
+            "10",
+            "--device_map",
+            "cuda:0",
+            "--attn_implementation",
+            "eager",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    actual = json.loads(output.read_text())
+    assert any(value < 1 - 1e-8 for row in actual["rows"] for value in row["values"]["full"])
+    for observed, prepared in zip(actual["rows"], expected, strict=True):
+        assert observed["id"] == prepared["id"]
+        assert observed["generated_ids"] == prepared["generated_ids"]
+        assert set(observed["values"]) == {"full", "10", "reference_mass_10"}
+        for key in prepared["values"]:
+            assert observed["values"][key] == pytest.approx(
+                prepared["values"][key], abs=1e-7, rel=0
+            )
+    assert [len(row["generated_ids"]) for row in actual["rows"]] == [3, 2]
+    assert all(
+        not info.get(key)
+        for info in actual["settings"]["checkpoint_loading_info"]
+        for key in (
+            "missing_keys",
+            "unexpected_keys",
+            "mismatched_keys",
+            "error_msgs",
+            "conversion_errors",
+        )
+    )

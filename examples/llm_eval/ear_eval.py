@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import time
 from pathlib import Path
 
@@ -186,6 +187,31 @@ def qualify_batch(reference, candidate, rows, eos_token_ids, batch_sizes, atol=1
     }
 
 
+def _load_checkpoint(loader, path, **kwargs):
+    model, info = loader.from_pretrained(path, output_loading_info=True, **kwargs)
+    failures = {
+        key: info[key]
+        for key in (
+            "missing_keys",
+            "unexpected_keys",
+            "mismatched_keys",
+            "error_msgs",
+            "conversion_errors",
+        )
+        if info.get(key)
+    }
+    if failures:
+        raise ValueError(f"Checkpoint did not load completely: {failures}")
+    if any(tensor.is_meta for tensor in (*model.parameters(), *model.buffers())):
+        raise ValueError("Checkpoint contains uninitialized or offloaded tensors.")
+    # Successful loader diagnostics contain empty sets in some Transformers versions.
+    diagnostics = {
+        key: sorted(value) if isinstance(value, (set, frozenset)) else value
+        for key, value in info.items()
+    }
+    return model.eval(), diagnostics
+
+
 def main():
     """Read frozen JSON trajectories and write position scores plus explicitly weighted aggregates."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -202,12 +228,18 @@ def main():
     parser.add_argument("--attn_implementation", default="eager")
     parser.add_argument("--trust_remote_code", action="store_true")
     args = parser.parse_args()
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+        parser.error("Run this example in one process; multiple visible GPUs are supported.")
     if args.output.exists():
         parser.error("Output already exists; preserve completed artifacts.")
     if args.batch_size != 1:
         parser.error("Use score_frozen with an independently qualified batch for these models.")
-    # Loading Transformers is optional when importing metric/scoring helpers or requesting help.
+    # Model loading is optional when importing scoring helpers or requesting help.
     from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    import modelopt.torch.opt as mto
+
+    mto.enable_huggingface_checkpointing()
 
     data = args.trajectories.read_bytes()
     rows = json.loads(data)
@@ -222,19 +254,22 @@ def main():
         or tokenizers[0].all_special_ids != tokenizers[1].all_special_ids
     ):
         raise ValueError("Reference and candidate must share token-ID semantics.")
-    models = [
-        AutoModelForCausalLM.from_pretrained(
+    loaded = [
+        _load_checkpoint(
+            AutoModelForCausalLM,
             p,
             torch_dtype=torch.bfloat16,
             device_map=args.device_map,
             attn_implementation=args.attn_implementation,
             trust_remote_code=args.trust_remote_code,
-        ).eval()
+        )
         for p in (args.reference, args.candidate)
     ]
+    reference, candidate = [model for model, _ in loaded]
     started = time.perf_counter()
     scored = score_frozen(
-        *models,
+        reference,
+        candidate,
         rows,
         args.eos_token_ids,
         pad_token_id=tokenizers[0].pad_token_id or 0,
@@ -250,13 +285,16 @@ def main():
             "temperature": 1,
             "torch_version": torch.__version__,
             "trajectories_sha256": hashlib.sha256(data).hexdigest(),
+            "checkpoint_loading_info": [info for _, info in loaded],
             "seconds": time.perf_counter() - started,
         },
         "summary": aggregate_ear(scored),
         "rows": scored,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, default=str, allow_nan=False) + "\n")
+    with args.output.open("x") as stream:
+        json.dump(report, stream, default=str, allow_nan=False)
+        stream.write("\n")
 
 
 if __name__ == "__main__":
