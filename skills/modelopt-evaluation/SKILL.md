@@ -8,7 +8,7 @@ license: Apache-2.0
 
 # NeMo Evaluator Launcher Assistant
 
-Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints.
+Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints. Outside the Day 0 program, load `modelopt-deployment` first and derive the serving record (step 5c); Step 3 uses it to cross-check the NEL deployment config, and NEL's own canary is the serving check.
 
 ## Completed-run analysis
 
