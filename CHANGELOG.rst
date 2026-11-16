@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- ONNX AutoTune can now upload its remote safety engine to a chosen path with ``autotune_remote_model_path`` / ``--autotune_remote_model_path`` (``--remote_model_path`` in the AutoTune CLI); its unique temporary filename remains the default.
 - Add an experimental NeMo AutoModel NVFP4 expert adapter example with fixed published scales, FSDP2 training support, and expert-weight export. It supports the bias-free SwiGLU torch expert loop with expert parallel size 1.
 
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
@@ -40,6 +41,7 @@ Changelog
 *Speculative Decoding*
 
 - Add uniform-layer hidden-state mixing for Hugging Face and Megatron EAGLE training. Enable it with ``eagle_mix_hidden_states=True`` and ``eagle_mix_hidden_states_mode="uniform_layer_sample"``; the default ``sparse_replace`` mode preserves the existing mixing behavior.
+- Streaming datasets accept JSON-encoded conversation and tool fields and preserve per-row chat-template arguments.
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
 - Add support for the `SPEED-Bench v1.1 <https://huggingface.co/datasets/nvidia/SPEED-Bench>`_ dataset.
 - With ``training.dataloader_num_workers`` > 0, ``examples/speculative_decoding/main.py`` now yields each training batch as soon as a worker finishes it, so one slow sample, such as a slow hidden-state fetch in streaming training, no longer stalls every DDP rank. Sample order within the prefetch window is then no longer deterministic; set ``training.dataloader_in_order=true`` to restore it (context-parallel and ``full_determinism`` runs always keep it).
@@ -50,6 +52,7 @@ Changelog
 - Add the opt-in ``--qdq_student_weight`` flag to the Megatron-Bridge QAD example and ``initialize_qdq_weights`` to initialize floating latent weights through their configured fake quantizers. Native resumes preserve trained weights and optimizer state.
 - Add ``--trainable_params`` (alias ``--trainable_parameter_patterns``) to ``examples/megatron_bridge/distill.py`` to train selected student weights, including full-rank routed-expert QAD. Reuse the selection on native resume.
 - Add ``--sft_in_batch_packing``, ``--moe_aux_loss_coeff`` and ``--dsa_kernel_backend`` to ``examples/megatron_bridge/distill.py`` (``--dsa_kernel_backend`` also to ``quantize.py``): pack ``--sft_hf_dataset`` conversations per micro-batch instead of padding each to ``--seq_length``, override the MoE load-balancing loss weight (e.g. 0 for padded SFT data), and select fused DeepSeek sparse-attention kernels for long sequences.
+- Add opt-in revision-pinned chat-blend preparation with indexed programming-question recovery, complete-record deduplication, question-isolated validation, and source shortfall/provenance reports.
 - Add ``--fake_quant_weight_cache`` to ``examples/megatron_bridge/distill.py`` to fake-quantize each student weight once per QAD step instead of once per micro-batch and activation recomputation. It costs an extra BF16 copy of the student's quantized weights per GPU.
 - Add ``skip_frozen_mtp`` to the Megatron ``DistillationConfig`` (``--skip_frozen_mtp`` in ``examples/megatron_bridge/distill.py``): training forwards skip the frozen MTP head of the student and the teacher, while evaluation still runs it and its weights are saved and exported unchanged. It supports GPTModel-based models such as Qwen3.5 / Qwen3.6 without pipeline parallelism.
 - Add ``--document_boundaries`` to ``examples/megatron_bridge/distill.py`` to attend within each document of a pre-tokenized window, and ``tokenizer`` / ``max_length`` / ``pack_max_tokens`` to ``chat_jsonl`` blends to drop conversations with nothing to train and pair the rest for ``--sft_in_batch_packing``. Packed distillation of Gated DeltaNet models needs ``flash-linear-attention`` >= 0.5.2 (earlier versions compute it wrongly), which ``nemo:26.10`` ships.
@@ -103,11 +106,13 @@ Changelog
 - ``modelopt.torch.export.copy_non_safetensor_files_from_ckpt`` is deprecated; use ``copy_non_model_files``.
 - ``modelopt.torch.sparsity.attention_sparsity.sparsify`` (``mtsa.sparsify``) is deprecated; use ``mts.sparsify(model, config, forward_loop=forward_loop)``.
 - PyTorch 2.10 support is deprecated and will be dropped in a future release.
+- ``dflash_architecture_config.shift_label`` is deprecated and will be removed in 0.50, since ``projector_type`` fixes the label alignment (DSpark and Domino predict the next token): remove it from DFlash-family configs. Until then a value matching ``projector_type`` is ignored with a warning and any other raises, as it never took effect; checkpoints saved with it still load.
 
 **Bug Fixes**
 
 - Fix gradients propagated between TTT steps being multiplied by the tensor-parallel size in Megatron EAGLE training with ``use_aux_hidden_state=False`` and ``sequence_parallel=True``. This also corrects runs with hidden-state mixing disabled; reported losses are unchanged.
 - Fix gradient accumulation averaging for Hugging Face EAGLE, Medusa and external draft training. Logged loss and gradient norms now use the corrected scale.
+- Fix EAGLE3 training to normalize raw draft hidden states independently of token embeddings, matching the exported architecture. Re-train drafts trained before this fix if acceptance rate is lower than expected.
 - QAT and QAD of the GGML formats (IQ, ``q8_0``) now re-encode trainable weights after every optimizer step, including under optimizers that write weights through a shared buffer or ``.data`` such as Megatron's distributed optimizer. With those optimizers the GGML codes used to stay those of each job's first forward, so re-run earlier Megatron QAD of these formats.
 - Fix ONNX loading and quantization graph exports failing on individual initializers larger than 2 GiB, while preserving nested scopes and sequence/optional value types.
 - Saving ONNX external weights to another directory no longer removes a same-named weight file from the working directory. Existing external weights remain intact when saving a model loaded without weight data.
@@ -128,6 +133,7 @@ Changelog
 - Fix GPT-OSS draft training with pre-normalization teacher hidden states by enabling the target model's final normalization.
 - Fix vanilla DSpark exports to use the Qwen3 DSpark architecture, head names and configuration expected by vLLM. Re-export existing training checkpoints to use this format.
 - ``mtq.fold_weight`` now folds sequential weight quantizers (e.g. W4A8 INT4 + FP8 weights) into the weights; it used to leave them unfolded and enabled.
+- DSpark and Domino exports now write the ``shift_label``, ``markov_rank`` and other head fields they were trained with. Domino's HF AR validation (``pseudo_speculative_generate``) now raises instead of scoring the backbone one block position off; Domino acceptance cannot be measured until a runtime applies its correction head.
 - Fix ONNX quantization placing a per-tensor Q/DQ pair on a rank-0 (scalar) constant input, which TensorRT's ONNX parser rejects (``convertAxis`` asserts the quantization axis lies in ``[0, nbDims]`` but ``nbDims == 0``). Rank-0 constant operands are now kept unquantized in the int8, fp8, and autotune export paths; the existing single-element Mul/Div/Pad stripping stays gated under ``target_dla``.
 - Fix the diffusers skip-softmax HF export to emit the schema TensorRT-LLM VisualGen loads (``threshold_scale_factor.coefficients`` and a scalar ``target_sparsity``). Re-export checkpoints that failed to load.
 - Fix PTQ of native Transformers FP8 experts to apply source weight scales during calibration and export. Re-quantize affected checkpoints from the original FP8 source.
@@ -167,6 +173,7 @@ Changelog
 - Fix DFlash2's candidate-selector loss weighing every block position equally and dividing by its own count of positions, unlike the backbone loss and the SGLang/SpecForge DFlash2 reference. Logged DFlash2 losses change.
 - Fix the Hugging Face export of a quantized Wan VAE (``AutoencoderKLWan``), which declared NVFP4 or FP8 in its ``quantization_config`` but saved its ``Conv3d`` weights unquantized: NVFP4 weights are now packed with their scales, other formats raise an error, and ``examples/diffusers`` quantizes only the decoder convolutions that text-to-video calibration runs. Re-quantize affected VAEs with the updated example: a VAE restored with ``--restore-from`` from an older example checkpoint keeps its uncalibrated encoder quantizers, and exporting it now raises.
 - The Hugging Face export of a diffusers model now raises an error, instead of writing a checkpoint without ``input_scale``, when a component's static input quantizers (e.g. NVFP4 or FP8) were never calibrated, as with Wan 2.2's ``transformer_2`` calibrated with ``--n-steps 1``. Calibrate with enough denoising steps to run every quantized component and re-export.
+- Fix ``ModuleNotFoundError: No module named 'huggingface_hub'`` when importing ``modelopt.torch`` without the optional ``hf`` extra. Install the ``hf`` extra to use Hugging Face checkpointing. Affects 0.44 through 0.48.
 - ``mts.sparsify(model, "sparsegpt")`` now writes the SparseGPT weight update into the kept weights, as documented. It applied only the 2:4 mask and kept the dense values of the unpruned weights. Re-run SparseGPT on affected models.
 
 0.48.0 (2026-11-02)
