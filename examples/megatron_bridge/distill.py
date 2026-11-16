@@ -570,9 +570,6 @@ def get_args():
 
     _check_shared_vocabulary(args)
 
-    if int(os.environ.get("RANK", "0")) == 0:
-        print_args(masked_args(args))
-
     return args
 
 
@@ -1069,6 +1066,7 @@ if __name__ == "__main__":
     args = get_args()
     dist.setup()
     try:
+        print_args(masked_args(args))
         # Entered inside the try: opening the run is fatal by design, and the peers of a rank
         # that exits without dist.abort() stay blocked on the first collective.
         with distill_run(args, DISTILL) as owns_the_run:
