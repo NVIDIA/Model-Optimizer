@@ -19,7 +19,6 @@ import contextlib
 import copy
 import importlib
 import json
-import os
 import re
 import tempfile
 import traceback
@@ -36,6 +35,7 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from modelopt import env
 from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
@@ -141,6 +141,7 @@ from .quant_format import (
 )
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
+    _get_uncalibrated_static_input_module_names,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -1390,6 +1391,24 @@ def _export_diffusers_checkpoint(
         name: comp for name, comp in all_components.items() if isinstance(comp, nn.Module)
     }
 
+    # Refuse before any component is fused, packed or written.
+    uncalibrated = {
+        name: module_names
+        for name, comp in module_components.items()
+        if (module_names := _get_uncalibrated_static_input_module_names(comp))
+    }
+    if uncalibrated:
+        details = "; ".join(
+            f"{name}: {len(module_names)} layer(s), e.g. {module_names[0]}"
+            for name, module_names in uncalibrated.items()
+        )
+        raise ValueError(
+            f"Static input quantizers were never calibrated ({details}): the checkpoint would "
+            "declare their input scales without containing them. Calibrate with data that runs "
+            "these layers, or leave the layers unquantized by disabling both their weight and "
+            "input quantizers."
+        )
+
     # Best-effort diffusers pipeline check (kept for folder layout + model_index.json behavior)
     is_diffusers_pipe = False
     if HAS_DIFFUSERS:
@@ -2066,17 +2085,8 @@ def _write_base_config(model: nn.Module, export_dir: Path) -> None:
 
 
 def _no_gather_export_asked() -> bool:
-    """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export.
-
-    ``nogather`` picks it; unset, empty or ``streaming`` keeps the default streaming path. Any other
-    value raises: a misspelled one would otherwise quietly take the path it was set to avoid.
-    """
-    value = os.environ.get("MODELOPT_FSDP2_EXPORT") or "streaming"
-    if value not in ("nogather", "streaming"):
-        raise ValueError(
-            f"MODELOPT_FSDP2_EXPORT={value!r}: expected 'nogather', or 'streaming', the default."
-        )
-    return value == "nogather"
+    """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export."""
+    return env.fsdp2_export() == "nogather"
 
 
 def export_hf_checkpoint(

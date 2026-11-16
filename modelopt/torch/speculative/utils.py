@@ -49,6 +49,19 @@ KIMI_K2_PACKAGE_NAME = "kimi_k2_temp"
 # modelopt.torch.speculative.plugins.modeling_fakebase._VLM_CONFIG_ATTRS.
 NESTED_CONFIG_ATTRS = ["text_config", "llm_config"]
 
+# Class-name markers of a speculative-decoding draft checkpoint's architecture, e.g.
+# ``LlamaForCausalLMEagle3``. A draft keeps its base model's ``model_type``, so the architecture
+# is what tells the two apart.
+SPECULATIVE_ARCHITECTURE_MARKERS = ("Eagle", "Medusa")
+
+
+def is_speculative_config(hf_config) -> bool:
+    """Whether a Hugging Face config describes a speculative-decoding draft model."""
+    architectures = getattr(hf_config, "architectures", None)
+    if not architectures:
+        return False
+    return any(marker in architectures[0] for marker in SPECULATIVE_ARCHITECTURE_MARKERS)
+
 
 REMOVE_THINK_CHAT_TEMPLATE = (
     "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"

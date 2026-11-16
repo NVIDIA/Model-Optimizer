@@ -42,14 +42,26 @@ PTQ and export launch with `torchrun`; QAD runs on 8 nodes with the `sbatch` scr
 
 ### 1. Data Preparation
 
-QAD trains on a weighted blend of 11 text-only chat sources, defined in [`data_blend.yaml`](data_blend.yaml) and computing the loss on assistant tokens only. Set `output_dir` in that file, then write the blend as chat JSONL with the [chat JSONL mode of `prepare_megatron_data_blend`](../../../dataset/MEGATRON_DATA_PREP.md#chat-jsonl-blends-for-assistant-only-loss):
+The revised recipe selects a weighted blend of 12 text-only chat sources, defined in [`data_blend.yaml`](data_blend.yaml) and computing the loss on assistant tokens only. Set `output_dir` in that file, then write the blend as chat JSONL with the [chat JSONL mode of `prepare_megatron_data_blend`](../../../dataset/MEGATRON_DATA_PREP.md#chat-jsonl-blends-for-assistant-only-loss):
 
 ```bash
 python -m modelopt.torch.utils.plugins.prepare_megatron_data_blend \
     --config /opt/Model-Optimizer/examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/data_blend.yaml
 ```
 
-This writes `train.jsonl` (35,800 conversations) and `validation.jsonl` (1,000) to `output_dir`. Run it in the container: Megatron-Bridge's text-only chat filter selects the rows.
+This targets `train.jsonl` (37,000 records) and `validation.jsonl` (1,000) in
+`output_dir`, with fixed dataset revisions, source buffer shuffling, recovered
+programming prompts, reasoning-on/off data, conservative image-reference filtering,
+complete-record deduplication and question-isolated splits. Rejected and reserved
+records are replenished from the same source; exhausted sources produce explicit
+warnings and smaller outputs. Inspect `report.json` and `manifest.jsonl` for actual
+counts and provenance. Run in an environment with Megatron-Bridge installed;
+preparation is CPU-only and does not require a GPU allocation.
+
+The results above used the original 11-source, 36,800-record recipe with sequential
+source selection. This revised blend changes the training data and has not been
+validated against those benchmark scores. The 600-iteration command below reads
+38,400 records, about 1.04 epochs of the revised target training split.
 
 ---
 
@@ -133,7 +145,7 @@ python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 
 - `--student_megatron_path` is the PTQ checkpoint from Section 2; `--student_hf_path` still points at the BF16 model, which supplies the architecture. The PTQ checkpoint was written at EP=4 and loads at EP=32.
 - `--sft --sft_hf_dataset ... --sft_loss_mode assistant` renders each conversation with the model's chat template and computes the loss on assistant tokens only.
-- `--seq_length 32768 --gbs 64`: 600 iterations cover 38,400 records, about 1.07 epochs of the 35,800-record training split.
+- `--seq_length 32768 --gbs 64`: 600 iterations cover 38,400 records, about 1.04 epochs of the revised 37,000-record training split (check actual counts in `report.json`).
 - `--recompute_*` and `--no_async_save` are needed to fit: the async-save worker needs its own CUDA context and runs out of memory next to the resident teacher.
 - `--freeze_mtp` keeps the MTP head out of training: its loss is skipped and its parameters are frozen, so the exported MTP head keeps its PTQ weights. Without it, the quantized MTP head's cross-entropy loss trains the head and, through the hidden states, embeddings and output layer it shares, the rest of the student too.
 - Each saved iteration is about 1.6 TB; size `--save_interval` and `--checkpoint_keep_last` to your storage.

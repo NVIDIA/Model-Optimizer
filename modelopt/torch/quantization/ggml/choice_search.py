@@ -17,9 +17,10 @@
 
 import torch
 
+from ..extensions import get_cuda_ext_ggml
 from .common import GGML_BLOCK_SIZE, GGMLFormat
 
-__all__ = ["search_choices"]
+__all__ = ["search_choices", "search_scratch"]
 
 # Bounds the candidate errors held at once, num_choices x rows x 256 float32 values (1 GiB).
 _CANDIDATE_ELEMENTS = 1 << 28
@@ -42,14 +43,15 @@ def search_choices(
     for every group, its codebook entries searched as the encoder does (weighted by ``importance``).
     In each block, each group first takes the choice with the least error under its own diagonal
     block of the Hessian; groups are then revisited in turn, each taking the choice that most lowers
-    the block's error with the others held.
+    the block's error with the others held, an update that needs each block's Hessian symmetric.
+    With the CUDA extension, the search after the encode runs as one kernel per block.
     """
     rows = weight.reshape(-1, weight.shape[-1])
     blocks, groups = weight.shape[-1] // GGML_BLOCK_SIZE, ggml_format.choice_groups
     hessian = hessian.to(device=weight.device, dtype=torch.float32)
     chunk_args = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
     decode_args = {} if decode_chunk_size is None else {"block_chunk_size": decode_chunk_size}
-    step = max(1, _CANDIDATE_ELEMENTS // (ggml_format.num_choices * GGML_BLOCK_SIZE))
+    step = _rows_per_chunk(ggml_format)
     picks = torch.empty((rows.shape[0], blocks, groups), dtype=torch.int64, device=weight.device)
     for block in range(blocks):
         columns = slice(block * GGML_BLOCK_SIZE, (block + 1) * GGML_BLOCK_SIZE)
@@ -64,6 +66,22 @@ def search_choices(
                 decode_args,
             )
     return picks.reshape(*weight.shape[:-1], blocks, groups)
+
+
+def _rows_per_chunk(ggml_format: GGMLFormat) -> int:
+    """Rows whose candidate errors fit in ``_CANDIDATE_ELEMENTS``."""
+    return max(1, _CANDIDATE_ELEMENTS // (ggml_format.num_choices * GGML_BLOCK_SIZE))
+
+
+def search_scratch(ggml_format: GGMLFormat, rows: int) -> int:
+    """Bytes :func:`search_choices` holds at once on ``rows`` rows, as measured with the CUDA codecs.
+
+    For each chunk of rows, every choice's payload and float32 errors, and the block's float32
+    reference and contiguous copy; the fused search kernel needs nothing as large besides.
+    """
+    chunk = min(rows, _rows_per_chunk(ggml_format))
+    candidates = ggml_format.num_choices * chunk * (4 * GGML_BLOCK_SIZE + ggml_format.block_bytes)
+    return candidates + chunk * 8 * GGML_BLOCK_SIZE
 
 
 def _search_block(ggml_format, block, hessian, importance, chunk_args, decode_args):
@@ -81,6 +99,8 @@ def _search_block(ggml_format, block, hessian, importance, chunk_args, decode_ar
         **decode_args,
     ).reshape(ggml_format.num_choices, rows, GGML_BLOCK_SIZE)
     errors -= reference
+    if block.is_cuda and (extension := get_cuda_ext_ggml()) is not None:
+        return extension.search_choices(errors, hessian, groups, _REFINE_SWEEPS)
     errors = errors.reshape(ggml_format.num_choices, rows, groups, group_size)
 
     group_rows = hessian.reshape(groups, group_size, GGML_BLOCK_SIZE)

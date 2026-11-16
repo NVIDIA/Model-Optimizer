@@ -40,7 +40,7 @@ from modelopt.torch.quantization.ggml.common import (
     pinned_importance,
     pinned_packed_weight,
 )
-from modelopt.torch.quantization.ggml.gptq import gptq_group_update
+from modelopt.torch.quantization.ggml.gptq import compensated_block_hessian, gptq_group_update
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.quantization.utils.calib_utils import (
     compute_hessian_inverse,
@@ -91,6 +91,22 @@ def test_group_update_folds_each_group_error_through_its_inverse_hessian_block()
     gptq_group_update(weight, h_inv, 8, 4, _round_in_groups_of_4)
 
     torch.testing.assert_close(weight, expected, rtol=1e-4, atol=1e-5)
+
+
+def test_compensated_block_hessian_is_the_schur_complement_of_the_remaining_columns():
+    # Fixing a group while only the later columns compensate costs inv(inv(H_FF)_gg), with F the
+    # group and every column after it; the plain damped H_gg would match only the last group.
+    _, hessian, h_inv = _problem(cols=16)
+    damped = hessian + 0.01 * hessian.diagonal().mean() * torch.eye(16)
+    for start in (0, 4, 8, 12):
+        remaining = slice(start, None)
+        expected = torch.linalg.inv(torch.linalg.inv(damped[remaining, remaining])[:4, :4])
+        torch.testing.assert_close(
+            compensated_block_hessian(h_inv, slice(start, start + 4)),
+            expected,
+            rtol=1e-4,
+            atol=1e-4,
+        )
 
 
 def test_group_update_rejects_blocks_that_split_a_group():
@@ -206,6 +222,23 @@ def test_gptq_weights_the_search_by_the_root_of_the_hessian_diagonal(
     root = inputs.square().sum(dim=0).sqrt()
     importance = torch.cat(gptq_calls)
     torch.testing.assert_close(importance / importance.mean(), root / root.mean())
+
+
+def test_local_hessian_scales_lower_the_output_error_of_correlated_inputs():
+    torch.manual_seed(0)
+    plain = torch.nn.Linear(512, 16, bias=False)
+    original = plain.weight.detach().clone()
+    searched = copy.deepcopy(plain)
+    inputs = _inputs()
+    algorithm = {**GPTQ, "importance_weighted": True}
+    for model, local_hessian_scales in ((plain, False), (searched, True)):
+        config = _iq_config({**algorithm, "local_hessian_scales": local_hessian_scales}, "iq2_xxs")
+        mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+
+    def output_error(model):
+        return ((model.weight_quantizer(model.weight) - original) @ inputs.T).square().sum()
+
+    assert output_error(searched) < 0.95 * output_error(plain)
 
 
 def test_a_module_calibration_never_reached_gets_the_plain_search():
@@ -385,6 +418,21 @@ def test_casting_the_model_keeps_the_importance_its_weight_encodes_to_the_pin_wi
     )
 
 
+@pytest.mark.parametrize("cast", ["bfloat16", "half"])
+def test_casting_the_model_keeps_the_local_scales_gptq_searched(cast):
+    # GPTQ ran on a float32 weight; a cast after it rounds nearly every block of that weight, and
+    # encoding the rounded weight afresh would re-pick the searched local scales.
+    algorithm = {**GPTQ, "importance_weighted": True, "local_hessian_scales": True}
+    model, _ = _gptq_model(rows=16, num_bits="iq2_xxs", algorithm=algorithm)
+    pinned = pinned_packed_weight(model.weight_quantizer, "iq2_xxs")
+
+    getattr(model, cast)()
+
+    assert torch.equal(
+        GGML_FORMAT_REGISTRY["iq2_xxs"].pack(model.weight, model.weight_quantizer), pinned
+    )
+
+
 @pytest.mark.parametrize("num_bits", ["iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s"])
 def test_a_checkpoint_from_before_kept_scales_still_encodes_to_its_pin(num_bits):
     # Earlier GPTQ left the weight as its decoding, rounded to the model's dtype, and no importance.
@@ -440,22 +488,33 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
     [
         ("q8_0", {**GPTQ, "importance_weighted": True}),
         ("iq2_xs", {**GPTQ, "importance_weighted": True}),
+        ("iq2_xxs", {**GPTQ, "importance_weighted": True}),
         ("iq2_xs", {"method": "local_hessian"}),
     ],
-    ids=["q8_0-gptq", "iq2_xs-gptq", "iq2_xs-local_hessian"],
+    ids=["q8_0-gptq", "iq2_xs-gptq", "iq2_xxs-gptq", "iq2_xs-local_hessian"],
 )
-def test_pin_survives_save_and_restore(num_bits, algorithm):
-    model, inputs = _gptq_model(num_bits=num_bits, algorithm=algorithm)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_pin_survives_save_and_restore(num_bits, algorithm, dtype):
+    model, inputs = _gptq_model(num_bits=num_bits, algorithm=algorithm, dtype=dtype)
     buffer = io.BytesIO()
     mto.save(model, buffer)
     buffer.seek(0)
 
-    restored = mto.restore(torch.nn.Linear(512, 8, bias=False), buffer)
+    restored = mto.restore(torch.nn.Linear(512, 8, bias=False, dtype=dtype), buffer)
 
     ggml_format = GGML_FORMAT_REGISTRY[num_bits]
     pinned = pinned_packed_weight(model.weight_quantizer, num_bits)
     assert torch.equal(ggml_format.pack(restored.weight, restored.weight_quantizer), pinned)
     torch.testing.assert_close(restored(inputs), model(inputs))
+
+    # Initialization uses the loaded PTQ result; no calibration data is supplied.
+    expected = ggml_format.dequantize(pinned, torch.tensor(restored.weight.shape), dtype=dtype)
+    output_before = restored(inputs).detach()
+    mtq.initialize_qdq_weights(restored)
+    torch.testing.assert_close(restored(inputs), output_before, rtol=0, atol=0)
+    torch.testing.assert_close(restored.weight, expected, rtol=0, atol=0)
+    assert restored.weight.dtype == dtype and restored.weight_quantizer.is_enabled
+    assert torch.equal(pinned_packed_weight(restored.weight_quantizer, num_bits), pinned)
 
 
 def test_pin_is_dropped_once_the_weight_changes():

@@ -200,11 +200,12 @@ def test_linear_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
     ],
 )
 @pytest.mark.parametrize("log_mse", [False, True])
+@pytest.mark.parametrize("local_hessian_scales", [False, True])
 def test_an_update_that_may_move_fits_its_room(
-    need_2_gpus, monkeypatch, num_bits, shape, dtype, cuda_extension, log_mse
+    need_2_gpus, monkeypatch, num_bits, shape, dtype, cuda_extension, log_mse, local_hessian_scales
 ):
-    """An update that may run on another GPU, logging its error or not, peaks there within the
-    room it is admitted with."""
+    """An update that may run on another GPU, logging its error or not and searching the local
+    scales or not, peaks there within the room it is admitted with."""
     if cuda_extension:
         get_cuda_ext_ggml(raise_if_failed=True)  # without it, no update may move to check
     else:
@@ -224,7 +225,9 @@ def test_an_update_that_may_move_fits_its_room(
         "algorithm": "max",
     }
     mtq.quantize(linear, config, forward_loop=lambda m: m(inputs))
-    helper = GGMLGPTQHelper(linear, "linear", log_mse=log_mse)
+    helper = GGMLGPTQHelper(
+        linear, "linear", log_mse=log_mse, local_hessian_scales=local_hessian_scales
+    )
     helper.accumulate(inputs)
     block_size = 256
     worker = torch.device("cuda", 1)
@@ -237,6 +240,62 @@ def test_an_update_that_may_move_fits_its_room(
 
     if helper.updates_on_any_device():
         assert peak <= calib_utils._update_room(helper, linear.weight, block_size)
+
+
+def _iq2_xxs_linear(in_features, out_features, dtype=torch.float32):
+    """A ``cuda:0`` linear with an IQ2_XXS weight quantizer, and its calibration inputs."""
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=dtype, device="cuda:0")
+    inputs = torch.randn(512, in_features, dtype=dtype, device="cuda:0")
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(linear, config, forward_loop=lambda m: m(inputs))
+    return linear, inputs
+
+
+def test_a_moved_update_has_landed_when_it_returns(need_2_gpus, monkeypatch):
+    """An update run on another GPU has finished writing the weight's GPU when it returns, so the
+    caller may free the module and empty the cache without releasing memory its copies still write.
+    """
+    get_cuda_ext_ggml(raise_if_failed=True)  # updates move only with the CUDA encoders
+    # Over 10 MiB, so the weight has a segment of its own that empty_cache() can release.
+    linear, inputs = _iq2_xxs_linear(2048, 4096, torch.bfloat16)
+    helper = GGMLGPTQHelper(linear, "linear", log_mse=False)
+    helper.accumulate(inputs)
+    blockwise_update = GGMLGPTQHelper._blockwise_update
+
+    def blockwise_update_then_stall(self, block_size):
+        blockwise_update(self, block_size)
+        torch.cuda._sleep(10**8)  # holds the copies back to the weight's GPU for tens of ms
+
+    monkeypatch.setattr(GGMLGPTQHelper, "_blockwise_update", blockwise_update_then_stall)
+    worker = torch.device("cuda", 1)
+    with torch.cuda.device(worker):
+        helper.update_weights(256, 0.3, linear.weight, device=worker)
+    assert torch.cuda.current_stream(worker).query()  # the copies back have finished
+    del helper, linear
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize(worker)  # raises if a copy wrote released memory
+
+
+def test_a_gpu_weight_may_be_updated_on_the_cpu():
+    linear, inputs = _iq2_xxs_linear(512, 16)
+    original = linear.weight.detach().clone()
+    helper = GGMLGPTQHelper(linear, "linear", log_mse=False)
+    helper.accumulate(inputs)
+
+    helper.update_weights(256, 0.3, linear.weight, device="cpu")
+
+    assert linear.weight.is_cuda
+    assert not torch.equal(linear.weight, original)
+    assert pinned_packed_weight(linear.weight_quantizer, "iq2_xxs").is_cuda
 
 
 @pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])

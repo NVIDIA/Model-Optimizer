@@ -47,10 +47,17 @@ from megatron.bridge.training.config import (
     ValidationConfig,
 )
 from megatron.bridge.training.distill import distill
-from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
+from megatron.bridge.training.post_training.checkpointing import (
+    _get_modelopt_checkpoint_path,
+    has_modelopt_state,
+)
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
-from trainable_params import configure_trainable_parameters
+from trainable_params import (
+    configure_trainable_parameters,
+    initialize_student_weights,
+    should_initialize_student_weights,
+)
 
 try:
     from megatron.bridge.data.builders import DirectHFSFTDatasetConfig
@@ -180,6 +187,13 @@ def get_args():
             "If the checkpoint carries ModelOpt state (i.e. it is quantized), the quantizers are "
             "restored automatically, turning distillation into Quantization Aware Distillation (QAD)."
         ),
+    )
+    parser.add_argument(
+        "--qdq_student_weight",
+        action="store_true",
+        help="Initialize trainable student latents from the restored quantizers' Q→DQ output "
+        "on a fresh run. Default: keep checkpoint weights. Does not rerun calibration or GPTQ; "
+        "native checkpoint resumes are unchanged.",
     )
     parser.add_argument(
         "--trainable_params",
@@ -319,6 +333,14 @@ def get_args():
         help="Freeze the student's MTP-specific parameters and disable its MTP loss "
         "(--no-freeze_mtp keeps them training). Unset, they are frozen only when "
         "--kd_loss_alpha is 1.0 and the student is quantized except for its MTP head.",
+    )
+    parser.add_argument(
+        "--skip_frozen_mtp",
+        action="store_true",
+        help="Skip the frozen MTP head (see --freeze_mtp) in the student's and teacher's training "
+        "forwards: its layers and its extra output-layer pass. Evaluation still runs it, and its "
+        "weights are saved unchanged. Supports GPTModel-based models (e.g. Qwen3.5 / Qwen3.6) "
+        "with --pp_size 1.",
     )
     parser.add_argument(
         "--moe_aux_loss_coeff",
@@ -487,6 +509,8 @@ def get_args():
         args.num_layers_in_first_pipeline_stage or args.num_layers_in_last_pipeline_stage
     ):
         raise ValueError("--num_layers_in_first/last_pipeline_stage require --pp_size > 1.")
+    if args.skip_frozen_mtp and args.pp_size > 1:
+        raise ValueError("--skip_frozen_mtp needs --pp_size 1.")
     if args.recompute_num_layers_per_stage is not None:
         if args.recompute_granularity != "full" or args.recompute_method != "block":
             raise ValueError(
@@ -654,6 +678,17 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     )
     if args.fake_quant_weight_cache and not student_has_modelopt_state:
         raise ValueError("--fake_quant_weight_cache needs a quantized --student_megatron_path.")
+    initialize_weights = should_initialize_student_weights(
+        args.qdq_student_weight,
+        Path(args.output_dir) / "checkpoints",
+        _get_modelopt_checkpoint_path(args.student_megatron_path)
+        if args.qdq_student_weight and args.student_megatron_path
+        else None,
+    )
+    if initialize_weights and not student_has_modelopt_state:
+        raise ValueError(
+            "--qdq_student_weight needs ModelOpt quantizer state in --student_megatron_path."
+        )
     if args.fake_quant_weight_cache and "callbacks" not in inspect.signature(distill).parameters:
         raise ValueError("--fake_quant_weight_cache needs a newer Megatron-Bridge; see the README.")
     # A quantized student pins the layout: it must match what quantize.py wrote, so reuse the same
@@ -745,6 +780,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         logit_kl_top_p=args.logit_kl_top_p,
         logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,
         freeze_mtp=args.freeze_mtp,
+        skip_frozen_mtp=args.skip_frozen_mtp,
     )
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
@@ -765,7 +801,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         distill_submodule="language_model" if is_vlm else None,
     )
 
-    if args.trainable_params:
+    if args.trainable_params or initialize_weights:
         # Run after initial student restoration; native training resume happens later.
         def _select_trainable_student_hook(model_chunks):
             """Select parameters in the distilled student before the teacher is attached."""
@@ -773,7 +809,9 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                 student = unwrap_model(chunk)
                 if is_vlm:
                     student = student.language_model
-                configure_trainable_parameters(student, args.trainable_params)
+                if args.trainable_params:
+                    configure_trainable_parameters(student, args.trainable_params)
+                initialize_student_weights(student, initialize_weights, checkpoint_dir)
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_select_trainable_student_hook, prepend=True)

@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "modelopt",
-      "source": "./plugins/modelopt",
+      "source": "./",
       "description": "Skills for Model Optimizer development, quantization, deployment, and evaluation.",
       "version": "0.1.0",
       "author": {

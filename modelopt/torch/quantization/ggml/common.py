@@ -31,6 +31,9 @@ _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
 _ROW_KEY_CHUNK = 256
 # Blocks hashed at once by _block_keys, which bounds its float32 and int64 temporaries.
 _KEY_BLOCKS_PER_CHUNK = 4096
+# Dtypes a model may be cast to after calibration (``model.bfloat16()``, Megatron's
+# ``Float16Module``); a pin's source fingerprint also holds the source rounded to each.
+_CAST_DTYPES = (torch.bfloat16, torch.float16)
 
 
 class _CacheKey(NamedTuple):
@@ -186,8 +189,9 @@ def pin_packed_weight(
 
     ``source`` is the weight the payload's per-group choices were picked for, when a search other
     than the encoder's own picked them, such as a local-Hessian one. Encoding again would re-pick
-    them, so each block still equal to that block of ``source`` keeps its pinned codes; a block QAD
-    changed is encoded as above, its local scales searched again under the pinned scale.
+    them, so each block still equal to that block of ``source``, or to its rounding by a cast to
+    bfloat16 or float16, keeps its pinned codes; a block QAD changed is encoded as above, its local
+    scales searched again under the pinned scale.
     """
     quantizer._set_buffer(_pin_name(format_name), packed_weights)
     importance_name = PINNED_IMPORTANCE_PREFIX + format_name
@@ -197,7 +201,9 @@ def pin_packed_weight(
         delattr(quantizer, importance_name)
     source_name = _source_name(format_name)
     if source is not None:
-        quantizer._set_buffer(source_name, _block_keys(source, packed_weights.shape[:-1]))
+        blocks_shape = packed_weights.shape[:-1]
+        keys = [_block_keys(source, blocks_shape, dtype) for dtype in (None, *_CAST_DTYPES)]
+        quantizer._set_buffer(source_name, torch.stack(keys, dim=-1))
     elif hasattr(quantizer, source_name):
         delattr(quantizer, source_name)
     quantizer._quantizer_cache = None
@@ -231,7 +237,7 @@ def _pin_name(format_name: str) -> str:
 
 
 def _source_name(format_name: str) -> str:
-    """The buffer holding a pin's source fingerprint, ``[*rows, blocks]``.
+    """The buffer holding a pin's source fingerprint, ``[*rows, blocks, keys]``.
 
     It shares the payload's prefix, so checkpointing and sharding treat it as part of the pin, and
     shards like the payload's leading dimensions.
@@ -239,15 +245,19 @@ def _source_name(format_name: str) -> str:
     return f"{_pin_name(format_name)}_source"
 
 
-def _block_keys(weight: torch.Tensor, blocks_shape: tuple[int, ...]) -> torch.Tensor:
+def _block_keys(
+    weight: torch.Tensor, blocks_shape: tuple[int, ...], dtype: torch.dtype | None = None
+) -> torch.Tensor:
     """A :func:`_row_keys` hash of each 256-value block of ``weight`` as float32, ``blocks_shape``.
 
     Hashing float32 values lets a lossless upcast of the weight, as folding hands over, match.
+    With ``dtype``, each block is first rounded to it, as a cast of the weight would.
     """
     blocks = weight.reshape(-1, GGML_BLOCK_SIZE)
     keys = torch.empty(blocks.shape[0], dtype=torch.int64, device=weight.device)
     for start in range(0, blocks.shape[0], _KEY_BLOCKS_PER_CHUNK):
         chunk = blocks[start : start + _KEY_BLOCKS_PER_CHUNK]
+        chunk = chunk if dtype is None else chunk.to(dtype)
         keys[start : start + _KEY_BLOCKS_PER_CHUNK] = _row_keys(chunk.float())
     return keys.reshape(blocks_shape)
 
@@ -463,7 +473,10 @@ class GGMLFormat:
                 source = getattr(quantizer, _source_name(self.name), None)
                 unchanged = None
                 if source is not None:
-                    unchanged = _block_keys(weight, pinned.shape[:-1]) == source.to(weight.device)
+                    # A fingerprint pinned before it held cast keys is [*rows, blocks].
+                    source = source.to(weight.device).reshape(*pinned.shape[:-1], -1)
+                    keys = _block_keys(weight, pinned.shape[:-1])
+                    unchanged = (keys[..., None] == source).any(-1)
                     if bool(unchanged.all()):
                         packed = pinned.to(weight.device)
                         return packed.reshape(*weight.shape[:-1], -1, self.block_bytes), shape
