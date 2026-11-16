@@ -27,6 +27,7 @@ from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
 from modelopt.torch.utils import atomic_print, get_unwrapped_name
 
 from .config import SparseAttentionConfig
+from .methods import get_sparse_method
 from .plugins import register_custom_model_plugins_on_the_fly
 from .sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 from .utils import get_named_sparse_attention_modules, get_sparse_attention_modules
@@ -73,17 +74,16 @@ def _check_methods_and_backends(sparse_cfg: dict) -> tuple[set[str], set[str]]:
     methods = {v["method"] for v in layer_cfgs}
     backends = {v.get("backend", "pytorch") for v in layer_cfgs}
 
-    if "vsa" in methods:
-        # Reject mixed VSA + non-VSA configs (VSA patches SDPA globally per-module,
-        # while softmax-patching methods need attn_implementation="eager").
-        non_vsa_methods = methods - {"vsa"}
-        if non_vsa_methods:
-            raise ValueError(
-                f"Cannot mix VSA with other sparse attention methods ({non_vsa_methods}). "
-                f"VSA patches F.scaled_dot_product_attention, which is incompatible "
-                f"with softmax-patching or triton methods."
-            )
-    elif "triton" in backends and "pytorch" in backends:
+    sdpa_methods = {m for m in methods if get_sparse_method(m).patches_sdpa}
+    other_methods = methods - sdpa_methods
+    if sdpa_methods and other_methods:
+        raise ValueError(
+            f"Cannot mix SDPA-replacing methods {sdpa_methods} with other sparse attention "
+            f"methods ({other_methods}). "
+            f"They patch F.scaled_dot_product_attention, which is incompatible "
+            f"with softmax-patching or triton methods."
+        )
+    if not sdpa_methods and "triton" in backends and "pytorch" in backends:
         raise ValueError(
             "Mixed backends ('triton' and 'pytorch') in the same model are not "
             "supported. All sparse attention layers must use the same backend."
@@ -99,9 +99,9 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
     - ``backend="pytorch"`` (default): sets ``attn_implementation="eager"`` so that
       softmax-patching methods (e.g. skip-softmax) work correctly.  FlashAttention
       and SDPA bypass ``F.softmax``, so eager is required.
-    - ``method="vsa"``: no-op. VSA patches ``F.scaled_dot_product_attention``
-      directly in ``SparseAttentionModule.forward()``, so no ``attn_implementation``
-      change is needed.
+    - SDPA-replacing methods (``"vsa"``, ``"sol_attn"``): no-op. They patch
+      ``F.scaled_dot_product_attention`` directly in ``SparseAttentionModule.forward()``,
+      so no ``attn_implementation`` change is needed.
 
     This is called automatically during ``mts.sparsify()`` so users never need
     to manually set ``attn_implementation``.
@@ -109,9 +109,9 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
     sparse_cfg = config.sparse_cfg if hasattr(config, "sparse_cfg") else {}
     methods, backends = _check_methods_and_backends(sparse_cfg)
 
-    # VSA patches F.scaled_dot_product_attention directly — it does not change
-    # attn_implementation.  Skip the rest for VSA-only configs.
-    if methods == {"vsa"}:
+    # SDPA-replacing methods do not change attn_implementation; skip the rest for them.
+    sdpa_methods = {m for m in methods if get_sparse_method(m).patches_sdpa}
+    if methods and methods == sdpa_methods:
         return
 
     model_config = getattr(model, "config", None)
@@ -610,6 +610,10 @@ def _format_threshold(info: dict) -> str:
         if isinstance(v, dict):
             return f"threshold={v}"
         return f"threshold={v:.2e}" if isinstance(v, float) else f"threshold={v}"
+    if t == "sol_attn":
+        return (
+            f"tau={info['tau']}, thresh_type={info['thresh_type']}, kv_splits={info['kv_splits']}"
+        )
     return "threshold=N/A"
 
 
