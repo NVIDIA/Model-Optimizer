@@ -23,6 +23,7 @@ This module supports both:
 import contextlib
 import copy
 import itertools
+import warnings
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -75,12 +76,13 @@ class _ShardedIterable(torch.utils.data.IterableDataset):
     seeded identically across ranks (as our VLM datasets are).
     """
 
-    def __init__(self, base, rank: int, world: int, per_rank: int):
+    def __init__(self, base, rank: int, world: int, per_rank: int, accept=None):
         super().__init__()
         self._base = base
         self._rank = rank
         self._world = world
         self._per_rank = per_rank
+        self._accept = accept
 
     def __iter__(self):
         # Yield exactly ``per_rank`` items: a rank left short blocks its peers forever on the next
@@ -92,6 +94,13 @@ class _ShardedIterable(torch.utils.data.IterableDataset):
         for item in itertools.islice(iter(self._base), self._rank, None, self._world):
             if count >= self._per_rank:
                 return
+            # Runs on this rank's own stride, so a rejected sample is dropped here (and made up for
+            # by the padding below) rather than reaching the collate, where an all-rejected batch
+            # would raise on this rank only.
+            if self._accept is not None:
+                item = self._accept(item)
+                if item is None:
+                    continue
             last = item
             count += 1
             yield item
@@ -101,8 +110,9 @@ class _ShardedIterable(torch.utils.data.IterableDataset):
                     f"Rank {self._rank} received no calibration samples "
                     f"(need {self._per_rank}); the dataset stream is empty."
                 )
-            warn_rank_0(
-                f"Calibration stream delivered {count} of {self._per_rank} samples for rank "
+            # Any rank can be short, so warn from this one rather than from rank 0 only.
+            warnings.warn(
+                f"Calibration stream delivered {count} of {self._per_rank} usable samples for rank "
                 f"{self._rank}; repeating the last sample to keep ranks in step."
             )
             for _ in range(self._per_rank - count):
@@ -433,19 +443,26 @@ def get_vlm_dataset_dataloader(
     #   prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     #   inputs = processor(text=[prompt], images=[pil_image], ...)
 
-    def _collate_fn(examples: list[dict[str, Any]]) -> dict[str, torch.Tensor] | dict[str, Any]:
+    def _load_example_image(ex: dict[str, Any]) -> Any:
         repo_id = None
         if dataset_name == "nemotron_vlm_dataset_v2":
             repo_id = SUPPORTED_VLM_DATASET_CONFIG[dataset_name]["config"]["path"]
         image_root = getattr(processor, "_modelopt_vlm_image_root", None)
+        return _maybe_load_image(
+            _extract_image_ref_from_example(ex), repo_id=repo_id, image_root=image_root
+        )
 
+    def _accept(ex: dict[str, Any]) -> dict[str, Any] | None:
+        img = _load_example_image(ex)
+        return None if require_image and img is None else {**ex, "_image": img}
+
+    def _collate_fn(examples: list[dict[str, Any]]) -> dict[str, torch.Tensor] | dict[str, Any]:
         pairs: list[tuple[str, Any]] = []
         for ex in examples:
             messages = ex.get("messages")
 
-            # Image extraction
-            img_ref = _extract_image_ref_from_example(ex)
-            img = _maybe_load_image(img_ref, repo_id=repo_id, image_root=image_root)
+            # Image extraction (already decoded when the per-rank filter ran)
+            img = ex["_image"] if "_image" in ex else _load_example_image(ex)
             if require_image and img is None:
                 continue
 
@@ -488,6 +505,11 @@ def get_vlm_dataset_dataloader(
                 if q is None and messages is not None:
                     q = _extract_text_from_messages(messages)
                 prompt = q or "Describe the image."
+                # A chat template that cannot render image parts leaves no placeholder, so the
+                # processor emits no image tokens and the forward rejects the image features.
+                image_token = getattr(processor, "image_token", None)
+                if img is not None and isinstance(image_token, str) and image_token not in prompt:
+                    prompt = f"{image_token}\n{prompt}"
 
             pairs.append((prompt, img))
 
@@ -536,11 +558,21 @@ def get_vlm_dataset_dataloader(
                     f"({dp_size}); otherwise some ranks get no calibration samples."
                 )
             dataset = _ShardedIterable(
-                dataset, rank=dp_rank, world=dp_size, per_rank=num_samples // dp_size
+                dataset,
+                rank=dp_rank,
+                world=dp_size,
+                per_rank=num_samples // dp_size,
+                accept=_accept,
             )
         else:
             from torch.utils.data.distributed import DistributedSampler
 
+            if require_image:
+                warn_rank_0(
+                    "Map-style datasets are sharded without the per-rank image filter: a batch "
+                    "whose images all fail to load raises on that rank only, and the other ranks "
+                    "wait in their next collective."
+                )
             sampler = DistributedSampler(dataset, num_replicas=dp_size, rank=dp_rank, shuffle=False)
 
     return DataLoader(

@@ -15,9 +15,10 @@
 
 import json
 import os
+import stat
 import sys
+import tempfile
 from pathlib import Path
-from tempfile import gettempdir
 from types import ModuleType
 from unittest import mock
 
@@ -30,12 +31,15 @@ tensorrt.tensorrt = mock.Mock()
 tensorrt.__version__ = "10.10"
 sys.modules["tensorrt"] = tensorrt
 
-from modelopt.torch._deploy._runtime.tensorrt.engine_builder import build_engine, profile_engine
+from modelopt.torch._deploy._runtime.tensorrt.engine_builder import (
+    _default_artifact_dir,
+    build_engine,
+    profile_engine,
+)
 
 
 @pytest.fixture
-def setup_mocks():
-    tmp_path = Path(gettempdir()) / "modelopt_build/trt_artifacts"
+def setup_mocks(tmp_path):
     engine_bytes = b"engine_bytes"
     dummy_hash = "997930f2"
     expected_engine_bytes = b"\x99y0\xf2" + b"A" * 28 + b",engine_bytes"
@@ -125,3 +129,30 @@ def test_profile_engine_variants(setup_mocks, enable_layerwise, profiling_runs):
         assert profiled_data == {}
 
     assert out == "success"
+
+
+def _write_engine_like_trtexec(cmd):
+    for arg in cmd:
+        if arg.startswith("--saveEngine="):
+            Path(arg.split("=", 1)[1]).write_bytes(b"engine_bytes")
+    return 0, "success"
+
+
+def test_default_artifact_dir_is_private_and_reused_within_a_process(setup_mocks, monkeypatch):
+    tmp_path, mock_run, mock_onnx, _ = setup_mocks
+    shared_tmp = tmp_path / "shared_tmp"
+    shared_tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(shared_tmp))
+    _default_artifact_dir.cache_clear()
+    mock_run.side_effect = _write_engine_like_trtexec
+
+    build_engine(onnx_bytes=mock_onnx)
+    build_engine(onnx_bytes=mock_onnx)
+    profile_engine(engine_bytes=b"\x99y0\xf2" + b"A" * 28 + b",engine_bytes")
+    _default_artifact_dir.cache_clear()
+
+    # A fixed shared path would let another local user pre-create it or plant symlinks in it. One
+    # unpredictable private directory per process keeps the timing cache shared across calls.
+    (artifact_dir,) = shared_tmp.iterdir()
+    if sys.platform != "win32":  # POSIX file modes
+        assert stat.S_IMODE(artifact_dir.stat().st_mode) == 0o700

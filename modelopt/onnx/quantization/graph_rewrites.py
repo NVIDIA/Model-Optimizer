@@ -26,6 +26,7 @@ from modelopt.onnx.quantization.graph_indexing import (
     get_tensor_consumer_nodes,
     match_fp8_mha_pattern,
 )
+from modelopt.onnx.utils import export_onnx
 
 __all__ = [
     "cast_custom_ops",
@@ -120,7 +121,7 @@ def cast_custom_ops(onnx_model: onnx.ModelProto, ops_to_cast: dict) -> onnx.Mode
 
     graph.cleanup().toposort()
 
-    onnx_model = gs.export_onnx(graph)
+    onnx_model = export_onnx(graph)
     # TODO: remove manual ir_version change once ORT supports ir_version 11
     onnx_model.ir_version = 10
 
@@ -192,7 +193,7 @@ def insert_fp8_mha_casts(onnx_model):
 
     graph.cleanup().toposort()
 
-    return gs.export_onnx(graph)
+    return export_onnx(graph)
 
 
 def convert_fp16_io(graph):

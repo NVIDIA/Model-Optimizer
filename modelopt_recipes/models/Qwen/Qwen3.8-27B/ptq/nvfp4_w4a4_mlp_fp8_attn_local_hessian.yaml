@@ -20,7 +20,7 @@ imports:
 metadata:
   description: >-
     Qwen3.8-27B local-Hessian PTQ using the NVFP4 W4A4 and FP8 W8A8 assignment exported by
-    the 5.5-bit NVFP4-max AutoQuantize sweep.
+    the 5.5-bit NVFP4-max AutoQuantize sweep, as published in nvidia/Qwen3.8-27B-NVFP4.
 
 quantize:
   $import: base

@@ -21,23 +21,29 @@ in ``modelopt.torch.opt`` (the lowest dependency layer) to avoid circular
 imports.
 """
 
+import re
+import sys
 from dataclasses import dataclass, field
 from importlib import import_module
 from importlib.resources import files
-from types import NoneType, UnionType
-
-try:
-    from importlib.resources.abc import Traversable
-except ImportError:  # Python < 3.11
-    from importlib.abc import Traversable
-import re
-import sys
+from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints, overload
+from types import NoneType, UnionType
+from typing import (
+    Any,
+    NotRequired,
+    Required,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+    overload,
+)
 
 import yaml
 from pydantic import TypeAdapter
-from typing_extensions import NotRequired, Required, is_typeddict
+from typing_extensions import is_typeddict
 
 from modelopt.torch.opt.config import ModeloptBaseConfig
 

@@ -26,8 +26,6 @@ the gradient signal definitely flows through the transformer when the
 ``compute_*_loss`` paths are exercised.
 """
 
-from __future__ import annotations
-
 import torch
 from torch import nn
 

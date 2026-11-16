@@ -15,11 +15,16 @@
 
 """Integration tests for layerwise_calibrate and LayerActivationCollector."""
 
+import pytest
 import torch
 import torch.nn as nn
 
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
-from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.quantization.utils import layerwise_calib
+from modelopt.torch.quantization.utils.layerwise_calib import (
+    LayerActivationCollector,
+    get_max_layerwise_batch_size,
+)
 
 
 class _DecoderBlock(nn.Module):
@@ -339,3 +344,98 @@ def test_skip_placeholder_uses_meta_device():
     assert out.device == torch.device("meta")
     assert out.shape == torch.Size([2, 3])
     assert out.dtype == torch.float32
+
+
+class _WideDecoderBlock(_DecoderBlock):
+    """A heavier kind of decoder layer: its FFN is 8x wider than _DecoderBlock's."""
+
+    def __init__(self, dim=16):
+        super().__init__(dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim * 32, bias=False),
+            nn.ReLU(),
+            nn.Linear(dim * 32, dim, bias=False),
+        )
+
+
+@pytest.mark.parametrize("same_class", [False, True], ids=["new_class", "same_class"])
+def test_layerwise_batch_probe_fits_the_heaviest_kind_of_layer(monkeypatch, same_class):
+    """The batch probe runs every kind of decoder layer, not just the first one, including layers
+    of one class that differ in width, like Nemotron-NAS's."""
+    _register_test_discoverer(monkeypatch)
+    budget = 256 * 2**20
+    monkeypatch.setattr(layerwise_calib, "get_available_gpu_memory", lambda gpu: budget)
+    model = _SimpleTransformerModel(n_layers=3, dim=256).cuda()
+
+    def probe():
+        return get_max_layerwise_batch_size(model, seq_len=512, max_batch_size=4096, num_samples=1)
+
+    light = probe()
+    if same_class:
+        model.layers[2].ffn = _WideDecoderBlock(256).ffn.cuda()
+    else:
+        model.layers[2] = _WideDecoderBlock(256).cuda()
+    heavy = probe()
+    assert 1 < heavy < light < 4096
+    assert not any(hasattr(layer, "_layerwise_calib") for layer in model.layers)
+
+    # The heavy layer's forward at the probed batch takes at most half of the available memory.
+    x = torch.randn(heavy, 512, 256, device="cuda")
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    with torch.no_grad():
+        model.layers[2](x)
+    assert torch.cuda.max_memory_allocated() - base <= budget / 2
+
+
+class _OutOfMemoryOnTwoSamples(nn.Module):
+    """Runs *module*, but runs out of GPU memory on a batch of more than one sample."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, x, **kwargs):
+        if x.shape[0] > 1:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory.")
+        return self.module(x, **kwargs)
+
+
+@pytest.mark.parametrize("where", ["layer_forward", "input_capture"])
+def test_layerwise_batch_probe_falls_back_to_one_sample(monkeypatch, where):
+    """A decoder layer that fits one sample but not two, or whose inputs for two samples cannot
+    be captured, gets a batch of one instead of stopping the run."""
+    _register_test_discoverer(monkeypatch)
+    model = _SimpleTransformerModel(n_layers=2, dim=64).cuda()
+    if where == "layer_forward":
+        model.layers[1] = _OutOfMemoryOnTwoSamples(model.layers[1])
+    else:
+        model.embed = _OutOfMemoryOnTwoSamples(model.embed)
+
+    assert get_max_layerwise_batch_size(model, seq_len=8, max_batch_size=64, num_samples=1) == 1
+    assert not any(hasattr(layer, "_layerwise_calib") for layer in model.layers)
+
+
+class _MultiGPUModel(_SimpleTransformerModel):
+    """Decoder layers spread over GPUs, as a ``device_map`` places them."""
+
+    def forward(self, x, **kwargs):
+        x = self.embed(x)
+        for layer in self.layers:
+            x = layer(x.to(layer.norm.weight.device))
+        return x
+
+
+def test_layerwise_batch_probe_fits_every_gpu_a_kind_of_layer_runs_on(need_2_gpus, monkeypatch):
+    """Of two identical layers, only the first is probed, but the second's GPU, with less memory,
+    sets the batch."""
+    _register_test_discoverer(monkeypatch)
+    model = _MultiGPUModel(n_layers=2, dim=256).cuda()
+    model.layers[1].to("cuda:1")
+
+    def probe(budgets):
+        monkeypatch.setattr(layerwise_calib, "get_available_gpu_memory", lambda gpu: budgets[gpu])
+        return get_max_layerwise_batch_size(model, seq_len=512, max_batch_size=4096, num_samples=1)
+
+    small, large = 256 * 2**20, 1024 * 2**20
+    assert probe({0: large, 1: small}) == probe({0: small, 1: small}) < probe({0: large, 1: large})

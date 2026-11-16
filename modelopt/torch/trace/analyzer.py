@@ -45,7 +45,7 @@ __all__ = ["analyze_symbols"]
 class Map:
     """A mapping of the dependencies that continuously updates/resolve recursive mappings."""
 
-    Dependency = dict[str, Node | None | NodeTarget | int | bool]
+    Dependency = dict[str, Node | NodeTarget | int | bool | None]
 
     def __init__(self):
         # this is the collection of root dependencies

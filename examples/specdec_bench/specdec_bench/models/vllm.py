@@ -16,6 +16,7 @@
 import asyncio
 import time
 
+from ..utils import shutdown_engine
 from .base import Model
 
 try:
@@ -36,6 +37,9 @@ PASSTHROUGH_ENGINE_ARGS = (
     "mamba_cache_philox_rounds",
     "enable_mamba_cache_stochastic_rounding",
 )
+
+# Bounds the engine-manager shutdown in stop(), so a stuck EngineCore cannot hold the job.
+ENGINE_SHUTDOWN_TIMEOUT_S = 60
 
 
 class VLLMModel(Model):
@@ -236,9 +240,8 @@ class VLLMModel(Model):
             pass
         return cfg
 
-    def stop(self):  # pragma: no cover
+    def stop(self):
         try:
-            self.loop.run_until_complete(self.model.shutdown())
+            shutdown_engine(self.model, loop=self.loop, timeout=ENGINE_SHUTDOWN_TIMEOUT_S)
+        finally:
             self.loop.close()
-        except Exception:
-            pass

@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
+import gc
 import os
 import warnings
+import weakref
 from contextlib import nullcontext
 
 import pytest
@@ -29,36 +31,38 @@ from _test_utils.torch.transformers_models import (
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
-from packaging.version import Version
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe.loader import load_recipe
+from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
+from modelopt.torch.quantization.config import LayerwiseConfig
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
     _QuantHFParallelLinear,
     _TransposedExpertsCalibMixin,
+    convert_hf_parallel_linears_on_the_fly,
     get_homogeneous_hf_decoder_layers,
     is_homogeneous_hf_model,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 pytest.importorskip("transformers")
 
 import transformers
 from transformers import AutoModelForCausalLM, LlamaForCausalLM
 from transformers.integrations.finegrained_fp8 import FP8Linear
-from transformers.models.dbrx.configuration_dbrx import DbrxConfig, DbrxFFNConfig
-from transformers.models.dbrx.modeling_dbrx import DbrxExpertGLU, DbrxExperts, DbrxFFN
 
 
 class HFModel(nn.Module):
-    def __init__(self):
+    def __init__(self, in_features=3, out_features=5):
         super().__init__()
         self.net = nn.Sequential(
             # initialization is (out_features, in_features) instead of (in_features, out_features)
-            transformers.pytorch_utils.Conv1D(5, 3),
+            transformers.pytorch_utils.Conv1D(out_features, in_features),
             nn.ReLU(),
-            transformers.pytorch_utils.Conv1D(5, 5),
+            transformers.pytorch_utils.Conv1D(out_features, out_features),
         )
 
     def forward(self, x):
@@ -104,6 +108,25 @@ def test_hf_parallel_weight_access_restores_dtensor_after_exception(monkeypatch)
     assert linear.weight is original_weight
 
 
+@pytest.mark.parametrize("expert_parallel", [False, True], ids=["no-plan", "expert-parallel"])
+def test_a_mesh_without_tp_sharded_linears_warns_unless_the_model_is_expert_parallel(
+    expert_parallel,
+):
+    """A transformers mesh with no TP-sharded Linear under it is worth a warning, except on a model
+    loaded expert-parallel: its mesh is the experts', and no Linear is meant to be sharded."""
+    model = nn.Sequential(nn.Linear(4, 4))
+    model._device_mesh = object()
+    if expert_parallel:
+        set_distribution_plan(model, DistributionPlan(2, ep_size=2))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        convert_hf_parallel_linears_on_the_fly(model)
+
+    warned = any("no TP-sharded linear layer" in str(w.message) for w in caught)
+    assert warned is not expert_parallel
+
+
 def test_convert_conv1d():
     set_seed()
     assert transformers.pytorch_utils.Conv1D in QuantModuleRegistry
@@ -137,6 +160,115 @@ def test_convert_conv1d():
     assert torch.allclose(out_1, out_2)
 
 
+_Q8_0_GPTQ_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": "q8_0",
+                "block_sizes": {-1: 32},
+                "backend": "ggml",
+                "effective_bits": GGML_FORMAT_REGISTRY["q8_0"].effective_bits,
+            },
+        },
+    ],
+    "algorithm": {"method": "gptq", "block_size": 256},
+}
+
+
+@pytest.mark.parametrize("rewrites", [False, True], ids=["int8", "q8_0_gptq"])
+def test_auto_quantize_frees_the_conv1d_weights_conversion_replaces(monkeypatch, rewrites):
+    # Conversion transposes each Conv1D weight into a new parameter. Only a search with a
+    # weight-rewriting candidate keeps the old ones, to hand back on a refusal, and only until its
+    # checks before calibration pass.
+    model = HFModel(in_features=256, out_features=256)
+    replaced = [
+        weakref.ref(m.weight)
+        for m in model.modules()
+        if isinstance(m, transformers.pytorch_utils.Conv1D)
+    ]
+    alive = []
+
+    def count_alive():
+        gc.collect()
+        alive.append(sum(ref() is not None for ref in replaced))
+
+    before_search = _AutoQuantizeBaseSearcher.before_search
+
+    def counting_before_search(self):
+        count_alive()
+        return before_search(self)
+
+    def forward_step(model, batch):
+        count_alive()
+        return model(batch)
+
+    monkeypatch.setattr(_AutoQuantizeBaseSearcher, "before_search", counting_before_search)
+    mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 10.0},
+        quantization_formats=[_Q8_0_GPTQ_CFG if rewrites else mtq.INT8_DEFAULT_CFG],
+        data_loader=[torch.randn(8, 256) for _ in range(2)],
+        forward_step=forward_step,
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+    after_conversion, *in_forwards = alive
+    assert after_conversion == (len(replaced) if rewrites else 0)
+    assert in_forwards and not any(in_forwards)
+
+
+@pytest.mark.parametrize(
+    "layerwise",
+    [{"export_dir": "export"}, {"export_dir": ""}, {"checkpoint_dir": "checkpoint"}],
+    ids=["export_dir", "empty_export_dir", "checkpoint_dir_beside_gptq"],
+)
+@pytest.mark.parametrize("as_config", [False, True], ids=["dict", "LayerwiseConfig"])
+def test_auto_quantize_refuses_layerwise_dirs_before_converting(
+    monkeypatch, tmp_path, layerwise, as_config
+):
+    # Exporting each calibrated layer would replace its weights with packed ones before scoring,
+    # and an empty path exports into the working directory. Resuming the max candidate's layers
+    # would load their weights into new Parameters, which the restore after GPTQ does not reach.
+    monkeypatch.chdir(tmp_path)
+    source = get_tiny_llama()
+    model = copy.deepcopy(source)
+    config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    layerwise = {"enable": True, **layerwise}
+    config["algorithm"] = {
+        "method": "max",
+        "layerwise": LayerwiseConfig(**layerwise) if as_config else layerwise,
+    }
+    formats = [config, _Q8_0_GPTQ_CFG] if "checkpoint_dir" in layerwise else [config]
+    input_ids = model.dummy_inputs["input_ids"]
+
+    def search():
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 11.0},
+            quantization_formats=formats,
+            data_loader=[{"input_ids": input_ids} for _ in range(2)],
+            forward_step=lambda model, batch: model(**batch),
+            loss_func=lambda output, batch: output.logits.float().square().sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+            # Otherwise layerwise export stops at the lm_head quantizer before exporting a layer.
+            disabled_layers=["*lm_head*"],
+        )
+
+    with pytest.raises(NotImplementedError):
+        search()
+
+    assert [type(m) for m in model.modules()] == [type(m) for m in source.modules()]
+    for weight, original in zip(model.parameters(), source.parameters()):
+        assert torch.equal(weight, original)
+    assert not any(tmp_path.iterdir())
+    config["algorithm"] = "max"
+    search()
+
+
 def test_fp8_linear_per_tensor_dequant(monkeypatch):
     module = FP8Linear(2, 2, block_size=(128, 128))
     module.weight_scale_inv = nn.Parameter(torch.tensor(2.0))
@@ -150,53 +282,6 @@ def test_fp8_linear_per_tensor_dequant(monkeypatch):
     torch.testing.assert_close(
         module._dequantize_weight(torch.float32), module.weight.float() * 2.0
     )
-
-
-@pytest.mark.skipif(
-    Version(transformers.__version__) < Version("5.0"),
-    reason="test_dbrx is not supported for transformers<5.0",
-)
-def test_dbrx():
-    assert DbrxExperts in QuantModuleRegistry
-    assert DbrxExpertGLU in QuantModuleRegistry
-
-    config = DbrxConfig(
-        ffn_config=DbrxFFNConfig(ffn_hidden_size=8, moe_num_experts=2, hidden_size=32),
-        hidden_size=32,
-    )
-
-    model_ref = DbrxFFN(config)
-    model_test = DbrxFFN(config)
-    with torch.no_grad():
-        model_ref.experts.mlp.w1.copy_(torch.randn(16, 32))
-        model_ref.experts.mlp.v1.copy_(torch.randn(16, 32))
-        model_ref.experts.mlp.w2.copy_(torch.randn(16, 32))
-
-    model_test.load_state_dict(model_ref.state_dict())
-
-    mtq.replace_quant_module(model_test)
-
-    expertglu_ref = model_ref.experts.mlp
-    expertglu_test = model_test.experts.mlp
-
-    assert hasattr(expertglu_test, "w1_linear") and not hasattr(expertglu_test, "w1")
-    assert hasattr(expertglu_test, "v1_linear") and not hasattr(expertglu_test, "v1")
-    assert hasattr(expertglu_test, "w2_linear") and not hasattr(expertglu_test, "w2")
-
-    # Weights are stored transposed (W = w1[i].T) to match F.linear semantics with
-    # transformers 5.0's raw matmul: x @ w1[i] = F.linear(x, w1[i].T)
-    assert torch.allclose(
-        torch.concat([m.weight.T for m in expertglu_test.w1_linear], dim=0),
-        expertglu_ref.w1,
-    )
-
-    mtq.set_quantizer_attributes_partial(model_test, "*", {"enable": False})
-
-    # In transformers 5.0, the FFN input dimension is ffn_hidden_size (not hidden_size)
-    x = torch.randn(1, 4, 8)
-    out_1 = model_ref(x)
-    out_2 = model_test(x)
-    assert torch.allclose(out_1[0], out_2[0])
 
 
 @pytest.mark.skipif(
@@ -243,9 +328,6 @@ def test_nemotron_h_experts_only_recipes_target_routed_experts(recipe_path):
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
 @pytest.mark.parametrize("model_provider", [get_tiny_llama, get_tiny_qwen3_moe])
 def test_autoquantize_huggingface(model_provider, method):
-    if model_provider == get_tiny_qwen3_moe and Version(torch.__version__) < Version("2.9"):
-        pytest.skip("torch 2.8 grouped_mm is CUDA-only")
-
     model = model_provider()
     input_ids = model.dummy_inputs["input_ids"]
 

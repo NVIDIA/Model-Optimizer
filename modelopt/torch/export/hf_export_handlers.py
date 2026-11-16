@@ -16,14 +16,33 @@
 """Built-in module handlers for unified Hugging Face export."""
 
 import collections.abc
+import contextlib
 import warnings
+from dataclasses import dataclass
 
+import torch
 import torch.nn as nn
+from torch.distributed.fsdp import FSDPModule
+
+from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.quantization.utils import (
+    fsdp2_aware_weight_update,
+    module_name_maps,
+    quantizer_attr_names,
+)
+from modelopt.torch.quantization.utils.core_utils import ModuleNames, _get_enclosing_fsdp_module
+from modelopt.torch.utils.distributed import distribution_plan
 
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
-from .moe_utils import _export_fused_experts
-from .quant_format import QUANTIZATION_NONE
-from .quant_utils import get_quantization_format
+from .moe_utils import _export_fused_experts, _export_fused_experts_keep_fused
+from .quant_format import QUANTIZATION_NONE, QUANTIZATION_NVFP4
+from .quant_utils import (
+    get_activation_scaling_factor,
+    get_quantization_format,
+    get_weight_block_size,
+    to_quantized_weight,
+)
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
 __all__: list[str] = []
@@ -32,6 +51,86 @@ __all__: list[str] = []
 def _has_fused_experts_quantizers(module: nn.Module) -> bool:
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     return hasattr(module, f"{first_proj_attr}_weight_quantizers")
+
+
+@dataclass
+class _HeldWindow:
+    """An FSDP2 unit's weight-update window, and the modules packed in it so far."""
+
+    unit: nn.Module
+    modules: list[nn.Module]
+    stack: contextlib.ExitStack
+
+
+def _enclosing_unit(ctx: ExportContext, module: nn.Module) -> nn.Module:
+    """The innermost FSDP2 unit enclosing ``module``, or the model if none does."""
+    if ctx.module_names is None:
+        ctx.module_names = module_name_maps(ctx.model)
+    return _get_enclosing_fsdp_module(module, ctx.model, ctx.module_names) or ctx.model
+
+
+def _window_root(ctx: ExportContext, unit: nn.Module) -> tuple[nn.Module, ModuleNames | None]:
+    """The root a weight-update window on ``unit`` is opened on, and its module names.
+
+    A window does nothing on an unwrapped root, which expert parallelism leaves (it FSDP2-shards
+    only the dense layers), so there the unit itself is the root, with names relative to it.
+    """
+    if isinstance(ctx.model, FSDPModule) or unit is ctx.model:
+        # The model's own names, which _enclosing_unit has built.
+        return ctx.model, ctx.module_names
+    return unit, module_name_maps(unit)
+
+
+def _fsdp2_weight_window(
+    ctx: ExportContext, module: nn.Module
+) -> contextlib.AbstractContextManager:
+    """The ``fsdp2_aware_weight_update`` window to pack ``module``'s weights in.
+
+    Inside :func:`held_fsdp2_weight_windows`, the window of the module's FSDP2 unit, held open
+    across the unit's modules. Anywhere else, a window of the module's own, closed when the handler
+    is done, so a dispatch loop that knows nothing of held windows cannot leave a unit unsharded.
+    """
+    unit = _enclosing_unit(ctx, module)
+    if not ctx.hold_fsdp2_windows:
+        root, names = _window_root(ctx, unit)
+        return fsdp2_aware_weight_update(root, module, names=names)
+    held = ctx.fsdp2_window
+    if held is not None and held.unit is unit:
+        # Once per module, though a handler packing several weights asks once per weight: the
+        # window re-registers each listed module's weights with FSDP2 when it closes.
+        if not any(m is module for m in held.modules):
+            held.modules.append(module)
+        return contextlib.nullcontext()
+    _close_fsdp2_weight_window(ctx)
+    root, names = _window_root(ctx, unit)
+    held = _HeldWindow(unit, [module], contextlib.ExitStack())
+    held.stack.enter_context(fsdp2_aware_weight_update(root, held.modules, names=names))
+    ctx.fsdp2_window = held
+    return contextlib.nullcontext()
+
+
+@contextlib.contextmanager
+def held_fsdp2_weight_windows(ctx: ExportContext):
+    """Within the block, pack each FSDP2 unit's modules in one weight-update window.
+
+    The window unshards the whole unit and reshards it when it closes, so a window per module
+    gathers a decoder layer once per quantized linear in it. Here the unit's window stays open from
+    one handler to the next until the export reaches another unit, each module joining the list
+    whose weights it re-registers with FSDP2, and leaving the block closes the last.
+    """
+    ctx.hold_fsdp2_windows = True
+    try:
+        yield
+    finally:
+        ctx.hold_fsdp2_windows = False
+        _close_fsdp2_weight_window(ctx)
+
+
+def _close_fsdp2_weight_window(ctx: ExportContext) -> None:
+    """Close the weight-update window the handlers hold open, if any, resharding its unit."""
+    held, ctx.fsdp2_window = ctx.fsdp2_window, None
+    if held is not None:
+        held.stack.close()
 
 
 def _export_weight(
@@ -43,27 +142,16 @@ def _export_weight(
     # install the built-in handlers while retaining this legacy helper's import path.
     from .unified_export_hf import _export_quantized_weight
 
+    # The no-gather export packs a still-sharded model: an FSDP2-owned weight goes in its unit's
+    # weight-update window, or the unit's next reshard puts FSDP2's unquantized shard back.
+    if ctx.keep_fused_experts and distribution_plan(ctx.model).is_fsdp_dense:
+        with _fsdp2_weight_window(ctx, module):
+            _export_quantized_weight(module, ctx.dtype, weight_name)
+        return
     _export_quantized_weight(module, ctx.dtype, weight_name)
 
 
 # Preparation handlers are registered in the same precedence as the legacy MoE prepass.
-
-
-# Keyed on the mixin class name too: the generated class is normally named
-# "QuantDbrxExperts", but _DMRegistryCls falls back to a module-prefixed name on
-# collision, while "_QuantDbrxExperts" remains in the generated class's MRO.
-@PrepareMoEInputsRegistry.register("QuantDbrxExperts", "_QuantDbrxExperts")
-def _prepare_dbrx_experts(name: str, moe_module: nn.Module, ctx: ExportContext) -> None:
-    """Fill missing input amax values for DBRX per-expert ModuleLists."""
-    experts_mlp = moe_module.experts.mlp
-    for linear_name in get_expert_linear_names(moe_module, ctx.model_type):
-        if hasattr(experts_mlp, linear_name):
-            linear_modulelist = getattr(experts_mlp, linear_name)
-            if hasattr(linear_modulelist, "__iter__"):
-                set_expert_quantizer_amax(
-                    modules=list(linear_modulelist),
-                    quantizer_attrs=["input_quantizer"],
-                )
 
 
 @PrepareMoEInputsRegistry.register(predicate=_has_fused_experts_quantizers)
@@ -125,12 +213,13 @@ def _is_quant_moe_linear(module: nn.Module) -> bool:
     name gets uniquified — would bypass this handler and export without the input-amax
     fallback. The name check is kept as a fallback so stand-in modules match too.
 
-    The wrapper lives in the optional transformers plugin, hence the lazy import.
+    The wrapper lives in the Step PTQ modeling module, imported lazily like other export
+    modules do to avoid an import cycle with ``modelopt.torch.quantization``.
     """
     if not hasattr(module, "experts"):
         return False
     try:
-        from modelopt.torch.quantization.plugins.huggingface import _QuantMoELinear
+        from modelopt.torch.models.step3p5.modeling_ptq import _QuantMoELinear
 
         if isinstance(module, _QuantMoELinear):
             return True
@@ -149,13 +238,37 @@ def _export_moe_linear(name: str, module: nn.Module, ctx: ExportContext) -> None
 def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Split and quantize a fused-experts module with plural weight quantizers.
 
-    Under FSDP2 each rank holds only some experts, so it packs just those (kept fused) and the
-    split into per-expert keys is deferred until the gather brings all experts together.
-
     Tied experts are packed independently and their duplicate keys are dropped by name
     in postprocess_state_dict; no per-module dedup cache is used.
+
+    Distributed no-gather export (``ctx.keep_fused_experts``) folds the quantizers into the fused
+    weight IN PLACE, quantizing only this rank's local experts and keeping the result ``Shard(0)`` --
+    the per-expert split happens later on the sharded weight (``split_fused_experts_state_dict``).
+    Otherwise (single process, or gather export) it splits into full per-expert submodules here.
     """
-    _export_fused_experts(module, ctx.dtype)
+    attr = name.rpartition(".")[2]
+    if ctx.keep_fused_experts and attr != "experts":
+        # The split into per-expert keys finds a fused weight by its ``experts.<proj>`` key, as the
+        # writer does, so one named otherwise would be written fused and fail only at load.
+        raise NotImplementedError(
+            f"{name}: the keep-fused export splits fused experts into per-expert keys by their "
+            f"`experts` attribute name, and this module is named {attr!r}."
+        )
+    if ctx.keep_fused_experts and distribution_plan(ctx.model).is_fsdp_dense:
+        # FSDP2 owns the fused weights here: fold them inside a weight-update window, which hands
+        # FSDP2 the packed weights. Replaced behind its back, they would be overwritten with its
+        # original shards the next time the layer reshards, and exported unquantized. The window
+        # unshards FSDP2's params, so under FSDP2 alone each rank folds every expert of the unit, one
+        # unit at a time as a forward holds it; expert weights FSDP2 does not shard, as expert
+        # parallelism keeps them, stay sharded over the experts, and each rank folds its own.
+        with _fsdp2_weight_window(ctx, module):
+            _export_fused_experts_keep_fused(module, ctx.dtype)
+    elif ctx.keep_fused_experts:
+        # No-gather distributed export: fold each rank's LOCAL experts and leave the weight
+        # fused + sharded; the per-expert split happens after consolidation.
+        _export_fused_experts_keep_fused(module, ctx.dtype)
+    else:
+        _export_fused_experts(module, ctx.dtype)
 
 
 @ExportModuleRegistry.register(predicate=is_quantlinear)
@@ -173,6 +286,145 @@ def _export_quant_linear(name: str, module: nn.Module, ctx: ExportContext) -> No
         raise AssertionError(
             f"Failed to export module '{name}' (type={type(module).__name__}): {e}"
         ) from e
+
+
+def _validate_dynamic_nvfp4_quantizer(
+    quantizer: TensorQuantizer | None,
+    role: str,
+) -> TensorQuantizer:
+    """Validate the exact quantizer contract used by Conv3d implicit GEMM."""
+    if not isinstance(quantizer, TensorQuantizer):
+        raise NotImplementedError(
+            f"Conv3d {role} quantizer must be a TensorQuantizer, got "
+            f"{type(quantizer).__name__ if quantizer is not None else 'None'}."
+        )
+    if not quantizer.is_enabled or not quantizer._if_quant:
+        raise NotImplementedError(f"Conv3d {role} quantizer must be enabled for quantization.")
+    if (
+        not quantizer.is_nvfp4_dynamic
+        or quantizer.block_sizes.get(-1) != 16
+        or quantizer.axis is not None
+    ):
+        raise NotImplementedError(
+            f"Conv3d {role} quantizer must use per-tensor dynamic block-16 NVFP4."
+        )
+    return quantizer
+
+
+def _export_quantized_conv3d_weight(
+    sub_module: nn.Module,
+    dtype: torch.dtype,
+    weight_name: str = "weight",
+) -> None:
+    """Export a supported Conv3d as logical flattened-K dynamic NVFP4 tensors.
+
+    The only supported contract is an ordinary, ungrouped Conv3d with full
+    NVFP4 weight/input quantization and a dynamic weight quantizer. Other
+    formats fail closed because their live fake-quant path does not share this
+    canonical flattened reduction axis.
+    """
+    if not isinstance(sub_module, nn.Conv3d):
+        raise TypeError(f"Expected nn.Conv3d, got {type(sub_module).__name__}.")
+    if sub_module.groups != 1:
+        raise NotImplementedError(
+            f"Grouped Conv3d export is not supported; got groups={sub_module.groups}."
+        )
+
+    quantizer_attrs = quantizer_attr_names(weight_name)
+    weight: nn.Parameter = getattr(sub_module, weight_name)
+    if weight.ndim != 5:
+        raise ValueError(f"Conv3d weight must be rank 5, got shape {tuple(weight.shape)}.")
+    if not weight.is_floating_point():
+        raise ValueError(f"Conv3d weight must be floating point, got {weight.dtype}.")
+
+    weight_quantizer = _validate_dynamic_nvfp4_quantizer(
+        getattr(sub_module, quantizer_attrs.weight_quantizer, None), "weight"
+    )
+    input_quantizer = _validate_dynamic_nvfp4_quantizer(
+        getattr(sub_module, quantizer_attrs.input_quantizer, None), "input"
+    )
+    output_quantizer = getattr(sub_module, quantizer_attrs.output_quantizer, None)
+    if output_quantizer is not None and getattr(output_quantizer, "is_enabled", False):
+        raise NotImplementedError("Conv3d output quantization is not supported for export.")
+    quantization_format = get_quantization_format(sub_module)
+    if quantization_format != QUANTIZATION_NVFP4:
+        raise NotImplementedError(
+            "Conv3d export supports only full dynamic NVFP4; "
+            f"got quantization format {quantization_format!r}."
+        )
+
+    block_size = get_weight_block_size(sub_module, weight_name)
+    weight_flat = weight.reshape(weight.shape[0], -1)
+    k_flat = weight_flat.shape[-1]
+    k_padded = ((k_flat + block_size - 1) // block_size) * block_size
+    if k_padded != k_flat:
+        weight_flat = torch.nn.functional.pad(weight_flat, (0, k_padded - k_flat))
+
+    weight_scale_2 = None
+    if weight_quantizer.amax is not None:
+        if weight_quantizer.amax.numel() != 1 or not torch.all(
+            torch.isfinite(weight_quantizer.amax) & (weight_quantizer.amax > 0)
+        ):
+            raise ValueError(
+                "Conv3d weight quantizer amax must be a finite positive scalar when calibrated."
+            )
+        weight_scale_2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
+    if weight_scale_2 is None:
+        weight_scale_2 = NVFP4QTensor.get_weights_scaling_factor_2(weight_flat)
+    weight_scale_2 = weight_scale_2.to(device=weight.device, dtype=torch.float32).squeeze()
+    if not torch.all(torch.isfinite(weight_scale_2)) or not torch.all(weight_scale_2 > 0):
+        raise ValueError(
+            f"Conv3d weight_scale_2 must be finite and positive, got {weight_scale_2}."
+        )
+    weight_scale = NVFP4QTensor.get_weights_scaling_factor(
+        weight_flat,
+        block_size=block_size,
+        weights_scaling_factor_2=weight_scale_2,
+    )[0]
+    quantized_weight = to_quantized_weight(
+        weight_flat.to(dtype),
+        weight_scale,
+        QUANTIZATION_NVFP4,
+        weight_scale_2,
+        block_size,
+    )
+
+    if input_quantizer.amax is None:
+        raise ValueError("Conv3d input quantizer must be calibrated before export.")
+    if input_quantizer.amax.numel() != 1 or not torch.all(
+        torch.isfinite(input_quantizer.amax) & (input_quantizer.amax > 0)
+    ):
+        raise ValueError("Conv3d input quantizer amax must be a finite positive scalar.")
+    input_scale = get_activation_scaling_factor(
+        sub_module, input_quantizer_name=quantizer_attrs.input_quantizer
+    )
+
+    # Commit only after every validation and tensor conversion succeeds.
+    setattr(sub_module, weight_name, nn.Parameter(quantized_weight, requires_grad=False))
+    sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
+    sub_module.register_buffer(quantizer_attrs.weight_scale_2, weight_scale_2)
+    sub_module.register_buffer(quantizer_attrs.input_scale, input_scale.squeeze())
+
+    torch.cuda.empty_cache()
+
+
+@ExportModuleRegistry.register(
+    "WanCausalConv3d", predicate=lambda module: hasattr(module, "weight_quantizer")
+)
+def _export_quant_conv3d(name: str, module: nn.Module, ctx: ExportContext) -> None:
+    """Export a supported quantized Wan Conv3d through its MRO registry match."""
+    quantizers = [
+        getattr(module, attr, None)
+        for attr in ("weight_quantizer", "input_quantizer", "output_quantizer")
+    ]
+    if not any(getattr(quantizer, "is_enabled", False) for quantizer in quantizers):
+        return
+
+    try:
+        _export_quantized_conv3d_weight(module, ctx.dtype)
+    except (AssertionError, NotImplementedError, TypeError, ValueError) as e:
+        message = f"Failed to export Conv3d '{name}' (type={type(module).__name__}): {e}"
+        raise type(e)(message) from e
 
 
 @ExportModuleRegistry.register(
@@ -209,9 +461,19 @@ def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) ->
 def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Export fused BMM-style expert weights (Llama4 / GPT-OSS).
 
-    Its weight quantizer has one amax covering all experts, so under FSDP2 each rank can pack
-    just the experts it owns and produce identical bytes -- no gather or unshard needed.
+    Their weight quantizer has one amax covering all experts. The keep-fused export refuses them,
+    since they store their experts transposed.
     """
+    if ctx.keep_fused_experts:
+        # The keep-fused export leaves fused experts for the writer to split by their
+        # ``experts.<proj>`` key, as ``(num_experts, out_dim, in_dim)`` weights. These store theirs
+        # transposed (GPT-OSS also interleaves gate and up, and keeps biases), so the split would cut
+        # every expert wrong, quantized or not.
+        raise NotImplementedError(
+            f"{name}: the keep-fused export splits fused experts stored (num_experts, out_dim, "
+            f"in_dim), and {type(module).__name__} stores its experts transposed; export it through "
+            "the gather export instead."
+        )
     if get_quantization_format(module) == QUANTIZATION_NONE:
         return
     # TODO: consolidate uncalibrated experts handling logic

@@ -16,6 +16,7 @@
 """Implements NVFP4 quantization for efficient tensor storage and computation."""
 
 import torch
+from torch.distributed.tensor import DTensor
 
 from ..backends.utils import fp4_compatible
 from ..qtensor.base_qtensor import BaseQuantizedTensor
@@ -44,6 +45,24 @@ def _cast_per_block_scale_to_fp8(
     if per_block_scale_max is not None:
         per_block_scale = per_block_scale.float() * fp8_max_for_normalization / per_block_scale_max
     return per_block_scale.clamp(min=2**-9, max=E4M3_MAX).to(torch.float8_e4m3fn)
+
+
+def cutlass_fp4_scale_to_modelopt_fp4_scale(
+    cutlass_scale: torch.Tensor, weight_shape: tuple[int, int]
+) -> torch.Tensor:
+    """Undo the cuBLAS/cutlass tiled swizzle of NVFP4 block scales (TensorRT-LLM ``fp4_quantize``).
+
+    The swizzled scale holds 128x4 tiles, each stored as ``[row % 32, row // 32, col]``; this is the
+    inverse of the rearrangement in ``swizzle_nvfp4_scales``. Returns the ``[m, n // 16]`` E4M3
+    scales of an ``[m, n]`` weight with block size 16.
+    """
+    m, n = weight_shape
+    n //= 16
+    row_blocks, col_blocks = -(-m // 128), -(-n // 4)
+    tiles = cutlass_scale.reshape(row_blocks, col_blocks, 32, 4, 4)
+    padded = tiles.permute(0, 3, 2, 1, 4).reshape(row_blocks * 128, col_blocks * 4)
+    # contiguous(): the slice is a strided view, and fp4_dequantize indexes the scale flatly.
+    return padded[:m, :n].contiguous().view(torch.float8_e4m3fn)
 
 
 class NVFP4QTensor(BaseQuantizedTensor):
@@ -145,7 +164,8 @@ class NVFP4QTensor(BaseQuantizedTensor):
             # Compute scales in float
             per_block_scale_max = global_amax / E2M1_MAX
             per_block_scale = per_block_amax / E2M1_MAX
-            per_block_scale[per_block_scale == 0] = 1.0
+            # torch.where, to match the dynamic path below, which must avoid index_put_ on a DTensor.
+            per_block_scale = torch.where(per_block_scale == 0, 1.0, per_block_scale)
 
             # Reshape per_block_scale to match weight's block structure
             num_blocks_per_row = weight.shape[-1] // block_size
@@ -195,8 +215,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
         per_block_scale = per_block_amax / (
             E2M1_MAX * weights_scaling_factor_2.to(per_block_amax.device)
         )
-        # Set all zero values in scale to 1.0
-        per_block_scale[per_block_scale == 0] = 1.0
+        # Set all zero values in scale to 1.0. torch.where, not a boolean-mask assignment: that lowers
+        # to index_put_, which DTensor (a sharded weight in the distributed export) cannot dispatch.
+        per_block_scale = torch.where(per_block_scale == 0, 1.0, per_block_scale)
 
         if not keep_high_precision:
             per_block_scale = _cast_per_block_scale_to_fp8(per_block_scale)
@@ -230,6 +251,11 @@ class NVFP4QTensor(BaseQuantizedTensor):
     @classmethod
     def _cast_fp4(cls, weight: torch.Tensor):
         """Converts tensor to uint4."""
+        # A DTensor is cast on its local shard: the steps below mix it with plain tensors, which
+        # DTensor refuses. The cast is elementwise, so rewrapping the result gives the same tensor.
+        sharded = weight if isinstance(weight, DTensor) else None
+        if sharded is not None:
+            weight = sharded.to_local()
         device = weight.device
 
         # Extract sign and compute absolute values in one pass
@@ -248,7 +274,19 @@ class NVFP4QTensor(BaseQuantizedTensor):
         )
 
         # Combine sign, ordinal, and rounding adjustment
-        return (sign_bit << 3) + ord + equals_odd_bounds
+        packed = (sign_bit << 3) + ord + equals_odd_bounds
+        if sharded is None:
+            return packed
+        # The global shape and stride as given: from_local would infer local x world, wrong for an
+        # uneven shard.
+        return DTensor.from_local(
+            packed,
+            sharded.device_mesh,
+            sharded.placements,
+            run_check=False,
+            shape=sharded.shape,
+            stride=sharded.stride(),
+        )
 
     @classmethod
     def quantize(
@@ -272,6 +310,16 @@ class NVFP4QTensor(BaseQuantizedTensor):
         Returns:
         tuple: Contains quantized data, quantized per block scaling factor, and per tensor scaling factor.
         """
+        if (
+            isinstance(input, DTensor)
+            and weights_scaling_factor is not None
+            and not isinstance(weights_scaling_factor, DTensor)
+        ):
+            # A plain per-block scale, as a static quantizer's, covers the whole weight.
+            raise NotImplementedError(
+                "NVFP4 packs a DTensor shard with the per-block scale computed off the shard "
+                "(get_weights_scaling_factor), not a plain one such as a static quantizer's."
+            )
         # Get original input shape
         input_shape = input.shape
         input_dtype = input.dtype
@@ -293,11 +341,6 @@ class NVFP4QTensor(BaseQuantizedTensor):
         ):
             try:
                 import tensorrt_llm  # noqa: F401
-
-                # Make sure this utils is available for dequantize
-                from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-                    cutlass_fp4_scale_to_modelopt_fp4_scale,  # noqa: F401
-                )
 
                 packed_weight, weights_scaling_factor = torch.ops.trtllm.fp4_quantize(
                     input, 1.0 / weights_scaling_factor_2, block_size, False
@@ -334,8 +377,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
             return scaled_weight
         # Cast weights to fp4
         q_weight = cls._cast_fp4(scaled_weight)
-        # Pack weights
-        packed_weight = (q_weight[..., 1::2] << 4) | q_weight[..., 0::2]
+        # Pack weights. torch.bitwise_left_shift, not ``<< 4``: on a DTensor the operator is a silent
+        # no-op, which would pack unrelated codes on the distributed export path.
+        packed_weight = torch.bitwise_left_shift(q_weight[..., 1::2], 4) | q_weight[..., 0::2]
         return (
             cls(input_shape, input_dtype, packed_weight),
             weights_scaling_factor,
@@ -364,18 +408,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
         # Get scales from kwargs
         if kwarg["scale"].dtype == torch.uint8 and kwarg["scale"].ndim == 1:
             # If quantization is done by trtllm, convert cutlass fp4 scale to modelopt fp4 scale
-            try:
-                from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-                    cutlass_fp4_scale_to_modelopt_fp4_scale,
-                )
-
-                kwarg["scale"] = cutlass_fp4_scale_to_modelopt_fp4_scale(
-                    kwarg["scale"], self.metadata["shape"][-2:]
-                )
-            except ImportError as e:
-                raise ImportError(
-                    "This tensor is quantized by trtllm, but tensorrt_llm cannot be imported."
-                ) from e
+            kwarg["scale"] = cutlass_fp4_scale_to_modelopt_fp4_scale(
+                kwarg["scale"], self.metadata["shape"][-2:]
+            )
 
         if fast:
             from modelopt.torch.kernels.quantization.gemm.fp4_kernel import fp4_dequantize

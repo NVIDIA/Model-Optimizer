@@ -1,0 +1,20 @@
+# Shared vLLM deployment for Qwen3-8B teacher, PTQ, and PTQ → QAD.
+deployment:
+  image: vllm/vllm-openai:v0.28.0-cu129
+  checkpoint_path: ${oc.env:MODEL_CHECKPOINT}
+  tensor_parallel_size: 1
+  data_parallel_size: 1
+  command: >-
+    vllm serve /checkpoint
+    --served-model-name ${deployment.served_model_name}
+    --host 0.0.0.0
+    --port ${deployment.port}
+    --dtype bfloat16
+    --tensor-parallel-size ${deployment.tensor_parallel_size}
+    --data-parallel-size ${deployment.data_parallel_size}
+    --max-model-len 32768
+    --max-num-seqs 2
+    --gpu-memory-utilization 0.85
+    --seed 42
+    --kv-cache-dtype auto
+  tokenizer_path: /checkpoint
