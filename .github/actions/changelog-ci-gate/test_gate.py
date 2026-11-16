@@ -20,7 +20,10 @@ import os
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from textwrap import dedent
 from unittest.mock import patch
 
 import gate
@@ -36,6 +39,15 @@ class ChangelogGateTest(unittest.TestCase):
         self.old_cwd = Path.cwd()
         os.chdir(self.directory.name)
         self.addCleanup(os.chdir, self.old_cwd)
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {
+                    "GIT_CONFIG_GLOBAL": os.devnull,
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                },
+            )
+        )
         self._git("init", "-q")
         self._git("config", "user.email", "test@example.com")
         self._git("config", "user.name", "CI test")
@@ -73,13 +85,21 @@ class ChangelogGateTest(unittest.TestCase):
             "CI_BASE_REF": "main",
             "CI_PR": "42",
             "CI_ALLOW_REUSE": "true",
+            "CI_EXECUTION_POLICY": "",
             "GITHUB_OUTPUT": "output",
             "GITHUB_STEP_SUMMARY": "summary",
             "CI_MARKER": "marker",
         }
 
     def _git(self, *args):
-        return subprocess.check_output(["git", *args], stderr=subprocess.PIPE).decode().strip()
+        return (
+            subprocess.check_output(
+                ["git", "-c", "commit.gpgsign=false", "-c", f"core.hooksPath={os.devnull}", *args],
+                stderr=subprocess.PIPE,
+            )
+            .decode()
+            .strip()
+        )
 
     def _commit(self, filename, contents):
         Path(filename).parent.mkdir(parents=True, exist_ok=True)
@@ -98,10 +118,15 @@ class ChangelogGateTest(unittest.TestCase):
         self.fail(f"Unexpected endpoint: {endpoint}")
 
     def _decision(self, expected):
+        Path("marker").unlink(missing_ok=True)
         with patch.dict(os.environ, self.env), patch.object(gate, "_api", side_effect=self._api):
             gate.main()
         assert f"reuse={str(expected).lower()}\n" in Path("output").read_text()
-        assert Path("marker").read_text().strip()
+        values = dict(line.split("=", 1) for line in Path("output").read_text().splitlines())
+        if values["fingerprint"]:
+            assert Path("marker").read_text().strip() == values["fingerprint"]
+        else:
+            assert not Path("marker").exists()
         Path("output").unlink()
 
     def test_changelog_updates_reuse_success_for_both_pr_routes(self):
@@ -140,6 +165,16 @@ class ChangelogGateTest(unittest.TestCase):
             with self.subTest(artifacts=artifacts):
                 self.artifacts = artifacts
                 self._decision(False)
+
+    def test_execution_policy_change_invalidates_reuse(self):
+        """Removing an allowed failure must rerun tests under the stricter policy."""
+        policy = "llm_qat"
+        key = gate.fingerprint(self.old_head, self.base, "main", "42", policy)
+        self.artifacts = [{"name": f"ci-equivalence-{key}", "expired": False}]
+        self.env["CI_EXECUTION_POLICY"] = policy
+        self._decision(True)
+        self.env["CI_EXECUTION_POLICY"] = ""
+        self._decision(False)
 
     def test_code_workflow_and_other_docs_changes_cannot_reuse(self):
         """Reject non-changelog source changes even if an artifact claims equivalence."""
@@ -188,13 +223,56 @@ class ChangelogGateTest(unittest.TestCase):
         self.env["CI_BASE_SHA"] = target
         self._decision(True)
 
+    def test_fingerprint_git_error_uses_normal_tests_without_evidence(self):
+        """An unreadable commit disables reuse and does not publish a fingerprint marker."""
+        self.env["CI_HEAD_SHA"] = "0" * 40
+        self._decision(False)
+        assert not Path("marker").exists()
+
     def test_api_errors_and_forced_runs_use_normal_tests(self):
-        """Keep API failures and forced runs on the normal test path."""
-        with patch.object(self, "_api", side_effect=subprocess.CalledProcessError(1, "gh")):
+        """Keep useful error details without letting multiline stderr emit workflow commands."""
+        log = StringIO()
+        error = subprocess.CalledProcessError(
+            1, "gh", stderr=b"HTTP 403: missing actions permission\n::error::untrusted stderr\r\n"
+        )
+        with redirect_stdout(log), patch.object(self, "_api", side_effect=error):
             self._decision(False)
+        for text in [log.getvalue(), Path("summary").read_text()]:
+            assert "HTTP 403: missing actions permission" in text
+            assert "::error::untrusted stderr" in text
+            assert len(text.splitlines()) == 1
         self.env["CI_ALLOW_REUSE"] = "false"
         with patch.object(self, "_api", side_effect=AssertionError("must not query")):
             self._decision(False)
+
+
+class LinuxRerunTest(unittest.TestCase):
+    """Exercise the Linux job's reuse decision without rerunning its upstream gate."""
+
+    def test_linux_rerun_ignores_retained_reuse_output(self):
+        """A later job attempt executes tests even if the upstream gate said to reuse."""
+        workflow = Path(__file__).resolve().parents[2] / "workflows/unit_tests.yml"
+        step = workflow.read_text().split("      - id: linux-reuse\n", 1)[1]
+        step = step.split("      - name:", 1)[0]
+        script = dedent(step.split("        run: |\n", 1)[1])
+        for attempt, previous, expected in [
+            ("1", "true", "true"),
+            ("2", "true", "false"),
+            ("1", "false", "false"),
+        ]:
+            with (
+                self.subTest(attempt=attempt, previous=previous),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                output = Path(directory) / "output"
+                env = dict(
+                    os.environ,
+                    RUN_ATTEMPT=attempt,
+                    PREVIOUS_REUSE=previous,
+                    GITHUB_OUTPUT=str(output),
+                )
+                subprocess.run(["bash", "-e", "-c", script], check=True, env=env)
+                assert output.read_text().strip() == f"reuse={expected}"
 
 
 if __name__ == "__main__":

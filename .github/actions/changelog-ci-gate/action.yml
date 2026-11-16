@@ -10,6 +10,10 @@ inputs:
   base-ref:
     description: Current PR target branch.
     required: true
+  execution-policy:
+    description: Effective policy that can change which test failures block CI.
+    required: false
+    default: ""
 outputs:
   reuse:
     description: Whether the previous successful workflow tested equivalent code.
@@ -24,12 +28,14 @@ runs:
         CI_HEAD_SHA: ${{ inputs.head-sha }}
         CI_BASE_SHA: ${{ inputs.base-sha }}
         CI_BASE_REF: ${{ inputs.base-ref }}
+        CI_EXECUTION_POLICY: ${{ inputs.execution-policy }}
         CI_PR: ${{ github.event.pull_request.number || github.ref_name }}
         CI_ALLOW_REUSE: ${{ github.run_attempt == 1 && (github.event.action == 'synchronize' || github.event_name == 'push') }}
         CI_MARKER: ${{ runner.temp }}/ci-equivalence.txt
       run: python3 "$GITHUB_ACTION_PATH/gate.py"
     # Only completed, successful workflow runs can supply a reusable marker.
     - uses: actions/upload-artifact@v7
+      if: steps.gate.outputs.fingerprint != ''
       continue-on-error: true
       with:
         name: ci-equivalence-${{ steps.gate.outputs.fingerprint }}

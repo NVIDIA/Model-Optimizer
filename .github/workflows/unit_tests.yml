@@ -77,15 +77,25 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
+      - id: linux-reuse
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          PREVIOUS_REUSE: ${{ needs.check-file-changes.outputs.reuse }}
+        run: |
+          reuse=false
+          if [[ "$RUN_ATTEMPT" == 1 && "$PREVIOUS_REUSE" == true ]]; then
+            reuse=true
+          fi
+          echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
       - name: Reuse successful tests for changelog-only update
-        if: needs.check-file-changes.outputs.reuse == 'true'
+        if: steps.linux-reuse.outputs.reuse == 'true'
         run: echo "Equivalent code already passed CI; see check-file-changes summary."
-      - if: needs.check-file-changes.outputs.reuse != 'true'
+      - if: steps.linux-reuse.outputs.reuse != 'true'
         uses: actions/checkout@v7
-      - if: needs.check-file-changes.outputs.reuse != 'true'
+      - if: steps.linux-reuse.outputs.reuse != 'true'
         uses: ./.github/actions/ubuntu-setup
       - name: Run unit tests
-        if: needs.check-file-changes.outputs.reuse != 'true'
+        if: steps.linux-reuse.outputs.reuse != 'true'
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
@@ -99,7 +109,7 @@ jobs:
           OMP_NUM_THREADS: "1"
         run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)" -- $PYTEST_EXTRA
       - name: Upload coverage reports to Codecov
-        if: needs.check-file-changes.outputs.reuse != 'true'
+        if: steps.linux-reuse.outputs.reuse != 'true'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

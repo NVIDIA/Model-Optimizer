@@ -152,7 +152,8 @@ See [`modelopt/torch/quantization/utils/calib_utils.py`](./modelopt/torch/quanti
 
 ## 📝 Writing and running tests
 
-We use [pytest](https://docs.pytest.org/) for all tests. For any new features / examples, make sure to add tests and that the coverage check in your PR passes. The tests are organized into the following directories:
+We use [pytest](https://docs.pytest.org/) for tests, except the CI gate self-tests, which use
+standard-library `unittest` so they can run before installing dependencies. For any new features / examples, make sure to add tests and that the coverage check in your PR passes. The tests are organized into the following directories:
 
 Test filenames must mirror the production module they primarily cover: tests for `foo.py` belong in `test_foo.py`. When a production module is renamed, split, or removed, rename or split its tests in the same change so test filenames do not preserve obsolete module names. A cross-module integration test may use a feature-oriented name only when no single production module owns the behavior.
 
@@ -293,7 +294,7 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 - If any CI/CD checks fail, fix the issues and push again.
 - **Changelog-only follow-ups:** Unit, GPU, example and regression workflows can reuse their
   previous successful run when only `CHANGELOG.rst` changed, the PR target commit and branch
-  are unchanged, and the tested code is otherwise identical. Lightweight gates still report
+  are unchanged, and the tested code and effective failure policy are otherwise identical. Lightweight gates still report
   required checks on the new commit; code quality and docs still run. Missing or expired
   evidence, failed or unfinished runs, and base/code changes use normal test selection.
   Nightly, manually dispatched workflows and job reruns do not reuse results.

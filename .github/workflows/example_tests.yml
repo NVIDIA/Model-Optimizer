@@ -57,6 +57,7 @@ jobs:
           head-sha: ${{ steps.base.outputs.head_sha }}
           base-sha: ${{ steps.base.outputs.base_sha }}
           base-ref: ${{ steps.base.outputs.base_ref }}
+          execution-policy: ${{ vars.ALLOW_FAILURE_EXAMPLE_TESTS }}
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
         id: changed
         uses: step-security/changed-files@2e07db73e5ccdb319b9a6c7766bd46d39d304bad # v47.0.5

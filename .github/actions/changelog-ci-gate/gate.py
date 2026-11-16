@@ -38,9 +38,16 @@ def _source_tree(sha):
     return b"\0".join(entry for entry in entries if not entry.endswith(b"\tCHANGELOG.rst"))
 
 
-def fingerprint(head_sha, base_sha, base_ref, pr):
+def fingerprint(head_sha, base_sha, base_ref, pr, execution_policy=""):
     """Identify source, tested checkout and PR target while ignoring the root changelog."""
-    context = [_source_tree(head_sha).hex(), _source_tree("HEAD").hex(), base_sha, base_ref, pr]
+    context = [
+        _source_tree(head_sha).hex(),
+        _source_tree("HEAD").hex(),
+        base_sha,
+        base_ref,
+        pr,
+        execution_policy,
+    ]
     return hashlib.sha256(json.dumps(context).encode()).hexdigest()
 
 
@@ -77,28 +84,39 @@ def reusable_run(repo, run_id, head_sha, key):
 
 def main():
     """Publish reuse evidence and fall back to normal tests if evidence is unavailable."""
-    key = fingerprint(
-        os.environ["CI_HEAD_SHA"],
-        os.environ["CI_BASE_SHA"],
-        os.environ["CI_BASE_REF"],
-        os.environ["CI_PR"],
-    )
+    key = ""
     previous = None
-    if os.environ["CI_ALLOW_REUSE"] == "true":
-        try:
+    failure_reason = ""
+    try:
+        key = fingerprint(
+            os.environ["CI_HEAD_SHA"],
+            os.environ["CI_BASE_SHA"],
+            os.environ["CI_BASE_REF"],
+            os.environ["CI_PR"],
+            os.environ["CI_EXECUTION_POLICY"],
+        )
+        if os.environ["CI_ALLOW_REUSE"] == "true":
             previous = reusable_run(
                 os.environ["GITHUB_REPOSITORY"],
                 os.environ["GITHUB_RUN_ID"],
                 os.environ["CI_HEAD_SHA"],
                 key,
             )
-        except (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError) as error:
-            print(f"CI reuse unavailable ({type(error).__name__}); running tests normally.")
+    except (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError) as error:
+        detail = getattr(error, "stderr", None) or str(error)
+        if isinstance(detail, bytes):
+            detail = detail.decode(errors="replace")
+        # Keep subprocess output on one prefixed line so it cannot emit workflow commands.
+        failure_reason = " ".join(detail.split()) or type(error).__name__
+        print(f"CI reuse unavailable: {failure_reason}; running tests normally.")
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
         output.write(f"reuse={str(previous is not None).lower()}\nfingerprint={key}\n")
-    Path(os.environ["CI_MARKER"]).write_text(f"{key}\n")
+    if key:
+        Path(os.environ["CI_MARKER"]).write_text(f"{key}\n")
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
-        if previous:
+        if failure_reason:
+            summary.write(f"CI reuse unavailable: {failure_reason}. Running tests normally.\n")
+        elif previous:
             summary.write(f"Changelog-only update: reusing [successful CI]({previous}).\n")
         else:
             summary.write("No equivalent successful CI run found; using normal test selection.\n")
