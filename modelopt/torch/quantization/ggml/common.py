@@ -359,6 +359,15 @@ class GGMLFormat:
     # Reads the FP16 super-block scale of each ``[blocks, block_bytes]`` payload row, for formats
     # whose ``quantize`` takes them as ``scales``; see :func:`pin_packed_weight`.
     payload_scales: Callable[[torch.Tensor], torch.Tensor] | None = None
+    # Native IQ fields: 32 grid entries and auxiliary values per block (format-native axes),
+    # [blocks, choice_groups] local scales, and [blocks] shared scales. Optional without GSQ.
+    pack_fields: (
+        Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None
+    ) = None
+    unpack_fields: (
+        Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]
+        | None
+    ) = None
 
     @property
     def effective_bits(self) -> float:

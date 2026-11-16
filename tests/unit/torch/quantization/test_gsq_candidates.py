@@ -15,6 +15,8 @@
 
 """Native IQ candidates preserve independently captured llama.cpp payloads."""
 
+from dataclasses import replace
+
 import pytest
 import torch
 from _test_utils.torch.quantization.iq_llama_cpp_vectors import expected_values, packed_blocks
@@ -94,3 +96,15 @@ def test_zero_scale_keeps_one_candidate_and_canonical_zero_payload(name):
     assert not candidates.valid_mask[..., 1:].any()
     assert torch.isfinite(candidates.coefficients).all()
     assert torch.equal(candidates.pack(selected, torch.full((1, 1), 1e-12)), packed)
+
+
+@pytest.mark.parametrize("missing_helper", ["pack_fields", "unpack_fields"])
+def test_registered_format_without_field_codec_is_rejected(monkeypatch, missing_helper):
+    future_format = replace(
+        IQ_FORMAT_REGISTRY["iq2_s"], name="iq3_future", **{missing_helper: None}
+    )
+    monkeypatch.setitem(IQ_FORMAT_REGISTRY, future_format.name, future_format)
+    packed = torch.zeros((1, 1, future_format.block_bytes), dtype=torch.uint8)
+
+    with pytest.raises(ValueError):
+        build_candidates(future_format.name, torch.zeros(1, 256), packed, max_candidates=1)

@@ -15,6 +15,7 @@
 
 """Fixed candidates of complete native IQ sub-blocks for GSQ refinement."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -32,7 +33,7 @@ class IQCandidates:
     coefficients: torch.Tensor
     base_scale: torch.Tensor
     valid_mask: torch.Tensor
-    _format_name: str
+    _pack_fields: Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
     _entries: torch.Tensor
     _auxiliary: torch.Tensor
     _local: torch.Tensor
@@ -46,8 +47,7 @@ class IQCandidates:
         auxiliary = self._auxiliary.gather(-2, index.expand_as(entries))
         local = self._local.gather(-1, choice.long().unsqueeze(-1)).squeeze(-1)
         rows, blocks = self.base_scale.shape
-        payload = _pack_fields(
-            self._format_name,
+        payload = self._pack_fields(
             entries.reshape(-1, 32),
             auxiliary.reshape(-1, 32),
             local.reshape(rows * blocks, -1),
@@ -77,6 +77,8 @@ def build_candidates(
     if not 1 <= max_candidates <= 5:
         raise ValueError("max_candidates must be between one and five")
     fmt = IQ_FORMAT_REGISTRY[format_name]
+    if fmt.pack_fields is None or fmt.unpack_fields is None:
+        raise ValueError(f"Unsupported IQ candidate format: {format_name}")
     if weight.ndim != 2 or not weight.numel() or weight.shape[-1] % 256:
         raise ValueError("IQ candidates require a matrix with complete 256-weight blocks")
     if not weight.is_floating_point():
@@ -87,7 +89,7 @@ def build_candidates(
     if packed.device != weight.device:
         raise ValueError("IQ candidate payload and weight must be on the same device")
     block_importance = importance_blocks(importance, weight, format_name)
-    entries, auxiliary, local, d = _unpack_fields(format_name, packed.reshape(-1, fmt.block_bytes))
+    entries, auxiliary, local, d = fmt.unpack_fields(packed.reshape(-1, fmt.block_bytes))
     groups = local.shape[-1]
     vectors = 32 // groups
     entries = entries.reshape(-1, groups, 1, vectors).to(torch.int16)
@@ -139,8 +141,7 @@ def build_candidates(
     )
     for start in range(0, len(d), block_chunk_size):
         stop = min(start + block_chunk_size, len(d))
-        unit = _pack_fields(
-            format_name,
+        unit = fmt.pack_fields(
             entries[start:stop].transpose(1, 2).reshape(-1, 32),
             auxiliary[start:stop].transpose(1, 2).reshape(-1, 32),
             local[start:stop].transpose(1, 2).reshape(-1, groups),
@@ -160,7 +161,7 @@ def build_candidates(
         coefficients,
         d.reshape(rows, -1),
         valid.reshape_as(local),
-        format_name,
+        fmt.pack_fields,
         entries,
         auxiliary,
         local,
@@ -169,13 +170,16 @@ def build_candidates(
 
 def _alternatives(name, weight, d, weights):
     fmt = IQ_FORMAT_REGISTRY[name]
+    assert fmt.unpack_fields is not None  # Validated by build_candidates.
     packed, _ = fmt.quantize(
         weight.reshape(1, -1),
         scales=d.half(),
         importance=None if weights is None else weights.reshape(-1),
         every_choice=True,
     )
-    entries, auxiliary, local, _ = _unpack_fields(name, packed.reshape(-1, fmt.block_bytes))
+    entries, auxiliary, local, _ = fmt.unpack_fields(packed.reshape(-1, fmt.block_bytes))
+    # Flatten strided field views here so alternatives do not retain the full decoded payload.
+    entries = entries.reshape(-1, 32)
     count, groups = weight.shape[0], fmt.choice_groups
     vectors = 32 // groups
     decoded = fmt.dequantize(
@@ -191,101 +195,3 @@ def _alternatives(name, weight, d, weights):
     auxiliary = auxiliary.reshape(fmt.num_choices, count, groups, vectors).permute(1, 2, 0, 3)
     local = local.reshape(fmt.num_choices, count, groups).permute(1, 2, 0)
     return entries, auxiliary, local, error.permute(1, 2, 0)
-
-
-def _unpack_fields(name, packed):
-    count = packed.shape[0]
-    d = packed[:, :2].contiguous().view(torch.float16).reshape(-1).float()
-    if name == "iq1_s":
-        high = packed[:, 34:50:2].long() | (packed[:, 35:50:2].long() << 8)
-        shifts = torch.arange(4, device=packed.device) * 3
-        entries = packed[:, 2:34].long().reshape(count, 8, 4) | (
-            ((high.unsqueeze(-1) >> shifts) & 7) << 8
-        )
-        auxiliary = (high >> 15).repeat_interleave(4, -1)
-        local = (high >> 12) & 7
-    elif name == "iq1_m":
-        high = packed[:, 32:48].long()
-        nibbles = torch.stack((high & 15, high >> 4), -1).reshape(count, 32)
-        entries = packed[:, :32].long() | ((nibbles & 7) << 8)
-        auxiliary = nibbles >> 3
-        words = packed[:, 48:56:2].long() | (packed[:, 49:56:2].long() << 8)
-        bits = ((words >> 12) << (torch.arange(4, device=packed.device) * 4)).sum(-1)
-        d = bits.to(torch.int16).view(torch.float16).float()
-        local = ((words.unsqueeze(-1) >> (torch.arange(4, device=packed.device) * 3)) & 7).reshape(
-            count, 16
-        )
-    elif name == "iq2_xxs":
-        body = packed[:, 2:].long().reshape(count, 8, 8)
-        entries = body[..., :4].reshape(count, 32)
-        bits = (body[..., 4:] << (torch.arange(4, device=packed.device) * 8)).sum(-1)
-        auxiliary = (
-            (bits.unsqueeze(-1) >> (torch.arange(4, device=packed.device) * 7)) & 127
-        ).reshape(count, 32)
-        local = bits >> 28
-    elif name == "iq2_xs":
-        codes = packed[:, 2:66:2].long() | (packed[:, 3:66:2].long() << 8)
-        entries, auxiliary = codes & 511, codes >> 9
-        local = torch.stack((packed[:, 66:].long() & 15, packed[:, 66:].long() >> 4), -1).reshape(
-            count, 16
-        )
-    else:
-        high = (
-            (packed[:, 66:74].long().unsqueeze(-1) >> (torch.arange(4, device=packed.device) * 2))
-            & 3
-        ).reshape(count, 32)
-        entries = packed[:, 2:34].long() | (high << 8)
-        auxiliary = packed[:, 34:66].long()
-        local = torch.stack((packed[:, 74:].long() & 15, packed[:, 74:].long() >> 4), -1).reshape(
-            count, 16
-        )
-    return entries.reshape(count, 32), auxiliary, local, d
-
-
-def _pack_fields(name, entries, auxiliary, local, d):
-    fmt = IQ_FORMAT_REGISTRY[name]
-    entries, auxiliary, local = entries.long(), auxiliary.long(), local.long()
-    count = entries.shape[0]
-    packed = torch.zeros((count, fmt.block_bytes), dtype=torch.uint8, device=entries.device)
-    native_d = d.clamp(-65504, 65504).to(torch.float16)
-    packed[:, :2] = native_d.contiguous().view(torch.uint8).reshape(count, 2)
-    if name == "iq1_s":
-        packed[:, 2:34] = (entries & 255).to(torch.uint8)
-        shifts = torch.arange(4, device=entries.device) * 3
-        high = (((entries.reshape(count, 8, 4) >> 8) & 7) << shifts).sum(-1)
-        high |= (local << 12) | (auxiliary[:, ::4] << 15)
-        packed[:, 34:50:2] = (high & 255).to(torch.uint8)
-        packed[:, 35:50:2] = (high >> 8).to(torch.uint8)
-    elif name == "iq1_m":
-        packed[:, :32] = (entries & 255).to(torch.uint8)
-        nibbles = (entries >> 8) | (auxiliary << 3)
-        packed[:, 32:48] = (nibbles[:, ::2] | (nibbles[:, 1::2] << 4)).to(torch.uint8)
-        words = (local.reshape(count, 4, 4) << (torch.arange(4, device=entries.device) * 3)).sum(-1)
-        d_bits = native_d.contiguous().view(torch.int16).long() & 65535
-        words |= ((d_bits.unsqueeze(-1) >> (torch.arange(4, device=entries.device) * 4)) & 15) << 12
-        packed[:, 48:56:2] = (words & 255).to(torch.uint8)
-        packed[:, 49:56:2] = (words >> 8).to(torch.uint8)
-    elif name == "iq2_xxs":
-        body = packed[:, 2:].reshape(count, 8, 8)
-        body[..., :4] = entries.reshape(count, 8, 4).to(torch.uint8)
-        bits = (auxiliary.reshape(count, 8, 4) << (torch.arange(4, device=entries.device) * 7)).sum(
-            -1
-        )
-        bits |= local << 28
-        body[..., 4:] = (
-            (bits.unsqueeze(-1) >> (torch.arange(4, device=entries.device) * 8)) & 255
-        ).to(torch.uint8)
-    elif name == "iq2_xs":
-        codes = entries | (auxiliary << 9)
-        packed[:, 2:66:2] = (codes & 255).to(torch.uint8)
-        packed[:, 3:66:2] = (codes >> 8).to(torch.uint8)
-        packed[:, 66:] = (local[:, ::2] | (local[:, 1::2] << 4)).to(torch.uint8)
-    else:
-        packed[:, 2:34] = (entries & 255).to(torch.uint8)
-        packed[:, 34:66] = auxiliary.to(torch.uint8)
-        high = (
-            (entries.reshape(count, 8, 4) >> 8) << (torch.arange(4, device=entries.device) * 2)
-        ).sum(-1)
-        packed[:, 66:74] = high.to(torch.uint8)
-        packed[:, 74:] = (local[:, ::2] | (local[:, 1::2] << 4)).to(torch.uint8)
-    return torch.where((native_d == 0).unsqueeze(-1), 0, packed)

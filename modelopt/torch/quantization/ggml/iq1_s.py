@@ -201,22 +201,9 @@ def _encode_blocks(
     selected_local = selected_choice & 0x7
     selected_shift = selected_choice >> 3
 
-    high = (selected_entry >> 8).reshape(block_count, 8, 4)
-    qh = (
-        high[:, :, 0]
-        | (high[:, :, 1] << 3)
-        | (high[:, :, 2] << 6)
-        | (high[:, :, 3] << 9)
-        | (selected_local << 12)
-        | (selected_shift << 15)
+    return _pack_fields(
+        selected_entry, selected_shift.repeat_interleave(4, dim=1), selected_local, d
     )
-
-    packed = torch.empty((block_count, IQ1_S_BLOCK_BYTES), dtype=torch.uint8, device=x.device)
-    packed[:, :2] = d.contiguous().view(torch.uint8).reshape(block_count, 2)
-    packed[:, 2:34] = (selected_entry & 0xFF).to(torch.uint8)
-    packed[:, 34:50:2] = (qh & 0xFF).to(torch.uint8)
-    packed[:, 35:50:2] = (qh >> 8).to(torch.uint8)
-    return torch.where((d_float == 0).unsqueeze(1), 0, packed)
 
 
 @torch.no_grad()
@@ -326,16 +313,44 @@ def dequantize_iq1_s(
     ).reshape(shape)
 
 
+def _unpack_fields(
+    packed: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Read grid entries, sign or delta bits, local scales, and the shared FP16 scale."""
+    count = packed.shape[0]
+    d = packed[:, :2].contiguous().view(torch.float16).reshape(-1).float()
+    high = packed[:, 34:50:2].long() | (packed[:, 35:50:2].long() << 8)
+    shifts = torch.arange(4, device=packed.device) * 3
+    entries = packed[:, 2:34].long().reshape(count, 8, 4) | (
+        ((high.unsqueeze(-1) >> shifts) & 7) << 8
+    )
+    auxiliary = (high >> 15).repeat_interleave(4, -1)
+    local = (high >> 12) & 7
+    return entries.reshape(count, 32), auxiliary, local, d
+
+
+def _pack_fields(
+    entries: torch.Tensor, auxiliary: torch.Tensor, local: torch.Tensor, d: torch.Tensor
+) -> torch.Tensor:
+    """Pack native fields without searching the codebook; round the shared scale to FP16."""
+    entries, auxiliary, local = entries.long(), auxiliary.long(), local.long()
+    count = entries.shape[0]
+    packed = torch.empty((count, IQ1_S_BLOCK_BYTES), dtype=torch.uint8, device=entries.device)
+    native_d = d.clamp(-65504, 65504).to(torch.float16)
+    packed[:, :2] = native_d.contiguous().view(torch.uint8).reshape(count, 2)
+    packed[:, 2:34] = (entries & 255).to(torch.uint8)
+    shifts = torch.arange(4, device=entries.device) * 3
+    high = (((entries.reshape(count, 8, 4) >> 8) & 7) << shifts).sum(-1)
+    high |= (local << 12) | (auxiliary[:, ::4] << 15)
+    packed[:, 34:50:2] = (high & 255).to(torch.uint8)
+    packed[:, 35:50:2] = (high >> 8).to(torch.uint8)
+    return torch.where((native_d == 0).unsqueeze(-1), 0, packed)
+
+
 def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Levels in eighths of a grid step (±1, ±7, ±9) and the step of each 32-value sub-block."""
-    shifts = torch.tensor([0, 3, 6, 9], dtype=torch.int64, device=blocks.device)
-    d = blocks[:, :2].contiguous().view(torch.float16).reshape(-1).float()
-    low = blocks[:, 2:34].to(torch.int64).reshape(-1, 8, 4)
-    qh = blocks[:, 34:50:2].to(torch.int64) | (blocks[:, 35:50:2].to(torch.int64) << 8)
-    high = (qh.unsqueeze(-1) >> shifts) & 0x7
-    entries = low | (high << 8)
-    local = (qh >> 12) & 0x7
-    delta_sign = torch.where((qh & 0x8000).bool(), -1.0, 1.0).unsqueeze(-1).unsqueeze(-1)
+    entries, auxiliary, local, d = _unpack_fields(blocks)
+    delta_sign = torch.where(auxiliary.bool(), -1.0, 1.0).unsqueeze(-1)
     levels = iq1_s_grid(blocks.device)[entries] / _IQ1_S_DELTA + delta_sign
     steps = d.unsqueeze(-1) * (2 * local + 1).float() * _IQ1_S_DELTA
     return levels.reshape(-1, IQ1_S_BLOCK_SIZE), steps
@@ -351,6 +366,8 @@ IQ1_S_FORMAT = GGMLFormat(
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
     int8_group_size=_IQ1_S_INT8_GROUP_SIZE,
     unpack_int8=_unpack_int8,
+    pack_fields=_pack_fields,
+    unpack_fields=_unpack_fields,
     weighted=True,
     choice_groups=8,
     num_choices=16,
