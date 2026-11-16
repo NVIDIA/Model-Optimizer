@@ -36,7 +36,7 @@ Changelog
 
 *Speculative Decoding*
 
-*Megatron & Distillation*
+*Megatron Framework (M-LM / M-Bridge)*
 
 *Misc*
 
@@ -227,7 +227,7 @@ Changelog
 - Fix DFlash-family drafters (DFlash, DFlash2, DSpark, Domino, LiLiCorr) trained from scratch with ``examples/speculative_decoding/main.py`` having their RoPE frequencies rounded to BF16, so they trained under different rotary phases than vLLM serves them with.
 - Fix DFlash2's candidate-selector loss weighing every block position equally and dividing by its own count of positions, unlike the backbone loss and the SGLang/SpecForge DFlash2 reference. Logged DFlash2 losses change.
 
-*Megatron & Distillation*
+*Megatron Framework (M-LM / M-Bridge)*
 
 - Nested ``only_student_forward()`` and ``only_teacher_forward()`` contexts now preserve the enclosing execution mode, including when an inner context is disabled or raises an exception.
 - Fix Megatron Top-K/Top-P distillation gradients being multiplied by the tensor-parallel size when tensor parallelism is enabled; reported loss values are unchanged.
