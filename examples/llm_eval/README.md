@@ -50,9 +50,12 @@ otherwise `i * (length - 1) // (m - 1)`. Recompute it for each count; grids are
 usually not nested. A generation cap is applied before selecting that grid.
 
 The CLI uses singleton scoring. The Python `score_frozen` API accepts batches;
-qualify them against singleton results with `qualify_batch` for the actual
-models, attention backend, lengths, and padding layouts before use. Memory fit
-alone does not establish numerical agreement. The qualifier reports absolute
+compare them against singleton results with `qualify_batch` before use. Apply a
+passing result only to the exact tested histories, row order, and batch grouping,
+with the same models, runtime, and scoring settings (including attention backend,
+padding, and head chunk size). Score other histories individually or qualify their
+exact batches. Memory fit alone does not establish numerical agreement. The
+qualifier reports absolute
 errors, elapsed time, throughput, and current-device peak GPU allocation; use
 per-device instrumentation for dispatched models. Decoder states are projected
 through the output head in bounded chunks. Validate that route against normal
