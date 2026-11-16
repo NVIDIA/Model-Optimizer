@@ -1043,8 +1043,13 @@ class HFDFlashModel(DFlashModel):
 
         if n_blocks == 0 or not block_keep_mask.any():
             # An all-masked answer-only batch: nothing to train, but DDP still reduces.
+            # draft_metrics is empty rather than absent: the forward's output carries the
+            # key on every step, so a reader never has to ask whether this was such a batch.
             return ModelOutput(
-                loss=self._draft_zero_loss(device), logits=base_outputs.logits, train_acc=[[0.0]]
+                loss=self._draft_zero_loss(device),
+                logits=base_outputs.logits,
+                train_acc=[[0.0]],
+                draft_metrics={},
             )
 
         # 4. Build draft inputs

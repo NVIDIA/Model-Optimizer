@@ -214,6 +214,9 @@ class HFLiLiCorrModel(HFDFlashModel):
         )
         # The identity `loss == origin_loss + lilicorr_loss` is the cheap parity check
         # on this objective, so both halves are reported next to the total.
+        # The base's metrics first, as DFlash2 merges them, so a key of LiLiCorr's own
+        # wins a collision: today the base reports none, but it will.
+        metrics = {**out.metrics, **metrics}
         metrics["origin_loss"] = out.loss.detach().float()
         metrics["origin_accuracy"] = out.accuracy
         return LossOutput(out.loss + lilicorr_loss, accuracy, metrics)
@@ -406,18 +409,18 @@ class HFLiLiCorrModel(HFDFlashModel):
 
         metrics = {name: value.detach().reshape(()).float() for name, value in raw_metrics.items()}
         # Weights recorded alongside the terms so a run states its own composition
-        # without the reader expanding the config. float64 holds the configured values exactly.
+        # without the reader expanding the config.
         weights = {
             "lilicorr_w_ce": self.dflash_lilicorr_w_ce,
             "lilicorr_w_margin": self.dflash_lilicorr_w_margin,
             "lilicorr_w_pen": self.dflash_lilicorr_w_pen,
             "lilicorr_w_cal": self.dflash_lilicorr_w_cal,
         }
+        # Every metric stays in the loss's own dtype: a diagnostic must not be the reason
+        # the step needs a dtype the device may not carry.
         for name, weight in weights.items():
-            metrics[name] = torch.full((), weight, dtype=torch.float64, device=loss.device)
-        # float64, as the Python division this replaces was, so the reported number is
-        # bit-for-bit what it used to be rather than a float32 round of it.
-        accuracy = metrics["lilicorr_selected_prefix"].double() / num_slots
+            metrics[name] = torch.full((), weight, device=loss.device)
+        accuracy = metrics["lilicorr_selected_prefix"] / num_slots
         return loss, accuracy, metrics
 
     def _distractor_penalty(
