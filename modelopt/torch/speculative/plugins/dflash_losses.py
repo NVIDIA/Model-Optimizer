@@ -224,10 +224,16 @@ class DraftLogits(NamedTuple):
 
 
 class LossOutput(NamedTuple):
-    """A training step's loss, the accuracy ``train_acc`` reports, and its metrics."""
+    """A training step's loss, the accuracy ``train_acc`` reports, and its metrics.
+
+    ``accuracy`` is a tensor for the same reason the metrics are: reading a scalar off
+    the device costs a sync, and the forward is not where that has to happen. It is the
+    forward that converts, once, because the example trainer averages ``train_acc`` with
+    ``numpy``, which cannot take a CUDA tensor.
+    """
 
     loss: torch.Tensor
-    accuracy: float
+    accuracy: torch.Tensor  # detached 0-dim
     metrics: dict  # name -> detached 0-dim tensor
 
 
