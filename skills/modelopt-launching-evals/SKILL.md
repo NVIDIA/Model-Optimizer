@@ -1,10 +1,10 @@
 ---
 name: modelopt-launching-evals
-description: NEL backend: run, monitor, analyze, and debug LLM evaluations via nemo-evaluator-launcher. Use only for NEL runs (the task or user names NEL, or an invocation ID or run directory comes from NEL); evaluations run with another tool use that tool's own skills. Covers checking status and live progress, debugging failed runs, exporting artifacts and logs, and analyzing results. Do NOT use for creating or modifying evaluation configs.
+description: NEL backend - run, monitor, analyze, and debug LLM evaluations via nemo-evaluator-launcher. Use only for NEL runs (the task or user names NEL, or an invocation ID or run directory comes from NEL); evaluations run with another tool use that tool's own skills. Covers checking status and live progress, debugging failed runs, exporting artifacts and logs, and analyzing results. Do NOT use for creating or modifying evaluation configs.
 license: Apache-2.0
-# Vendored verbatim from NVIDIA NeMo Evaluator (commit 8fa16b2)
+# Vendored from NVIDIA NeMo Evaluator (commit 8fa16b2), description overridden (see sync-upstream-skills.sh)
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/8fa16b237d11e213ea665d5bad6b44d393762317/packages/nemo-evaluator-launcher/.claude/skills/launching-evals
-# To re-sync: .claude/scripts/sync-upstream-skills.sh
+# To re-sync: .agents/scripts/sync-upstream-skills.sh
 ---
 
 # NeMo Evaluator Skill
