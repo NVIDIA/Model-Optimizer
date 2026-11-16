@@ -266,35 +266,29 @@ Is question-level analysis reliable on real benchmarks compared with repetition-
 We compare the two approaches by spending the same response budget on more unique questions or
 more repetitions per question, then measuring how much the resulting scores vary. Each allocation
 produces 20 observed scores, using 1,000
-responses per model for MMLU-Pro and 280 for SciCode. In the plots below, solid lines show means;
-shading shows ±1 observed standard deviation (SD). Means stay fixed because every allocation
-uses the same saved response pool: 1,000 questions × 20 repetitions for MMLU-Pro (20,000 responses
-per model) and 280 subtasks × 20 repetitions for SciCode (5,600 responses per model).
-Lower observed SD means more consistent score estimates across these groups for the same response budget.
+responses per model for MMLU-Pro and 280 for SciCode.
+
+At the same response budget, more questions with fewer repetitions give more consistent Candidate
+accuracy estimates on both MMLU-Pro and SciCode, with lower observed standard deviation (SD).
+Shading shows ±1 SD across 20 group scores; solid lines show their mean.
 
 .. figure:: images/budget-allocation-accuracy.svg
    :alt: Candidate mean accuracy with plus or minus one observed standard deviation. At fixed response budgets, using more unique questions gives less spread for MMLU-Pro and SciCode.
    :width: 720px
 
-For both MMLU-Pro and SciCode, greater question coverage gives more reliable Candidate accuracy
-estimates, with lower observed SD.
-Along the x-axis, more repetitions mean fewer unique questions or subtasks within the same
-response budget.
-
-Comparing Candidate and Baseline on the same questions can reduce variation caused by question
-difficulty. MMLU-Pro's accuracy difference has slightly less
-observed spread with more repetitions; SciCode's accuracy and cap-hit-rate differences have less
-spread with more subtask coverage. Check the metric you intend to use for the comparison.
+For Candidate − Baseline accuracy differences, more repetitions give slightly lower observed SD
+on MMLU-Pro, while more question coverage gives lower SD on SciCode.
 
 .. figure:: images/budget-allocation-differences.svg
-   :alt: Mean Candidate minus Baseline differences with plus or minus one observed standard deviation. More repetitions slightly reduce spread for MMLU-Pro accuracy differences, while more subtask coverage gives less spread for SciCode accuracy and cap-hit-rate differences.
+   :alt: Mean Candidate minus Baseline accuracy differences with plus or minus one observed standard deviation. More repetitions slightly reduce spread for MMLU-Pro, while more subtask coverage gives less spread for SciCode.
    :width: 720px
 
-The useful budget allocation can differ for absolute scores and paired model differences.
+For SciCode, more subtasks with fewer repetitions give a more consistent estimate of Candidate's
+cap-hit-rate reduction relative to Baseline, with lower observed SD.
 
-Future benchmarks could make experimentation faster by providing representative, approximately
-independent questions sampled from their intended domain, and documenting dependencies between
-related tasks.
+.. figure:: images/budget-allocation-cap-hit-differences.svg
+   :alt: Mean Candidate minus Baseline cap-hit-rate differences on SciCode with plus or minus one observed standard deviation. More subtask coverage gives lower observed SD for the same response budget.
+   :width: 720px
 
 .. _evaluation-collect-data:
 

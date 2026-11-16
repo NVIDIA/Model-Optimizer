@@ -71,14 +71,16 @@ Saved metrics
 -------------
 
 We save the means, observed standard deviations, confidence intervals, and p-values shown in the
-guide’s four plots as CSV summaries:
+guide’s five plots as CSV summaries:
 
 - **MMLU-Pro and SciCode: Candidate accuracy at fixed response budgets** — data used in the guide
   section :ref:`Choose between question-level and repetition-level analysis <evaluation-choose-questions-and-repetitions>`.
   CSV file: :download:`budget-allocation-accuracy.csv <budget-allocation-accuracy.csv>`.
-- **MMLU-Pro and SciCode: accuracy and cap-hit-rate differences at fixed response budgets** — data
-  used in the same section.
+- **MMLU-Pro and SciCode: accuracy differences at fixed response budgets** — data used in the
+  same section.
   CSV file: :download:`budget-allocation-differences.csv <budget-allocation-differences.csv>`.
+- **SciCode: cap-hit-rate differences at a fixed response budget** — data used in the same section.
+  CSV file: :download:`budget-allocation-cap-hit-differences.csv <budget-allocation-cap-hit-differences.csv>`.
 - **SciCode: cap-hit rates** — data used in the guide section
   :ref:`Collect as much evaluation data as you need <evaluation-collect-data>`.
   CSV file: :download:`scicode-cap-data-volume.csv <scicode-cap-data-volume.csv>`.
