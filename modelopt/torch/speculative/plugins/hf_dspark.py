@@ -74,7 +74,6 @@ from .dflash_losses import (
     _block_tokens,
     _first_predicted_position,
     _masked_top1,
-    _tvd_chunk,
     _tvd_per_token,
 )
 from .hf_dflash import HFDFlashModel
@@ -119,12 +118,6 @@ class HFDSparkModel(HFDFlashModel):
                 "dflash_confidence_head_alpha > 0 but the confidence head was not built; "
                 "set dflash_architecture_config.use_confidence_head=true."
             )
-        # Compiling fuses the chunk's six vocab-wide elementwise passes.
-        self._tvd_chunk_fn = (
-            torch.compile(_tvd_chunk, dynamic=False, fullgraph=True)
-            if self.dflash_use_torch_compile
-            else _tvd_chunk
-        )
 
     def get_exporter(self):
         """Get the exporter for the DSpark draft model."""
