@@ -130,11 +130,14 @@ class TestDominoForward:
         out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         assert out.loss.requires_grad
         assert out.loss.dim() == 0
-        # dual-loss bookkeeping
+        # dual-loss bookkeeping, on top of the objective's own per-term losses
         assert "loss_backbone" in out.draft_metrics
         assert "loss_final" in out.draft_metrics
+        assert "loss_ce" in out.draft_metrics
         assert "backbone_accuracy" in out.draft_metrics
         assert out.draft_metrics["lambda_base"] == 1.0  # default before any callback
+        # No diagnostic asks the device for a dtype the step does not otherwise need.
+        assert all(v.dtype is not torch.float64 for v in out.draft_metrics.values())
 
         out.loss.backward()
         gru_grad = model.dflash_module.prefix_gru.weight_ih_l0.grad

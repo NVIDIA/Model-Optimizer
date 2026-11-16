@@ -140,7 +140,8 @@ class HFDominoModel(HFDFlashModel):
 
     @property
     def _position_weighting(self):
-        # dflash_loss_objective is not wired for Domino yet: it always decays.
+        # dflash_loss_objective is not wired for Domino yet: it always takes the decay
+        # scheme, which without a decay factor weights every block position equally.
         return "decay"
 
     def _online_base_outputs(self, input_ids, attention_mask, **kwargs):
@@ -189,11 +190,14 @@ class HFDominoModel(HFDFlashModel):
             backbone_loss, _ = objective_loss(self._objective, ctx, "backbone")
             loss = (1.0 - lambda_base) * out.loss + lambda_base * backbone_loss
         metrics = {
+            # Merged, as DFlash2 and LiLiCorr do, so Domino's own key wins a collision:
+            # replacing them would drop every term the objective grows, and backbone_accuracy.
+            **out.metrics,
             "loss_final": out.loss.detach(),
             "loss_backbone": backbone_loss.detach(),
-            "backbone_accuracy": out.metrics["backbone_accuracy"],
-            # float64 holds the scheduled value exactly.
-            "lambda_base": torch.full((), lambda_base, dtype=torch.float64, device=out.loss.device),
+            # float32, like the loss's other diagnostics: a logged schedule value is never
+            # the reason the step needs a dtype the device may not carry.
+            "lambda_base": torch.full((), lambda_base, dtype=torch.float32, device=out.loss.device),
         }
         return LossOutput(loss, out.accuracy, metrics)
 
