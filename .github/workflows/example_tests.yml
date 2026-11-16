@@ -31,6 +31,7 @@ jobs:
   pr-gate:
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       checks: read
       contents: read
     outputs:
@@ -49,6 +50,13 @@ jobs:
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
         id: base
         uses: ./.github/actions/pr-merge-base
+      - if: startsWith(github.ref, 'refs/heads/pull-request/')
+        id: changelog
+        uses: ./.github/actions/changelog-ci-gate
+        with:
+          head-sha: ${{ steps.base.outputs.head_sha }}
+          base-sha: ${{ steps.base.outputs.base_sha }}
+          base-ref: ${{ steps.base.outputs.base_ref }}
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
         id: changed
         uses: step-security/changed-files@2e07db73e5ccdb319b9a6c7766bd46d39d304bad # v47.0.5
@@ -100,6 +108,7 @@ jobs:
           NON_PR: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
           # Stacked PRs (base is another PR's branch) skip GPU tests; only the bottom PR runs them.
           STACKED: ${{ steps.base.outputs.stacked }}
+          REUSE: ${{ steps.changelog.outputs.reuse }}
           COMMON: ${{ steps.changed.outputs.common_any_modified }}
           TORCH: ${{ steps.changed.outputs.torch_any_modified }}
           VLLM: ${{ steps.changed.outputs.vllm_any_modified }}
@@ -110,7 +119,7 @@ jobs:
         run: |
           any=false
           for lane in TORCH VLLM TRTLLM MEGATRON DIFFUSERS ONNX; do
-            if [[ "$STACKED" != "true" && ( "$NON_PR" == "true" || "$COMMON" == "true" || "${!lane}" == "true" ) ]]; then
+            if [[ "$REUSE" != "true" && "$STACKED" != "true" && ( "$NON_PR" == "true" || "$COMMON" == "true" || "${!lane}" == "true" ) ]]; then
               run=true
               any=true
             else

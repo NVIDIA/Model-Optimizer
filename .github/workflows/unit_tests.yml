@@ -29,8 +29,12 @@ concurrency:
 jobs:
   check-file-changes:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
-      any_changed: ${{ steps.changed.outputs.any_modified || steps.non-pr.outputs.any_changed }}
+      any_changed: ${{ steps.changelog.outputs.reuse != 'true' && (steps.changed.outputs.any_modified || steps.non-pr.outputs.any_changed) }}
+      reuse: ${{ steps.changelog.outputs.reuse }}
     steps:
       - id: non-pr
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -40,12 +44,23 @@ jobs:
         with:
           fetch-depth: 0
       - if: github.event_name == 'pull_request'
+        name: Test CI reuse policy
+        run: python3 -m unittest discover -s .github/actions/changelog-ci-gate -p 'test_*.py' -v
+      - if: github.event_name == 'pull_request'
+        id: changelog
+        uses: ./.github/actions/changelog-ci-gate
+        with:
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          base-ref: ${{ github.event.pull_request.base.ref }}
+      - if: github.event_name == 'pull_request'
         name: Check for changes in test-relevant paths
         id: changed
         uses: step-security/changed-files@2e07db73e5ccdb319b9a6c7766bd46d39d304bad # v47.0.5
         with:
           files: |
             .github/workflows/unit_tests.yml
+            .github/actions/changelog-ci-gate/**
             modelopt/**
             modelopt_recipes/**
             noxfile.py
@@ -58,12 +73,19 @@ jobs:
             .agents/skills/**
             skills/**
   linux:
+    needs: [check-file-changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/ubuntu-setup
+      - name: Reuse successful tests for changelog-only update
+        if: needs.check-file-changes.outputs.reuse == 'true'
+        run: echo "Equivalent code already passed CI; see check-file-changes summary."
+      - if: needs.check-file-changes.outputs.reuse != 'true'
+        uses: actions/checkout@v7
+      - if: needs.check-file-changes.outputs.reuse != 'true'
+        uses: ./.github/actions/ubuntu-setup
       - name: Run unit tests
+        if: needs.check-file-changes.outputs.reuse != 'true'
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
@@ -77,6 +99,7 @@ jobs:
           OMP_NUM_THREADS: "1"
         run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)" -- $PYTEST_EXTRA
       - name: Upload coverage reports to Codecov
+        if: needs.check-file-changes.outputs.reuse != 'true'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

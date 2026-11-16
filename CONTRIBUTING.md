@@ -291,6 +291,12 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 - **Contributors without write access:** When GitHub requests workflow approval, a reviewer with write permission
   must select **Approve and run workflows** to start GitHub Actions CI.
 - If any CI/CD checks fail, fix the issues and push again.
+- **Changelog-only follow-ups:** Unit, GPU, example and regression workflows can reuse their
+  previous successful run when only `CHANGELOG.rst` changed, the PR target commit and branch
+  are unchanged, and the tested code is otherwise identical. Lightweight gates still report
+  required checks on the new commit; code quality and docs still run. Missing or expired
+  evidence, failed or unfinished runs, and base/code changes use normal test selection.
+  Nightly, manually dispatched workflows and job reruns do not reuse results.
 - **Stacked PRs:** GPU, example and regression tests run only for PRs that target `main`, `release/*`
   or `feature/*`, the same branches the unit tests run for. A PR based on another PR's branch gets
   failing `*-pr-required-check`s that say the tests are deferred; once it targets `main`, push or use
