@@ -159,7 +159,10 @@ below, tell the user and offer to address it before pushing; do not push as-is.
   description. File features under the matching `**New Features**` sub-section
   used by recent releases (e.g. `*Quantization*`, `*Speculative Decoding*`,
   `*Megatron Framework (M-LM / M-Bridge)*`, `*Misc*`) rather than relabeling
-  existing ones.
+  existing ones. Quantization has sub-sections (`*Quantization - ONNX*`,
+  `- Algorithms`, `- QAT / QAD`, `- Export & Deployment`, `- Recipes`) and Bug
+  Fixes use coarse area headings. Append to the end of the closest one so PRs
+  don't all collide on one section.
 
 ## Reviewing pull requests
 
