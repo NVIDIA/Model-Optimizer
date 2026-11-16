@@ -51,6 +51,8 @@ def _reference(teacher, student, mask, eta, indices=None):
         "extreme",
         "zero_probability",
         "masked_zero_student_probability",
+        "masked_nonfinite_teacher",
+        "masked_nonfinite_student",
         "fractional_weights",
     ],
 )
@@ -59,7 +61,6 @@ def test_lk_loss_matches_reference_and_only_differentiates_student(truncated, et
     teacher = torch.randn(2, 5, 11)
     if case in ("zero_probability", "empty_mask"):
         teacher[..., 2] = -torch.inf
-    teacher.requires_grad_()
     indices = torch.tensor([8, 2, 6, 0, 10]) if truncated else None
     student = torch.randn(2, 5, 5 if truncated else 11)
     if case == "identical":
@@ -73,13 +74,25 @@ def test_lk_loss_matches_reference_and_only_differentiates_student(truncated, et
         mask *= torch.linspace(0.01, 0.09, mask.numel()).reshape_as(mask)
     if case in ("empty_mask", "masked_zero_student_probability"):
         student[..., 0].masked_fill_(mask == 0, -torch.inf)
+    if case in ("empty_mask", "masked_nonfinite_teacher"):
+        teacher.masked_fill_((mask == 0).unsqueeze(-1), -torch.inf)
+        teacher[0, 0] = torch.nan
+    if case in ("empty_mask", "masked_nonfinite_student"):
+        student.masked_fill_((mask == 0).unsqueeze(-1), -torch.inf)
+        student[0, 0] = torch.inf
+    teacher.requires_grad_()
     student = student.requires_grad_()
+    original_teacher = teacher.detach().clone()
     reference_student = student.detach().clone().requires_grad_()
     expected = _reference(teacher, reference_student, mask, eta, indices)
     actual = masked_lk_lambda_loss(teacher, student, mask, eta=eta, draft_vocab_indices=indices)
+    assert torch.isfinite(actual)
     torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
     (actual * 1.7).backward()
     (expected * 1.7).backward()
+    torch.testing.assert_close(teacher, original_teacher, equal_nan=True)
+    torch.testing.assert_close(student, reference_student, equal_nan=True)
+    assert torch.isfinite(student.grad).all()
     torch.testing.assert_close(student.grad, reference_student.grad, atol=1e-6, rtol=1e-5)
     assert teacher.grad is None
     assert torch.count_nonzero(student.grad[mask == 0]) == 0

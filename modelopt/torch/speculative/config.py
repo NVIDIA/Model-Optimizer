@@ -780,6 +780,15 @@ class EagleConfig(ModeloptBaseConfig):
     )
 
     @model_validator(mode="after")
+    def _check_lk_lambda_base_lora(self) -> Self:
+        if self.eagle_loss_type == "lk_lambda" and self.eagle_base_lora:
+            raise ValueError(
+                "eagle_loss_type='lk_lambda' requires a frozen teacher and is incompatible "
+                "with eagle_base_lora=True. Use eagle_loss_type='soft_target_ce' for base-LoRA."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _check_rope_scaling_consistency(self) -> Self:
         if not self.eagle_export_rope_scaling:
             return self

@@ -133,6 +133,8 @@ def create_mtp_model(
         )
     )
     model = EagleDMRegistry.convert(model)
+    # Native MTP supplies its decoder and frozen endpoints, so use only base config assignment.
+    # Keep the shared forward state initialized below consistent with HFEagleModel.modify.
     EagleModel.modify(
         model,
         EagleConfig(

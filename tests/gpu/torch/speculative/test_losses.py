@@ -39,9 +39,11 @@ def test_lk_compiled_cuda_matches_fp32_reference(dtype, truncated, mask_kind):
         mask /= mask.numel()
     elif mask_kind == "empty":
         mask.zero_()
-    # Masked tokens may have positive teacher mass where the student has zero mass.
-    student.masked_fill_((mask == 0).unsqueeze(-1), -torch.inf)
-    student[..., 0].masked_fill_(mask == 0, 0)
+    # Undefined distributions at masked tokens must not poison the loss or gradients.
+    if mask_kind != "fractional":
+        student.masked_fill_((mask == 0).unsqueeze(-1), -torch.inf)
+    if mask_kind != "binary":
+        teacher.masked_fill_((mask == 0).unsqueeze(-1), torch.nan)
     reference_student = student.float().requires_grad_()
     expected = masked_lk_lambda_loss(
         teacher.float(), reference_student, mask, draft_vocab_indices=indices

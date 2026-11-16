@@ -54,12 +54,14 @@ def _soft_target_lk_loss(
     eta: float,
     draft_vocab_indices: torch.Tensor | None,
 ) -> torch.Tensor:
-    log_p = teacher_logits.float().log_softmax(-1)
+    # Mask before normalization: masking a NaN loss later still leaves NaN gradients.
+    masked_tokens = (loss_mask == 0).unsqueeze(-1)
+    log_p = torch.where(masked_tokens, 0, teacher_logits).float().log_softmax(-1)
     if draft_vocab_indices is not None:
         log_p = log_p.index_select(-1, draft_vocab_indices)
     p = log_p.exp()
     p_conditional = p if draft_vocab_indices is None else log_p.softmax(-1)
-    log_q = student_logits.float().log_softmax(-1)
+    log_q = torch.where(masked_tokens, 0, student_logits).float().log_softmax(-1)
     q = log_q.exp()
     # Keep the repaired objective's subgradient at equal probabilities.
     overlap = torch.where(q < p, q, p).sum(-1)

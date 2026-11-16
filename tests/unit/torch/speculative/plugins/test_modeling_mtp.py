@@ -25,6 +25,8 @@ from pydantic import ValidationError
 from safetensors.torch import load_file
 from torch import nn
 from torch.nn import functional as F
+
+pytest.importorskip("transformers")
 from transformers import DynamicCache, PretrainedConfig, Trainer, TrainingArguments
 
 from modelopt.torch.speculative.eagle.utils import (
