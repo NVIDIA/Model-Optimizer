@@ -1,5 +1,5 @@
-Guidelines for Evaluating Models Optimized with NVIDIA Model Optimizer
-======================================================================
+Guidelines for Fast Evaluation During Model Optimization Experiments
+====================================================================
 
 .. contents:: Contents
    :local:

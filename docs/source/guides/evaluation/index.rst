@@ -1,7 +1,7 @@
 Evaluation
 ==========
 
-* :doc:`Evaluation guidelines <evaluation_guidelines>`:
+* :doc:`Guidelines for fast experimentation <evaluation_guidelines>`:
   evaluate models quickly and reliably during optimization experiments, with guidance
   on metrics, regression and reliability checks, and evaluation budgets.
 
@@ -18,5 +18,5 @@ Evaluation
    :hidden:
    :maxdepth: 1
 
-   Evaluation guidelines <evaluation_guidelines>
+   Guidelines for fast experimentation <evaluation_guidelines>
    Reproducibility notes <reproducibility/index>
