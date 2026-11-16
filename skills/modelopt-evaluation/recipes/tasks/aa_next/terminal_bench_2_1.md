@@ -48,9 +48,8 @@ agent/task timeouts and sandbox/SLURM lifetimes separate; record them for baseli
 | scope | 89 tasks × `repeats: 8` |
 
 Except for the ModelOpt timeout/lifetime overrides below, these values follow
-the benchmark config that `modelopttools:eval-config` points to (its source-of-truth note: benchmark config,
-manifest and image pin) — re-check it before a scored run. See `references/nel-next.md` + the
-eval-config "source of truth" note. A Gym-native variant of this benchmark is a different backend
+the canonical benchmark config (benchmark config, manifest and image pin) — re-check it before a
+scored run. See `references/nel-next.md`. A Gym-native variant of this benchmark is a different backend
 — don't mix its values in. The `benchmarks:` block (drop into the example template):
 
 ```yaml

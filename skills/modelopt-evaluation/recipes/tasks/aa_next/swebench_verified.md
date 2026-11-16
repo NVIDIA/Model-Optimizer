@@ -5,7 +5,7 @@ run flow). Same harbor/ECS-Fargate flow as Terminal-Bench; the deltas are the
 **OpenHands agent**, a larger problem set, longer timeouts, and a different
 ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 
-> **Reference values:** match the canonical benchmark config and eval-image pin that `modelopttools:eval-config` points to (its source-of-truth note) for a reference run.
+> **Reference values:** match the canonical benchmark config and eval-image pin for this benchmark for a reference run.
 >
 > A Gym/opencode variant of this benchmark uses different values; don't mix them in.
 
@@ -32,7 +32,7 @@ Follow shared guidance for sampling/thinking, context limits and timeouts; recor
 | `solver` | `timeout_strategy: max`, `run_timeout: 10800` (3h), `agent_kwargs.llm_kwargs.timeout: 3600` |
 | `sandbox.region` | `${HARBOR_ECS_REGION:-us-east-2}` |
 | `sandbox.ecr_repository` | `${HARBOR_SWEBENCH_ECR_REPOSITORY}` (`harbor-swebench`, **us-west-2** regardless of sandbox region) |
-| `cluster.eval_image` | `${NEL_NEXT_EVAL_IMAGE}` → **`0.5.0.1-harbor`** (same pin as TB2.1; see the eval-config source-of-truth note) *(shared — see `references/nel-next.md`)* |
+| `cluster.eval_image` | `${NEL_NEXT_EVAL_IMAGE}` → **`0.5.0.1-harbor`** (same pin as TB2.1) *(shared — see `references/nel-next.md`)* |
 | `cluster.container_env.AWS_DEFAULT_REGION` | `${HARBOR_ECS_REGION:-us-east-2}` (match `sandbox.region`) |
 | `output.export_config.mlflow.tags` | `task_name: swebench-verified` |
 | `proxy.model_traffic.capture_request_body` | `true`, per service *(shared — see `references/nel-next.md`)* |
@@ -80,8 +80,8 @@ obtain it:
 # (a) From a reference run dir — the exact file a scored run mounted. Read that run's
 #     full_config.yaml `cluster.container_mounts` entry for swebench_instruction.md, then:
 scp <ref-cluster>:<path-from-that-config> ./swebench_instruction.md
-# (b) From the benchmark config that `modelopttools:eval-config` points to (its source-of-truth
-#     note) — the path `_swebench_verified.instruction_template` points at in that config.
+# (b) From the canonical benchmark config — the path `_swebench_verified.instruction_template`
+#     points at in that config.
 
 sha256sum ./swebench_instruction.md          # record this next to the score
 ssh <login> 'mkdir -p <lustre>/<user>/prompts'
