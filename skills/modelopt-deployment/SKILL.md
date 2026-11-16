@@ -212,7 +212,7 @@ token shapes, and how to read `profile_export_aiperf.json`.
 Before an accuracy evaluation of a checkpoint, derive the serving deployment explicitly and write it down. An evaluation tool that takes a deployment from its caller needs this record and will not guess serving flags.
 
 1. Read the model's vendor serving recipe (the recipe page for the model on recipes.vllm.ai, or the model card) and `references/vllm.md`. Take parallelism, serving image or version, reasoning and tool parsers, chat template and family-specific flags from them. Say which source each value came from.
-2. Serve the checkpoint once with those values (step 4) and pass step 5. Do not start the evaluation on an unverified deployment.
+2. Serve the checkpoint once with those values (step 4) and pass step 5, unless the evaluation tool's own canary serves it with the same values before any scored run. Do not start a scored evaluation on an unverified deployment.
 3. Write the record next to the evaluation artifacts: checkpoint path and revision, serving image, framework version, tensor/data parallel sizes, the full serve flags, parser and chat template, and the source of each value.
 4. Give the record to the evaluation tool. For a baseline and its quantized candidate, change only what the quantization requires and list each difference.
 
