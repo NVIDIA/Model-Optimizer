@@ -948,7 +948,9 @@ def test_recipe_metadata_and_tensor_reload_share_module_mapping(
     )
     fused = ("in_proj_qkvz", "in_proj_ba") if gdn else ("qkv_proj",)
     source_names = [f"{source}.{projection}.input_quantizer" for projection in projections]
+    source_names.append(f"{source}.gate_proj.input_quantizer")
     expected = {f"{target}.{projection}.input_quantizer" for projection in fused}
+    expected.add(f"{target}.gate_proj.input_quantizer")
     if not gdn:
         source_names.append(f"{source}.k_bmm_quantizer")
         expected.add(f"{target}.attn.k_bmm_quantizer")
@@ -981,7 +983,12 @@ def test_recipe_metadata_and_tensor_reload_share_module_mapping(
     for name in expected:
         quantizer = model.get_submodule(name)
         assert quantizer.is_enabled and quantizer.amax.dtype == torch.float32
-        assert torch.equal(quantizer.amax, torch.tensor(4.001 if gdn else 1.001))
+        assert torch.equal(
+            quantizer.amax,
+            torch.tensor(
+                4.001 if gdn and not name.endswith(".gate_proj.input_quantizer") else 1.001
+            ),
+        )
     hf_state = {"modelopt_state_dict": [("quantize", {"metadata": {"quantizer_state": recipe}})]}
     converted = reload_utils.convert_modelopt_state_to_vllm(
         hf_state, model.hf_to_vllm_mapper.apply_dict

@@ -152,7 +152,11 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     # Check if this is a non-expert gate/up projection that needs merging. Only *routed* experts
     # (``experts.<i>.``) merge into w13/w2 above; shared experts are a plain MLP whose gate/up
     # still merge into ``gate_up_proj``, so they must not be excluded by the "experts" substring.
-    if "mixer" not in key and not re.search(r"\.experts\.\d+\.", key):
+    if (
+        "mixer" not in key
+        and not re.search(r"\.experts\.\d+\.", key)
+        and not re.search(r"\.(self_attn|linear_attn)\.", key)
+    ):
         gate_up_match = re.search(r"(.*\.)(gate|up)_proj\.([^.]+_quantizer)(\..+)?$", key)
         if gate_up_match:
             suffix = gate_up_match.group(4) or ""
