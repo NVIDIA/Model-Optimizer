@@ -52,6 +52,27 @@ def test_kl_direction_shared_support_and_chunk_reduction(kl_eval, chunk_size):
     assert entire_vocab["conditional_topk_kl"] == pytest.approx(expected_full, abs=1e-6)
 
 
+@pytest.mark.parametrize("chunk_size", [1, 4])
+def test_spaced_full_kl_uses_entire_response_and_short_eos(kl_eval, chunk_size):
+    reference = torch.tensor([[0.5, 0.5]] * 6).log()
+    candidate = torch.tensor(
+        [[0.5, 0.5], [0.1, 0.9], [0.2, 0.8], [0.3, 0.7], [0.4, 0.6], [0.05, 0.95]]
+    ).log()
+    actual = kl_eval.mean_kl(
+        reference, candidate, top_k=None, chunk_size=chunk_size, position_counts=[1, 3, 6, 8192]
+    )
+    per_token = (reference.exp() * (reference - candidate)).sum(-1).tolist()
+    # EAR's endpoint grid for six positions and three samples is [0, 2, 5].
+    assert actual["spaced_full_vocab_kl_3"] == pytest.approx(
+        (per_token[0] + per_token[2] + per_token[5]) / 3, abs=1e-6
+    )
+    assert actual["spaced_full_vocab_kl_1"] == pytest.approx(per_token[0], abs=1e-6)
+    assert actual["spaced_full_vocab_kl_6"] == actual["full_vocab_kl"]
+    assert actual["spaced_full_vocab_kl_8192"] == actual["full_vocab_kl"]
+    with pytest.raises(ValueError):
+        kl_eval.mean_kl(reference, candidate, position_counts=[0], top_k=None)
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_identical_logits_have_zero_kl(kl_eval, dtype):
     logits = torch.tensor([[1, 2, -3], [8, 4, 1]], dtype=dtype)
@@ -127,9 +148,11 @@ def test_real_generation_stops_at_eos_and_scores_it(kl_eval, monkeypatch, detail
         max_new_tokens=4,
         top_k=top_k,
         detailed_results=args.detailed_results,
+        position_counts=[1, 64, 64],
     )
     assert reference.generation_config == original_generation
     expected = {"full_vocab_kl": 0}
+    expected.update({"spaced_full_vocab_kl_1": 0, "spaced_full_vocab_kl_64": 0})
     if top_k is not None:
         expected["conditional_topk_kl"] = 0
     if detailed_results:
@@ -178,7 +201,7 @@ def blended_fixture(kl_eval, monkeypatch):
         ]
     )
     # Replace only the external Hub read; exercise real dataset selection and chat tokenization.
-    monkeypatch.setattr(kl_eval, "load_dataset", lambda *_a, **_kw: dataset)
+    monkeypatch.setattr("datasets.load_dataset", lambda *_a, **_kw: dataset)
     return tokenizer, dataset
 
 
@@ -223,14 +246,15 @@ def test_batched_scoring_excludes_padding_and_matches_single_rows(kl_eval, top_k
         quantized.lm_head.weight[3, 0].add_(3)
     sequences = [[4, 5, 6, 7, 8], [4, 5, 0], [4, 5, 6, 7, 8, 9]]
     lengths = [3, 2, 2]
-    actual = kl_eval._score_batch(reference, quantized, sequences, lengths, 0, top_k)
+    counts = [1, 3, 8192]
+    actual = kl_eval._score_batch(reference, quantized, sequences, lengths, 0, top_k, counts)
     for sequence, prompt_length, metrics in zip(sequences, lengths, actual):
         # Independent unpadded forwards verify alignment, EOS inclusion, and per-row means.
         inputs = torch.tensor([sequence[:-1]])
         with torch.inference_mode():
             p = reference(inputs, use_cache=False).logits[0, prompt_length - 1 :]
             q = quantized(inputs, use_cache=False).logits[0, prompt_length - 1 :]
-        expected = kl_eval.mean_kl(p, q, top_k)
+        expected = kl_eval.mean_kl(p, q, top_k, position_counts=counts)
         assert metrics == pytest.approx(expected, abs=1e-6)
 
 

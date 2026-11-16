@@ -19,23 +19,32 @@ import argparse
 import copy
 import inspect
 import json
+import math
 import os
 import sys
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from datasets import load_dataset
 from transformers import GenerationConfig, set_seed
 
-__all__ = ["evaluate", "mean_kl", "score_continuation"]
+__all__ = ["evaluate", "mean_kl", "score_continuation", "spaced_positions"]
 
 EVALUATION_DATASET = "nvidia/balanced-benchmark-prompts-300"
 EVALUATION_REVISION = "c211674f78e43ecd5aa487b3d3539499efafce78"
 
 
 @torch.inference_mode()
-def mean_kl(reference_logits, quantized_logits, top_k=1024, chunk_size=32):
+def spaced_positions(length, count):
+    """Select an endpoint-inclusive integer grid, matching EAR's position policy."""
+    if length < 1 or count < 1:
+        raise ValueError("Require positive response length and position count.")
+    take = min(length, count)
+    return [0] if take == 1 else [i * (length - 1) // (take - 1) for i in range(take)]
+
+
+@torch.inference_mode()
+def mean_kl(reference_logits, quantized_logits, top_k=1024, chunk_size=32, position_counts=()):
     """Return full and conditional top-k forward KL in nats; top_k=None skips the head metric."""
     if reference_logits.ndim != 2 or reference_logits.shape != quantized_logits.shape:
         raise ValueError("Expected matching [generated positions, vocabulary] logits.")
@@ -45,6 +54,9 @@ def mean_kl(reference_logits, quantized_logits, top_k=1024, chunk_size=32):
     if top_k is not None and (not isinstance(top_k, int) or not 1 <= top_k <= vocab_size):
         raise ValueError("Require integer 1 <= top_k <= V when conditional KL is requested.")
     names = ["full_vocab_kl"] + (["conditional_topk_kl"] if top_k is not None else [])
+    if any(not isinstance(count, int) or count < 1 for count in position_counts):
+        raise ValueError("Position counts must be positive integers.")
+    per_position = []
     totals = torch.zeros(len(names), dtype=torch.float32, device=reference_logits.device)
     for start in range(0, num_tokens, chunk_size):
         reference = reference_logits[start : start + chunk_size].float()
@@ -54,6 +66,8 @@ def mean_kl(reference_logits, quantized_logits, top_k=1024, chunk_size=32):
         log_p = F.log_softmax(reference, dim=-1)
         log_q = F.log_softmax(quantized, dim=-1)
         values = [F.kl_div(log_q, log_p, log_target=True, reduction="none").sum(-1)]
+        if position_counts:
+            per_position.append(values[0])
         if top_k is not None:
             # Both conditional distributions use the reference's token IDs, not rank slots.
             ids = reference.topk(top_k, dim=-1).indices
@@ -66,11 +80,22 @@ def mean_kl(reference_logits, quantized_logits, top_k=1024, chunk_size=32):
     means = totals / num_tokens
     if not torch.isfinite(means).all():
         raise ValueError("Non-finite KL: inspect the model logits instead of dropping positions.")
-    return dict(zip(names, means.cpu().tolist()))
+    result = dict(zip(names, means.cpu().tolist()))
+    if position_counts:
+        per_position = torch.cat(per_position).cpu().tolist()
+        result["full_vocab_kl"] = math.fsum(per_position) / num_tokens
+    for count in position_counts:
+        selected = spaced_positions(num_tokens, count)
+        result[f"spaced_full_vocab_kl_{count}"] = math.fsum(
+            per_position[i] for i in selected
+        ) / len(selected)
+    return result
 
 
 @torch.inference_mode()
-def _score_batch(reference, quantized, sequences, prompt_lengths, pad_token_id, top_k):
+def _score_batch(
+    reference, quantized, sequences, prompt_lengths, pad_token_id, top_k, position_counts=()
+):
     generated_lengths = [
         len(sequence) - length for sequence, length in zip(sequences, prompt_lengths)
     ]
@@ -103,19 +128,21 @@ def _score_batch(reference, quantized, sequences, prompt_lengths, pad_token_id, 
             [outputs.logits[i, -length:].clone() for i, length in enumerate(generated_lengths)]
         )
         del outputs
-    return [mean_kl(p, q, top_k) for p, q in zip(*scores)]
+    return [mean_kl(p, q, top_k, position_counts=position_counts) for p, q in zip(*scores)]
 
 
 @torch.inference_mode()
-def score_continuation(reference, quantized, token_ids, prompt_tokens, top_k=1024):
+def score_continuation(
+    reference, quantized, token_ids, prompt_tokens, top_k=1024, position_counts=()
+):
     """Score only continuation predictions, including the first generated token and EOS."""
     if token_ids.ndim != 2 or token_ids.shape[0] != 1:
         raise ValueError("Expected one prompt and its continuation.")
     if not 0 < prompt_tokens < token_ids.shape[1]:
         raise ValueError("Require a nonempty prompt and continuation.")
-    return _score_batch(reference, quantized, token_ids.cpu().tolist(), [prompt_tokens], 0, top_k)[
-        0
-    ]
+    return _score_batch(
+        reference, quantized, token_ids.cpu().tolist(), [prompt_tokens], 0, top_k, position_counts
+    )[0]
 
 
 @torch.inference_mode()
@@ -128,10 +155,14 @@ def evaluate(
     top_k=1024,
     detailed_results=False,
     eval_batch_size=8,
+    position_counts=(),
 ):
     """Generate and score shared continuations in batches, averaging prompt scores equally."""
     if not prompts or eval_batch_size < 1:
         raise ValueError("Require evaluation prompts and a positive evaluation batch size.")
+    position_counts = tuple(dict.fromkeys(position_counts))
+    if any(not isinstance(count, int) or count < 1 for count in position_counts):
+        raise ValueError("Position counts must be positive integers.")
     reference.eval()
     quantized.eval()
     eos = reference.generation_config.eos_token_id
@@ -152,6 +183,7 @@ def evaluate(
         use_cache=True,
     )
     totals = {"full_vocab_kl": 0.0}
+    totals.update({f"spaced_full_vocab_kl_{count}": 0.0 for count in position_counts})
     if top_k is not None:
         totals["conditional_topk_kl"] = 0.0
     results = []
@@ -188,7 +220,9 @@ def evaluate(
             continuations.append(tokens[:end])
         del sequences
         histories = [prompt["input_ids"] + tokens for prompt, tokens in zip(batch, continuations)]
-        metrics = _score_batch(reference, quantized, histories, lengths, pad_token_id, top_k)
+        metrics = _score_batch(
+            reference, quantized, histories, lengths, pad_token_id, top_k, position_counts
+        )
         for index, (prompt, tokens, values) in enumerate(zip(batch, continuations, metrics), start):
             for name, value in values.items():
                 totals[name] += value
@@ -211,6 +245,9 @@ def evaluate(
 
 
 def _blended_prompts(tokenizer, num_examples, revision, context_limit, max_new_tokens):
+    # Frozen-continuation scoring does not need the dataset-loading dependencies.
+    from datasets import load_dataset
+
     dataset = load_dataset(EVALUATION_DATASET, split="test", revision=revision, token=True)
     if not 1 <= num_examples <= len(dataset):
         raise ValueError(f"Require 1 <= num_examples <= {len(dataset)} dataset rows.")
@@ -262,6 +299,13 @@ def _parse_args():
         help="Reference top tokens for conditional KL (default: 1024); full KL is always computed.",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--position_counts",
+        nargs="+",
+        type=int,
+        default=[],
+        help="Also score evenly spaced positions over each complete continuation (e.g. 16 32 64 128).",
+    )
     parser.add_argument("--output", type=Path, default=Path("kl_results.json"))
     parser.add_argument(
         "--detailed_results",
@@ -284,6 +328,8 @@ def _parse_args():
             parser.error(f"--{name} must be positive.")
     if args.top_k is not None and args.top_k < 1:
         parser.error("--top_k must be positive when supplied.")
+    if any(count < 1 for count in args.position_counts):
+        parser.error("--position_counts must be positive.")
     if args.calib_seq is not None and args.calib_seq < 1:
         parser.error("--calib_seq must be positive.")
     if args.batch_size is not None and args.batch_size < 0:
@@ -372,6 +418,7 @@ def main():
             args.top_k,
             detailed_results=args.detailed_results,
             eval_batch_size=args.eval_batch_size,
+            position_counts=args.position_counts,
         )
         if args.detailed_results:
             report["settings"] = {
@@ -395,6 +442,8 @@ def main():
                 "prompt_tokens": [len(prompt["input_ids"]) for prompt in prompts],
                 "max_new_tokens": args.max_new_tokens,
                 "evaluation_batch_size": args.eval_batch_size,
+                "position_counts": args.position_counts,
+                "position_policy": "endpoint_inclusive_integer_grid_over_valid_generated_positions",
                 "top_k": args.top_k,
                 "seed": args.seed,
                 "generation": "greedy_until_eos_or_token_cap",
