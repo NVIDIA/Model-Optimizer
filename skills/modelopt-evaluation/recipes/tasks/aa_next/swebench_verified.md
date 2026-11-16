@@ -80,8 +80,8 @@ obtain it:
 # (a) From a reference run dir — the exact file a scored run mounted. Read that run's
 #     full_config.yaml `cluster.container_mounts` entry for swebench_instruction.md, then:
 scp <ref-cluster>:<path-from-that-config> ./swebench_instruction.md
-# (b) From the benchmark owners' repository — the path `_swebench_verified.instruction_template`
-#     points at in the benchmark config (see the eval-config "source of truth" note).
+# (b) From the benchmark config that `modelopttools:eval-config` points to (its source-of-truth
+#     note) — the path `_swebench_verified.instruction_template` points at in that config.
 
 sha256sum ./swebench_instruction.md          # record this next to the score
 ssh <login> 'mkdir -p <lustre>/<user>/prompts'
