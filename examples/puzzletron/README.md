@@ -103,6 +103,20 @@ hf auth login --token <your token>
    [2025-11-02 12:52:34][rank-0][main.py:115] Puzzletron Progress 8/8: puzzletron pipeline completed (multi-gpu)
    ```
 
+   **Scoring runtime and progress:** The timestamps above illustrate one run,
+   not guaranteed runtimes. Step 6 depends on hardware, candidate count,
+   sequence length, and `scoring.eval_samples`.
+
+   The current Llama-3.1-8B example uses `scoring.eval_samples: 8`.
+   Using 128 samples increases evaluation work per candidate. Reducing the
+   sample count may affect architecture selection. The separate
+   `realize_model.eval_samples` setting controls final-solution evaluation.
+
+   After each solution completes, progress messages report completed solutions,
+   elapsed time, and estimated remaining time. The estimate uses the average
+   time per completed solution and excludes teacher preparation and later
+   pipeline stages. Different candidates may take different amounts of time.
+
    Once the process is complete, the resulting network architecture will be recorded in `log.txt` for your review:
 
    ```bash
