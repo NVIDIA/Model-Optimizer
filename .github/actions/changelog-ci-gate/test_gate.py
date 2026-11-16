@@ -60,6 +60,7 @@ class ChangelogGateTest(unittest.TestCase):
         self.current = {
             "id": 200,
             "run_number": 20,
+            "run_attempt": 1,
             "head_branch": "feature",
             "event": "pull_request",
             "workflow_id": 3,
@@ -165,6 +166,13 @@ class ChangelogGateTest(unittest.TestCase):
             with self.subTest(artifacts=artifacts):
                 self.artifacts = artifacts
                 self._decision(False)
+
+    def test_successful_rerun_cannot_reuse_failed_attempt_policy(self):
+        """A permissive retry cannot certify the strict-policy artifact from its failed attempt."""
+        permissive_key = gate.fingerprint(self.old_head, self.base, "main", "42", "llm_qat")
+        self.artifacts.append({"name": f"ci-equivalence-{permissive_key}", "expired": False})
+        self.previous["run_attempt"] = 2
+        self._decision(False)
 
     def test_execution_policy_change_invalidates_reuse(self):
         """Removing an allowed failure must rerun tests under the stricter policy."""

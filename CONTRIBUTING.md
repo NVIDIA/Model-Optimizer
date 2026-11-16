@@ -298,6 +298,8 @@ nox -s "unit-3.12(torch_211, tf_latest)"
   required checks on the new commit; code quality and docs still run. Missing or expired
   evidence, failed or unfinished runs, and base/code changes use normal test selection.
   Nightly, manually dispatched workflows and job reruns do not reuse results.
+  Prior runs must also have succeeded on their first attempt, because artifacts from
+  failed attempts can remain after a retry succeeds.
 - **Stacked PRs:** GPU, example and regression tests run only for PRs that target `main`, `release/*`
   or `feature/*`, the same branches the unit tests run for. A PR based on another PR's branch gets
   failing `*-pr-required-check`s that say the tests are deferred; once it targets `main`, push or use

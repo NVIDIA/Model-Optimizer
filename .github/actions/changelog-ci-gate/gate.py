@@ -61,6 +61,9 @@ def reusable_run(repo, run_id, head_sha, key):
     previous = next((run for run in runs if run["run_number"] < current["run_number"]), None)
     if not previous or previous["status"] != "completed" or previous["conclusion"] != "success":
         return None
+    # Run artifacts survive failed attempts; a later success cannot certify their policy.
+    if previous["run_attempt"] != 1:
+        return None
     if previous["head_repository"]["id"] != current["head_repository"]["id"]:
         return None
     if {pr["number"] for pr in previous["pull_requests"]} != {
