@@ -215,7 +215,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         # The identity `loss == origin_loss + lilicorr_loss` is the cheap parity check
         # on this objective, so both halves are reported next to the total.
         metrics["origin_loss"] = out.loss.detach().float()
-        metrics["origin_accuracy"] = torch.full((), out.accuracy, device=out.loss.device)
+        metrics["origin_accuracy"] = out.accuracy
         return LossOutput(out.loss + lilicorr_loss, accuracy, metrics)
 
     def _compute_lilicorr_loss(
@@ -415,7 +415,9 @@ class HFLiLiCorrModel(HFDFlashModel):
         }
         for name, weight in weights.items():
             metrics[name] = torch.full((), weight, dtype=torch.float64, device=loss.device)
-        accuracy = metrics["lilicorr_selected_prefix"].item() / float(num_slots)
+        # float64, as the Python division this replaces was, so the reported number is
+        # bit-for-bit what it used to be rather than a float32 round of it.
+        accuracy = metrics["lilicorr_selected_prefix"].double() / num_slots
         return loss, accuracy, metrics
 
     def _distractor_penalty(

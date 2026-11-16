@@ -933,7 +933,8 @@ class HFDFlashModel(DFlashModel):
         """
         final = ctx.logits.final
         if not ctx.trainable:
-            return LossOutput(self._draft_zero_loss(final.device, through=(final,)), 0.0, {})
+            zero = self._draft_zero_loss(final.device, through=(final,))
+            return LossOutput(zero, torch.zeros((), device=final.device), {})
 
         if self.dflash_self_logit_distillation:
             flat_logits = ctx.flat_logits("final")
@@ -946,7 +947,7 @@ class HFDFlashModel(DFlashModel):
 
         with torch.no_grad():
             accuracy = _masked_top1(final, ctx.targets.token_ids, ctx.targets.mask)
-        return LossOutput(loss, accuracy.item(), {})
+        return LossOutput(loss, accuracy, {})
 
     def forward(
         self,
@@ -1077,7 +1078,10 @@ class HFDFlashModel(DFlashModel):
         return ModelOutput(
             loss=out.loss,
             logits=base_outputs.logits,
-            train_acc=[[out.accuracy]],
+            # The loss path's only host sync, and it is here rather than inside the loss
+            # because the example trainer averages train_acc with numpy, which cannot
+            # take a CUDA tensor.
+            train_acc=[[out.accuracy.item()]],
             draft_metrics=out.metrics,
         )
 
