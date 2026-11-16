@@ -152,12 +152,11 @@ below, tell the user and offer to address it before pushing; do not push as-is.
   an API or flag, and what you actually ran under Testing. Root cause, benchmark
   numbers, and design rationale belong here only as far as they support the why,
   a few lines each. Don't restate the diff file by file.
-- **List the modules touched and why each is needed.** After "What does this PR
-  do?", add a `### Modules touched` section: one line per module the PR changes
-  (e.g. `modelopt/torch/export`, `examples/hf_ptq`, `skills/modelopt-ptq`)
-  saying why the fix cannot be made without changing it. Tests and docs that
-  only follow the change need no line. A module you cannot justify this way
-  belongs in a separate PR.
+- **List the modules touched and why each is needed.** When the PR changes more
+  than one module, add a `### Modules touched` section after "What does this PR
+  do?": one line per module saying why the fix cannot be made without changing
+  it. Tests and docs that only follow the change don't count. A module you
+  cannot justify this way belongs in a separate PR.
 - **Only changelog-worthy changes get a `CHANGELOG.rst` entry:** new features,
   backward breaking changes, deprecations, and fixes for critical or known bugs
   from a previous release. Skip bugs introduced and fixed within the same
