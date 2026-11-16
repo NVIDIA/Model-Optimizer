@@ -1,6 +1,6 @@
 ---
 name: modelopt-evaluation
-description: NEL backend: creates configs, launches and validates accuracy evaluations with NeMo Evaluator Launcher (NEL). Use only when the task or the user names NEL (nel, nemo-evaluator-launcher); for any other evaluation tool use that tool's own skills. Also use for validating completed NEL runs. Not for quantizing models (use modelopt-ptq), standalone serving (use modelopt-deployment), or comparing completed baseline-vs-quantized results (use modelopt-compare-results).
+description: NEL backend - creates configs, launches and validates accuracy evaluations with NeMo Evaluator Launcher (NEL). Use when the task or user names NEL (nel, nemo-evaluator-launcher) or names no evaluation tool — NEL is the default; for another named tool use that tool's skills. Also use for validating completed NEL runs. Not for quantizing models (use modelopt-ptq), standalone serving (use modelopt-deployment), or comparing completed baseline-vs-quantized results (use modelopt-compare-results).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073).
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
