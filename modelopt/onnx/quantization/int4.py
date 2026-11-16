@@ -954,11 +954,21 @@ def get_x_w_mean_for_subgraph(
 
     assert w_concatenated is not None
     org_shape = w_concatenated.shape
-    w_concatenated = w_concatenated.reshape(block_size, -1)
-    div_by = np.amax(np.abs(w_concatenated), axis=0)
+    slice_after_padding = None
+    if org_shape[0] % block_size != 0:
+        slice_after_padding = slice(org_shape[0])
+        w_concatenated = _pad(w_concatenated, block_size)
+        org_shape = w_concatenated.shape
+    # Blocks are `block_size` consecutive rows; splitting dim 0 into
+    # (n_blocks, block_size) keeps each block's rows together, unlike
+    # reshape(block_size, -1), which interleaves rows from different blocks.
+    w_concatenated = w_concatenated.reshape(org_shape[0] // block_size, block_size, org_shape[1])
+    div_by = np.amax(np.abs(w_concatenated), axis=1, keepdims=True)
     div_by = div_by + 1e-6  # damping factor 1e-6 is taken from AutoAWQ
     w_concatenated = np.abs(w_concatenated) / div_by
     w_concatenated = w_concatenated.reshape(org_shape)
+    if slice_after_padding is not None:
+        w_concatenated = w_concatenated[slice_after_padding, ...]
     w_m = np.mean(w_concatenated, axis=1)
 
     del w_concatenated
