@@ -44,11 +44,15 @@ and :class:`LossContext`, which carries them with the draft's logits to the loss
 """
 
 import functools
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+
+if TYPE_CHECKING:
+    # Only for annotations: this module imports nothing from the package at runtime.
+    from .hf_dflash import DraftBatch
 
 __all__ = ["DraftLogits", "LossContext", "LossOutput"]
 
@@ -234,7 +238,7 @@ class LossOutput(NamedTuple):
 
     loss: torch.Tensor
     accuracy: torch.Tensor  # detached 0-dim
-    metrics: dict  # name -> detached 0-dim tensor
+    metrics: dict[str, torch.Tensor]  # each detached 0-dim
 
 
 class LossContext:
@@ -245,7 +249,16 @@ class LossContext:
     objective backpropagates through it; otherwise it runs under ``no_grad``.
     """
 
-    def __init__(self, batch, logits, targets, *, weighting, teacher, ce_grad):
+    def __init__(
+        self,
+        batch: "DraftBatch",
+        logits: DraftLogits,
+        targets: _BlockTargets,
+        *,
+        weighting: dict,
+        teacher,
+        ce_grad: bool,
+    ):
         """Weigh the step's block positions.
 
         Args:
@@ -275,13 +288,17 @@ class LossContext:
         """Whether the weights leave anything to train on (reads the device once)."""
         return bool(self.weight_sum > 1.0)
 
-    def flat_logits(self, source):
-        """``logits.<source>`` as [B * N * bs, V]."""
+    def flat_logits(self, source: str) -> torch.Tensor:
+        """``logits.<source>`` -- ``"final"`` or ``"backbone"`` -- as [B * N * bs, V]."""
         logits = getattr(self.logits, source)
         return logits.reshape(-1, logits.shape[-1])
 
-    def ce(self, source):
-        """Per-token cross-entropy of ``logits.<source>`` on the labels: [B * N * bs]."""
+    def ce(self, source: str) -> torch.Tensor:
+        """Per-token cross-entropy on the labels: [B * N * bs].
+
+        ``source`` is ``"final"`` or ``"backbone"``, the two fields of ``DraftLogits``.
+        Each is computed at most once and kept, so terms on the same source share it.
+        """
         if source not in self._ce:
             with torch.set_grad_enabled(self._ce_grad):
                 self._ce[source] = F.cross_entropy(

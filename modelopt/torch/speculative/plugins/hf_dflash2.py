@@ -42,7 +42,7 @@ from transformers import PreTrainedModel
 
 from ..dflash.conversion import DFlash2DMRegistry
 from ..losses import _lk_lambda_loss
-from .dflash_losses import LossOutput, _block_tokens
+from .dflash_losses import LossContext, LossOutput, _block_tokens
 from .hf_dflash import HFDFlashModel
 from .modeling_dflash2 import DFlash2Module
 
@@ -157,7 +157,7 @@ class HFDFlash2Model(HFDFlashModel):
         # every training step. The trainer converts them at the logging boundary.
         return loss, accuracy.detach(), coverage.detach()
 
-    def _lk_loss(self, ctx):
+    def _lk_loss(self, ctx: LossContext) -> torch.Tensor:
         """Re-weight the block objective between cross-entropy and acceptance.
 
         Both terms are read off the same per-position cross-entropy the backbone loss
@@ -192,7 +192,7 @@ class HFDFlash2Model(HFDFlashModel):
             mean_acceptance=acceptance,
         )
 
-    def _compute_loss(self, ctx):
+    def _compute_loss(self, ctx: LossContext) -> LossOutput:
         """Backbone DFlash loss plus the candidate-selector cross-entropy.
 
         Reported accuracy stays the backbone's top-1, so DFlash and DFlash2 runs remain
