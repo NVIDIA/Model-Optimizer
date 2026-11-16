@@ -39,12 +39,14 @@ from modelopt.torch.quantization.algorithms import (
     QuantRecipeHparam,
     _AutoQuantizeBaseSearcher,
     _AutoQuantizeGradientScoringSession,
+    _get_kl_div_loss,
+    _get_log_prob,
     _module_search_space_signature,
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
 from modelopt.torch.utils import safe_load, safe_save
-from modelopt.torch.utils.distributed import DistributedProcessGroup
+from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 
 
 class _AttentionLayer(torch.nn.Module):
@@ -1697,6 +1699,41 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
                 torch.testing.assert_close(
                     s1["state_dict"][qname][buf_name], s2["state_dict"][qname][buf_name]
                 )
+
+
+def _tensor_parallel_kl_job(rank, size):
+    torch.manual_seed(0)
+    tokens, vocab = 64, 32 * size
+    unquant = torch.randn(tokens, vocab).bfloat16()
+    context = (unquant.float() + 3 * torch.randn(tokens, vocab)).bfloat16()
+    nudged = context.clone()
+    nudged[:, :: vocab // size] += 0.125  # one column in each rank's shard
+    shard = slice(rank * vocab // size, (rank + 1) * vocab // size)
+
+    def reference(quant):
+        log_p = torch.log_softmax(unquant.double(), -1)[:, shard]
+        log_q = torch.log_softmax(quant.double(), -1)[:, shard]
+        return (log_p.exp() * (log_p - log_q)).sum()
+
+    lm_head = SimpleNamespace(parallel_state=ParallelState(tensor_parallel_group=None))
+    # The compiled function's math, without compiling it on CPU.
+    with torch.compiler.set_stance("force_eager"):
+        log_prob_unquant = _get_log_prob(unquant[:, shard], lm_head)
+        # Summed over batches, as the searcher sums each candidate's scores.
+        context_score, nudged_score = (
+            sum(_get_kl_div_loss(log_prob_unquant, quant[:, shard], lm_head) for _ in range(8))
+            for quant in (context, nudged)
+        )
+    expected = 8 * (reference(nudged) - reference(context))
+    assert reference(nudged).bfloat16() == reference(context).bfloat16()  # bf16 cannot tell them
+    torch.testing.assert_close(nudged_score - context_score, expected.float(), rtol=0.05, atol=0)
+
+
+def test_tensor_parallel_kl_keeps_small_differences_over_a_large_shared_kl(cpu_dist_workers):
+    """A KL context adds one large base to every candidate's score. The vocab-sharded log-probs
+    of a tensor-parallel LM head stay fp32 so the scores keep the candidates' small differences
+    through each batch's KL and the sum over batches; a bf16 KL rounds them away."""
+    cpu_dist_workers.run(_tensor_parallel_kl_job)
 
 
 def test_auto_quantize_checkpoint_rejects_changed_fixed_ptq_baseline(tmp_path):

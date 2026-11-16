@@ -2365,13 +2365,14 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBackwardScoringSearcher):
 
 @torch.compile(dynamic=True)
 def _get_log_softmax_dist(logits: torch.Tensor, tp_group) -> torch.Tensor:
-    dtype = logits.dtype
+    # In fp32 like the unsharded path: a KL context adds one large base to every score, and a bf16
+    # KL would round away the candidates' differences.
     max_logits = torch.amax(logits, dim=-1, keepdim=True)
     torch.distributed.all_reduce(max_logits, op=torch.distributed.ReduceOp.MAX, group=tp_group)
-    logits = (logits - max_logits).float()
+    logits = logits.float() - max_logits
     sum_exp_logits = torch.exp(torch.logsumexp(logits, dim=-1, keepdim=True))
     torch.distributed.all_reduce(sum_exp_logits, op=torch.distributed.ReduceOp.SUM, group=tp_group)
-    return (logits - torch.log(sum_exp_logits)).to(dtype)
+    return logits - torch.log(sum_exp_logits)
 
 
 def _get_log_prob(logits: torch.Tensor, lm_head: nn.Module = None) -> torch.Tensor:
@@ -2504,11 +2505,7 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
 
             def kl_to_unquantized():
                 logits_quant = self.config["forward_step"](self.model, data)
-                # Summed over batches in fp32: a context adds one large base to every score, and
-                # a bf16 running sum (Megatron's log-probs) would round away their differences.
-                return _get_kl_div_loss(
-                    log_prob_unquant, logits_quant, _get_lm_head(self.model)
-                ).float()
+                return _get_kl_div_loss(log_prob_unquant, logits_quant, _get_lm_head(self.model))
 
             set_to(context_recipe)
             hparams = [
