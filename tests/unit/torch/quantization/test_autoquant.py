@@ -1053,6 +1053,39 @@ def test_pqs_folding(config):
     assert torch.allclose(model_ref(inputs), model_test(inputs))
 
 
+def test_auto_quantize_preserves_awq_full_clipping(monkeypatch):
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(torch.nn.Linear(128, 32, bias=False))
+    inputs = torch.randn(64, 128)
+    config = copy.deepcopy(mtq.INT4_AWQ_CFG)
+    config["algorithm"] = "awq_full"
+    fold_pqs_to_weights = QuantRecipe.fold_pqs_to_weights
+    before_folding = {}
+
+    def record_and_fold(model):
+        before_folding["amax"] = model[0].weight_quantizer.amax.clone()
+        before_folding["output"] = model(inputs).detach()
+        fold_pqs_to_weights(model)
+
+    monkeypatch.setattr(QuantRecipe, "fold_pqs_to_weights", staticmethod(record_and_fold))
+    model, _ = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 4.0},
+        quantization_formats=[(config, "AWQ_FULL")],
+        data_loader=[inputs],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, batch: output.square().mean(),
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
+
+    assert model[0].weight_quantizer.pre_quant_scale is None
+    torch.testing.assert_close(
+        model[0].weight_quantizer.amax, before_folding["amax"], rtol=0, atol=0
+    )
+    torch.testing.assert_close(model(inputs), before_folding["output"], rtol=0, atol=0)
+
+
 def _test_data_parallel_auto_quantize(rank, size):
     model = SimpleLinear()
     # Each rank its own batches: only the data-parallel score sync makes their scores agree.
