@@ -18,6 +18,7 @@
 import argparse
 import gzip
 import hashlib
+import inspect
 import json
 import math
 import multiprocessing as mp
@@ -39,6 +40,7 @@ from modelopt.torch.utils import (
     prepare_messages_for_chat_template,
 )
 
+from ._chat_blend import prepare_grouped_blend
 from .megatron_preprocess_data import megatron_preprocess_data
 
 __all__ = ["prepare_chat_data_blend", "prepare_megatron_data_blend"]
@@ -110,9 +112,15 @@ def _download_files(source: dict[str, Any], output_dir: Path) -> list[str]:
     """Download the repository ``files`` of a source and return their local paths."""
     dataset = source["hf_dataset"]
     raw_dir = output_dir.parent / "raw" / dataset.replace("/", "--")
+    if "revision" in source:
+        raw_dir /= source["revision"]
     return [
         huggingface_hub.hf_hub_download(
-            repo_id=dataset, filename=file, repo_type="dataset", local_dir=raw_dir
+            repo_id=dataset,
+            filename=file,
+            repo_type="dataset",
+            local_dir=raw_dir,
+            **({"revision": source["revision"]} if "revision" in source else {}),
         )
         for file in source["files"]
     ]
@@ -183,13 +191,16 @@ def _to_chat(
     content_field: str,
     reasoning_content: ReasoningContentMode = "native",
     loss_mode: str = "assistant",
+    *,
+    preserve_chat_template_kwargs: bool = False,
 ) -> dict[str, Any] | None:
     """Convert a source row to ``{"messages": [...]}``, or ``None`` if it has nothing to train on.
 
     ``messages`` go through :func:`prepare_messages_for_chat_template` with ``reasoning_content``,
-    and non-empty ``tools`` and ``system`` fields are kept for the chat path. A ``text`` row in the NeMo chat
-    format (``<extra_id_1>User`` / ``Assistant`` markers) is split into turns; any other ``text``
-    row becomes one assistant turn, so all of it is trained.
+    and non-empty ``tools`` and ``system`` fields are kept for the chat path. Grouped selection
+    also preserves ``chat_template_kwargs`` when ``preserve_chat_template_kwargs`` is enabled.
+    A ``text`` row in the NeMo chat format (``<extra_id_1>User`` / ``Assistant`` markers) is split
+    into turns; any other ``text`` row becomes one assistant turn, so all of it is trained.
     """
     if content_field == "messages":
         messages = row.get("messages")
@@ -202,6 +213,8 @@ def _to_chat(
         for key in ("tools", "system"):
             if row.get(key):
                 chat[key] = row[key]
+        if preserve_chat_template_kwargs and row.get("chat_template_kwargs"):
+            chat["chat_template_kwargs"] = row["chat_template_kwargs"]
     else:
         text = row.get("text")
         if not text or not isinstance(text, str):
@@ -240,7 +253,8 @@ def _iter_rows(
     source: dict[str, Any], output_dir: Path, shuffle: bool, seed: int
 ) -> Iterator[dict[str, Any]]:
     """Yield the rows of a source: its ``files`` in order, or its Hugging Face split, streamed."""
-    if "files" in source:
+
+    def file_rows():
         for path in _download_files(source, output_dir):
             opener = gzip.open if path.endswith(".gz") else open
             with opener(path, "rt", encoding="utf-8") as f:
@@ -250,13 +264,34 @@ def _iter_rows(
                     try:
                         yield json.loads(line)
                     except ValueError as e:
-                        # As in the tokenizing reader: some Nemotron files carry a malformed record.
                         print(f"[WARN] Skipping malformed JSONL record in {path}: {e}", flush=True)
+
+    buffer_size = source.get("shuffle_buffer_size", 1000)
+    if "files" in source:
+        rows = file_rows()
+        # Keep legacy file ordering unless buffer shuffling was explicitly configured.
+        if not shuffle or "shuffle_buffer_size" not in source:
+            yield from rows
+            return
+        rng, buffer = random.Random(seed), []
+        for row in rows:
+            if len(buffer) < buffer_size:
+                buffer.append(row)
+            else:
+                i = rng.randrange(len(buffer))
+                yield buffer[i]
+                buffer[i] = row
+        rng.shuffle(buffer)
+        yield from buffer
         return
     dataset = load_dataset(
-        source["hf_dataset"], source.get("config"), split=source["split"], streaming=True
+        source["hf_dataset"],
+        source.get("config"),
+        split=source["split"],
+        streaming=True,
+        **({"revision": source["revision"]} if "revision" in source else {}),
     )
-    yield from dataset.shuffle(seed=seed) if shuffle else dataset
+    yield from dataset.shuffle(seed=seed, buffer_size=buffer_size) if shuffle else dataset
 
 
 def _take_chat_rows(
@@ -343,6 +378,9 @@ def _part_path(parts_dir: Path, source: dict[str, Any], settings: dict[str, Any]
     A part holds the first usable rows of the source, so it serves any budget it covers.
     """
     selection = {key: source.get(key) for key in ("hf_dataset", "config", "split", "files")}
+    selection.update(
+        (key, source[key]) for key in ("revision", "shuffle_buffer_size") if key in source
+    )
     selection.update(settings, content_field=source["content_field"])
     digest = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()[:16]
     label = source.get("split") or Path(source["files"][0]).name.split(".")[0]
@@ -480,7 +518,30 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
             f"reasoning_content must be one of {sorted(REASONING_CONTENT_MODES)}, "
             f"got {reasoning_content!r}."
         )
+    grouped_options = {
+        "question_sources",
+        "validation_samples",
+        "shuffle_buffer_size",
+        "filter_image_references",
+        "filter_tool_calls",
+        "filter_invalid_reasoning",
+    }
+    if grouped_options.intersection(config) and not config.get("group_split"):
+        raise ValueError("Question isolation and filtering options require group_split: true.")
     budgets = _chat_budgets(config)
+    if config.get("group_split"):
+        pipeline_code = Path(__file__).read_bytes()
+        pipeline_code += Path(inspect.getfile(prepare_messages_for_chat_template)).read_bytes()
+        return prepare_grouped_blend(
+            config_path,
+            config,
+            iter_rows=_iter_rows,
+            to_chat=_to_chat,
+            read_jsonl=_read_jsonl,
+            write_jsonl=_write_jsonl,
+            copy_config=_copy_config,
+            pipeline_code=pipeline_code,
+        )
     output_dir = Path(config["output_dir"])
     parts_dir = output_dir / "parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
@@ -546,6 +607,13 @@ def prepare_megatron_data_blend(config_path: Path) -> list[tuple[float, str]]:
         "loss_mode",
         "pack_max_tokens",
         "num_workers",
+        "group_split",
+        "question_sources",
+        "validation_samples",
+        "shuffle_buffer_size",
+        "filter_image_references",
+        "filter_tool_calls",
+        "filter_invalid_reasoning",
     } & config.keys()
     if chat_keys:
         raise ValueError(f"Tokenized blends do not use {sorted(chat_keys)}.")
