@@ -245,6 +245,14 @@ def test_a_module_calibration_never_reached_gets_the_plain_search(algorithm):
     assert torch.equal(_decoded(model["unused"].weight_quantizer, original.shape), plain)
     assert torch.equal(model["unused"].weight, original)
 
+    # A QAD step that barely moves the weight barely moves its effective weight: the codes are
+    # searched again at the scales they were searched at, not at the raised stored ones.
+    unused = model["unused"]
+    with torch.no_grad():
+        unused.weight.add_(torch.randn_like(unused.weight) * 1e-7 * unused.weight.abs().max())
+        effective = unused.weight_quantizer(unused.weight)
+    assert (effective - plain).norm() < 1e-3 * plain.norm()
+
 
 def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
     original = copy.deepcopy(moe.mlp)

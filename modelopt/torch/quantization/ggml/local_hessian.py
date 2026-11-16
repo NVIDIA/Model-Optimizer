@@ -24,6 +24,7 @@ from .common import (
     floored_second_moments,
     pin_packed_weight,
     pinned_packed_weight,
+    quantize_energy_matched,
     validate_weight,
 )
 from .registry import GGML_FORMAT_REGISTRY
@@ -88,19 +89,26 @@ class GGMLLocalHessianEncoder(LocalHessianEncoder):
                     block_chunk_size,
                     decode_chunk_size,
                 )
+        searched = None
         if "choices" in kwargs:
             packed, shape = ggml_format.quantize(
                 weight.contiguous(), block_chunk_size=block_chunk_size, **kwargs
             )
         else:
-            # No calibration input reached the weight: the plain encode its forwards would give.
-            packed, shape = ggml_format.plain_quantize(
-                weight.contiguous(), block_chunk_size=block_chunk_size
+            # No calibration input reached the weight: the plain encode its forwards would give,
+            # whose stored scales are raised after the search, so the pin keeps the searched ones.
+            packed, shape, searched = quantize_energy_matched(
+                ggml_format, weight.contiguous(), block_chunk_size=block_chunk_size
             )
-        # Pinned with the weight it was encoded from, which encoding again would not reproduce:
-        # the choices are searched, and the plain encode's scales are rescaled after its search.
+        # Pinned with the weight it was encoded from, which encoding again would not reproduce for
+        # searched choices; a block QAD changes is searched again at its search scales.
         pin_packed_weight(
-            quantizer, quantizer.num_bits, packed, kwargs.get("importance"), source=weight
+            quantizer,
+            quantizer.num_bits,
+            packed,
+            kwargs.get("importance"),
+            source=weight,
+            search_scales=searched,
         )
         if ggml_format.payload_scales is not None:
             return weight
