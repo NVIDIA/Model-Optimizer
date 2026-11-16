@@ -39,11 +39,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 import modelopt.torch.speculative.plugins.dflash_flex_attention as dflash_flex_attention
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
-from modelopt.torch.speculative.plugins.dflash_losses import (
-    DraftLogits,
-    _block_targets,
-    _dpace_position_weights,
-)
+from modelopt.torch.speculative.plugins.dflash_losses import DraftLogits, _block_targets
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
     DFlashBaseModelOutput,
@@ -167,61 +163,8 @@ def test_multimodal_forward_kwargs_exclude_non_model_inputs():
     assert forwarded["mm_token_type_ids"] is mm_token_type_ids
 
 
-class TestDPaceWeights:
-    """Test the D-PACE position-weighting objective (arXiv:2605.18810)."""
-
-    @staticmethod
-    def _reference_weights(conf, alpha):
-        """Paper closed form computed by explicit summation (Eq.7-8).
-
-        q~_i = (1-a)q_i + a; C_m = prod_{i<=m} q~_i; w_j = sum_{m>=j} C_m.
-        Deliberately a plain double loop so it is an independent oracle for the
-        vectorized implementation under test.
-        """
-        smoothed = alpha + (1.0 - alpha) * conf
-        length = smoothed.shape[-1]
-        cum = torch.ones_like(smoothed)
-        running = torch.ones(smoothed.shape[:-1])
-        for m in range(length):
-            running = running * smoothed[..., m]
-            cum[..., m] = running
-        expected = torch.zeros_like(smoothed)
-        for j in range(length):
-            expected[..., j] = cum[..., j:].sum(dim=-1)
-        return expected
-
-    def test_weights_match_paper_formula(self):
-        """Eq.7-8, pinned both to a hand-worked value and an independent loop oracle.
-
-        conf=[0.8, 0.5], alpha=0.5 -> q~=[0.9, 0.75] -> prefix=[0.9, 0.675]
-        -> w=[0.9+0.675, 0.675]=[1.575, 0.675].
-        """
-        hand = _dpace_position_weights(torch.tensor([[0.8, 0.5]]), alpha=0.5)
-        assert torch.allclose(hand, torch.tensor([[1.575, 0.675]]), atol=1e-6)
-        conf = torch.tensor([[0.9, 0.6, 0.3, 0.8]])
-        assert torch.allclose(
-            _dpace_position_weights(conf, 0.5), self._reference_weights(conf, 0.5), atol=1e-6
-        )
-
-    def test_mask_makes_invalid_positions_noops(self):
-        """Invalid positions neither shrink the prefix product nor add to the sum."""
-        alpha = 0.5
-        conf = torch.tensor([[0.9, 0.2, 0.3, 0.8]])
-        mask = torch.tensor([[1.0, 0.0, 1.0, 1.0]])
-        masked = _dpace_position_weights(conf, alpha, valid_mask=mask)
-        # Dropping the invalid slot entirely must give the same weights at the kept slots.
-        kept = _dpace_position_weights(conf[:, [0, 2, 3]], alpha)
-        assert torch.allclose(masked[:, [0, 2, 3]], kept, atol=1e-6)
-
-    def test_weights_are_detached(self):
-        """Weights must carry no gradient (paper Eq.9 detaches them)."""
-        conf = torch.rand(2, 3, 5, requires_grad=True)
-        weights = _dpace_position_weights(conf, 0.5)
-        assert not weights.requires_grad
-
-    def test_invalid_alpha_raises(self):
-        with pytest.raises(ValueError, match="dflash_dpace_alpha"):
-            _dpace_position_weights(torch.rand(1, 4), alpha=1.5)
+class TestDPaceConvert:
+    """D-PACE's config keys, as convert validates and wires them."""
 
     def test_default_objective_is_dpace(self):
         """D-PACE is the default (alpha=0.5); an explicit alpha override is wired through."""
