@@ -285,6 +285,32 @@ class TestLiLiCorrForward:
         for name, expected in VARIANTS[variant].items():
             assert metrics[f"lilicorr_{name}"] == expected
 
+    def test_weight_metrics_ignore_the_global_default_dtype(self):
+        """The reported weights are the configured ones, whatever ``set_default_dtype`` is.
+
+        They are built by ``torch.full``, which takes the global default unless told
+        otherwise: under float16 a configured 1e-8 would report as 0 while the objective
+        still trains with it. The model is built first and the default changed only around
+        the forward, as a script that sets it once at import would leave things.
+
+        Only these four are pinned. The rest of the dict, and the loss itself, follow the
+        dtype the step computes in, which this test does not constrain.
+        """
+        model = _converted(variant="base")
+        model.train()
+        model.dflash_lilicorr_w_cal = 1e-8
+        batch = _make_batch(model.dflash_config.vocab_size)
+        names = ["lilicorr_w_ce", "lilicorr_w_margin", "lilicorr_w_pen", "lilicorr_w_cal"]
+        previous = torch.get_default_dtype()
+        try:
+            for default in (torch.float16, torch.float64):
+                torch.set_default_dtype(default)
+                metrics = model(**batch).draft_metrics
+                assert [metrics[n].dtype for n in names] == [torch.float32] * 4, default
+                assert metrics["lilicorr_w_cal"].item() == pytest.approx(1e-8, rel=1e-6)
+        finally:
+            torch.set_default_dtype(previous)
+
     @pytest.mark.parametrize("variant", list(VARIANTS))
     def test_loss_is_exactly_origin_plus_lilicorr(self, variant):
         """The parity check the training recipe relies on: no outer multiplier."""
