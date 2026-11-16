@@ -2440,8 +2440,8 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
         quantized candidate, and an int ``k`` to the ``k``-th from the lowest, counting from 0
         (so ``0`` is ``"lowest"``) and capped at its highest. A score is then the KL at that
         operating point and also counts how a group's error compounds with the others'; every
-        candidate, BF16 included, is measured. Pick the context nearest the budget: the further it
-        is from the selection, the less its scores add up.
+        candidate, BF16 included, is measured. ``"lowest"`` is a good default; in our sub-4-bit
+        tests a context nearer the budget measured the same.
         """
         config = super().default_search_config
         config.update(
