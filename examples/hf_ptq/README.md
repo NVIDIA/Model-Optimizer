@@ -633,6 +633,25 @@ python hf_ptq.py --pyt_ckpt_path $HF_PATH --recipe $RECIPE \
 Both need `--auto_quantize_checkpoint` and a weight search for `constraints.effective_bits` without
 a KV-cache search, in a single `hf_ptq.py` process: not under `torchrun` or with `--use_fsdp2`.
 
+### Sub-4-bit AutoQuantize (GGML formats)
+
+Below 4 bits (IQ2 and similar GGML formats), the default search does no better than uniform
+quantization. The
+[Qwen3.6-35B-A3B recipes](../../modelopt_recipes/models/Qwen/Qwen3.6-35B-A3B/auto_quantize/README.md)
+use this setup:
+
+- **Score KL in a low-bit context:** `auto_quantize_method: kl_div` with
+  `method_options: {context: lowest}`. Default scoring prices each layer with every other layer in
+  BF16. At 2 bits, that rates early layers ~30× more sensitive than late ones and starves the late
+  layers. A context scores every candidate with the other searched layers at their lowest-bit
+  format. At NVFP4/FP8 budgets, context scoring did not beat the default gradient scoring in our tests.
+- **Finalize with sequential GPTQ:** calibrate the IQ candidates with local GPTQ + imatrix and set
+  `finalize_algorithm` to sequential GPTQ + imatrix. That gives ~20% lower KL than imatrix alone.
+- **Search the MoE experts, and keep the other layers fixed.** On Nemotron 3.5 Bolt, also searching
+  the non-expert layers in the same context measured 6–17% worse. Their single-layer scores vary more
+  than the gaps between their formats.
+- **Score the formats in parallel** with format shards, as above.
+
 ## Real Quant
 
 When working with large language models, memory constraints can be a significant challenge. ModelOpt provides a workflow for initializing HF models with compressed weights across multiple GPUs to dramatically reduce memory usage. Check `--low_memory_mode` option in hf_ptq.py for more details.
