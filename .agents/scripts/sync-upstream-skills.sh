@@ -45,8 +45,9 @@ SHA="${UPSTREAM_SHA:-$DEFAULT_SHA}"
 SHORT_SHA="${SHA:0:7}"
 
 # Local description override for launching-evals: scope the upstream "ALWAYS triggers" text to
-# NEL runs so the skill does not claim evaluations run with other tools. Keep on one line.
-DESC_LAUNCHING_EVALS="NEL backend - run, monitor, analyze, and debug LLM evaluations via nemo-evaluator-launcher. Use only for NEL runs (the task or user names NEL, or an invocation ID or run directory comes from NEL); evaluations run with another tool use that tool's own skills. Covers checking status and live progress, debugging failed runs, exporting artifacts and logs, and analyzing results. Do NOT use for creating or modifying evaluation configs."
+# NEL runs so the skill does not claim evaluations run with other tools. Keep on one line, with no
+# double quotes or backslashes: it is written as a double-quoted YAML string (the text contains ": ").
+DESC_LAUNCHING_EVALS="NEL backend - run, monitor, analyze, and debug LLM evaluations via nemo-evaluator-launcher. Use for NEL runs: the task or user names NEL or names no evaluation tool (NEL is the default), or an invocation ID or run directory comes from NEL; evaluations run with another named tool use that tool's own skills. Covers checking status and live progress, debugging failed runs, exporting artifacts and logs, and analyzing results. Do NOT use for creating or modifying evaluation configs."
 
 UPSTREAM_REPO="NVIDIA-NeMo/Evaluator"
 UPSTREAM_BASE="packages/nemo-evaluator-launcher/.claude/skills"
@@ -114,7 +115,7 @@ inject_provenance() {
 
     # The override goes through ENVIRON, not -v, so awk does not process backslash escapes.
     DESC_OVERRIDE="$desc_override" awk -v sha="$SHA" -v short="$SHORT_SHA" -v skill="$skill" -v extra="$extra_note" '
-        BEGIN { in_fm = 0; injected = 0; fm_end_seen = 0; desc = ENVIRON["DESC_OVERRIDE"] }
+        BEGIN { in_fm = 0; injected = 0; fm_end_seen = 0; skip_desc = 0; desc = ENVIRON["DESC_OVERRIDE"] }
         # Skip any pre-existing provenance or license lines we own
         /^license: Apache-2\.0$/ && in_fm && !fm_end_seen { next }
         /^# Vendored / && in_fm && !fm_end_seen { next }
@@ -123,8 +124,14 @@ inject_provenance() {
         /^# Note: this skill depends on the mlflow-mcp/ && in_fm && !fm_end_seen { next }
         /^# configured in the user/ && in_fm && !fm_end_seen { next }
         {
+            # With a description override, drop the upstream description continuation lines (every
+            # line up to the next frontmatter key or the closing ---).
+            if (in_fm && !fm_end_seen && skip_desc) {
+                if ($0 ~ /^[A-Za-z_][A-Za-z0-9_-]*:/ || $0 == "---") skip_desc = 0
+                else next
+            }
             if (in_fm && !fm_end_seen && $0 ~ /^name: /) $0 = "name: modelopt-" skill
-            if (in_fm && !fm_end_seen && desc != "" && $0 ~ /^description: /) $0 = "description: " desc
+            if (in_fm && !fm_end_seen && desc != "" && $0 ~ /^description: /) { $0 = "description: \"" desc "\""; skip_desc = 1 }
             print
             if ($0 == "---") {
                 if (in_fm == 0) { in_fm = 1 }
