@@ -225,6 +225,22 @@ def invalidate_weight_cache(model: nn.Module | list[nn.Module]) -> None:
             session.drop(quantizer)
 
 
+@contextmanager
+def _suspend_weight_cache(model: nn.Module):
+    """Drop and bypass active entries during initialization, including for child modules."""
+    if not _num_open_scopes:
+        yield
+        return
+    sessions = {q: _ACTIVE[q] for q in model.modules() if q in _ACTIVE}
+    for quantizer, session in sessions.items():
+        session.drop(quantizer)
+        del _ACTIVE[quantizer]
+    try:
+        yield
+    finally:
+        _ACTIVE.update(sessions)
+
+
 def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) -> torch.Tensor:
     """``quantizer._fake_quantize(inputs)``, reused while ``quantizer`` is in an open scope.
 

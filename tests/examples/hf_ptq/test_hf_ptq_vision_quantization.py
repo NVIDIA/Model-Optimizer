@@ -75,7 +75,6 @@ def test_image_calibration_model_target_follows_recipe(
         "hf_model_type",
         lambda model: "qwen3_vl" if model is full_model else "qwen3_vl_text",
     )
-    monkeypatch.setattr(hf_ptq, "is_nemotron_vl", lambda model: False)
     monkeypatch.setattr(
         hf_ptq.AutoProcessor,
         "from_pretrained",
@@ -149,7 +148,7 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
     )
     monkeypatch.setattr(hf_ptq.mtq, "quantize", quantize)
 
-    # Force the Nemotron reinsertion branch: a full-model recipe target must not be assigned as
+    # Force the VLM-wrapper reinsertion branch: a full-model recipe target must not be assigned as
     # its own nested language model.
     hf_ptq.mono_quantize(
         args,
@@ -159,7 +158,7 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
         model_type="qwen3_vl",
         calibration_only=False,
         calib_dataloader=calib_dataloader,
-        is_nemotron_vl_model=True,
+        vlm_wrapper=True,
     )
 
     assert calls == {

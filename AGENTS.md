@@ -7,9 +7,8 @@ These instructions apply to AI-assisted work in this repository.
 - Start with `README.md` for project overview and install.
 - Use `modelopt/` for source, `tests/` for focused test coverage, and
   `examples/` or `docs/` for usage patterns.
-- **Agent skills live under `plugins/modelopt/skills/`**, the installable
-  plugin's canonical skill tree. `.agents/skills` and `.claude/skills` expose
-  those skills through relative symlinks. Shared agent config and scripts
+- **Agent skills live under root `skills/`**, inside the repository-root plugin.
+  `.agents/skills` and `.claude/skills` expose them through relative symlinks. Shared agent config and scripts
   remain under `.agents/`. See `.agents/README.md` for the convention.
 
 ## Coding guidelines
@@ -160,7 +159,10 @@ below, tell the user and offer to address it before pushing; do not push as-is.
   description. File features under the matching `**New Features**` sub-section
   used by recent releases (e.g. `*Quantization*`, `*Speculative Decoding*`,
   `*Megatron Framework (M-LM / M-Bridge)*`, `*Misc*`) rather than relabeling
-  existing ones.
+  existing ones. Quantization has sub-sections (`*Quantization - ONNX*`,
+  `- Algorithms`, `- QAT / QAD`, `- Export & Deployment`, `- Recipes`) and Bug
+  Fixes use coarse area headings. Append to the end of the closest one so PRs
+  don't all collide on one section.
 
 ## Reviewing pull requests
 

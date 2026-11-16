@@ -123,7 +123,10 @@ class GGMLGPTQHelper(GPTQHelper):
         return self.local_hessian_scales and ggml_format.num_choices > 0 and self.n_samples > 0
 
     def update_weights(self, block_size, perc_damp, weight=None, device=None):
-        """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
+        """Run the GPTQ update, then pin the chosen payload to the weight quantizer.
+
+        On a ``device`` other than the weight's, it returns once its results are on the weight's GPU.
+        """
         weight = self.module.weight if weight is None else weight
         self._weight_dtype = weight.dtype
         super().update_weights(block_size, perc_damp, weight, device)
@@ -140,6 +143,11 @@ class GGMLGPTQHelper(GPTQHelper):
             source=weight if self._searched else None,
         )
         self._packed = self._unrounded = self._importance = self._searched = None
+        target = weight.device if device is None else torch.device(device)
+        if target.type == "cuda" and target != weight.device:
+            # The weight's GPU's allocator does not see the copies into it running on this
+            # device's stream, so emptying its cache could release their targets mid-copy.
+            torch.cuda.current_stream(target).synchronize()
 
     def _blockwise_update(self, block_size):
         quantizer = self.weight_quantizer
