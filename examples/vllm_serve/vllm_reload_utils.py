@@ -149,6 +149,10 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
         )
         return ("group", group_key, value)
 
+    # Attention output gates are standalone; let the architecture mapper rename them.
+    if re.search(r"\.self_attn\.gate_proj\.", key):
+        return ("copy", key, value)
+
     # Check if this is a non-expert gate/up projection that needs merging. Only *routed* experts
     # (``experts.<i>.``) merge into w13/w2 above; shared experts are a plain MLP whose gate/up
     # still merge into ``gate_up_proj``, so they must not be excluded by the "experts" substring.

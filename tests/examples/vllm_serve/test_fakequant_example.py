@@ -1058,3 +1058,33 @@ def test_full_state_restore_overrides_disabled_conversion_defaults(reload_utils,
     assert restored[0].input_quantizer.num_bits == 8
     assert restored[0].input_quantizer._dynamic is dynamic
     assert not restored[0].weight_quantizer.is_enabled
+
+
+@pytest.mark.parametrize("handle", ["input_quantizer", "weight_quantizer", "output_quantizer"])
+def test_attention_gate_uses_architecture_mapping_without_mlp_fusion(reload_utils, handle):
+    attention = f"model.layers.0.self_attn.gate_proj.{handle}"
+    mlp_gate = f"model.layers.0.mlp.gate_proj.{handle}"
+    mlp_up = f"model.layers.0.mlp.up_proj.{handle}"
+    metadata = {
+        attention: {"_disabled": False},
+        mlp_gate: {"_disabled": True},
+        mlp_up: {"_disabled": True},
+    }
+
+    def mapper(state):
+        return {
+            key.replace("self_attn.gate_proj.", "self_attn.output_gate_proj."): value
+            for key, value in state.items()
+        }
+
+    mapped = reload_utils.convert_dict_to_vllm(metadata, max_or_concat=False, map_fun=mapper)
+    assert mapped == {
+        f"model.layers.0.self_attn.output_gate_proj.{handle}": {"_disabled": False},
+        f"model.layers.0.mlp.gate_up_proj.{handle}": {"_disabled": True},
+    }
+    buffers = {attention: {"_amax": torch.tensor(3.0)}}
+    mapped_buffers = reload_utils.convert_dict_to_vllm(buffers, map_fun=mapper)
+    assert torch.equal(
+        mapped_buffers[f"model.layers.0.self_attn.output_gate_proj.{handle}"]["_amax"],
+        buffers[attention]["_amax"],
+    )
