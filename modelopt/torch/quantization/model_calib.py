@@ -1001,12 +1001,18 @@ def _mse_calibrate_weights(
                 )
                 if cal is None:
                     continue
+                original_calibrator = weight_quantizer._calibrator
                 weight_quantizer._calibrator = cal
-                _run_and_load_max_stats(
-                    weight_quantizer, partial(_collect_weight_stats, weight=weight)
-                )
-                if hasattr(cal, "reset"):
-                    cal.reset()
+                try:
+                    _run_and_load_max_stats(
+                        weight_quantizer, partial(_collect_weight_stats, weight=weight)
+                    )
+                finally:
+                    # MSE refines _amax; its temporary collector must not leak into
+                    # another calibration pass (e.g. fixed AutoQuant embeddings).
+                    weight_quantizer._calibrator = original_calibrator
+                    if hasattr(cal, "reset"):
+                        cal.reset()
 
                 pbar.update(1)
     pbar.close()
