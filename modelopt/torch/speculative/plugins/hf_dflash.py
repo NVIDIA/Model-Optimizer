@@ -92,6 +92,9 @@ from .dflash_losses import (
     _block_targets,
     _first_predicted_position,
     _masked_top1,
+    _tvd_chunk,
+    objective_loss,
+    objective_term,
 )
 from .modeling_dflash import (  # noqa: F401
     DFlashAttention,
@@ -227,7 +230,7 @@ class HFDFlashModel(DFlashModel):
     @property
     def _needs_base_logits(self) -> bool:
         """Whether the loss reads the target's logits; offline training then reconstructs them."""
-        return bool(self.dflash_self_logit_distillation)
+        return any(term.needs_teacher for _, _, term in self._objective)
 
     @property
     def _base_llm_config(self):
@@ -448,9 +451,21 @@ class HFDFlashModel(DFlashModel):
         if self.dflash_use_torch_compile:
             self.dflash_module.compile_body()
 
+        self._objective = self._build_objective(config)
+        # Compiling fuses the TVD chunk's six vocab-wide elementwise passes.
+        self._tvd_chunk_fn = (
+            torch.compile(_tvd_chunk, dynamic=False, fullgraph=True)
+            if self.dflash_use_torch_compile
+            else _tvd_chunk
+        )
+
     def _build_draft_module(self, dflash_config):
         """Build the draft module. Subclasses override to use an augmented module."""
         return DFlashModule(dflash_config)
+
+    def _build_objective(self, config):
+        """The block objective, ``[(name, weight, term)]``: KD from the base model, or CE."""
+        return [objective_term("kd" if config.dflash_self_logit_distillation else "ce", 1.0)]
 
     def _base_device(self):
         """Device the frozen base model sits on. ``meta`` during a from_pretrained restore."""
@@ -883,7 +898,13 @@ class HFDFlashModel(DFlashModel):
         )
 
     def _draft_logits(self, batch: DraftBatch) -> DraftLogits:
-        """The draft's logits per block position; a variant with a head applies it here."""
+        """The draft's logits per block position; a variant with a head applies it here.
+
+        Overriding this puts a head between the backbone and the served distribution, so
+        the logits have to exist: a loss that reaches them by projecting ``batch.hidden``
+        itself, as a fused lm_head would, reproduces the backbone's and silently drops the
+        head. Whoever adds such a path keys its refusal on who overrides this method.
+        """
         logits = self._base_model_lm_head(batch.hidden)
         logits = logits.view(*batch.anchors.shape, self.dflash_block_size, -1)
         return DraftLogits(final=logits, backbone=logits)
@@ -916,38 +937,35 @@ class HFDFlashModel(DFlashModel):
             teacher=functools.partial(
                 self._teacher_logits, batch.base_outputs, label_positions=targets.positions
             ),
-            # The KD path optimizes the soft target; its D-PACE confidences need no gradient.
-            # This reads only this class's objective, but ctx.ce is shared: DFlash2's tv and
-            # lambda blends backpropagate through it too. They are safe because
-            # HFDFlash2Model.modify refuses to combine them with distillation -- were that
-            # check gone, the blend would train on a no-grad cross-entropy, and the selector
-            # term would keep the total differentiable enough for backward to say nothing.
-            ce_grad=not self.dflash_self_logit_distillation,
+            ce_grad=any(term.needs_ce_grad for _, _, term in self._objective),
+            tvd_chunk=self._tvd_chunk_fn,
         )
 
     def _compute_loss(self, ctx: LossContext) -> LossOutput:
-        """The weighted cross-entropy (or KD) loss on the served logits, and its accuracy.
+        """The objective on the served logits and its accuracy.
 
-        A step whose position weights leave nothing to train returns a zero loss and
-        accuracy 0.0.
+        Metrics: each objective term, and the backbone's accuracy when a head sits on it.
+        A step whose position weights leave nothing to train gets ``_zero_output``.
         """
-        final = ctx.logits.final
+        final, backbone = ctx.logits
         if not ctx.trainable:
-            zero = self._draft_zero_loss(final.device, through=(final,))
-            return LossOutput(zero, torch.zeros((), device=final.device), {})
-
-        if self.dflash_self_logit_distillation:
-            flat_logits = ctx.flat_logits("final")
-            target_soft = torch.softmax(ctx.teacher().reshape(flat_logits.shape), dim=-1)
-            draft_logsoft = torch.log_softmax(flat_logits, dim=-1)
-            per_token = -(target_soft * draft_logsoft).sum(dim=-1)
-        else:
-            per_token = ctx.ce("final")
-        loss = (per_token * ctx.weights.view(-1)).sum() / ctx.weight_sum
-
+            return self._zero_output(ctx, self._draft_zero_loss(final.device, through=(final,)))
+        loss, metrics = objective_loss(self._objective, ctx, "final")
         with torch.no_grad():
             accuracy = _masked_top1(final, ctx.targets.token_ids, ctx.targets.mask)
-        return LossOutput(loss, accuracy, {})
+            if backbone is not final:
+                metrics["backbone_accuracy"] = _masked_top1(
+                    backbone, ctx.targets.token_ids, ctx.targets.mask
+                )
+        return LossOutput(loss, accuracy, metrics)
+
+    def _zero_output(self, ctx, loss):
+        """``loss``, a zero, for a step with nothing to train; accuracy and metrics read 0."""
+        zero = torch.zeros((), device=loss.device)
+        names = [f"loss_{name}" for name, _, _ in self._objective]
+        if ctx.logits.backbone is not ctx.logits.final:
+            names.append("backbone_accuracy")
+        return LossOutput(loss, zero, dict.fromkeys(names, zero))
 
     def forward(
         self,
