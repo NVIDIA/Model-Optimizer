@@ -4,6 +4,56 @@ This folder includes popular 3rd-party LLM benchmarks for LLM accuracy evaluatio
 
 The following instructions show how to evaluate the Model Optimizer quantized LLM with the benchmarks, including the TensorRT-LLM deployment.
 
+## PyTorch expected acceptance rate on frozen trajectories
+
+`ear_eval.py` scores immutable token IDs under the reference and candidate at
+identical histories and temperature one. Supply an ordered JSON array of
+`{"id": "example-0", "prompt_ids": [1, 2], "generated_ids": [3, 4]}` records.
+These are already rendered prompts and frozen reference continuations; the
+example neither generates tokens nor retokenizes the histories.
+
+```sh
+python examples/llm_eval/ear_eval.py \
+    --reference /models/reference --candidate /models/candidate \
+    --trajectories trajectories.json --eos_token_ids 4 \
+    --top_ks 10 32 128 512 1024 2048 --output ear_results.json
+```
+
+Both distributions normalize over the full vocabulary in FP64. Full EAR is
+`sum(min(p, q)) = 1 - TV(p, q)`; top-k EAR sums the same overlap only on the
+reference's top-k token IDs, without renormalization. Higher is better. The
+reference top-k mass is retained as the self-comparison ceiling. This overlap
+truncation differs from conditional top-k KL in `kl_eval.py`.
+
+Reports retain each valid response position, including the prediction of the
+first EOS/EOT token, with padding and later tokens excluded. `equal_prompt`
+first averages within each prompt and then gives every prompt equal weight;
+`native_flat` gives every selected position equal weight. Per-position results
+can be reused across vocabulary, prompt-count, generation-length, position-count,
+and candidate-ranking comparisons without repeating model forwards:
+
+```python
+from ear_metrics import aggregate_ear
+
+# Preserve bank order and membership when selecting the frozen prompt prefix.
+prefix = aggregate_ear(report["rows"], prompt_count=100, max_tokens=1024)
+spaced = aggregate_ear(report["rows"], position_count=64, selection="spaced")
+```
+
+The spaced grid uses `m = min(count, length)` positions: `[0]` for `m == 1`,
+otherwise `i * (length - 1) // (m - 1)`. Recompute it for each count; grids are
+usually not nested. A generation cap is applied before selecting that grid.
+
+The CLI uses singleton scoring. The Python `score_frozen` API accepts batches;
+qualify them against singleton results with `qualify_batch` for the actual
+models, attention backend, lengths, and padding layouts before use. Memory fit
+alone does not establish numerical agreement. The qualifier reports absolute
+errors, elapsed time, throughput, and current-device peak GPU allocation; use
+per-device instrumentation for dispatched models. Decoder states are projected
+through the output head in bounded chunks. Validate that route against normal
+model forwards for each architecture; post-head scaling or soft-capping needs
+an adapter. Checkpoint-loading equivalence is a separate validation requirement.
+
 ## PyTorch KL evaluation prototype
 
 `kl_eval.py` compares an unquantized BF16 base model with a separately calibrated fake-quant copy. Evaluation defaults to the private [NVIDIA 300-prompt benchmark blend](https://huggingface.co/datasets/nvidia/balanced-benchmark-prompts-300). Supply a model and a fixed PTQ recipe; calibration reuses the `hf_ptq.py` workflow and stops before checkpoint export. Install ModelOpt and the [hf_ptq requirements](../hf_ptq/requirements.txt) as described in the [hf_ptq setup](../hf_ptq/README.md).
