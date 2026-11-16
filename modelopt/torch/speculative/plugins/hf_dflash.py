@@ -917,6 +917,11 @@ class HFDFlashModel(DFlashModel):
                 self._teacher_logits, batch.base_outputs, label_positions=targets.positions
             ),
             # The KD path optimizes the soft target; its D-PACE confidences need no gradient.
+            # This reads only this class's objective, but ctx.ce is shared: DFlash2's tv and
+            # lambda blends backpropagate through it too. They are safe because
+            # HFDFlash2Model.modify refuses to combine them with distillation -- were that
+            # check gone, the blend would train on a no-grad cross-entropy, and the selector
+            # term would keep the total differentiable enough for backward to say nothing.
             ce_grad=not self.dflash_self_logit_distillation,
         )
 
