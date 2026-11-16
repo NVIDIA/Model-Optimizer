@@ -5,8 +5,8 @@
 - Benchmark: <https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/mrcr>
 - Resource server: <https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mrcr/configs/mrcr.yaml>
 - Dataset: `openai/mrcr` (HF, gated → `HF_TOKEN`)
-- **Source of truth:** the benchmark config that `modelopttools:eval-config` points to for MRCR (1M) and MRCR-128K
-  (its source-of-truth note) — re-check before a scored run.
+- **Source of truth:** the canonical benchmark config for MRCR (1M) and MRCR-128K — re-check before a
+  scored run.
 
 Long-context retrieval. Each task is a long multi-turn conversation with N
 near-identical "needle" responses; the model must reproduce the Nth verbatim

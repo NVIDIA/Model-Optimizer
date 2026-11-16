@@ -16,8 +16,7 @@
 
 # Re-vendor upstream Claude skills from NVIDIA-NeMo/Evaluator at a pinned SHA.
 #
-# Scope: skills we vendor from upstream (launching-evals, accessing-mlflow). Their bodies are
-# verbatim; launching-evals gets a local `description:` override (see DESC_LAUNCHING_EVALS).
+# Scope: only skills we vendor verbatim (launching-evals, accessing-mlflow).
 # The `evaluation` skill is a *modified* fork of upstream nel-assistant and is
 # NOT managed by this script — update it manually when pulling upstream changes.
 #
@@ -31,8 +30,7 @@
 # .agents/skills compatibility symlink and
 # re-applies our provenance lines into each SKILL.md frontmatter. If you have
 # local changes to a vendored skill, they will be lost — that is expected,
-# since vendored skills should not be modified locally. The only intended local
-# difference is the description override below, which is re-applied on every sync.
+# since vendored-verbatim skills should not be modified locally.
 #
 # Note: .claude/skills/ (and other agent-specific skill dirs) are symlinks to
 # root skills/ — see .agents/README.md.
@@ -43,11 +41,6 @@ set -euo pipefail
 DEFAULT_SHA="8fa16b237d11e213ea665d5bad6b44d393762317"
 SHA="${UPSTREAM_SHA:-$DEFAULT_SHA}"
 SHORT_SHA="${SHA:0:7}"
-
-# Local description override for launching-evals: scope the upstream "ALWAYS triggers" text to
-# NEL runs so the skill does not claim evaluations run with other tools. Keep on one line, with no
-# double quotes or backslashes: it is written as a double-quoted YAML string (the text contains ": ").
-DESC_LAUNCHING_EVALS="NEL backend - run, monitor, analyze, and debug LLM evaluations via nemo-evaluator-launcher. Use for NEL runs: the task or user names NEL or names no evaluation tool (NEL is the default), or an invocation ID or run directory comes from NEL; evaluations run with another named tool use that tool's own skills. Covers checking status and live progress, debugging failed runs, exporting artifacts and logs, and analyzing results. Do NOT use for creating or modifying evaluation configs."
 
 UPSTREAM_REPO="NVIDIA-NeMo/Evaluator"
 UPSTREAM_BASE="packages/nemo-evaluator-launcher/.claude/skills"
@@ -105,33 +98,22 @@ fetch_skill_recursive() {
 
 # Inject our provenance lines into a SKILL.md frontmatter, right after the
 # `description:` line. Idempotent — removes any existing provenance block first.
-# Optional 3rd argument replaces the upstream `description:` text and changes the provenance
-# wording to "vendored, description overridden".
 inject_provenance() {
     local skill="$1"
     local extra_note="${2:-}"
-    local desc_override="${3:-}"
     local path="$DEST_BASE/modelopt-$skill/SKILL.md"
 
-    # The override goes through ENVIRON, not -v, so awk does not process backslash escapes.
-    DESC_OVERRIDE="$desc_override" awk -v sha="$SHA" -v short="$SHORT_SHA" -v skill="$skill" -v extra="$extra_note" '
-        BEGIN { in_fm = 0; injected = 0; fm_end_seen = 0; skip_desc = 0; desc = ENVIRON["DESC_OVERRIDE"] }
+    awk -v sha="$SHA" -v short="$SHORT_SHA" -v skill="$skill" -v extra="$extra_note" '
+        BEGIN { in_fm = 0; injected = 0; fm_end_seen = 0 }
         # Skip any pre-existing provenance or license lines we own
         /^license: Apache-2\.0$/ && in_fm && !fm_end_seen { next }
-        /^# Vendored / && in_fm && !fm_end_seen { next }
+        /^# Vendored verbatim/ && in_fm && !fm_end_seen { next }
         /^# https:\/\/github\.com\/NVIDIA-NeMo\/Evaluator\/tree\// && in_fm && !fm_end_seen { next }
         /^# To re-sync:/ && in_fm && !fm_end_seen { next }
         /^# Note: this skill depends on the mlflow-mcp/ && in_fm && !fm_end_seen { next }
         /^# configured in the user/ && in_fm && !fm_end_seen { next }
         {
-            # With a description override, drop the upstream description continuation lines (every
-            # line up to the next frontmatter key or the closing ---).
-            if (in_fm && !fm_end_seen && skip_desc) {
-                if ($0 ~ /^[A-Za-z_][A-Za-z0-9_-]*:/ || $0 == "---") skip_desc = 0
-                else next
-            }
             if (in_fm && !fm_end_seen && $0 ~ /^name: /) $0 = "name: modelopt-" skill
-            if (in_fm && !fm_end_seen && desc != "" && $0 ~ /^description: /) { $0 = "description: \"" desc "\""; skip_desc = 1 }
             print
             if ($0 == "---") {
                 if (in_fm == 0) { in_fm = 1 }
@@ -139,8 +121,7 @@ inject_provenance() {
             }
             if (in_fm && !injected && $0 ~ /^description: /) {
                 print "license: Apache-2.0"
-                if (desc != "") print "# Vendored from NVIDIA NeMo Evaluator (commit " short "), description overridden (see sync-upstream-skills.sh)"
-                else print "# Vendored verbatim from NVIDIA NeMo Evaluator (commit " short ")"
+                print "# Vendored verbatim from NVIDIA NeMo Evaluator (commit " short ")"
                 print "# https://github.com/NVIDIA-NeMo/Evaluator/tree/" sha "/packages/nemo-evaluator-launcher/.claude/skills/" skill
                 print "# To re-sync: .agents/scripts/sync-upstream-skills.sh"
                 if (extra != "") {
@@ -167,9 +148,6 @@ for skill in launching-evals accessing-mlflow; do
         accessing-mlflow)
             inject_provenance "$skill" \
                 "Note: this skill depends on the mlflow-mcp MCP server (https://github.com/kkruglik/mlflow-mcp)|configured in the user's Claude Code setup."
-            ;;
-        launching-evals)
-            inject_provenance "$skill" "" "$DESC_LAUNCHING_EVALS"
             ;;
         *)
             inject_provenance "$skill"
