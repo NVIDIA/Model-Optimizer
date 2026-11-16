@@ -77,7 +77,7 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import LiLiCorrDMRegistry
-from .dflash_losses import LossOutput, _block_positions
+from .dflash_losses import LossContext, LossOutput, _block_positions
 from .hf_dflash import HFDFlashModel
 from .modeling_lilicorr import LiLiCorrModule
 
@@ -190,7 +190,7 @@ class HFLiLiCorrModel(HFDFlashModel):
 
         return LiLiCorrExporter(self)
 
-    def _compute_loss(self, ctx):
+    def _compute_loss(self, ctx: LossContext) -> LossOutput:
         """Add the LiLiCorr lattice terms to the DFlash block loss.
 
         The returned accuracy is the reranker's greedy path-prefix fraction — the

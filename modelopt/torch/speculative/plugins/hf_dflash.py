@@ -882,7 +882,7 @@ class HFDFlashModel(DFlashModel):
             target_hidden=self._target_hidden(raw_outputs.hidden_states), logits=raw_outputs.logits
         )
 
-    def _draft_logits(self, batch):
+    def _draft_logits(self, batch: DraftBatch) -> DraftLogits:
         """The draft's logits per block position; a variant with a head applies it here."""
         logits = self._base_model_lm_head(batch.hidden)
         logits = logits.view(*batch.anchors.shape, self.dflash_block_size, -1)
@@ -893,7 +893,7 @@ class HFDFlashModel(DFlashModel):
         """How block positions are weighted in the loss: ``"dpace"`` or ``"decay"``."""
         return self.dflash_loss_objective
 
-    def _loss_context(self, batch):
+    def _loss_context(self, batch: DraftBatch) -> LossContext:
         """The step's labels, the draft's logits and the position weights."""
         targets = _block_targets(
             batch.input_ids,
@@ -925,7 +925,7 @@ class HFDFlashModel(DFlashModel):
             ce_grad=not self.dflash_self_logit_distillation,
         )
 
-    def _compute_loss(self, ctx):
+    def _compute_loss(self, ctx: LossContext) -> LossOutput:
         """The weighted cross-entropy (or KD) loss on the served logits, and its accuracy.
 
         A step whose position weights leave nothing to train returns a zero loss and
