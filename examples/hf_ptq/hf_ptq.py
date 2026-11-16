@@ -27,6 +27,9 @@ import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
 from autoquant_utils import (
+    _auto_quantize_finalize_config,
+    _auto_quantize_finalizes,
+    _check_auto_quantize_shard_args,
     _get_autoquant_memory_probe,
     _quantize_config_explicitly_enables_kv,
     _recipe_is_auto_quantize,
@@ -35,6 +38,7 @@ from autoquant_utils import (
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from example_utils import (
     HF_PTQ,
+    _layerwise_blocks,
     _prepare_quant_cfg,
     build_quant_cfg,
     create_vlm_calibration_forward,
@@ -664,12 +668,32 @@ def _run_auto_quantize_recipe(
     calibration_only: bool,
     calib_dataloader: DataLoader,
     vlm_wrapper: bool,
-) -> None:
-    """Run the recipe's fixed PTQ, weight search, and KV search in order."""
+) -> bool:
+    """Run the recipe's fixed PTQ, weight search, and KV search in order.
+
+    Returns whether the model is quantized and ready to export: a format shard, and a search
+    whose recipe defers calibration to ``finalize_algorithm``, only save their checkpoint.
+    """
     primary = recipe.auto_quantize
     followup_kv = recipe.kv_auto_quantize
     primary_is_kv = primary.constraints.cost_model == "kv_cache"
     fixed_quantize_config = recipe.quantize
+    # Off unless given, like the shard flags autoquant_utils reads, for args built without them.
+    format_shard = getattr(args, "auto_quantize_format_shard", None)
+    finalized_quant_cfg = _auto_quantize_finalize_config(recipe, args)
+    if finalized_quant_cfg is not None:
+        # The search's scores are saved: calibrate the source weights with the frozen formats.
+        mono_quantize(
+            args,
+            _prepare_quant_cfg(args, finalized_quant_cfg, full_model),
+            full_model,
+            language_model,
+            model_type,
+            calibration_only,
+            calib_dataloader,
+            vlm_wrapper,
+        )
+        return True
 
     if fixed_quantize_config is not None and (primary_is_kv or followup_kv is not None):
         if _quantize_config_explicitly_enables_kv(fixed_quantize_config.model_dump()):
@@ -719,6 +743,13 @@ def _run_auto_quantize_recipe(
             # never use the KV-primary legacy fallback and collide with the weight state.
             checkpoint=args.kv_auto_quantize_checkpoint,
         )
+    if format_shard is not None:
+        print(f"Saved format shard {format_shard}; merge every shard to solve.")
+        return False
+    if primary.finalize_algorithm is not None:
+        print("Saved the AutoQuantize scores; rerun the same command to finalize and export.")
+        return False
+    return True
 
 
 def export_quantized(
@@ -1046,6 +1077,12 @@ def quantize_main(
 
     layerwise_cfgs = recipe_layerwise_blocks(recipe)
     is_layerwise = any(cfg.get("enable", False) for cfg in layerwise_cfgs)
+    if aq_config is not None and _auto_quantize_finalizes(recipe, args):
+        # This run only calibrates the frozen formats with finalize_algorithm, so its batch is
+        # sized for that algorithm (one layer at a time, if layerwise) rather than for the search.
+        is_layerwise = any(
+            block.get("enable", False) for block in _layerwise_blocks(aq_config.finalize_algorithm)
+        )
 
     # The value is a placeholder, replaced with --export_path below; presence is the switch.
     args.layerwise_export = layerwise_export_requested(layerwise_cfgs)
@@ -1152,7 +1189,7 @@ def quantize_main(
 
     if aq_config is not None:
         assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
-        _run_auto_quantize_recipe(
+        if not _run_auto_quantize_recipe(
             args,
             recipe,
             full_model,
@@ -1161,7 +1198,8 @@ def quantize_main(
             calibration_only,
             calib_dataloader,
             vlm_wrapper,
-        )
+        ):
+            return
 
     else:
         # mono quantization
@@ -1444,7 +1482,31 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Path to checkpoint file for saving/restoring weight AutoQuantize search state "
-            "(sensitivity scores, costs, etc.). Used with an AutoQuantize --recipe."
+            "(sensitivity scores, costs, etc.). Used with an AutoQuantize --recipe. A run that "
+            "finalizes saved scores (auto_quantize.finalize_algorithm) refuses scores from "
+            "another method or for other candidate formats, but takes the other search settings "
+            "(disabled layers, cost model) from the checkpoint: change those with a new "
+            "checkpoint."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_format_shard",
+        type=str,
+        default=None,
+        help=(
+            "INDEX/COUNT: calibrate and score only this shard of the searched formats and save "
+            "it to --auto_quantize_checkpoint, without solving or exporting. Run every shard "
+            "0..COUNT-1 (e.g. one per GPU), then merge with --auto_quantize_merge_shards."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_merge_shards",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated format-shard checkpoints to merge into --auto_quantize_checkpoint "
+            "(if it does not exist yet) before the search, which then restores every format's "
+            "calibration and scores instead of computing them."
         ),
     )
     parser.add_argument(
@@ -1528,6 +1590,7 @@ def parse_args() -> argparse.Namespace:
     args.checkpoint_exported = False
     resolve_mlflow_args(args, parser, HF_PTQ)
 
+    _check_auto_quantize_shard_args(args, parser)
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
 

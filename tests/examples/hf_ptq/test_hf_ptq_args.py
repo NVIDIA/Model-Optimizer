@@ -38,6 +38,7 @@ from modelopt.recipe.presets import QUANT_CFG_CHOICES, RecipeSupersededAction
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils import mlflow as mlflow_lib
+from modelopt.torch.utils import safe_save
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.mlflow import describe_run, run_tags
 
@@ -188,6 +189,148 @@ def test_hf_ptq_runs_weight_then_kv_autoquantize_stages(monkeypatch):
     assert calls[0]["allow_uniform_kv"] is False
     assert calls[0]["checkpoint"] == "weight-search.pth"
     assert calls[1]["checkpoint"] == "kv-search.pth"
+
+
+def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
+    """Directory checkpoints, as the searcher lays them out, reach the merge and the finalize."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(
+        tensor_quant,
+        "dynamic_block_quantize_op",
+        lambda inputs, *_args, **_kwargs: torch.zeros_like(inputs),
+    )
+    recipe = ModelOptAutoQuantizeRecipe(
+        auto_quantize=AutoQuantizeConfig(
+            constraints=AutoQuantizeConstraints(effective_bits=6.0),
+            candidate_formats=[
+                QuantizeConfig(**QUANT_CFG_CHOICES["fp8"]),
+                QuantizeConfig(**QUANT_CFG_CHOICES["nvfp4"]),
+            ],
+            finalize_algorithm="max",
+            # A "*" entry, as a whole KV-only config starts, must not reset the frozen formats.
+            kv_cache=QuantizeConfig(
+                quant_cfg=[
+                    {"quantizer_name": "*", "enable": False},
+                    {
+                        "quantizer_name": "*[kv]_bmm_quantizer",
+                        "cfg": {"num_bits": (4, 3), "use_constant_amax": True},
+                    },
+                ]
+            ),
+        )
+    )
+    input_ids = torch.arange(8).unsqueeze(0)
+    data = [{"input_ids": input_ids, "labels": input_ids.clone()}]
+
+    def run(checkpoint, aq_recipe=recipe, **flags):
+        model = get_tiny_qwen3(num_hidden_layers=1)
+        args = SimpleNamespace(
+            qformat="fp8",
+            calib_with_images=False,
+            inference_pipeline_parallel=1,
+            use_fsdp2=False,
+            kv_cache_qformat="none",
+            batch_size=1,
+            auto_quantize_checkpoint=str(tmp_path / checkpoint),
+            kv_auto_quantize_checkpoint=None,
+            auto_quantize_format_shard=None,
+            auto_quantize_merge_shards=None,
+            local_checkpoint_path="dummy",
+            hub_model_id=None,
+            cast_mxfp4_to_nvfp4=False,
+            layerwise_export=False,
+            specdec_offline_dataset=None,
+        )
+        vars(args).update(flags)
+        ready = hf_ptq._run_auto_quantize_recipe(
+            args, aq_recipe, model, model, None, False, data, False
+        )
+        return ready, model
+
+    # Unsharded: the search saves the scores, and the rerun finalizes a fresh model.
+    ready, model = run("search")
+    assert not ready and not model.model.layers[0].self_attn.k_bmm_quantizer.is_enabled
+    ready, model = run("search")
+    assert ready
+    assert model.model.layers[0].mlp.down_proj.weight_quantizer.is_enabled
+    assert model.model.layers[0].self_attn.k_bmm_quantizer.is_enabled
+    # An existing file without an extension is read as is, as the searcher loads it.
+    (tmp_path / "legacy").write_bytes((tmp_path / "search" / "rank0.pth").read_bytes())
+    assert run("legacy")[0]
+    # Another method's scores are refused, as a resumed search refuses them.
+    kl_div = ModelOptAutoQuantizeRecipe(
+        auto_quantize=recipe.auto_quantize.model_copy(update={"auto_quantize_method": "kl_div"})
+    )
+    with pytest.raises(ValueError, match="gradient scores"):
+        run("search", kl_div)
+    # So are scores taken for other candidate formats.
+    fp8_only = ModelOptAutoQuantizeRecipe(
+        auto_quantize=recipe.auto_quantize.model_copy(
+            update={"candidate_formats": [QuantizeConfig(**QUANT_CFG_CHOICES["fp8"])]}
+        )
+    )
+    with pytest.raises(ValueError, match="quantization_formats do not match"):
+        run("search", fp8_only)
+
+    for index in range(2):
+        assert not run(f"shard{index}", auto_quantize_format_shard=(index, 2))[0]
+    shards = f"{tmp_path / 'shard0'},{tmp_path / 'shard1'}"
+    assert run("merged", auto_quantize_merge_shards=shards)[0]
+    assert (tmp_path / "merged" / "rank0.pth").is_file()
+
+
+@pytest.mark.parametrize("refusal", ["kv_followup", "distributed"])
+def test_hf_ptq_refuses_finalize_and_shards_before_searching(monkeypatch, refusal):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    recipe = load_recipe(
+        "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
+        if refusal == "kv_followup"
+        else "general/auto_quantize/nvfp4_fp8_at_5p4bits"
+    )
+    if refusal == "distributed":
+        monkeypatch.setattr("modelopt.torch.utils.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr(hf_ptq, "auto_quantize", lambda *_args, **_kwargs: pytest.fail("searched"))
+    args = SimpleNamespace(
+        auto_quantize_checkpoint="search.pth",
+        kv_auto_quantize_checkpoint=None,
+        auto_quantize_format_shard=(0, 2),
+        auto_quantize_merge_shards=None,
+    )
+
+    match = "without a KV-cache search" if refusal == "kv_followup" else "run in one process"
+    with pytest.raises(ValueError, match=match):
+        hf_ptq._run_auto_quantize_recipe(args, recipe, None, None, None, False, [], False)
+
+
+def test_auto_quantize_format_shard_flags(monkeypatch):
+    cli = [
+        "--pyt_ckpt_path",
+        "/models/Qwen3-0.6B",
+        "--recipe",
+        "general/auto_quantize/nvfp4_fp8_at_5p4bits",
+        "--auto_quantize_checkpoint",
+        "search.pth",
+    ]
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, *cli, "--auto_quantize_format_shard", "1/2", "--batch_size", "1"
+    )
+    assert args.auto_quantize_format_shard == (1, 2)
+
+    for bad in (
+        ["--auto_quantize_format_shard", "1-2", "--batch_size", "1"],
+        ["--auto_quantize_format_shard", "2/2", "--batch_size", "1"],  # before loading the model
+        ["--auto_quantize_format_shard", "1/2"],  # a probed batch size can differ per shard
+        [
+            "--auto_quantize_format_shard",
+            "1/2",
+            "--batch_size",
+            "1",
+            "--auto_quantize_merge_shards",
+            "s0.pth",
+        ],
+    ):
+        with pytest.raises(SystemExit):
+            _parse_hf_ptq_args(monkeypatch, *cli, *bad)
 
 
 def test_hf_ptq_runs_real_weight_then_kv_autoquantize_stages(monkeypatch):
@@ -565,6 +708,47 @@ def test_layerwise_calibration_batch_reaches_the_dataloader(
     with pytest.raises(_DataloaderReachedError):
         hf_ptq.quantize_main(args, None, None, None, False, None, None, torch.device("cpu"))
     assert batch_sizes == [expected]
+
+
+@pytest.mark.parametrize("scored", [False, True], ids=["search", "finalize"])
+def test_a_finalizing_run_sizes_its_batch_for_the_finalize_algorithm(monkeypatch, tmp_path, scored):
+    """Once the scores are saved, the run only calibrates: one layer at a time, here."""
+    checkpoint = tmp_path / "search.pth"
+    if scored:
+        safe_save({"method": "gradient", "candidate_stats": {"layer": {}}}, str(checkpoint))
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        *("--pyt_ckpt_path", "/models/Qwen3-0.6B"),
+        *("--recipe", "general/auto_quantize/nvfp4_fp8_at_5p4bits"),
+        *("--auto_quantize_checkpoint", str(checkpoint)),
+    )
+    searched = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits")
+    layerwise_gptq = {"method": "gptq", "layerwise": {"enable": True}}
+    recipe = searched.model_copy(
+        update={
+            "auto_quantize": searched.auto_quantize.model_copy(
+                update={"finalize_algorithm": layerwise_gptq}
+            )
+        }
+    )
+    monkeypatch.setattr(hf_ptq, "load_recipe", lambda _recipe: recipe)
+    monkeypatch.setattr(hf_ptq, "calibration_sample_input", lambda *_args: None)
+    monkeypatch.setattr(hf_ptq, "get_max_batch_size", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(hf_ptq, "get_max_layerwise_batch_size", lambda *_args, **_kwargs: 7)
+
+    class _DataloaderReachedError(Exception):
+        pass
+
+    batch_sizes = []
+
+    def make_calib_dataloader(args, *_args, **_kwargs):
+        batch_sizes.append(args.batch_size)
+        raise _DataloaderReachedError
+
+    monkeypatch.setattr(hf_ptq, "make_calib_dataloader", make_calib_dataloader)
+    with pytest.raises(_DataloaderReachedError):
+        hf_ptq.quantize_main(args, None, None, None, False, None, None, torch.device("cpu"))
+    assert batch_sizes == [7 if scored else 3]
 
 
 def test_calib_seq_must_be_positive(monkeypatch):

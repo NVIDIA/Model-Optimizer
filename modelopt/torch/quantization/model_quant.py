@@ -664,6 +664,90 @@ def _process_quantization_formats(formats, custom_name_prefix):
     return processed
 
 
+def _process_search_space(quantization_formats, module_search_spaces, fixed_quantization_config):
+    """Validate and name ``auto_quantize``'s candidates as its searcher receives them.
+
+    Returns the global formats, the module search spaces and the fixed config, processed.
+    """
+    if fixed_quantization_config is None and quantization_formats is None:
+        quantization_formats = [mtq.NVFP4_AWQ_LITE_CFG, mtq.FP8_DEFAULT_CFG]
+    elif fixed_quantization_config is not None and quantization_formats is None:
+        quantization_formats = []
+
+    if fixed_quantization_config is not None and quantization_formats:
+        raise ValueError(
+            "`fixed_quantization_config` cannot be combined with global "
+            "`quantization_formats`; put every searched module in `module_search_spaces`."
+        )
+    if fixed_quantization_config is None and not quantization_formats:
+        raise ValueError("`quantization_formats` must be a non-empty list.")
+    processed_quantization_formats = _process_quantization_formats(quantization_formats, "CUSTOM")
+    if quantization_formats and not processed_quantization_formats:
+        raise ValueError("`quantization_formats` must contain at least one non-None format.")
+
+    processed_module_search_spaces = []
+    for idx, search_space in enumerate(module_search_spaces or []):
+        if not isinstance(search_space, dict):
+            raise TypeError("Each module_search_spaces entry must be a dict.")
+        unknown_keys = set(search_space) - {
+            "module_name_patterns",
+            "quantization_formats",
+            "allow_no_quant",
+        }
+        if unknown_keys:
+            raise ValueError(f"Unsupported module_search_spaces keys: {sorted(unknown_keys)}")
+        patterns = search_space.get("module_name_patterns")
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        if (
+            not isinstance(patterns, list)
+            or not patterns
+            or not all(isinstance(pattern, str) for pattern in patterns)
+        ):
+            raise ValueError(
+                "module_search_spaces.module_name_patterns must be a non-empty string list."
+            )
+        raw_formats = search_space.get("quantization_formats")
+        if not isinstance(raw_formats, list):
+            raise TypeError("module_search_spaces.quantization_formats must be a list.")
+        if not raw_formats:
+            raise ValueError("module_search_spaces.quantization_formats must be a non-empty list.")
+        formats = _process_quantization_formats(raw_formats, f"CUSTOM_MODULE_{idx}")
+        if not formats:
+            raise ValueError(
+                "module_search_spaces.quantization_formats must contain at least one non-None format."
+            )
+        allow_no_quant = search_space.get("allow_no_quant", True)
+        if not isinstance(allow_no_quant, bool):
+            raise TypeError("module_search_spaces.allow_no_quant must be a bool.")
+        processed_module_search_spaces.append(
+            {
+                "module_name_patterns": patterns,
+                "quantization_formats": formats,
+                "allow_no_quant": allow_no_quant,
+            }
+        )
+
+    if fixed_quantization_config is not None and not processed_module_search_spaces:
+        raise ValueError(
+            "`fixed_quantization_config` requires at least one explicit "
+            "`module_search_spaces` entry."
+        )
+    processed_fixed_quantization_configs = _process_quantization_formats(
+        [fixed_quantization_config] if fixed_quantization_config is not None else [],
+        "FIXED",
+    )
+    assert len(processed_fixed_quantization_configs) <= 1
+    processed_fixed_quantization_config = (
+        processed_fixed_quantization_configs[0] if processed_fixed_quantization_configs else None
+    )
+    return (
+        processed_quantization_formats,
+        processed_module_search_spaces,
+        processed_fixed_quantization_config,
+    )
+
+
 def _parse_auto_quantize_method(
     method: str | dict[str, Any] | None,
 ) -> tuple[str | None, dict[str, Any]]:
@@ -1150,82 +1234,15 @@ def auto_quantize(
 
     method_name = method_name or "gradient"
 
-    if fixed_quantization_config is None and quantization_formats is None:
-        quantization_formats = [mtq.NVFP4_AWQ_LITE_CFG, mtq.FP8_DEFAULT_CFG]
-    elif fixed_quantization_config is not None and quantization_formats is None:
-        quantization_formats = []
-
-    if fixed_quantization_config is not None and quantization_formats:
-        raise ValueError(
-            "`fixed_quantization_config` cannot be combined with global "
-            "`quantization_formats`; put every searched module in `module_search_spaces`."
-        )
-    if fixed_quantization_config is None and not quantization_formats:
-        raise ValueError("`quantization_formats` must be a non-empty list.")
-    processed_quantization_formats = _process_quantization_formats(quantization_formats, "CUSTOM")
-    if quantization_formats and not processed_quantization_formats:
-        raise ValueError("`quantization_formats` must contain at least one non-None format.")
-
-    processed_module_search_spaces = []
-    for idx, search_space in enumerate(module_search_spaces or []):
-        if not isinstance(search_space, dict):
-            raise TypeError("Each module_search_spaces entry must be a dict.")
-        unknown_keys = set(search_space) - {
-            "module_name_patterns",
-            "quantization_formats",
-            "allow_no_quant",
-        }
-        if unknown_keys:
-            raise ValueError(f"Unsupported module_search_spaces keys: {sorted(unknown_keys)}")
-        patterns = search_space.get("module_name_patterns")
-        if isinstance(patterns, str):
-            patterns = [patterns]
-        if (
-            not isinstance(patterns, list)
-            or not patterns
-            or not all(isinstance(pattern, str) for pattern in patterns)
-        ):
-            raise ValueError(
-                "module_search_spaces.module_name_patterns must be a non-empty string list."
-            )
-        raw_formats = search_space.get("quantization_formats")
-        if not isinstance(raw_formats, list):
-            raise TypeError("module_search_spaces.quantization_formats must be a list.")
-        if not raw_formats:
-            raise ValueError("module_search_spaces.quantization_formats must be a non-empty list.")
-        formats = _process_quantization_formats(raw_formats, f"CUSTOM_MODULE_{idx}")
-        if not formats:
-            raise ValueError(
-                "module_search_spaces.quantization_formats must contain at least one non-None format."
-            )
-        allow_no_quant = search_space.get("allow_no_quant", True)
-        if not isinstance(allow_no_quant, bool):
-            raise TypeError("module_search_spaces.allow_no_quant must be a bool.")
-        processed_module_search_spaces.append(
-            {
-                "module_name_patterns": patterns,
-                "quantization_formats": formats,
-                "allow_no_quant": allow_no_quant,
-            }
-        )
-
-    if fixed_quantization_config is not None and not processed_module_search_spaces:
-        raise ValueError(
-            "`fixed_quantization_config` requires at least one explicit "
-            "`module_search_spaces` entry."
-        )
-    processed_fixed_quantization_configs = _process_quantization_formats(
-        [fixed_quantization_config] if fixed_quantization_config is not None else [],
-        "FIXED",
-    )
-    assert len(processed_fixed_quantization_configs) <= 1
-    processed_fixed_quantization_config = (
-        processed_fixed_quantization_configs[0] if processed_fixed_quantization_configs else None
-    )
+    (
+        processed_quantization_formats,
+        processed_module_search_spaces,
+        processed_fixed_quantization_config,
+    ) = _process_search_space(quantization_formats, module_search_spaces, fixed_quantization_config)
 
     all_processed_formats = [
         *processed_quantization_formats,
-        *processed_fixed_quantization_configs,
+        *([processed_fixed_quantization_config] if processed_fixed_quantization_config else []),
         *(
             quant_format
             for search_space in processed_module_search_spaces
@@ -1355,7 +1372,7 @@ def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint
         raise
 
 
-def get_auto_quantize_config(search_state, constraints=None, verbose=False):
+def get_auto_quantize_config(search_state, constraints=None, verbose=False, algorithm=None):
     """Build a flat quant config from auto_quantize search_state.
 
     Re-solves for ``constraints`` if provided, otherwise uses the stored best recipe.
@@ -1365,6 +1382,11 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         constraints: Optional dict, e.g. ``{"effective_bits": 5.5}``, to re-solve for a
             different target without re-running calibration or scoring.
         verbose: If True, prints the per-layer recipe assignments.
+        algorithm: Calibration algorithm of the returned config (default ``"max"``). A layerwise
+            algorithm such as sequential GPTQ belongs here rather than in the search: the search
+            scores each layer on its own, while sequential GPTQ makes each layer depend on the
+            formats chosen before it, so it runs once the per-layer formats are frozen, on a
+            fresh model with the source weights.
 
     Returns:
         A config dict suitable for :func:`quantize`.
@@ -1387,10 +1409,20 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
             # Or apply the same/customized config on a fresh model instance
             # fresh_model = load_model(...)
             # fresh_model = mtq.quantize(fresh_model, config, forward_loop=calibrate_loop)
+
+            # Freeze the formats, then run sequential GPTQ on the source weights
+            config = mtq.get_auto_quantize_config(
+                search_state, algorithm={"method": "gptq", "layerwise": {"enable": True}}
+            )
+            fresh_model = mtq.quantize(load_model(...), config, forward_loop=calibrate_loop)
     """
     if search_state.get("cost_model") == COST_MODEL_KV_CACHE:
+        if algorithm is not None:
+            raise ValueError("KV-cache AutoQuantize configs carry no calibration algorithm.")
         return get_kv_cache_auto_quantize_config(search_state, constraints, verbose=verbose)
-    return _get_auto_quantize_config(search_state, constraints, verbose=verbose)
+    return _get_auto_quantize_config(
+        search_state, constraints, verbose=verbose, algorithm=algorithm
+    )
 
 
 def disable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):

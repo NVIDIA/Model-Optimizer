@@ -73,7 +73,7 @@ repos:
         name: sync .claude/skills/ symlinks from plugin skills
         entry: bash tools/precommit/sync_claude_skills.sh
         language: system
-        files: ^plugins/modelopt/skills/
+        files: ^skills/
         pass_filenames: false
 
       - id: check-launcher-yaml
