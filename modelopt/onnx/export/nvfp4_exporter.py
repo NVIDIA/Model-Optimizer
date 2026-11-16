@@ -321,8 +321,9 @@ class NVFP4QuantExporter(ONNXQuantExporter):
     def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Post-processes the ONNX model for NVFP4 quantization.
 
-        Replaces TRT_FP4QDQ nodes with two DequantizeLinear nodes and handles
-        precision casting for inputs.
+        Replaces TRT_FP4QDQ nodes with two DequantizeLinear nodes, handles precision
+        casting around the consuming GEMMs, and declares the TRT_FP4DynamicQuantize
+        output types.
         """
         logger.info("Post-processing NVFP4 quantization")
         graph = onnx_model.graph
@@ -344,18 +345,25 @@ class NVFP4QuantExporter(ONNXQuantExporter):
                     break  # Assuming all weights are of the same precision
             return precision_dtype
 
-        def _cast_input_dtypes(node: onnx.NodeProto, precision_dtype: str):
+        def _cast_input_dtypes(node: onnx.NodeProto, precision_dtype: str, weight_dtype: int):
             # Change the input types to match weight precision (precision_dtype)
             if node.op_type == "Transpose":
                 maybe_matmul = tensor_consumers[node.output[0]][0]
                 assert maybe_matmul.op_type == "MatMul"
                 node = maybe_matmul
 
-            # Create Cast nodes for each input of the target node except bias
-            for i, input_name in enumerate(node.input[:2]):
+            cast_output_suffix = "bf16" if precision_dtype == "BFloat16" else "f16"
+            # When the weights' dtype differs from the GEMM precision (e.g. an FP32 model), the
+            # bias must be cast too, and the output cast back so downstream nodes keep their dtype.
+            restore_dtype = weight_dtype != onnx_dtype_map[precision_dtype]
+            num_inputs = len(node.input) if restore_dtype and node.op_type == "Gemm" else 2
+
+            # Create Cast nodes for each input of the target node (bias only when restoring)
+            for i, input_name in enumerate(node.input[:num_inputs]):
+                if not input_name:
+                    continue
                 cast_output_name = cast_output_cache.get((input_name, precision_dtype))
                 if cast_output_name is None:
-                    cast_output_suffix = "bf16" if precision_dtype == "BFloat16" else "f16"
                     cast_output_name = f"{input_name}_{cast_output_suffix}"
                     cast_output_cache[(input_name, precision_dtype)] = cast_output_name
 
@@ -373,6 +381,35 @@ class NVFP4QuantExporter(ONNXQuantExporter):
                 # Update the target node input to use the cast node output
                 node.input[i] = cast_output_name
 
+            if restore_dtype:
+                output_name = node.output[0]
+                node.output[0] = f"{output_name}_{cast_output_suffix}"
+                graph.node.append(
+                    onnx.helper.make_node(
+                        "Cast",
+                        inputs=[node.output[0]],
+                        outputs=[output_name],
+                        to=weight_dtype,
+                    )
+                )
+
+        # TorchScript export leaves the TRT_FP4DynamicQuantize outputs UNDEFINED. ONNX Runtime
+        # cannot infer them for the custom op, so EPs such as TensorRT-RTX fail to load the model.
+        for node in graph.node:
+            if node.op_type != "TRT_FP4DynamicQuantize":
+                continue
+            scale_type = next(
+                (attr.i for attr in node.attribute if attr.name == "scale_type"),
+                onnx_dtype_map["Float8"],
+            )
+            for name, elem_type in zip(node.output, (onnx_dtype_map["Float4"], scale_type)):
+                if name in value_info_map:
+                    value_info_map[name].type.tensor_type.elem_type = elem_type
+                else:
+                    graph.value_info.append(
+                        onnx.helper.make_tensor_value_info(name, elem_type, None)
+                    )
+
         precision_dtype = _get_precision_dtype()
         logger.debug(f"Using precision dtype: {precision_dtype}")
 
@@ -383,6 +420,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
             idx = initializer_indices.get(node.input[0])
             assert idx is not None, f"Initializer for weight '{node.input[0]}' not found."
             initializers_to_delete.append(graph.initializer[idx].name)
+            weight_dtype = graph.initializer[idx].data_type
 
             # Retrieve compressed data from node attributes
             block_size = node.attribute[0].i
@@ -418,7 +456,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
 
             # Cast input dtypes for the next node
             next_node = tensor_consumers[node.output[0]][0]
-            _cast_input_dtypes(next_node, precision_dtype)
+            _cast_input_dtypes(next_node, precision_dtype, weight_dtype)
 
         # Remove old initializers
         new_initializers = [

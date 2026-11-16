@@ -299,6 +299,56 @@ def test_nvfp4_shared_activation_reuses_cast():
     onnx.checker.check_model(converted_model)
 
 
+@pytest.mark.parametrize("dtype", [TensorProto.FLOAT, TensorProto.FLOAT16], ids=["fp32", "fp16"])
+def test_nvfp4_weight_and_activation_export_is_type_consistent(dtype):
+    """ONNX Runtime EPs (e.g. TensorRT-RTX) reject the graph unless every tensor type resolves."""
+    np_dtype = helper.tensor_dtype_to_np_dtype(dtype)
+    nodes = [
+        helper.make_node("Cast", ["input"], ["input_f16"], to=TensorProto.FLOAT16),
+        helper.make_node(
+            "TRT_FP4DynamicQuantize",
+            ["input_f16", "act_scale"],
+            ["x_f4", "x_scale_f8"],
+            domain="trt",
+            axis=-1,
+            block_size=16,
+            scale_type=TensorProto.FLOAT8E4M3FN,
+        ),
+        helper.make_node("DequantizeLinear", ["x_scale_f8", "act_scale"], ["x_scale"]),
+        helper.make_node("DequantizeLinear", ["x_f4", "x_scale"], ["x_dq"], axis=-1, block_size=16),
+        helper.make_node("TRT_FP4QDQ", ["weight"], ["w_qdq"], domain="trt", block_size=16),
+        helper.make_node("Gemm", ["x_dq", "w_qdq", "bias"], ["output"], transB=1),
+    ]
+    initializers = [
+        numpy_helper.from_array(
+            np.linspace(-1.0, 1.0, num=64 * 32, dtype=np_dtype).reshape(64, 32), "weight"
+        ),
+        numpy_helper.from_array(np.zeros(64, dtype=np_dtype), "bias"),
+        numpy_helper.from_array(np.array(1.0, dtype=np.float16), "act_scale"),
+    ]
+    # TorchScript export leaves the custom-op outputs UNDEFINED.
+    value_info = [
+        helper.make_tensor_value_info(name, TensorProto.UNDEFINED, None)
+        for name in ("x_f4", "x_scale_f8")
+    ]
+    value_info.append(helper.make_tensor_value_info("w_qdq", dtype, [64, 32]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "nvfp4_weight_and_activation",
+            [helper.make_tensor_value_info("input", dtype, [4, 32])],
+            [helper.make_tensor_value_info("output", dtype, [4, 64])],
+            initializers,
+            value_info=value_info,
+        ),
+        opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("trt", 1)],
+    )
+
+    converted_model = NVFP4QuantExporter.process_model(model)
+
+    onnx.shape_inference.infer_shapes(converted_model, check_type=True, strict_mode=True)
+
+
 def test_topologically_sort_graph_nodes_accounts_for_subgraph_captures():
     input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1])
     cond_tensor = helper.make_tensor_value_info("cond", TensorProto.BOOL, [])

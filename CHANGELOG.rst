@@ -32,6 +32,9 @@ Changelog
 
 *ONNX*
 
+- Fix NVFP4 ONNX exports with activation quantization failing to load in ONNX Runtime (e.g. the TensorRT-RTX execution provider) because the ``TRT_FP4DynamicQuantize`` outputs had no declared type. ``NVFP4QuantExporter`` now declares the FP4 data and FP8 scale output types.
+- Fix NVFP4 ONNX export of FP32 models producing ``Gemm`` nodes with mixed FP16/FP32 inputs. The bias is now cast with the other GEMM inputs, and the GEMM output is cast back to FP32.
+
 *Speculative Decoding*
 
 *Megatron Framework (M-LM / M-Bridge)*
