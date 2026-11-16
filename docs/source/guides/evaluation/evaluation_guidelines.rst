@@ -1,5 +1,5 @@
-Guidelines for Fast Evaluation During Model Optimization Experiments
-====================================================================
+Guidelines for Efficient Evaluation During Model Optimization Experiments
+=========================================================================
 
 .. contents:: Contents
    :local:
