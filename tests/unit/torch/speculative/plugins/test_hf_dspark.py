@@ -22,6 +22,7 @@ BCE), vLLM vanilla exports, and native gated/recurrent exports.
 """
 
 import json
+import logging
 import shutil
 from copy import deepcopy
 from fnmatch import fnmatchcase
@@ -137,6 +138,26 @@ class TestDSparkConvert:
         model = get_tiny_llama(num_hidden_layers=4)
         with pytest.raises(ValueError, match="markov_rank"):
             mtsp.convert(model, [("dflash", config)])
+
+    @pytest.mark.parametrize("decay_factor", [0.0, 7.0])
+    def test_pinned_position_weighting_reports_what_actually_weights_the_block(
+        self, decay_factor, caplog
+    ):
+        """DSpark pins decay over dflash_loss_objective, which defaults to D-PACE.
+
+        So every DSpark run is told which field weights its block positions (Domino pins
+        the same way), and told it once: the D-PACE notice that a plain DFlash gets for a
+        non-zero decay factor would say the factor is ignored, when for DSpark it is the
+        only one of the two that is read.
+        """
+        config = _get_dspark_config()
+        config["dflash_loss_decay_factor"] = decay_factor
+        model = get_tiny_llama(num_hidden_layers=4)
+        with caplog.at_level(logging.WARNING):
+            mtsp.convert(model, [("dflash", config)])
+        messages = [r.getMessage() for r in caplog.records]
+        assert [m for m in messages if "dflash_loss_objective='dpace' is not wired" in m]
+        assert not [m for m in messages if "is ignored when dflash_loss_objective" in m]
 
     def test_dflash_mode_still_creates_plain_dflash(self):
         """Without projector_type=dspark, conversion still yields a plain DFlash model."""

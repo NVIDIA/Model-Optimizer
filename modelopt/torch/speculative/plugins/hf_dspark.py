@@ -121,7 +121,8 @@ class HFDSparkModel(HFDFlashModel):
 
     @property
     def _position_weighting(self):
-        # dflash_loss_objective is not wired for DSpark yet: it always decays.
+        # dflash_loss_objective is not wired for DSpark yet: it always takes the decay
+        # scheme, which without a decay factor weights every block position equally.
         return "decay"
 
     def _online_base_outputs(self, input_ids, attention_mask, **kwargs):
