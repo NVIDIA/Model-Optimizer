@@ -215,6 +215,8 @@ Changelog
 - Fix ONNX INT4 quantization ending the Python process when the INT4 packing extension fails to build, for example without a C++ compiler. It now falls back to the Python implementation.
 - Fix the column-major ``DequantizeLinear`` surgery leaving a negative or default ``axis`` attribute unchanged while transposing the weight it refers to, which changed the model's output. Re-run the surgery on affected models.
 - Fix BF16-to-FP8 ONNX export with ``ml_dtypes`` 0.7.0 producing NaN FP8 weights for very small convolution weights.
+- Fix AutoCast turning FP64 initializers and ``Constant`` values that exceed the FP32 range into infinities. They are now clamped to the largest FP32 value and the affected tensor is named in a warning.
+- Fix AutoCast flipping the sign of an initializer value too small for the target precision; such values now keep their sign.
 
 *Speculative Decoding*
 
@@ -229,8 +231,6 @@ Changelog
 - Fix streaming speculative-decoding training capturing another request's hidden states when the vLLM serve ran requests concurrently, and failing on vLLM 0.29 and later. Retrain drafters trained in streaming mode against a serve that ran requests concurrently.
 - Fix DFlash-family drafters (DFlash, DFlash2, DSpark, Domino, LiLiCorr) trained from scratch with ``examples/speculative_decoding/main.py`` having their RoPE frequencies rounded to BF16, so they trained under different rotary phases than vLLM serves them with.
 - Fix DFlash2's candidate-selector loss weighing every block position equally and dividing by its own count of positions, unlike the backbone loss and the SGLang/SpecForge DFlash2 reference. Logged DFlash2 losses change.
-- Fix AutoCast turning FP64 initializers and ``Constant`` values that exceed the FP32 range into infinities. They are now clamped to the largest FP32 value and the affected tensor is named in a warning.
-- Fix AutoCast flipping the sign of an initializer value too small for the target precision; such values now keep their sign.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
@@ -447,8 +447,6 @@ Changelog
 - Fix the ``evaluation`` agent skill's LiveCodeBench recipe scoring correct solutions that use binary standard I/O (``sys.stdin.buffer`` / ``sys.stdout.buffer``) as failures: the recipe now pins a fixed LiveCodeBench judge in the NeMo-Skills container. LiveCodeBench scores change as a result, so re-run earlier baselines before comparing.
 - Fix GPTQ with Megatron data parallelism: each data-parallel replica of a module now builds its Hessian from the whole calibration set instead of only its own shard, so all replicas reach the same quantized weights.
 - Fix ``examples/llm_sparsity/weight_sparsity/finetune.py`` saving a sharded state dict under FSDP2, the default FSDP version in Transformers 5, which made ``export_hf_ckpt.py`` fail to restore it. Re-run finetuning to produce a loadable ``finetuned_modelopt_state.pth``.
-- Fix AutoCast turning FP64 initializers and ``Constant`` values that exceed the FP32 range into infinities. They are now clamped to the largest FP32 value and the affected tensor is named in a warning.
-- Fix AutoCast flipping the sign of an initializer value too small for the target precision; such values now keep their sign.
 
 0.47.0 (2026-09-23)
 ^^^^^^^^^^^^^^^^^^^

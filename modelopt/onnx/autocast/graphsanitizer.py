@@ -627,9 +627,8 @@ class GraphSanitizer:
                     if attr.name == "value" and attr.t.data_type == onnx.TensorProto.DOUBLE:
                         # Convert the tensor value to FP32
                         fp64_data = numpy_helper.to_array(attr.t, base_dir=self.external_data_dir)
-                        fp64_data = self._clamp_to_fp32_range(
-                            fp64_data, f"{node.op_type} node {node.name}"
-                        )
+                        tensor_name = node.output[0] if node.output else node.name
+                        fp64_data = self._clamp_to_fp32_range(fp64_data, tensor_name)
                         fp32_data = fp64_data.astype(np.float32)
                         new_tensor = numpy_helper.from_array(fp32_data)
                         attr.t.CopyFrom(new_tensor)

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 from unittest.mock import Mock
 
 import numpy as np
@@ -331,6 +333,35 @@ def test_convert_fp64_nodes_clamps_out_of_range_values(op_type):
     )
     assert np.all(np.isfinite(converted)), f"{op_type} value was cast to infinity"
     assert converted == np.finfo(np.float32).max
+
+
+def test_convert_fp64_nodes_warning_names_the_output_tensor(caplog):
+    """The clamp warning must name the Constant's output tensor, not the node.
+
+    Regression test: the warning was built from f"{node.op_type} node {node.name}",
+    which identifies the node, not the tensor whose values are out of range -- the
+    same mistake _convert_fp64_initializers avoids by passing initializer.name.
+    """
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
+    value = numpy_helper.from_array(
+        np.array([np.finfo(np.float64).max], np.float64), name="big_value"
+    )
+    producer = helper.make_node("Constant", [], ["big_output"], name="big_node", value=value)
+
+    graph = helper.make_graph(
+        nodes=[producer, helper.make_node("Mul", ["X", "big_output"], ["Y"], name="mul")],
+        name="fp64_node_warning_name",
+        inputs=[x],
+        outputs=[y],
+    )
+    sanitizer = GraphSanitizer(helper.make_model(graph))
+
+    with caplog.at_level(logging.WARNING):
+        assert sanitizer._convert_fp64_nodes() is True
+
+    assert any("big_output" in record.message for record in caplog.records)
+    assert not any("big_node" in record.message for record in caplog.records)
 
 
 def test_convert_fp64_io_types():
