@@ -459,13 +459,13 @@ Use an uncompressed, adapter-free checkpoint and load it with
 `distill.py --student_megatron_path /output/qwen3_qdq`.
 PTQ prepares all enabled quantized weights; choose trainable parameters during QAD.
 
-- **GGML PTQ:** reuse initial codes until weights change, then recompute scales and codes.
-- **GPTQ:** keep super-block scales and FP32 importance fixed.
+- **GGML IQ PTQ:** keep the original super-block scales fixed during QAD; local scale indices,
+  codes, and signs can change.
+- **GPTQ / imatrix:** preserve the existing fixed super-block scales and FP32 importance.
 
-Restore GGML QDQ checkpoints with the same tensor-parallel layout used when saving.
 Shared or sequential GGML PTQ quantizers are unsupported.
 
-> **Note:** Initial encoding retention applies to GGML. Other formats retain their existing
+> **Note:** Super-block scale pinning applies to GGML IQ formats. Other formats retain their existing
 > quantization behavior; for example, dynamic NVFP4 reuses its calibrated global scale but
 > recomputes local scales for each 16-weight block. Exact round-trip equality is not guaranteed
 > for these formats or BF16 transforms.

@@ -1479,10 +1479,9 @@ def initialize_qdq_weights(model: nn.Module) -> nn.Module:
     Pre-scales and rotations are inverted before storing values, so subsequent forwards
     continue to apply those transforms exactly once. This is initialization, not folding:
     quantizers remain enabled. Uses already-restored calibration state without rerunning
-    calibration or GPTQ. Never call on a resumed training checkpoint. Unpinned GGML PTQ keeps its
-    initialization payload until the weight changes, then resumes its ordinary scale/code search.
-    Megatron retains the inactive packed buffer and a sharded activity flag for checkpoint-key
-    stability. GGML checkpoint restores require the saved tensor-parallel layout.
+    calibration or GPTQ. Never call on a resumed training checkpoint. GGML IQ PTQ pins its
+    initial super-block scales for QAD; local scale indices, codes and signs can still change.
+    Existing GPTQ/imatrix scales and importance buffers are preserved.
     Other dynamic quantizers and low-precision inverse transforms can change the effective weight;
     this API does not guarantee bitwise-identical forwards.
 

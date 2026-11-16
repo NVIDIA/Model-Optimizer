@@ -527,9 +527,6 @@ class _MegatronParallelLinear(_ParallelLinear):
 
         super()._setup()
 
-    # TP-local updates must not remove only some shards of a checkpoint tensor.
-    _retain_qdq_initialization = True
-
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):
         if v.ndim == 4:
             quantizer_state_dict[k] = v.squeeze(1).squeeze(-1)

@@ -202,11 +202,6 @@ def pin_packed_weight(
     then searches at these and keeps the pinned ones, so a block QAD changed is not searched at the
     raised scale, which would shrink it. They are kept as their bits, which casting the model leaves.
     """
-    initial_name = _initialization_name(format_name)
-    if hasattr(quantizer, initial_name):
-        delattr(quantizer, initial_name)
-    if hasattr(quantizer, initial_name + "_active"):
-        delattr(quantizer, initial_name + "_active")
     quantizer._set_buffer(_pin_name(format_name), packed_weights)
     importance_name = PINNED_IMPORTANCE_PREFIX + format_name
     if importance is not None:
@@ -278,10 +273,6 @@ def drop_search_scales(quantizer) -> None:
     if isinstance(num_bits, str) and hasattr(quantizer, _search_scales_name(num_bits)):
         delattr(quantizer, _search_scales_name(num_bits))
         quantizer._quantizer_cache = None
-def _initialization_name(format_name: str) -> str:
-    return f"{PINNED_PAYLOAD_PREFIX}{format_name}_qdq_initialization"
-
-
 def _source_name(format_name: str) -> str:
     """The buffer holding a pin's source fingerprint, ``[*rows, blocks, keys]``.
 
@@ -344,6 +335,7 @@ def fake_quantize_with_cache(
     decode_chunk_size: int,
     quantize: Callable[..., tuple[torch.Tensor, torch.Tensor]],
     dequantize: Callable[..., torch.Tensor],
+    pin_scales: bool,
 ) -> torch.Tensor:
     """Fake-quantize a weight while caching its compact packed representation."""
     cache = _matching_cache(quantizer, inputs, format_name)
@@ -369,20 +361,18 @@ def fake_quantize_with_cache(
             quantizer._quantizer_cache = None
 
     initialization_shape = getattr(quantizer, "_qdq_initialization_shape", None)
-    if initialization_shape is not None and pinned_packed_weight(quantizer, format_name) is None:
-        initial_name = _initialization_name(format_name)
-        quantizer._set_buffer(
-            initial_name,
+    if (
+        pin_scales
+        and initialization_shape is not None
+        and pinned_packed_weight(quantizer, format_name) is None
+    ):
+        pin_packed_weight(
+            quantizer,
+            format_name,
             packed_weights.reshape(
                 *initialization_shape[:-1], initialization_shape[-1] // block_size, -1
             ),
         )
-        if getattr(quantizer, "_ggml_retain_initialization", False):
-            # Stable, shardable checkpoint keys even if TP shards retire at different updates.
-            quantizer._set_buffer(
-                initial_name + "_active",
-                torch.ones_like(getattr(quantizer, initial_name)[..., :1], dtype=torch.bool),
-            )
 
     # Sized separately from the encode chunk: packing happens once per weight and is bounded
     # by its search temporaries, while this runs on every forward and is bounded by launches.
@@ -528,6 +518,7 @@ class GGMLFormat:
             ),
             quantize=partial(self._pinned_or_quantize, quantizer),
             dequantize=self.dequantize,
+            pin_scales=self.payload_scales is not None,
         )
 
     def pack(self, weight: torch.Tensor, quantizer=None) -> torch.Tensor:
@@ -561,30 +552,6 @@ class GGMLFormat:
         """``quantize(weight)``, under the pinned scales or as the pinned rows ``weight`` decodes."""
         shape = torch.tensor(weight.shape, dtype=torch.int64)
         kwargs = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
-        initial_name = _initialization_name(self.name)
-        initial = getattr(quantizer, initial_name, None)
-        active = getattr(quantizer, initial_name + "_active", None)
-        if active is not None:
-            if initial is None:
-                raise ValueError("GGML initialization activity state is missing its payload.")
-            if not bool(active.any()):
-                initial = None
-            elif not bool(active.all()):
-                raise NotImplementedError(
-                    "Cannot combine active and retired GGML initialization shards. "
-                    "Resume with the saved tensor-parallel topology until all shards retire."
-                )
-        if initial is not None:
-            packed = self._pinned_rows(quantizer, weight, payload=initial)
-            if packed is not None:
-                return packed, shape
-            # A no-op optimizer step may invalidate the cache without changing the weight.
-            # Export slices cannot establish whether the whole weight changed.
-            if weight.numel() == initial.numel() // self.block_bytes * self.block_size:
-                if active is None:
-                    delattr(quantizer, initial_name)
-                else:
-                    active.zero_()
         pinned = pinned_packed_weight(quantizer, self.name)
         keeps_scales = pinned is not None and self.payload_scales is not None
         # Unless the pin stands in for the weight (PIN_OVERRIDES_WEIGHT): AutoQuantize then keeps
@@ -675,9 +642,7 @@ class GGMLFormat:
             quantizer._set_buffer(_source_name(self.name), source)
         return self.dequantize(packed, shape, dtype=dtype)
 
-    def _pinned_rows(
-        self, quantizer, weight: torch.Tensor, *, payload: torch.Tensor | None = None
-    ) -> torch.Tensor | None:
+    def _pinned_rows(self, quantizer, weight: torch.Tensor) -> torch.Tensor | None:
         """The pinned payload of ``weight``, a view of the pinned weight or rows taken from it.
 
         Fake quant hands over the pinned weight itself in 256-value rows; export may hand over row
@@ -686,8 +651,7 @@ class GGMLFormat:
         so a float32 weight also matches the decoding rounded through BF16 or FP16. The comparison
         syncs, but it only runs for weights the identity cache has not seen.
         """
-        initialization = payload is not None
-        pinned = payload if initialization else pinned_packed_weight(quantizer, self.name)
+        pinned = pinned_packed_weight(quantizer, self.name)
         width = weight.shape[-1] // self.block_size
         if (
             pinned is None
@@ -697,8 +661,7 @@ class GGMLFormat:
             return None
         pinned = pinned.to(weight.device).reshape(-1, width, self.block_bytes)
         if (
-            not initialization
-            and getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
+            getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
             and self.full_pin(quantizer, weight) is not None
         ):
             return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
@@ -719,8 +682,6 @@ class GGMLFormat:
             for storage_dtype in storage_dtypes:
                 if torch.equal(rows, decoding(storage_dtype)):
                     return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
-            if initialization:
-                return None
         for storage_dtype in storage_dtypes:
             index = _matching_rows(decoding(storage_dtype), rows)
             if index is not None:

@@ -609,13 +609,9 @@ def _pinned_export(rows, num_bits, qdq_ptq=False):
     )
     if qdq_ptq:
         mtq.initialize_qdq_weights(model)
-        pinned = next(
-            buffer
-            for name, buffer in model.weight_quantizer.named_buffers()
-            if name.endswith("_qdq_initialization")
-        )
-    else:
-        pinned = pinned_packed_weight(model.weight_quantizer, num_bits)
+    pinned = pinned_packed_weight(model.weight_quantizer, num_bits)
+    if pinned is None:
+        pinned = GGML_FORMAT_REGISTRY[num_bits].pack(model.weight, model.weight_quantizer)
     return model.weight.detach(), model.weight_quantizer, pinned
 
 

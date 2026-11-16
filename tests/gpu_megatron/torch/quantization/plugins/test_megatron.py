@@ -1756,17 +1756,21 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
     if preparation == "ptq":
         mtq.initialize_qdq_weights(model_ref)
     original_keys = set(model_ref.sharded_state_dict())
+    original_pins = {
+        k: v.detach().clone()
+        for k, v in model_ref.state_dict().items()
+        if PINNED_PAYLOAD_PREFIX in k or PINNED_IMPORTANCE_PREFIX in k
+    }
     for phase in ("initial", "rank_local_update") if preparation == "ptq" else ("initial",):
         if phase == "rank_local_update":
-            # Only one TP shard retires initialization; checkpoint tensor keys must stay stable.
+            # Updating one TP shard must keep its scale pins and checkpoint keys intact.
             for module in model_ref.modules():
                 if not hasattr(module, "iter_weights_for_calibration"):
                     continue
                 changed = False
                 for weight, quantizer in module.iter_weights_for_calibration():
                     if any(
-                        n.endswith("_qdq_initialization_active")
-                        for n, _ in quantizer.named_buffers()
+                        n.startswith(PINNED_PAYLOAD_PREFIX) for n, _ in quantizer.named_buffers()
                     ):
                         if rank == 0:
                             with torch.no_grad():
@@ -1783,20 +1787,17 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
         }
         sharded = model_ref.sharded_state_dict()
         checks = [bool(pinned), set(sharded) == original_keys, all(k in sharded for k in pinned)]
+        checks.append(pinned.keys() == original_pins.keys())
+        checks.append(all(torch.equal(v, original_pins[k]) for k, v in pinned.items()))
         if preparation == "ptq":
-            active = [v for k, v in pinned.items() if k.endswith("_qdq_initialization_active")]
-            checks.append(bool(active))
-            if phase == "initial":
-                checks.append(all(v.all() for v in active))
-            if phase == "rank_local_update":
-                checks.append(any(not v.any() for v in active) == (rank == 0))
+            checks.append(not any(PINNED_IMPORTANCE_PREFIX in k for k in pinned))
             if grouped:
                 checks.append(any("weight_quantizer.0." in k for k in pinned))
         else:
             checks.append(any(PINNED_IMPORTANCE_PREFIX in k for k in pinned))
         matches = torch.tensor(all(checks), device="cuda")
         torch.distributed.all_reduce(matches, op=torch.distributed.ReduceOp.MIN)
-        assert matches.item(), "GGML payload checkpoint keys or activity state are incorrect"
+        assert matches.item(), "GGML scale pins or checkpoint keys changed"
 
         checkpoint = tmp_path / phase
         checkpoint.mkdir(exist_ok=True)
@@ -1805,14 +1806,15 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
         model_test = create_model()
         reset = TensorQuantizer._reset_pytorch_state_from_metadata
 
-        def poison_activity(quantizer, metadata):
+        def poison_placeholders(quantizer, metadata):
             reset(quantizer, metadata)
             for name, buffer in quantizer.named_buffers(recurse=False):
-                if name.endswith("_qdq_initialization_active") and buffer.numel() > 1:
+                if name.startswith(PINNED_PAYLOAD_PREFIX):
                     buffer.zero_()
-                    buffer.reshape(-1)[0] = True
 
-        with patch.object(TensorQuantizer, "_reset_pytorch_state_from_metadata", poison_activity):
+        with patch.object(
+            TensorQuantizer, "_reset_pytorch_state_from_metadata", poison_placeholders
+        ):
             restore_sharded_modelopt_state([model_test], checkpoint)
         model_test = load_distributed_checkpoint(checkpoint, model_test)
         restored = model_test.state_dict()
@@ -1821,8 +1823,7 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
             device="cuda",
         )
         torch.distributed.all_reduce(matches, op=torch.distributed.ReduceOp.MIN)
-        assert matches.item(), "GGML payloads and activity flags did not survive the checkpoint"
-        # Exercise the restored quantizers too, including a shard whose payload is inactive.
+        assert matches.item(), "GGML payloads did not survive the checkpoint"
         same_effective_weights = True
         for source, target in zip(model_ref.modules(), model_test.modules()):
             if not hasattr(source, "iter_weights_for_calibration"):
@@ -1838,58 +1839,12 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
         assert matches.item(), "GGML effective weights changed after native resume"
         del model_test
 
-    if preparation == "ptq":
-        # Retire every local payload, not just the first weight on one TP rank.
-        for module in model_ref.modules():
-            if not hasattr(module, "iter_weights_for_calibration"):
-                continue
-            for weight, quantizer in module.iter_weights_for_calibration():
-                if any(
-                    name.endswith("_qdq_initialization_active")
-                    for name, _ in quantizer.named_buffers()
-                ):
-                    with torch.no_grad():
-                        weight.add_(0.125)
-                    quantizer(weight)
-        active = [
-            buffer
-            for name, buffer in model_ref.named_buffers()
-            if name.endswith("_qdq_initialization_active")
-        ]
-        retired = torch.tensor(bool(active) and all(not v.any() for v in active), device="cuda")
-        torch.distributed.all_reduce(retired, op=torch.distributed.ReduceOp.MIN)
-        assert retired.item(), "All TP shards must retire initialization before saving"
-        checkpoint = tmp_path / "retired"
-        checkpoint.mkdir(exist_ok=True)
-        save_distributed_checkpoint(checkpoint, model_ref)
-        save_sharded_modelopt_state([model_ref], checkpoint)
-        torch.distributed.barrier()
-        del model_ref
-        destroy_model_parallel()
-        initialize_for_megatron(
-            tensor_model_parallel_size=1,
-            expert_tensor_parallel_size=1 if grouped else None,
-            seed=SEED,
-        )
-        for phase in ("initial", "retired"):
-            target = [create_model(tp_size=1)]
-            error = None
-            try:
-                # Metadata restore must reject TP=2 -> TP=1 before loading weight tensors.
-                restore_sharded_modelopt_state(target, tmp_path / phase)
-            except Exception as exc:
-                error = exc
-            rejected = torch.tensor(isinstance(error, NotImplementedError), device="cuda")
-            torch.distributed.all_reduce(rejected, op=torch.distributed.ReduceOp.MIN)
-            assert rejected.item(), f"Expected an early GGML layout rejection ({phase}): {error!r}"
-            del target
-
 
 @pytest.mark.parametrize(
     ("preparation", "grouped"), [("gptq", False), ("ptq", False), ("ptq", True)]
 )
 def test_ggml_payload_sharded_state_dict(dist_workers_size_2, tmp_path, preparation, grouped):
-    """Dense/grouped payloads restore at the same TP size and reject active/retired TP changes."""
+    """Dense/grouped scale pins and effective weights survive rank-local updates and reload."""
     dist_workers_size_2.run(
         partial(_test_ggml_payload_sharded_state_dict, tmp_path, preparation, grouped)
     )
