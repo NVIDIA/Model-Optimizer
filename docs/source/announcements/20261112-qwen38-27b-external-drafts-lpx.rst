@@ -24,19 +24,24 @@ is incurred for every drafted token, leading to a tradeoff between acceptance le
 The introduction of NVIDIA Groq 3 LPX has shifted this tradeoff by lowering the latency of larger,
 multi-layer standalone drafts. By deploying these larger draft models, along with the target models,
 on NVIDIA Groq 3 LPX, acceptance lengths similar to, and in some cases better than, tail-augmented
-drafts can be achieved without sacrificing system latency. Standalone drafts also need only the
+drafts can be achieved (see Results). Standalone drafts also need only the
 target's tokens and probabilities, not its hidden states, which suits a disaggregated system where
 the draft and target run on separate hardware. Coupled with pipelined verification and parallel
-drafting, drafting time can be largely hidden behind verification time, resulting in SOTA
-performance in minimum-latency scenarios (see Figure 1).
+drafting, drafting time can be largely hidden behind verification time, resulting in very high
+output speeds in minimum-latency scenarios (see Figure 1).
 
 .. image:: assets/qwen38-27b-external-drafts-lpx-speed.png
-   :alt: Output speed of Groq 3 LPX at 100K input tokens, as measured by Artificial Analysis and
-         NVIDIA
+   :alt: Output speed of Groq 3 LPX at 100K input tokens: Gemma 4 31B measured by Artificial
+         Analysis, Qwen3.8-27B measured internally by NVIDIA
    :width: 100%
 
-**Figure 1. Speed of Groq 3 LPX with 100K input tokens of context length, as measured by Artificial
-Analysis and NVIDIA.**
+**Figure 1. Output speed of Groq 3 LPX with 100K input tokens of context length.** Both results use
+the Artificial Analysis 100K context benchmark: median output speed across samples, with tokens
+counted using the o200k_base tokenizer for every model. The Gemma 4 31B result was measured by
+Artificial Analysis, as reported in `How NVIDIA Groq 3 LPX Unlocks Ultrafast Interactivity at Long
+Context on NVIDIA Vera Rubin
+<https://developer.nvidia.com/blog/how-nvidia-groq-3-lpx-unlocks-ultrafast-interactivity-at-long-context-on-nvidia-vera-rubin/>`__.
+The Qwen3.8-27B result was measured internally by NVIDIA with the same benchmark.
 
 In this report we outline the ultra-low latency NVIDIA Groq 3 LPX speculative decoding system in
 more detail. We also describe the process of training standalone drafts from existing small model
@@ -308,7 +313,8 @@ swapped in at step 2.
      --data_path $WORK/prompts/sample-100K.jsonl \
      --output_path $WORK/conversations/train.jsonl \
      --model $TARGET --temperature 1.0 --max_tokens 9216 \
-     --extra_body '{"top_p":0.95,"top_k":20,"chat_template_kwargs":{"reasoning_effort":"xhigh"}}'
+     --extra_body '{"top_p":0.95,"top_k":20,"chat_template_kwargs":{"reasoning_effort":"xhigh"}}' \
+     --fail_on_error
    kill %1; wait
 
    # ---------------------------------------------------------------------------
@@ -362,17 +368,6 @@ swapped in at step 2.
      training.logging_steps=10 \
      training.save_steps=3125
 
-Deployment
-**********
-
-The intended deployment of the standalone drafts is on Groq LPX hardware. Models are compiled for
-Groq 3 LPX and run with the LPX runtime. **LPX customers will receive a compiler SDK letting them
-take advantage of the deterministic execution model to generate pre-compiled schedules for the
-models to run on their racks.** LPX’s deterministic execution model means that compiled performance
-is exactly what will be achieved, minus some runtime overhead. Coupled with measuring the individual
-models’ acceptance lengths, developers will be able to predict how their speculative decoding system
-will perform before deployment, without detailed hardware profiling.
-
 Conclusion
 **********
 
@@ -380,8 +375,8 @@ In this blog post, we have presented the viability of using standalone drafts fo
 decoding in Groq 3 LPX systems. Further, we release three standalone draft models that have been
 aligned for Qwen/Qwen3.8-27B. In a fully dynamic unbounded drafting regime the 4B and 0.8B drafts
 achieve higher acceptance lengths than the model’s native MTP head, and the 1B draft comes within 9%
-of it. Finally, we provide an overview of ModelOpt’s training process and best practices for these
-drafts.
+of it. The intended deployment of these standalone drafts is with the Groq 3 LPX Runtime. Finally, we
+provide an overview of ModelOpt’s training process and best practices for these drafts.
 
 Resources
 *********
