@@ -20,8 +20,6 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
-*Sparsity*
-
 *Misc*
 
 **Backward Breaking Changes**
