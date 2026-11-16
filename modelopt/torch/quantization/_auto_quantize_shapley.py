@@ -446,6 +446,11 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
 
     def validate_search_input(self, constraints, config) -> None:
         """Reject ambiguous target combinations (runs before any model mutation)."""
+        self._check_targets(constraints, config)
+        super().validate_search_input(constraints, config)
+
+    @staticmethod
+    def _check_targets(constraints, config) -> None:
         if (
             config.get("max_predicted_damage") is not None
             and (constraints or {}).get("effective_bits") is not None
@@ -461,7 +466,7 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
         # Reject before ``super().before_search()`` calibrates every search recipe.
         self._raise_if_vocab_sharded()
         if self.config["max_predicted_damage"] is not None:
-            self.validate_search_input(self.constraints, self.config)
+            self._check_targets(self.constraints, self.config)
             self.constraints = {"effective_bits": 16.0, **(self.constraints or {})}
         # Stored scores are only reusable when their meaning is unchanged (see
         # _current_scoring_signature); damage-bound re-solves are allowed on resume.

@@ -975,8 +975,31 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     def validate_search_input(self, constraints, config) -> None:
         """Validate method-specific inputs before quantizing the model."""
+        # Refuse scores of another method or scoring options before the model is converted, so the
+        # caller can retry the same model with another checkpoint. The search restores the state
+        # read here rather than reading the checkpoint again.
+        self.config = config
+        self._preloaded_state = None
+        self.reset_search()
+        loaded = self.load_search_checkpoint()
+        state = self.state_dict()
+        self._preloaded_state = state if loaded else {}
+        if not state["candidate_stats"]:
+            return
+        if state.get("method") not in (None, self.method_name):
+            raise ValueError(
+                f"Checkpoint method '{state['method']}' does not match current method "
+                f"'{self.method_name}'. Use a different checkpoint path."
+            )
+        if mismatch := self.scoring_mismatch(state):
+            raise ValueError(f"{mismatch} Use a different checkpoint path.")
 
     def load_search_checkpoint(self) -> bool:
+        state, self._preloaded_state = getattr(self, "_preloaded_state", None), None
+        if state is not None:  # read by validate_search_input; search() reset the attributes
+            for key, value in state.items():
+                setattr(self, key, value)
+            return bool(state)
         loaded = super().load_search_checkpoint(strict=False)
         # safe_save stores the defaultdict as a dict, which scoring after a resume fills by name.
         self.candidate_stats = defaultdict(dict, self.candidate_stats)

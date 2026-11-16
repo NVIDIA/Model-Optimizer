@@ -1700,6 +1700,35 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
                     s1["state_dict"][qname][buf_name], s2["state_dict"][qname][buf_name]
                 )
 
+    # Scores of another method or scoring options are refused before the model is converted, so
+    # the same model can retry with a new checkpoint.
+    other = {
+        "gradient": {"method": "kl_div", "context": "lowest"},
+        "kl_div": {"method": "kl_div", "context": "lowest"},
+        "aumann_shapley": {"method": "aumann_shapley", "num_path_nodes": 1},
+    }[method]
+    model_3 = SimpleLinear()
+
+    def search(checkpoint):
+        return mtq.auto_quantize(
+            model_3,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+            data_loader=[model_3.get_input() for _ in range(2)],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+            method=other,
+            checkpoint=checkpoint,
+        )
+
+    refusal = "method 'gradient'" if method == "gradient" else "scoring"
+    with pytest.raises(ValueError, match=refusal):
+        search(checkpoint_path)
+    assert not mto.ModeloptStateManager.is_converted(model_3)
+    search(str(tmp_path / "other_options.pth"))
+
 
 def _tensor_parallel_kl_job(rank, size):
     torch.manual_seed(0)
