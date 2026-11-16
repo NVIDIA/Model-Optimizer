@@ -373,6 +373,12 @@ class LanguageDataCollator:
 class VisionLanguageDataCollator(LanguageDataCollator):
     """VisionLanguageDataCollator is a subclass of LanguageDataCollator that is used to collate vision-language data."""
 
+    # Transient media-read retries (see _processor_apply). Class-level defaults so an
+    # instance built without __init__ (as unit tests do) still has them; __init__
+    # overrides them from VLM_MEDIA_LOAD_RETRIES / VLM_MEDIA_RETRY_SLEEP.
+    _media_retries: int = 4
+    _media_retry_sleep: float = 0.5
+
     def __init__(
         self,
         processor: str,
