@@ -10,6 +10,8 @@ license: Apache-2.0
 
 Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints.
 
+**Another evaluation tool:** this skill covers NEL. When the task names another tool, use that tool's skills. If they need the serving deployment from the caller, first derive and record it with `modelopt-deployment` (step 5c, serving record) and hand it to the tool.
+
 ## Completed-run analysis
 
 For completed runs, skip launch/config; use launching-evals for artifacts/analysis
