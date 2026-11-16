@@ -416,10 +416,10 @@ class HFLiLiCorrModel(HFDFlashModel):
             "lilicorr_w_pen": self.dflash_lilicorr_w_pen,
             "lilicorr_w_cal": self.dflash_lilicorr_w_cal,
         }
-        # Every metric stays in the loss's own dtype: a diagnostic must not be the reason
-        # the step needs a dtype the device may not carry.
+        # float32, like the terms above: pinned rather than left to the global default, so a
+        # diagnostic is never the reason the step needs a dtype the device may not carry.
         for name, weight in weights.items():
-            metrics[name] = torch.full((), weight, device=loss.device)
+            metrics[name] = torch.full((), weight, dtype=torch.float32, device=loss.device)
         accuracy = metrics["lilicorr_selected_prefix"] / num_slots
         return loss, accuracy, metrics
 
