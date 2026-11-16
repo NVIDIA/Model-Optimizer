@@ -451,18 +451,28 @@ def test_sanitize_large_external_initializer_metadata():
     assert [node.op_type for node in sanitizer.model.graph.node] == ["Identity"]
 
 
-def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch):
+@pytest.mark.parametrize("is_trt_plugin", [False, True])
+@pytest.mark.parametrize("node_name", ["custom", ""])
+def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch, is_trt_plugin, node_name):
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
     y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
-    custom_node = helper.make_node("CustomOp", [x.name], [y.name], name="custom")
-    graph = helper.make_graph([custom_node], "custom_graph", [x], [y])
+    standard_name = "standard" if node_name else ""
+    standard_node = helper.make_node("Relu", [x.name], ["standard_out"], name=standard_name)
+    custom_node = helper.make_node("CustomOp", ["standard_out"], [y.name], name=node_name)
+    graph = helper.make_graph([standard_node, custom_node], "custom_graph", [x], [y])
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)])
     model_path = tmp_path / "custom.onnx"
     tensor_info = {"Y": {"dtype": TensorProto.FLOAT, "shape": [1]}}
-    get_custom_layers = Mock(return_value=([custom_node.name], tensor_info))
+    layer_name = node_name or "node_of_Y"
+    plugin_layers = [standard_name or "node_of_standard_out"]
+    if is_trt_plugin:
+        plugin_layers.append(layer_name)
+    get_custom_layers = Mock(return_value=(plugin_layers, tensor_info))
     infer_types_shapes = Mock(return_value=model)
 
-    monkeypatch.setattr(graphsanitizer, "set_trt_plugin_domain", Mock(return_value=model))
+    monkeypatch.setattr(graphsanitizer, "TRT_PYTHON_AVAILABLE", True)
+    set_trt_plugin_domain = Mock(return_value=model)
+    monkeypatch.setattr(graphsanitizer, "set_trt_plugin_domain", set_trt_plugin_domain)
     monkeypatch.setattr(graphsanitizer, "get_custom_layers", get_custom_layers)
     monkeypatch.setattr(graphsanitizer, "infer_types_shapes_tensorrt", infer_types_shapes)
 
@@ -471,3 +481,8 @@ def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch):
 
     get_custom_layers.assert_called_once_with(str(model_path.resolve()), [])
     infer_types_shapes.assert_called_once_with(model, [], all_tensor_info=tensor_info)
+    assert sanitizer.trt_plugin_ops == ({"CustomOp"} if is_trt_plugin else set())
+    if is_trt_plugin:
+        set_trt_plugin_domain.assert_called_once_with(model, {"CustomOp"})
+    else:
+        set_trt_plugin_domain.assert_not_called()

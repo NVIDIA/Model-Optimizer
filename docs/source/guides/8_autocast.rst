@@ -137,7 +137,8 @@ Best Practices
 #. **TensorRT custom op support**
 
    - Refer to :ref:`TensorRT Execution Provider requirements <ort_ep_requirements>`.
-   - When a custom op is detected, the TensorRT Execution Provider is automatically enabled.
+   - The TensorRT Execution Provider is automatically enabled only when TensorRT introspection confirms a custom TensorRT plugin. Standard ONNX operators keep their original domains even if TensorRT implements them with internal plugins.
+   - Without standalone TensorRT Python bindings, introspection is skipped and the selected execution providers are kept. ORT-supported contrib operators can use the CPU provider; conversion still requires the selected provider to support the resulting graph.
    - To also enable the CUDA execution provider, use ``--providers cpu cuda:x``, where ``x`` is your device ID (``x=0`` if your system only has 1 GPU).
    - Use ``--trt_plugins`` to provide the paths to the necessary TensorRT plugin libraries (in ``.so`` format).
 

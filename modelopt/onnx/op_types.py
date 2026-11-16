@@ -175,7 +175,7 @@ def is_non_reshape_copy_op(op_type: str):
 
 
 def is_irregular_mem_access_op(op_type: str):
-    """Returns whether the given op type is of Irreggular mem access category or not."""
+    """Returns whether the given op type is of irregular mem access category or not."""
     return op_type in [
         "Gather",
         "GatherElements",

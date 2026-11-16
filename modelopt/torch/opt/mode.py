@@ -94,7 +94,7 @@ class ModeDescriptor(ABC):
         """Modes that should not be applied after this mode.
 
         This is used to specify that certain modes should not be applied after this mode.
-        A ``None`` value indicates that incompatibitly check is skipped for this mode.
+        A ``None`` value indicates that the incompatibility check is skipped for this mode.
         This is useful if there are many allowed modes but only a few prohibited modes.
 
         Returns:

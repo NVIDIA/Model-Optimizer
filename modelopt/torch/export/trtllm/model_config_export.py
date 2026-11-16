@@ -36,6 +36,7 @@ from modelopt.torch.utils import import_plugin
 from ..layer_utils import is_layernorm
 from ..quant_format import QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ
 from ..quant_utils import get_quantization_format, process_layer_quant_config
+from .decoder_type import get_decoder_type
 from .layer_utils import (
     build_conv_config,
     build_decoder_config,
@@ -98,7 +99,7 @@ _DEPRECATION_MSG = (
 
 def torch_to_tensorrt_llm_checkpoint(
     model: nn.Module,
-    decoder_type: str,
+    decoder_type: str | None = None,
     dtype: torch.dtype | None = None,
     inference_tensor_parallel: int = 0,
     inference_pipeline_parallel: int = 1,
@@ -117,8 +118,10 @@ def torch_to_tensorrt_llm_checkpoint(
 
     Args:
         model: the torch model.
-        decoder_type: the type of the decoder, e.g. gpt, gptj, llama.
-            Please see :mod:`modelopt.torch.export.model_utils` for the supported models.
+        decoder_type: the TensorRT-LLM decoder type, e.g. gpt, gptj, llama. Detected from the
+            model class name if None, falling back to the generic decoder export for an
+            unrecognized model that has ``config.architectures``. Required for Megatron-Core
+            models.
         dtype: the weights data type to export the unquantized layers or the default model data type if None.
         inference_tensor_parallel: The target inference time tensor parallel.
             We will merge or split the calibration tensor parallelism to inference.
@@ -155,13 +158,26 @@ def torch_to_tensorrt_llm_checkpoint(
 
 def _torch_to_tensorrt_llm_checkpoint(
     model: nn.Module,
-    decoder_type: str,
+    decoder_type: str | None = None,
     dtype: torch.dtype | None = None,
     inference_tensor_parallel: int = 0,
     inference_pipeline_parallel: int = 1,
     workspace_path: Path | str | None = None,
 ) -> Iterator[tuple[dict[str, Any], dict[str, torch.Tensor], dict[str, Any]]]:
     """Generator behind :func:`torch_to_tensorrt_llm_checkpoint`; see it for the contract."""
+    if decoder_type is None:
+        decoder_type = get_decoder_type(model)
+        if decoder_type is None:
+            # The generic decoder path takes the TensorRT-LLM architecture from the Hugging Face
+            # config, so it only works for a model that has config.architectures.
+            if not getattr(getattr(model, "config", None), "architectures", None):
+                raise ValueError(
+                    f"Cannot detect decoder_type for {type(model).__name__}, and it has no "
+                    "config.architectures to fall back on. Pass decoder_type explicitly "
+                    "(required for Megatron-Core models)."
+                )
+            warn(f"Unknown decoder_type for {type(model).__name__}. Continue exporting...")
+            decoder_type = f"unknown:{type(model).__name__}"
     if dtype is None:
         dtype = get_dtype(model)
 
@@ -200,7 +216,7 @@ def _torch_to_tensorrt_llm_checkpoint(
         if hasattr(model, "model") and hasattr(model.model, "alibi_mask"):
             model_metadata_config["alibi"] = True
 
-        # For MPT, DBRX
+        # For MPT
         for config_key in ["attn_config", "ffn_config"]:
             config_value = model_metadata_config.get(config_key, None)
             if config_value:
@@ -480,7 +496,7 @@ def _torch_to_tensorrt_llm_checkpoint(
 
 def export_tensorrt_llm_checkpoint(
     model: nn.Module,
-    decoder_type: str,
+    decoder_type: str | None = None,
     dtype: torch.dtype | None = None,
     export_dir: Path | str = tempfile.gettempdir(),
     inference_tensor_parallel: int = 0,
@@ -497,8 +513,10 @@ def export_tensorrt_llm_checkpoint(
 
     Args:
         model: the torch model.
-        decoder_type: the type of the decoder, e.g. gpt, gptj, llama.
-            Please see the model_utils.py for the supported models.
+        decoder_type: the TensorRT-LLM decoder type, e.g. gpt, gptj, llama. Detected from the
+            model class name if None, falling back to the generic decoder export for an
+            unrecognized model that has ``config.architectures``. Required for Megatron-Core
+            models.
         dtype: the weights data type to export the unquantized layers or the default model data type if None.
         export_dir: the target export path.
         inference_tensor_parallel: The target inference time tensor parallel.

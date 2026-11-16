@@ -1,0 +1,159 @@
+{
+  "model": {
+    "id": "Qwen/Qwen3-8B",
+    "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "weight_dtype": "BF16",
+    "attention_layers": 36,
+    "kv_heads": 8,
+    "head_dim": 128
+  },
+  "runtime": {
+    "kind": "development vLLM",
+    "image_sha256": "95f552c4d541fbcf1d4fea060f604f9256591424e6fe12732abbd903f19da486",
+    "tensor_parallelism": 1,
+    "data_parallelism": 4,
+    "cuda_graphs": true,
+    "prefix_caching": true,
+    "chunked_prefill": true
+  },
+  "search": {
+    "dataset": "Nemotron Post-Training Dataset v3",
+    "packed_rows": 64,
+    "tokens_per_row": 8192,
+    "scored_tail_tokens": 1024,
+    "seed": 1234,
+    "disjoint_validation_rows": 64,
+    "benchmark_prompts_separate": true,
+    "candidates": [
+      "FP8 K/V",
+      "FP8 K / NVFP4 V",
+      "NVFP4 K/V"
+    ],
+    "requested_budgets": [
+      5.375,
+      5.8125
+    ]
+  },
+  "autoquant_scale_policy": {
+    "mode": "default",
+    "kv_scale": 1.0,
+    "persistent_kv_scale_tensors_removed": 72,
+    "note": "Layer maps and BF16 weights were preserved; search was not rerun after removing scale tensors."
+  },
+  "accuracy_drop": {
+    "formula": "recipe accuracy_pct - BF16 accuracy_pct",
+    "units": "percentage points",
+    "positive": "better than BF16",
+    "negative": "worse than BF16",
+    "rounding": "Differences use unrounded input scores; table rounds half up to two decimal places.",
+    "uncertainty": "Point-estimate differences. CSV stderr_pp refers to each absolute accuracy, not the difference. No paired significance test is implied."
+  },
+  "uncertainty": {
+    "general": "Retained evaluator SE unless the CSV uncertainty_basis specifies a reconstruction or approximation. Repeated completions do not add independent benchmark problems.",
+    "scicode_bf16_nvfp4": "Approximate binomial SE: 100 * sqrt(p * (1-p) / 2704); repeated completions treated as independent.",
+    "scicode_native_6p25": "Mean of three independent run scores: 543/2704, 519/2704, 524/2704. SE is their sample SD / sqrt(3). CSV response counts sum across the three runs.",
+    "scicode_other": "Repeat-derived standard errors retained in the CSV."
+  },
+  "coverage": {
+    "six_non_scicode_tasks": "Complete successful response coverage for every displayed cell.",
+    "scicode": "Fixed denominator 2704 per run; missing and unsuccessful generations remain failures.",
+    "withheld": "NVFP4 and NVFP4 Four-over-Six AIME2025 controls used unmatched runtime/topology. Legacy-kernel results and unavailable matched AA-LCR, TauBench2, and TerminalBench results are excluded."
+  },
+  "payload": {
+    "formula_bytes": "resident_tokens * 36 * 8 * 128 * 2 * effective_kv_bits / 8",
+    "figure_resident_tokens": 32768,
+    "includes": "NVFP4 block scales",
+    "excludes": [
+      "allocator padding",
+      "cache-page rounding",
+      "tensor-scale metadata",
+      "weights",
+      "activations",
+      "runtime workspaces"
+    ],
+    "scope": "Calculated KV payload; not total GPU memory, throughput, or concurrency."
+  },
+  "benchmarks": {
+    "AIME2025": {
+      "task": "AIME_2025_aa_v2",
+      "max_model_len": 40960,
+      "max_new_tokens": 32768,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "repeats": 64,
+      "exact_denominator": 1920,
+      "reasoning_parser": null
+    },
+    "AIME2026": {
+      "task": "ns_aime2026",
+      "max_model_len": 40960,
+      "max_new_tokens": 32768,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "repeats": 64,
+      "exact_denominator": 1920,
+      "reasoning_parser": null
+    },
+    "GPQA": {
+      "task": "gpqa_diamond_aa_v3",
+      "max_model_len": 40960,
+      "max_new_tokens": 32768,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "repeats": 64,
+      "exact_denominator": 12672,
+      "reasoning_parser": null
+    },
+    "LiveCodeBench": {
+      "task": "ns_livecodebench",
+      "max_model_len": 40960,
+      "max_new_tokens": 32768,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "repeats": 8,
+      "exact_denominator": 3632,
+      "reasoning_parser": null,
+      "dataset": "test-v6-2408-2505"
+    },
+    "IFBench": {
+      "task": "ns_ifbench",
+      "max_model_len": 262144,
+      "max_new_tokens": 131072,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "repeats": 5,
+      "exact_denominator": 1500,
+      "reasoning_parser": "qwen3",
+      "tool_call_parser": "qwen3_coder",
+      "canonical_metric": "pass@1[avg-of-5].prompt_loose_accuracy",
+      "stderr_method": "sample standard error reconstructed from the five cumulative prompt-loose repeat aggregates",
+      "yarn_factor": 8
+    },
+    "SciCode": {
+      "task": "ns_scicode",
+      "max_model_len": 262144,
+      "max_new_tokens": 131072,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "repeats": 8,
+      "exact_denominator": 2704,
+      "reasoning_parser": "qwen3",
+      "tool_call_parser": "qwen3_coder",
+      "yarn_factor": 8,
+      "canonical_metric": "pass@1[avg-of-8].subtask_accuracy"
+    },
+    "RULER-128K": {
+      "task": "ruler-128k-chat",
+      "max_model_len": 131072,
+      "max_new_tokens": 2048,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "exact_denominator": 6500,
+      "reasoning_parser": null,
+      "sequence_tokens": 128000,
+      "subtasks": 13,
+      "samples_per_subtask": 500
+    }
+  },
+  "availability": "Development runtime and study checkpoints are not distributed with the blog. The pinned merged starter example uses a different candidate menu and search dataset. Local BF16 results have not been independently reproduced under the same evaluation contract."
+}

@@ -142,7 +142,7 @@ quantization and weight & activation quantization). ``effective_bits`` constrain
 You may specify a ``effective_bits`` constraint such as 4.8 for mixed precision quantization using  :attr:`NVFP4_DEFAULT_CFG` & :attr:`FP8_DEFAULT_CFG`.
 ``AutoQuantize`` will automatically quantize highly sensitive layers in :attr:`FP8_DEFAULT_CFG` while keeping less sensitive layers in :attr:`NVFP4_DEFAULT_CFG`
 (and even skip quantization for any extremely sensitive layers) so that
-the the final mixed precision quantized model has an effective quantized bits of 4.8.
+the final mixed precision quantized model has an effective quantized bits of 4.8.
 This model would give a better accuracy than the model quantized with vanilla :attr:`NVFP4_DEFAULT_CFG` since
 the more aggressive :attr:`NVFP4_DEFAULT_CFG` quantization was not applied for the highly sensitive layers.
 
@@ -393,6 +393,15 @@ Here is an example of creating custom calibration mode:
         @property
         def convert(self) -> ConvertEntrypoint:
         ...
+
+        # whether it calibrates correctly when every rank calibrates on its own data
+        _distributed_calibration = False
+
+A custom calibration mode declares ``_distributed_calibration`` on its descriptor: ``True`` if the
+algorithm calibrates correctly when every rank of a distributed model calibrates on its own data,
+for example by syncing what it gathers across the ranks, and ``False`` if it keeps statistics on
+each rank. A mode that declares neither is refused on a model whose recorded distribution plan
+spans several ranks.
 
 
 You can specify ``custom_calib`` as ``algorithm`` in ``quant_cfg`` to use it. Here is an example of using a custom calibrator to quantize your model:

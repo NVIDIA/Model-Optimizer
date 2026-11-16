@@ -24,7 +24,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="mixtral",
-        min_transformers_version="4.57",
+        min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
             block_names=("MixtralSparseMoeBlock",),

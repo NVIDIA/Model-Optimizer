@@ -22,3 +22,4 @@ from .quant_module import QuantInputBase, QuantModuleRegistry
 QuantModuleRegistry.register({nn.BatchNorm1d: "nn.BatchNorm1d"})(QuantInputBase)
 QuantModuleRegistry.register({nn.BatchNorm2d: "nn.BatchNorm2d"})(QuantInputBase)
 QuantModuleRegistry.register({nn.BatchNorm3d: "nn.BatchNorm3d"})(QuantInputBase)
+QuantModuleRegistry.register({nn.SyncBatchNorm: "nn.SyncBatchNorm"})(QuantInputBase)

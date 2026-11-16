@@ -1,0 +1,12 @@
+# Keeps the SHA-pinned GitHub Actions in .github/ up to date.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]

@@ -26,9 +26,18 @@ import torch.nn as nn
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.config import MaxCalibConfig, QuantizerAttributeConfig
-from modelopt.torch.quantization.model_calib import max_calibrate
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+from modelopt.torch.quantization.config import (
+    MaxCalibConfig,
+    QuantizeConfig,
+    QuantizerAttributeConfig,
+)
+from modelopt.torch.quantization.conversion import update_quantize_metadata
+from modelopt.torch.quantization.model_calib import _sync_fused_projection_amax, max_calibrate
+from modelopt.torch.quantization.nn import (
+    NVFP4StaticQuantizer,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.utils import (
     SHARED_PATTERNS,
     SharedWeightGlobalAmaxState,
@@ -507,3 +516,168 @@ class TestMaxCalibrateEndToEnd:
             MaxCalibConfig(shared_states={"weight_global_amax": {"pattern": [r".*"]}})
         with pytest.raises(ValueError, match="invalid regex"):
             MaxCalibConfig(shared_states={"weight_global_amax": {"patterns": ["("]}})
+
+
+# Down-projections deployment fuses into one GEMM: Megatron-Core MLA's, DeepSeek-V4's, and HF MLA's.
+_MLA_DOWN_PROJECTIONS = (
+    ("linear_q_down_proj", "linear_kv_down_proj"),
+    ("linear_q_down_proj", "linear_kv_proj"),
+    ("q_a_proj", "kv_a_proj_with_mqa"),
+)
+
+
+class _DummyMLA(nn.Module):
+    """An MLA's q_down / kv_down projections."""
+
+    def __init__(self, names=_MLA_DOWN_PROJECTIONS[0]) -> None:
+        super().__init__()
+        self.q_name, self.kv_name = names
+        self.add_module(self.q_name, nn.Linear(32, 32, bias=False))
+        self.add_module(self.kv_name, nn.Linear(32, 32, bias=False))
+        with torch.no_grad():
+            self.kv_down.weight.mul_(4)  # give the two weights different ranges
+
+    @property
+    def q_down(self):
+        return getattr(self, self.q_name)
+
+    @property
+    def kv_down(self):
+        return getattr(self, self.kv_name)
+
+    def forward(self, x):
+        return self.q_down(x) + self.kv_down(2 * x)  # and different input ranges
+
+
+_PER_TENSOR_INT8 = {"num_bits": 8, "axis": None}
+_STATIC_NVFP4 = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: NVFP4_BLOCK, "type": "static", "scale_bits": (4, 3)},
+}
+
+
+def _quantize_mla(weight_cfg, algorithm, input_cfg=None, names=_MLA_DOWN_PROJECTIONS[0]):
+    quant_cfg = [
+        {"enable": False, "quantizer_name": "*"},
+        {"cfg": weight_cfg, "quantizer_name": "*weight_quantizer"},
+    ]
+    if input_cfg is not None:
+        quant_cfg.append({"cfg": input_cfg, "quantizer_name": "*input_quantizer"})
+    mla = _DummyMLA(names)
+    mtq.quantize(
+        mla, {"quant_cfg": quant_cfg, "algorithm": algorithm}, lambda m: m(torch.randn(4, 32))
+    )
+    return mla
+
+
+@pytest.mark.parametrize("names", _MLA_DOWN_PROJECTIONS[:2])
+@pytest.mark.parametrize("algorithm", ["max", {"method": "mse"}])
+def test_mla_down_projections_share_per_tensor_ranges(algorithm, names):
+    """The MSE weight search refines each range on its own, so the pair is shared again after it."""
+    mla = _quantize_mla(_PER_TENSOR_INT8, algorithm, input_cfg=_PER_TENSOR_INT8, names=names)
+    q_down, kv_down = mla.q_down, mla.kv_down
+
+    assert torch.equal(q_down.input_quantizer.amax, kv_down.input_quantizer.amax)
+    assert torch.equal(q_down.weight_quantizer.amax, kv_down.weight_quantizer.amax)
+    assert kv_down.weight_quantizer.amax > q_down.weight.abs().max()
+
+
+@pytest.mark.parametrize("algorithm", ["max", {"method": "mse"}])
+def test_hf_mla_down_projections_keep_own_per_tensor_ranges(algorithm):
+    """Outside Megatron-Core, the HF export gives the fused pair one range instead."""
+    mla = _quantize_mla(
+        _PER_TENSOR_INT8, algorithm, input_cfg=_PER_TENSOR_INT8, names=_MLA_DOWN_PROJECTIONS[2]
+    )
+    q_down, kv_down = mla.q_down, mla.kv_down
+
+    assert kv_down.input_quantizer.amax > q_down.input_quantizer.amax
+    assert kv_down.weight_quantizer.amax > q_down.weight_quantizer.amax
+
+
+def test_hf_gates_keep_own_static_nvfp4_global_ranges():
+    """Outside Megatron-Core, KDA-style gates next to q/k/v keep their own global ranges."""
+    attn = _DummyAttention()
+    for name in ("g_proj", "f_a_proj", "b_proj"):
+        attn.add_module(name, nn.Linear(32, 32, bias=False))
+    with torch.no_grad():
+        attn.g_proj.weight.mul_(8)
+    quant_cfg = [
+        {"enable": False, "quantizer_name": "*"},
+        {"cfg": _STATIC_NVFP4, "quantizer_name": "*weight_quantizer"},
+    ]
+    mtq.quantize(attn, {"quant_cfg": quant_cfg, "algorithm": "max"}, None)
+
+    q_global = attn.q_proj.weight_quantizer.global_amax
+    assert torch.equal(q_global, attn.v_proj.weight_quantizer.global_amax)
+    assert attn.g_proj.weight_quantizer.global_amax > q_global
+
+
+def test_mla_down_projections_share_the_fp8_stage_of_sequential_weight_quantizers():
+    mla = _DummyMLA()
+    mtq.replace_quant_module(mla)
+    first_stages = []
+    for scale, proj in enumerate((mla.linear_q_down_proj, mla.linear_kv_down_proj), start=1):
+        proj.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+        proj.weight_quantizer[0].amax = torch.full((32, 1), float(scale))
+        proj.weight_quantizer[1].amax = torch.tensor(float(scale))
+        proj.input_quantizer.amax = torch.tensor(float(scale))
+        first_stages.append(proj.weight_quantizer[0].amax.clone())
+    mla.linear_kv_down_proj.input_quantizer.disable()
+
+    _sync_fused_projection_amax(mla)
+
+    q_down, kv_down = mla.linear_q_down_proj, mla.linear_kv_down_proj
+    assert q_down.weight_quantizer[1].amax == kv_down.weight_quantizer[1].amax == 2.0
+    for proj, first_stage in zip((q_down, kv_down), first_stages):
+        assert torch.equal(proj.weight_quantizer[0].amax, first_stage)  # per-channel: left alone
+    assert q_down.input_quantizer.amax == 1.0  # the other side is not quantized
+
+
+@pytest.mark.parametrize("names", _MLA_DOWN_PROJECTIONS)
+def test_mla_down_projections_of_older_checkpoints_restore_ungrouped(tmp_path, names):
+    """A checkpoint saved before the MLA pair was grouped keeps each member's own range."""
+    mla = _quantize_mla(_STATIC_NVFP4, "max", names=names)
+    shared = mla.q_down.weight_quantizer.global_amax.clone()
+    assert torch.equal(shared, mla.kv_down.weight_quantizer.global_amax)
+    path = tmp_path / "model.pth"
+    mto.save(mla, path)
+
+    restored = _DummyMLA(names)
+    mto.restore(restored, path)
+    _single_global_amax_state(restored)
+
+    # Older checkpoints did not record the patterns; restore must not tie the pair.
+    checkpoint = torch.load(path, weights_only=False)
+    for _, mode_state in checkpoint["modelopt_state"]["modelopt_state_dict"]:
+        mode_state["metadata"].pop("shared_quant_patterns", None)
+    torch.save(checkpoint, path)
+    restored = _DummyMLA(names)
+    mto.restore(restored, path)
+    assert not hasattr(restored, "_shared_quant_states")
+
+
+def test_custom_grouping_patterns_survive_save_and_restore(tmp_path):
+    """Restore groups as calibration did, even where the metadata is written with a default config."""
+    q_and_k = r"(?:(.*)\.)?(?:q_proj|k_proj)"
+    cfg = {
+        "quant_cfg": [
+            {"enable": False, "quantizer_name": "*"},
+            {"cfg": _STATIC_NVFP4, "quantizer_name": "*weight_quantizer"},
+        ],
+        "algorithm": {
+            "method": "max",
+            "shared_states": {"weight_global_amax": {"patterns": [q_and_k]}},
+        },
+    }
+    attn = _DummyAttention()
+    mtq.quantize(attn, cfg, lambda m: m(torch.randn(2, 32)))
+    assert _single_global_amax_state(attn).members == (attn.q_proj, attn.k_proj)
+    metadata = {}
+    update_quantize_metadata(attn, QuantizeConfig(), metadata)  # as LoRA and AutoQuantize do
+    assert metadata["shared_quant_patterns"] == [q_and_k]
+
+    path = tmp_path / "model.pth"
+    mto.save(attn, path)
+    restored = _DummyAttention()
+    mto.restore(restored, path)
+    assert _single_global_amax_state(restored).members == (restored.q_proj, restored.k_proj)

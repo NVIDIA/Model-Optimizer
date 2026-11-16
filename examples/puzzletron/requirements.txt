@@ -1,4 +1,2 @@
 math-verify
 ray
-# Likely works for transformers v5 also, but we need to test it
-transformers<5.0

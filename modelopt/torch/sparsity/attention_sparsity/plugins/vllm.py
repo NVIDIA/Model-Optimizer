@@ -65,7 +65,11 @@ __all__ = [
 @functools.cache
 def _flash_attention_kv_cache_layout() -> str:
     """Return the installed vLLM backend's K/V packing contract."""
-    cache_shape = FlashAttentionBackend.get_kv_cache_shape(3, 16, 1, 16)
+    get_cache_shape = getattr(FlashAttentionBackend, "get_kv_cache_shape", None)
+    if get_cache_shape is None:
+        # vLLM >= 0.29 no longer exposes this helper; validate the live cache below.
+        return "packed"
+    cache_shape = get_cache_shape(3, 16, 1, 16)
     if cache_shape == (2, 3, 16, 1, 16):
         return "kv-first"
     if cache_shape == (3, 2, 16, 1, 16):
@@ -82,6 +86,10 @@ def _flash_attention_kv_cache_views(kv_cache: torch.Tensor, head_size: int):
         return kv_cache.unbind(0)
     if cache_layout == "blocks-first":
         return kv_cache.unbind(1)
+    if kv_cache.ndim != 4 or kv_cache.shape[-1] != 2 * head_size:
+        raise RuntimeError(
+            f"Unsupported packed vLLM FlashAttention KV cache shape {tuple(kv_cache.shape)}"
+        )
     return kv_cache.transpose(1, 2).split(head_size, dim=-1)
 
 
@@ -277,6 +285,32 @@ def _resolve_forward(
     )
 
 
+def _record_sparse_validation(impl, phase: str, output, max_seq_len: int) -> None:
+    """Collect serving counters only while the calibration worker validates."""
+    stats = getattr(impl, "_sparse_validation_stats", None)
+    if stats is None:
+        return
+    record = stats.setdefault(
+        phase,
+        {
+            "total": 0,
+            "skipped": 0,
+            "launches": 0,
+            "unmeasured_launches": 0,
+            "min_seq_len": max_seq_len,
+        },
+    )
+    record["launches"] += 1
+    record["min_seq_len"] = min(record["min_seq_len"], max_seq_len)
+    total = getattr(output, "_sparsity_total", None)
+    skipped = getattr(output, "_sparsity_skipped", None)
+    if total is None or skipped is None or total <= 0 or not 0 <= skipped <= total:
+        record["unmeasured_launches"] += 1
+    else:
+        record["total"] += int(total)
+        record["skipped"] += int(skipped)
+
+
 def _calibration_active(impl) -> bool:
     """Return whether skip-softmax calibration mode is enabled on an impl."""
     return bool(getattr(impl, "_calibrate", False)) and bool(
@@ -446,6 +480,9 @@ def _forward_modelopt(
     if not _should_run_modelopt_kernel(sparse_kw, quant_active):
         # Dynamic calibration can disable sparse work for a launch. Preserve the
         # backend's native dense path when no ModelOpt transform remains active.
+        _record_sparse_validation(
+            impl, "decode" if is_decode_only else "prefill", None, max_seq_len
+        )
         return dense_fallback()
     if prepare_modelopt is not None:
         prepare_modelopt()
@@ -495,6 +532,8 @@ def _forward_modelopt(
         return output
 
     # Paged mode reads K/V through the cache. The dummy shape provides the GQA ratio.
+    if getattr(impl, "_sparse_validation_stats", None) is not None:
+        sparse_kw["measure_sparsity"] = True
     k_dummy = torch.empty(0, impl.num_kv_heads, impl.head_size, device=q.device, dtype=q.dtype)
     triton_out = triton_attention(
         q,
@@ -518,6 +557,9 @@ def _forward_modelopt(
         v_qdq_amax=v_qdq_amax,
         v_cache_quantized=v_cache_quantized,
         **sparse_kw,
+    )
+    _record_sparse_validation(
+        impl, "decode" if is_decode_only else "prefill", triton_out, max_seq_len
     )
     output[:num_actual_tokens] = triton_out
     return output
@@ -714,6 +756,12 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             output_block_scale,
         )
         if resolved is None:
+            _record_sparse_validation(
+                self,
+                "decode" if getattr(attn_metadata, "max_query_len", 0) <= 1 else "prefill",
+                None,
+                getattr(attn_metadata, "max_seq_len", 0),
+            )
             return native_forward()
 
         key_cache, value_cache = _flash_attention_kv_cache_views(kv_cache, self.head_size)
@@ -836,6 +884,19 @@ def patch_flashinfer_metadata_builder() -> bool:
     return True
 
 
+def _flashinfer_kv_cache_views(kv_cache: torch.Tensor, head_size: int):
+    """Return logical [blocks, page, heads, dim] K/V views for FlashInfer."""
+    if kv_cache.ndim == 5 and kv_cache.shape[1] == 2:
+        return kv_cache[:, 0], kv_cache[:, 1]
+    if kv_cache.ndim == 4 and kv_cache.shape[-1] == 2 * head_size:
+        return kv_cache.transpose(1, 2).split(head_size, dim=-1)
+    raise ValueError(
+        "FlashInfer KV cache must have logical shape [blocks, 2, page, heads, dim] "
+        "or [blocks, heads, page, 2 * dim], "
+        f"got {tuple(kv_cache.shape)}"
+    )
+
+
 def _flashinfer_cache_write(layer, key, value, kv_cache, attn_metadata, impl) -> None:
     """Issue FlashInfer's native paged K/V cache write."""
     torch.ops._C_cache_ops.reshape_and_cache_flash(
@@ -916,18 +977,15 @@ def _flashinfer_forward(
                 "FlashInfer metadata is missing the ModelOpt calibration "
                 f"fields: {', '.join(missing)}"
             )
-        if kv_cache.ndim != 5 or kv_cache.shape[1] != 2:
-            raise ValueError(
-                "FlashInfer KV cache must have logical shape [blocks, 2, page, heads, dim]"
-            )
+        key_cache, value_cache = _flashinfer_kv_cache_views(kv_cache, impl.head_size)
         # Order matters: releases that update the KV cache inside forward must
         # write the current K/V before the calibrate kernel reads the cache.
         prepare_modelopt()
         return _forward_calibrate(
             impl,
             query=query,
-            key_cache=kv_cache[:, 0],
-            value_cache=kv_cache[:, 1],
+            key_cache=key_cache,
+            value_cache=value_cache,
             block_table=attn_metadata._modelopt_block_table,
             seq_lens=attn_metadata._modelopt_seq_lens,
             cu_seqlens_q=attn_metadata._modelopt_query_start_loc,
@@ -944,15 +1002,15 @@ def _flashinfer_forward(
         require_flashinfer_metadata=True,
     )
     if resolved is None:
+        _record_sparse_validation(
+            impl,
+            "decode" if getattr(attn_metadata, "_modelopt_max_query_len", 0) <= 1 else "prefill",
+            None,
+            getattr(attn_metadata, "_modelopt_max_seq_len", 0),
+        )
         return dense_fallback()
 
-    if kv_cache.ndim != 5 or kv_cache.shape[1] != 2:
-        raise ValueError(
-            "FlashInfer KV cache must have logical shape [blocks, 2, page, heads, dim]"
-        )
-
-    key_cache = kv_cache[:, 0]
-    value_cache = kv_cache[:, 1]
+    key_cache, value_cache = _flashinfer_kv_cache_views(kv_cache, impl.head_size)
     max_query_len = attn_metadata._modelopt_max_query_len
     is_decode_only = max_query_len <= 1
     common_kw = {

@@ -5,6 +5,7 @@
 | From JSONL files | Tokenize local JSONL files | \[[Link](#from-jsonl-files)\] |
 | From Hugging Face Hub | Stream or download HF datasets and tokenize | \[[Link](#from-hugging-face-hub)\] |
 | Token-budgeted data blends | Prepare weighted subsets for fast experiments | \[[Link](#prepare-token-budgeted-data-blends)\] |
+| Chat JSONL blends | Weighted chat data for assistant-only loss | \[[Link](#chat-jsonl-blends-for-assistant-only-loss)\] |
 | `reasoning_content` for Post-Training v3 | Control how chain-of-thought traces are handled | \[[Link](#reasoning_content-for-post-training-v3-datasets)\] |
 | Nemotron Pre/Post-Training Datasets | Ready-to-run commands for all Nemotron datasets | \[[Link](#ready-to-run-tokenization-commands)\] |
 
@@ -171,6 +172,72 @@ python -m modelopt.torch.utils.plugins.prepare_megatron_data_blend --config blen
 The output contains tokenized Megatron `.bin`/`.idx` files, `data_blend.txt` with the weighted paths for training,
 and `config.yaml` recording how the blend was generated. The final token count can slightly exceed the target
 because the final document from each source is kept whole.
+
+### Chat JSONL blends for assistant-only loss
+
+Tokenized `.bin`/`.idx` data carries no loss mask, so `--data_paths` training computes the loss on every token.
+To compute it on assistant tokens only, set `output_format: chat_jsonl`. The same sources are then written,
+untokenized, as `train.jsonl` and `validation.jsonl` with one `{"messages": [...]}` conversation per line, for
+Megatron-Bridge's chat path (`examples/megatron_bridge/distill.py --sft --sft_hf_dataset <dir>/train.jsonl
+--sft_hf_validation <dir>/validation.jsonl --sft_loss_mode assistant`), which applies the model's chat template
+when it loads the data. Run it in an environment with Megatron-Bridge, whose text-only chat filter selects the rows.
+
+```yaml
+output_dir: /path/to/chat_blend
+output_format: chat_jsonl
+target_samples: 36_800  # Total conversations; required, since the selected rows are mixed in memory.
+shuffle: false          # Optional; take the first rows of each split in order (default: buffer shuffle).
+seed: 1234              # Optional; seeds the shuffle, the cross-source mix and the validation hold-out.
+reasoning_content: native  # Optional; native (default), inline or strip.
+sources:
+  - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
+    config: Nemotron-SFT-General
+    split: train
+    content_field: text
+    weight: 20
+  - hf_dataset: nvidia/Nemotron-SFT-Math-v3
+    config: default
+    split: train
+    content_field: messages
+    weight: 17
+```
+
+Each source contributes `round(target_samples * weight / sum(weights))` conversations that contain only text
+and have an assistant turn; a source that rounds to zero is skipped. `content_field` must be `messages` or `text`:
+
+- A `text` row becomes one assistant turn, or is split into turns if it uses the `<extra_id_1>User` /
+  `<extra_id_1>Assistant` / `System` chat markers. A row with a marker for any other role (such as a SteerLM
+  label line) or with an empty turn other than `System` is dropped.
+- `messages` and a row's `tools` are prepared as in the tokenizing mode (JSON-string `tool_calls` arguments
+  become dicts), and a top-level `system` prompt is kept for Megatron-Bridge to prepend. The one difference is
+  that `reasoning_content` stays on the message by default (`native`), because the chat template is applied
+  later, at training time. Use `inline` if your model's chat template ignores `reasoning_content`, so the
+  reasoning is kept as a `<think>` block in `content` (see [below](#reasoning_content-for-post-training-v3-datasets)),
+  or `strip` to drop it.
+
+`files` may be `.jsonl` or `.jsonl.gz`; malformed records in them are skipped with a warning. The conversations are
+mixed and `min(1000, n // 20)` of them are held out for validation. A source that fails to load, has no usable
+rows, or runs out of them stops the run. Each source's selection is cached under `<output_dir>/parts`, keyed by
+the settings that choose its rows, so an interrupted run resumes and a changed configuration selects afresh.
+Nothing prunes `parts`; delete it once `train.jsonl` is written to reclaim the space.
+
+To feed `distill.py --sft_in_batch_packing`, also count tokens the way Megatron-Bridge trains them:
+
+```yaml
+tokenizer: Qwen/Qwen3.6-35B-A3B  # The student's tokenizer.
+max_length: 32768       # distill.py --seq_length; longer conversations are truncated.
+loss_mode: assistant    # Optional; as distill.py --sft_loss_mode.
+pack_max_tokens: 33280  # Optional; order each split as pairs of at most this many tokens.
+num_workers: 48         # Optional; tokenizer processes (default: all CPUs).
+```
+
+With `tokenizer` and `max_length`, a conversation with no trained token left after truncation is
+dropped, since Megatron-Bridge fails on it during training. `pack_max_tokens` pairs long
+conversations with short ones and writes each split pair by pair, so `--mbs 2` packs every pair
+into one micro-batch; a conversation that fits with no other is dropped. With `--cp_size` > 1,
+Megatron-Bridge pads each conversation to a multiple of `2 * cp_size`, so a pair can exceed the cap
+by under `2 * cp_size` tokens per conversation. Tokenizing runs on the CPU: ~0.4 s per
+conversation per process for GLM-5.3-Flash on Nemotron-Cascade-2 (4.4K tokens on average).
 
 ## `reasoning_content` for Post-Training v3 Datasets
 
@@ -389,3 +456,50 @@ reasoning_off_messages.{bin,idx}
 reasoning_on_messages.{bin,idx}
 nvidia--Nemotron-Agentic-v1_tool_calling_messages.{bin,idx}
 ```
+
+### Reproducible question-isolated chat blends
+
+Set `group_split: true` in a chat JSONL configuration to enable complete-record
+deduplication and question-isolated train/validation selection. Every source must
+specify a full `revision` commit SHA. `validation_samples` defaults to 1,000;
+`shuffle_buffer_size` defaults to 10,000 and applies to both HF splits and JSONL
+files when `shuffle: true`. This is bounded buffer shuffling, not uniform sampling
+from the entire repository. Configuration and dependency versions must remain
+fixed to reproduce the same result.
+
+This mode retains different answers/reasoning for the same input, but assigns
+whole known question groups to one split. Validation uses one record per group,
+stratified within each source by document/single-turn/multi-turn format and
+reasoning presence where available. Other versions of validation questions are
+reserved, not used for training. Without a reliable problem ID, grouping uses
+exact task inputs; translations and paraphrases can remain undetected.
+
+Optional `filter_image_references`, `filter_tool_calls` and
+`filter_invalid_reasoning` flags reject image-marked text (including HTML/code
+examples), tool interactions, and unbalanced inline `<think>` tags respectively.
+Structured media is always rejected by Bridge's text-only filter. These checks
+do not establish answer correctness or completeness of a nonempty problem.
+
+`question_sources` maps indexed Nemotron competitive-programming source names
+(`taco`, `apps`, `code_contests`, `open-r1/codeforces`) to `hf_dataset` and pinned
+`revision` values. Missing `"-"` prompts are recovered from those indexed sources;
+an unavailable or ambiguous original question fails generation rather than
+silently training the placeholder. See the Nemotron 3.5 Super VL tutorial's
+`data_blend.yaml` for the full configuration, including schema-safe JSONL file
+selection for instruction-following reasoning-on/off data.
+
+Rejected, duplicate and validation-reserved records are replenished from the
+same source. Exhaustion produces a warning and a smaller result, never automatic
+cross-source redistribution; network/authentication failures still fail the run.
+Inspect `report.json` for requested/actual source counts, shortfalls, format
+counts, dependency versions and output hashes. `manifest.jsonl` records selected
+source revisions, sampled positions, IDs, restoration keys and group membership.
+Cross-source duplicates are attributed using a stable source-configuration hash
+order, independently of YAML source order. `config.yaml` preserves the recipe.
+A completed result is reused only when its configuration, pipeline/dependency
+fingerprint and output hashes match; interrupted selection restarts from the
+same seed. The selected data is held in memory, so size `target_samples` accordingly.
+
+Grouped selection writes master records and does not support `max_length` or
+`pack_max_tokens`: sequence-length-specific filtering/packing remains a separate
+step. It does not modify training loss masks or guarantee benchmark decontamination.
