@@ -452,6 +452,26 @@ class HFDFlashModel(DFlashModel):
             self.dflash_module.compile_body()
 
         self._objective = self._build_objective(config)
+        # Here, not in DFlashModel.modify: only here is it known whether the variant
+        # pins the scheme, and a pin the loss cannot see afterwards is what made the
+        # D-PACE notice below name the wrong field for DSpark and Domino.
+        pinned = self._position_weighting
+        if pinned != self.dflash_loss_objective:
+            logger.warning(
+                "dflash_loss_objective=%r is not wired for %s: block positions are always "
+                "weighted by %r, with dflash_loss_decay_factor=%s (0 weights them all "
+                "equally).",
+                self.dflash_loss_objective,
+                type(self).__name__,
+                pinned,
+                self.dflash_loss_decay_factor,
+            )
+        elif pinned == "dpace" and self.dflash_loss_decay_factor > 0:
+            logger.warning(
+                "dflash_loss_decay_factor=%s is ignored when dflash_loss_objective='dpace'; "
+                "D-PACE derives per-position weights dynamically from draft confidence.",
+                self.dflash_loss_decay_factor,
+            )
         # Compiling fuses the TVD chunk's six vocab-wide elementwise passes.
         self._tvd_chunk_fn = (
             torch.compile(_tvd_chunk, dynamic=False, fullgraph=True)
