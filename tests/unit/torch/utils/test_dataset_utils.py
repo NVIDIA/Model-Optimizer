@@ -912,6 +912,28 @@ def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, tiny_tokeniz
     )
 
 
+@pytest.mark.filterwarnings("ignore:pack=True produced")
+def test_packed_rows_carry_labels(monkeypatch, tiny_tokenizer):
+    """Gradient-based calibration (AutoQuantize) reads labels from packed rows as from padded ones:
+    every real token, and -100 on the last row's padding."""
+    monkeypatch.setattr(dataset_utils, "get_dataset_samples", lambda *_args, **_kwargs: ["a b c"])
+
+    loader = get_dataset_dataloader(
+        dataset_name="src",
+        tokenizer=tiny_tokenizer,
+        num_samples=1,
+        max_sample_length=16,
+        pack=True,
+        include_labels=True,
+    )
+    (batch,) = loader
+
+    assert not batch["attention_mask"].all()  # the text fills part of the row
+    assert torch.equal(
+        batch["labels"], batch["input_ids"].masked_fill(batch["attention_mask"] == 0, -100)
+    )
+
+
 class TestDatasetCombosExpansion:
     """Combo names in ``--dataset`` fan out to their registered members.
 

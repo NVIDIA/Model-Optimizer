@@ -769,8 +769,8 @@ def get_dataset_dataloader(
             loader oversamples raw text 16x to ensure enough docs to fill all rows).
         max_sample_length: Maximum length of a sample (or per-row length under ``pack=True``).
         device: Target device for the returned dataloader.
-        include_labels: Whether to include labels in the dataloader (ignored when
-            ``pack=True``).
+        include_labels: Whether to include labels in the dataloader: the input ids, with -100 at
+            the padding.
         apply_chat_template: Whether to apply the chat template to the samples
             (if supported by the dataset).
         pack: If True, use global-stream document packing (Megatron-LM pretraining
@@ -874,9 +874,11 @@ def get_dataset_dataloader(
         if device:
             input_ids = input_ids.to(device)
             attention_mask = attention_mask.to(device)
-        tokenized_dataset = _CustomDataset(
-            {"input_ids": input_ids, "attention_mask": attention_mask}
-        )
+        encodings = {"input_ids": input_ids, "attention_mask": attention_mask}
+        if include_labels:
+            # As for unpacked rows below: every real token, none of the last row's padding.
+            encodings["labels"] = torch.where(attention_mask > 0.5, input_ids, -100)
+        tokenized_dataset = _CustomDataset(encodings)
         return get_dataloader_from_dataset(
             tokenized_dataset,
             batch_size=batch_size,

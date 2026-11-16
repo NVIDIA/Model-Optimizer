@@ -239,9 +239,11 @@ def test_post_quantize_decodes_through_the_processor_when_there_is_no_tokenizer(
     assert "example outputs after ptq: 7 8" in out
 
 
+@pytest.mark.parametrize("calib_pack", [False, True])
 def test_make_calib_dataloader_takes_a_model_types_own_calibration_data(
-    hf_ptq, monkeypatch: pytest.MonkeyPatch
+    hf_ptq, monkeypatch: pytest.MonkeyPatch, calib_pack
 ):
+    """--calib_pack, which packs text, is refused rather than ignored."""
     monkeypatch.setattr(
         whisper_calibration,
         "get_speech_dataset_dataloader",
@@ -253,17 +255,23 @@ def test_make_calib_dataloader_takes_a_model_types_own_calibration_data(
         dataset=None,
         calib_size=[8],
         batch_size=2,
+        calib_pack=calib_pack,
     )
     language_model = _Model(None)
     language_model.dtype = torch.float32
 
-    result = hf_ptq.make_calib_dataloader(
-        args,
-        language_model,
-        object.__new__(WhisperProcessor),
-        None,
-        torch.device("cpu"),
-        "whisper",
-    )
+    def build():
+        return hf_ptq.make_calib_dataloader(
+            args,
+            language_model,
+            object.__new__(WhisperProcessor),
+            None,
+            torch.device("cpu"),
+            "whisper",
+        )
 
-    assert result == ("loader", "transcript")
+    if calib_pack:
+        with pytest.raises(ValueError, match="--calib_pack"):
+            build()
+    else:
+        assert build() == ("loader", "transcript")
