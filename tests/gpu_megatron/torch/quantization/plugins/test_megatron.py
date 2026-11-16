@@ -15,6 +15,7 @@
 
 import copy
 import math
+import re
 import sys
 import types
 from contextlib import ExitStack, nullcontext
@@ -412,6 +413,12 @@ def _test_sharded_state_dict(
     for module in model_ref.modules():
         if hasattr(module, "_amax_for_smoothing"):
             delattr(module, "_amax_for_smoothing")
+
+    if not meta_device:
+        # Megatron-Bridge restores the modelopt_state into a model whose weights are not loaded yet.
+        for name, param in model_test.named_parameters():
+            if re.search(r"\.linear_\w+\.weight\d*$", name):
+                param.data.fill_(float("nan"))
 
     sharded_state_dict_test_helper(
         tmp_path,
