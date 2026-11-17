@@ -481,8 +481,8 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
 
 
 # Q8_0 keeps no scales: its pin holds while the weight is the decoding. IQ2_XS keeps its pinned
-# scales: it re-encodes the unrounded weight, so needs the importance too, and local_hessian's
-# searched choices need the source fingerprint as well.
+# scales: it re-encodes the unrounded weight, so needs the importance too, local_hessian's
+# searched choices need the source fingerprint, and imatrix's the scales its codes were searched at.
 @pytest.mark.parametrize(
     ("num_bits", "algorithm"),
     [
@@ -490,8 +490,9 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
         ("iq2_xs", {**GPTQ, "importance_weighted": True}),
         ("iq2_xxs", {**GPTQ, "importance_weighted": True}),
         ("iq2_xs", {"method": "local_hessian"}),
+        ("iq2_xs", {"method": "imatrix"}),
     ],
-    ids=["q8_0-gptq", "iq2_xs-gptq", "iq2_xxs-gptq", "iq2_xs-local_hessian"],
+    ids=["q8_0-gptq", "iq2_xs-gptq", "iq2_xxs-gptq", "iq2_xs-local_hessian", "iq2_xs-imatrix"],
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_pin_survives_save_and_restore(num_bits, algorithm, dtype):
@@ -542,10 +543,10 @@ def test_pin_is_ignored_once_the_quantizer_changes_format(restore):
     mtq.set_quantizer_by_cfg(model, _iq_config(None, "iq2_xxs")["quant_cfg"])
 
     weight = model.weight.detach()
-    expected = IQ2_XXS.dequantize(*IQ2_XXS.quantize(weight), dtype=torch.float32)
+    expected = IQ2_XXS.dequantize(*IQ2_XXS.plain_quantize(weight), dtype=torch.float32)
     torch.testing.assert_close(model(inputs), inputs @ expected.T)
     assert torch.equal(
-        IQ2_XXS.pack(model.weight, model.weight_quantizer), IQ2_XXS.quantize(weight)[0]
+        IQ2_XXS.pack(model.weight, model.weight_quantizer), IQ2_XXS.plain_quantize(weight)[0]
     )
 
 
@@ -723,6 +724,8 @@ def test_auto_quantize_scores_other_candidates_on_the_source_weights_gptq_rewrot
         # The GGML entry replaces an earlier INT4 entry for the same quantizers.
         (GPTQ, "iq2_xxs", True, True),
         ({"method": "imatrix"}, "q8_0", False, False),  # imatrix leaves Q8_0 to plain PTQ
+        # imatrix keeps the scales its codes were searched at, which the decoding must not use.
+        ({"method": "imatrix"}, "iq2_xxs", True, False),
     ],
 )
 def test_auto_quantize_selects_the_codes_calibration_chose(
@@ -750,6 +753,9 @@ def test_auto_quantize_selects_the_codes_calibration_chose(
         )
         assert torch.equal(first.weight, decoded)
         assert not torch.equal(payload, ggml_format.quantize(source[0].weight.detach())[0])
+        # The returned model runs, and exports, the codes the search scored.
+        assert torch.equal(first.weight_quantizer(first.weight), decoded)
+        assert torch.equal(ggml_format.pack(first.weight, first.weight_quantizer), payload)
     else:
         assert payload is None
         assert torch.equal(first.weight, source[0].weight)

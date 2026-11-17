@@ -145,10 +145,18 @@ below, tell the user and offer to address it before pushing; do not push as-is.
 - Before opening or marking a PR ready for review, read the
   [submitting your code](CONTRIBUTING.md#submitting-your-code) guidance.
 - Read `.github/PULL_REQUEST_TEMPLATE.md` and satisfy the checklist.
-- **PR description:** fill the template sections — what changed and why, a usage
-  snippet if it adds an API or flag, and what you actually ran under Testing.
-  Root cause, benchmark numbers, and design rationale belong here. Don't restate
-  the diff file by file.
+- **PR description: problem first, and short.** Open with the problem the PR
+  solves — what is broken, missing, or slow, and for whom — so reviewers see why
+  it is needed before reading the diff; then say in a sentence or two how the
+  change fixes it. Fill the other template sections: a usage snippet if it adds
+  an API or flag, and what you actually ran under Testing. Root cause, benchmark
+  numbers, and design rationale belong here only as far as they support the why,
+  a few lines each. Don't restate the diff file by file.
+- **List the modules touched and why each is needed.** When the PR changes more
+  than one module, fill the template's `### Modules touched` section: one line
+  per module saying why the fix cannot be made without changing it. Otherwise
+  delete the section. Tests and docs that only follow the change don't count. A
+  module you cannot justify this way belongs in a separate PR.
 - **Only changelog-worthy changes get a `CHANGELOG.rst` entry:** new features,
   backward breaking changes, deprecations, and fixes for critical or known bugs
   from a previous release. Skip bugs introduced and fixed within the same
