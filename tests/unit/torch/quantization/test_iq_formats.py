@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Behaviour every GGML IQ format shares, exercised identically for each of them.
+"""Shared IQ1/IQ2 catalog contracts, exercised identically for each of them.
 
 The formats differ only in codebook size, payload layout and bits per weight. Anything that
 should hold for one should hold for all, so the contract lives here once and is parametrized
@@ -49,7 +49,7 @@ FORMATS = {
 NAMES = sorted(FORMATS)
 # The formats backend dispatch can reach. A codec can land before it is registered, so the
 # tests that go through TensorQuantizer iterate these rather than every codec above.
-DISPATCHED = sorted(IQ_FORMAT_REGISTRY)
+DISPATCHED = sorted(set(IQ_FORMAT_REGISTRY) & FORMATS.keys())
 # IQ1 grids are ternary; IQ2 grids hold the magnitudes 8, 25 and 43.
 TERNARY = {"iq1_s", "iq1_m"}
 # Weights sharing one sub-block scale: the formats with an extra 0.19-0.25 bits per weight spend
@@ -324,6 +324,7 @@ def test_int8_view_matches_llama_cpp_on_captured_blocks(name):
 
 def test_every_format_has_conformance_vectors():
     """A new format must arrive with blocks captured from a real llama.cpp checkpoint."""
+    assert sorted(IQ_FORMAT_REGISTRY) == NAMES
     assert sorted(formats()) == NAMES
 
 
@@ -342,9 +343,9 @@ def test_error_decreases_with_bit_width():
     assert errors == sorted(errors, reverse=True), dict(zip(ordered, errors))
 
 
-def test_every_registered_format_is_covered():
+def test_every_registered_weighted_catalog_is_covered():
     """A format registered for dispatch must also be listed here, or it escapes this contract."""
-    assert set(IQ_FORMAT_REGISTRY) <= set(FORMATS)
+    assert {name for name, fmt in IQ_FORMAT_REGISTRY.items() if fmt.weighted} <= set(FORMATS)
 
 
 # Formats whose encoder takes a per-input-column importance, read from the registry so a format
