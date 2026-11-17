@@ -35,12 +35,14 @@ def search_choices(
     importance: torch.Tensor | None = None,
     block_chunk_size: int | None = None,
     decode_chunk_size: int | None = None,
+    scales: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Each group's choice minimizing the layer-output error ``dw H dw^T``, ``[*rows, blocks, groups]``.
 
     ``hessian`` holds one ``[256, 256]`` Hessian per block of columns, ``[in_features // 256, 256,
     256]``; the result is the ``choices`` the format's ``quantize`` takes. Every choice is encoded
-    for every group, its codebook entries searched as the encoder does (weighted by ``importance``).
+    for every group, its codebook entries searched as the encoder does (weighted by ``importance``),
+    at each block's FP16 super-block scale in ``scales`` or, when ``None``, the predicted one.
     In each block, each group first takes the choice with the least error under its own diagonal
     block of the Hessian; groups are then revisited in turn, each taking the choice that most lowers
     the block's error with the others held, an update that needs each block's Hessian symmetric.
@@ -52,6 +54,7 @@ def search_choices(
     chunk_args = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
     decode_args = {} if decode_chunk_size is None else {"block_chunk_size": decode_chunk_size}
     step = _rows_per_chunk(ggml_format)
+    block_scales = None if scales is None else scales.reshape(rows.shape[0], blocks)
     picks = torch.empty((rows.shape[0], blocks, groups), dtype=torch.int64, device=weight.device)
     for block in range(blocks):
         columns = slice(block * GGML_BLOCK_SIZE, (block + 1) * GGML_BLOCK_SIZE)
@@ -62,6 +65,7 @@ def search_choices(
                 rows[start : start + step, columns],
                 hessian[block],
                 block_importance,
+                None if block_scales is None else block_scales[start : start + step, block],
                 chunk_args,
                 decode_args,
             )
@@ -84,13 +88,13 @@ def search_scratch(ggml_format: GGMLFormat, rows: int) -> int:
     return candidates + chunk * 8 * GGML_BLOCK_SIZE
 
 
-def _search_block(ggml_format, block, hessian, importance, chunk_args, decode_args):
+def _search_block(ggml_format, block, hessian, importance, scales, chunk_args, decode_args):
     """:func:`search_choices` on one block of columns, ``[rows, 256]``: picks ``[rows, groups]``."""
     rows, groups = block.shape[0], ggml_format.choice_groups
     group_size = GGML_BLOCK_SIZE // groups
     reference = block.float()
     packed, _ = ggml_format.quantize(
-        block.contiguous(), importance=importance, every_choice=True, **chunk_args
+        block.contiguous(), importance=importance, every_choice=True, scales=scales, **chunk_args
     )
     errors = ggml_format.dequantize(
         packed.reshape(-1, 1, ggml_format.block_bytes),
