@@ -19,7 +19,6 @@ import logging
 import random
 
 import numpy as np
-
 import torch
 
 from modelopt.torch.quantization.repair import IQRepairPolicy
@@ -40,6 +39,8 @@ class _BypassRunner:
         self.fields = {}
         self.modules = {u.name: student.get_submodule(u.student_path) for u in units}
         self.consumed_batches = 0
+        self.consumed_hashes = []
+        self.checkpoint = None
 
     def _iterator(self, loader):
         iterator, error = None, None
@@ -97,11 +98,19 @@ class _BypassRunner:
                         "Dataloader batches must exactly fill each data lane's global-batch share"
                     )
                 window.append(batch)
+                if self.checkpoint is not None:
+                    from ._bypass_checkpoint import _batch_hash
+
+                    self.consumed_hashes.append(_batch_hash(batch))
                 self.consumed_batches += 1
         except StopIteration:
             error = "Bypass data exhausted; provide unique samples for every update"
         except (ValueError, TypeError, KeyError) as exc:
             error = str(exc)
+        except Exception as exc:
+            if self.runtime is None:
+                raise
+            error = f"{type(exc).__name__}: {exc}"
         if self.runtime is not None:
             self.runtime.synchronize_error(error)
             counts = self.runtime.gather_values(
@@ -117,6 +126,79 @@ class _BypassRunner:
         elif error:
             raise ValueError(error)
         return window
+
+    def _checkpoint_fields(self):
+        fields = {}
+        for policy in self.policies.values():
+            for _, state, _, _ in policy.adapters:
+                for name, value in state.values().items():
+                    if name in fields:
+                        raise ValueError("Bypass checkpoint native field ownership overlaps")
+                    fields[name] = value
+        return fields
+
+    def _save_checkpoint(self, dataloader, step, priming_batch, devices):
+        assert self.checkpoint is not None
+        from collections.abc import Sequence
+
+        from torch.utils._pytree import tree_map
+
+        from ._bypass_checkpoint import _batch_hash, _rng_state
+
+        priming_devices = []
+
+        def pack(value):
+            if isinstance(value, torch.Tensor):
+                priming_devices.append(str(value.device))
+                return value.detach().cpu()
+            return value
+
+        position = {
+            "consumed_batches": self.consumed_batches,
+            "prefix_hashes": self.consumed_hashes,
+            "priming_batch": tree_map(pack, priming_batch),
+            "priming_devices": priming_devices,
+        }
+        if isinstance(dataloader, Sequence):
+            position["next_batch_hash"] = (
+                _batch_hash(dataloader[self.consumed_batches])
+                if self.consumed_batches < len(dataloader)
+                else None
+            )
+        if callable(getattr(dataloader, "state_dict", None)):
+            position["loader_state"] = dataloader.state_dict()
+        self.checkpoint.save(
+            step,
+            fields=self._checkpoint_fields(),
+            optimizers=self.optimizers,
+            runtime=self.runtime,
+            data_position=position,
+            rng_state=_rng_state(devices),
+        )
+
+    def _restore_cursor(self, dataloader, state):
+        assert self.checkpoint is not None
+        from ._bypass_checkpoint import _batch_hash
+
+        position = state["data_position"]
+
+        def restore():
+            if "loader_state" in position:
+                dataloader.load_state_dict(position["loader_state"])
+                batches = iter(dataloader)
+            else:
+                hashes = position["prefix_hashes"]
+                if len(hashes) != position["consumed_batches"]:
+                    raise ValueError("Bypass consumed-data cursor is incomplete")
+                batches = iter(dataloader)
+                for expected in hashes:
+                    if _batch_hash(next(batches)) != expected:
+                        raise ValueError("Bypass consumed sample order or content changed")
+            self.consumed_batches = position["consumed_batches"]
+            self.consumed_hashes = list(position["prefix_hashes"])
+            return batches
+
+        return self.checkpoint.restore_data_cursor(restore)
 
     def _measure(self, batches, training):
         statistics = {}
@@ -210,8 +292,33 @@ class _BypassRunner:
             np.random.set_state(numpy_state)
 
     def _run(self, train_dataloader, validation_dataloader, devices):
-        batches = self._iterator(train_dataloader)
-        first = self._window(batches)
+        saved, start = None, 0
+        if self.config.checkpoint_dir is not None or self.config.resume_from is not None:
+            from ._bypass_checkpoint import BypassCheckpoint
+
+            self.checkpoint = BypassCheckpoint(
+                self.student, self.teacher, self.config, self.runtime, dataloader=train_dataloader
+            )
+            if self.config.resume_from is not None:
+                start, saved = self.checkpoint.load(self.config.resume_from)
+        if saved is None:
+            batches = self._iterator(train_dataloader)
+            first = self._window(batches)
+        else:
+            from torch.utils._pytree import tree_map
+
+            priming_devices = iter(saved["data_position"]["priming_devices"])
+            first = [
+                tree_map(
+                    lambda value: (
+                        value.to(next(priming_devices))
+                        if isinstance(value, torch.Tensor)
+                        else value
+                    ),
+                    saved["data_position"]["priming_batch"],
+                )
+            ]
+            self.adapter.validate_batch(first[0], self.config)
         modes = {
             module: module.training
             for root in (self.student, self.teacher)
@@ -235,12 +342,26 @@ class _BypassRunner:
                 )
                 self.fields[unit.name] = fields
                 self.optimizers[unit.name] = Lion(fields, lr=self.config.max_lr)
-            for step in range(1, self.config.num_steps + 1):
+            if saved is not None:
+                from ._bypass_checkpoint import _restore_rng_state
+
+                assert self.checkpoint is not None
+                batches = self._restore_cursor(train_dataloader, saved)
+                self.checkpoint.restore_training_state(
+                    saved, self._checkpoint_fields(), self.optimizers
+                )
+                _restore_rng_state(saved["rng_state"])
+                first.clear()
+            for step in range(start + 1, self.config.num_steps + 1):
                 window = first if step == 1 else self._window(batches)
                 for optimizer in self.optimizers.values():
                     optimizer.zero_grad(set_to_none=True)
                 with torch.profiler.record_function("modelopt.bypass.update"):
                     self._update(self._measure(window, training=True), step)
+                if self.config.checkpoint_dir is not None and (
+                    step % self.config.checkpoint_interval == 0 or step == self.config.num_steps
+                ):
+                    self._save_checkpoint(train_dataloader, step, window[0], devices)
                 window.clear()
             if validation_dataloader is not None:
                 statistics = self._measure(validation_dataloader, training=False)

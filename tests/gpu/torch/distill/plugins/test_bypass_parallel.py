@@ -32,23 +32,6 @@ from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
-@pytest.fixture
-def bypass_cpu_workers(_dist_pools):
-    from _test_utils.torch.distributed.utils import (
-        DistributedWorkerPool,
-        default_worker_teardown,
-        get_live_pool,
-    )
-
-    return get_live_pool(
-        _dist_pools,
-        ("bypass_cpu", 2),
-        lambda: DistributedWorkerPool(
-            world_size=2, backend="gloo", teardown_fn=default_worker_teardown
-        ),
-    )
-
-
 def _unique_batch_worker(rank, size, axis, unequal):
     from torch.distributed.device_mesh import init_device_mesh
 
@@ -141,6 +124,79 @@ def _unique_batch_worker(rank, size, axis, unequal):
 @pytest.mark.parametrize(("axis", "unequal"), [("dp", False), ("cp", False), ("dp", True)])
 def test_distributed_bypass_matches_unique_batch(bypass_cpu_workers, axis, unequal):
     bypass_cpu_workers.run(_unique_batch_worker, axis, unequal)
+
+
+def _validation_refusal_worker(rank, size, problem):
+    from _test_utils.torch.distributed.utils import bounded_collectives
+    from torch.distributed.device_mesh import init_device_mesh
+
+    group = dist.new_group(timeout=timedelta(seconds=10))
+
+    class CollectiveTeacher(torch.nn.Sequential):
+        def forward(self, inputs):
+            inputs = inputs.clone()
+            dist.all_reduce(inputs, group=group)
+            return super().forward(inputs / size)
+
+    torch.manual_seed(97)
+    teacher = CollectiveTeacher(OrderedDict([("mlp", torch.nn.Linear(256, 256, bias=False))]))
+    batch = torch.randn(2, 4, 256)
+    student = mtq.quantize(
+        torch.nn.Sequential(OrderedDict([("mlp", copy.deepcopy(teacher.mlp))])),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda model: model(batch),
+    )
+    before = copy.deepcopy(student.state_dict())
+    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("cp",))
+
+    class Validation:
+        def __iter__(self):
+            if problem == "iterator" and rank == 1:
+                raise OSError("validation iterator failure")
+            return self.read()
+
+        def read(self):
+            yield batch[:1] if problem == "microbatches" and rank == 1 else batch
+            if problem == "advance" and rank == 1:
+                raise OSError("validation reader failure")
+            if problem != "length" or rank == 0:
+                yield batch
+
+    validation = None if problem == "presence" and rank == 1 else Validation()
+    try:
+        with bounded_collectives(seconds=10), pytest.raises(ValueError):
+            mtd.bypass(
+                student,
+                teacher,
+                [batch],
+                {"num_steps": 1, "global_batch_size": 2, "sequence_length": 4},
+                validation_dataloader=validation,
+                device_mesh=mesh,
+            )
+        assert all(torch.equal(value, before[name]) for name, value in student.state_dict().items())
+        assert not any("_local_repair_state" in name for name in student.state_dict())
+    finally:
+        dist.destroy_process_group(group)
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("problem", ["presence", "iterator", "length", "advance", "microbatches"])
+def test_distributed_bypass_refuses_unequal_validation(bypass_cpu_workers, problem):
+    timeout = bypass_cpu_workers.job_timeout
+    try:
+        bypass_cpu_workers.job_timeout = 60
+        bypass_cpu_workers.run(_validation_refusal_worker, problem)
+    finally:
+        bypass_cpu_workers.job_timeout = timeout
 
 
 @pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
@@ -294,25 +350,6 @@ def test_native_mesh_adoption_preserves_forward_and_hooks(tmp_path):
         )
     finally:
         dist.destroy_process_group()
-
-
-@pytest.fixture
-def native_workers(_dist_pools):
-    if torch.cuda.device_count() < 4:
-        pytest.skip("Native overlapping TP/FSDP/EP projection checks require four GPUs")
-    from _test_utils.torch.distributed.utils import (
-        DistributedWorkerPool,
-        default_worker_teardown,
-        get_live_pool,
-    )
-
-    return get_live_pool(
-        _dist_pools,
-        4,
-        lambda: DistributedWorkerPool(
-            world_size=4, backend="nccl", teardown_fn=default_worker_teardown
-        ),
-    )
 
 
 def _native_projection_worker(rank, size, frozen_format, layout=None):
