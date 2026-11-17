@@ -30,28 +30,23 @@ from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
 
 trainable_params = _load_example_module("trainable_params.py", "megatron_bridge")
 configure_trainable_parameters = trainable_params.configure_trainable_parameters
-initialize_student_weights = trainable_params.initialize_student_weights
 
 
-@pytest.mark.parametrize("qdq_student_weight", [False, True])
+@pytest.mark.parametrize("output_qdq_weight", [False, True])
 @pytest.mark.parametrize("recompute", [False, True])
 @pytest.mark.parametrize("restore_kind", ["state", "file"])
-def test_full_rank_training_and_restore(recompute, restore_kind, qdq_student_weight, tmp_path):
+def test_full_rank_training_and_restore(recompute, restore_kind, output_qdq_weight, tmp_path):
     """Preserve selective updates and Adam restoration with frozen embeddings."""
     torch.manual_seed(42)
     model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16), nn.Linear(16, 16))
     inputs = torch.arange(8)
     mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(inputs))
-    baseline = model(inputs).detach()
+    if output_qdq_weight:
+        mtq.initialize_qdq_weights(model)
     frozen = {n: p.detach().clone() for n, p in model.named_parameters() if n != "1.weight"}
     configure_trainable_parameters(model, ["1.weight"])
     # Reapplying setup must not nest wrappers or alter quantizer state.
     configure_trainable_parameters(model, ["1.weight"])
-    ptq_source = tmp_path / "ptq_source"
-    ptq_source.mkdir()
-    torch.save({"step": torch.tensor(0)}, ptq_source / "train_state.pt")
-    initialize_student_weights(model, qdq_student_weight, tmp_path / "fresh", ptq_source)
-    torch.testing.assert_close(model(inputs), baseline, rtol=0, atol=0)
     initial_weight = model[1].weight.detach().clone()
     optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=0.1)
     activation = model[0](inputs)
@@ -85,19 +80,6 @@ def test_full_rank_training_and_restore(recompute, restore_kind, qdq_student_wei
     assert restored[1].weight.grad.count_nonzero() > 0
     restored.zero_grad(set_to_none=True)
     configure_trainable_parameters(restored, ["1.weight"])
-    resume_dir = tmp_path / "resume"
-    resume_dir.mkdir()
-    (resume_dir / "latest_checkpointed_iteration.txt").write_text("1")
-    before_resume = restored[1].weight.detach().clone()
-    initialize_student_weights(restored, True, resume_dir)
-    torch.testing.assert_close(restored[1].weight, before_resume, rtol=0, atol=0)
-    source = tmp_path / "source" / "iter_0000001"
-    source.mkdir(parents=True)
-    if restore_kind == "state":
-        torch.save({"step": torch.tensor(1)}, source / "train_state.pt")
-    with pytest.raises(ValueError, match="trained student checkpoint"):
-        initialize_student_weights(restored, True, tmp_path / "fresh_output", source)
-    torch.testing.assert_close(restored[1].weight, before_resume, rtol=0, atol=0)
     restored_optimizer = torch.optim.Adam([restored[1].weight], lr=0.1)
     restored_optimizer.load_state_dict(copy.deepcopy(optimizer.state_dict()))
     for candidate, opt in [(model, optimizer), (restored, restored_optimizer)]:

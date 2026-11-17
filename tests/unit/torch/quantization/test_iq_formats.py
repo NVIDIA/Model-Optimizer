@@ -216,6 +216,12 @@ def test_saturates_finite_values_above_the_float32_range(name):
     packed, _ = quantize(weight)
     assert torch.equal(packed, quantize(saturated)[0])
     assert not torch.equal(packed, quantize(zeroed)[0])
+    # Forwards and export encode at a derived, energy-matched scale, which must saturate too
+    # rather than overflow and zero the block.
+    fmt = IQ_FORMAT_REGISTRY[name]
+    packed, _ = fmt.plain_quantize(weight)
+    assert torch.equal(packed, fmt.plain_quantize(saturated)[0])
+    assert fmt.payload_scales(packed.reshape(-1, fmt.block_bytes)).item() == 65504
 
 
 @pytest.mark.parametrize("name", NAMES)

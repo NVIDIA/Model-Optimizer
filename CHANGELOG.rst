@@ -10,6 +10,8 @@ Changelog
 
 *Quantization - Algorithms*
 
+- ``max`` and ``imatrix`` calibration of ``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` now derive each block's super-block scale from the weights and match each block's output energy, in place of fixed per-format scale anchors, which lowered KL divergence in all our tests (by up to half at IQ1) and matches or beats llama.cpp's own imatrix quantizer in most of them.
+
 *Quantization - QAT / QAD*
 
 *Quantization - Export & Deployment*
@@ -99,7 +101,7 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
-- Add the opt-in ``--qdq_student_weight`` flag to the Megatron-Bridge QAD example and ``initialize_qdq_weights`` to initialize floating latent weights through their configured fake quantizers. Native resumes preserve trained weights and optimizer state.
+- Add ``--output_qdq_weight`` to Megatron-Bridge PTQ to save decoded floating-point weights with ModelOpt state for QAD; GGML IQ super-block scales remain fixed during training. Custom PTQ pipelines can call ``mtq.initialize_qdq_weights(model)``.
 - Add ``--trainable_params`` (alias ``--trainable_parameter_patterns``) to ``examples/megatron_bridge/distill.py`` to train selected student weights, including full-rank routed-expert QAD. Reuse the selection on native resume.
 - Add ``--sft_in_batch_packing``, ``--moe_aux_loss_coeff`` and ``--dsa_kernel_backend`` to ``examples/megatron_bridge/distill.py`` (``--dsa_kernel_backend`` also to ``quantize.py``): pack ``--sft_hf_dataset`` conversations per micro-batch instead of padding each to ``--seq_length``, override the MoE load-balancing loss weight (e.g. 0 for padded SFT data), and select fused DeepSeek sparse-attention kernels for long sequences.
 - Add opt-in revision-pinned chat-blend preparation with indexed programming-question recovery, complete-record deduplication, question-isolated validation, and source shortfall/provenance reports.
@@ -169,6 +171,7 @@ Changelog
 - Hugging Face fused MoE experts stored transposed, ``(num_experts, in_dim, out_dim)``, without a quantized wrapper of their own (for example Aria's) are now left unquantized with a warning. They were quantized with gate and up split along the wrong axis, so their exported weights were wrong; the Hugging Face export now refuses such a model's MoE block instead.
 - Calibrating a Megatron-Core model now gives the projections vLLM and TensorRT-LLM fuse into one GEMM one per-tensor input and weight range: MLA's and DeepSeek-V4's down-projections, and HF-named ones such as Kimi K3's MLA and KDA input projections with their gates; static NVFP4 also shares one global weight range between ``q_a_proj`` and ``kv_a_proj_with_mqa`` of Hugging Face DeepSeek-style models. Re-calibrate existing checkpoints to get the shared ranges.
 - Calibrating a Megatron-Core model with pipeline parallelism no longer hangs on, or mixes ranges across stages of, its ``TELinear`` layers (e.g. MLA down-projections, DSA indexer and latent-MoE projections). They now sync ranges over their own pipeline stage's tensor-, data- and context-parallel ranks instead of all ranks.
+- Fix ONNX INT4 RTN Q/DQ exports missing blocked quantization attributes, which prevented inference with ONNX Runtime CUDA and CPU execution providers. Re-export affected models.
 - ``export_mcore_gpt_to_hf`` and ``capture_kv_cache_export_state`` now write NVFP4 KV-cache ``k_scale`` / ``v_scale`` as amax / 448, like the HF exporter and as vLLM and TensorRT-LLM expect. They wrote amax / (6 * 448), which overflows in the attention kernels. Re-export Megatron checkpoints with an NVFP4 KV cache.
 - Loading a quantized Megatron-Core checkpoint into a model whose weights are not initialized yet, as Megatron-Bridge's ``load_megatron_model`` does, no longer fails with ``detected nan values in amax``. It failed whenever that memory held NaNs, e.g. on CPU or with pipeline parallelism.
 - Preserve accumulated histogram counts when computing an entropy calibration threshold with NumPy histograms.
@@ -213,6 +216,9 @@ Changelog
 - Fix ONNX quantization with the default ``concat_elimination`` pass crashing in calibration with ``KeyError: '<tensor>_ReduceMin'`` when a ``Concat`` input is a constant, such as the class token of a ViT.
 - Fix ONNX INT4 quantization ending the Python process when the INT4 packing extension fails to build, for example without a C++ compiler. It now falls back to the Python implementation.
 - Fix the column-major ``DequantizeLinear`` surgery leaving a negative or default ``axis`` attribute unchanged while transposing the weight it refers to, which changed the model's output. Re-run the surgery on affected models.
+- Fix BF16-to-FP8 ONNX export with ``ml_dtypes`` 0.7.0 producing NaN FP8 weights for very small convolution weights.
+- Fix AutoCast turning FP64 initializers and ``Constant`` values that exceed the FP32 range into infinities. They are now clamped to the largest FP32 value and the affected tensor is named in a warning.
+- Fix AutoCast flipping the sign of an initializer value too small for the target precision; such values now keep their sign.
 
 *Speculative Decoding*
 
