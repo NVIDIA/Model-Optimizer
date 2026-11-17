@@ -366,6 +366,8 @@ def fake_quantize_with_cache(
         and initialization_shape is not None
         and pinned_packed_weight(quantizer, format_name) is None
     ):
+        # TensorQuantizer may have padded the parameter before block reshaping.
+        initialization_shape = getattr(quantizer, "_original_shape", initialization_shape)
         pin_packed_weight(
             quantizer,
             format_name,
@@ -565,6 +567,10 @@ class GGMLFormat:
             # quant hands the weight over in 256-value rows.
             pinned_shape = (*pinned.shape[:-2], pinned.shape[-2] * self.block_size)
             if math.prod(pinned_shape) == weight.numel():
+                if hasattr(quantizer, "_padding"):
+                    packed = self._pinned_rows(quantizer, weight)
+                    if packed is not None:
+                        return packed, shape
                 source = getattr(quantizer, _source_name(self.name), None)
                 unchanged = None
                 if source is not None:
@@ -679,9 +685,17 @@ class GGMLFormat:
         # Every whole-weight comparison first: matching rows builds int64 keys several times the
         # weight's size, and only row slices need it.
         if rows.shape[0] == pinned.shape[0]:
+            padded = (
+                hasattr(quantizer, "_padding")
+                and math.prod(quantizer._original_shape) == rows.numel()
+            )
+            # Padding is recreated as zeros; only the real parameter entries must match.
+            compare = quantizer._reset_to_original_shape if padded else lambda x: x
             for storage_dtype in storage_dtypes:
-                if torch.equal(rows, decoding(storage_dtype)):
+                if torch.equal(compare(rows), compare(decoding(storage_dtype))):
                     return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
+            if padded:
+                return None
         for storage_dtype in storage_dtypes:
             index = _matching_rows(decoding(storage_dtype), rows)
             if index is not None:

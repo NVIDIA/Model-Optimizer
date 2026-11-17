@@ -236,17 +236,38 @@ def test_new_pin_replaces_qdq_payload(num_bits):
     torch.testing.assert_close(pinned_packed_weight(quantizer, num_bits), packed, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("preparation", ["ptq", "ptq_updated", "gptq"])
-def test_parallel_ggml_checkpoint_restore(preparation, parallel_linear, monkeypatch):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    ("preparation", "num_bits", "width"),
+    [
+        *[(preparation, "iq2_xxs", 256) for preparation in ("ptq", "ptq_updated", "gptq")],
+        *[
+            (preparation, name, width)
+            for name in FORMAT_NAMES
+            for preparation, width in (("ptq", 128), ("ptq_updated", 300))
+        ],
+    ],
+)
+def test_parallel_ggml_checkpoint_restore(
+    preparation, num_bits, width, dtype, parallel_linear, monkeypatch
+):
     torch.manual_seed(1234)
-    model = parallel_linear(256, 2, bias=False)
-    inputs = torch.randn(32, 256)
+    model = parallel_linear(width, 2, bias=False, dtype=dtype)
+    inputs = torch.randn(32, width, dtype=dtype)
+    codec = GGML_FORMAT_REGISTRY[num_bits]
+    if width % codec.block_size:
+        with pytest.raises(ValueError):
+            codec.quantize(model.weight)
     config = {
         "quant_cfg": [
             {"quantizer_name": "*", "enable": False},
             {
                 "quantizer_name": "*weight_quantizer",
-                "cfg": {"num_bits": "iq2_xxs", "backend": "ggml"},
+                "cfg": {
+                    "num_bits": num_bits,
+                    "backend": "ggml",
+                    "block_sizes": {-1: codec.block_size},
+                },
             },
         ],
         "algorithm": {"method": "gptq", "block_size": 256, "importance_weighted": True}
@@ -254,7 +275,14 @@ def test_parallel_ggml_checkpoint_restore(preparation, parallel_linear, monkeypa
         else "max",
     }
     mtq.quantize(model, config, lambda m: m(inputs))
+    initial_output = model(inputs).detach()
     mtq.initialize_qdq_weights(model)
+    torch.testing.assert_close(model(inputs), initial_output, rtol=0, atol=0)
+    assert model.weight.shape == (2, width)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0)
+    model.weight.grad = torch.ones_like(model.weight)
+    optimizer.step()
+    torch.testing.assert_close(model(inputs), initial_output, rtol=0, atol=0)
     if preparation == "ptq_updated":
         with torch.no_grad():
             model.weight.add_(0.125)
@@ -271,7 +299,7 @@ def test_parallel_ggml_checkpoint_restore(preparation, parallel_linear, monkeypa
                 buffer.zero_()
 
     monkeypatch.setattr(TensorQuantizer, "_reset_pytorch_state_from_metadata", poison_placeholders)
-    restored = mto.restore(parallel_linear(256, 2, bias=False), checkpoint)
+    restored = mto.restore(parallel_linear(width, 2, bias=False, dtype=dtype), checkpoint)
     torch.testing.assert_close(restored(inputs), expected, rtol=0, atol=0)
     for name, buffer in model.named_buffers():
         torch.testing.assert_close(dict(restored.named_buffers())[name], buffer, rtol=0, atol=0)
