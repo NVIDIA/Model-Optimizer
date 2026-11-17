@@ -128,14 +128,19 @@ its `spec_decode_acceptance_length` is a mean over requests. Per-category AL: gr
 
 ## Step 5 — Publish to the team tracker (NVIDIA internal)
 
-The team's internal speculative-decoding dashboard takes these runs from its
-publisher, `acceptance_results.py` (ask the speculative-decoding team where it lives).
-It validates the run against a JSON manifest, then writes one MLflow run with the AL,
-per-category AL, positional curves and the raw AIPerf files.
+The team's speculative-decoding dashboard reads these runs from MLflow. The publisher is
+`acceptance_results.py` at the root of the internal GitLab repository
+[omniml/specdec-visualizer](https://gitlab-master.nvidia.com/omniml/specdec-visualizer)
+(NVIDIA account required); its `docs/acceptance.md` is the full contract. It validates the
+run against a JSON manifest, then writes one MLflow run with the AL, per-category AL,
+positional curves and the raw AIPerf files. Run it from the repository root, since it
+imports the modules beside it. Validating needs only the standard library, publishing `mlflow`.
 
 ```bash
+git clone ssh://git@gitlab-master.nvidia.com:12051/omniml/specdec-visualizer.git
+cd specdec-visualizer && pip install mlflow-skinny
 python acceptance_results.py <run-dir> --manifest manifest.json --output acceptance.json            # validate
-python acceptance_results.py <run-dir> --manifest manifest.json --output acceptance.json --publish  # publish
+python acceptance_results.py <run-dir> --manifest manifest.json --output acceptance.json --publish  # prints the run URL
 ```
 
 Fill the manifest from the run as executed: `name`, `profile` (`speed-qualitative`,
@@ -152,12 +157,11 @@ sent), and the exact `server_command` and `client_command`.
 - `draft_model` must equal the `model` in `--speculative-config`. To serve a local
   copy under its Hub id, start `vllm serve` in a directory holding it at `<org>/<repo>`.
 - No credentials in either command (`--api-key`, tokens).
-- The publisher must read AIPerf `d1f80b6` exports: dataset provenance under
-  `metadata.dataset`, sessions keyed by `x_correlation_id`. One that does not fails
+- Use the repository's current `main`. Older checkouts reject AIPerf `d1f80b6` exports
   with "Saved AIPerf dataset provenance does not match the manifest", or with "MT-Bench
   is missing a conversation turn" on a complete MT-Bench run.
 - Always validate before `--publish`, which writes to the shared experiment the
-  dashboard reads; test uploads do not belong there.
+  dashboard reads. Send a trial upload to a scratch experiment with `--experiment <name>`.
 
 ## Compare with specdec_bench
 
