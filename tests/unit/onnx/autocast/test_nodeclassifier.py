@@ -547,14 +547,24 @@ def test_node_classifier_with_multi_batch_calibration(test_model):
         assert not set(fp16_nodes).intersection(set(fp32_nodes))
 
 
-@pytest.mark.parametrize("square", ["pow_initializer", "pow_constant", "mul"])
+@pytest.mark.parametrize(
+    "square", ["pow_initializer", "pow_constant", "pow_constant_float", "pow_constant_int", "mul"]
+)
 def test_norm_variance_stays_high_precision_without_reference_data(square):
     """An RMSNorm variance overflows fp16 for |x| > 256, which random reference data misses."""
     two = numpy_helper.from_array(np.array(2.0, dtype=np.float32), "two")
     square_op = "Mul" if square == "mul" else "Pow"
     square_inputs = ["x", "x"] if square == "mul" else ["x", "two"]
-    constant = helper.make_node("Constant", [], ["two"], name="two", value=two)
-    nodes = [constant] if square == "pow_constant" else []
+    constant_value = {
+        "pow_constant": {"value": two},
+        "pow_constant_float": {"value_float": 2.0},
+        "pow_constant_int": {"value_int": 2},
+    }
+    nodes = []
+    if square in constant_value:
+        nodes.append(
+            helper.make_node("Constant", [], ["two"], name="two", **constant_value[square])
+        )
     nodes += [
         helper.make_node(square_op, square_inputs, ["sq"], name="square"),
         helper.make_node("ReduceMean", ["sq", "axes"], ["var"], name="reduce", keepdims=1),

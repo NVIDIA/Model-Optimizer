@@ -276,9 +276,9 @@ class NormVarianceRule(NodeRuleBase):
         """
         constants = {init.name: init for init in model.graph.initializer}
         constants.update(
-            (node.output[0], node.attribute[0].t)
+            (node.output[0], onnx.helper.get_attribute_value(node.attribute[0]))
             for node in model.graph.node
-            if node.op_type == "Constant" and node.attribute and node.attribute[0].name == "value"
+            if node.op_type == "Constant" and node.attribute
         )
 
         def is_squared(node):
@@ -286,11 +286,14 @@ class NormVarianceRule(NodeRuleBase):
                 return node.input[0] == node.input[1]
             if node.op_type != "Pow":
                 return False
-            # Only scalar exponents are read, so weights are never converted to numpy.
-            tensor = constants.get(node.input[1])
-            if tensor is None or np.prod(tensor.dims) != 1:
-                return False
-            return np.isclose(float(onnx.numpy_helper.to_array(tensor).item()), 2.0)
+            exponent = constants.get(node.input[1])
+            if isinstance(exponent, onnx.TensorProto):
+                # Only scalar exponents are read, so weights are never converted to numpy.
+                if np.prod(exponent.dims) != 1:
+                    return False
+                exponent = onnx.numpy_helper.to_array(exponent).item()
+            # Constant's value_float / value_int forms give a plain Python scalar.
+            return isinstance(exponent, (int, float)) and np.isclose(exponent, 2.0)
 
         producer = {out: node for node in model.graph.node for out in node.output}
         consumers: dict[str, list[onnx.NodeProto]] = {}
