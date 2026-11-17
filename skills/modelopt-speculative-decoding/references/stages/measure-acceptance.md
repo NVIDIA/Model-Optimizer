@@ -69,7 +69,8 @@ aiperf profile --model <served-model-name> --tokenizer <target> \
   --url http://127.0.0.1:8000 --endpoint-type chat --streaming \
   --public-dataset speed_bench_qualitative --dataset-sampling-strategy sequential \
   --num-conversations 880 --request-count 1138 --concurrency 32 \
-  --extra-inputs '{"temperature": 0, "top_p": 1.0, "top_k": 0, "max_tokens": 4096, "ignore_eos": false}' \
+  --extra-inputs '{"temperature": 0, "top_p": 1.0, "top_k": 0, "max_tokens": 4096, "ignore_eos": false,
+                  "chat_template_kwargs": {"enable_thinking": true}}' \
   --use-server-token-count --no-server-metrics --no-gpu-telemetry --ui-type none \
   --export-level records --artifact-dir <run-dir>
 ```
@@ -80,6 +81,9 @@ aiperf profile --model <served-model-name> --tokenizer <target> \
 - Keep `ignore_eos` false and set no `min_tokens`: forcing the output length lowers AL.
 - Send `temperature`, `top_p` and `top_k` explicitly; `vllm serve` fills unset fields
   from the model's `generation_config.json`.
+- Always set the reasoning mode explicitly in `chat_template_kwargs`, even to the
+  model's default: it changes AL, and template defaults differ by model. Use the keys
+  the model's chat template reads (`reasoning_effort`, `enable_thinking`, ...).
 - Unset `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE` for the client: offline mode makes
   this AIPerf build fail to load the tokenizer, even from a local path.
 - Smoke test: SPEED-Bench rows are grouped by category, so the first K sessions of the
@@ -142,7 +146,8 @@ after multi-turn expansion, Step 1), `model`, `model_revision`, `draft_model`,
 positional curves), `backend: vllm`, `runtime_version`, `aiperf_revision`,
 `btk_revision` (required; say "not used" when AIPerf runs directly), `gpu`,
 `gpu_count`, `concurrency`, `output_tokens`, `temperature`, `acceptance_mode: real`,
-`routing: real`, `ignore_eos: false`, and the exact `server_command` and `client_command`.
+`routing: real`, `ignore_eos: false`, `chat_template_args` (exactly the `chat_template_kwargs`
+sent), and the exact `server_command` and `client_command`.
 
 - `draft_model` must equal the `model` in `--speculative-config`. To serve a local
   copy under its Hub id, start `vllm serve` in a directory holding it at `<org>/<repo>`.
