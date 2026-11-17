@@ -278,7 +278,7 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
     safe_save(state, tmp_path / "kl_div.pth")
     lowest = ModelOptAutoQuantizeRecipe(
         auto_quantize=kl_div.auto_quantize.model_copy(
-            update={"method_options": {"context": "lowest"}}
+            update={"method_options": {"context_quant_level": "lowest"}}
         )
     )
     with pytest.raises(ValueError, match="scoring options"):

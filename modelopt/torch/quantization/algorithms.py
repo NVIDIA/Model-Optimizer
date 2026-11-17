@@ -941,11 +941,17 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         options = options or {}
         return {key: options.get(key, defaults[key]) for key in sorted(self.scoring_config_keys)}
 
+    def unknown_scoring_options(self, state: dict) -> list[str]:
+        """Scoring options ``state`` records that this searcher does not know, e.g. a renamed one."""
+        return sorted(set(state.get("scoring_config") or {}) - self.scoring_config_keys)
+
     def scoring_mismatch(self, state: dict) -> str | None:
         """How the scores in ``state`` were taken other than this search's config takes them.
 
         Options a checkpoint does not record count as the defaults it was scored with.
         """
+        if unknown := self.unknown_scoring_options(state):
+            return f"Checkpoint scoring options {unknown} are not known to this search."
         restored = self.scoring_config_from(state.get("scoring_config"))
         current = self.scoring_config_from(self.config)
         if restored != current:
@@ -2428,26 +2434,27 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
     """A searcher for AutoQuantize algorithm that uses KL-Divergence loss based score estimation."""
 
     method_name = "kl_div"
-    method_config_keys = frozenset({"context"})
-    scoring_config_keys = frozenset({"context"})
+    method_config_keys = frozenset({"context_quant_level"})
+    scoring_config_keys = frozenset({"context_quant_level"})
 
     @property
     def default_search_config(self):
         """Get the default config for the searcher.
 
-        ``context``: what the other searched groups use while one group's candidates are scored.
-        ``None`` (default) leaves them unquantized. ``"lowest"`` quantizes each to its lowest-bit
-        quantized candidate, and an int ``k`` to the ``k``-th from the lowest, counting from 0
-        (so ``0`` is ``"lowest"``) and capped at its highest. A score is then the KL at that
-        operating point and also counts how a group's error compounds with the others'; every
-        candidate, BF16 included, is measured. ``"lowest"`` is a good default; in our sub-4-bit
-        tests a context nearer the budget measured the same.
+        ``context_quant_level``: the format the other searched groups take while one group's
+        candidates are scored (the scoring context). ``None`` (default) leaves them unquantized.
+        ``"lowest"`` quantizes each to its lowest-bit quantized candidate, and an int ``k`` to the
+        ``k``-th from the lowest, counting from 0 (so ``0`` is ``"lowest"``) and capped at its
+        highest. A score is then the KL at that operating point and also counts how a group's
+        error compounds with the others'; every candidate, BF16 included, is measured.
+        ``"lowest"`` is a good default; in our sub-4-bit tests a context nearer the budget
+        measured the same.
         """
         config = super().default_search_config
         config.update(
             {
                 "forward_step": None,
-                "context": None,
+                "context_quant_level": None,
             }
         )
         return config
@@ -2467,36 +2474,36 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
             "`forward_step` must be provided for KL-Divergence loss based `auto_quantize`. "
             "`forward_step(model, data)` should return model logits."
         )
-        context = config["context"]
-        if not (context in (None, "lowest") or (type(context) is int and context >= 0)):
+        level = config["context_quant_level"]
+        if not (level in (None, "lowest") or (type(level) is int and level >= 0)):
             raise ValueError(
-                f"kl_div context must be None, 'lowest' or an int >= 0, got {context!r}."
+                f"kl_div context_quant_level must be None, 'lowest' or an int >= 0, got {level!r}."
             )
         return config
 
     def scoring_config_from(self, options: dict | None) -> dict:
         """``0`` scores as ``"lowest"``; record one spelling so each reuses the other's scores."""
         config = super().scoring_config_from(options)
-        if type(config["context"]) is int and config["context"] == 0:
-            config["context"] = "lowest"
+        if type(config["context_quant_level"]) is int and config["context_quant_level"] == 0:
+            config["context_quant_level"] = "lowest"
         return config
 
     def _context_recipe(self, hparam):
         """The recipe ``hparam`` holds while other groups are scored; no-quant without a context."""
-        context = self.config["context"]
-        if context is None:
+        level = self.config["context_quant_level"]
+        if level is None:
             return QuantRecipe(quant_cfg=None)
         # choices are sorted by compression, so they run from lowest bits up to no-quant.
         quantized = [recipe for recipe in hparam.choices if not recipe.is_no_quant]
-        return quantized[min(0 if context == "lowest" else context, len(quantized) - 1)]
+        return quantized[min(0 if level == "lowest" else level, len(quantized) - 1)]
 
     def _shared_calibration_recipes(self, quant_recipe_hparams) -> set:
-        if self.config["context"] is None:
+        if self.config["context_quant_level"] is None:
             return set()
         return {self._context_recipe(h) for h in quant_recipe_hparams if h.is_configurable}
 
     def _scores_recipe(self, hparam, recipe) -> bool:
-        if recipe.is_no_quant and self.config["context"] is not None:
+        if recipe.is_no_quant and self.config["context_quant_level"] is not None:
             # BF16 is measured in the quantized context; one shard measures it for the merge.
             return self.format_shard is None or self.format_shard[0] == 0
         return super()._scores_recipe(hparam, recipe)
@@ -2508,7 +2515,7 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
         Higher score means more sensitive to quantization.
         """
         no_quant = QuantRecipe(quant_cfg=None)
-        context = self.config["context"]
+        context = self.config["context_quant_level"]
 
         context_recipe = self._context_recipe
 
@@ -2577,7 +2584,7 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
         A scoring context adds the same base damage to every candidate of every group, so a
         threshold on raw scores is meaningless; those scores are ranked by their sum instead.
         """
-        if self.config["context"] is not None:
+        if self.config["context_quant_level"] is not None:
             return self._run_linear_program_search(max_weight_size, verbose)
         # Collect all sensitivity scores to determine initial threshold bounds
         all_scores = [
@@ -2810,6 +2817,8 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
             f"Expected one of {sorted(AUTO_QUANTIZE_SEARCHERS)}."
         )
     searcher = AUTO_QUANTIZE_SEARCHERS[method]()
+    if unknown := searcher.unknown_scoring_options(search_state):
+        raise ValueError(f"Search state scoring options {unknown} are not known to {method!r}.")
     searcher.candidate_stats = candidate_stats
     searcher.cost_model = search_state.get("cost_model", COST_MODEL_WEIGHT)
     searcher.cost = search_state.get("cost", {})

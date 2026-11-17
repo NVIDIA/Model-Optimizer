@@ -408,9 +408,11 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
             raise ValueError(
                 f"auto_quantize_method={self.auto_quantize_method!r} accepts no method_options."
             )
-        if self.auto_quantize_method == "kl_div" and set(self.method_options or {}) - {"context"}:
+        if self.auto_quantize_method == "kl_div" and set(self.method_options or {}) - {
+            "context_quant_level"
+        }:
             raise ValueError(
-                "auto_quantize_method='kl_div' accepts only the 'context' method_option."
+                "auto_quantize_method='kl_div' accepts only the 'context_quant_level' method_option."
             )
         return self
 

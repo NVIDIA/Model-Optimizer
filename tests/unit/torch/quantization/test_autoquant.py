@@ -875,8 +875,8 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
     [
         "gradient",
         "kl_div",
-        {"method": "kl_div", "context": "lowest"},
-        {"method": "kl_div", "context": 1},
+        {"method": "kl_div", "context_quant_level": "lowest"},
+        {"method": "kl_div", "context_quant_level": 1},
     ],
 )
 def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, method):
@@ -952,8 +952,16 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
         del unrecorded["scoring_config"]
         safe_save(unrecorded, tmp_path / "unrecorded.pth")
         search(tmp_path / "unrecorded.pth", (0, 2))
+        # An option this version does not know, such as a renamed one, is refused, not dropped.
+        unknown = {"scoring_config": {"context": "lowest"}}
+        safe_save({**unrecorded, **unknown}, tmp_path / "unknown.pth")
+        with pytest.raises(ValueError, match="not known"):
+            search(tmp_path / "unknown.pth", (0, 2))
+        with pytest.raises(ValueError, match="not known"):
+            mtq.get_auto_quantize_config({**expected, **unknown}, {"effective_bits": 6.0})
     if isinstance(method, dict):  # scores taken in another context neither resume nor merge
-        other = {**method, "context": 1 if method["context"] == "lowest" else "lowest"}
+        level = method["context_quant_level"]
+        other = {**method, "context_quant_level": 1 if level == "lowest" else "lowest"}
         with pytest.raises(ValueError, match="scoring options"):
             search(shards[0], (0, 2), method=other)
         search(tmp_path / "other1.pth", (1, 2), method=other)
@@ -961,8 +969,8 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
             model_quant.merge_auto_quantize_checkpoints(
                 [shards[0], tmp_path / "other1.pth"], str(tmp_path / "z.pth")
             )
-    if isinstance(method, dict) and method["context"] == "lowest":  # 0 is the same context
-        zero = {**method, "context": 0}
+    if isinstance(method, dict) and method["context_quant_level"] == "lowest":  # 0 is the same
+        zero = {**method, "context_quant_level": 0}
         search(shards[0], (0, 2), method=zero)
         search(tmp_path / "zero1.pth", (1, 2), method=zero)
         model_quant.merge_auto_quantize_checkpoints(
@@ -1710,8 +1718,8 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     # Scores of another method or scoring options are refused before the model is converted, so
     # the same model can retry with a new checkpoint.
     other = {
-        "gradient": {"method": "kl_div", "context": "lowest"},
-        "kl_div": {"method": "kl_div", "context": "lowest"},
+        "gradient": {"method": "kl_div", "context_quant_level": "lowest"},
+        "kl_div": {"method": "kl_div", "context_quant_level": "lowest"},
         "aumann_shapley": {"method": "aumann_shapley", "num_path_nodes": 1},
     }[method]
     model_3 = SimpleLinear()
