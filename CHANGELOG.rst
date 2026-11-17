@@ -215,6 +215,8 @@ Changelog
 - Fix ONNX INT4 quantization ending the Python process when the INT4 packing extension fails to build, for example without a C++ compiler. It now falls back to the Python implementation.
 - Fix the column-major ``DequantizeLinear`` surgery leaving a negative or default ``axis`` attribute unchanged while transposing the weight it refers to, which changed the model's output. Re-run the surgery on affected models.
 - Fix BF16-to-FP8 ONNX export with ``ml_dtypes`` 0.7.0 producing NaN FP8 weights for very small convolution weights.
+- Fix AutoCast turning FP64 initializers and ``Constant`` values that exceed the FP32 range into infinities. They are now clamped to the largest FP32 value and the affected tensor is named in a warning.
+- Fix AutoCast flipping the sign of an initializer value too small for the target precision; such values now keep their sign.
 
 *Speculative Decoding*
 
