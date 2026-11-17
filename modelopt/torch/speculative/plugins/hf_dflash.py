@@ -82,7 +82,9 @@ from transformers.models.qwen3.configuration_qwen3 import Qwen3Config as _Qwen3C
 from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
 
-from ..dflash.conversion import DFlashDMRegistry
+from ...opt.conversion import ModeloptStateManager
+from ..config import DFlashConfig
+from ..dflash.conversion import DFlashDMRegistry, with_default_architecture
 from ..dflash.dflash_model import DFlashModel
 from .dflash_flex_attention import build_draft_block_mask
 from .modeling_dflash import (  # noqa: F401
@@ -479,18 +481,6 @@ class HFDFlashModel(DFlashModel):
         self.dflash_config.block_size = self.dflash_block_size
         # On the draft config so _build_draft_module stays a pure function of it.
         self.dflash_config.attention_sink_bias = self.dflash_attention_sink
-        if self.dflash_use_flex_attention and self.dflash_attention_sink:
-            raise ValueError(
-                "dflash_use_flex_attention does not support dflash_attention_sink: the flex "
-                "kernel has no sink column, so the draft would train without the sink it is "
-                "exported with. Unset one of them."
-            )
-        if self.dflash_use_flex_attention and self.dflash_config.attention_dropout:
-            raise ValueError(
-                "dflash_use_flex_attention does not support attention_dropout > 0 (got "
-                f"{self.dflash_config.attention_dropout}): the flex path applies no dropout, "
-                "so it would be silently skipped. Unset one of them."
-            )
 
         # Which base layers feed the draft's `fc`: explicit ids win, else the uniform default.
         num_target_layers = (
@@ -572,9 +562,79 @@ class HFDFlashModel(DFlashModel):
             self._base_model._modules.pop("layers")
 
         self.is_quantized = False
+        self._configure_training(config)
+
+    def _configure_training(self, config):
+        """Also refuse FlexAttention where it would drop a feature, and compile the draft stack."""
+        if config.dflash_use_flex_attention and self.dflash_attention_sink:
+            raise ValueError(
+                "dflash_use_flex_attention does not support dflash_attention_sink: the flex "
+                "kernel has no sink column, so the draft would train without the sink it is "
+                "exported with. Unset one of them."
+            )
+        if config.dflash_use_flex_attention and self.dflash_config.attention_dropout:
+            raise ValueError(
+                "dflash_use_flex_attention does not support attention_dropout > 0 (got "
+                f"{self.dflash_config.attention_dropout}): the flex path applies no dropout, "
+                "so it would be silently skipped. Unset one of them."
+            )
+        super()._configure_training(config)
         self._num_anchors = self.dflash_num_anchors
-        if self.dflash_use_torch_compile:
-            self.dflash_module.compile_body()
+        self.dflash_module.compile_body(self.dflash_use_torch_compile)
+
+    def apply_resumed_config(self, config: DFlashConfig) -> dict[str, tuple]:
+        """Apply a resumed run's own ``dflash`` settings to a draft restored from its checkpoint.
+
+        The restore rebuilds the draft from the config saved with the checkpoint, so without
+        this a resumed run silently trains with the checkpoint's settings. Each field
+        ``config`` sets explicitly must either be in ``DFlashConfig.RESUMABLE_FIELDS``, and then
+        replaces the saved value, or equal the saved value: the other fields define the draft
+        the checkpoint holds. The saved config is updated too, so the next checkpoint records
+        what the run trained with.
+
+        Returns:
+            ``{field: (saved value, new value)}`` for each setting it changed.
+        """
+        manager = ModeloptStateManager(self)
+        if manager.last_mode is None or manager.last_mode.name != "dflash":
+            raise ValueError(
+                f"apply_resumed_config needs a model whose last ModelOpt mode is dflash, got "
+                f"{manager.last_mode}; the saved config it updates would be another mode's."
+            )
+        saved = manager._last_config
+        requested = {
+            name: getattr(config, name)
+            for name in config.model_fields_set - DFlashConfig.INIT_ONLY_FIELDS
+        }
+        if "dflash_architecture_config" in requested:
+            # Compared as convert stores it: over the default architecture.
+            requested["dflash_architecture_config"] = with_default_architecture(
+                requested["dflash_architecture_config"]
+            )
+        if "dflash_mask_token_id" in requested and requested["dflash_mask_token_id"] is None:
+            # An unset mask token asks for the tokenizer's, which the checkpoint already holds.
+            del requested["dflash_mask_token_id"]
+        changed = {
+            name: (getattr(saved, name), new)
+            for name, new in sorted(requested.items())
+            if getattr(saved, name) != new
+        }
+        fixed = {n: v for n, v in changed.items() if n not in DFlashConfig.RESUMABLE_FIELDS}
+        if fixed:
+            raise ValueError(
+                "The resumed run's dflash settings change the draft its checkpoint holds: "
+                + "; ".join(
+                    f"{n} is {old!r} there, {new!r} here" for n, (old, new) in fixed.items()
+                )
+                + ". Keep the checkpoint's values, or start a new run to change them."
+            )
+        if changed:
+            merged = type(saved).model_validate(
+                {**saved.model_dump(), **{n: new for n, (_, new) in changed.items()}}
+            )
+            self._configure_training(merged)
+            manager._last_config = merged
+        return changed
 
     def _build_draft_module(self, dflash_config):
         """Build the draft module. Subclasses override to use an augmented module."""

@@ -60,7 +60,7 @@ class HFDFlash2Model(HFDFlashModel):
         return DFlash2Module(dflash_config)
 
     def modify(self, config):
-        """Initialize the DFlash2 draft module and read the selector loss weight."""
+        """Initialize the DFlash2 draft module."""
         arch_config = config.dflash_architecture_config
         missing = [
             name
@@ -74,18 +74,22 @@ class HFDFlash2Model(HFDFlashModel):
                 "candidate selector's rank/top-k)."
             )
         super().modify(config)
-        self.dflash_selector_loss_alpha = config.dflash_selector_loss_alpha
-        self.dflash_lk_loss_type = config.dflash_lk_loss_type
-        self.dflash_lk_ce_scale = config.dflash_lk_ce_scale
-        self.dflash_lk_ce_decay = config.dflash_lk_ce_decay
-        if self.dflash_lk_loss_type != "ce" and self.dflash_self_logit_distillation:
+        self._selector_metrics = None
+
+    def _configure_training(self, config):
+        """Also read the selector loss weight and the LK blend."""
+        if config.dflash_lk_loss_type != "ce" and config.dflash_self_logit_distillation:
             raise ValueError(
-                f"dflash_lk_loss_type={self.dflash_lk_loss_type!r} needs the draft's "
+                f"dflash_lk_loss_type={config.dflash_lk_loss_type!r} needs the draft's "
                 "probability of the gold token, which the KD path never forms -- it "
                 "optimizes a soft target instead. Set dflash_self_logit_distillation=false, "
                 "or dflash_lk_loss_type='ce' to keep distillation."
             )
-        self._selector_metrics = None
+        super()._configure_training(config)
+        self.dflash_selector_loss_alpha = config.dflash_selector_loss_alpha
+        self.dflash_lk_loss_type = config.dflash_lk_loss_type
+        self.dflash_lk_ce_scale = config.dflash_lk_ce_scale
+        self.dflash_lk_ce_decay = config.dflash_lk_ce_decay
 
     def forward(self, *args, **kwargs):
         """Run the DFlash training forward and attach the candidate-selector metrics.

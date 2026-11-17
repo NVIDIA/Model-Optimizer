@@ -30,10 +30,25 @@ class DFlashModel(DynamicModule):
         self._register_temp_attribute("dflash_module", None)
 
     def modify(self, config):
-        """Base DFlash Model modify function. Child class should implement the details."""
+        """Base DFlash Model modify function. Child class should implement the details.
+
+        Reads the fields that define the draft. The child class calls
+        ``_configure_training`` once it has built the draft.
+        """
         self.dflash_offline = config.dflash_offline
         self.dflash_block_size = config.dflash_block_size
         self.dflash_freeze_base_model = config.dflash_freeze_base_model
+        self.dflash_swa_window_size = config.dflash_swa_window_size
+        self.dflash_draft_attention = config.dflash_draft_attention
+        self.dflash_attention_sink = config.dflash_attention_sink
+        self.dflash_init_checkpoint = config.dflash_init_checkpoint
+
+    def _configure_training(self, config):
+        """Read the settings a resumed run may change (``DFlashConfig.RESUMABLE_FIELDS``).
+
+        Runs again on a resume that changes them, so it must not touch the draft's structure.
+        Overrides check ``config`` before setting anything, so a refusal changes nothing.
+        """
         self.dflash_loss_decay_factor = config.dflash_loss_decay_factor
         self.dflash_loss_objective = config.dflash_loss_objective
         self.dflash_dpace_alpha = config.dflash_dpace_alpha
@@ -48,9 +63,5 @@ class DFlashModel(DynamicModule):
         self.dflash_num_anchors = config.dflash_num_anchors
         self.dflash_report_acc = config.dflash_report_acc
         self.dflash_use_torch_compile = config.dflash_use_torch_compile
-        self.dflash_swa_window_size = config.dflash_swa_window_size
-        self.dflash_draft_attention = config.dflash_draft_attention
-        self.dflash_attention_sink = config.dflash_attention_sink
-        self.dflash_init_checkpoint = config.dflash_init_checkpoint
         self.dflash_use_flex_attention = config.dflash_use_flex_attention
         self.dflash_export_rope_scaling = config.dflash_export_rope_scaling
