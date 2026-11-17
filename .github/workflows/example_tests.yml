@@ -72,7 +72,7 @@ jobs:
               - tests/examples/conftest.py
               - "!**/*.{md,rst,png,ipynb}"
             torch:
-              - "{examples,tests/examples}/{llm_distill,llm_qat,llm_sparsity,specdec_bench,speculative_decoding}/**"
+              - "{examples,tests/examples}/{bypass,llm_distill,llm_qat,llm_sparsity,specdec_bench,speculative_decoding}/**"
               - examples/dataset/** # data prep for llm_qat and speculative_decoding
               - examples/hf_ptq/** # the speculative_decoding test drives hf_ptq
               - "!**/*.{md,rst,png,ipynb}"
@@ -136,7 +136,7 @@ jobs:
       matrix:
         # llm_qat and speculative_decoding take 9-16 min and stay on their own jobs; the three small ones share one.
         # llm_distill pins trl and torchao, so it goes last.
-        example: ["specdec_bench llm_sparsity llm_distill", llm_qat, speculative_decoding]
+        example: ["specdec_bench llm_sparsity llm_distill", llm_qat, speculative_decoding, bypass]
     uses: ./.github/workflows/_example_tests_runner.yml
     permissions:
       contents: read
