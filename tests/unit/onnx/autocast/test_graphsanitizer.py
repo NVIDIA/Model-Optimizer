@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import logging
-
 from unittest.mock import Mock
 
 import numpy as np
