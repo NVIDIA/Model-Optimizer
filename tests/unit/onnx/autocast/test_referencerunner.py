@@ -292,6 +292,32 @@ class TestPerNodeReferenceRunner:
         assert actual["Y"].shape == expected["Y"].shape
         np.testing.assert_allclose(actual["Y"].max_val, np.max(expected["Y"]))
 
+    def test_recovers_stale_intermediate_dtype(self):
+        x = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [2, 3])
+        stale_intermediate = helper.make_tensor_value_info(
+            "cast_output", TensorProto.FLOAT16, [2, 3]
+        )
+        y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 3])
+        graph = helper.make_graph(
+            [
+                helper.make_node("Cast", ["X"], ["cast_output"], name="cast", to=TensorProto.FLOAT),
+                helper.make_node("Relu", ["cast_output"], ["Y"], name="relu"),
+            ],
+            "stale_output_dtype",
+            [x],
+            [y],
+            value_info=[stale_intermediate],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)], ir_version=10)
+        runner = ReferenceRunner(model)
+        inputs = {"X": np.arange(6, dtype=np.float16).reshape(2, 3)}
+
+        expected = runner.run(inputs)
+        actual = runner.run(inputs, calibrate_per_node=True)
+
+        assert actual["Y"].shape == expected["Y"].shape
+        np.testing.assert_allclose(actual["Y"].max_val, np.max(expected["Y"]))
+
     def test_random_inputs_preserve_explicit_zero_dimensions(self):
         x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 1])
         x_empty = helper.make_tensor_value_info("X_empty", TensorProto.FLOAT, [2, 0])

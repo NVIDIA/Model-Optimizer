@@ -308,6 +308,9 @@ class ReferenceRunner:
                 model_initializers.append(initializer_map[input_name])
             elif input_name in value_info_map:
                 runtime_input = copy.deepcopy(value_info_map[input_name])
+                runtime_input.type.tensor_type.elem_type = onnx.helper.np_dtype_to_tensor_dtype(
+                    runtime_values[input_name].dtype
+                )
                 runtime_shape = runtime_input.type.tensor_type.shape
                 runtime_shape.ClearField("dim")
                 for dimension in runtime_values[input_name].shape:
@@ -328,6 +331,7 @@ class ReferenceRunner:
                 )
             output = copy.deepcopy(value_info_map[output_name])
             if node.domain in ("", "ai.onnx"):
+                output.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
                 output.type.tensor_type.ClearField("shape")
             model_outputs.append(output)
 
