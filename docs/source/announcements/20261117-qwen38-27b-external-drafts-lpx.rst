@@ -4,7 +4,7 @@ Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX
 ################################################################################
 
 :Author: Peter Hicks, Bear Xiong, Arash Taheri-Dezfouli, Charlie Wang, Seth Weidman, Andrew Ling
-:Date: November 12, 2026
+:Date: November 17, 2026
 :Tags: speculative-decoding, external-draft, groq-lpx, qwen3.8, distillation
 
 Introduction
