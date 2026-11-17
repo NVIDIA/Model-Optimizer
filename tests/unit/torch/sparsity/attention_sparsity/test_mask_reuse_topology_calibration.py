@@ -654,29 +654,41 @@ def test_selector_rejects_development_outer_group_overlap(tmp_path):
 
 
 def test_selector_is_deterministic_under_exact_ties(tmp_path):
-    result, captures, path, checkpoint = _run(tmp_path)
+    checkpoint = _checkpoint(tmp_path)
+    path = tmp_path / "topology.jsonl"
+    captures = [
+        _capture(split, prompt, target, checkpoint.sha256)
+        for split, prompt in (("calibration", "cal-0"), ("heldout", "held-0"))
+        for target in (0.5, 0.7)
+    ]
+
+    def select():
+        return calibrate_mask_reuse_topology(
+            path,
+            vanilla_calibration=_FIT,
+            checkpoint_manifest=checkpoint,
+            evidence=_evidence(_write(path, captures)),
+            max_anchor_dropped_mass=0.03,
+            reuse_dropped_mass_report_threshold=0.025,
+            target_bmm1_skip_ratio=0.3,
+        )
+
     for capture in captures:
-        # Both donor heads have identical risk and retained cost. Canonical
-        # tie-breaking must keep the lowest donor index.
         for candidates in capture["consumer_candidates_by_layer"].values():
             for stats in candidates.values():
-                stats["dropped_mass"] = _matrix(stats["dropped_mass"][0][0])
-    digest = _write(path, captures)
-    tied = calibrate_mask_reuse_topology(
-        path,
-        vanilla_calibration=_FIT,
-        checkpoint_manifest=checkpoint,
-        evidence=_evidence(digest),
-        max_anchor_dropped_mass=0.03,
-        reuse_dropped_mass_report_threshold=0.025,
-        target_bmm1_skip_ratio=0.3,
+                stats["dropped_mass"] = [[2 * row[0], row[1]] for row in stats["dropped_mass"]]
+    biased = select()
+    assert any(
+        d == 1 for ds in biased["discovery_context_policies"][0]["headmaps"].values() for d in ds
     )
-
-    assert result["anchors"] == tied["anchors"]
+    for capture in captures:
+        for candidates in capture["consumer_candidates_by_layer"].values():
+            for stats in candidates.values():
+                stats["dropped_mass"] = [[row[1], row[1]] for row in stats["dropped_mass"]]
+    tied = select()
+    assert tied["anchors"] == biased["anchors"]
     assert all(
-        donor == 0
-        for donors in tied["discovery_context_policies"][0]["headmaps"].values()
-        for donor in donors
+        d == 0 for ds in tied["discovery_context_policies"][0]["headmaps"].values() for d in ds
     )
 
 

@@ -36,7 +36,7 @@ import time
 from array import array
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from functools import cache
 from hashlib import sha256
 from pathlib import Path
@@ -57,6 +57,7 @@ from .mask_reuse import (
     _bucket_key,
     _Choice,
     _donor_head_candidates,
+    _dropped_mass_matrix,
     _number,
     _pareto_donor_options,
     _ReuseEvaluation,
@@ -84,12 +85,7 @@ from .mask_reuse_contracts import (
     threshold_pair_matches,
     validate_context_buckets,
 )
-from .mask_reuse_solver import (
-    MaskReuseSolverConfig,
-    MaskReuseSolverError,
-    MaskReuseSolverFailure,
-    _SolverSession,
-)
+from .mask_reuse_solver import MaskReuseSolverConfig, MaskReuseSolverFailure, _SolverSession
 
 __all__ = [
     "TopologyDiscoveryCapture",
@@ -130,29 +126,6 @@ def _canonical_layer_key(value: object, label: str) -> int:
     if not isinstance(value, str) or not value.isdigit() or value != str(int(value)):
         raise MaskReuseCalibrationError(f"{label} keys must be canonical nonnegative integers")
     return int(value)
-
-
-def _matrix(raw: object, *, heads: int, label: str) -> tuple[tuple[float, ...], ...]:
-    if not isinstance(raw, list) or len(raw) != heads:
-        raise MaskReuseCalibrationError(f"{label} must have {heads} consumer rows")
-    rows = []
-    for consumer_head, row in enumerate(raw):
-        if not isinstance(row, list) or len(row) != heads:
-            raise MaskReuseCalibrationError(
-                f"{label}[{consumer_head}] must cover every global donor head"
-            )
-        rows.append(
-            tuple(
-                _number(
-                    value,
-                    f"{label}[{consumer_head}][{donor_head}]",
-                    minimum=0.0,
-                    maximum=1.0,
-                )
-                for donor_head, value in enumerate(row)
-            )
-        )
-    return tuple(rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,7 +304,7 @@ class TopologyDiscoveryCapture:
                         f"candidate {anchor}->{consumer} must be an object"
                     )
                 _exact_fields(raw_stats, _CANDIDATE_FIELDS, f"candidate {anchor}->{consumer}")
-                by_anchor[anchor] = _matrix(
+                by_anchor[anchor] = _dropped_mass_matrix(
                     raw_stats["dropped_mass"],
                     heads=heads,
                     label=f"candidate {anchor}->{consumer}.dropped_mass",
@@ -801,7 +774,6 @@ def _selection_pass(
     solver_session: _SolverSession | None = None,
     donor_head_mode: str = "calibrated",
     stride_paths: Mapping[int, tuple[tuple[int, int], ...]] | None = None,
-    menu_checkpoint=None,
 ) -> tuple[_FrozenSelection, list[Mapping[str, object]]]:
     session = solver_session or _SolverSession()
     layers = dataset.attention_layers
@@ -821,6 +793,7 @@ def _selection_pass(
                 prompt_mass={},
             )
     for capture in source:
+        session._remaining_seconds()
         if capture.split != "calibration":
             continue
         accumulator = accumulators[(capture.bucket, capture.target_sparsity)]
@@ -966,95 +939,6 @@ def _selection_pass(
             worst_individual_dropped_mass=worst_individual_risk,
         )
 
-    def payload(selection):
-        if selection is None:
-            return None
-        return {
-            "anchors": list(selection.anchors),
-            "choices": [
-                [list(bucket), consumer, head, choice.donor_head, choice.fallback]
-                for (bucket, consumer, head), choice in selection.choices.items()
-            ],
-            "summary": {
-                key: value
-                for key, value in asdict(selection).items()
-                if key not in {"targets", "anchors", "nearest", "choices"}
-            },
-        }
-
-    def restore(raw, targets, minimum, target_met):
-        if raw is None:
-            return (
-                None  # The checkpoint adapter separately validates native infeasibility provenance.
-            )
-        if not isinstance(raw, dict) or set(raw) != {"anchors", "choices", "summary"}:
-            raise MaskReuseCalibrationError("invalid topology menu witness")
-        anchors = tuple(raw["anchors"])
-        if (
-            not anchors
-            or any(type(a) is not int or a not in layer_index for a in anchors)
-            or anchors != tuple(sorted(set(anchors), key=layer_index.__getitem__))
-            or anchors[0] != layers[0]
-        ):
-            raise MaskReuseCalibrationError("checkpoint anchors do not form an ordered topology")
-        starts = [layer_index[a] for a in anchors]
-        path = tuple(zip(starts, [*starts[1:], len(layers)], strict=True))
-        if any(stop - start - 1 > dataset.max_reuse_span for start, stop in path) or (
-            stride_paths is not None and path not in stride_paths.values()
-        ):
-            raise MaskReuseCalibrationError("checkpoint topology is outside the original family")
-        nearest = {layer: layers[start] for start, stop in path for layer in layers[start:stop]}
-        expected = {
-            (b, c, h)
-            for b in dataset.buckets
-            for c in layers
-            if nearest[c] != c
-            for h in range(dataset.global_num_heads)
-        }
-        choices = {}
-        for row in raw["choices"]:
-            if (
-                not isinstance(row, list)
-                or len(row) != 5
-                or not isinstance(row[0], list)
-                or any(type(v) is not int for v in row[1:4])
-                or type(row[4]) is not bool
-            ):
-                raise MaskReuseCalibrationError("invalid checkpoint donor record")
-            bucket, consumer, head, donor, fallback = tuple(row[0]), *row[1:]
-            key = (bucket, consumer, head)
-            if key not in expected or key in choices:
-                raise MaskReuseCalibrationError("checkpoint donor census differs")
-            options = donor_options(
-                bucket, targets[bucket], anchor=nearest[consumer], consumer=consumer, head=head
-            )
-            matches = [
-                o.choice
-                for o in options
-                if o.choice.donor_head == donor and o.choice.fallback == fallback
-            ]
-            if len(matches) != 1:
-                raise MaskReuseCalibrationError("checkpoint donor is outside original options")
-            choices[key] = matches[0]
-        if choices.keys() != expected:
-            raise MaskReuseCalibrationError("checkpoint has missing consumer heads")
-        if max_anchor_dropped_mass is not None:
-            for bucket in dataset.buckets:
-                accumulator = accumulators[(bucket, targets[bucket])]
-                for means in accumulator.anchor_prompt_means.values():
-                    if sum(float(means[s]) - max_anchor_dropped_mass for s in starts) > 1e-5:
-                        raise MaskReuseCalibrationError(
-                            "checkpoint violates original anchor constraint"
-                        )
-        cost = sum(edge(start, stop, targets).anchor_tile_cost for start, stop in path)
-        cost += sum(2 * choice.retained_tiles for choice in choices.values())
-        selection = freeze_selection(targets, anchors, nearest, choices, cost, minimum, target_met)
-        if payload(selection) != raw:
-            raise MaskReuseCalibrationError(
-                "checkpoint work/risk summary differs from actual coefficients"
-            )
-        return selection
-
     def solve_path(
         targets: Mapping[Bucket, float],
         *,
@@ -1193,6 +1077,7 @@ def _selection_pass(
         seed_pair_savings = defaultdict(int)
         for start in range(len(layers)):
             anchor = layers[start]
+            session._remaining_seconds()
             maximum_consumer_stop = min(len(layers), start + dataset.max_reuse_span + 1)
             for consumer_index in range(start + 1, maximum_consumer_stop):
                 if allowed_edges is not None and not any(
@@ -1389,7 +1274,8 @@ def _selection_pass(
                         for name, row in constraints.items()
                         if name not in before_risk_set and name not in all_risk_names
                     )
-                    current_problem.constraints = type(constraints)(ordered)
+                    constraints.clear()
+                    constraints.update(ordered)
                     diagnostics["active_prompts"] = len(active_prompts)
                 diagnostics["row_materialization_seconds"] += time.monotonic() - row_started
                 return bool(violated)
@@ -1532,8 +1418,9 @@ def _selection_pass(
         ):
             return None
         if minimize_and_fix(cost_expression, "fix_cost", integral=True) is None:
-            raise MaskReuseCalibrationError(
-                "topology solver lost feasibility after fixing worst-prompt total risk"
+            raise MaskReuseSolverFailure(
+                "topology solver lost feasibility after fixing worst-prompt total risk",
+                session.records,
             )
         deterministic_phases = (
             (reuse_count_expression, "fix_reuse_count"),
@@ -1541,8 +1428,8 @@ def _selection_pass(
         )
         for expression, fix_name in deterministic_phases:
             if minimize_and_fix(expression, fix_name, integral=True) is None:
-                raise MaskReuseCalibrationError(
-                    "topology solver lost deterministic tie-break feasibility"
+                raise MaskReuseSolverFailure(
+                    "topology solver lost deterministic tie-break feasibility", session.records
                 )
         session.lexicographic(
             problem,
@@ -1577,7 +1464,9 @@ def _selection_pass(
             edge_key for edge_key, variable in edge_variables.items() if variable.value() > 0.5
         )
         if not selected or selected[0][0] != 0 or selected[-1][1] != len(layers):
-            raise MaskReuseCalibrationError("topology solver returned a non-covering path")
+            raise MaskReuseSolverFailure(
+                "topology solver returned a non-covering path", session.records
+            )
         anchors = tuple(layers[start] for start, _ in selected)
         nearest: dict[int, int] = {}
         choices: dict[tuple[Bucket, int, int], _Choice] = {}
@@ -1606,29 +1495,6 @@ def _selection_pass(
             target_met,
         )
 
-    def solve_menu(
-        targets, *, minimum_bmm1_skipped_tiles, target_met, maximize_bmm1_skipped_tiles=False
-    ):
-        kwargs = {
-            "minimum_bmm1_skipped_tiles": minimum_bmm1_skipped_tiles,
-            "target_met": target_met,
-            "maximize_bmm1_skipped_tiles": maximize_bmm1_skipped_tiles,
-        }
-        if menu_checkpoint is None:
-            return solve_path(targets, **kwargs)
-        case = {
-            "pass": "maximum_work" if maximize_bmm1_skipped_tiles else "target",
-            "targets": [[list(b), targets[b].hex()] for b in dataset.buckets],
-            "required_tiles": minimum_bmm1_skipped_tiles,
-            "eligible_tiles": eligible_bmm1_tiles(targets),
-        }
-        return menu_checkpoint.run(
-            case,
-            lambda: payload(solve_path(targets, **kwargs)),
-            lambda raw: restore(raw, targets, minimum_bmm1_skipped_tiles, target_met),
-            session,
-        )
-
     frontier: list[Mapping[str, object]] = []
     candidates: list[tuple[tuple[object, ...], _FrozenSelection]] = []
     maximum_candidates: list[tuple[tuple[object, ...], _FrozenSelection]] = []
@@ -1648,7 +1514,7 @@ def _selection_pass(
             )
             for bucket in dataset.buckets
         )
-        solved = solve_menu(
+        solved = solve_path(
             targets,
             minimum_bmm1_skipped_tiles=required_tiles,
             target_met=True,
@@ -1699,7 +1565,7 @@ def _selection_pass(
         selection = min(candidates, key=lambda item: item[0])[1]
         return selection, frontier
     for targets, target_values, row in infeasible_targets:
-        maximum = solve_menu(
+        maximum = solve_path(
             targets,
             minimum_bmm1_skipped_tiles=None,
             maximize_bmm1_skipped_tiles=True,
@@ -1868,7 +1734,6 @@ def calibrate_mask_reuse_topology(
     solver_config: MaskReuseSolverConfig | None = None,
     donor_head_mode: str = "calibrated",
     anchor_stride_choices: Sequence[int] | None = None,
-    menu_checkpoint=None,
 ) -> dict[str, object]:
     """Select a global candidate topology and evaluate it without held-out tuning.
 
@@ -1886,9 +1751,8 @@ def calibrate_mask_reuse_topology(
     retaining exact fallback. Optional anchor strides refer to full-attention
     layer positions and restrict selection to one complete stride topology.
 
-    ``menu_checkpoint`` is an optional trusted orchestration hook. It restores
-    completed native-menu witnesses and cumulative budgets, not partial MIPs.
     """
+    solver_session = _SolverSession(solver_config)
     _validate_donor_head_mode(donor_head_mode)
     if not isinstance(checkpoint_manifest, VerifiedCheckpointManifest):
         raise MaskReuseCalibrationError(
@@ -1907,6 +1771,8 @@ def calibrate_mask_reuse_topology(
         "max_observed_sparsity",
     } <= params.keys()
     dataset = source.validated_dataset(fit=fit)
+    if any(hi is None for _, hi in dataset.buckets):
+        raise MaskReuseCalibrationError("calibration context ranges require finite maximum lengths")
     stride_paths = _stride_paths(
         dataset.attention_layers, anchor_stride_choices, dataset.max_reuse_span
     )
@@ -1940,67 +1806,27 @@ def calibrate_mask_reuse_topology(
         minimum=0.0,
         maximum=1.0,
     )
-    solver_session = (
-        _SolverSession(solver_config)
-        if menu_checkpoint is None
-        else menu_checkpoint.session(
-            solver_config or MaskReuseSolverConfig(),
-            {
-                "selection_contract": "per_bucket_rho_unnormalized_risk_v2",
-                "source_sha256": input_sha256,
-                "checkpoint_sha256": checkpoint_manifest.sha256,
-                "fit": fit,
-                "target_bmm1_skip_ratio": bmm1_target,
-                "max_anchor_dropped_mass": anchor_bound,
-                "donor_head_mode": donor_head_mode,
-                "stride_paths": None
-                if stride_paths is None
-                else {str(k): [list(edge) for edge in path] for k, path in stride_paths.items()},
-                "attention_layers": list(dataset.attention_layers),
-                "global_num_heads": dataset.global_num_heads,
-                "max_reuse_span": dataset.max_reuse_span,
-            },
-        )
+    solver_session._remaining_seconds()
+    selection, frontier = _selection_pass(
+        source,
+        dataset,
+        target_bmm1_skip_ratio=bmm1_target,
+        max_anchor_dropped_mass=anchor_bound,
+        solver_session=solver_session,
+        donor_head_mode=donor_head_mode,
+        stride_paths=stride_paths,
     )
-    try:
-        selection, frontier = _selection_pass(
-            source,
-            dataset,
-            target_bmm1_skip_ratio=bmm1_target,
-            max_anchor_dropped_mass=anchor_bound,
-            solver_session=solver_session,
-            donor_head_mode=donor_head_mode,
-            stride_paths=stride_paths,
-            menu_checkpoint=menu_checkpoint,
+    reuse_evaluations, anchor_evaluations, bmm1_evaluations = _evaluation_pass(
+        source,
+        dataset,
+        selection,
+        anchor_dropped_mass_report_threshold=anchor_report_threshold,
+        reuse_dropped_mass_report_threshold=reuse_report_threshold,
+    )
+    if source.sha256() != input_sha256:
+        raise MaskReuseCalibrationError(
+            "topology discovery capture file changed during calibration; discard this result"
         )
-        if menu_checkpoint is not None and source.sha256() != input_sha256:
-            raise MaskReuseCalibrationError("coefficient source changed during menu execution")
-    except BaseException as error:
-        if menu_checkpoint is not None and (
-            isinstance(error, MaskReuseSolverFailure)
-            or not isinstance(error, (MaskReuseSolverError, KeyboardInterrupt))
-        ):
-            menu_checkpoint.invalidate(str(error))
-        raise
-    finally:
-        if menu_checkpoint is not None:
-            menu_checkpoint.close(solver_session)
-    try:
-        reuse_evaluations, anchor_evaluations, bmm1_evaluations = _evaluation_pass(
-            source,
-            dataset,
-            selection,
-            anchor_dropped_mass_report_threshold=anchor_report_threshold,
-            reuse_dropped_mass_report_threshold=reuse_report_threshold,
-        )
-        if source.sha256() != input_sha256:
-            raise MaskReuseCalibrationError(
-                "topology discovery capture file changed during calibration; discard this result"
-            )
-    except BaseException as error:
-        if menu_checkpoint is not None:
-            menu_checkpoint.invalidate(str(error))
-        raise
 
     policies = []
     bucket_reports = []

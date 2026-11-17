@@ -16,8 +16,8 @@
 """Select a global mask-reuse topology from bounded discovery captures.
 
 The output is a development-selected, held-out-evaluated topology candidate.
-Freeze its ``anchors`` and ``nearest`` fields, then rerun the ordinary compact
-collector/calibrator to obtain the final context-bucket policy.
+Pass this artifact and the same discovery captures to ``calibrate_mask_reuse.py``
+to refit head maps and thresholds with the selected anchors frozen.
 """
 
 from __future__ import annotations
@@ -265,6 +265,12 @@ def run(args: argparse.Namespace) -> Path:
     vanilla_path = Path(args.vanilla_config)
     prompt_path = Path(args.prompt_plan)
     output_path = Path(args.output)
+    report_path = args.output_report or Path(str(output_path) + ".report.json")
+    if output_path.resolve() == report_path.resolve():
+        raise ValueError("topology and report output paths must differ")
+    for path in (output_path, report_path):
+        if path.exists() or path.is_symlink():
+            raise ValueError(f"output already exists: {path}")
     capture_snapshot = read_stable_file_snapshot(captures_path, label="topology discovery captures")
     manifest_snapshot = read_stable_file_snapshot(manifest_path, label="topology capture manifest")
     vanilla_snapshot = read_stable_file_snapshot(vanilla_path, label="vanilla calibration")
@@ -357,12 +363,19 @@ def main(argv: list[str] | None = None) -> int:
         run(args)
     except MaskReuseSolverError as error:
         report_path = args.output_report or Path(args.output + ".report.json")
-        _publish_no_clobber(
-            report_path,
-            _canonical_json_bytes(
-                {"selection_status": "unresolved", "error": str(error), "solver": error.diagnostics}
-            ),
-        )
+        try:
+            _publish_no_clobber(
+                report_path,
+                _canonical_json_bytes(
+                    {
+                        "selection_status": "unresolved",
+                        "error": str(error),
+                        "solver": error.diagnostics,
+                    }
+                ),
+            )
+        except OSError as publication_error:
+            print(f"[ModelOpt] Could not publish unresolved report: {publication_error}")
         print(f"[ModelOpt] Selection unresolved; report: {report_path.resolve()}")
         return 3
     except (OSError, ValueError) as error:

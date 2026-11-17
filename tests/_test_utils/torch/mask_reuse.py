@@ -157,14 +157,12 @@ def solve(tmp_path, cp, rows, rho, backend):
     )
 
 
-def brute(row, rho):
-    """Enumerate topology and head choices without using selector/pruning helpers."""
-    layers, heads, eligible = (
-        len(row["attention_layers"]),
-        row["global_num_heads"],
-        row["eligible_tiles"],
-    )
+def brute(observations, rho):
+    """Enumerate every topology/map, using all supplied calibration prompts."""
+    rows = observations if isinstance(observations, list) else [observations]
+    layers, heads = len(rows[0]["attention_layers"]), rows[0]["global_num_heads"]
     denominator = layers * heads
+    eligible_sum = sum(r["eligible_tiles"] for r in rows)
     best = None
     for flags in itertools.product((False, True), repeat=layers - 1):
         anchors = (0, *(i + 1 for i, flag in enumerate(flags) if flag))
@@ -173,30 +171,35 @@ def brute(row, rho):
         ]
         nearest = {layer: max(a for a in anchors if a <= layer) for layer in range(layers)}
         for donors in itertools.product(range(-1, heads), repeat=len(consumers)):
-            skipped, cost, reused = 0, 0, 0
-            risk = 0.0
-            for a in anchors:
-                stats = row["anchor_stats_by_layer"][str(a)]
-                cost += heads * eligible + sum(stats["retained_tiles"])
-                risk += sum(stats["dropped_mass"])
-            for (layer, head), donor in zip(consumers, donors):
-                if donor == -1:
-                    cost += 2 * eligible
-                else:
-                    anchor = nearest[layer]
-                    kept = row["anchor_stats_by_layer"][str(anchor)]["retained_tiles"][donor]
-                    skipped += eligible - kept
-                    cost += 2 * kept
-                    risk += row["consumer_candidates_by_layer"][str(layer)][str(anchor)][
-                        "dropped_mass"
-                    ][head][donor]
-                    reused += 1
-            if skipped < required_skipped_tiles(rho, denominator * eligible):
+            skipped, cost = 0, 0
+            prompt_risks = []
+            for row in rows:
+                eligible = row["eligible_tiles"]
+                risk = []
+                for a in anchors:
+                    stats = row["anchor_stats_by_layer"][str(a)]
+                    cost += heads * eligible + sum(stats["retained_tiles"])
+                    risk.extend(stats["dropped_mass"])
+                for (layer, head), donor in zip(consumers, donors):
+                    if donor == -1:
+                        cost += 2 * eligible
+                    else:
+                        anchor = nearest[layer]
+                        kept = row["anchor_stats_by_layer"][str(anchor)]["retained_tiles"][donor]
+                        skipped += eligible - kept
+                        cost += 2 * kept
+                        risk.append(
+                            row["consumer_candidates_by_layer"][str(layer)][str(anchor)][
+                                "dropped_mass"
+                            ][head][donor]
+                        )
+                prompt_risks.append(math.fsum(risk) / denominator)
+            if skipped < required_skipped_tiles(rho, denominator * eligible_sum):
                 continue
             key = (
-                round(risk / denominator, 14),
+                round(max(prompt_risks), 14),
                 cost,
-                reused,
+                sum(d >= 0 for d in donors),
                 len(anchors),
                 anchors,
                 tuple(d + 1 for d in donors),

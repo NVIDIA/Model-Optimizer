@@ -21,6 +21,8 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+import numpy as np
+
 _FORMULA = "a * exp(b * target_sparsity)"
 
 _CALIBRATION_PROTOCOL = "modelopt_mask_reuse_target_sparsity_v1"
@@ -94,6 +96,23 @@ def _number(
     if not math.isfinite(result) or below or (maximum is not None and result > maximum):
         raise MaskReuseCalibrationError(f"{name} is outside its valid range")
     return result
+
+
+def _dropped_mass_matrix(raw: object, *, heads: int, label: str) -> tuple[tuple[float, ...], ...]:
+    """Validate a head-by-donor matrix without formatting a label for every element."""
+    if not isinstance(raw, list) or len(raw) != heads:
+        raise MaskReuseCalibrationError(f"{label} must have {heads} consumer rows")
+    rows = []
+    for head, row in enumerate(raw):
+        if not isinstance(row, list) or len(row) != heads:
+            raise MaskReuseCalibrationError(f"{label}[{head}] must cover every global donor head")
+        for donor, value in enumerate(row):
+            if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 1:
+                raise MaskReuseCalibrationError(
+                    f"{label}[{head}][{donor}] must be finite and in [0, 1]"
+                )
+        rows.append(tuple(map(float, row)))
+    return tuple(rows)
 
 
 def _sha256(value: object, name: str) -> str:
@@ -222,8 +241,10 @@ def _normalize_topology(raw: Mapping[str, object]) -> tuple[tuple[int, ...], dic
             raise MaskReuseCalibrationError(f"topology layer {layer} has invalid anchor {anchor}")
         if layer in anchor_set and anchor != layer:
             raise MaskReuseCalibrationError(f"topology anchor {layer} must map to itself")
-    if not any(layer != anchor for layer, anchor in nearest.items()):
-        raise MaskReuseCalibrationError("topology must contain at least one reuse layer")
+        if anchor != max(a for a in anchors if a <= layer):
+            raise MaskReuseCalibrationError(
+                f"topology layer {layer} must use its nearest preceding anchor"
+            )
     return anchors, dict(sorted(nearest.items()))
 
 
@@ -385,23 +406,30 @@ def _risk_variant(max_anchor_dropped_mass, anchor_dropped_mass_report_threshold)
 
 def _pareto_donor_options(options):
     """Prune only dominance that also preserves the canonical donor-map tie-break."""
-    kept = []
-    for candidate in options:
-        rank = (not candidate.choice.fallback, candidate.choice.donor_head)
-        dominated = False
-        for other in options:
-            if other is candidate:
-                continue
-            no_worse = other.bmm1_skipped_tiles >= candidate.bmm1_skipped_tiles and all(
-                a <= b for a, b in zip(other.risk_by_prompt, candidate.risk_by_prompt, strict=True)
-            )
-            canonical = (not other.choice.fallback, other.choice.donor_head) < rank
-            if no_worse and (other.bmm1_skipped_tiles > candidate.bmm1_skipped_tiles or canonical):
-                dominated = True
-                break
-        if not dominated:
-            kept.append(candidate)
-    return tuple(kept)
+    skipped = np.asarray([option.bmm1_skipped_tiles for option in options])
+    ranks = np.asarray(
+        [0 if option.choice.fallback else option.choice.donor_head + 1 for option in options]
+    )
+    risks = np.asarray([option.risk_by_prompt for option in options], dtype=np.float64)
+    dominates = skipped[:, None] >= skipped[None, :]
+    for prompt in risks.T:
+        dominates &= prompt[:, None] <= prompt[None, :]
+    dominates &= (skipped[:, None] > skipped[None, :]) | (ranks[:, None] < ranks[None, :])
+    keep = ~dominates.any(axis=0)
+    retained_risks = risks[keep]
+    # A zero MIP gap does not resolve distinct coefficients below the native
+    # feasibility precision. Refuse these alternatives rather than treating
+    # them as exact ties and preferring cheaper work over lower risk.
+    separations = np.zeros((len(retained_risks), len(retained_risks)))
+    for prompt in retained_risks.T:
+        np.maximum(separations, np.abs(prompt[:, None] - prompt[None, :]), out=separations)
+    if np.any((separations > 0) & (separations <= 1e-9)):
+        from .mask_reuse_solver import MaskReuseSolverError
+
+        raise MaskReuseSolverError(
+            "distinct donor risks are below native solver precision; selection is unresolved", []
+        )
+    return tuple(option for option, retained in zip(options, keep, strict=True) if retained)
 
 
 def _validate_donor_head_mode(mode: str) -> None:
@@ -414,7 +442,7 @@ def _donor_head_candidates(mode: str, consumer_head: int, global_num_heads: int)
 
 
 def _canonical_evidence(raw: Mapping[str, object]) -> dict[str, str]:
-    missing = _EVIDENCE_FIELDS - raw.keys()
+    missing = {"vanilla_fit_sha256", "reuse_bundle_sha256"} - raw.keys()
     extra = raw.keys() - _EVIDENCE_FIELDS
     if missing or extra:
         raise MaskReuseCalibrationError(

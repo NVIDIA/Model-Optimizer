@@ -35,6 +35,7 @@ from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_compact i
 )
 from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_solver import (
     MaskReuseSolverConfig,
+    MaskReuseSolverError,
 )
 
 _FIT = {
@@ -417,4 +418,28 @@ def test_compact_validation_rejects_impossible_geometry_or_sparsity_trend(tmp_pa
             max_anchor_dropped_mass=0.03,
             reuse_dropped_mass_report_threshold=0.025,
             target_bmm1_skip_ratio=0.25,
+        )
+
+
+@pytest.mark.parametrize("delta", [1e-17, 1e-13, 1e-10])
+def test_unresolvable_donor_risks_do_not_export_a_more_expensive_risk(tmp_path, delta):
+    checkpoint = _checkpoint(tmp_path)
+    path = tmp_path / "near.jsonl"
+    captures = [
+        _capture(split, prompt, 0.5, checkpoint.sha256)
+        for split, prompt in (("calibration", "cal-0"), ("heldout", "held-0"))
+    ]
+    for capture in captures:
+        capture["anchor_stats_by_layer"]["0"]["retained_tiles"] = [2, 1]
+        capture["consumer_layers"]["1"]["dropped_mass"] = [[0.01, 0.01 + delta]] * 2
+    digest = _write_payload(path, captures)
+    with pytest.raises(MaskReuseSolverError):
+        calibrate_compact_mask_reuse_policy(
+            path,
+            vanilla_calibration=_FIT,
+            topology=_TOPOLOGY,
+            checkpoint_manifest=checkpoint,
+            evidence=_evidence(digest),
+            reuse_dropped_mass_report_threshold=0.02,
+            target_bmm1_skip_ratio=0.1,
         )

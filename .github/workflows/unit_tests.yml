@@ -8,6 +8,7 @@ on:
     paths:
       - ".github/workflows/unit_tests.yml"
       - "modelopt/**"
+      - "examples/vllm_serve/**"
       - "noxfile.py"
       - "pyproject.toml"
       - "tests/unit/**"
@@ -47,6 +48,7 @@ jobs:
           files: |
             .github/workflows/unit_tests.yml
             modelopt/**
+            examples/vllm_serve/**
             modelopt_recipes/**
             noxfile.py
             pyproject.toml

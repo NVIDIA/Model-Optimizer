@@ -18,6 +18,7 @@
 import importlib.util
 import json
 import os
+import runpy
 import sys
 from hashlib import sha256
 from pathlib import Path
@@ -492,7 +493,7 @@ def test_capture_environment_rejects_extra_fa4_source_path(tmp_path, monkeypatch
 def resume_case(tmp_path, monkeypatch):
     checkpoint = tmp_path / "model"
     checkpoint.mkdir()
-    (checkpoint / "config.json").write_text("{}\n")
+    (checkpoint / "config.json").write_text('{"num_hidden_layers":2,"num_attention_heads":2}\n')
     (checkpoint / "model.safetensors").write_bytes(b"weights")
     witness = create_checkpoint_manifest(checkpoint, model="toy")
     source = tmp_path / "source"
@@ -583,7 +584,35 @@ def resume_case(tmp_path, monkeypatch):
     return args
 
 
-def test_partial_resume_matches_uninterrupted_capture_and_manifest_bytes(resume_case, tmp_path):
+def test_publication_failure_can_resume_completed_capture(resume_case, tmp_path, monkeypatch):
+    args = resume_case
+    args.max_wall_seconds = 3600
+    publish = collect_mask_reuse_cli._publish_no_clobber
+
+    def fail_publication(*args):
+        raise OSError("output filesystem does not support hard links")
+
+    monkeypatch.setattr(collect_mask_reuse_cli, "_publish_no_clobber", fail_publication)
+    with pytest.raises(OSError):
+        collect_mask_reuse_cli.run(args)
+    prior = Path(args.output).parent
+    assert json.loads((prior / "capture.failure.json").read_text())["resumable_prefix"]
+    monkeypatch.setattr(collect_mask_reuse_cli, "_publish_no_clobber", publish)
+    args.resume_from = prior
+    args.output = str(tmp_path / "new-destination/captures.jsonl")
+    capture, manifest = collect_mask_reuse_cli.run(args)
+    assert (
+        len(capture.read_bytes().splitlines())
+        == json.loads(manifest.read_text())["capture_count"]
+        == 4
+    )
+    assert _LLM.instances[-1].events.count("generate") == 0
+
+
+@pytest.mark.parametrize("torn_tail", [False, True])
+def test_partial_resume_matches_uninterrupted_capture_and_manifest_bytes(
+    resume_case, tmp_path, torn_tail
+):
     args = resume_case
     args.max_wall_seconds = 1e-12
     assert collect_mask_reuse_cli.run(args) is None
@@ -593,6 +622,10 @@ def test_partial_resume_matches_uninterrupted_capture_and_manifest_bytes(resume_
     assert receipt["eligible_as_capture_manifest"] is False
     assert not Path(args.output).exists()
     assert not Path(args.output + ".manifest.json").exists()
+    if torn_tail:
+        (prior / "capture.partial.json").unlink()
+        with (prior / "capture.progress.jsonl").open("ab") as handle:
+            handle.write(b'{"uncommitted":')
     before = (prior / "capture.progress.jsonl").read_bytes()
     args.resume_from = prior
     args.max_wall_seconds = None
@@ -732,6 +765,7 @@ def test_runtime_interruption_preserves_only_completed_requests(resume_case, tmp
 
 
 class _StreamLLM(_LLM):
+    discovery = False
     fail_after_chunk = None
     tamper_completion = False
     wrong_output_tokens = False
@@ -795,6 +829,19 @@ class _StreamLLM(_LLM):
                         eligible - 1,
                         eligible,
                     ]
+                    if self.discovery:
+                        consumer = payload.pop("consumer_layers")["1"]
+                        consumer.pop("anchor_layer")
+                        payload.update(
+                            capture_mode="topology_discovery",
+                            attention_layers=[0, 1],
+                            max_reuse_span=1,
+                            consumer_candidates_by_layer={"1": {"0": consumer}},
+                        )
+                        payload["anchor_stats_by_layer"]["1"] = dict(
+                            payload["anchor_stats_by_layer"]["0"]
+                        )
+
                 handle.write(
                     collect_mask_reuse_cli._canonical_capture_line(
                         {
@@ -854,6 +901,98 @@ def whole_resume_case(resume_case, tmp_path, monkeypatch):
     monkeypatch.setattr(_StreamLLM, "wrong_output_tokens", False)
     monkeypatch.setattr(_StreamLLM, "malformed_completion", False)
     return args
+
+
+@pytest.mark.parametrize("discovery", [False, True])
+def test_whole_prefill_collector_output_runs_through_refit(
+    whole_resume_case, tmp_path, monkeypatch, discovery
+):
+    args = whole_resume_case
+    monkeypatch.setattr(_StreamLLM, "discovery", discovery)
+    if discovery:
+        args.plan = "test_topology_discovery"
+        args.max_reuse_span = 1
+    fit = json.loads(Path(args.vanilla_config).read_text())
+    fit["prefill"].update(a=82.07903190934026, b=8.239507888257323)
+    Path(args.vanilla_config).write_text(json.dumps(fit))
+    args.target_sparsities = [0.5, 0.6, 0.7]
+    args.max_model_len = 40961
+    prompts = Path(args.prompts_jsonl)
+    rows = [json.loads(line) for line in prompts.read_text().splitlines()]
+    for i, row in enumerate(rows):
+        tokens = list(range(i, i + 40960))
+        row.update(prompt_token_ids=tokens, prompt_token_ids_sha256=source_capture_sha256(tokens))
+    prompts.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    capture, manifest = collect_mask_reuse_cli.run(args)
+    evidence = json.loads(manifest.read_text())
+    assert evidence["capture_count"] == 30
+    assert evidence["whole_prefill"]["analytical_dense_capture_count"] == 8
+    # Old whole-prefill manifests could silently omit all-dense prefixes.
+    from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_stream import (
+        validate_whole_prefill_evidence,
+    )
+
+    omitted = json.loads(manifest.read_text())
+    omitted["whole_prefill"]["analytical_dense_capture_count"] = 0
+    omitted["capture_count"] -= 8
+    with pytest.raises(collect_mask_reuse_cli.CaptureContractError):
+        validate_whole_prefill_evidence(omitted)
+    topology = tmp_path / "topology.json"
+    if discovery:
+        discover = runpy.run_path(str(_SCRIPT_PATH.with_name("calibrate_mask_reuse_topology.py")))
+        assert (
+            discover["main"](
+                [
+                    "--checkpoint",
+                    args.model,
+                    "--captures",
+                    str(capture),
+                    "--capture-manifest",
+                    str(manifest),
+                    "--vanilla-config",
+                    args.vanilla_config,
+                    "--prompt-plan",
+                    args.prompts_jsonl,
+                    "--target-bmm1-skip-ratio",
+                    "0",
+                    "--reuse-dropped-mass-report-threshold",
+                    "0.02",
+                    "--output",
+                    str(topology),
+                ]
+            )
+            == 0
+        )
+    else:
+        topology.write_text('{"anchors":[0],"nearest":{"0":0,"1":0}}')
+    policy, report = tmp_path / "policy.json", tmp_path / "report.json"
+    cli = runpy.run_path(str(_SCRIPT_PATH.with_name("calibrate_mask_reuse.py")))
+    assert (
+        cli["main"](
+            [
+                "--checkpoint",
+                args.model,
+                "--compact-captures",
+                str(capture),
+                "--capture-manifest",
+                str(manifest),
+                "--vanilla-config",
+                args.vanilla_config,
+                "--topology",
+                str(topology),
+                "--target-bmm1-skip-ratio",
+                "0",
+                "--reuse-dropped-mass-report-threshold",
+                "0.02",
+                "--output-policy",
+                str(policy),
+                "--output-report",
+                str(report),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(policy.read_text())["provenance"]["input_capture_count"] == 30
 
 
 @pytest.mark.parametrize("hard_kill", [False, True])

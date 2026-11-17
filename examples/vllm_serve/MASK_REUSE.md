@@ -5,7 +5,7 @@ It does not promote a serving policy or establish task accuracy. The capture
 provider is a separate runtime package; install and validate that provider
 before collecting real-model data. Decode remains dense.
 
-Install the optional exact solver from the repository root:
+Install the optional MILP solver from the repository root:
 
 ```bash
 pip install -e '.[mask-reuse]'
@@ -94,13 +94,16 @@ python calibrate_mask_reuse_topology.py --checkpoint <CHECKPOINT> \
 
 Discovery enforces the BMM1 target in **every context range**, rather than only
 over pooled prompts. It rejects duplicate prompt sources and inconsistent
-layer sets or spans. It uses the same risk objective and exact solver contract
+layer sets or spans. It uses the same risk objective and solver optimality checks
 as refitting. A pooled maximum-saving diagnostic is not a per-range guarantee.
 
-Freeze the exported `anchors` and `nearest` assignments. Collect refit statistics
-using that topology, then pass the complete discovery artifact directly to
-`--topology` below. Checkpoint identity, head count, layer coverage, and target
-status are checked before refitting. Discovery never selects using held-out data.
+Freeze the exported `anchors` and `nearest` assignments. Pass the discovery
+capture file and its manifest to the refit command below, with the complete
+discovery artifact as `--topology`. Refit streams only the chosen anchor and
+consumer matrices from those captures; no second GPU capture is required.
+The candidate records both source and topology hashes. Checkpoint identity,
+head count, layer coverage, captured span, and target status are checked before
+refitting. Discovery never selects using held-out data.
 
 ## Refit a fixed topology
 
@@ -109,17 +112,17 @@ python calibrate_mask_reuse.py --checkpoint <CHECKPOINT> \
   --checkpoint-manifest checkpoint-manifest.json \
   --compact-captures captures.jsonl --capture-manifest captures.jsonl.manifest.json \
   --vanilla-config sparse_attention_config.json --topology topology.json \
-  --calibration-plan calibration-plan.json --family-registry family-registry.json \
-  --grouped-fit grouped-fit.json --outer-report outer-report.json \
   --anchor-dropped-mass-report-threshold 0.02 \
   --reuse-dropped-mass-report-threshold 0.02 --target-bmm1-skip-ratio 0.50 \
   --output-policy candidate.json --output-report report.json
 ```
 
 The topology must cover exactly the checkpoint's full-attention layers and
-query heads. Optional `--topology-sha256` pins the topology bytes. Evidence
-files must be nonempty JSON; their hashes bind the candidate to those files.
-This structural check does not replace the end-to-end quality protocol.
+query heads. Context ranges need finite maximum lengths. Optional
+`--topology-sha256` pins the topology bytes. Capture, checkpoint, fit, and
+topology identities are mandatory. The four additional provenance JSON flags
+are optional; supplying them records their hashes without certifying their
+contents or benchmark quality.
 
 For each context range, the selector meets the model-wide BMM1 skip target,
 then minimizes worst-prompt anchor-plus-consumer dropped mass. It subsequently
@@ -127,15 +130,30 @@ minimizes tile cost and uses deterministic lexicographic tie-breaks. The two
 reported mass thresholds are diagnostics, not hard acceptance caps. The
 optional `--max-anchor-dropped-mass` selects the older capped formulation.
 
-HiGHS is the default; `--solver cbc` selects the hardened fallback.
-`--solver-time-limit-seconds` bounds the complete selection session. Every stage
-requires a proved optimum with zero native MIP gap; a feasible incumbent alone
-is insufficient. Unresolved solves return exit code 3 and a report. An
-infeasible BMM1 target returns code 2 and a report, without exporting a policy.
-`--allow-unmet-target` explicitly requests a diagnostic maximum-saving candidate.
-A zero target is valid and may produce a dense policy.
+HiGHS is the default; `--solver cbc` selects the hardened fallback. Every
+stage requires optimal status with zero native MIP gap. The returned assignment
+must reproduce the reported objective. HiGHS starts with presolve disabled;
+an inconsistent assignment or nonzero gap triggers a fresh, unseeded solve with
+presolve enabled. A second failure remains unresolved rather than accepting a
+feasible incumbent or a positive gap.
+
+Fixed risk is rechecked using exact arithmetic on the captured coefficients,
+with an eight-ULP allowance for expression accumulation. Distinct donor risk
+vectors separated by at most native feasibility precision (`1e-9` in raw
+per-head mass) remain unresolved; they are not rounded into ties. Native
+optimal status is not a rational-arithmetic proof of arbitrary sub-tolerance
+ordering.
+
+`--solver-time-limit-seconds` is a shared cooperative selection budget checked
+during model construction. Native operations may overrun it; use a
+process or scheduler deadline when a hard wall-time limit is required.
+Unresolved solves return exit code 3 and a report. An infeasible BMM1 target
+returns code 2 and a report without a policy. `--allow-unmet-target` explicitly
+requests a diagnostic maximum-saving candidate. A zero target is valid and may
+produce a dense policy.
 
 Held-out observations evaluate the frozen choices without retuning them.
 Outputs retain `promotion_status="candidate_only"` and
 `deployment_geometry_validated=false`. Serving must reject these candidates
-until the independent quality and runtime-validation gates pass.
+until the independent quality and runtime-validation gates pass. Production-size
+discovery completion remains unqualified.

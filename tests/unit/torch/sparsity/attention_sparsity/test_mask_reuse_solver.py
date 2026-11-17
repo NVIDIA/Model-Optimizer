@@ -15,19 +15,109 @@
 
 """Proof status, bounded exact ordering, and budget contracts for mask-reuse solves."""
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pulp
 import pytest
+from _test_utils.torch.mask_reuse import brute, captures, checkpoint, solve
 
 from modelopt.torch.sparsity.attention_sparsity.calibration import (
     mask_reuse_solver as solver_module,
 )
+from modelopt.torch.sparsity.attention_sparsity.calibration import mask_reuse_topology
 from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_solver import (
     MaskReuseSolverConfig,
     MaskReuseSolverError,
     _SolverSession,
 )
+
+
+def test_highs_stale_mip_start_cannot_fix_a_nonoptimal_risk(monkeypatch):
+    pytest.importorskip("highspy")
+    fixture = Path(__file__).parents[4] / "_test_utils/torch/data/mask_reuse_highs_stale"
+    start = json.loads(fixture.with_suffix(".json").read_text())
+    variables, problem = pulp.LpProblem.fromMPS(str(fixture.with_suffix(".mps")))
+    for index, name in enumerate(start["names"]):
+        variables[f"c{index}"].name = name
+    problem._mask_reuse_initial_values = {
+        variables[f"c{i}"]: value for i, value in enumerate(start["values"])
+    }
+    risk = next(iter(problem.objective))
+    session = _SolverSession()
+    original_solver = session._solver
+
+    def use_affected_native_configuration():
+        solver = original_solver()
+        if not session._highs_cold:
+            solver.optionsDict["presolve"] = "choose"
+        return solver
+
+    monkeypatch.setattr(session, "_solver", use_affected_native_configuration)
+    # Exact binary fractions; brute force and a cold native solve agree.
+    assert session.minimize_and_fix(problem, risk, "risk", integral=False) == 4268 / 65536
+    assert risk.value() == 4268 / 65536
+
+
+@pytest.mark.parametrize("seed", [3, 16, 25, 30, 34, 39])
+def test_native_roundoff_retries_without_accepting_a_nonzero_gap(tmp_path, seed):
+    pytest.importorskip("highspy")
+    cp = checkpoint(tmp_path)
+    ranges = ((129, 512, 256), (513, 1024, 768), (1025, 4096, 2048), (4097, 8192, 8192))
+    result = solve(tmp_path, cp, captures(cp, seed=seed, buckets=ranges), 0.1, "highs")
+    assert result["bmm1_skip_objective"]["target_met"]
+    assert all(
+        phase.get("native_gap", 0) == 0 or phase.get("cold_retry")
+        for phase in result["provenance"]["solver"]["phases"]
+    )
+
+
+def test_lazy_prompt_rows_preserve_the_eager_optimum(tmp_path, monkeypatch):
+    pytest.importorskip("highspy")
+    cp = checkpoint(tmp_path)
+    rows = captures(cp, seed=1, buckets=((129, 512, 256), (129, 512, 384), (129, 512, 512)))
+    eager = solve(tmp_path, cp, rows, 0.1, "highs")
+    monkeypatch.setattr(mask_reuse_topology, "_GENERATED_RISK_TERM_THRESHOLD", -1)
+    lazy = solve(tmp_path, cp, rows, 0.1, "highs")
+    for key in ("anchors", "nearest", "discovery_context_policies", "risk_selection_objective"):
+        assert lazy[key] == eager[key]
+
+
+@pytest.mark.parametrize(
+    ("seed", "tied"), [(0, False), (5, False), (7, False), (11, False), (0, True), (5, True)]
+)
+def test_cpu_selector_matches_all_brute_force_objectives(tmp_path, seed, tied):
+    pytest.importorskip("highspy")
+    cp = checkpoint(tmp_path)
+    rows = captures(cp, seed=seed, buckets=((129, 512, 256), (129, 512, 384)))
+    if tied:
+        # Binary-fraction ties require the cost and donor-map stages. Random
+        # continuous risks usually have a unique optimum and cannot test them.
+        for row in rows:
+            for stats in row["anchor_stats_by_layer"].values():
+                stats["dropped_mass"] = [round(x * 1000) % 4 / 8 for x in stats["dropped_mass"]]
+            for candidates in row["consumer_candidates_by_layer"].values():
+                for stats in candidates.values():
+                    stats["dropped_mass"] = [
+                        [round(x * 1000) % 4 / 8 for x in values]
+                        for values in stats["dropped_mass"]
+                    ]
+    expected = brute([row for row in rows if row["invocation"]["split"] == "calibration"], 0.1)
+    result = solve(tmp_path, cp, rows, 0.1, "highs")
+    assert expected is not None
+    key, consumers, donors = expected
+    assert result["calibration_report"]["combined_tile_cost"] == key[1]
+    assert result["anchors"] == list(key[4])
+    assert result["risk_selection_objective"][
+        "worst_development_prompt_model_wide_total_dropped_mass"
+    ] == pytest.approx(key[0], abs=1e-13)
+    policy = result["discovery_context_policies"][0]
+    actual = [
+        (-1 if h in policy["fallback_heads"][str(layer)] else policy["headmaps"][str(layer)][h])
+        for layer, h in consumers
+    ]
+    assert actual == list(donors)
 
 
 @pytest.mark.parametrize(

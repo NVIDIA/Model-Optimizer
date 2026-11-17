@@ -56,6 +56,7 @@ from .mask_reuse import (
     _canonical_evidence,
     _Choice,
     _donor_head_candidates,
+    _dropped_mass_matrix,
     _normalize_topology,
     _number,
     _pareto_donor_options,
@@ -71,7 +72,7 @@ from .mask_reuse_contracts import (
     threshold_pair_matches,
     validate_context_buckets,
 )
-from .mask_reuse_solver import MaskReuseSolverConfig, _SolverSession
+from .mask_reuse_solver import MaskReuseSolverConfig, MaskReuseSolverFailure, _SolverSession
 
 __all__ = [
     "CompactMaskReuseCapture",
@@ -321,8 +322,8 @@ class CompactMaskReuseCapture:
             anchors[layer] = AnchorLayerStats(retained, dropped)
 
         raw_consumers = raw["consumer_layers"]
-        if not isinstance(raw_consumers, Mapping) or not raw_consumers:
-            raise MaskReuseCalibrationError("consumer_layers must be non-empty")
+        if not isinstance(raw_consumers, Mapping):
+            raise MaskReuseCalibrationError("consumer_layers must be an object")
         consumers: dict[int, CompactConsumerStats] = {}
         for raw_layer, raw_stats in raw_consumers.items():
             if (
@@ -336,23 +337,9 @@ class CompactMaskReuseCapture:
                 raise MaskReuseCalibrationError(f"consumer_layers[{layer}] must be an object")
             _exact_fields(raw_stats, _CONSUMER_FIELDS, f"consumer_layers[{layer}]")
             anchor = _integer(raw_stats["anchor_layer"], f"consumer_layers[{layer}].anchor")
-            matrix = raw_stats["dropped_mass"]
-            if not isinstance(matrix, list) or len(matrix) != global_num_heads:
-                raise MaskReuseCalibrationError(
-                    f"consumer_layers[{layer}] must have {global_num_heads} consumer rows"
-                )
-            for consumer_head, row in enumerate(matrix):
-                if not isinstance(row, list) or len(row) != global_num_heads:
-                    raise MaskReuseCalibrationError(
-                        f"consumer_layers[{layer}][{consumer_head}] must cover all donors"
-                    )
-                for donor_head, value in enumerate(row):
-                    _number(
-                        value,
-                        f"consumer_layers[{layer}][{consumer_head}][{donor_head}]",
-                        minimum=0.0,
-                        maximum=1.0,
-                    )
+            matrix = _dropped_mass_matrix(
+                raw_stats["dropped_mass"], heads=global_num_heads, label=f"consumer_layers[{layer}]"
+            )
             consumers[layer] = CompactConsumerStats(anchor, matrix)
         return cls(
             model=_text(invocation["model"], "model"),
@@ -396,6 +383,8 @@ class CompactMaskReuseCaptureSource:
     """Re-iterable strict JSONL source used by the three-pass selector."""
 
     path: Path
+    topology: Mapping[str, object] | None = None
+    discovery_span: int | None = None
 
     def __iter__(self) -> Iterator[CompactMaskReuseCapture]:
         with self.path.open(encoding="utf-8") as handle:
@@ -417,11 +406,49 @@ class CompactMaskReuseCaptureSource:
                         f"line {line_number}: compact capture must be an object"
                     )
                 try:
+                    if "topology_discovery_capture_schema_version" in raw:
+                        raw = self._project(raw)
                     yield CompactMaskReuseCapture.from_mapping(raw)
                 except MaskReuseCalibrationError as error:
                     raise MaskReuseCalibrationError(f"line {line_number}: {error}") from error
             if not seen:
                 raise MaskReuseCalibrationError("compact capture input is empty")
+
+    def _project(self, raw):
+        # Discovery shares compact parsing helpers, so defer this circular import.
+        from .mask_reuse_topology import TopologyDiscoveryCapture
+
+        if self.topology is None:
+            raise MaskReuseCalibrationError("discovery captures require an explicit topology")
+        anchors, nearest = _normalize_topology(self.topology)
+        original = TopologyDiscoveryCapture.from_mapping(raw)
+        if self.discovery_span is not None and original.max_reuse_span != self.discovery_span:
+            raise MaskReuseCalibrationError("discovery reuse span differs from the manifest")
+        if tuple(nearest) != original.attention_layers:
+            raise MaskReuseCalibrationError("projection topology differs from capture layer set")
+        consumers = {}
+        for layer, anchor in nearest.items():
+            if layer == anchor:
+                continue
+            candidates = original.consumer_candidates_by_layer.get(layer, {})
+            if anchor not in candidates:
+                raise MaskReuseCalibrationError("projection donor is outside captured reuse span")
+            consumers[str(layer)] = {
+                "anchor_layer": anchor,
+                "dropped_mass": [list(row) for row in candidates[anchor]],
+            }
+        return {
+            **{
+                key: raw[key]
+                for key in ("invocation", "geometry", "global_num_heads", "eligible_tiles")
+            },
+            **({"analytical_dense": raw["analytical_dense"]} if "analytical_dense" in raw else {}),
+            "compact_capture_schema_version": raw["topology_discovery_capture_schema_version"],
+            "anchor_stats_by_layer": {
+                str(a): raw["anchor_stats_by_layer"][str(a)] for a in anchors
+            },
+            "consumer_layers": consumers,
+        }
 
     def sha256(self) -> str:
         """Hash exact file bytes without loading the capture bundle."""
@@ -432,9 +459,11 @@ class CompactMaskReuseCaptureSource:
         return digest.hexdigest()
 
 
-def load_compact_mask_reuse_captures(path: str | Path) -> CompactMaskReuseCaptureSource:
+def load_compact_mask_reuse_captures(
+    path: str | Path, *, topology=None, discovery_span=None
+) -> CompactMaskReuseCaptureSource:
     """Return a lazy, re-iterable compact-capture source."""
-    source = CompactMaskReuseCaptureSource(Path(path))
+    source = CompactMaskReuseCaptureSource(Path(path), topology, discovery_span)
     if not source.path.is_file():
         raise MaskReuseCalibrationError(f"compact capture file does not exist: {source.path}")
     return source
@@ -953,12 +982,13 @@ def _selection_pass(
         if not minimize_and_fix(worst_prompt_risk, "fix_worst_prompt_risk", integral=False):
             return None
         if not minimize_and_fix(retained_reuse, "fix_retained_reuse", integral=True):
-            raise MaskReuseCalibrationError(
-                "compact selector lost feasibility after fixing worst-prompt reuse risk"
+            raise MaskReuseSolverFailure(
+                "compact selector lost feasibility after fixing worst-prompt reuse risk",
+                session.records,
             )
         if not minimize_and_fix(reuse_count, "fix_reuse_count", integral=True):
-            raise MaskReuseCalibrationError(
-                "compact selector lost deterministic tie-break feasibility"
+            raise MaskReuseSolverFailure(
+                "compact selector lost deterministic tie-break feasibility", session.records
             )
         donor_groups = defaultdict(list)
         for key, variable in variables.items():
@@ -1177,6 +1207,7 @@ def _selection_pass(
                 dense_choices,
                 tuple(frontier),
                 "no_target_sparsity_satisfied_anchor_calibration_constraint",
+                target_bmm1_skip_ratio_met=target_bmm1_skip_ratio == 0,
                 bmm1_eligible_tiles=(
                     accumulator.eligible_sum[target]
                     * dataset.global_num_heads
@@ -1321,6 +1352,8 @@ def calibrate_compact_mask_reuse_policy(
         nearest=nearest,
         allow_same_group_prefixes=allow_same_group_prefixes,
     )
+    if any(hi is None for _, hi in dataset.buckets):
+        raise MaskReuseCalibrationError("calibration context ranges require finite maximum lengths")
     checkpoint_identity = checkpoint_manifest.sha256
     if dataset.checkpoint_manifest_sha256 != checkpoint_identity:
         raise MaskReuseCalibrationError(
@@ -1389,10 +1422,6 @@ def calibrate_compact_mask_reuse_policy(
     total_bmm1_skipped = 0
     for bucket in dataset.buckets:
         selection = selections[bucket]
-        if selection.target_sparsity is not None and bucket[1] is None:
-            raise MaskReuseCalibrationError(
-                "a deployment-qualified sparse context bucket requires a finite maximum"
-            )
         reuse_calibration = reuse_evaluations[(bucket, "calibration")]
         reuse_heldout = reuse_evaluations[(bucket, "heldout")]
         anchor_calibration = anchor_evaluations[(bucket, "calibration")]
@@ -1452,8 +1481,7 @@ def calibrate_compact_mask_reuse_policy(
                 "selected_target_sparsity": selection.target_sparsity,
                 "selection_status": (
                     "target_bmm1_skip_ratio_met"
-                    if selection.target_sparsity is not None
-                    and selection.target_bmm1_skip_ratio_met
+                    if selection.target_bmm1_skip_ratio_met
                     else (
                         "target_bmm1_skip_ratio_unmet_maximum_feasible"
                         if selection.target_sparsity is not None
@@ -1616,7 +1644,7 @@ def calibrate_compact_mask_reuse_policy(
         "overall": {
             "consumer_head_bucket_count": denominator,
             "fallback_head_bucket_count": total_fallback,
-            "fallback_fraction": total_fallback / denominator,
+            "fallback_fraction": total_fallback / denominator if denominator else 0.0,
             "bmm1_skip_objective": {
                 "target_per_context_bucket": bmm1_target,
                 "all_context_buckets_met": all(

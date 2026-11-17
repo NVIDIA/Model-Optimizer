@@ -139,7 +139,7 @@ class _BatchHiGHS(pulp.HiGHS):
         if problem.solverModel.passModel(model) == highspy.HighsStatus.kError:
             raise pulp.PulpSolverError("HiGHS rejected the batched calibration model")
         initial = problem.__dict__.pop("_mask_reuse_initial_values", None)
-        if initial is not None:
+        if initial is not None and not getattr(self, "_disable_starts", False):
             # The selector validated this full assignment; omitted entries are
             # explicit zeros, not unspecified values in a partial MIP start.
             solution = highspy.HighsSolution()
@@ -198,7 +198,7 @@ class _PersistentHiGHS(_BatchHiGHS):
         import highspy
 
         values, self._incumbent = self._incumbent, None
-        if values is None:
+        if values is None or getattr(self, "_disable_starts", False):
             return
         variables = problem.variables()
         if len(values) != len(variables) or not all(math.isfinite(value) for value in values):
@@ -423,6 +423,7 @@ class _SolverSession:
         self._spent_seconds = spent_seconds
         self.records: list[dict[str, object]] = [dict(row) for row in records]
         self._highs_solver: _PersistentHiGHS | None = None
+        self._highs_cold = False
 
     @property
     def elapsed_seconds(self) -> float:
@@ -474,14 +475,25 @@ class _SolverSession:
                     mip_feasibility_tolerance=1e-9,
                     mip_rel_gap=0.0,
                     mip_abs_gap=0.0,
+                    # HiGHS 1.16 presolve can misreport warm-start assignments and
+                    # overrun its time budget on large discovery models.
+                    presolve="choose" if self._highs_cold else "off",
                 )
+                self._highs_solver._disable_starts = self._highs_cold
             solver = self._highs_solver
             solver.timeLimit = remaining
             solver._remaining_budget_seconds = self._native_remaining_seconds
         else:
             solver = pulp.PULP_CBC_CMD(
                 **kwargs,
-                options=["randomSeed 1", "randomCbcSeed 1", "increment 1e-12", "preprocess off"],
+                options=[
+                    "randomSeed 1",
+                    "randomCbcSeed 1",
+                    "increment 1e-12",
+                    "preprocess off",
+                    "primalTolerance 1e-12",
+                    "integerTolerance 1e-9",
+                ],
             )
         if not solver.available():
             raise MaskReuseSolverFailure(
@@ -489,8 +501,28 @@ class _SolverSession:
             )
         return solver
 
+    def _retry_without_warm_start(self, problem) -> bool:
+        if self.config.backend != "highs" or self._highs_cold:
+            return False
+        assert self._highs_solver is not None
+        self.records[-1]["cold_retry"] = True
+        self._highs_solver._discard()
+        self._highs_solver = None
+        self._highs_cold = True
+        problem.__dict__.pop("_mask_reuse_initial_values", None)
+        return True
+
     def minimize(self, problem: pulp.LpProblem, expression, phase: str) -> bool:
-        problem.setObjective(pulp.lpSum([expression]))
+        objective = pulp.lpSum([expression])
+        if not any(objective.values()):
+            # PuLP's temporary dummy column survives in CBC's later MPS bounds.
+            zero = getattr(problem, "_mask_reuse_zero", None)
+            if zero is None:
+                zero = pulp.LpVariable("mask_reuse_zero", 0, 0)
+                problem._mask_reuse_zero = zero
+                problem += zero == 0, "mask_reuse_zero"
+            objective += zero
+        problem.setObjective(objective)
         while True:
             started = time.monotonic()
             try:
@@ -553,6 +585,29 @@ class _SolverSession:
                     primal_bound=info.objective_function_value,
                     dual_bound=info.mip_dual_bound,
                 )
+                # A status and gap certify the reported objective, not necessarily
+                # the returned point (HiGHS can retain a stale MIP-start buffer).
+                lp, solution = native.getLp(), native.getSolution()
+                actual = (
+                    math.fsum(c * v for c, v in zip(lp.col_cost_, solution.col_value)) + lp.offset_
+                )
+                reported = info.objective_function_value
+                consistent = (
+                    solution.value_valid
+                    and math.isfinite(actual)
+                    and math.isfinite(reported)
+                    and abs(actual - reported) <= 8 * max(math.ulp(actual), math.ulp(reported))
+                )
+                self.records[-1]["assignment_objective"] = actual
+                if (not consistent or info.mip_gap != 0.0) and self._retry_without_warm_start(
+                    problem
+                ):
+                    continue
+                if not consistent:
+                    raise MaskReuseSolverFailure(
+                        f"native objective differs from returned assignment in {phase}",
+                        self.records,
+                    )
                 if info.mip_gap != 0.0:
                     raise MaskReuseSolverError("native MIP gap is nonzero", self.records)
             if (
@@ -611,7 +666,9 @@ class _SolverSession:
                 if fixed_risk is not None:
                     variable, bound = fixed_risk
                     actual = self._discrete_risk(problem, variable)
-                    if actual > bound + 8 * math.ulp(bound):
+                    if actual > bound + Fraction(8 * math.ulp(float(bound))):
+                        if self._retry_without_warm_start(problem):
+                            continue
                         raise MaskReuseSolverFailure(
                             f"later tie-break worsened the fixed risk in {phase}", self.records
                         )
@@ -620,7 +677,7 @@ class _SolverSession:
     @staticmethod
     def _discrete_risk(problem, variable):
         """Evaluate original prompt-risk rows using the selected integer decisions."""
-        required = 0.0
+        required = Fraction(0)
         for row in problem.constraints.values():
             coefficient = row.get(variable, 0)
             if coefficient >= 0 or row.sense != pulp.LpConstraintLE:
@@ -628,8 +685,11 @@ class _SolverSession:
             others = [(v, c) for v, c in row.items() if v is not variable]
             if any(v.cat != pulp.LpInteger for v, _ in others):
                 continue
-            numerator = math.fsum([row.constant, *(c * round(v.varValue) for v, c in others)])
-            required = max(required, -numerator / coefficient)
+            numerator = Fraction(row.constant) + sum(
+                (Fraction(c) * round(v.varValue) for v, c in others if round(v.varValue)),
+                Fraction(0),
+            )
+            required = max(required, -numerator / Fraction(coefficient))
         return required
 
     def require_work_target(
@@ -702,8 +762,9 @@ class _SolverSession:
             if isinstance(expression, pulp.LpVariable):
                 # CBC's solution file rounds the continuous epigraph value.
                 # Fix the objective of the actual selected discrete policy.
-                value = self._discrete_risk(problem, expression)
-                problem._mask_reuse_fixed_risk = expression, value
+                exact_value = self._discrete_risk(problem, expression)
+                problem._mask_reuse_fixed_risk = expression, exact_value
+                value = float(exact_value)
             problem += (
                 pulp.lpSum([expression]) <= value,
                 phase,

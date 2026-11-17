@@ -24,6 +24,8 @@ Changelog
 
 *Misc*
 
+- Add offline cross-layer attention-mask calibration with vLLM whole-prefill capture, anchor discovery, and fixed-topology refitting. Export requires the requested per-range BMM1 saving target and completed solver optimality checks; task-quality validation remains separate.
+
 **Backward Breaking Changes**
 
 **Deprecations**

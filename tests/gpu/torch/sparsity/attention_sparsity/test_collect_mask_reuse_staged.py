@@ -203,7 +203,10 @@ def test_migration_requires_exact_controller_bridge(whole_resume_case, tmp_path,
     args.source_bridge_sha256 = sha256(args.source_bridge.read_bytes()).hexdigest()
     _, receipt = collector.run(args)
     normalized = receipt.parent / CaptureStageFiles.NORMALIZED
-    assert normalized.read_bytes() == old_output.read_bytes()
+    # The journal preserves execution order; publication sorts calibration rows.
+    assert sorted(normalized.read_bytes().splitlines()) == sorted(
+        old_output.read_bytes().splitlines()
+    )
     new_journal = (receipt.parent / "capture.progress.jsonl").read_bytes()
     assert new_journal != (old_output.parent / "capture.progress.jsonl").read_bytes()
     assert (
@@ -294,7 +297,7 @@ def test_noncanonical_prior_is_canonicalized_without_overwriting(whole_resume_ca
     normalized, prepared = collector.run(args)
     assert journal.read_bytes() == noncanonical
     assert (prepared.parent / "capture.progress.jsonl").read_bytes() == canonical
-    assert normalized.read_bytes() == output.read_bytes()
+    assert sorted(normalized.read_bytes().splitlines()) == sorted(output.read_bytes().splitlines())
 
 
 def test_model_load_failure_is_not_a_resumable_runtime_prefix(whole_resume_case, monkeypatch):
@@ -497,9 +500,9 @@ def test_finalization_uses_one_parsed_pass_and_fresh_stable_hash(
     inherited = CaptureStageFiles.verify_inherited_bytes
     stable = collector.stable_file_sha256
 
-    def counted_records(path):
+    def counted_records(self, path):
         calls["parsed"] += 1
-        yield from records(path)
+        yield from records(self, path)
 
     def counted_verify(self, *a, **kw):
         calls["verify"] += 1
@@ -514,7 +517,7 @@ def test_finalization_uses_one_parsed_pass_and_fresh_stable_hash(
         assert Path(path) == prepared.parent / "capture.progress.jsonl"
         return stable(path, **kw)
 
-    monkeypatch.setattr(collector._CaptureJournal, "_records", staticmethod(counted_records))
+    monkeypatch.setattr(collector._CaptureJournal, "_records", counted_records)
     monkeypatch.setattr(CaptureStageFiles, "verify", counted_verify)
     monkeypatch.setattr(CaptureStageFiles, "verify_inherited_bytes", counted_inherited)
     monkeypatch.setattr(collector, "stable_file_sha256", counted_stable)
@@ -658,14 +661,14 @@ def test_monolithic_finish_keeps_semantic_revalidation(validated_journal, monkey
     scans = []
     records = collector._CaptureJournal._records
 
-    def counted(path):
+    def counted(self, path):
         scans.append(path)
-        yield from records(path)
+        yield from records(self, path)
 
     def forbidden(*a, **kw):
         pytest.fail("ordinary finish must not use the staged byte shortcut")
 
-    monkeypatch.setattr(collector._CaptureJournal, "_records", staticmethod(counted))
+    monkeypatch.setattr(collector._CaptureJournal, "_records", counted)
     monkeypatch.setattr(collector, "stable_file_sha256", forbidden)
     journal.finish("complete", identity_verified=True, stage="collection")
     assert scans == [journal.path]
