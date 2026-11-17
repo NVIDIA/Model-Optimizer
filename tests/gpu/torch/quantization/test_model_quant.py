@@ -201,7 +201,7 @@ def test_initialize_weight_memory_and_time(record_property, capsys, cache_enable
     packed_bytes = sum(
         buffer.numel() * buffer.element_size()
         for name, buffer in model.named_buffers()
-        if name.startswith("_ggml_pinned_")
+        if "_ggml_pinned_" in name
     )
     record_property("pinned_initialization_payload_bytes", packed_bytes)
     optimizer = torch.optim.SGD(model.parameters(), lr=0)
