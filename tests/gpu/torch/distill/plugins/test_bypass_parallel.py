@@ -16,6 +16,7 @@
 """Native IQ payload placement, mesh adoption and real four-GPU projection checks."""
 
 import copy
+from collections import OrderedDict
 from datetime import timedelta
 
 import pytest
@@ -29,6 +30,117 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
+
+
+@pytest.fixture
+def bypass_cpu_workers(_dist_pools):
+    from _test_utils.torch.distributed.utils import (
+        DistributedWorkerPool,
+        default_worker_teardown,
+        get_live_pool,
+    )
+
+    return get_live_pool(
+        _dist_pools,
+        ("bypass_cpu", 2),
+        lambda: DistributedWorkerPool(
+            world_size=2, backend="gloo", teardown_fn=default_worker_teardown
+        ),
+    )
+
+
+def _unique_batch_worker(rank, size, axis, unequal):
+    from torch.distributed.device_mesh import init_device_mesh
+
+    from modelopt.torch.distill._bypass_optimizer import Lion
+
+    torch.manual_seed(67)
+    teacher = torch.nn.Sequential(
+        OrderedDict(
+            [
+                ("mlp", torch.nn.Linear(256, 256, bias=False)),
+                ("activation", torch.nn.SiLU()),
+                ("moe", torch.nn.Linear(256, 256, bias=False)),
+            ]
+        )
+    )
+    batches = [torch.randn(1, 4, 256) for _ in range(4)]
+    student = mtq.quantize(
+        copy.deepcopy(teacher),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda m: m(batches[0]),
+    )
+    config = {
+        "num_steps": 2,
+        "global_batch_size": 2,
+        "micro_batch_size": 1,
+        "sequence_length": 4,
+        "warmup_fraction": 0,
+        "scheduler": "constant",
+        "max_grad_norm": 1e-8,
+    }
+    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=(axis,))
+    single = init_device_mesh("cpu", (size, 1), mesh_dim_names=("owners", "dp"))["dp"]
+    reference = copy.deepcopy(student)
+    gradients, norms = [], []
+    original_step = Lion.step
+
+    def observed_step(optimizer, closure=None):
+        values = [
+            p.grad.detach().clone() for group in optimizer.param_groups for p in group["params"]
+        ]
+        gradients.append(values)
+        norms.append(sum(g.square().sum() for g in values).sqrt())
+        return original_step(optimizer, closure)
+
+    Lion.step = observed_step
+    try:
+        mtd.bypass(reference, copy.deepcopy(teacher), batches, config, device_mesh=single)
+    finally:
+        Lion.step = original_step
+    expected_gradients = gradients[:]
+    gradients.clear()
+    local = batches[rank::size] if axis == "dp" else batches
+    if unequal and rank == 1:
+        local = local[:1]
+    if unequal:
+        before = copy.deepcopy(student.state_dict())
+        with pytest.raises(ValueError):
+            mtd.bypass(student, teacher, local, config, device_mesh=mesh)
+        # No partially assembled global update may advance native fields.
+        if axis == "dp":
+            assert not any("_local_repair_state" in key for key in student.state_dict())
+        assert all(torch.equal(value, before[name]) for name, value in student.state_dict().items())
+        return
+    Lion.step = observed_step
+    try:
+        mtd.bypass(student, teacher, local, config, device_mesh=mesh)
+    finally:
+        Lion.step = original_step
+    for actual, expected in zip(gradients, expected_gradients, strict=True):
+        for a, b in zip(actual, expected, strict=True):
+            torch.testing.assert_close(a, b, rtol=2e-5, atol=1e-14)
+    assert all(norm <= config["max_grad_norm"] for norm in norms)
+    for name, value in reference.state_dict().items():
+        if value.is_floating_point():
+            torch.testing.assert_close(student.state_dict()[name], value, rtol=0, atol=0)
+        else:
+            assert torch.equal(student.state_dict()[name], value), name
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(("axis", "unequal"), [("dp", False), ("cp", False), ("dp", True)])
+def test_distributed_bypass_matches_unique_batch(bypass_cpu_workers, axis, unequal):
+    bypass_cpu_workers.run(_unique_batch_worker, axis, unequal)
 
 
 @pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
@@ -203,12 +315,13 @@ def native_workers(_dist_pools):
     )
 
 
-def _native_projection_worker(rank, size, frozen_format):
+def _native_projection_worker(rank, size, frozen_format, layout=None):
     from _test_utils.transformers_families import build_model, cases
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.tensor import DTensor
     from transformers.distributed.utils import TransformersDeviceMesh
 
+    from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
     assert size == 4
@@ -217,7 +330,12 @@ def _native_projection_worker(rank, size, frozen_format):
     record = cases(["qwen3_moe"])[0]
     record["minimum_pattern_prefix"] = 2
     record["config"]["mlp_only_layers"] = [0]
+    record["config"]["num_experts"] = 4
+    record["config"]["num_experts_per_tok"] = 1
     model = build_model(record, torch.device("cuda", rank))
+    with torch.no_grad():
+        model.model.layers[1].mlp.gate.weight.zero_()
+    teacher = copy.deepcopy(model) if layout is not None else None
     batch = {"input_ids": torch.randint(3, 100, (2, 8), device=torch.device("cuda", rank))}
     frozen_cfg = (
         {"num_bits": (4, 3), "axis": None}
@@ -242,14 +360,108 @@ def _native_projection_worker(rank, size, frozen_format):
     )
     with torch.no_grad():
         expected = model(**batch).logits.detach().cpu()
+    batches = [
+        {"input_ids": torch.randint(3, 100, (1, 8), device=torch.device("cuda", rank))}
+        for _ in range(16)
+    ]
+    recipe = {
+        "num_steps": 2,
+        "global_batch_size": 8,
+        "sequence_length": 8,
+        "warmup_fraction": 0,
+        "scheduler": "constant",
+        "max_grad_norm": 1e-8,
+    }
+    traces, phase, trace_index = [], "reference", 0
+    original_clip = DistributedBypassRuntime.clip_gradients
+
+    def observed_clip(runtime, fields, max_norm):
+        nonlocal trace_index
+        selected = {id(p) for p in fields}
+        values = {}
+        for quantizer in runtime.student.modules():
+            state = getattr(quantizer, "_local_repair_state", None)
+            if state is None:
+                continue
+            for field, parameter in state.named_parameters():
+                if id(parameter) in selected:
+                    values[state.field_prefix + "." + field] = (
+                        None if parameter.grad is None else parameter.grad.detach().float().cpu(),
+                        state.weight_shape,
+                        state.format.block_size,
+                    )
+        norm = original_clip(runtime, fields, max_norm)
+        if phase == "reference":
+            traces.append((values, norm.detach().cpu()))
+        else:
+            expected_values, expected_norm = traces[trace_index]
+            trace_index += 1
+            torch.testing.assert_close(norm.detach().cpu(), expected_norm, rtol=0.03, atol=0)
+            for key, (actual, shape, block) in values.items():
+                expected, full_shape, _ = expected_values[key]
+                if expected is None:
+                    assert actual is None or not bool(actual.count_nonzero())
+                    continue
+                assert actual is not None
+                if shape != full_shape:
+                    # This fixture has ordinary gate/up/down matrices: align
+                    # native TP rows or complete K blocks with the full oracle.
+                    view = expected.reshape(
+                        full_shape[0], full_shape[1] // block, *expected.shape[1:]
+                    )
+                    dimension = 0 if shape[0] != full_shape[0] else 1
+                    expected = view.chunk(runtime.context.tensor_mesh.size(), dim=dimension)[
+                        runtime.context.tensor_mesh.get_local_rank()
+                    ].reshape_as(actual)
+                error = (actual - expected).norm() / expected.norm().clamp_min(1e-20)
+                assert error < 0.03, (key, error.item())
+        return norm
+
+    if layout is not None:
+        single = init_device_mesh("cuda", (4, 1), mesh_dim_names=("owners", "dp"))["dp"]
+        reference = copy.deepcopy(model)
+        DistributedBypassRuntime.clip_gradients = observed_clip
+        try:
+            mtd.bypass(reference, copy.deepcopy(teacher), batches, recipe, device_mesh=single)
+        finally:
+            DistributedBypassRuntime.clip_gradients = original_clip
+        with torch.no_grad():
+            expected = reference(**batch).logits.detach().cpu()
+    fsdp, tp, efsdp, ep = (4, 1, 2, 2) if layout == "ep2-replica2" else (2, 2, 1, 4)
     manager = TransformersDeviceMesh(
-        init_device_mesh("cuda", (1, 1, 2, 2), mesh_dim_names=("pp", "dp_replicate", "fsdp", "tp")),
         init_device_mesh(
-            "cuda", (1, 1, 1, 4), mesh_dim_names=("pp", "dp_replicate", "efsdp", "ep")
+            "cuda", (1, 1, fsdp, tp), mesh_dim_names=("pp", "dp_replicate", "fsdp", "tp")
+        ),
+        init_device_mesh(
+            "cuda", (1, 1, efsdp, ep), mesh_dim_names=("pp", "dp_replicate", "efsdp", "ep")
         ),
     )
     adapter = TransformersBypassAdapter(manager)
     adapter.parallelize(model)
+    metadata = adapter.context.parallel_metadata[id(model)]
+    assert all(len(ids) == 4 // ep for ids in metadata["expert_global_ids"].values())
+    if layout is not None:
+        adapter.parallelize(teacher)
+        frozen = {
+            name: value.detach().clone()
+            for name, value in model.state_dict().items()
+            if "experts.down_proj" in name or ".mlp.gate." in name
+        }
+        lane = adapter.context.data_mesh.get_local_rank()
+        local = [
+            batches[step * 8 + index]
+            for step in range(2)
+            for index in range(lane, 8, adapter.context.dp_size)
+        ]
+        phase = "native"
+        DistributedBypassRuntime.clip_gradients = observed_clip
+        try:
+            mtd.bypass(model, teacher, local, recipe, device_mesh=manager)
+        finally:
+            DistributedBypassRuntime.clip_gradients = original_clip
+        assert trace_index == len(traces)
+        for name, value in frozen.items():
+            torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
     with torch.no_grad():
         actual = model(**batch).logits
         actual = actual.full_tensor() if isinstance(actual, DTensor) else actual
@@ -260,3 +472,142 @@ def _native_projection_worker(rank, size, frozen_format):
 @pytest.mark.timeout(300)
 def test_native_iq_placement_preserves_projection(native_workers, frozen_format):
     native_workers.run(_native_projection_worker, frozen_format)
+
+
+@pytest.mark.parametrize("layout", ["tp2-fsdp2-ep4", "ep2-replica2"])
+@pytest.mark.parametrize("frozen_format", ["fp8", "nvfp4"])
+@pytest.mark.timeout(300)
+def test_native_owner_updates_match_reference(native_workers, layout, frozen_format):
+    native_workers.run(_native_projection_worker, frozen_format, layout)
+
+
+def _context_worker(rank, size, fallback):
+    from torch.distributed.device_mesh import init_device_mesh
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from modelopt.torch.distill._bypass_optimizer import Lion
+    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+    from modelopt.torch.quantization.ggml.scale_fields import (
+        decode_scale_fields,
+        replace_scale_fields,
+    )
+
+    torch.cuda.set_device(rank)
+    torch.manual_seed(71)
+    device = torch.device("cuda", rank)
+    config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=256,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        use_cache=False,
+    )
+    config._attn_implementation = "sdpa"
+    teacher = LlamaForCausalLM(config).to(device=device, dtype=torch.bfloat16).eval()
+    batches = [{"input_ids": torch.randint(3, 32, (1, 8), device=device)} for _ in range(8)]
+    if fallback:
+        for batch in batches:
+            batch["attention_mask"] = torch.ones(1, 1, 8, 8, dtype=torch.bool, device=device).tril()
+            batch["valid_mask"] = torch.ones(1, 8, dtype=torch.bool, device=device)
+    student = mtq.quantize(
+        copy.deepcopy(teacher),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*mlp*weight_quantizer",
+                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda m: m(**{k: v for k, v in batches[0].items() if k != "valid_mask"}),
+    )
+    recipe = {
+        "num_steps": 2,
+        "global_batch_size": 4,
+        "sequence_length": 8,
+        "scheduler": "constant",
+        "warmup_fraction": 0,
+    }
+    reference = copy.deepcopy(student)
+    single = init_device_mesh("cuda", (size, 1), mesh_dim_names=("owners", "dp"))["dp"]
+    gradients = []
+    original_step = Lion.step
+
+    def observed_step(optimizer, closure=None):
+        gradients.append(
+            [
+                p.grad.detach().float().cpu()
+                for group in optimizer.param_groups
+                for p in group["params"]
+            ]
+        )
+        return original_step(optimizer, closure)
+
+    Lion.step = observed_step
+    try:
+        mtd.bypass(reference, copy.deepcopy(teacher), batches, recipe, device_mesh=single)
+    finally:
+        Lion.step = original_step
+    expected_gradients = gradients[:]
+    gradients.clear()
+    mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("dp", "cp"))
+    adapter = TransformersBypassAdapter(mesh)
+    adapter.parallelize(student)
+    adapter.parallelize(teacher)
+    local = [
+        batches[step * 4 + index]
+        for step in range(2)
+        for index in range(mesh["dp"].get_local_rank(), 4, 2)
+    ]
+    Lion.step = observed_step
+    try:
+        mtd.bypass(student, teacher, local, recipe, device_mesh=mesh)
+    finally:
+        Lion.step = original_step
+    # BF16 dW rounds before each CP owner's sum; native attention also changes
+    # its reduction tree. Validate the actual normalized VJP, rather than
+    # demanding bitwise scale updates after Lion amplifies a near-zero sign.
+    for actual, expected in zip(gradients, expected_gradients, strict=True):
+        for a, b in zip(actual, expected, strict=True):
+            relative_error = (a - b).norm() / b.norm().clamp_min(1e-20)
+            assert relative_error < 0.03, relative_error.item()
+    assert student._modelopt_bypass_execution["context_parallel_modes"] == [
+        "replicated_full_context" if fallback else "native_sdpa"
+    ]
+    for name, module in student.named_modules():
+        if isinstance(module, TensorQuantizer) and module.backend == "ggml":
+            fmt = IQ_FORMAT_REGISTRY["iq2_s"]
+            actual = module._ggml_pinned_iq2_s
+            expected = reference.get_submodule(name)._ggml_pinned_iq2_s
+            global_scale, local_scale, _ = decode_scale_fields(expected, fmt)
+            assert torch.equal(
+                replace_scale_fields(actual, fmt, global_scale, local_scale), expected
+            )
+            shape = torch.tensor((actual.shape[0], actual.shape[1] * fmt.block_size))
+            torch.testing.assert_close(
+                fmt.dequantize(actual, shape, dtype=torch.float32),
+                fmt.dequantize(expected, shape, dtype=torch.float32),
+                rtol=0.006,
+                atol=1e-6,
+            )
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.timeout(300)
+def test_native_context_and_replicated_fallback_match_reference(native_workers, fallback):
+    import importlib
+
+    if not fallback:
+        try:
+            native = importlib.import_module(
+                "torch.distributed.tensor.experimental._context_parallel._attention"
+            )
+        except ImportError:
+            pytest.skip("Native CP needs Torch's scoped module-wrapper attention API")
+        if not hasattr(native, "_ContextParallel"):
+            pytest.skip("Native CP needs Torch's scoped module-wrapper attention API")
+    native_workers.run(_context_worker, fallback)

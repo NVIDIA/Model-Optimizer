@@ -108,32 +108,6 @@ def native_mesh_context(manager):
     )
 
 
-def torch_mesh_context(mesh):
-    """Adopt explicit Torch dense meshes without inferring an independent EP multiplier."""
-    from ..._bypass_parallel import _submesh
-
-    if not mesh.mesh_dim_names or not set(mesh.mesh_dim_names).issubset(
-        {"dp", "fsdp", "dp_replicate", "dp_shard", "tp", "pp", "cp", "ep"}
-    ):
-        raise ValueError("Bypass needs explicit supported Torch mesh axis names")
-    if _size(_submesh(mesh, "ep")) > 1:
-        raise ValueError("Use TransformersDeviceMesh for overlapping expert parallelism")
-    data_axes = tuple(
-        axis for axis in ("dp", "fsdp", "dp_replicate", "dp_shard") if axis in mesh.mesh_dim_names
-    )
-    data = _combine(mesh, data_axes, "modelopt_bypass_torch_data") if data_axes else None
-    return BypassMeshContext(
-        device_mesh=mesh,
-        data_mesh=data,
-        data_context_mesh=data,
-        tensor_mesh=_submesh(mesh, "tp"),
-        expert_replica_mesh=data,
-        pipeline_mesh=_submesh(mesh, "pp"),
-        context_mesh=_submesh(mesh, "cp"),
-        fsdp_mesh=_submesh(mesh, "fsdp"),
-    )
-
-
 def apply_hf_tensor_parallelism(model, mesh, plan=None):
     """Apply the exact stable-5.23 native TP interface."""
     from transformers.distributed.tensor_parallel import apply_tensor_parallelism
@@ -358,7 +332,9 @@ def parallelize_native_transformers(model, context, *, initialize=None):
                 raise ValueError("Native HF config sizes must match the caller's realized meshes.")
         plans = model._resolve_parallel_plans(config)
         tp_plan, ep_plan, fsdp_plan = plans
-        plans = tp_plan, ep_plan, fsdp_plan
+        from .functional_fsdp import extend_family_fsdp_plan
+
+        plans = tp_plan, ep_plan, extend_family_fsdp_plan(model, fsdp_plan)
         for axis, plan, mesh in (
             ("TP", tp_plan, context.tensor_mesh),
             ("EP", ep_plan, context.expert_mesh),
@@ -476,6 +452,9 @@ def parallelize_native_transformers(model, context, *, initialize=None):
     context.tp_quantizer_layouts[id(model)] = prepare_quantizer_partitions(model, context)
     if not adopted and context.data_mesh.size() > 1:
         apply_fully_sharded_data_parallelism(model, context.mesh_manager, fsdp_plan, ep_plan)
+    from .functional_fsdp import install_functional_fsdp_calls
+
+    install_functional_fsdp_calls(model)
     names = {id(module): name for name, module in model.named_modules()}
     metadata.update(
         dense_ranks=context.device_mesh.mesh.tolist(),

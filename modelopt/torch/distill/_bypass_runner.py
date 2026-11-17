@@ -19,6 +19,7 @@ import logging
 import random
 
 import numpy as np
+
 import torch
 
 from modelopt.torch.quantization.repair import IQRepairPolicy
@@ -30,30 +31,91 @@ _LOG = logging.getLogger(__name__)
 
 
 class _BypassRunner:
-    def __init__(self, student, teacher, units, plan, config, adapter):
+    def __init__(self, student, teacher, units, plan, config, adapter, runtime=None):
         self.student, self.teacher, self.units = student, teacher, units
         self.plan, self.config, self.adapter = plan, config, adapter
+        self.runtime = runtime
         self.policies = {}
         self.optimizers = {}
         self.fields = {}
         self.modules = {u.name: student.get_submodule(u.student_path) for u in units}
         self.consumed_batches = 0
 
-    def _window(self, batches):
-        window, samples = [], 0
-        while samples < self.config.global_batch_size:
+    def _iterator(self, loader):
+        iterator, error = None, None
+        try:
+            iterator = iter(loader)
+        except Exception as exc:
+            if self.runtime is None:
+                raise
+            error = f"{type(exc).__name__}: {exc}"
+        if self.runtime is not None:
+            self.runtime.synchronize_error(error)
+        assert iterator is not None
+        return iterator
+
+    def _validation_batches(self, loader):
+        iterator = self._iterator(loader)
+        while True:
+            batch, present, error, count = None, False, None, 0
             try:
+                batch = next(iterator)
+                present = True
+                self.adapter.validate_batch(batch, self.config)
+                count = (
+                    self.adapter.batch_size(batch) + self.config.micro_batch_size - 1
+                ) // self.config.micro_batch_size
+            except StopIteration:
+                pass
+            except Exception as exc:
+                if self.runtime is None:
+                    raise
+                error = f"{type(exc).__name__}: {exc}"
+            if self.runtime is not None:
+                schedules = self.runtime.gather_values((present, error, count))
+                errors = [state[1] for state in schedules if state[1] is not None]
+                if errors:
+                    raise ValueError(f"Bypass validation reader failed: {errors}")
+                if len({(state[0], state[2]) for state in schedules}) != 1:
+                    raise ValueError("Bypass ranks have unequal validation schedules")
+            if not present:
+                return
+            yield batch
+
+    def _window(self, batches):
+        window, samples, error = [], 0, None
+        batch_size = (
+            self.config.global_batch_size if self.runtime is None else self.runtime.local_batch_size
+        )
+        try:
+            while samples < batch_size:
                 batch = next(batches)
-            except StopIteration as exc:
-                raise ValueError(
-                    "Bypass data exhausted; provide unique samples for every update"
-                ) from exc
-            self.adapter.validate_batch(batch, self.config)
-            samples += self.adapter.batch_size(batch)
-            if samples > self.config.global_batch_size:
-                raise ValueError("Dataloader batches must exactly fill the configured global batch")
-            window.append(batch)
-            self.consumed_batches += 1
+                self.adapter.validate_batch(batch, self.config)
+                samples += self.adapter.batch_size(batch)
+                if samples > batch_size:
+                    raise ValueError(
+                        "Dataloader batches must exactly fill each data lane's global-batch share"
+                    )
+                window.append(batch)
+                self.consumed_batches += 1
+        except StopIteration:
+            error = "Bypass data exhausted; provide unique samples for every update"
+        except (ValueError, TypeError, KeyError) as exc:
+            error = str(exc)
+        if self.runtime is not None:
+            self.runtime.synchronize_error(error)
+            counts = self.runtime.gather_values(
+                sum(
+                    (self.adapter.batch_size(b) + self.config.micro_batch_size - 1)
+                    // self.config.micro_batch_size
+                    for b in window
+                )
+            )
+            self.runtime.synchronize_error(
+                "Bypass ranks have unequal microbatch schedules" if len(set(counts)) != 1 else None
+            )
+        elif error:
+            raise ValueError(error)
         return window
 
     def _measure(self, batches, training):
@@ -61,7 +123,15 @@ class _BypassRunner:
 
         def consume(unit, record):
             with torch.enable_grad() if training else torch.no_grad():
-                prediction = self.adapter.replay(self.modules[unit.name], record)
+                if self.runtime is None:
+                    prediction = self.adapter.replay(self.modules[unit.name], record)
+                else:
+                    record = self.runtime.record(
+                        unit, record, native_context=getattr(self.adapter, "_native_context", False)
+                    )
+                    prediction = self.runtime.replay(
+                        self.modules[unit.name], record, self.adapter, training
+                    )
                 error, count = mse_statistics(prediction, record.target, record.valid_mask)
                 if training:
                     error.backward()
@@ -71,9 +141,11 @@ class _BypassRunner:
                     statistics[unit.name][0].add_(error.detach())
                     statistics[unit.name][1].add_(count)
 
-        for batch in batches:
+        for batch in batches if training else self._validation_batches(batches):
             for microbatch in self.adapter.microbatches(batch, self.config.micro_batch_size):
                 self.adapter.teacher_microbatch(self.teacher, self.units, microbatch, consume)
+        if self.runtime is not None:
+            return self.runtime.reduce_statistics(statistics, self.modules)
         if set(statistics) != set(self.modules):
             raise ValueError("Every selected Bypass boundary must execute in the teacher forward")
         return statistics
@@ -86,12 +158,17 @@ class _BypassRunner:
             if count.item() == 0:
                 raise ValueError("A Bypass update has no valid target elements")
             fields = self.fields[unit.name]
+            if self.runtime is not None:
+                self.runtime.reduce_gradients(fields)
             for parameter in fields:
                 if parameter.grad is not None:
                     parameter.grad.div_(count.to(parameter.device))
-            torch.nn.utils.clip_grad_norm_(
-                fields, self.config.max_grad_norm, error_if_nonfinite=True
-            )
+            if self.runtime is None:
+                torch.nn.utils.clip_grad_norm_(
+                    fields, self.config.max_grad_norm, error_if_nonfinite=True
+                )
+            else:
+                self.runtime.clip_gradients(fields, self.config.max_grad_norm)
         lr = learning_rate(self.config, step)
         for unit in self.units:
             optimizer = self.optimizers[unit.name]
@@ -133,7 +210,7 @@ class _BypassRunner:
             np.random.set_state(numpy_state)
 
     def _run(self, train_dataloader, validation_dataloader, devices):
-        batches = iter(train_dataloader)
+        batches = self._iterator(train_dataloader)
         first = self._window(batches)
         modes = {
             module: module.training
@@ -144,10 +221,18 @@ class _BypassRunner:
         try:
             self.student.eval()
             self.teacher.eval().requires_grad_(False)
+            if self.runtime is not None:
+                self.runtime.initialize(
+                    self.student, self.teacher, self.units, self.adapter, first[0]
+                )
             for index, unit in enumerate(self.units):
                 policy = IQRepairPolicy()
                 self.policies[unit.name] = policy
-                fields = policy.prepare_plan(self.plan, index)
+                fields = (
+                    policy.prepare_plan(self.plan, index)
+                    if self.runtime is None
+                    else self.runtime.prepare_policy(self.plan, index, policy)
+                )
                 self.fields[unit.name] = fields
                 self.optimizers[unit.name] = Lion(fields, lr=self.config.max_lr)
             for step in range(1, self.config.num_steps + 1):
@@ -163,12 +248,24 @@ class _BypassRunner:
                     "Bypass final validation mse=%s",
                     {n: (e / c).item() for n, (e, c) in statistics.items()},
                 )
-            for policy in self.policies.values():
-                policy.finalize_()
+            for name, policy in self.policies.items():
+                if self.runtime is None:
+                    policy.finalize_()
+                else:
+                    self.runtime.finalize_policy(self.modules[name], policy)
+            if self.runtime is not None:
+                self.student._modelopt_bypass_execution = {
+                    "context_parallel_modes": sorted(self.runtime.context_modes),
+                    "data_lanes": self.runtime.context.dp_size,
+                    "local_batch_size": self.runtime.local_batch_size,
+                }
+                _LOG.info("Bypass execution: %s", self.student._modelopt_bypass_execution)
             return self.student
         finally:
             for policy in self.policies.values():
                 policy.close()
+            if self.runtime is not None:
+                self.runtime.close()
             for parameter, flag in teacher_flags.items():
                 parameter.requires_grad_(flag)
             for module, mode in modes.items():

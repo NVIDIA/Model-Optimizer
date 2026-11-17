@@ -15,6 +15,7 @@
 
 """Transactional IQ-only repair ownership, shared by Bypass adapters."""
 
+import weakref
 from dataclasses import dataclass
 from itertools import islice
 from types import MethodType
@@ -168,7 +169,7 @@ class IQRepairPolicy:
     def __init__(self):
         """Initialize an inactive, model-independent repair policy."""
         self.adapters = []
-        self._flags = {}
+        self._flags = []
         self._calibration_flags = {}
         self._gemm_flags = {}
 
@@ -179,7 +180,7 @@ class IQRepairPolicy:
     def prepare_plan(self, plan, index):
         """Materialize a validated unit inside its owner's weight-lifetime scope."""
         unit = plan.units[index]
-        self._flags.update({p: p.requires_grad for p in unit.parameters()})
+        self._flags.extend((weakref.ref(p), p.requires_grad) for p in unit.parameters())
         unit.requires_grad_(False)
         for module in unit.modules():
             if isinstance(module, TensorQuantizer):
@@ -260,6 +261,8 @@ class IQRepairPolicy:
             else:
                 delattr(module, "allow_real_quant_gemm")
         self._gemm_flags.clear()
-        for parameter, flag in self._flags.items():
-            parameter.requires_grad_(flag)
+        for reference, flag in self._flags:
+            parameter = reference()
+            if parameter is not None:
+                parameter.requires_grad_(flag)
         self._flags.clear()

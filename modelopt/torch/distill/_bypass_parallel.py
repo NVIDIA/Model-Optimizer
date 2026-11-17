@@ -44,6 +44,36 @@ def _submesh(mesh, axis):
         return None
 
 
+def torch_mesh_context(mesh):
+    """Describe an actual dense Torch mesh without importing Transformers."""
+    axes = mesh.mesh_dim_names
+    if not axes or not set(axes).issubset(
+        {"dp", "fsdp", "dp_replicate", "dp_shard", "tp", "pp", "cp", "ep"}
+    ):
+        raise ValueError("Bypass needs explicit supported Torch mesh axis names")
+    if _size(_submesh(mesh, "ep")) > 1:
+        raise ValueError("Use TransformersDeviceMesh for overlapping expert parallelism")
+
+    def combine(names, alias):
+        names = [name for name in names if name in axes]
+        if not names:
+            return None
+        return mesh[names[0]] if len(names) == 1 else mesh[tuple(names)]._flatten(alias)
+
+    data = ("dp", "fsdp", "dp_replicate", "dp_shard")
+    context = BypassMeshContext(
+        device_mesh=mesh,
+        data_mesh=combine(data, "modelopt_bypass_data"),
+        data_context_mesh=combine((*data, "cp"), "modelopt_bypass_data_context"),
+        tensor_mesh=_submesh(mesh, "tp"),
+        pipeline_mesh=_submesh(mesh, "pp"),
+        context_mesh=_submesh(mesh, "cp"),
+        fsdp_mesh=_submesh(mesh, "fsdp"),
+    )
+    context.expert_replica_mesh = context.data_context_mesh
+    return context
+
+
 @dataclass
 class BypassMeshContext:
     """Real data lanes, disjoint weight owners and replica groups, with no launcher sizes."""

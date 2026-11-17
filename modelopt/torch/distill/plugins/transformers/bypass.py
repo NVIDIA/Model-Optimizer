@@ -34,7 +34,7 @@ from ..._bypass_capture import (
     validate_unit_ownership,
 )
 from .output_head import bypass_head_context
-from .packing import batch_documents, document_batches
+from .packing import batch_documents, document_batches, empty_document_batch
 
 
 def _require_transformers():
@@ -68,7 +68,8 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         self.device_mesh = device_mesh
         self.context = None
         if device_mesh is not None:
-            from .parallel import native_mesh_context, torch_mesh_context
+            from ..._bypass_parallel import torch_mesh_context
+            from .parallel import native_mesh_context
 
             self.context = (
                 native_mesh_context(device_mesh)
@@ -76,6 +77,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 else torch_mesh_context(device_mesh)
             )
         self.student = None
+        self._native_context = False
         self._providers = {}
 
     def parallelize(self, model, *, initialize=None):
@@ -460,29 +462,151 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             else:
                 delattr(teacher, "forward")
 
+    def _synchronize_error(self, error):
+        from ..._bypass_parallel import _all_rank_values
+
+        errors = sorted({value for value in _all_rank_values(self.context, error) if value})
+        if errors:
+            raise ValueError("; ".join(errors))
+
+    def execution_metadata(self):
+        """Report actual CP execution without claiming savings for replicated work."""
+        return {"context_parallel_modes": sorted(getattr(self, "_context_modes", set()))}
+
+    def _cp_inputs(self, teacher, batch):
+        from modelopt.torch.quantization.repair_partition import requires_full_context_activations
+
+        models = [model for model in (teacher, self.student) if model is not None]
+        for model in models:
+            config = model.config.get_text_config()
+            if (
+                not _model_spec(model).causal_context_parallel
+                or not model.supports_context_parallel
+                or config._attn_implementation != "sdpa"
+                or next(model.parameters()).dtype not in (torch.float16, torch.bfloat16)
+                or requires_full_context_activations(model)
+            ):
+                raise ValueError("This model requires faithful full-context execution")
+        supported = {
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "valid_mask",
+            "_packed_seq_ids",
+            "use_cache",
+            "labels",
+            "loss_mask",
+            "sample_ids",
+            "document_ids",
+        }
+        if any(key not in supported and value is not None for key, value in batch.items()):
+            raise ValueError("Native CP cannot discard model-specific inputs")
+        tokens = batch["input_ids"]
+        if tokens.ndim != 2:
+            raise ValueError("Native CP needs [batch, sequence] tokens")
+        positions = batch.get("position_ids")
+        for name in ("attention_mask", "valid_mask", "_packed_seq_ids"):
+            value = batch.get(name)
+            if value is not None and (value.shape != tokens.shape or not bool(value.eq(1).all())):
+                raise ValueError("Native CP requires unpadded single-document causal rows")
+        if positions is not None and (
+            positions.shape != tokens.shape
+            or bool((positions[:, 1:] - positions[:, :-1] != 1).any())
+        ):
+            raise ValueError("Native CP cannot discard position resets or mRoPE axes")
+        if positions is None:
+            positions = torch.arange(tokens.shape[1], device=tokens.device).expand_as(tokens)
+        return tokens, positions
+
+    @staticmethod
+    def _causal_attention(module, args, kwargs):
+        return args, {**kwargs, "attention_mask": None, "is_causal": True}
+
+    def _document_teacher(self, teacher, units, document, consume):
+        from ..._bypass_parallel import _all_rank_values, _size
+
+        cp = None if self.context is None else self.context.context_mesh
+        native, inputs = False, None
+        if _size(cp) > 1:
+            try:
+                native_api = importlib.import_module(
+                    "torch.distributed.tensor.experimental._context_parallel._attention"
+                )
+                if hasattr(native_api, "_ContextParallel"):
+                    inputs = self._cp_inputs(teacher, document)
+                    native = True
+            except (ImportError, AttributeError, ValueError, TypeError):
+                pass
+            native = all(_all_rank_values(self.context, native))
+        self._context_modes = getattr(self, "_context_modes", set())
+        if not native:
+            if _size(cp) > 1:
+                self._context_modes.add("replicated_full_context")
+            prepared, error = None, None
+            try:
+                prepared = {
+                    **self.prepare_batch(teacher, document),
+                    "valid_mask": _valid_token_mask(document),
+                }
+            except (ValueError, TypeError, KeyError) as exc:
+                error = str(exc)
+            self._synchronize_error(error)
+            return super().teacher_microbatch(teacher, units, prepared, consume)
+        from .context_parallel import CPSequenceLayout
+
+        assert inputs is not None
+        tokens, positions = inputs
+        layout = CPSequenceLayout(cp, tokens.shape[1], device=tokens.device)
+        batch = {
+            "input_ids": layout.shard(tokens, 1),
+            "position_ids": layout.shard(positions, 1),
+            "valid_mask": layout.shard(torch.ones_like(tokens, dtype=torch.bool), 1),
+        }
+        handles = [
+            module.register_forward_pre_hook(self._causal_attention, with_kwargs=True)
+            for model in (teacher, self.student)
+            if model is not None
+            for name, module in model.named_modules()
+            if name.endswith("self_attn")
+        ]
+        self._context_modes.add("native_sdpa")
+        self._native_context = True
+        try:
+            with layout.attention():
+                return super().teacher_microbatch(teacher, units, batch, consume)
+        finally:
+            self._native_context = False
+            for handle in handles:
+                handle.remove()
+
     def teacher_microbatch(self, teacher, units, batch, consume):
-        """Preserve independent document recurrence and stream each native boundary."""
-        self._validate_text_batch(batch)
+        """Keep document recurrence faithful and match every rank's forward schedule."""
+        from ..._bypass_parallel import _all_rank_values
+
+        documents, error = [], None
+        try:
+            self._validate_text_batch(batch)
+            spec = _model_spec(teacher)
+            documents = document_batches(batch) if spec.isolated_documents else [batch]
+            if (
+                spec.isolated_documents
+                and self._batch_documents(teacher)
+                and self._batch_documents(self.student)
+            ):
+                documents = batch_documents(documents, batch["input_ids"].numel())
+        except (ValueError, TypeError, KeyError) as exc:
+            error = str(exc)
+        self._synchronize_error(error)
+        slots = max(_all_rank_values(self.context, len(documents)))
         task = getattr(teacher, "thinker", teacher)
         getter = getattr(task, "get_output_embeddings", None)
         try:
             head = getter() if callable(getter) else None
         except NotImplementedError:
             head = None
-        spec = _model_spec(teacher)
-        documents = document_batches(batch) if spec.isolated_documents else [batch]
-        if (
-            spec.isolated_documents
-            and self._batch_documents(teacher)
-            and self._batch_documents(self.student)
-        ):
-            documents = batch_documents(documents, batch["input_ids"].numel())
         with bypass_head_context(teacher, units, head):
-            for document in documents:
-                prepared = self.prepare_batch(teacher, document)
-                # Validity metadata belongs to the capture, not the model's forward kwargs.
-                raw = {
-                    **prepared,
-                    "valid_mask": _valid_token_mask(document),
-                }
-                super().teacher_microbatch(teacher, units, raw, consume)
+            for index in range(slots):
+                document = (
+                    documents[index] if index < len(documents) else empty_document_batch(batch)
+                )
+                self._document_teacher(teacher, units, document, consume)

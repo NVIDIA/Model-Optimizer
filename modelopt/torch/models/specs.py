@@ -369,6 +369,7 @@ class BypassSpec(SpecSection):
     decoder_paths: tuple[str, ...] = ()
     feedforward_names: tuple[str, ...] = ("mlp", "moe", "ffn", "block_sparse_moe")
     isolated_documents: bool = True
+    causal_context_parallel: bool = False
     batch_packed_documents: bool = False
     functional_children: tuple[str, ...] = ()
     adapter_path: str | None = None
