@@ -24,8 +24,8 @@ from typing import Any
 import torch
 from torch.utils._pytree import tree_map
 
-from modelopt.torch.quantization.nn import QuantModule
-from modelopt.torch.quantization.repair import _iq_quantizer, _storage_span
+from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
+from modelopt.torch.quantization.repair import _iq_quantizer, _router_paths, _storage_span
 
 
 @dataclass(frozen=True)
@@ -63,10 +63,12 @@ def select_output(output, selector=()):
 
 def has_iq_weights(module):
     """Inspect quantizer metadata without slicing packed or sharded weights."""
+    routers = _router_paths(module)
     return any(
         _iq_quantizer(q) is not None
-        for child in module.modules()
+        for path, child in module.named_modules()
         if isinstance(child, QuantModule)
+        and not any(path == router or path.startswith(router + ".") for router in routers)
         for q in child.iter_weight_quantizers_for_calibration()
     )
 
@@ -78,12 +80,16 @@ def validate_unit_ownership(student, teacher, units):
             "No eligible Bypass boundaries; provide exact modules or quantize IQ weights"
         )
     paths = [unit.student_path for unit in units]
+    routers = _router_paths(student)
+    if any(path == router or path.startswith(router + ".") for path in paths for router in routers):
+        raise ValueError("Bypass cannot select a frozen routing gate as a repair boundary")
     if any(
         a == b or not a or not b or a.startswith(b + ".") or b.startswith(a + ".")
         for i, a in enumerate(paths)
         for b in paths[:i]
     ):
         raise ValueError("Bypass boundaries overlap; select disjoint owning modules")
+    _validate_student_owners(student, paths)
     teacher_storage = {}
     for tensor in [*teacher.parameters(), *teacher.buffers()]:
         span = _storage_span(tensor)
@@ -110,6 +116,36 @@ def validate_unit_ownership(student, teacher, units):
                 key, start, stop = span
                 if any(start < end and begin < stop for begin, end in teacher_storage.get(key, ())):
                     raise ValueError("Student Bypass state aliases teacher storage")
+
+
+def _validate_student_owners(student, paths):
+    modules, tensors, storage = {}, {}, {}
+    for path, module in student.named_modules(remove_duplicate=False):
+        selected = any(not root or path == root or path.startswith(root + ".") for root in paths)
+        if isinstance(module, TensorQuantizer):
+            previous = modules.get(id(module))
+            if previous is not None and (selected or previous):
+                raise ValueError("Selected Bypass state shares a quantizer owner")
+            modules[id(module)] = selected
+        for tensor in (*module._parameters.values(), *module._buffers.values()):
+            if tensor is None:
+                continue
+            previous = tensors.get(id(tensor))
+            if previous is not None and (selected or previous):
+                raise ValueError("Selected Bypass state shares a tensor owner")
+            tensors[id(tensor)] = selected
+            span = _storage_span(tensor)
+            if span is not None:
+                key, start, stop = span
+                storage.setdefault(key, []).append((start, stop, selected))
+    for spans in storage.values():
+        any_end = selected_end = -1
+        for start, stop, selected in sorted(spans):
+            if start < (any_end if selected else selected_end):
+                raise ValueError("Selected Bypass state overlaps another student's storage")
+            any_end = max(any_end, stop)
+            if selected:
+                selected_end = max(selected_end, stop)
 
 
 def _valid_token_mask(batch):

@@ -72,6 +72,18 @@ def _iq_quantizer(container):
     )
 
 
+def _router_paths(unit):
+    # A feed-forward gate projection belongs to an expert; routing gates belong
+    # directly to an MoE owner. Treat only the latter as frozen routers.
+    return {
+        ".".join(filter(None, (path, name)))
+        for path, module in unit.named_modules()
+        if any(hasattr(module, attr) for attr in ("experts", "routed_experts"))
+        for name in ("router", "gate")
+        if name in module._modules
+    }
+
+
 def _storage_span(tensor):
     """Local storage interval; metadata inspection never gathers a DTensor."""
     if isinstance(tensor, DTensor):
@@ -95,7 +107,10 @@ def plan_iq_repair(units):
     storage_ranges = {}
     for unit_index, unit in enumerate(units):
         bindings = []
+        routers = _router_paths(unit)
         for path, module in unit.named_modules(remove_duplicate=False):
+            if any(path == router or path.startswith(router + ".") for router in routers):
+                continue
             if not isinstance(module, QuantModule):
                 continue
             selected = False

@@ -16,7 +16,9 @@
 """Full-global-batch IQ Bypass updates over streamed independent boundaries."""
 
 import logging
+import random
 
+import numpy as np
 import torch
 
 from modelopt.torch.quantization.repair import IQRepairPolicy
@@ -108,6 +110,29 @@ class _BypassRunner:
 
     def run(self, train_dataloader, validation_dataloader=None):
         """Finalize the supplied student and restore all caller modes/gradient flags."""
+        devices = sorted(
+            {
+                p.device.index
+                for model in (self.student, self.teacher)
+                for p in (*model.parameters(), *model.buffers())
+                if p.is_cuda
+            }
+        )
+        python_state, numpy_state = random.getstate(), np.random.get_state()
+        try:
+            with torch.random.fork_rng(devices=devices):
+                random.seed(self.config.seed)
+                np.random.seed(self.config.seed % 2**32)
+                torch.random.default_generator.manual_seed(self.config.seed)
+                for device in devices:
+                    with torch.cuda.device(device):
+                        torch.cuda.manual_seed(self.config.seed)
+                return self._run(train_dataloader, validation_dataloader, devices)
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+
+    def _run(self, train_dataloader, validation_dataloader, devices):
         batches = iter(train_dataloader)
         first = self._window(batches)
         modes = {
@@ -125,26 +150,19 @@ class _BypassRunner:
                 fields = policy.prepare_plan(self.plan, index)
                 self.fields[unit.name] = fields
                 self.optimizers[unit.name] = Lion(fields, lr=self.config.max_lr)
-            devices = sorted({p.device.index for p in self.student.parameters() if p.is_cuda})
-            with (
-                torch.random.fork_rng(devices=devices)
-                if devices
-                else torch.random.fork_rng(devices=[])
-            ):
-                torch.manual_seed(self.config.seed)
-                for step in range(1, self.config.num_steps + 1):
-                    window = first if step == 1 else self._window(batches)
-                    for optimizer in self.optimizers.values():
-                        optimizer.zero_grad(set_to_none=True)
-                    with torch.profiler.record_function("modelopt.bypass.update"):
-                        self._update(self._measure(window, training=True), step)
-                    window.clear()
-                if validation_dataloader is not None:
-                    statistics = self._measure(validation_dataloader, training=False)
-                    _LOG.info(
-                        "Bypass final validation mse=%s",
-                        {n: (e / c).item() for n, (e, c) in statistics.items()},
-                    )
+            for step in range(1, self.config.num_steps + 1):
+                window = first if step == 1 else self._window(batches)
+                for optimizer in self.optimizers.values():
+                    optimizer.zero_grad(set_to_none=True)
+                with torch.profiler.record_function("modelopt.bypass.update"):
+                    self._update(self._measure(window, training=True), step)
+                window.clear()
+            if validation_dataloader is not None:
+                statistics = self._measure(validation_dataloader, training=False)
+                _LOG.info(
+                    "Bypass final validation mse=%s",
+                    {n: (e / c).item() for n, (e, c) in statistics.items()},
+                )
             for policy in self.policies.values():
                 policy.finalize_()
             return self.student

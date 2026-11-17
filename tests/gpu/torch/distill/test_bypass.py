@@ -16,8 +16,10 @@
 """Offline end-to-end public Bypass flows, including real native save/restore."""
 
 import copy
+import random
 from collections import OrderedDict
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
@@ -233,3 +235,128 @@ def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch):
     assert len(observed) == len(expected)
     for actual, wanted in zip(observed, expected):
         torch.testing.assert_close(actual, wanted, rtol=1e-5, atol=1e-10)
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ["parameter", "storage_view", "module", "quantizer", "router_weight", "router_quantizer"],
+)
+def test_bypass_refuses_selected_state_shared_with_excluded_owners(alias):
+    student, teacher, batches = _problem()
+    selected = "mlp"
+    if alias.startswith("router_"):
+
+        class MoE(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate = nn.Linear(256, 1, bias=False)
+                self.experts = nn.ModuleList([nn.Linear(256, 256, bias=False)])
+
+            def forward(self, x):
+                return self.experts[0](x) * self.gate(x).sigmoid()
+
+        teacher = nn.Sequential(OrderedDict([("moe", MoE())]))
+        student = mtq.quantize(
+            copy.deepcopy(teacher),
+            {
+                "quant_cfg": [
+                    {"quantizer_name": "*", "enable": False},
+                    {
+                        "quantizer_name": "*weight_quantizer",
+                        "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                    },
+                ],
+                "algorithm": "max",
+            },
+            lambda model: model(batches[0]),
+        )
+        expert, router = student.moe.experts[0], student.moe.gate
+        if alias == "router_weight":
+            router.weight = nn.Parameter(expert.weight[:1].detach())
+        else:
+            router.weight_quantizer = expert.weight_quantizer
+        selected = "moe"
+    elif alias == "parameter":
+        student.moe.weight = student.mlp.weight
+    elif alias == "storage_view":
+        student.moe.weight = nn.Parameter(student.mlp.weight.detach().T)
+    elif alias == "module":
+        student.moe = student.mlp
+    else:
+        student.moe.weight_quantizer = student.mlp.weight_quantizer
+    before = copy.deepcopy(student.state_dict())
+    teacher_before = copy.deepcopy(teacher.state_dict())
+    flags = [(parameter, parameter.requires_grad) for parameter in student.parameters()]
+    with pytest.raises(ValueError):
+        mtd.bypass(student, teacher, batches, {"num_steps": 0, "modules": [selected]})
+    assert all(torch.equal(value, before[name]) for name, value in student.state_dict().items())
+    assert all(
+        torch.equal(value, teacher_before[name]) for name, value in teacher.state_dict().items()
+    )
+    assert all(parameter.requires_grad == flag for parameter, flag in flags)
+    assert not any("_local_repair_state" in name for name in student.state_dict())
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_public_bypass_rng_scope_preserves_caller_and_seeds_initial_reader(fail):
+    initial, teacher, batches = _problem()
+
+    class RandomBatches:
+        def __init__(self):
+            self.draws = []
+
+        def draw(self):
+            values = (random.random(), np.random.random(), torch.rand(()).item())
+            self.draws.append(values)
+            return sum(values) * 0.01
+
+        def __iter__(self):
+            self.draw()
+            return self.read()
+
+        def read(self):
+            for index, batch in enumerate(batches):
+                if fail and index == 1:
+                    raise OSError("reader failure")
+                yield batch + self.draw()
+
+    previous = None
+    for caller_seed in (101, 203):
+        random.seed(caller_seed)
+        np.random.seed(caller_seed)
+        torch.manual_seed(caller_seed)
+        caller = (
+            random.getstate(),
+            np.random.get_state(),
+            torch.get_rng_state(),
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+        )
+        data, student = RandomBatches(), copy.deepcopy(initial)
+        recipe = {
+            "num_steps": 2,
+            "global_batch_size": 2,
+            "sequence_length": 3,
+            "scheduler": "constant",
+            "warmup_fraction": 0,
+        }
+        if fail:
+            with pytest.raises(OSError):
+                mtd.bypass(student, teacher, data, recipe)
+        else:
+            mtd.bypass(student, teacher, data, recipe)
+        assert random.getstate() == caller[0]
+        actual_numpy = np.random.get_state()
+        assert actual_numpy[0] == caller[1][0]
+        np.testing.assert_array_equal(actual_numpy[1], caller[1][1])
+        assert actual_numpy[2:] == caller[1][2:]
+        assert torch.equal(torch.get_rng_state(), caller[2])
+        assert all(
+            torch.equal(torch.cuda.get_rng_state(i), state) for i, state in enumerate(caller[3])
+        )
+        if previous is not None:
+            draws, state = previous
+            assert data.draws == draws
+            assert all(
+                torch.equal(value, state[name]) for name, value in student.state_dict().items()
+            )
+        previous = (data.draws, copy.deepcopy(student.state_dict()))
