@@ -2,7 +2,8 @@
 
 An external draft is an ordinary pretrained causal LM trained to propose tokens for a
 target model. Unlike the head-based modes (EAGLE, Medusa, DFlash) nothing is grafted onto
-the target, and it has no dependence on target hidden states. Such drafters can be served efficiently on decode-efficient hardware such as the LPU.
+the target, and it has no dependence on target hidden states. Any serving engine that supports a
+separate draft model can load it without mode-specific support.
 
 This document serves as a "quick start" guide to get users up and running with training drafts.
 
@@ -27,7 +28,7 @@ Draft (a complete causal LM, trained)  ──► its own lm_head ──► draft
 
 We generally start draft training with an existing pre-trained small model. We then perform a "vocabulary" or "tokenizer swap" (see [`vocab_swap.py`](../../../modelopt/torch/speculative/external/vocab_swap.py)) to transform the existing small model into the target's embedding space. This allows for the small draft to be (1) directly optimized via logit distillation, (2) used directly as a draft, without the need for any transformation between the draft and target token spaces during inference.
 
-The tokenizer-swap does not completely preserve the small draft model's performance, and on top of this, we need to align the draft. As our intended deployment setting is always speculative decoding at non-zero temperatures with rejection sampling, we tend to opt for TVD loss, or combinations of TVD loss and e.g. cross entropy. These losses directly minimise the rejection probability under rejection sampling and as such are advantageous here.
+The tokenizer-swap does not completely preserve the small draft model's performance, and on top of this, we need to align the draft. As our intended deployment setting is always speculative decoding at non-zero temperatures with rejection sampling, we tend to opt for TVD loss, or TVD combined with cross entropy (`tvd_ce`). Under rejection sampling the probability that a proposed token is rejected equals the TVD between the draft and target distributions the server samples from. Only `tvd_deploy` computes that quantity, since it puts both sides through the serving top-k and top-p filter. `tvd` leaves the draft unfiltered and `tvd_ce` adds a cross-entropy term, so neither equals the deployed rejection probability.
 
 Furthermore, in search for a good drafter we recommend sweeping other hyperparameters, primarily the training loss, batch size, and potentially even teacher deployment settings.
 
@@ -81,23 +82,32 @@ We currently support the following objectives for external draft training though
 | `tvd_deploy` | The same, with both sides put through the serving filter first | either format |
 | `tvd_ce` | `tvd` plus a cross-entropy term on the target's argmax token | either format |
 
-We generally recommend using "TVD deploy" as it matches the deployment conditions for a draft model. On the sparse path the target side is truncated by the dump whichever objective runs, since that is all the saved dataset holds. The `tvd` and `tvd_deploy` losses then differ only in whether the *draft* is put through the filter too. Only `tvd_deploy` applies the same nucleus to both sides.
+We generally recommend starting with `tvd_deploy`, as it matches the deployment conditions for a draft model. The reference configuration below uses `tvd_ce` because it gave the higher acceptance length in the sweep for that draft. TVD is bounded, so it ranks weakly among tokens inside the target's support, and the cross-entropy term's log penalty has no such ceiling. Include both in a sweep.
+
+On the sparse path the target side is truncated by the dump whichever objective runs, since that is all the saved dataset holds. The `tvd` and `tvd_deploy` losses then differ only in whether the *draft* is put through the filter too. Only `tvd_deploy` applies the same nucleus to both sides. Pairing `soft_ce` with `data.sparse_data_path` is a hard error, not a quiet degradation.
+
+Report which truncation you trained under. Different `top_k` and `top_p` settings give different targets, so a number quoted without them cannot be compared with anything.
 
 ### Teacher policy data
 
 Standalone draft models are aligned via logit distillation against the target model. The required
-training data is a set of target model prompts and responses, with saved top-k logprobs for each
-response token. Training data is teacher generated responses. Responses should be generated at the deployment sampling parameters the draft model is intended to be used at, usually for this we reference a target models recommended sampling parameters. This is so that the draft learns the teacher distribution under the intended deployment settings.
+training data is a set of prompts with responses the **target generated itself**, not the responses
+that shipped with the prompts, plus the target's top-k logprobs at each response token. The draft
+is trained to match the target at the positions it will meet when serving, and those lie along the
+target's own samples. [Data Synthesis](../README.md#data-synthesis) covers generating them.
+Generate the responses at the sampling parameters the draft will be deployed with, usually the
+target model's recommended ones.
+
+The saved policy and every loss use temperature-1 probabilities: the dump applies the top-k and
+top-p filter but no temperature. At a deployment temperature other than 1, the draft learns the
+temperature-1 distribution rather than the one the server samples from.
 
 For a simple first attempt at draft training we tend to use 100-200k training samples taken from `nvidia/Nemotron-Post-Training-Dataset-v2`, we recommend initially trying an even split of datasets. If a user has a specific deployment use case then training data should be specialized toward that, however, we do still recommend maintaining a mix of subjects in the training data. Ideally some component of the training data should also match the context size that you intend to deploy the draft-target pair at.
 
-The data format:
-
-`$CONVERSATIONS` should carry responses the **target generated itself**, not the responses
-that shipped with the prompts. The objective trains the draft to match the target at the
-positions it will meet when serving, and those lie along the target's own samples; scoring
-it against another model's text trains it on positions the target would rarely produce.
-[Data Synthesis](../README.md#data-synthesis) covers generating them.
+The data format: `$CONVERSATIONS` is a `.jsonl` file, or a directory of them, with one
+conversation per line under a `messages` (or `conversations`) key holding the usual list of
+`{"role", "content"}` turns. The dump below scores the assistant turns and writes gzipped JSONL
+shards of the target's truncated next-token distribution to `$POLICY_DIR`.
 
 ```bash
 python collect_hidden_states/compute_sparse_policy_hf.py \
@@ -198,6 +208,15 @@ Training writes an ordinary HuggingFace checkpoint, shipped with the **target's*
 when the vocabulary was swapped, since the draft's rows are indexed by the target's ids from
 that point on. Nothing in the saved artifact depends on ModelOpt at load time.
 
+**There is no export step for this mode.** `scripts/export_hf_checkpoint.py` restructures a
+grafted head into a servable checkpoint; an external draft has no head to restructure, so the
+script rejects it. The training output is the artifact.
+
+`training.output_dir` also holds training residue that `from_pretrained` ignores:
+`modelopt_state.pth`, `trainer_state.json`, `training_args.bin` and the `checkpoint-*`
+directories. Ship `config.json`, `generation_config.json`, the weights and the tokenizer
+files.
+
 ## Reference Configuration (Llama-3.2-1B drafting for Qwen3.8-27B)
 
 A cross-tokenizer draft: Llama-3.2-1B-Instruct re-indexed onto Qwen3.8-27B's
@@ -248,3 +267,23 @@ torchrun --nproc_per_node 8 main.py \
 > **Note on the learning rate:** we recommend sweeping to find the best rate for your own
 > draft and target. The hyperparameters chosen here came from a sweep over learning rate and
 > loss, scored on acceptance length.
+
+## Open Items
+
+### Validated end-to-end
+
+- Sparse teacher-policy training with `tvd` and `tvd_ce`, from dump through training to a
+  loadable checkpoint.
+- The cross-tokenizer vocabulary swap, on a draft trained this way.
+
+### Covered by tests, not yet exercised in a full run
+
+- `soft_ce`, `tvd_deploy`, and the dense hidden-states data path.
+- Resume, with and without a swap.
+- Untied output heads, and heads carrying a bias.
+
+### Not yet validated
+
+- Streaming the teacher data from a live `vllm serve`. It is accepted for this mode but has
+  not been exercised. Online training is rejected outright, since it produces no cached
+  target outputs for the draft to be scored against.
