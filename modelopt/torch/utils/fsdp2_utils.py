@@ -174,7 +174,9 @@ def _register_output_capture(model) -> None:
             )
         return
     for module in recorders:
-        _CAN_RECORD_REGISTRY[str(type(module))] = module._can_record_outputs
+        # Both registry versions store class-name keys. Newer Transformers wraps assignment to
+        # accept a model instead of a string, so write the shared representation directly.
+        dict.__setitem__(_CAN_RECORD_REGISTRY, str(type(module)), module._can_record_outputs)
 
 
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):

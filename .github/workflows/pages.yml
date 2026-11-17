@@ -3,7 +3,7 @@ name: Docs
 on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
-    branches: [main, release/*, feature/*]
+    branches: [main, release/*, feature/*, codex/bypass-*]
   push:
     branches: [main]
   schedule:

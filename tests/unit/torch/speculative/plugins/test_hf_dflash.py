@@ -409,12 +409,38 @@ class TestDFlashLazyRotaryEmb:
         assert hasattr(model.dflash_module, "rotary_emb")
         assert not any(b.is_meta for b in model.dflash_module.rotary_emb.buffers())
 
-    def test_rotary_emb_deferred_on_meta(self):
-        """On meta the buffer is still deferred, which is what the laziness is for."""
-        model = get_tiny_llama(num_hidden_layers=4).to("meta")
+    @pytest.mark.parametrize(
+        ("default_device", "device", "expected_device"),
+        [
+            ("cpu", None, "cpu"),
+            ("meta", None, "meta"),
+            ("meta", "cpu", "cpu"),
+            ("cpu", torch.device("meta"), "meta"),
+        ],
+    )
+    def test_rotary_emb_deferred_on_meta(self, default_device, device, expected_device):
+        """Meta construction defers RoPE until its initialization device is known."""
+        model = get_tiny_llama(num_hidden_layers=4, head_dim=4).to("meta")
         config = get_dflash_config()
+        config["dflash_architecture_config"]["head_dim"] = 4
         mtsp.convert(model, [("dflash", config)])
         assert not hasattr(model.dflash_module, "rotary_emb")
+
+        original_dtype = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(torch.bfloat16)
+            with torch.device(default_device):
+                model.dflash_module._maybe_init_rotary_emb(device=device)
+                assert torch.empty(0).device.type == default_device
+        finally:
+            torch.set_default_dtype(original_dtype)
+
+        rotary = model.dflash_module.rotary_emb
+        assert all(b.device.type == expected_device for b in rotary.buffers())
+        assert all(b.dtype == torch.float32 for b in rotary.buffers())
+        if expected_device == "cpu":
+            torch.testing.assert_close(rotary.inv_freq, torch.tensor([1.0, 0.01]))
+            torch.testing.assert_close(rotary.original_inv_freq, rotary.inv_freq)
 
     def test_rotary_emb_init_is_idempotent(self):
         """A later _maybe_init_rotary_emb must not replace an existing buffer."""
@@ -446,9 +472,11 @@ class TestDFlashLazyRotaryEmb:
         mtsp.convert(model, [("dflash", get_dflash_config())])
         model.to_empty(device="cpu")  # stands in for from_pretrained loading the weights
 
-        model.restore_draft_precision()
+        with torch.device("meta"):
+            model.restore_draft_precision()
 
         assert model.dflash_module.rotary_emb.inv_freq.dtype == torch.float32
+        assert all(b.device.type == "cpu" for b in model.dflash_module.rotary_emb.buffers())
         assert all(p.dtype == torch.bfloat16 for p in model.dflash_module.parameters())
 
 

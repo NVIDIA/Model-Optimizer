@@ -112,6 +112,40 @@ def test_forward_and_gradients_match_reference(use_aux, layers):
         torch.testing.assert_close(parameter.grad, expected_parameters[name].grad)
 
 
+@pytest.mark.parametrize(
+    ("default_device", "device", "expected_device"),
+    [
+        ("cpu", None, "cpu"),
+        ("meta", None, "meta"),
+        ("meta", "cpu", "cpu"),
+        ("cpu", torch.device("meta"), "meta"),
+    ],
+)
+def test_rotary_initialization_respects_device(default_device, device, expected_device):
+    model = tiny_eagle()
+    del model.rotary_emb
+    original_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.bfloat16)
+        with torch.device(default_device):
+            model._maybe_init_rope(device=device)
+            assert torch.empty(0).device.type == default_device
+    finally:
+        torch.set_default_dtype(original_dtype)
+
+    rotary = model.rotary_emb
+    assert all(b.device.type == expected_device for b in rotary.buffers())
+    assert all(b.dtype == torch.float32 for b in rotary.buffers())
+    if expected_device == "cpu":
+        torch.testing.assert_close(rotary.inv_freq, torch.tensor([1.0, 0.01]))
+        cos, sin = rotary(torch.zeros(1, 2, 8), torch.tensor([[0, 1]]))
+        angles = torch.tensor([[[0.0, 0.0, 0.0, 0.0], [1.0, 0.01, 1.0, 0.01]]])
+        torch.testing.assert_close(cos, angles.cos())
+        torch.testing.assert_close(sin, angles.sin())
+    model._maybe_init_rope(device="cpu")
+    assert model.rotary_emb is rotary
+
+
 @pytest.mark.parametrize("failure_at", ["decoder", "attention"])
 def test_failed_forward_releases_inputs(failure_at):
     model = tiny_eagle()

@@ -2,7 +2,7 @@ name: Code Quality
 
 on:
   pull_request:
-    branches: [main, release/*, feature/*]
+    branches: [main, release/*, feature/*, codex/bypass-*]
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch:

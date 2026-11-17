@@ -291,8 +291,8 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 - **Contributors without write access:** When GitHub requests workflow approval, a reviewer with write permission
   must select **Approve and run workflows** to start GitHub Actions CI.
 - If any CI/CD checks fail, fix the issues and push again.
-- **Stacked PRs:** GPU, example and regression tests run only for PRs that target `main`, `release/*`
-  or `feature/*`, the same branches the unit tests run for. A PR based on another PR's branch gets
+- **Stacked PRs:** GPU, example and regression tests run for PRs that target `main`, `release/*`,
+  `feature/*` or `codex/bypass-*`, the same branches the unit tests run for. Other stack bases get
   failing `*-pr-required-check`s that say the tests are deferred; once it targets `main`, push or use
   **Re-run all jobs** to run them. To test a stacked PR before then, run the tests on its branch by
   hand: in the repo's **Actions** tab, open **GPU tests** (or **Example tests** / **Regression

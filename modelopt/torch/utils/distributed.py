@@ -864,9 +864,16 @@ def reinstall_a2a_forwards(model, ep_mesh) -> int:
     except ImportError:  # older transformers
         from transformers.integrations.tensor_parallel import ALL_PARALLEL_STYLES
     try:
-        from transformers.distributed.tensor_parallel import _get_parameter_tp_plan
+        from transformers.distributed.parallel_utils import _get_parameter_plan
     except ImportError:
-        from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
+        try:
+            from transformers.distributed.tensor_parallel import (
+                _get_parameter_tp_plan as _get_parameter_plan,
+            )
+        except ImportError:
+            from transformers.integrations.tensor_parallel import (
+                _get_parameter_tp_plan as _get_parameter_plan,
+            )
 
     plan = getattr(model, "tp_plan", None) or {}
     if not plan:
@@ -874,7 +881,7 @@ def reinstall_a2a_forwards(model, ep_mesh) -> int:
 
     n = 0
     for name, mod in model.named_modules():
-        style_name = _get_parameter_tp_plan(parameter_name=name, tp_plan=plan, is_weight=False)
+        style_name = _get_parameter_plan(name, plan, is_weight=False)
         if style_name not in ("torch_a2a_experts", "torch_a2a_router"):
             continue
         # Before transformers 5.16 a style installs its transforms as forward pre-hooks, which

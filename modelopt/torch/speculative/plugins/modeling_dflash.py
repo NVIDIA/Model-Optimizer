@@ -41,6 +41,7 @@ Draft model components use Qwen3 (MLP, RMSNorm, RotaryEmbedding) from
 The draft architecture is independent of the target model.
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -411,7 +412,9 @@ class DFlashModule(nn.Module):
         preventing the meta-tensor inv_freq issue on checkpoint resume.
         """
         if not hasattr(self, "rotary_emb"):
-            self.rotary_emb = _ROTARY_CLS(config=self._rotary_config, device=device)
+            # Transformers >= 5.23 uses the default device instead of a constructor argument.
+            with torch.device(device) if device is not None else nullcontext():
+                self.rotary_emb = _ROTARY_CLS(config=self._rotary_config)
 
     def _init_weights(self, config):
         """Initialize weights matching HF PreTrainedModel._init_weights."""

@@ -764,7 +764,7 @@ def _hf_cache_types() -> tuple[type, ...]:
         from transformers import cache_utils
     except ImportError:
         return ()
-    names = ("Cache", "CacheLayerMixin", "LinearAttentionCacheLayerMixin")
+    names = ("Cache", "CacheLayerMixin", "LinearAttentionCacheLayerMixin", "DummyLayer")
     bases = tuple(b for n in names if (b := getattr(cache_utils, n, None)) is not None)
     if not bases:
         return ()

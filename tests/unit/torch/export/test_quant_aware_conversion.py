@@ -140,13 +140,27 @@ def _load_shards(export_dir):
     }
 
 
-def _fp8_llama(*quantizer_names):
+def _fp8_llama(*quantizer_names, source_dir=None):
     pytest.importorskip("transformers.core_model_loading")
     # Local import: transformers and its test fixtures are optional dependencies.
     from _test_utils.torch.transformers_models import get_tiny_llama
 
     model = get_tiny_llama(num_hidden_layers=1, num_key_value_heads=16)
     model.config.architectures = ["LlamaForCausalLM"]
+    if source_dir is not None:
+        model.config.save_pretrained(source_dir)
+        source_state = dict(model.state_dict())
+        source_state["head.weight"] = source_state.pop("lm_head.weight")
+        save_file(source_state, source_dir / "model.safetensors")
+        model, loading_info = type(model).from_pretrained(
+            source_dir,
+            key_mapping={r"^head\.weight$": "lm_head.weight"},
+            dtype="auto",
+            output_loading_info=True,
+        )
+        assert not loading_info["missing_keys"]
+        assert not loading_info["unexpected_keys"]
+        torch.testing.assert_close(model.lm_head.weight, source_state["head.weight"])
     return mtq.quantize(
         model,
         {
@@ -1083,7 +1097,7 @@ def test_quantized_weight_specific_rename_keeps_scales_aligned(tmp_path, export_
     from transformers.core_model_loading import WeightRenaming
 
     weight_rename = WeightRenaming(r"^head\.weight$", "lm_head.weight")
-    container_rename = WeightRenaming("output", "head")
+    container_rename = WeightRenaming("^output", "head")
     for rule in (weight_rename, container_rename):
         if scope:
             _set_scope_attr(rule, "scope_prefix", scope)
@@ -1092,6 +1106,8 @@ def test_quantized_weight_specific_rename_keeps_scales_aligned(tmp_path, export_
     state = _nvfp4_linear(prefix + "lm_head", 8, 16)
     state[prefix + "lm_head.weight_scale_inv"] = torch.ones(8, 1)
     state["unrelated.weight"] = torch.ones(8, 16)
+    anchored_sibling = prefix + "lm_head.weight_aux"
+    state[anchored_sibling] = torch.ones(2)
 
     if export_mode == "resident":
         written = revert_weight_conversion_quant_aware(model, state)
@@ -1102,11 +1118,21 @@ def test_quantized_weight_specific_rename_keeps_scales_aligned(tmp_path, export_
     config = {"quantized_layers": {prefix + "lm_head": {"quant_algo": "NVFP4"}}}
     revert_quant_config_names(config, build_reverse_name_mapper(model))
     assert config["quantized_layers"] == {prefix + "output": {"quant_algo": "NVFP4"}}
-    assert set(written) == {key.replace(prefix + "lm_head.", prefix + "output.") for key in state}
+    assert set(written) == {
+        key if key == anchored_sibling else key.replace(prefix + "lm_head.", prefix + "output.")
+        for key in state
+    }
     for key, value in state.items():
-        torch.testing.assert_close(
-            written[key.replace(prefix + "lm_head.", prefix + "output.")], value
+        expected = (
+            key if key == anchored_sibling else key.replace(prefix + "lm_head.", prefix + "output.")
         )
+        torch.testing.assert_close(written[expected], value)
+    for key, value in written.items():
+        if key.endswith(".weight"):
+            restored = key
+            for conversion in model._weight_conversions:
+                restored, _ = conversion.rename_source_key(restored)
+            torch.testing.assert_close(state[restored], value)
 
 
 @pytest.mark.parametrize("export_mode", ["resident", "streaming", "layerwise"])
@@ -1114,11 +1140,11 @@ def test_quantized_weight_specific_rename_keeps_scales_aligned(tmp_path, export_
 def test_export_weight_specific_rename_keeps_config_aligned(tmp_path, quantized_head, export_mode):
     """Every export path keeps renamed BF16/FP8 weights, scales, and config aligned."""
     names = ["model.layers.0.self_attn.q_proj.weight_quantizer"]
-    model = _fp8_llama(*names, *(["lm_head.*quantizer"] if quantized_head else []))
-    # Local import: _fp8_llama guards the optional dependency.
-    from transformers.core_model_loading import WeightRenaming
-
-    model._weight_conversions = [WeightRenaming(r"^head\.weight$", "lm_head.weight")]
+    model = _fp8_llama(
+        *names,
+        *(["lm_head.*quantizer"] if quantized_head else []),
+        source_dir=tmp_path / "source",
+    )
     original_head = model.lm_head.weight.detach().clone()
     if export_mode == "layerwise":
         exporter = LayerwiseExporter(model, tmp_path)

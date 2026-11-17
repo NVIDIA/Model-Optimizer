@@ -15,6 +15,7 @@
 
 """EAGLE draft model architecture (EagleModule) and related data structures."""
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -83,7 +84,9 @@ class EagleModule(nn.Module):
 
     def _maybe_init_rope(self, device=None):
         if self.config.eagle_decoder_type == "llama" and not hasattr(self, "rotary_emb"):
-            self.rotary_emb = LlamaRotaryEmbedding(config=self.config, device=device)
+            # Transformers >= 5.23 uses the default device instead of a constructor argument.
+            with torch.device(device) if device is not None else nullcontext():
+                self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
 
     def _expand_first_attn_in_dim(self, first_layer_attn):
         """Modify qkv projection in first layer to accept 2h hidden size."""

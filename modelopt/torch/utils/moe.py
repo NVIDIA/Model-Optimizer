@@ -123,7 +123,7 @@ def _choose_ep_degree(world_size: int, num_experts: int) -> int:
 # The styles a base_model_ep_plan gives a layer's routed-experts container. A plan that styles the
 # experts' grouped-GEMM parameters names the containers through their parents too, so a plan that
 # styles some containers one way and others the other names them all.
-_EXPERTS_STYLES = ("moe_tp_experts", "nemotron_experts_ep")
+_EXPERTS_STYLES = ("moe_tp_experts", "nemotron_experts_ep", "ep_dispatch_experts")
 
 
 def _routed_expert_keys(ep_plan: dict[str, str]) -> set[str]:
@@ -538,6 +538,10 @@ def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, p
             "torch_a2a experts forward requires the EP `process_group` (use the `torch_a2a_experts` "
             "TP style, which injects it via _prepare_input_fn)."
         )
+    if getattr(self, "has_post_expert_norm", False):
+        raise NotImplementedError(
+            "torch_a2a does not support post_expert_norm. Quantize the model without expert parallelism."
+        )
     num_local = self.num_experts
     # Per-expert biases (e.g. GPT-OSS ``gate_up_proj_bias`` / ``down_proj_bias``) are indexed by local
     # expert id below, so the plan must shard them over dim 0 like the weights (grouped_gemm): left
@@ -600,31 +604,28 @@ def register_torch_a2a():
 
     These two styles are functionally transformers' ``megamoe_router`` / ``megamoe_experts`` (added
     in 5.10.4 for DeepGEMM Mega-MoE), reimplemented here so the transport works below 5.10.4 too.
-    The base classes (``RouterParallel``, ``TensorParallelLayer``) are stock wherever the EP infra
-    exists (transformers >= 5.6); ``grouped_gemm`` (expert weight sharding) is stock too. A model
+    ``TensorParallelLayer`` and ``grouped_gemm`` (expert weight sharding) are stock wherever the EP
+    infra exists (transformers >= 5.6). A model
     builds with ``torch_a2a`` only from 5.7, the floor ``load_and_prepare_ep`` enforces: 5.6 accepts
     only the experts implementations it ships.
     """
     global _TORCH_A2A_REGISTERED
     if _TORCH_A2A_REGISTERED:
         return
+    from transformers.integrations import tensor_parallel as tp
     from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS
-    from transformers.integrations.tensor_parallel import ALL_PARALLEL_STYLES, TensorParallelLayer
-
-    try:
-        from transformers.integrations.tensor_parallel import RouterParallel
-    except ImportError:
-        # transformers 5.16.0 exports it only as EpRouterParallel; 5.16.1 restored the alias.
-        from transformers.integrations.tensor_parallel import EpRouterParallel as RouterParallel
 
     ALL_EXPERTS_FUNCTIONS.register("torch_a2a", torch_a2a_experts_forward)
 
-    class TorchA2ARouter(RouterParallel):
+    class TorchA2ARouter(tp.TensorParallelLayer):
         """torch_a2a router style: emit global, unmasked expert ids (== stock ``megamoe_router``).
 
-        The base ``RouterParallel._prepare_output_fn`` remaps to local ids + masks non-local; the a2a
+        Stock ``RouterParallel._prepare_output_fn`` remaps to local ids + masks non-local; the a2a
         dispatch needs the global ids, so this just passes the router outputs through unchanged.
         """
+
+        def _prepare_input_fn(self, mod, inputs, device_mesh):
+            return inputs[0] if inputs else inputs
 
         def _prepare_output_fn(self, mod, outputs, device_mesh):
             return outputs
@@ -633,7 +634,10 @@ def register_torch_a2a():
         def transform_output_post_forward(self, module, output, mesh):
             return output
 
-    class TorchA2AExperts(TensorParallelLayer):
+        def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
+            return param[...].to(device=device, dtype=dtype)
+
+    class TorchA2AExperts(tp.TensorParallelLayer):
         """torch_a2a experts style: inject the EP ``process_group`` (4th arg) + skip the all-reduce.
 
         (== stock ``megamoe_experts``.) Expert weights shard via packed_colwise/rowwise +
@@ -667,8 +671,8 @@ def register_torch_a2a():
         def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
             return param[...].to(device=device, dtype=dtype)
 
-    ALL_PARALLEL_STYLES.register("torch_a2a_router", TorchA2ARouter())
-    ALL_PARALLEL_STYLES.register("torch_a2a_experts", TorchA2AExperts())
+    tp.ALL_PARALLEL_STYLES.register("torch_a2a_router", TorchA2ARouter())
+    tp.ALL_PARALLEL_STYLES.register("torch_a2a_experts", TorchA2AExperts())
     _TORCH_A2A_REGISTERED = True
 
 

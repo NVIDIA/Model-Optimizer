@@ -467,17 +467,24 @@ def test_image_calibration_loop_reaches_the_vision_tower(tmp_path, gloo_group):
     """Image-text calibration drives the whole FSDP2 VLM, so the vision tower (its own unit) runs."""
     from _test_utils.examples.hf_ptq_example_utils import example_utils
 
-    _tiny_llava_checkpoint(tmp_path)
+    reference = _tiny_llava_checkpoint(tmp_path)
     model = _fsdp2_load(tmp_path)
     calls = []
+    logits = []
     model.model.vision_tower.register_forward_hook(lambda *_: calls.append(1))
+    model.register_forward_hook(lambda _m, _args, output: logits.append(output.logits.detach()))
     batch = {
         "input_ids": torch.tensor([[1, 63, 63, 63, 63, 2]]),  # 4 image tokens: 28px / 14px patches
         "attention_mask": torch.ones(1, 6, dtype=torch.long),
         "pixel_values": torch.randn(1, 3, 28, 28),
     }
+    with torch.no_grad():
+        expected = reference(**batch).logits
     example_utils.create_vlm_calibration_loop(model, [batch, batch])(model)
     assert len(calls) == 2
+    assert len(logits) == 2
+    for actual in logits:
+        torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.skipif(
@@ -4095,17 +4102,131 @@ def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given():
     if mixin is None:
         pytest.skip("this transformers honors from_pretrained's device_mesh")
     builder = mixin.initialize_distributed_mesh
+    distribute = PreTrainedModel.maybe_distribute_model.__func__
     ep_mesh = SimpleNamespace(device_type="cpu")
     config = DistributedConfig(enable_expert_parallel=True, tp_plan="auto", tp_size=2)
     with _experts_sharded_over(ep_mesh):
         _, device_map, device_mesh = PreTrainedModel.prepare_distribute_model(config)
 
-    assert device_mesh is ep_mesh
+    if hasattr(mixin, "TransformersDeviceMesh"):
+        assert device_mesh.get_mesh(("pp", "fsdp", "tp")) is ep_mesh
+    else:
+        assert device_mesh is ep_mesh
     assert device_map == torch.device("cpu")
     assert mixin.initialize_distributed_mesh is builder
+    assert PreTrainedModel.maybe_distribute_model.__func__ is distribute
     with pytest.raises(RuntimeError), _experts_sharded_over(ep_mesh):
         raise RuntimeError("the load failed")
     assert mixin.initialize_distributed_mesh is builder
+    assert PreTrainedModel.maybe_distribute_model.__func__ is distribute
+
+
+def _native_ep_checkpoint_load_job(rank, size, checkpoint):
+    initialize_mesh = torch.distributed.device_mesh.init_device_mesh
+
+    def cpu_mesh(device_type, *args, **kwargs):
+        return initialize_mesh("cpu", *args, **kwargs)
+
+    with (
+        bounded_collectives(),
+        # Substitute CPU hardware only; native checkpoint loading, sharding and hooks run unchanged.
+        mock.patch.object(torch.distributed.device_mesh, "init_device_mesh", cpu_mesh),
+        mock.patch.object(torch.cuda, "synchronize"),
+    ):
+        reference = AutoModelForCausalLM.from_pretrained(
+            checkpoint,
+            dtype=torch.bfloat16,
+            experts_implementation="grouped_mm",
+            attn_implementation="eager",
+        ).eval()
+        loaded = load_and_prepare_ep(
+            checkpoint,
+            DistributionPlan(size, ep_size=size),
+            hf_config=AutoConfig.from_pretrained(checkpoint),
+            attn_implementation="eager",
+            freeze=False,
+        )
+        for name, parameter in loaded.named_parameters():
+            expected = reference.get_parameter(name)
+            assert parameter.dtype == expected.dtype == torch.bfloat16
+            if ".experts." in name:
+                assert isinstance(parameter, DTensor), name
+                assert parameter.placements == (Shard(0),)
+                local_count = expected.shape[0] // size
+                owned = slice(rank * local_count, (rank + 1) * local_count)
+                torch.testing.assert_close(parameter.to_local(), expected[owned], rtol=0, atol=0)
+            else:
+                assert not isinstance(parameter, DTensor), name
+                torch.testing.assert_close(parameter, expected, rtol=0, atol=0)
+
+        ids = torch.tensor([[rank + 1, rank + 3, rank + 5]])
+        with torch.no_grad():
+            torch.testing.assert_close(
+                loaded(ids).logits, reference(ids).logits, atol=2e-3, rtol=2e-2
+            )
+
+        mtq.quantize(
+            loaded,
+            {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None},
+        )
+        assert dist.reinstall_a2a_forwards(loaded, loaded._device_mesh) == 1
+        with torch.no_grad():
+            torch.testing.assert_close(
+                loaded(ids).logits, reference(ids).logits, atol=2e-3, rtol=2e-2
+            )
+
+        whole = reference.model.layers[0].mlp.experts
+        local = loaded.model.layers[0].mlp.experts
+        generator = torch.Generator().manual_seed(0)
+        hidden = torch.randn(size * 3, 8, generator=generator).bfloat16()
+        routes = (torch.arange(size * 3 * 2) % whole.num_experts).reshape(size * 3, 2)
+        weights = torch.rand(size * 3, 2, generator=generator)
+        full_hidden = hidden.clone().requires_grad_(True)
+        full_weights = weights.clone().requires_grad_(True)
+        expected = whole(full_hidden, routes, full_weights)
+        expected.float().square().sum().backward()
+        tokens = slice(rank * 3, (rank + 1) * 3)
+        local_hidden = hidden[tokens].clone().requires_grad_(True)
+        local_weights = weights[tokens].clone().requires_grad_(True)
+        actual = local(local_hidden, routes[tokens], local_weights)
+        actual.float().square().sum().backward()
+        for actual_value, expected_value in (
+            (actual, expected[tokens]),
+            (local_hidden.grad, full_hidden.grad[tokens]),
+            (local_weights.grad, full_weights.grad[tokens]),
+        ):
+            assert actual_value.detach().abs().max() > 0
+            torch.testing.assert_close(actual_value, expected_value, atol=3e-2, rtol=3e-2)
+        for name in ("gate_up_proj", "down_proj"):
+            parameter = getattr(local, name)
+            local_count = parameter.to_local().shape[0]
+            owned = slice(rank * local_count, (rank + 1) * local_count)
+            assert parameter.grad.to_local().abs().max() > 0
+            torch.testing.assert_close(
+                parameter.grad.to_local(), getattr(whole, name).grad[owned], atol=3e-2, rtol=3e-2
+            )
+
+
+def test_native_from_pretrained_shards_and_runs_the_saved_experts(cpu_dist_workers, tmp_path):
+    if Version(transformers.__version__) < Version(_EP_MIN_TRANSFORMERS):
+        pytest.skip("native expert-parallel loading requires transformers >= 5.7")
+    source = get_tiny_qwen3_moe(
+        hidden_size=8,
+        intermediate_size=16,
+        moe_intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=4,
+        bos_token_id=0,
+        eos_token_id=1,
+        dtype=torch.bfloat16,
+    )
+    with torch.no_grad():
+        for name in ("gate_up_proj", "down_proj"):
+            getattr(source.model.layers[0].mlp.experts, name).normal_(std=0.3)
+    source.save_pretrained(tmp_path)
+    cpu_dist_workers.run(_native_ep_checkpoint_load_job, checkpoint=str(tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -5311,6 +5432,12 @@ def test_the_expert_converter_leads_with_a_merge_that_dequantizes_each_expert(
     that dequantizes each expert with its own scales and drops them before ``Concatenate``."""
     if not hasattr(FineGrainedFP8HfQuantizer, "update_weight_conversions"):
         pytest.skip("this transformers' FP8 quantizer prepends no dequant to the expert converter")
+    hook_kwargs = (
+        {"model": nn.Linear(1, 1)}
+        if "model"
+        in inspect.signature(FineGrainedFP8HfQuantizer.update_weight_conversions).parameters
+        else {}
+    )
     model_load_utils._patch_finegrained_fp8_dequant(torch.float32)
     experts = WeightConverter(
         source_patterns=["mlp.experts.*.gate_proj.weight", "mlp.experts.*.up_proj.weight"],
@@ -5323,7 +5450,7 @@ def test_the_expert_converter_leads_with_a_merge_that_dequantizes_each_expert(
 
     [converter] = [
         conv
-        for conv in quantizer.update_weight_conversions([experts])
+        for conv in quantizer.update_weight_conversions([experts], **hook_kwargs)
         if conv.target_patterns == ["mlp.experts.gate_up_proj"]
     ]
 
@@ -5332,10 +5459,18 @@ def test_the_expert_converter_leads_with_a_merge_that_dequantizes_each_expert(
         name: [_block_fp8((8, 12), (2, 3), seed=3 * p + e) for e in range(3)]
         for p, name in enumerate(("gate_proj", "up_proj"))
     }
-    tensors = {}  # what the loader collects for each of the converter's source patterns
-    for name, pairs in blocks.items():
-        tensors[f"mlp.experts.*.{name}.weight$"] = [weight for weight, _ in pairs]
-        tensors[f"mlp.experts.*.{name}.weight_scale_inv$"] = [scale_inv for _, scale_inv in pairs]
+    serialized = {
+        f"mlp.experts.*.{name}.{leaf}": [pair[index] for pair in pairs]
+        for name, pairs in blocks.items()
+        for index, leaf in enumerate(("weight", "weight_scale_inv"))
+    }
+    # The loader groups tensors by each converter's actual pattern. Older HF adds end anchors.
+    tensors = {
+        pattern: serialized[pattern.removesuffix("$")]
+        for pattern in converter.source_patterns
+        if pattern.removesuffix("$") in serialized
+    }
+    assert len(tensors) == 4
     for op in converter.operations:
         tensors = op.convert(
             tensors,

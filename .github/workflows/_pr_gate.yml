@@ -18,17 +18,17 @@ on:
           **/*.rst
     outputs:
       any_changed:
-        description: "Whether any relevant files changed (always false for a stacked PR)"
+        description: "Whether relevant files changed on a supported PR base or a non-PR run"
         value: ${{ jobs.check-file-changes.outputs.any_changed }}
       stacked:
-        description: "Whether the PR targets another PR's branch, so its GPU tests are deferred"
+        description: "Whether the PR base defers GPU tests"
         value: ${{ jobs.check-file-changes.outputs.stacked }}
 
 jobs:
   check-file-changes:
     runs-on: ubuntu-24.04
     outputs:
-      # Stacked PRs (base is another PR's branch) skip GPU tests; only the bottom PR, targeting main, runs them.
+      # Unsupported stack bases defer GPU tests; the registered Bypass stack runs the full checks.
       any_changed: ${{ steps.base.outputs.stacked != 'true' && (steps.changed-tests.outputs.any_modified || steps.non-pr.outputs.any_changed) || 'false' }}
       stacked: ${{ steps.base.outputs.stacked == 'true' }}
     steps:

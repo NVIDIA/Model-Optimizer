@@ -63,6 +63,7 @@ Reverse rules are derived from the model's conversion mapping via transformers'
 """
 
 import contextlib
+import copy
 import functools
 import logging
 import re
@@ -799,6 +800,35 @@ def _decodes_in_place(rev, ops) -> bool:
     return bool(sources) and sources[:1] == targets[:1] and len(modules) == 1
 
 
+def _reverse_transform(conversion):
+    """Reverse without mutating the load mapping or emitting regex end anchors."""
+    # Older Transformers normalizes these lists in place while reversing. Copy only
+    # pattern metadata; operations may reference the model's quantizer or weight state.
+    conversion = copy.copy(conversion)
+    for name in (
+        "source_patterns",
+        "target_patterns",
+        "_original_source_patterns",
+        "_original_target_patterns",
+    ):
+        if hasattr(conversion, name):
+            object.__setattr__(conversion, name, _as_list(getattr(conversion, name)))
+    rev = conversion.reverse_transform()
+    targets = _as_list(rev.target_patterns)
+    if not any(target.endswith("$") for target in targets):
+        return rev
+    # Transformers 5.23 retains source end anchors when they become reverse targets.
+    # Preserve the matching constraint, then use concrete names as replacements.
+    sources = _as_list(rev.source_patterns)
+    if len(sources) == len(targets):
+        sources = [
+            source + "$" if target.endswith("$") and not source.endswith("$") else source
+            for source, target in zip(sources, targets)
+        ]
+    kwargs = {"operations": list(rev.operations)} if hasattr(rev, "operations") else {}
+    return rev.copy(sources, [target.removesuffix("$") for target in targets], **kwargs)
+
+
 def _build_reverse_rules(
     model,
 ) -> tuple[list[SplitRule], list[_MergeRule], list[RenameRule], list[str], set[str] | None]:
@@ -864,7 +894,7 @@ def _build_reverse_rules(
     # which the per-expert-index leaf renames cannot rewrite.
     expert_fused_leaves: list[str] = []
     for conv in conversions:
-        rev = conv.reverse_transform()  # hub<-in-memory; reversed name patterns + ops
+        rev = _reverse_transform(conv)  # hub<-in-memory; reversed name patterns + ops
         if isinstance(rev, WeightRenaming):
             scope_prefixes = _scope_prefixes(rev)
             for pattern, repl in zip(_as_list(rev.source_patterns), _as_list(rev.target_patterns)):

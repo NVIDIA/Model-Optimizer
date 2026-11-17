@@ -40,6 +40,7 @@ import torch.distributed as dist
 from _test_utils.torch.moe_models import MoeLayer, model_with_decoder_at
 from packaging.version import Version
 from torch import nn
+from torch.distributed.device_mesh import init_device_mesh
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.moe as moe
@@ -223,24 +224,35 @@ def test_a2a_moe_warns_when_a_rank_receives_more_than_any_rank_sent(cpu_dist_wor
     cpu_dist_workers.run(_routing_skew_job, routing=routing)
 
 
-def test_the_router_style_registers_under_transformers_5_16_0s_name(monkeypatch):
-    """transformers 5.16.0 exports the router style only as ``EpRouterParallel``; 5.16.1 restored
-    ``RouterParallel`` as an alias. The registration takes either."""
+@pytest.mark.parametrize("remove_legacy_router", [False, True], ids=["stock", "no-legacy-router"])
+def test_the_router_style_keeps_global_routes(monkeypatch, remove_legacy_router):
+    """Register with old router names or without them, as on transformers 5.23."""
     tp = pytest.importorskip("transformers.integrations.tensor_parallel")
-    if not hasattr(tp, "EpRouterParallel"):
-        pytest.skip("this transformers has no EpRouterParallel")
-    # 5.16.0 itself has no RouterParallel to delete.
-    monkeypatch.delattr(tp, "RouterParallel", raising=False)
+    if remove_legacy_router:
+        monkeypatch.delattr(tp, "RouterParallel", raising=False)
+        monkeypatch.delattr(tp, "EpRouterParallel", raising=False)
     monkeypatch.setattr(moe, "_TORCH_A2A_REGISTERED", False)
 
     moe.register_torch_a2a()
 
-    assert isinstance(tp.ALL_PARALLEL_STYLES["torch_a2a_router"], tp.EpRouterParallel)
+    style = tp.ALL_PARALLEL_STYLES["torch_a2a_router"]
+    logits = torch.randn(T, E)
+    weights, indices = logits.softmax(-1).topk(TOP_K, dim=-1)
+    outputs = (logits, weights, indices)
+    assert style._prepare_input_fn(None, (logits,), None) is logits
+    assert style._prepare_input_fn(None, (), None) == ()
+    assert style._prepare_output_fn(None, outputs, None) is outputs
+    assert style.transform_output_post_forward(None, outputs, None) is outputs
+    torch.testing.assert_close(style.shard_tensor(logits), logits, rtol=0, atol=0)
+    if hasattr(style, "install_forward"):
+        router = nn.Identity()
+        style.install_forward(router, None)
+        assert router(outputs) is outputs
 
 
-def test_experts_whose_biases_the_plan_left_whole_are_refused():
-    """A plan that shards GPT-OSS's expert weights but not their biases leaves every rank all the
-    experts' biases, which the forward indexes by local expert id; it refuses them instead."""
+@pytest.mark.parametrize("unsupported", ["unsharded-bias", "post-expert-norm"])
+def test_experts_with_unsupported_features_are_refused_before_dispatch(unsupported):
+    """Refuse unsharded expert biases and post-expert norms before changing weights or dispatching."""
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
@@ -262,11 +274,21 @@ def test_experts_whose_biases_the_plan_left_whole_are_refused():
     local_config = copy.deepcopy(config)
     local_config.num_local_experts = E // 2
     local = GptOssExperts(local_config)
-    local.gate_up_proj_bias = whole.gate_up_proj_bias
+    if unsupported == "unsharded-bias":
+        local.gate_up_proj_bias = whole.gate_up_proj_bias
+    else:
+        local.has_post_expert_norm = True
+        local.post_expert_norm = nn.LayerNorm(H)
+    with torch.no_grad():
+        for parameter in local.parameters():
+            parameter.fill_(0.25)
+    state = {name: value.clone() for name, value in local.state_dict().items()}
     x, weights, index = torch.randn(T, H), torch.rand(T, TOP_K), torch.randint(0, E, (T, TOP_K))
     # The refusal comes before any collective, so it needs no process group to reach.
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError if unsupported == "unsharded-bias" else NotImplementedError):
         moe.torch_a2a_experts_forward(local, x, index, weights, process_group=object())
+    for name, value in local.state_dict().items():
+        torch.testing.assert_close(value, state[name], rtol=0, atol=0)
 
 
 def _no_tokens_for_rank1_job(rank, size):
@@ -365,10 +387,19 @@ def _assert_experts_backward_matches(rank, whole, local, owned, size, to_rank0=F
     out_ref.float().pow(2).sum().backward()
 
     local.config._experts_implementation = "torch_a2a"
+    # Transformers is optional in the unit lane that collects this module without the HF extra.
+    from transformers.integrations.tensor_parallel import ALL_PARALLEL_STYLES
+
+    style = ALL_PARALLEL_STYLES["torch_a2a_experts"]
+    mesh = init_device_mesh("cpu", (size,))
+    if hasattr(style, "install_forward"):
+        style.install_forward(local, mesh)
+    else:
+        style.prepare_module_tp(local, mesh)
     x_ep = x[tok].clone().requires_grad_(True)
     w_ep = weights[tok].clone().requires_grad_(True)
-    # The torch_a2a_experts parallel style passes the EP group as a fourth argument.
-    out_ep = local(x_ep, index[tok], w_ep, dist.group.WORLD)
+    # The installed style must inject the group and retain the global routing ids.
+    out_ep = local(x_ep, index[tok], w_ep)
     out_ep.float().pow(2).sum().backward()
 
     close = {"atol": 3e-2, "rtol": 3e-2}
@@ -524,13 +555,21 @@ _STOCK_PLAN = {
         _STOCK_PLAN,
         {"layers.*.mlp.experts": "moe_tp_experts"},
         {"layers.*.mlp.experts": "nemotron_experts_ep"},
+        {"layers.*.mlp.experts": "ep_dispatch_experts"},
         {k: v for k, v in _STOCK_PLAN.items() if v == "grouped_gemm"},
         {
             "layers.*.block_sparse_moe.experts": "moe_tp_experts",
             "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
         },
     ],
-    ids=["stock", "experts-style-only", "nemotron-style-only", "grouped-gemm-only", "hybrid"],
+    ids=[
+        "stock",
+        "experts-style-only",
+        "nemotron-style-only",
+        "dispatch-style-only",
+        "grouped-gemm-only",
+        "hybrid",
+    ],
 )
 @pytest.mark.parametrize(
     "prefix",

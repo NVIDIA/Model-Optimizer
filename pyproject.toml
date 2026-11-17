@@ -87,7 +87,7 @@ hf = [
     "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
     "tiktoken",
     # TensorRT-LLM 1.3.0 ships transformers 5.5; keep in sync with modelopt/torch/__init__.py and noxfile.py
-    "transformers>=5.5,<5.19",
+    "transformers>=5.5,<5.24",
     "wonderwords",
 ]
 

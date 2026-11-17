@@ -2235,13 +2235,18 @@ def _ep_aware_caching_allocator_warmup(
 
     def _ep_aware(model, accelerator_device_map, hf_quantizer=None, *args, **kwargs):
         try:
-            try:  # where current transformers keeps it (5.18); older releases, under integrations
-                from transformers.distributed.tensor_parallel import _get_parameter_tp_plan
+            try:
+                from transformers.distributed.parallel_utils import (
+                    _get_parameter_plan as _get_parameter_tp_plan,
+                )
             except ImportError:
                 try:
-                    from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
+                    from transformers.distributed.tensor_parallel import _get_parameter_tp_plan
                 except ImportError:
-                    _get_parameter_tp_plan = None
+                    try:
+                        from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
+                    except ImportError:
+                        _get_parameter_tp_plan = None
             ws = (
                 torch.distributed.get_world_size()
                 if torch.distributed.is_available() and torch.distributed.is_initialized()
@@ -2564,8 +2569,8 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         ):
             _orig_uwc = _FineGrainedFP8HfQuantizer.update_weight_conversions
 
-            def _uwc_fixed(self, weight_conversions):
-                convs = _orig_uwc(self, weight_conversions)
+            def _uwc_fixed(self, weight_conversions, *args, **kwargs):
+                convs = _orig_uwc(self, weight_conversions, *args, **kwargs)
                 for conv in convs:
                     ops = getattr(conv, "operations", None)
                     # Match the expert converter update_weight_conversions produced:
@@ -2876,16 +2881,62 @@ def _experts_sharded_over(ep_mesh):
         yield
         return
 
+    split_api = hasattr(mixin, "TransformersDeviceMesh")
+
+    class _EPLoadMesh:
+        def get_mesh(self, dims):
+            if dims != ("pp", "fsdp", "tp"):
+                raise ValueError(f"The expert-parallel checkpoint load has no {dims!r} mesh.")
+            return ep_mesh
+
+    mesh_manager = _EPLoadMesh() if split_api else ep_mesh
+
     def _ep_mesh(*args, **kwargs):
         index = torch.cuda.current_device() if ep_mesh.device_type == "cuda" else None
-        return torch.device(ep_mesh.device_type, index), ep_mesh
+        return torch.device(ep_mesh.device_type, index), mesh_manager
+
+    def _distribute_ep(cls, model, distributed_config, mesh):
+        if (
+            mesh is not mesh_manager
+            or distributed_config.tp_plan != "auto"
+            or distributed_config.tp_size != ep_mesh.size()
+            or distributed_config.ep_size != ep_mesh.size()
+            or any(
+                getattr(distributed_config, attr) != 1
+                for attr in ("pp_size", "fsdp_size", "dp_replicate_size")
+            )
+            or distributed_config.ep_plan is not None
+            or distributed_config.fsdp_plan is not None
+            or distributed_config.ep_implementation != "auto"
+        ):
+            raise ValueError("This checkpoint load supports only ModelOpt's DP=EP distribution.")
+        plan = dict(model.ep_plan)
+        allowed = {"grouped_gemm", "torch_a2a_experts", "torch_a2a_router"}
+        if not plan or set(plan.values()) - allowed:
+            raise ValueError(f"The expert-parallel load cannot apply expert plan {plan}.")
+        model._device_mesh = ep_mesh
+        model._tp_plan = plan
+        # The split API's dispatcher requires a stock ep_dispatch_experts rule and also enables
+        # native TP/FSDP. Apply only this loader's EP rules with the real native sharder and hooks.
+        return mixin.apply_expert_parallelism(
+            model, ep_mesh, ep_mesh, model._expand_parallel_plan(plan)
+        )
 
     original = mixin.initialize_distributed_mesh
+    original_distribute = (
+        inspect.getattr_static(mixin.DistributedMixin, "maybe_distribute_model")
+        if split_api
+        else None
+    )
     mixin.initialize_distributed_mesh = _ep_mesh
     try:
+        if split_api:
+            mixin.DistributedMixin.maybe_distribute_model = classmethod(_distribute_ep)
         yield
     finally:
         mixin.initialize_distributed_mesh = original
+        if split_api:
+            mixin.DistributedMixin.maybe_distribute_model = original_distribute
 
 
 @contextlib.contextmanager
@@ -3355,6 +3406,14 @@ def load_and_prepare_ep(
                 f"{type(model).__name__} matches, so calibration would reduce the experts' amax over "
                 "ranks holding different experts. Quantize the model without expert parallelism."
             )
+        # Quantizer insertion reinstalls these module hooks by the model's actual qualified names.
+        model._tp_plan = {
+            name: style
+            for name, style in (getattr(model, "tp_plan", None) or {}).items()
+            if style == "torch_a2a_router"
+        } | dict.fromkeys(
+            (replace_layer_number_by_wildcard(name) for name in expert_modules), "torch_a2a_experts"
+        )
         # Calibration tells routed experts by their names, and reduces any other module's weight amax
         # over the expert-parallel group, which would merge the scales of different experts. Imported
         # here, as fsdp2_wrap does: the quantization package sits above this module.

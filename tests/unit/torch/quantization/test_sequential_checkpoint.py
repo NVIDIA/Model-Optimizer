@@ -294,18 +294,29 @@ def test_hf_cache_types_cover_all_cache_classes():
 def test_hybrid_linear_attention_cache_round_trips(tmp_path):
     """A DynamicCache of a hybrid model holds LinearAttentionLayer, which derives from its own
     mixin rather than CacheLayerMixin; it must stay loadable on resume."""
-    pytest.importorskip("transformers.cache_utils")
+    cache_utils = pytest.importorskip("transformers.cache_utils")
     qwen3_5 = pytest.importorskip("transformers.models.qwen3_5.configuration_qwen3_5")
     from transformers import DynamicCache
 
     cache = DynamicCache(config=qwen3_5.Qwen3_5TextConfig(num_hidden_layers=4))
     assert any(type(layer).__name__ == "LinearAttentionLayer" for layer in cache.layers)
+    if hasattr(cache_utils, "DummyLayer"):
+        # Shared-cache and MLP-only layers use a placeholder outside the cache mixin hierarchy.
+        cache.layers.append(cache_utils.DummyLayer())
+    keys, values = torch.randn(1, 2, 3, 4), torch.randn(1, 2, 3, 4)
+    attention_layer = next(
+        layer for layer in cache.layers if isinstance(layer, cache_utils.DynamicLayer)
+    )
+    attention_layer.update(keys, values)
     path = str(tmp_path / "next_inputs.pt")
     safe_save({"past_key_values": cache}, path)
     loaded = lc._load_checkpoint_file(path, "cpu", allow_caches=True)
     assert [type(layer) for layer in loaded["past_key_values"].layers] == [
         type(layer) for layer in cache.layers
     ]
+    restored = loaded["past_key_values"].layers[cache.layers.index(attention_layer)]
+    torch.testing.assert_close(restored.keys, keys)
+    torch.testing.assert_close(restored.values, values)
 
 
 def test_resume_hf_model_with_quantizers(tmp_path):

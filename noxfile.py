@@ -37,17 +37,17 @@ nox.options.envdir = "/tmp/.nox"
 nox.options.reuse_existing_virtualenvs = True
 
 TORCH_VERSIONS = {
-    "torch_210": "torchvision~=0.25.0",
-    "torch_211": "torchvision~=0.26.0",
-    "torch_212": "torchvision~=0.27.0",
-    "torch_213": "torchvision~=0.28.0",
-    "torch_214": "torchvision~=0.29.0",
+    "torch_210": ("torch~=2.10.0", "torchvision~=0.25.0"),
+    "torch_211": ("torch~=2.11.0", "torchvision~=0.26.0"),
+    "torch_212": ("torch~=2.12.0", "torchvision~=0.27.0"),
+    "torch_213": ("torch~=2.13.0", "torchvision~=0.28.0"),
+    "torch_214": ("torch~=2.14.0", "torchvision~=0.29.0"),
 }
 
 # Extra install pins applied per transformers matrix entry (installed after the base
 # ``.[all,dev-test]`` install to constrain that env).
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": ("transformers~=5.18.0",),
+    "tf_latest": ("transformers~=5.23.0",),
     "tf_min": ("transformers~=5.5.0",),
 }
 
@@ -70,7 +70,7 @@ def unit(session, torch_ver, tf_ver):
     # with the torchvision pin so the resolver keeps the leg's torch. Not in dev-test: the
     # transformers-free partial_unit(torch) lane installs that extra, and compressed-tensors pulls in
     # transformers.
-    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]", "compressed-tensors")
+    session.install(*TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]", "compressed-tensors")
     tf_pins = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pins:
         session.install(*tf_pins)
@@ -218,7 +218,15 @@ def _install_built_from_source(session, *names):
 @nox.session(venv_backend="none")
 def gpu(session):
     _install_built_from_source(session, "fast_hadamard_transform")
-    session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
+    session.run(
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "-e",
+        ".[all,dev-test,dev-fla]",
+        *TRANSFORMERS_VERSIONS["tf_latest"],
+    )
     _install_built_from_source(session, "mamba_ssm", "causal_conv1d")
     # quack-kernels (via mamba-ssm) pins an older nvidia-cutlass-dsl than the image's
     # nvidia-cutlass-operators needs, and Inductor (torch >= 2.14) imports it to compile any matmul.

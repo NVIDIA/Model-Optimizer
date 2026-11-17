@@ -2,7 +2,7 @@ name: Unit tests
 
 on:
   pull_request:
-    branches: [main, release/*, feature/*]
+    branches: [main, release/*, feature/*, codex/bypass-*]
   push:
     branches: [main, release/*, feature/*]
     paths:
