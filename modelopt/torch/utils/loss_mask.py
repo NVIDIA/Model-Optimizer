@@ -136,3 +136,94 @@ def _kimi_compute(tokenizer, input_ids) -> torch.Tensor:
 register_loss_mask_recovery(
     LossMaskRecovery(name="kimi", detect=_kimi_detect, compute=_kimi_compute)
 )
+
+
+# ---------------------------------------------------------------------------
+# Kimi-K3
+#
+# K3 replaces K2's <|im_*|> markers with XTML tags (see the checkpoint's
+# encoding_k3.py). An assistant turn renders as
+#   <|open|>message role="assistant"<|sep|>
+#     <|open|>think<|sep|> {reasoning} <|close|>think<|sep|>
+#     <|open|>response<|sep|> {content} <|close|>response<|sep|> [tool calls]
+#   <|close|>message<|sep|><|end_of_msg|>
+# Tag names and attributes are ordinary text tokens; only <|open|>, <|close|>,
+# <|sep|> and <|end_of_msg|> are special. Message content is encoded with special
+# tokens disallowed, so it cannot contain a structural tag.
+# ---------------------------------------------------------------------------
+
+_K3_MARKERS = ("<|open|>", "<|close|>", "<|sep|>", "<|end_of_msg|>")
+_K3_ASSISTANT_HEADER = 'message role="assistant"'
+
+
+def _k3_detect(tokenizer) -> bool:
+    """Whether ``tokenizer`` defines Kimi-K3's XTML structural markers as real tokens."""
+    unk = getattr(tokenizer, "unk_token_id", None)
+    try:
+        ids = [tokenizer.convert_tokens_to_ids(t) for t in _K3_MARKERS]
+    except Exception:
+        return False
+    return all(i is not None and i != unk for i in ids)
+
+
+def _k3_compute(tokenizer, input_ids) -> torch.Tensor:
+    """Recover the generated-token mask from already-tokenized Kimi-K3 chat ids.
+
+    Marks what the model generates in each assistant turn: everything after the turn's
+    first channel opener (``<|open|>think<|sep|>``, or ``<|open|>response<|sep|>`` in
+    non-thinking mode) through ``<|end_of_msg|>``. The message header and that first
+    opener end K3's generation prompt, so the model never emits them. A turn cut off by
+    truncation is marked to the end of the sequence; a trailing generation prompt marks
+    nothing.
+    """
+    ids = input_ids.tolist() if hasattr(input_ids, "tolist") else list(input_ids)
+    open_id, close_id, sep_id, eom_id = (tokenizer.convert_tokens_to_ids(t) for t in _K3_MARKERS)
+    n = len(ids)
+
+    def tag_end(i):
+        # Index of the <|sep|> closing the tag opened at ``i``, or None if malformed.
+        j = i + 1
+        while j < n and ids[j] not in (sep_id, open_id, close_id, eom_id):
+            j += 1
+        return j if j < n and ids[j] == sep_id else None
+
+    def message_header(i):
+        # Decoded ``message ...`` header of the tag opened at ``i``, else None.
+        j = tag_end(i) if ids[i] == open_id else None
+        if j is None:
+            return None, None
+        header = tokenizer.decode(ids[i + 1 : j])
+        is_message = header == "message" or header.startswith("message ")
+        return (header if is_message else None), j
+
+    mask = [0] * n
+    i = 0
+    while i < n:
+        header, j = message_header(i)
+        if header is None:
+            i += 1
+            continue
+        if header != _K3_ASSISTANT_HEADER and not header.startswith(_K3_ASSISTANT_HEADER + " "):
+            i = j + 1
+            continue
+        start = j + 1
+        if start < n and message_header(start)[0] is None:
+            first_opener_end = tag_end(start) if ids[start] == open_id else None
+            if first_opener_end is not None:
+                start = first_opener_end + 1
+        k = start
+        while k < n and ids[k] != eom_id:
+            if message_header(k)[0] is not None:
+                break  # next message without this one's <|end_of_msg|>
+            k += 1
+        end = k + 1 if k < n and ids[k] == eom_id else k
+        for t in range(start, end):
+            mask[t] = 1
+        i = end
+
+    return torch.tensor(mask, dtype=torch.long)
+
+
+register_loss_mask_recovery(
+    LossMaskRecovery(name="kimi_k3", detect=_k3_detect, compute=_k3_compute)
+)

@@ -441,8 +441,13 @@ class HFDFlashModel(DFlashModel):
         # got -- a llama3 or yarn target would fail in convert() with a bare KeyError. The
         # scaling family is deliberately not inherited (see above); it is added at export
         # via dflash_export_rope_scaling.
+        # dflash_rope_theta opts out of inheriting the base only: the draft applies its own
+        # rotary to the projected target hidden states (modeling_dflash k_proj), so its base
+        # need only match between training and serving, and the exporter writes it.
         for attr in ("rope_theta", "rope_type", "rope_interleaved"):
-            if attr == "rope_theta" and attr in base_rope_params:
+            if attr == "rope_theta" and self.dflash_rope_theta is not None:
+                base_val = self.dflash_rope_theta
+            elif attr == "rope_theta" and attr in base_rope_params:
                 base_val = base_rope_params[attr]
             elif hasattr(base_config, attr):
                 base_val = getattr(base_config, attr)
@@ -456,9 +461,9 @@ class HFDFlashModel(DFlashModel):
             user_val = getattr(self.dflash_config, attr, None)
             if user_val is not None and user_val != base_val:
                 logger.warning(
-                    "DFlash: ignoring dflash_architecture_config.%s=%r and enforcing the "
-                    "base model's value %r — the draft injects the target's KV, so its RoPE "
-                    "base must match the target's.",
+                    "DFlash: ignoring dflash_architecture_config.%s=%r and enforcing %r "
+                    "(the base model's value, or dflash_rope_theta when set) — the exporter "
+                    "writes that value, so training must use it too.",
                     attr,
                     user_val,
                     base_val,

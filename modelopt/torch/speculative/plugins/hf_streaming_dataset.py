@@ -38,10 +38,11 @@ consecutive-failure circuit breaker, loss_mask alignment); subclasses override
 """
 
 import base64
+import json
 import os
 import re
 import time
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import httpx
 import torch
@@ -88,6 +89,7 @@ def _tokenize_with_loss_mask(
     conversations: list,
     answer_only_loss: bool,
     max_seq_len: int | None = None,
+    tools: list | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Tokenize one conversation and derive its loss mask in the same call.
 
@@ -133,6 +135,7 @@ def _tokenize_with_loss_mask(
             )
     out = tokenizer.apply_chat_template(
         conversations,
+        tools=tools,
         tokenize=True,
         return_tensors="pt",
         return_dict=True,
@@ -159,6 +162,21 @@ def _tokenize_with_loss_mask(
     return input_ids, loss_mask
 
 
+def _keep_last_span(loss_mask: torch.Tensor) -> torch.Tensor:
+    """Zero every supervised token before the last contiguous supervised span.
+
+    Chat templates mark each assistant message as one contiguous run, so this keeps only
+    the final assistant turn.
+    """
+    on = loss_mask > 0
+    starts = (on & ~torch.cat([on.new_zeros(1), on[:-1]])).nonzero()
+    if starts.numel() == 0:
+        return loss_mask
+    out = loss_mask.clone()
+    out[: int(starts[-1])] = 0
+    return out
+
+
 class StreamingConfig(BaseModel):
     """Static tuning knobs for :class:`StreamingDataset`.
 
@@ -173,6 +191,17 @@ class StreamingConfig(BaseModel):
     # Token-level cap applied during tokenization (right-truncation). Must hold
     # ``max_seq_len <= vllm.max_model_len``. ``None`` disables truncation.
     max_seq_len: int | None = None
+    # A row longer than ``max_seq_len`` trains on a window instead of being right-truncated:
+    # up to this many tokens of context before its first supervised token, then as many
+    # tokens as fit. ``None`` keeps right-truncation.
+    window_context_tokens: int | None = Field(default=None, ge=0)
+    # "full": the server prefills the whole history up to the window's end and returns hidden
+    # states for the window only, as served (backends with ``supports_window_start``).
+    # "window": only the window's tokens are sent, so the context is cut at the window.
+    window_prefill: Literal["full", "window"] = "full"
+    # Skip rows whose prompt up to the window's end is longer than this (the server's
+    # ``max_model_len``). ``None`` disables the check.
+    max_prompt_len: int | None = Field(default=None, gt=0)
     # Circuit breaker: raise after this many consecutive _fetch failures (per worker
     # process) so a dead server doesn't silently resample the whole corpus.
     fail_after_consecutive_skips: int = Field(default=16, ge=1)
@@ -196,6 +225,9 @@ class StreamingDataset(Dataset):
     # reads from the _fetch output. When set, base class validates _fetch's return
     # value carries all required keys (fail-loud on the first sample).
     fetch_payload_cls: type | None = None
+    # Whether ``_fetch`` honours ``sample["window_start"]`` (prefill everything, return
+    # hidden states from that position on). Backends without it get window-only prompts.
+    supports_window_start: bool = False
 
     def __init__(
         self,
@@ -222,8 +254,10 @@ class StreamingDataset(Dataset):
             raise ValueError("entries is empty")
         self.tokenizer = tokenizer
         self.config = config if config is not None else self.config_cls()
-        # Materialize to a plain list so DataLoader worker processes fork it cheaply.
-        self.entries = list(entries)
+        # Keep indexable inputs (an HF ``Dataset`` is memory-mapped Arrow) as they are:
+        # a Python list of a 1M+ row corpus costs tens of GB per rank, and forked
+        # DataLoader workers copy its pages as they touch the objects' refcounts.
+        self.entries = entries if hasattr(entries, "__getitem__") else list(entries)
         # Per-process consecutive-failure counter for the circuit breaker. Reset to 0
         # on every successful fetch; tripped only by fetch failures (not unfit entries).
         self._consecutive_fail = 0
@@ -284,6 +318,13 @@ class StreamingDataset(Dataset):
         Returns ``None`` for entries missing ``cid`` / ``conversations``-or-``messages``, or when
         right-truncation to ``max_seq_len`` drops the entire supervised span
         (``answer_only_loss`` mode with the assistant turn at the tail).
+
+        Optional entry keys: ``tools`` (a list, or its JSON string, since tool schemas don't
+        share one Arrow type across rows) is passed to the chat template; ``loss_turns="last"``
+        supervises only the final assistant turn (for a row whose earlier turns came from
+        another model). With ``window_context_tokens`` set, a row longer than ``max_seq_len``
+        becomes a window (see :class:`StreamingConfig`); the sample then carries
+        ``window_start`` and, for "full" prefill, ``token_ids`` up to the window's end.
         """
         cid = entry.get("conversation_id") or entry.get("uuid")
         # Prefer ``conversations``, fall back to ``messages`` (the documented default format;
@@ -294,19 +335,41 @@ class StreamingDataset(Dataset):
         convs = entry.get("conversations") or entry.get("messages")
         if cid is None or not convs or not isinstance(convs, list):
             return None
+        tools = entry.get("tools")
+        if isinstance(tools, str):
+            tools = json.loads(tools)
+        cfg = self.config
+        windowed = cfg.window_context_tokens is not None and cfg.max_seq_len is not None
         input_ids, loss_mask = _tokenize_with_loss_mask(
             self.tokenizer,
             convs,
-            self.config.answer_only_loss,
-            max_seq_len=self.config.max_seq_len,
+            cfg.answer_only_loss,
+            max_seq_len=None if windowed else cfg.max_seq_len,
+            tools=tools or None,
         )
+        ids = input_ids.squeeze(0)
+        if cfg.answer_only_loss and entry.get("loss_turns") == "last":
+            loss_mask = _keep_last_span(loss_mask)
         if int(loss_mask.sum()) == 0:
             return None
-        return {
+        start, end = 0, ids.shape[0]
+        if windowed and end > cfg.max_seq_len:
+            first = int(loss_mask.nonzero()[0])
+            start = max(0, first - cfg.window_context_tokens)
+            end = start + cfg.max_seq_len
+            if cfg.max_prompt_len is not None and end > cfg.max_prompt_len:
+                return None
+            if cfg.window_prefill == "window" or not self.supports_window_start:
+                ids, loss_mask = ids[start:end], loss_mask[start:end]
+                start, end = 0, ids.shape[0]
+        sample = {
             "cid": str(cid),
-            "token_ids": input_ids.squeeze(0).tolist(),
-            "loss_mask": loss_mask,
+            "token_ids": ids[:end].tolist(),
+            "loss_mask": loss_mask[:end],
         }
+        if start:
+            sample["window_start"] = start
+        return sample
 
     def _fetch(self, sample: dict) -> dict | None:
         """Backend hook: send the request and decode the server's response.
@@ -402,6 +465,8 @@ class EagleVllmStreamingDataset(StreamingDataset):
 
     config_cls = EagleVllmStreamingConfig
     fetch_payload_cls = EagleFetchPayload
+    # The RDMA connector honours kv_transfer_params["hs_window_start"].
+    supports_window_start = True
 
     def __init__(
         self,
@@ -459,15 +524,16 @@ class EagleVllmStreamingDataset(StreamingDataset):
         agent = self._rdma()
         url = self._next_url()
         host = url.split("://", 1)[-1].split(":")[0]
-        r = self._http_rdma.post(
-            f"{url}/v1/completions",
-            json={
-                "model": self.config.model,
-                "prompt": sample["token_ids"],
-                "max_tokens": 1,
-                "temperature": 0,
-            },
-        )
+        start = sample.get("window_start", 0)
+        req = {
+            "model": self.config.model,
+            "prompt": sample["token_ids"],
+            "max_tokens": 1,
+            "temperature": 0,
+        }
+        if start:
+            req["kv_transfer_params"] = {"hs_window_start": start}
+        r = self._http_rdma.post(f"{url}/v1/completions", json=req)
         r.raise_for_status()
         kv = r.json().get("kv_transfer_params") or {}
         # Fail loud on undersized pool slots: if the serve connector's max_tokens is below our
@@ -555,14 +621,15 @@ class EagleVllmStreamingDataset(StreamingDataset):
             warn_rank_0(f"[streaming] slot lapped mid-read for {sample['cid']}; resampling")
             return None
         token_ids = torch.tensor(desc["token_ids"], dtype=torch.long)
-        client_ids = torch.as_tensor(sample["token_ids"], dtype=token_ids.dtype)
+        # The server returns only the window [start:], so compare against that.
+        client_ids = torch.as_tensor(sample["token_ids"][start:], dtype=token_ids.dtype)
         n = client_ids.shape[0]
         if token_ids.shape[0] not in (n, n + 1) or not torch.equal(token_ids[:n], client_ids):
             raise RuntimeError(
                 f"server token_ids drift for {sample['cid']}: client_len={n}, "
-                f"server_len={token_ids.shape[0]}"
+                f"server_len={token_ids.shape[0]}, window_start={start}"
             )
-        loss_mask = self._align_loss_mask(sample["loss_mask"], token_ids.shape[0])
+        loss_mask = self._align_loss_mask(sample["loss_mask"][start:], token_ids.shape[0])
         return {"token_ids": token_ids, "hidden_states": hidden_states, "loss_mask": loss_mask}
 
     @staticmethod

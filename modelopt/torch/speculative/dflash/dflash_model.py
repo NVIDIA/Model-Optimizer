@@ -54,3 +54,4 @@ class DFlashModel(DynamicModule):
         self.dflash_init_checkpoint = config.dflash_init_checkpoint
         self.dflash_use_flex_attention = config.dflash_use_flex_attention
         self.dflash_export_rope_scaling = config.dflash_export_rope_scaling
+        self.dflash_rope_theta = config.dflash_rope_theta

@@ -81,6 +81,15 @@ class DataArguments(BaseModel):
     # vLLM captures each layer once, so there is no distinct extra plane for the base hidden
     # and the final plane must serve both roles.
     final_aux_is_base_hidden: bool = False
+    # Streaming only. Train a row longer than the training length on a window: up to this
+    # many tokens of context before its first supervised token, then as much as fits. With
+    # "full" prefill the server still prefills the whole history and returns hidden states
+    # for the window only; "window" sends just the window. Rows whose prompt up to the
+    # window's end exceeds ``streaming_max_prompt_len`` (the server's max_model_len) are
+    # skipped. Rows may set ``loss_turns: "last"`` and ``tools``; see hf_streaming_dataset.
+    streaming_window_context: int | None = None
+    streaming_window_prefill: Literal["full", "window"] = "full"
+    streaming_max_prompt_len: int | None = None
 
     @field_validator("sample_size")
     @classmethod

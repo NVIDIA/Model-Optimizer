@@ -1,0 +1,189 @@
+# LOCAL ONLY. K3.1 DSpark Bolt-mix run (Zhehao, 11/10: 4 replicas on 9 trays), set up so the later full
+# run (full Bolt pool, about 6.3M rows) continues from its pre-decay checkpoint instead of retraining.
+# Recipe: Phase 4's, with the lr8e-4-wsd ablation's schedule (tied Phase 4: held-out pos-0 0.718 vs
+# 0.723, MT-Bench AL 2.31 vs 2.33): LR 8e-4, warmup-stable-decay, cosine decay. Its decay was 17.7% of the run
+# (2,408 of 13,596); here 13,585 of 93,585 (14.5%; Zhehao, 11/10: about 15%, not a fixed 2,408).
+# Data (Zhehao, 11/10: add the 110k Nemotron rows): 1,388,594 K3.1-regenerated Bolt rows (`all` + tool
+# `last` rows) plus 108,756 of Phase 4's 108,772 Nemotron Post-Training-v2 conversations (its 1,000
+# held-out rows excluded; 16 dropped for sharing a prompt with Bolt's held-out set), 1,497,350 rows; an
+# epoch is 93,585 steps at 16. Merge and checks: bolt/merge_nemo.py,
+# bolt/nemo_loader_check.py. max_steps 93,585 (one full epoch) with 13,585 decay steps puts the decay
+# start at 80,000, a multiple of save_steps:
+#   - checkpoint-80000 is the last all-stable-LR state (weights, optimizer, scheduler). The full run
+#     resumes from it (redoing about 13.6k steps' worth of LR schedule versus a late decay). With
+#     save_total_limit 8 the run ends holding 80000..92000 and 93585 (the final save), so 80000 is
+#     never rotated out (8 x 47 GB = 376 GB peak); the watcher also hard-links it out of the run dir.
+#   - The decayed export (93585) gets the held-out eval and MT-Bench. Held-out evals also on
+#     checkpoint-46000 (49%), 70000 (75%) and 80000 (pre-decay: the decay's own gain), weights via
+#     k31-patches/tools/extract_draft.py.
+# Warm-up is absolute (3,456, about 4%): a ratio is recomputed from the new total on resume, and
+# the full run's total could push it past step 80,000 (CPU check bolt/wsd_resume_check.py: resuming
+# at 80 with total 3000 and ratio 0.04 dropped LR back to warm-up; absolute warm-up kept 8e-4).
+# Must match in the full run: architecture, dflash_rope_theta, EAGLE_CAPTURE_IDS, AttnRes taps,
+# training_seq_len, block size, mask token, loss decay, LR, warmup_steps (its decay is sized to its own
+# end). It keeps ignore_data_skip False in every job: True in a 24 h chain would repeat data.
+# Layout from rep4 (15.9 samples/s on Phase 4 data, about 12.9 expected on Bolt rows; the Bolt smoke 1689426
+# ran 19% slower per replica): about 32 h, over batch_long's 24 h, so a second submission of the same
+# sbatch script (--dependency=afterany:<first>) resumes from the last checkpoint.
+# Before launch: commit the HF-Dataset memory fix, the launcher comment field and dflash_rope_theta;
+# set the THETA line from theta1e6's eval. Score with eval/eval_bolt_heldout.yaml.
+
+job_name: Kimi-K3.1_DSpark_bolt
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    # Under SLURM_HF_LOCAL; folder name as NGC created it (confirmed 2026-11-03).
+    hf_model: /hf-local/rainhollow/rainhollow-final-weights-1103_v1
+
+  task_0:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dspark.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - model.trust_remote_code=true
+      - data.mode=streaming
+      # K3.1-regenerated Bolt-mix turns: `all` rows (whole conversation) and `last` rows (one
+      # regenerated turn after another model's history, with `tools`).
+      # Plus Phase 4's Nemotron Post-Training-v2 rows (`all`, no tools); the sampler mixes them in.
+      - data.data_path=/hf-local/datasets/k31-bolt/train_plus_nemo  # BOLT: 32 Bolt + 4 Nemotron shards; held-out rows removed
+      # Rows over 8,192 tokens train on a window: 2,048 tokens of context before the
+      # regenerated turn, then as much as fits. The server prefills the whole history (as served)
+      # and returns hidden states for the window only. Prompts over max_model_len are skipped.
+      - data.streaming_window_context=2048  # BOLT
+      - data.streaming_window_prefill=full  # BOLT
+      # One below max_model_len: the fetch asks for max_tokens=1 on top of the prompt.
+      - data.streaming_max_prompt_len=32767  # BOLT
+      - training.output_dir=/scratchspace/dspark
+      - training.training_seq_len=8192
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+      - training.num_train_epochs=1
+      - training.max_steps=93585  # BOLT: one epoch; decay starts at 80,000 (see header)
+      - training.per_device_train_batch_size=4
+      - training.gradient_accumulation_steps=1
+      # Every ~40 min at ~0.8 step/s. A checkpoint is 47 GB (optimizer 38.5 GB). 8 keeps the
+      # pre-decay checkpoint-80000 to the end (see header).
+      - training.save_steps=2000  # BOLT
+      - training.save_total_limit=8  # BOLT
+      - training.logging_steps=50  # BOLT
+      # Schedule of the lr8e-4-wsd ablation (job 1657936), warm-up absolute (see header).
+      - training.learning_rate=8e-4  # BOLT
+      - training.lr_scheduler_type=warmup_stable_decay  # BOLT
+      - training.lr_scheduler_kwargs.num_decay_steps=13585  # BOLT: 14.5%, from step 80,000
+      - training.warmup_steps=3456  # BOLT
+      # (The rehearsal's 1e-4 with 2000 warm-up steps, from the K3 example, left the draft
+      # undertrained: AL 1.21.)
+      # K3's slow tokenizer can't emit assistant masks; recovered from its XTML tags.
+      - training.answer_only_loss=true
+      # The vLLM serve container has no tensorboard -> trainer init crash.
+      - training.report_to=none
+      # The DSpark draft does NOT inherit the base GQA/FFN dims, so set them
+      # explicitly (K3 shares K2.6's 7168 hidden size; else a silently wrong-shape draft).
+      - dflash.dflash_architecture_config.num_hidden_layers=6
+      - dflash.dflash_architecture_config.num_key_value_heads=8
+      - dflash.dflash_architecture_config.intermediate_size=18432
+      # Semi-AR generation block: 7 draft tokens per step, as K3 drafters are served.
+      - dflash.dflash_block_size=8
+      # K3 has no dedicated mask token. 163837 is an unused reserved slot
+      # (163838 is [UNK] and 163839 is [PAD] on K3).
+      - dflash.dflash_mask_token_id=163837
+      # DSpark always uses exponential decay (dflash_loss_objective is not wired for it);
+      # weight exp(-k/4) per block position is DFlash's setting for block 8 (dspark.yaml's 7.0
+      # goes with block 16).
+      - dflash.dflash_loss_decay_factor=4.0
+      # THETA: uncomment if theta1e6 beats Phase 4 on the held-out eval and MT-Bench.
+      # - dflash.dflash_rope_theta=1000000.0
+      # YaRN at export: trained at 8,192 tokens, served up to K3.1's 1,048,576 (factor 128).
+      - dflash.dflash_export_rope_scaling.type=yarn
+      - dflash.dflash_export_rope_scaling.factor=128.0
+      - dflash.dflash_export_rope_scaling.original_max_position_embeddings=8192
+      - dflash.dflash_export_rope_scaling.beta_fast=1.0
+      - dflash.dflash_export_rope_scaling.beta_slow=1.0
+      - dflash.dflash_export_rope_scaling.mscale=1.0
+      - dflash.dflash_export_rope_scaling.mscale_all_dim=1.0
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # 6 aux layers (the default target layers for 93 layers, 1-based) + the true
+      # final hidden (93).
+      - EAGLE_CAPTURE_IDS: "[2,20,38,55,73,91,93]"
+      # Per-layer taps (LOCAL vLLM patch, mounted below). Under AttnRes the residual stream
+      # between layers is only the current block's running prefix. The 6 feature taps keep
+      # vLLM's default prefix (0), which is what users serve the drafter with; only the
+      # layer-93 tap reads the AttnRes output aggregation, the true pre-norm model output the
+      # teacher logits need. With a global 1 (Phase 3) the drafter must be served with 1,
+      # which also disables K3's specialized decode path under speculative decoding.
+      - VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: "0"
+      - VLLM_KIMI_K3_AUX_ATTN_RES_STREAM_LAYERS: "93"
+      # One TP8 replica across two GB300 trays (4 GPUs each).
+      - SERVE_NODES: "8"  # BOLT: 4 TP8 replicas (rep4)
+      - SERVE_NODES_PER_REPLICA: "2"
+      - SERVE_TP: "8"
+      - STREAMING_NUM_WORKERS: "4"
+      # Kimi's custom-modeling base needs --trust_remote_code at export.
+      - EXPORT_EXTRA_ARGS: "--trust_remote_code"
+      # Full-history prefill of `last` rows: histories up to the 24k sampling cap plus the turn.
+      # Without chunked prefill, max_num_batched_tokens defaults to max_model_len, so a whole
+      # prompt prefills in one step (the connector needs that).
+      - SERVE_MAX_MODEL_LEN: "32768"  # BOLT
+      - SERVE_MAX_NUM_SEQS: "24"
+      # One pinned pool slot per in-flight request (connector warns below max_num_seqs).
+      - HS_POOL_SLOTS: "24"
+      # Tokens per pool slot. train_eagle_streaming.sh defaults it to 4096, and the trainer
+      # refuses a connector below training_seq_len (8192) at its first fetch.
+      - HS_MAX_TOKENS: "8192"
+      - SERVE_GPU_MEM_UTIL: "0.9"
+      - SERVE_READY_TIMEOUT: "5400"
+      # --no-numa-bind: the mum-tracking builds before the NUMA launch fix (f395f923) need it.
+      - SERVE_EXTRA_ARGS: "--trust-remote-code --no-numa-bind"
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      # oci-jhb NIXL/UCX (#nixl-dev, NIXL 1.5 / UCX 1.23): "all" is UCX's default, i.e. the
+      # advised `unset UCX_TLS`; inet avoids the IPv6 bind failure on tcp/rdma_vf_rail0.
+      # Leave the cluster's pinned NCCL_* settings alone. The node's enroot environ.d
+      # (50-nccl.env) sets UCX_TLS=tcp and UCX_NET_DEVICES=eth0 inside every container, which
+      # NIXL rejects on GPU nodes; slurm_config.srun_args --container-env makes these win.
+      # Pin the four active RoCE VF rails (the ones NCCL_IB_HCA uses): with "all", UCX also
+      # opens GPU-direct interfaces on the down rdma_rail0..3 PFs, which have no GID table,
+      # and NIXL's UCX backend fails to start (smoke run 1536857; 2-node NIXL probe 1540942:
+      # "all" fails, these rails pass at ~77 GB/s).
+      - UCX_TLS: "all"
+      - UCX_TCP_AF_PRIO: "inet"
+      - UCX_NET_DEVICES: "rdma_vf_rail0:1,rdma_vf_rail1:1,rdma_vf_rail2:1,rdma_vf_rail3:1"
+      # Compile caches on node-local /tmp: $HOME on oci-jhb is NFS, and 8 ranks compiling
+      # at once hit "Stale file handle" reading Triton's cache there (smoke test).
+      - TRITON_CACHE_DIR: /tmp/triton_cache
+      - VLLM_CACHE_ROOT: /tmp/vllm_cache
+      - XDG_CACHE_HOME: /tmp/xdg_cache
+      - FLASHINFER_WORKSPACE_BASE: /tmp/flashinfer
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 9  # BOLT
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      # The factory default is 4 h even on batch_long; the replica alone takes ~38 min to
+      # come up (Phase 2), and ~3k steps plus export need well more than the rest.
+      time: "24:00:00"
+      # One NVL72 block for all trays: the K3.1 MoE kernels rendezvous CUDA symmetric
+      # memory across the TP8 group, which fails across racks (smoke test 2026-11-03).
+      segment: 9  # BOLT
+      # Idle-GPU reaper exemption: the replicas load K3.1 for about 40 min before training
+      # (rep4 retest 1689423 survived with 60). Needs the launcher's slurm_config.comment.
+      comment: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"60","reason":"model_loading","description":"Each vLLM replica loads Kimi K3.1 weights
+        (96 shards, about 35 min) before training starts"}}'                                                                                                                                                    # BOLT
+      # Replaces the factory default, so keep --no-container-mount-home. --container-env lets
+      # the UCX_* values above override oci-jhb's /etc/enroot/environ.d/50-nccl.env
+      # (UCX_TLS=tcp, UCX_NET_DEVICES=eth0; smoke test 2026-11-03).
+      # Replaces the factory default, so keep the /hf-local mount. The second entry overlays
+      # vLLM's K3 model with the per-layer-tap patch (VLLM_KIMI_K3_AUX_ATTN_RES_STREAM_LAYERS).
+      container_mounts:
+        - /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/zhehaoh/models:/hf-local
+        - /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/zhehaoh/k31-patches/vllm_kimi_k3_nvidia_model.py:/usr/local/lib/python3.12/dist-packages/vllm/models/kimi_k3/nvidia/model.py
+      srun_args:
+        - --no-container-mount-home
+        - --container-env=UCX_TLS,UCX_TCP_AF_PRIO,UCX_NET_DEVICES
+      # Option (B) from header step 3, imported to Lustre.
+      container: /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/zhehaoh/containers/k31-vllm-mum-oss-143dfe9.sqsh

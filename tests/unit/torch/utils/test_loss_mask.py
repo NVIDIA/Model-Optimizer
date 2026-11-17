@@ -157,3 +157,82 @@ def test_register_and_lookup_custom_recovery(restore_registry):
     assert get_loss_mask_recovery(Tok()) is recovery
     # A tokenizer that matches nothing still returns None.
     assert get_loss_mask_recovery(object()) is None
+
+
+# Kimi-K3: XTML structural markers are special tokens; tag names/attributes are text.
+_K3_IDS = {"<|open|>": 10, "<|close|>": 11, "<|sep|>": 12, "<|end_of_msg|>": 13}
+_K3_TEXT = {
+    20: "message",
+    21: ' role="user"',
+    22: ' role="assistant"',
+    23: "think",
+    24: "response",
+    25: ' name="a"',
+}
+_OPEN, _CLOSE, _SEP, _EOM = _K3_IDS.values()
+
+
+class FakeK3Tokenizer:
+    is_fast = False
+    unk_token_id = 999
+
+    def convert_tokens_to_ids(self, token):
+        return _K3_IDS.get(token, self.unk_token_id)
+
+    def decode(self, ids):
+        return "".join(_K3_TEXT.get(i, f"<{i}>") for i in ids)
+
+
+def _k3_tag(open_id, *name_ids):
+    return [open_id, *name_ids, _SEP]
+
+
+def _k3_user(content):
+    return [*_k3_tag(_OPEN, 20, 21), *content, *_k3_tag(_CLOSE, 20), _EOM]
+
+
+def _k3_assistant(reasoning, content, attrs=(22,)):
+    return [
+        *_k3_tag(_OPEN, 20, *attrs),
+        *_k3_tag(_OPEN, 23),
+        *reasoning,
+        *_k3_tag(_CLOSE, 23),
+        *_k3_tag(_OPEN, 24),
+        *content,
+        *_k3_tag(_CLOSE, 24),
+        *_k3_tag(_CLOSE, 20),
+        _EOM,
+    ]
+
+
+def test_k3_recovery_is_registered():
+    assert get_loss_mask_recovery(FakeK3Tokenizer()).name == "kimi_k3"
+    assert get_loss_mask_recovery(FakeKimiTokenizer()).name == "kimi"
+
+
+def test_k3_mask_marks_generated_tokens():
+    # Marked: everything after the first channel opener through <|end_of_msg|>, in every
+    # assistant turn (named ones too). The header and <|open|>think<|sep|> are prompt.
+    tok = FakeK3Tokenizer()
+    first = _k3_assistant([300], [301])
+    second = _k3_assistant([302], [303], attrs=(22, 25))
+    ids = [*_k3_user([200]), *first, *_k3_user([201]), *second]
+    mask = get_loss_mask_recovery(tok).compute(tok, torch.tensor(ids))
+
+    prompt_len = len(_k3_tag(_OPEN, 20, 22)) + len(_k3_tag(_OPEN, 23))
+    off1 = len(_k3_user([200]))
+    off2 = off1 + len(first) + len(_k3_user([201]))
+    expected = set(range(off1 + prompt_len, off1 + len(first)))
+    expected |= set(range(off2 + prompt_len + 1, off2 + len(second)))  # +1: name attr
+    assert {i for i, m in enumerate(mask.tolist()) if m} == expected
+
+
+def test_k3_mask_truncated_turn_and_generation_prompt():
+    tok = FakeK3Tokenizer()
+    compute = get_loss_mask_recovery(tok).compute
+    # Truncated mid-reasoning: marked to the end of the sequence.
+    truncated = [*_k3_tag(_OPEN, 20, 22), *_k3_tag(_OPEN, 23), 300, 301]
+    assert compute(tok, truncated).tolist()[-2:] == [1, 1]
+    # A trailing generation prompt carries no generated tokens.
+    gen_prompt = [*_k3_user([200]), *_k3_tag(_OPEN, 20, 22), *_k3_tag(_OPEN, 23)]
+    assert int(compute(tok, gen_prompt).sum()) == 0

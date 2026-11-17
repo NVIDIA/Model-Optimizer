@@ -131,6 +131,9 @@ def make_speculative_data_module(
             max_seq_len=train_len,
             answer_only_loss=answer_only_loss,
             final_aux_is_base_hidden=final_aux_is_base_hidden,
+            window_context_tokens=data_args.streaming_window_context,
+            window_prefill=data_args.streaming_window_prefill,
+            max_prompt_len=data_args.streaming_max_prompt_len,
         )
         train_dataset = EagleVllmStreamingDataset(
             entries=ds,

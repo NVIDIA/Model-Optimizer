@@ -62,6 +62,9 @@ class SlurmConfig:
     # domain) set this to the node count to keep all nodes in one NVL72 so
     # inter-node traffic rides NVLink. None = let the scheduler place freely.
     segment: Optional[int] = None
+    # Slurm --comment, e.g. a JSON idle-GPU-reaper exemption for jobs that load weights for
+    # longer than the reaper's idle window.
+    comment: Optional[str] = None
 
 
 @run.cli.factory
@@ -86,6 +89,7 @@ def slurm_factory(
     time: str = "04:00:00",
     mem: str = os.environ.get("SLURM_MEM", "0"),
     segment: Optional[int] = None,
+    comment: Optional[str] = None,
 ) -> SlurmConfig:
     """Generic Slurm factory — configure via environment variables or CLI overrides."""
     return SlurmConfig(
@@ -106,4 +110,5 @@ def slurm_factory(
         time=time,
         mem=mem,
         segment=segment,
+        comment=comment,
     )

@@ -56,6 +56,17 @@ def test_empty_corpus_raises():
         StreamingDataset([], tokenizer=MagicMock(), config=StreamingConfig())
 
 
+def test_hf_dataset_entries_not_materialized(tmp_path):
+    datasets = pytest.importorskip("datasets")
+    (tmp_path / "a.jsonl").write_text("".join(f'{{"id": {i}}}\n' for i in range(5)))
+    hf = datasets.load_dataset(
+        "json", data_files=str(tmp_path / "a.jsonl"), split="train", cache_dir=str(tmp_path)
+    )
+    ds = StreamingDataset(hf, tokenizer=MagicMock(), config=StreamingConfig())
+    assert ds.entries is hf  # memory-mapped Arrow, not a per-rank Python list
+    assert len(ds) == 5
+
+
 def test_len_matches_corpus():
     ds = StreamingDataset(_entries(37), tokenizer=MagicMock(), config=StreamingConfig())
     assert len(ds) == 37
@@ -543,3 +554,100 @@ def test_answer_only_loss_rejects_slow_tokenizer_without_recovery():
     tok.convert_tokens_to_ids.return_value = None  # defeat recovery detect()s
     with pytest.raises(RuntimeError, match="fast tokenizer"):
         hf_streaming_dataset._tokenize_with_loss_mask(tok, _CONV, answer_only_loss=True)
+
+
+# ---------------------------------------------------------------------------
+# Tool rows: last-turn loss, tools passthrough, windows over long histories
+# ---------------------------------------------------------------------------
+
+# 20 tokens: an earlier (other-model) assistant turn at 4..7, the regenerated one at 12..19.
+_TOOL_MASK = torch.tensor([0] * 4 + [1] * 4 + [0] * 4 + [1] * 8)
+
+
+def _tool_row_tokenizer() -> MagicMock:
+    tok = _fast_tokenizer_with_template("{% generation %}", seq=20)
+    tok.apply_chat_template.return_value["assistant_masks"] = _TOOL_MASK.unsqueeze(0)
+    return tok
+
+
+_TOOL_ROW = {
+    "conversation_id": "t-0",
+    "conversations": _CONV,
+    "tools": '[{"type": "function", "function": {"name": "f"}}]',
+    "loss_turns": "last",
+}
+
+
+@pytest.mark.parametrize(
+    ("prefill", "supports", "want_ids", "want_start"),
+    [
+        # Full prefill: send the history up to the window's end, fetch from position 10.
+        ("full", True, list(range(18)), 10),
+        # Window-only (by choice, or a backend that can't offset): send just the window.
+        ("window", True, list(range(10, 18)), None),
+        ("full", False, list(range(10, 18)), None),
+    ],
+)
+def test_tool_row_window_and_last_turn_loss(prefill, supports, want_ids, want_start):
+    """A row longer than max_seq_len becomes a window ending in the last turn's tokens.
+
+    Only the last assistant turn is supervised; ``tools`` reaches the chat template parsed.
+    """
+    cls = type("_DS", (StreamingDataset,), {"supports_window_start": supports})
+    tok = _tool_row_tokenizer()
+    ds = cls(
+        entries=[_TOOL_ROW],
+        tokenizer=tok,
+        config=StreamingConfig(
+            answer_only_loss=True, max_seq_len=8, window_context_tokens=2, window_prefill=prefill
+        ),
+    )
+    s = ds._tokenize_entry(_TOOL_ROW)
+    assert tok.apply_chat_template.call_args.kwargs["tools"] == [
+        {"type": "function", "function": {"name": "f"}}
+    ]
+    assert tok.apply_chat_template.call_args.kwargs["truncation"] is False
+    assert s["token_ids"] == want_ids
+    assert s.get("window_start") == want_start
+    # The earlier assistant turn (4..7) is dropped; the window's last-turn tokens are kept.
+    mask = s["loss_mask"][want_start or 0 :]
+    assert mask.tolist() == [0, 0, 1, 1, 1, 1, 1, 1]
+
+
+def test_window_fetch_sends_offset_and_checks_window_ids(monkeypatch):
+    """With full prefill, the request carries hs_window_start and the server returns only
+    the window, which the drift check and loss mask are aligned to."""
+    seen = {}
+
+    def on_completion(request):
+        import json
+
+        seen.update(json.loads(request.content))
+
+    handler = _rdma_sidecar_handler(8, 3, 16, on_completion=on_completion)
+
+    def windowed(request):
+        resp = handler(request)
+        if request.url.path == "/desc":
+            body = resp.json()
+            body["token_ids"] = list(range(10, 18))  # the connector returns ids[start:]
+            return httpx.Response(200, json=body)
+        return resp
+
+    _mock_rdma(monkeypatch, windowed)
+    ds = EagleVllmStreamingDataset(
+        entries=[_TOOL_ROW],
+        tokenizer=_tool_row_tokenizer(),
+        config=EagleVllmStreamingConfig(
+            server_urls="http://mock:8000",
+            model="m",
+            max_seq_len=8,
+            answer_only_loss=True,
+            window_context_tokens=2,
+        ),
+    )
+    b = ds[0]
+    assert seen["prompt"] == list(range(18))
+    assert seen["kv_transfer_params"] == {"hs_window_start": 10}
+    assert b["input_ids"].tolist() == list(range(10, 18))
+    assert b["loss_mask"].tolist() == [0, 0, 1, 1, 1, 1, 1, 1]

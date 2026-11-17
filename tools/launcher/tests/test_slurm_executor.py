@@ -461,3 +461,22 @@ class TestControlMasterSSHTunnel:
         # nemo-run's sbatch wrapper actually issues `scontrol requeue` on preemption.
         assert executor.additional_parameters["requeue"] is True
         assert executor.retries == 3
+
+    @patch("core.run.SlurmExecutor")
+    @patch("core.run.SSHTunnel")
+    def test_comment_renders_verbatim(self, mock_tunnel, mock_executor):
+        # A JSON reaper exemption must reach Slurm as is: Slurm strips bare double quotes from
+        # #SBATCH values, and extra quoting would be stored in the comment.
+        from nemo_run.core.execution.slurm import _as_sbatch_flag
+
+        comment = '{"a":{"b":"c d"}}'
+        mock_executor.return_value.additional_parameters = {}
+        slurm_config = MagicMock(
+            requeue=False, comment=comment, container_mounts=[], srun_args=[], array=None
+        )
+        build_slurm_executor(
+            user="u", identity=None, slurm_config=slurm_config, experiment_id="e",
+            job_dir="/j", task_name="t", packager=MagicMock(),
+        )  # fmt: skip
+        value = mock_executor.return_value.additional_parameters["comment"]
+        assert _as_sbatch_flag("comment", value) == f"#SBATCH --comment='{comment}'"

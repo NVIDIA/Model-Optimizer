@@ -30,6 +30,9 @@ Load out-of-tree:
 Scope: TP>=1 (hidden states are replicated across TP ranks; only rank 0 owns the
 pool + sidecar and serves them), host(pinned) memory (container UCX has no CUDA),
 ring-slot reuse (fine when in-flight requests < pool_slots; no credit protocol yet).
+A request may set ``kv_transfer_params={"hs_window_start": s}`` to have the whole prompt
+prefilled but only positions ``s:`` captured; ``max_tokens`` then bounds the window, not
+the prompt.
 PP>1 is not supported (the capture layer lives on one PP rank; owner election only
 covers TP). The sidecar is unauthenticated and binds all interfaces, so it assumes a
 trusted cluster fabric -- any reachable peer can read descriptors / free slots.
@@ -54,7 +57,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     SupportsHMA,
 )
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -63,8 +65,15 @@ from .hf_streaming_dataset import nixl_backends_from_env
 logger = init_logger(__name__)
 
 
-def extract_from_kv_cache(kv_cache, slot_mapping, num_tokens):
-    """Gather the first ``num_tokens`` rows of ``kv_cache`` addressed by ``slot_mapping``."""
+def extract_from_kv_cache(kv_cache, slot_mapping, num_tokens, heads_first=False):
+    """Gather the first ``num_tokens`` rows of ``kv_cache`` addressed by ``slot_mapping``.
+
+    ``kv_cache`` is ``[num_blocks, block_size, num_heads, head_size]``, or with ``heads_first``
+    ``[num_blocks, num_heads, block_size, head_size]`` (newer vLLM's cache-only layer); either
+    way the result is ``[num_tokens, num_heads, head_size]``.
+    """
+    if heads_first:
+        kv_cache = kv_cache.transpose(1, 2)
     block_size = kv_cache.shape[1]
     return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
 
@@ -76,11 +85,22 @@ class ReqMeta:
     req_id: str
     token_ids: torch.Tensor
     slot: int
+    # The request's blocks in the hidden-states KV cache group: where its tokens sit.
+    block_ids: list[int] = field(default_factory=list)
+    # First prompt position to capture: the trainer can have the whole history prefilled but
+    # fetch only a window at its end (kv_transfer_params["hs_window_start"]).
+    start: int = 0
 
     @staticmethod
-    def make(req_id, token_ids, slot):
+    def make(req_id, token_ids, slot, block_ids, start=0):
         """Build a :class:`ReqMeta`, tensorizing ``token_ids``."""
-        return ReqMeta(req_id=req_id, token_ids=torch.tensor(token_ids), slot=slot)
+        return ReqMeta(
+            req_id=req_id,
+            token_ids=torch.tensor(token_ids),
+            slot=slot,
+            block_ids=list(block_ids),
+            start=start,
+        )
 
 
 @dataclass
@@ -89,9 +109,9 @@ class RdmaConnMeta(KVConnectorMetadata):
 
     requests: list = field(default_factory=list)
 
-    def add(self, req_id, token_ids, slot):
+    def add(self, req_id, token_ids, slot, block_ids, start=0):
         """Append one request's capture metadata."""
-        self.requests.append(ReqMeta.make(req_id, token_ids, slot))
+        self.requests.append(ReqMeta.make(req_id, token_ids, slot, block_ids, start))
 
 
 class _Sidecar(BaseHTTPRequestHandler):
@@ -166,6 +186,8 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._sidecar_port = int(ex("sidecar_port", "18999"))
         self._pool_slots = int(ex("pool_slots", "64"))
         self._max_tokens = int(ex("max_tokens", "512"))
+        self._cache_group_id = self._find_cache_kv_group_id(kv_cache_config)
+        self._block_size = 0  # the cache-only layer's block size (worker, set at registration)
         self.cache_layers: list[str] = []
         # TP: hidden states are replicated across ranks, so only rank 0 owns the
         # pool + sidecar (set for real in register_kv_caches). Default True so the
@@ -179,6 +201,7 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._pool: Any = None  # [pool_slots, slot_elems] pinned (owner only)
         self._slot_elems = 0
         self._per_token_elems = 0
+        self._heads_first = False
         self._bufs: dict[str, dict] = {}
         # slot -> write counter; a req records its gen to detect a mid-read lap (see /done).
         self._slot_gen: dict[int, int] = {}
@@ -187,12 +210,37 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._lock = threading.Lock()
         # scheduler state
         self._slot_ctr = 0
+        self._window_start: dict[str, int] = {}  # req id -> hs_window_start, until scheduled
         logger.info(
             "RdmaHiddenStatesConnector role=%s slots=%d max_tokens=%d port=%d",
             role,
             self._pool_slots,
             self._max_tokens,
             self._sidecar_port,
+        )
+
+    @staticmethod
+    def _find_cache_kv_group_id(kv_cache_config) -> int:
+        """Index of the KV cache group holding the captured hidden states.
+
+        Same rule as vLLM's ExampleHiddenStatesConnector: found by spec type, so it resolves
+        identically on the scheduler and the worker.
+        """
+        if kv_cache_config is None:
+            return 0
+        from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+
+        groups = kv_cache_config.kv_cache_groups
+        ids = [
+            gid for gid, g in enumerate(groups) if isinstance(g.kv_cache_spec, HiddenStateCacheSpec)
+        ]
+        if len(ids) == 1:
+            return ids[0]
+        if not ids and len(groups) == 1:
+            return 0
+        raise ValueError(
+            f"RdmaHiddenStatesConnector: cannot identify the hidden-states KV cache group "
+            f"among {len(groups)} groups."
         )
 
     def _cs(self):
@@ -229,6 +277,18 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             )
             return
         kv = kv_caches[self.cache_layers[0]]
+        # Newer vLLM stores the cache-only layer heads-first; sizing the pool off the old
+        # layout there counts a whole block per token (an ~800 GB slot -> pinned-alloc OOM).
+        num_heads = layers[self.cache_layers[0]].num_heads
+        if kv.shape[1] == kv.shape[2]:
+            raise ValueError(
+                f"RdmaHiddenStatesConnector: cannot tell block_size from num_heads in "
+                f"cache-only KV shape {tuple(kv.shape)}."
+            )
+        self._heads_first = kv.shape[1] == num_heads
+        if self._heads_first:
+            kv = kv.transpose(1, 2)
+        self._block_size = int(kv.shape[1])
         # per-token feature = everything past [num_blocks, block_size]
         self._per_token_elems = int(prod(kv.shape[2:]))
         self._feat_shape = tuple(kv.shape[2:])
@@ -309,17 +369,16 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         ready = torch.cuda.Event()
         ready.record()
         cs.wait_event(ready)
-        slot_mapping = get_forward_context().slot_mapping[layer_name]
-        # Assumes new-request tokens sit contiguously at the front of slot_mapping; bound
-        # the offset walk so an unexpected layout fails loud instead of short-slicing.
-        n_capture = sum(req.token_ids.shape[0] for req in md.requests)
-        assert n_capture <= slot_mapping.shape[0], (
-            f"RdmaHiddenStatesConnector: capturing {n_capture} tokens but slot_mapping has "
-            f"only {slot_mapping.shape[0]}; unexpected batch layout (chunked prefill?)."
-        )
-        offset = 0
+        # Each request's cache slots come from its own block ids, as in vLLM's
+        # ExampleHiddenStatesConnector. The batch's slot_mapping is in the model runner's batch
+        # order, which need not match the scheduler's order of new requests, so slicing it
+        # with a running offset hands a request another request's hidden states whenever
+        # several are in flight (token ids still match, so nothing downstream notices).
+        bs = self._block_size
+        offsets = torch.arange(bs, dtype=torch.long)
         for req in md.requests:
-            n = req.token_ids.shape[0]
+            start, end = req.start, req.token_ids.shape[0]
+            n = end - start  # captured tokens: the window [start, end) of the prompt
             nelems = n * self._per_token_elems
             slot = req.slot
             if nelems > self._slot_elems:
@@ -337,12 +396,17 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                         self._max_tokens,
                     )
                     self._oversize_warned = True
-                offset += n
                 continue
+            blocks = torch.tensor(req.block_ids, dtype=torch.long)
+            if blocks.numel() * bs < end:
+                raise RuntimeError(
+                    f"RdmaHiddenStatesConnector: req {req.req_id} has {end} tokens but only "
+                    f"{blocks.numel()} blocks of {bs} in the hidden-states group."
+                )
+            slots = (blocks[:, None] * bs + offsets[None, :]).flatten()[start:end]
             with torch.cuda.stream(cs):
-                rsm = slot_mapping[offset : offset + n]
-                offset += n
-                hs_gpu = extract_from_kv_cache(kv_layer, rsm, n)  # [n, *feat]
+                rsm = slots.to(kv_layer.device, non_blocking=True)
+                hs_gpu = extract_from_kv_cache(kv_layer, rsm, n, self._heads_first)  # [n, *feat]
                 # copy into the pre-registered pool slot (flattened)
                 self._pool[slot, :nelems].copy_(hs_gpu.reshape(-1), non_blocking=True)
             ev = torch.cuda.Event()
@@ -358,7 +422,7 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                     "descs": descs,
                     "shape": (n, *self._feat_shape),
                     "dtype": str(self._dtype).split(".")[-1],
-                    "token_ids": req.token_ids.tolist(),
+                    "token_ids": req.token_ids[start:].tolist(),
                     "event": ev,
                     "gen": gen,
                 }
@@ -369,28 +433,65 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         return 0, False
 
     def update_state_after_alloc(self, request, blocks, num_external_tokens):
-        """Store-only connector: no external tokens are ever allocated."""
+        """Store-only connector: no external tokens are ever allocated.
+
+        Records the request's ``hs_window_start`` (from the completion request's
+        ``kv_transfer_params``) for :meth:`build_connector_meta`.
+        """
         assert num_external_tokens == 0
+        start = int((request.kv_transfer_params or {}).get("hs_window_start", 0))
+        if start:
+            self._window_start[request.request_id] = start
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """Assign each newly scheduled request a ring-pool slot for this step.
 
-        ``save_kv_layer`` walks ``slot_mapping`` with a running offset, so it needs each
-        prompt computed whole in one step; assert that here (chunked prefill would split
-        it and silently misalign the capture).
+        ``save_kv_layer`` reads each prompt's hidden states from its own blocks in one go, so
+        it needs each prompt computed whole in one step; assert that here (chunked prefill
+        would split it and capture only part).
         """
         meta = RdmaConnMeta()
         for nr in scheduler_output.scheduled_new_reqs:
             prompt = nr.prompt_token_ids or []
             n_sched = scheduler_output.num_scheduled_tokens[nr.req_id]
-            assert n_sched == len(prompt), (
+            start = self._window_start.pop(nr.req_id, 0)
+            assert n_sched >= len(prompt), (
                 f"RdmaHiddenStatesConnector requires the full prompt in one step "
                 f"(disable chunked prefill): req {nr.req_id} scheduled {n_sched} of "
                 f"{len(prompt)} prompt tokens."
             )
+            if n_sched > len(prompt):
+                # A preempted request resumes as new with its output tokens re-prefilled. Its
+                # prompt was already captured before preemption (or it is a generation request
+                # nobody fetches), so skip it rather than kill the engine.
+                logger.warning(
+                    "RdmaHiddenStatesConnector: req %s resumed after preemption (%d tokens "
+                    "scheduled, %d-token prompt); not capturing it again.",
+                    nr.req_id,
+                    n_sched,
+                    len(prompt),
+                )
+                continue
+            if not 0 <= start < len(prompt):
+                # A bad client value must not kill the engine: capture the whole prompt, and
+                # the trainer's token-drift check rejects the mismatched window loudly.
+                logger.error(
+                    "RdmaHiddenStatesConnector: hs_window_start=%d outside the %d-token "
+                    "prompt of req %s; capturing the whole prompt.",
+                    start,
+                    len(prompt),
+                    nr.req_id,
+                )
+                start = 0
             slot = self._slot_ctr % self._pool_slots
             self._slot_ctr += 1
-            meta.add(nr.req_id, token_ids=prompt, slot=slot)
+            meta.add(
+                nr.req_id,
+                token_ids=prompt,
+                slot=slot,
+                block_ids=nr.block_ids[self._cache_group_id],
+                start=start,
+            )
         return meta
 
     def request_finished(self, request, block_ids):

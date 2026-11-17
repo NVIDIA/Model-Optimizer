@@ -132,6 +132,18 @@ class TestDFlashConvert:
         model.train()
         assert torch.isfinite(model(**_dflash_batch(model.config.vocab_size)).loss)
 
+    def test_convert_rope_theta_override_reaches_rotary_and_export(self):
+        """dflash_rope_theta replaces the inherited base in the draft rotary and the export."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        config["dflash_rope_theta"] = 1000000.0
+        mtsp.convert(model, [("dflash", config)])
+        model.dflash_module._maybe_init_rotary_emb(device="cpu")
+        head_dim = model.dflash_config.head_dim
+        expected = 1.0 / (1000000.0 ** (torch.arange(0, head_dim, 2).float() / head_dim))
+        torch.testing.assert_close(model.dflash_module.rotary_emb.inv_freq.cpu(), expected)
+        assert model.get_exporter()._export_config()["rope_theta"] == 1000000.0
+
 
 def test_multimodal_forward_kwargs_exclude_non_model_inputs():
     """Do not forward Trainer or collator-only fields to Hugging Face models."""

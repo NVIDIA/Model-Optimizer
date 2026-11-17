@@ -232,7 +232,7 @@ class HFDSparkModel(HFDFlashModel):
             # The confidence head is not behind final_logits.
             loss = self._draft_zero_loss(flat_final.device, through=(flat_final, confidence_logits))
             metrics = {"ce_loss": 0.0, "l1_loss": 0.0, "confidence_loss": 0.0, "base_accuracy": 0.0}
-            return loss, 0.0, metrics
+            return loss, [0.0] * self.dflash_block_size, metrics
 
         # Aligned target distribution: the base model's own prediction of each label.
         flat_teacher = self._teacher_logits(
@@ -268,11 +268,20 @@ class HFDSparkModel(HFDFlashModel):
         )
 
         with torch.no_grad():
-            acc = _masked_top1(flat_final, flat_targets, binary_eval_mask)
+            # Top-1 per block position, the training-side counterpart of serving's
+            # per-position acceptance (each position is given the true prefix).
+            correct = (flat_final.argmax(dim=-1) == flat_targets).float() * binary_eval_mask
+            bs = self.dflash_block_size
+            pos_acc = correct.view(-1, bs).sum(0) / (binary_eval_mask.view(-1, bs).sum(0) + 1e-6)
             base_acc = _masked_top1(flat_base, flat_targets, binary_eval_mask)
-            # One device sync for all five scalars instead of one per .item().
-            acc_v, base_acc_v, ce_v, l1_v, conf_v = torch.stack(
-                [acc, base_acc, ce_loss.detach(), l1_loss.detach(), confidence_loss.detach()]
+            # One device sync for all scalars instead of one per .item().
+            *acc_v, base_acc_v, ce_v, l1_v, conf_v = torch.cat(
+                [
+                    pos_acc,
+                    torch.stack(
+                        [base_acc, ce_loss.detach(), l1_loss.detach(), confidence_loss.detach()]
+                    ),
+                ]
             ).tolist()
             metrics = {
                 "ce_loss": ce_v,
@@ -363,7 +372,11 @@ class HFDSparkModel(HFDFlashModel):
         n_blocks = anchor_positions.shape[1]
 
         if n_blocks == 0 or not block_keep_mask.any():
-            return ModelOutput(loss=self._draft_zero_loss(device), logits=None, train_acc=[[0.0]])
+            return ModelOutput(
+                loss=self._draft_zero_loss(device),
+                logits=None,
+                train_acc=[[0.0] * block_size],
+            )
 
         # 4. Build draft inputs (inherited helpers).
         noise_embedding = self._build_noise_embedding(
@@ -404,7 +417,8 @@ class HFDSparkModel(HFDFlashModel):
             base_outputs,
         )
 
-        return ModelOutput(loss=loss, logits=None, train_acc=[[accuracy]], dspark_metrics=metrics)
+        # One entry per block position, logged as train_acc/parallel_0_step_<k>.
+        return ModelOutput(loss=loss, logits=None, train_acc=[accuracy], dspark_metrics=metrics)
 
     @torch.no_grad()
     def pseudo_speculative_generate(self, input_ids, steps=1):

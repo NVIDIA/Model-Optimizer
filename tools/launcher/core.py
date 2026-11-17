@@ -602,6 +602,11 @@ def build_slurm_executor(
         # TORCHX_MAX_RETRIES > SLURM_RESTART_COUNT.  retries=0 (the default)
         # disables this, so bump it when requeue is requested.
         executor.retries = max(executor.retries, 3)
+    comment = getattr(slurm_config, "comment", None)
+    if comment is not None:
+        # Passed raw: nemo-run shell-quotes #SBATCH values, which keeps a JSON comment's double
+        # quotes (Slurm strips bare ones); quoting it here too would store the quotes in it.
+        executor.additional_parameters["comment"] = comment
     return executor
 
 

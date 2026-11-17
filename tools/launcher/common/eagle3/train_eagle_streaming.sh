@@ -23,14 +23,15 @@
 # auto-chosen from the Slurm allocation (yaml `nodes:`) and $SERVE_NODES; nemo_run
 # runs this script once per node, branching on $SLURM_NODEID:
 #   nodes == 1  -> co-located: vllm serve on $SERVE_GPU, trainer on the rest.
-#   nodes >= 2  -> split: nodes 0..SERVE_NODES-1 each run an independent whole-node
-#                 vllm serve replica; nodes SERVE_NODES..NNODES-1 are multi-node-DDP
-#                 trainers. SERVE_NODES default 1. Rendezvous over shared
-#                 /scratchspace: each serve i publishes .serve_addr.i; head trainer
-#                 (first trainer node = accelerate machine_rank 0) publishes its IP;
-#                 trainers collect every serve address.
+#   nodes >= 2  -> split: nodes 0..SERVE_NODES-1 run independent vllm serve replicas of
+#                 SERVE_NODES_PER_REPLICA nodes each (default 1: whole-node replicas);
+#                 nodes SERVE_NODES..NNODES-1 are multi-node-DDP trainers. SERVE_NODES
+#                 default 1. Rendezvous over shared /scratchspace: each serve replica i
+#                 publishes .serve_addr.i from its first node; head trainer (first
+#                 trainer node = accelerate machine_rank 0) publishes its IP; trainers
+#                 collect every serve address.
 # Map-style dataset: DistributedSampler shards the corpus across trainer ranks, each
-# rank fetches only its shard round-robin across the SERVE_NODES replicas
+# rank fetches only its shard round-robin across the serve replicas
 # (data.streaming_server_url = comma-joined list).
 #
 # Env vars (required):
@@ -41,6 +42,10 @@
 #
 # Env vars (optional):
 #   SERVE_NODES         multi-node: dedicated serve replica nodes (0..SERVE_NODES-1). default 1
+#   SERVE_NODES_PER_REPLICA  multi-node: nodes per serve replica, for a target too big for
+#                       one node. >1 runs one vllm across them (--nnodes): the first node
+#                       serves the API and the RDMA pool (TP rank 0), the rest join
+#                       --headless. Must divide SERVE_NODES. default 1
 #   SERVE_GPU_MEM_UTIL  default 0.4 single-node / 0.9 multi-node serve node
 #   SERVE_READY_TIMEOUT server startup wait, seconds. default 900
 #   SERVE_EXTRA_ARGS    extra `vllm serve` flags (e.g. --trust-remote-code)
@@ -52,7 +57,7 @@
 #                         by nemo_run's unquoted env export, so "--block-size 128" cannot ride it.
 #   SERVE_HOST          single-node: bind/connect host. default 127.0.0.1
 #   SERVE_GPU           single-node: CUDA_VISIBLE_DEVICES for vllm. default "0"
-#   SERVE_TP            tensor-parallel size. default 1 single-node / all serve-node GPUs
+#   SERVE_TP            tensor-parallel size. default 1 single-node / all GPUs of a serve replica
 #   TRAIN_GPUS          single-node: trainer CUDA_VISIBLE_DEVICES. default = all but SERVE_GPU
 #   SERVE_ADVERTISE_IP  multi-node: address node 1 dials. default node 0's routable IP
 
@@ -92,19 +97,25 @@ dependencies = [
 include = ["modelopt*", "modelopt_recipes*"]
 EOF
 fi
-pip install --no-cache-dir -e modules/Model-Optimizer/
-pip install --no-cache-dir -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
-pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
-
 # Role is needed here, not just at the dispatch below: provisioning runs on every
-# node, so an ungated override would also downgrade the serve replicas. Derived once
-# and reused by the dispatch.
+# node, so ungated trainer installs would also downgrade the serve replicas. Derived
+# once and reused by the dispatch.
 NNODES="${SLURM_NNODES:-1}"
 NODEID="${SLURM_NODEID:-0}"
 # Only multi-node has dedicated serve nodes. Single-node is co-located -- one env runs
 # both vllm serve and the trainer -- so there is nothing to gate there.
 if [ "$NNODES" -gt 1 ] && [ "$NODEID" -lt "${SERVE_NODES:-1}" ]; then
     IS_SERVE_NODE=1
+fi
+
+pip install --no-cache-dir -e modules/Model-Optimizer/
+# Trainer-only requirements. Skipped on dedicated serve nodes, which need modelopt only
+# for the connector: the requirements' transformers cap would downgrade the vllm
+# image's own transformers (and NCCL with it), and newer vllm model code imports
+# configs that only the image's transformers has.
+if [ -z "${IS_SERVE_NODE:-}" ]; then
+    pip install --no-cache-dir -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
+    pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
 fi
 
 # Some trust_remote_code models pin an older transformers (e.g. MiniMax-M2.7
@@ -139,11 +150,13 @@ SCRIPT_ARGS=("$@")
 SERVE_PORT="${SERVE_PORT:-8765}"
 SERVE_READY_TIMEOUT="${SERVE_READY_TIMEOUT:-900}"
 SERVE_NODES="${SERVE_NODES:-1}"
+SERVE_NODES_PER_REPLICA="${SERVE_NODES_PER_REPLICA:-1}"
 SERVE_LOG="/scratchspace/vllm_serve.log"   # serve nodes override with a per-node path
-# Namespace rendezvous/sentinel files per Slurm job (SLURM_JOB_ID: same across an
-# allocation's nodes, unique across allocations) so concurrent allocations on the
-# shared mount don't clobber each other's addresses. Fixed token off-Slurm.
-RUN_ID="${SLURM_JOB_ID:-local}"
+# Namespace rendezvous/sentinel files per Slurm job attempt so concurrent allocations on
+# the shared mount don't clobber each other's addresses. A requeued job keeps its
+# SLURM_JOB_ID, so SLURM_RESTART_COUNT keeps a worker from reading the preempted
+# attempt's master address or done sentinel before node 0 clears them. Fixed token off-Slurm.
+RUN_ID="${SLURM_JOB_ID:-local}_${SLURM_RESTART_COUNT:-0}"
 SERVE_ADDR_FILE="/scratchspace/.serve_addr.${RUN_ID}"
 DONE_FILE="/scratchspace/.training_done.${RUN_ID}"
 SERVE_PID=""
@@ -170,8 +183,10 @@ resolve_routable_ip() {
 
 # Start vllm serve in the background. Sets SERVE_PID.
 #   $1 = bind host   $2 = tensor-parallel size   $3 = CUDA_VISIBLE_DEVICES ("" -> all)
+#   $4.. = extra vllm serve flags (multi-node replica placement)
 launch_vllm() {
     local bind_host="$1" tp="$2" cvd="$3"
+    local -a node_args=("${@:4}")
     echo "Launching vllm serve on ${bind_host}:${SERVE_PORT} (TP=${tp}, CUDA_VISIBLE_DEVICES=${cvd:-all}, mem=${SERVE_GPU_MEM_UTIL}, log: $SERVE_LOG)..."
     # Pin GPUs only for a non-empty set; empty CUDA_VISIBLE_DEVICES hides ALL, so unset = whole node.
     local -a gpu_env=()
@@ -198,6 +213,7 @@ launch_vllm() {
         --no-enable-flashinfer-autotune \
         --gpu-memory-utilization "$SERVE_GPU_MEM_UTIL" \
         "${opt_args[@]}" \
+        "${node_args[@]}" \
         ${SERVE_EXTRA_ARGS:-} \
         --speculative-config "{
             \"method\":\"extract_hidden_states\",
@@ -284,6 +300,11 @@ if [ "$NNODES" -gt 1 ] && [ "$SERVE_NODES" -ge "$NNODES" ]; then
     echo "ERROR: SERVE_NODES ($SERVE_NODES) must be < SLURM_NNODES ($NNODES); need >=1 trainer node." >&2
     exit 1
 fi
+if [ "$SERVE_NODES_PER_REPLICA" -lt 1 ] || [ $(( SERVE_NODES % SERVE_NODES_PER_REPLICA )) -ne 0 ]; then
+    echo "ERROR: SERVE_NODES ($SERVE_NODES) must be a positive multiple of SERVE_NODES_PER_REPLICA ($SERVE_NODES_PER_REPLICA)." >&2
+    exit 1
+fi
+NUM_REPLICAS=$(( SERVE_NODES / SERVE_NODES_PER_REPLICA ))
 
 if [ "$NNODES" -le 1 ]; then
     # ----------------------------- single node -----------------------------
@@ -311,21 +332,50 @@ PY
 
 elif [ "$NODEID" -lt "$SERVE_NODES" ]; then
     # ---------------------- multi-node: serve node(s) ----------------------
-    # Each runs a whole-node vllm serve replica and publishes ${SERVE_ADDR_FILE}.${NODEID}.
+    # Replica r spans nodes r*P..r*P+P-1 (P = SERVE_NODES_PER_REPLICA). Its first node
+    # serves the API and publishes ${SERVE_ADDR_FILE}.r; with P > 1 the other nodes join
+    # it as headless vllm workers (one TP group across the nodes).
+    REPLICA=$(( NODEID / SERVE_NODES_PER_REPLICA ))
+    REPLICA_RANK=$(( NODEID % SERVE_NODES_PER_REPLICA ))
+    MASTER_FILE="${SERVE_ADDR_FILE}.${REPLICA}.master"
     SERVE_GPU_MEM_UTIL="${SERVE_GPU_MEM_UTIL:-0.9}"     # dedicated node -> use most of it
-    SERVE_TP="${SERVE_TP:-$(gpus_on_node)}"              # default: all GPUs on this node
+    SERVE_TP="${SERVE_TP:-$(( $(gpus_on_node) * SERVE_NODES_PER_REPLICA ))}"  # default: all replica GPUs
     SERVE_LOG="/scratchspace/vllm_serve.${NODEID}.log"  # per-node log (avoid collision)
-    rm -f "${SERVE_ADDR_FILE}.${NODEID}"                 # clear own stale address
     [ "$NODEID" -eq 0 ] && rm -f "$DONE_FILE"            # node 0 clears the shared sentinel once
+    serve_addr=$(resolve_routable_ip "${SERVE_ADVERTISE_IP:-}")
 
     trap cleanup INT TERM EXIT
-    launch_vllm "0.0.0.0" "$SERVE_TP" ""
-    wait_vllm_ready "http://127.0.0.1:${SERVE_PORT}" || exit 1
-
-    serve_addr=$(resolve_routable_ip "${SERVE_ADVERTISE_IP:-}")
-    echo "$serve_addr" > "${SERVE_ADDR_FILE}.${NODEID}"
-    echo "Serve node ${NODEID}/${SERVE_NODES} published ${serve_addr}; holding up until training signals done..."
-    while [ ! -f "$DONE_FILE" ]; do sleep 10; done
+    if [ "$REPLICA_RANK" -eq 0 ]; then
+        rm -f "${SERVE_ADDR_FILE}.${REPLICA}" "$MASTER_FILE"  # clear own stale addresses
+        node_args=()
+        if [ "$SERVE_NODES_PER_REPLICA" -gt 1 ]; then
+            # Published before launch: the head's vllm waits for its workers to join.
+            echo "$serve_addr" > "$MASTER_FILE"
+            node_args=(--nnodes "$SERVE_NODES_PER_REPLICA" --node-rank 0 --master-addr "$serve_addr")
+        fi
+        launch_vllm "0.0.0.0" "$SERVE_TP" "" "${node_args[@]}"
+        wait_vllm_ready "http://127.0.0.1:${SERVE_PORT}" || exit 1
+        echo "$serve_addr" > "${SERVE_ADDR_FILE}.${REPLICA}"
+        echo "Serve replica ${REPLICA}/${NUM_REPLICAS} (node ${NODEID}) published ${serve_addr}; holding up until training signals done..."
+        while [ ! -f "$DONE_FILE" ]; do sleep 10; done
+    else
+        for ((i = 0; i < SERVE_READY_TIMEOUT; i++)); do
+            [ -f "$MASTER_FILE" ] && break
+            sleep 1
+        done
+        [ -f "$MASTER_FILE" ] || { echo "ERROR: serve replica ${REPLICA} head never published its address." >&2; exit 1; }
+        master_addr=$(cat "$MASTER_FILE")
+        launch_vllm "0.0.0.0" "$SERVE_TP" "" \
+            --nnodes "$SERVE_NODES_PER_REPLICA" --node-rank "$REPLICA_RANK" --master-addr "$master_addr" --headless
+        echo "Serve replica ${REPLICA} worker (node ${NODEID}, node rank ${REPLICA_RANK}) joined ${master_addr}; holding up until training signals done..."
+        # A headless worker has no API anyone polls, so watch its process directly.
+        while [ ! -f "$DONE_FILE" ]; do
+            if ! kill -0 "$SERVE_PID" 2>/dev/null; then
+                echo "ERROR: headless vllm worker exited early. Tail of $SERVE_LOG:" >&2; tail -100 "$SERVE_LOG"; exit 1
+            fi
+            sleep 10
+        done
+    fi
     echo "Training-done sentinel seen; serve node ${NODEID} exiting (EXIT trap stops vllm)."
 
 else
@@ -343,15 +393,15 @@ else
     fi
 
     # Collect serve addresses into the comma-joined URL list the dataset round-robins across.
-    echo "Trainer node (rank ${TRAINER_RANK}/${NUM_TRAINER_NODES}) waiting for ${SERVE_NODES} serve address(es)..."
+    echo "Trainer node (rank ${TRAINER_RANK}/${NUM_TRAINER_NODES}) waiting for ${NUM_REPLICAS} serve address(es)..."
     URLS=""
-    for ((s = 0; s < SERVE_NODES; s++)); do
+    for ((s = 0; s < NUM_REPLICAS; s++)); do
         af="${SERVE_ADDR_FILE}.${s}"
         for ((i = 0; i < SERVE_READY_TIMEOUT; i++)); do
             [ -f "$af" ] && break
             sleep 1
         done
-        [ -f "$af" ] || { echo "ERROR: serve node ${s} never published its address." >&2; exit 1; }
+        [ -f "$af" ] || { echo "ERROR: serve replica ${s} never published its address." >&2; exit 1; }
         surl="http://$(cat "$af"):${SERVE_PORT}"
         wait_vllm_ready "$surl" || exit 1
         URLS="${URLS:+$URLS,}$surl"

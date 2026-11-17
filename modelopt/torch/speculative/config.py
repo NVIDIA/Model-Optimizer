@@ -241,6 +241,18 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_rope_theta: float | None = ModeloptField(
+        default=None,
+        gt=0.0,
+        description=(
+            "RoPE base for the draft, used in training and written to the exported config. "
+            "None (default) inherits the base model's rope_theta. The draft projects the "
+            "target's hidden states through its own k_proj and applies its own rotary to "
+            "them, so its base only has to agree between training and serving, not with "
+            "the target's. Example: 1000000.0 for a 10000-base target."
+        ),
+    )
+
     dflash_lambda_base_start: float = ModeloptField(
         default=1.0,
         ge=0.0,
