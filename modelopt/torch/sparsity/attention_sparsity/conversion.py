@@ -50,10 +50,14 @@ def export_threshold_scale_factor(calibration_params: dict[str, Any]) -> dict[st
     block: dict[str, Any] = {"formula": "a * exp(b * target_sparsity)"}
     for phase in ("prefill", "decode"):
         if phase in calibration_params:
-            block[phase] = {
+            phase_params = {
                 "a": float(calibration_params[phase]["a"]),
                 "b": float(calibration_params[phase]["b"]),
             }
+            for key in ("min_observed_sparsity", "max_observed_sparsity"):
+                if key in calibration_params[phase]:
+                    phase_params[key] = float(calibration_params[phase][key])
+            block[phase] = phase_params
     return block
 
 

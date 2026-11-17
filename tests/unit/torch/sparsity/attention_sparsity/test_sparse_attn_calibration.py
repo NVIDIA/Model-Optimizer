@@ -126,6 +126,10 @@ class TestFitFromCounts:
         assert abs(params["prefill"]["a"] - a_true) / a_true < 0.3
         assert abs(params["prefill"]["b"] - b_true) / b_true < 0.15
         assert 0.0 <= params["prefill"]["min_observed_sparsity"] <= 1.0
+        exported = build_sparse_attention_config(params, 0.4)
+        fit = exported["config_groups"]["group_0"]["threshold_scale_factor"]["prefill"]
+        for key in ("min_observed_sparsity", "max_observed_sparsity"):
+            assert fit[key] == params["prefill"][key]
 
     def test_empty_phase_produces_no_fit(self):
         assert fit_from_counts({"decode": []}, DEFAULT_THRESHOLD_TRIALS) == {}
