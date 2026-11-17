@@ -48,9 +48,9 @@ more detail. We also describe the process of training standalone drafts from exi
 architectures using the ModelOpt library. Further, today we release three new standalone draft models,
 trained for the ``Qwen/Qwen3.8-27B`` target:
 
-- ``nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft``
-- ``nvidia/Qwen3.5-0.8B-Qwen3.8-27B-Draft``
-- ``nvidia/Llama-3.2-1B-Qwen3.8-27B-Draft``
+- `nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft <https://huggingface.co/nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft>`__
+- `nvidia/Qwen3.5-0.8B-Qwen3.8-27B-Draft <https://huggingface.co/nvidia/Qwen3.5-0.8B-Qwen3.8-27B-Draft>`__
+- `nvidia/Llama-3.2-1B-Qwen3.8-27B-Draft <https://huggingface.co/nvidia/Llama-3.2-1B-Qwen3.8-27B-Draft>`__
 
 These models have been distilled using ModelOpt to align the drafts with the target.
 
