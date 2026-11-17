@@ -32,9 +32,14 @@ from modelopt.torch.quantization.qtensor import QTensorWrapper
 
 __all__ = [
     "configure_trainable_parameters",
+    "freeze_router_bias_updates",
     "initialize_student_weights",
+    "keep_dense_optimizer_non_empty",
     "should_initialize_student_weights",
 ]
+
+# The decoder's own final norm; an MTP head has a ``final_layernorm`` of its own.
+_DECODER_FINAL_NORM = re.compile(r"(^|\.)decoder\.final_(layernorm|norm)\.")
 
 
 def should_initialize_student_weights(
@@ -118,3 +123,44 @@ def configure_trainable_parameters(model: nn.Module, target_parameters: list[str
     for name in selected:
         parameters[name].requires_grad_(True)
     return model
+
+
+def freeze_router_bias_updates(model: nn.Module) -> int:
+    """Stop the load-balancing update of ``expert_bias`` in routers whose weight is frozen.
+
+    ``expert_bias`` is a buffer that Megatron nudges after every step from the expert token
+    counts, whatever ``requires_grad`` says, so a frozen router would still drift. Returns the
+    number of routers held fixed.
+    """
+    frozen = 0
+    for module in model.modules():
+        weight = getattr(module, "weight", None)
+        if getattr(module, "expert_bias", None) is not None and not (
+            isinstance(weight, nn.Parameter) and weight.requires_grad
+        ):
+            module.frozen_expert_bias = True
+            frozen += 1
+    return frozen
+
+
+def keep_dense_optimizer_non_empty(model: nn.Module) -> list[str]:
+    """Keep the decoder final norm trainable when only routed-expert weights are selected.
+
+    Megatron builds an empty dense optimizer when every non-expert parameter is frozen, and
+    the first checkpoint save then crashes in ``DistributedOptimizer.state_dict``. Selecting the
+    final norm gives it one parameter. Returns the names re-enabled; raises when none can be.
+    """
+    trainable = [n for n, p in model.named_parameters() if p.requires_grad]
+    if not trainable or any(".mlp.experts." not in f".{n}" for n in trainable):
+        return []
+    norms = [n for n, _ in model.named_parameters() if _DECODER_FINAL_NORM.search(n)]
+    if not norms:
+        raise ValueError(
+            "Only routed-expert weights are trainable and this model chunk has no decoder final "
+            "norm to keep the dense optimizer non-empty, so the first checkpoint save would "
+            "crash. Select a dense parameter too, or use --pp_size 1."
+        )
+    parameters = dict(model.named_parameters())
+    for name in norms:
+        parameters[name].requires_grad_(True)
+    return norms

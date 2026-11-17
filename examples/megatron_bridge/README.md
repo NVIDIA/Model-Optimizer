@@ -437,6 +437,10 @@ Only selected parameters in the distilled student train; the teacher stays froze
 For VLMs, names are relative to `language_model`; vision/projector settings are untouched.
 Quantizers and activation gradients remain enabled; unsupported activation stacks are rejected.
 
+When only routed-expert weights are selected, the script holds each router's `expert_bias` fixed
+(no load-balancing updates) and also trains the decoder final norm on the last pipeline stage. Megatron's
+distributed optimizer cannot save a checkpoint when no dense parameter is trainable.
+
 Reuse the selection and `--student_megatron_path` with ModelOpt state on native resume;
 selection fails if that state has not been restored before wrapping. Native checkpointing
 restores FP32 masters, Adam state, and training counters afterward.
