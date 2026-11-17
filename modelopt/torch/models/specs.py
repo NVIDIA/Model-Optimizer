@@ -399,9 +399,10 @@ class ModelSpec:
     release, which is what lets the test suite tell an expected absence on an older
     transformers apart from a spec that no longer matches reality."""
 
-    modeling_source: Literal["transformers", "remote_code"] = "transformers"
+    modeling_source: Literal["transformers", "remote_code", "modelopt"] = "transformers"
     """Where the model's modeling code lives: shipped inside ``transformers``, or
-    carried by the checkpoint and loaded with ``trust_remote_code=True``.
+    carried by the checkpoint and loaded with ``trust_remote_code=True``, or a
+    ModelOpt-owned differentiable port (``modelopt``).
 
     A fact about the model, not about any one subsystem: it decides whether the classes
     named in this spec can be imported at all, so ``model_type`` is a remote-code

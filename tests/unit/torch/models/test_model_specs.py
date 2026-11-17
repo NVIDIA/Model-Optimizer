@@ -647,7 +647,14 @@ def test_moe_layout_carries_no_export_policy():
 def test_moe_layout_table_is_exhaustive():
     # Fails when a new MoE spec is added without a row above, so the table cannot
     # silently drift out of date.
-    registered = {(s.model_type, v.block_names) for s in get_specs() for v in _layouts(s)}
+    # Local ports are exercised with their actual models in the source/math and
+    # Bypass/reload suites; this table covers the upstream and remote adapters.
+    registered = {
+        (s.model_type, v.block_names)
+        for s in get_specs()
+        if s.modeling_source != "modelopt"
+        for v in _layouts(s)
+    }
     tabled = {(mt, bn) for mt, bn, _, _, _ in EXPECTED_MOE_LAYOUTS}
     assert registered == tabled
 
@@ -736,7 +743,7 @@ def test_iterable_experts_matches_pre_refactor_support():
         "qwen3_next": "Qwen3NextForCausalLM",
         "qwen3_vl_moe": "Qwen3VLMoeForConditionalGeneration",
     }
-    moe_specs = [s for s in get_specs() if _layouts(s)]
+    moe_specs = [s for s in get_specs() if _layouts(s) and s.modeling_source != "modelopt"]
     assert {s.model_type for s in moe_specs} == set(root_class_names), (
         "root_class_names is out of sync with the registered MoE specs"
     )
