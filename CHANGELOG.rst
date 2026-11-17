@@ -30,6 +30,8 @@ Changelog
 
 *Quantization*
 
+- Fixed importing Torch quantization on PyTorch versions that no longer re-export ``torch.jit.script``.
+
 *ONNX*
 
 *Speculative Decoding*
