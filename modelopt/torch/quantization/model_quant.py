@@ -1110,7 +1110,14 @@ def auto_quantize(
             (default; uses gradient-based loss estimation, linear programming search, and requires
             ``loss_func`` or ``forward_backward_step``), ``"kl_div"`` (uses KL divergence between
             unquantized and quantized outputs, relies on threshold-based binary search, and only
-            requires ``forward_step`` returning logits), and ``"aumann_shapley"`` (path-integral
+            requires ``forward_step`` returning logits. Its ``"context_quant_level"`` option sets
+            the format the other searched groups take while one group's candidates are scored:
+            ``None`` (default) leaves them unquantized, ``"lowest"`` puts each at its lowest-bit
+            format, and an int ``k`` at its ``k``-th quantized format from the lowest, counting
+            from 0 (so ``0`` is ``"lowest"``), not counting BF16 and capped at the highest. With
+            such a context, every candidate, BF16 included, is measured in it and the search uses
+            linear programming, e.g. ``{"method": "kl_div", "context_quant_level": "lowest"}``),
+            and ``"aumann_shapley"`` (path-integral
             damage attributions, calibrated against a directly measured reference point; label-free
             like ``"kl_div"``, and additionally reports a ``predicted_damage`` estimate for the
             selected recipe). For example, use
@@ -1348,8 +1355,9 @@ def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint
     ``format_shard``) to restore every format's calibration and scores and solve. The shard files
     are memory-mapped on the CPU, so any host can merge them, and the restore moves each
     calibration onto the model's devices. Under distributed scoring, merge each rank's files
-    separately. Shards that recorded different search setups (formats, groups, method, cost, or
-    calibration and scoring step counts) are refused; running every shard on the same weights
+    separately. Shards that recorded different search setups (formats, groups, method, scoring
+    options such as the KL context, cost, or calibration and scoring step counts) are refused;
+    running every shard on the same weights
     and batches is up to the caller.
 
     Args:
