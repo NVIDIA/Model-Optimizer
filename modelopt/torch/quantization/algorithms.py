@@ -2474,6 +2474,13 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
             )
         return config
 
+    def scoring_config_from(self, options: dict | None) -> dict:
+        """``0`` scores as ``"lowest"``; record one spelling so each reuses the other's scores."""
+        config = super().scoring_config_from(options)
+        if type(config["context"]) is int and config["context"] == 0:
+            config["context"] = "lowest"
+        return config
+
     def _context_recipe(self, hparam):
         """The recipe ``hparam`` holds while other groups are scored; no-quant without a context."""
         context = self.config["context"]

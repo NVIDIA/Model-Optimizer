@@ -1110,9 +1110,13 @@ def auto_quantize(
             (default; uses gradient-based loss estimation, linear programming search, and requires
             ``loss_func`` or ``forward_backward_step``), ``"kl_div"`` (uses KL divergence between
             unquantized and quantized outputs, relies on threshold-based binary search, and only
-            requires ``forward_step`` returning logits; ``{"method": "kl_div", "context": "lowest"}``
-            scores each candidate with the other searched groups quantized instead and searches by
-            linear programming), and ``"aumann_shapley"`` (path-integral
+            requires ``forward_step`` returning logits. Its ``"context"`` option sets what the
+            other searched groups use while one group's candidates are scored: ``None`` (default)
+            leaves them unquantized, ``"lowest"`` puts each at its lowest-bit format, and an int
+            ``k`` at its ``k``-th quantized format from the lowest, counting from 0 (so ``0`` is
+            ``"lowest"``), not counting BF16 and capped at the highest. With a context, every
+            candidate, BF16 included, is measured in it and the search uses linear programming,
+            e.g. ``{"method": "kl_div", "context": "lowest"}``), and ``"aumann_shapley"`` (path-integral
             damage attributions, calibrated against a directly measured reference point; label-free
             like ``"kl_div"``, and additionally reports a ``predicted_damage`` estimate for the
             selected recipe). For example, use

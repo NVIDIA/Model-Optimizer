@@ -961,6 +961,13 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
             model_quant.merge_auto_quantize_checkpoints(
                 [shards[0], tmp_path / "other1.pth"], str(tmp_path / "z.pth")
             )
+    if isinstance(method, dict) and method["context"] == "lowest":  # 0 is the same context
+        zero = {**method, "context": 0}
+        search(shards[0], (0, 2), method=zero)
+        search(tmp_path / "zero1.pth", (1, 2), method=zero)
+        model_quant.merge_auto_quantize_checkpoints(
+            [shards[0], tmp_path / "zero1.pth"], str(tmp_path / "zero.pth")
+        )
 
     merged = tmp_path / "merged.pth"
     merge_states = model_quant.merge_auto_quantize_shards
