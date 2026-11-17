@@ -71,6 +71,7 @@ def _test_logits_kl_loss(rank, size):
         max_sequence_length=max_sequence_length,
         vocab_size=vocab_size,
         activation_func="squared_relu",
+        bf16=False,
     ).cuda()
 
     # Create student model (same size for simplicity)
@@ -86,6 +87,7 @@ def _test_logits_kl_loss(rank, size):
         max_sequence_length=max_sequence_length,
         vocab_size=vocab_size,
         activation_func="squared_relu",
+        bf16=False,
     ).cuda()
 
     # Setup distillation config
@@ -136,6 +138,34 @@ def _test_logits_kl_loss(rank, size):
 
     # Backward pass
     loss["kd_loss"].backward()
+
+    # Validation computes CE before consuming the captured logits for KD.
+    captured = {}
+
+    def capture_logits(_module, _inputs, output):
+        captured["logits"] = output[0].detach().clone()
+
+    handle = distillation_model.output_layer.register_forward_hook(capture_logits)
+    distillation_model.eval()
+    with torch.no_grad():
+        for fused in (False, True):
+            distillation_model.config.cross_entropy_loss_fusion = fused
+            distillation_model.config.cross_entropy_fusion_impl = "native"
+            student_loss = distillation_model(
+                prompt_tokens, position_ids, attention_mask, labels=labels
+            )
+            assert captured["logits"].dtype == torch.float32
+            torch.testing.assert_close(
+                distillation_model.output_layer._intermediate_output[0],
+                captured["logits"],
+                rtol=0,
+                atol=0,
+            )
+            validation = distillation_model.compute_kd_loss(
+                student_loss=student_loss.mean(), loss_reduction_fn=lambda x: x[0].mean()
+            )
+            assert torch.isfinite(validation["kd_loss"])
+    handle.remove()
 
 
 def _test_topk_logits_kl_loss(kd_kwargs, rank, size):

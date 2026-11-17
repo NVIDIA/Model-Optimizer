@@ -889,6 +889,9 @@ def adjust_distillation_model_for_mcore(
         is_mtp_call = self._lm_loss_call_count <= mtp_num_layers
         if self.training and (skip_mtp_loss if is_mtp_call else skip_lm_loss):
             return torch.zeros_like(labels, dtype=logits.dtype)
+        # Native Core cross-entropy also mutates FP32 inputs, which KD hooks retain.
+        if logits.dtype == torch.float32:
+            logits = logits.clone()
         return type(self).compute_language_model_loss(self, labels, logits)
 
     model.compute_language_model_loss = MethodType(_compute_student_lm_loss, model)
