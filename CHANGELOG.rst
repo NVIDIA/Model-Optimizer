@@ -8,6 +8,8 @@ Changelog
 
 *Quantization - ONNX*
 
+- The Windows ONNX LLM quantization example supports text calibration for hybrid decoder inputs, including embedding-only exports and linear-attention states, and keeps small constants inline when exporting external weights. Install the example requirements with Transformers ``>=5.5,<5.19`` (previously ``<5.0.0``).
+
 *Quantization - Algorithms*
 
 - ``max`` and ``imatrix`` calibration of ``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` now derive each block's super-block scale from the weights and match each block's output energy, in place of fixed per-format scale anchors, which lowered KL divergence in all our tests (by up to half at IQ1) and matches or beats llama.cpp's own imatrix quantizer in most of them.
@@ -33,6 +35,8 @@ Changelog
 *Quantization*
 
 *ONNX*
+
+- ONNX AutoCast now keeps the variance of decomposed RMSNorm and unfused LayerNorm in FP32 for both FP16 and BF16 conversion, so FP16 models converted without calibration data no longer give wrong outputs on execution providers such as TensorRT-RTX. Reconvert affected models.
 
 *Speculative Decoding*
 
@@ -99,7 +103,7 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
-- Add the opt-in ``--qdq_student_weight`` flag to the Megatron-Bridge QAD example and ``initialize_qdq_weights`` to initialize floating latent weights through their configured fake quantizers. Native resumes preserve trained weights and optimizer state.
+- Add ``--output_qdq_weight`` to Megatron-Bridge PTQ to save decoded floating-point weights with ModelOpt state for QAD; GGML IQ super-block scales remain fixed during training. Custom PTQ pipelines can call ``mtq.initialize_qdq_weights(model)``.
 - Add ``--trainable_params`` (alias ``--trainable_parameter_patterns``) to ``examples/megatron_bridge/distill.py`` to train selected student weights, including full-rank routed-expert QAD. Reuse the selection on native resume.
 - Add ``--sft_in_batch_packing``, ``--moe_aux_loss_coeff`` and ``--dsa_kernel_backend`` to ``examples/megatron_bridge/distill.py`` (``--dsa_kernel_backend`` also to ``quantize.py``): pack ``--sft_hf_dataset`` conversations per micro-batch instead of padding each to ``--seq_length``, override the MoE load-balancing loss weight (e.g. 0 for padded SFT data), and select fused DeepSeek sparse-attention kernels for long sequences.
 - Add opt-in revision-pinned chat-blend preparation with indexed programming-question recovery, complete-record deduplication, question-isolated validation, and source shortfall/provenance reports.

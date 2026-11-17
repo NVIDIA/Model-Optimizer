@@ -332,10 +332,12 @@ def fake_quantize_with_cache(
     quantizer,
     *,
     format_name: str,
+    block_size: int,
     block_chunk_size: int,
     decode_chunk_size: int,
     quantize: Callable[..., tuple[torch.Tensor, torch.Tensor]],
     dequantize: Callable[..., torch.Tensor],
+    pin_scales: bool,
 ) -> torch.Tensor:
     """Fake-quantize a weight while caching its compact packed representation."""
     cache = _matching_cache(quantizer, inputs, format_name)
@@ -359,6 +361,22 @@ def fake_quantize_with_cache(
             _track_trainable(quantizer._quantizer_cache, base)
         else:
             quantizer._quantizer_cache = None
+
+    initialization_shape = getattr(quantizer, "_qdq_initialization_shape", None)
+    if (
+        pin_scales
+        and initialization_shape is not None
+        and pinned_packed_weight(quantizer, format_name) is None
+    ):
+        # TensorQuantizer may have padded the parameter before block reshaping.
+        initialization_shape = getattr(quantizer, "_original_shape", initialization_shape)
+        pin_packed_weight(
+            quantizer,
+            format_name,
+            packed_weights.reshape(
+                *initialization_shape[:-1], initialization_shape[-1] // block_size, -1
+            ),
+        )
 
     # Sized separately from the encode chunk: packing happens once per weight and is bounded
     # by its search temporaries, while this runs on every forward and is bounded by launches.
@@ -495,6 +513,7 @@ class GGMLFormat:
             inputs,
             quantizer,
             format_name=self.name,
+            block_size=self.block_size,
             block_chunk_size=(
                 self.block_chunk_size if block_chunk_size is None else block_chunk_size
             ),
@@ -503,6 +522,7 @@ class GGMLFormat:
             ),
             quantize=partial(self._pinned_or_quantize, quantizer),
             dequantize=self.dequantize,
+            pin_scales=self.payload_scales is not None,
         )
 
     def pack(self, weight: torch.Tensor, quantizer=None) -> torch.Tensor:
@@ -549,6 +569,10 @@ class GGMLFormat:
             # quant hands the weight over in 256-value rows.
             pinned_shape = (*pinned.shape[:-2], pinned.shape[-2] * self.block_size)
             if math.prod(pinned_shape) == weight.numel():
+                if hasattr(quantizer, "_padding"):
+                    packed = self._pinned_rows(quantizer, weight)
+                    if packed is not None:
+                        return packed, shape
                 source = getattr(quantizer, _source_name(self.name), None)
                 unchanged = None
                 if source is not None:
@@ -663,9 +687,17 @@ class GGMLFormat:
         # Every whole-weight comparison first: matching rows builds int64 keys several times the
         # weight's size, and only row slices need it.
         if rows.shape[0] == pinned.shape[0]:
+            padded = (
+                hasattr(quantizer, "_padding")
+                and math.prod(quantizer._original_shape) == rows.numel()
+            )
+            # Padding is recreated as zeros; only the real parameter entries must match.
+            compare = quantizer._reset_to_original_shape if padded else lambda x: x
             for storage_dtype in storage_dtypes:
-                if torch.equal(rows, decoding(storage_dtype)):
+                if torch.equal(compare(rows), compare(decoding(storage_dtype))):
                     return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
+            if padded:
+                return None
         for storage_dtype in storage_dtypes:
             index = _matching_rows(decoding(storage_dtype), rows)
             if index is not None:
