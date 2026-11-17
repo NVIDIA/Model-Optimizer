@@ -695,6 +695,7 @@ def quantize(
             each benchmark; concurrent runs must use distinct paths.
         kwargs:
             Additional keyword arguments for int4 quantization, including:
+
             - awqlite_alpha_step (float): Alpha step for lite, range [0, 1].
             - awqlite_reuse_activations (bool): Default False. Share captured activations
               across adjacent same-input weights in per-node AWQ Lite/Full when
