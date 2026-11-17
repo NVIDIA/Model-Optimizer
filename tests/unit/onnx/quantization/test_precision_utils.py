@@ -114,7 +114,9 @@ def test_export_transform_runs_between_int8_qdq_and_fp8(monkeypatch):
     monkeypatch.setattr(
         export_utils,
         "insert_qdq_at_tensors",
-        lambda graph, points, config: events.append(f"insert_{config.default_quant_type}"),
+        lambda graph, points, config, **kwargs: events.append(
+            f"insert_{config.default_quant_type}"
+        ),
     )
     monkeypatch.setattr(
         export_utils,
