@@ -25,6 +25,7 @@ import pytest
 from _test_utils.onnx.lib_test_models import find_init
 
 import modelopt.onnx.quantization as moq
+import modelopt.onnx.quantization.int4 as int4
 from modelopt.onnx.quantization.int4 import get_weight_scale, get_x_w_mean_for_subgraph
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
 from modelopt.onnx.utils import save_onnx
@@ -521,9 +522,16 @@ def test_get_x_w_mean_for_subgraph_matches_reference(ci, co_parts):
     wa_pack = [(None, onnx.numpy_helper.from_array(w), False, 0, "") for w in weight_parts]
     x = rng.randn(5, ci)
 
+    # get_x_w_mean_for_subgraph uses int4.py's own module-level `np`, which is cupy
+    # when CUDA is available: pass x through the same name so it is a cupy array in
+    # that case, like production callers already do, and convert the outputs back
+    # for comparison with plain numpy.
     x_m, w_m = get_x_w_mean_for_subgraph(
-        wa_pack, list(range(len(wa_pack))), "unused_path", x, block_size
+        wa_pack, list(range(len(wa_pack))), "unused_path", int4.np.asarray(x), block_size
     )
+    if int4.has_cupy:
+        x_m = int4.np.asnumpy(x_m)
+        w_m = int4.np.asnumpy(w_m)
 
     concatenated = np.concatenate(weight_parts, axis=1)
     expected_x_m = (np.abs(x).sum(axis=0) / x.shape[0]).reshape(-1)
