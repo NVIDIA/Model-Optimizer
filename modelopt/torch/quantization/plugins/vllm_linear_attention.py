@@ -91,6 +91,10 @@ class _QuantVllmLinearAttention(_LinearAttentionQuantMixin):
         self.parallel_state = create_parallel_state()
 
     def validate_linear_attention(self):
+        if self.linear_attention_config.experimental_state_format is not None:
+            raise ValueError(
+                "Research K128 state checkpoints require their explicit reference serving adapter"
+            )
         # vLLM owns execution and phase boundaries; validate only the state-QDQ policy.
         if self._linear_attn_state.is_enabled:
             state_quantizer_config(self._linear_attn_state)

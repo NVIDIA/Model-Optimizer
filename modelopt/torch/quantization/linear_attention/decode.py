@@ -23,6 +23,7 @@ from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
 from ._two_precision import two_precision_decode
 from ._vllm_autograd import normalized
+from .state_clip import _capped_nvfp4
 from .utils import _state_qdq, forward_value
 
 __all__ = []
@@ -113,10 +114,26 @@ def _sum_keys(value):
 
 
 def _run_decode_chunk(
-    state, q, k, v, g, beta, gates, state_quantizer, block_v, precision, scale, normalize
+    state,
+    q,
+    k,
+    v,
+    g,
+    beta,
+    gates,
+    state_quantizer,
+    block_v,
+    precision,
+    scale,
+    normalize,
+    state_clip_caps=None,
+    state_clip_format=None,
 ):
     # Import the optional native backend only for the ordinary state-QDQ path.
     from ._vllm_autograd import step
+
+    if q.ndim == 4:
+        from ._vllm_autograd import step_batched as step
 
     outputs = []
     for t in range(len(q)):
@@ -133,7 +150,18 @@ def _run_decode_chunk(
             gate_inputs=(gates[0][t], gates[1][t], *gates[2:]) if gates is not None else None,
         )
         outputs.append(output)
-        state = _state_qdq(working, state_quantizer, block_v)
+        if state_clip_caps is not None:
+            # The cap tensor retains gradients; distributed module hooks run in the caller.
+            if state_clip_format == "e2m1_k128_fp32_reference":
+                from ...kernels.quantization.linear_attention.reference_k128 import (
+                    reference_k128_qdq,
+                )
+
+                state = reference_k128_qdq(working, state_clip_caps)
+            else:
+                state = _capped_nvfp4(working, state_clip_caps)
+        else:
+            state = _state_qdq(working, state_quantizer, block_v)
     return torch.stack(outputs), state
 
 
@@ -164,8 +192,19 @@ def _recurrent_decode(
         zero = (q.sum() + k.sum() + v.sum() + g.sum() + beta.sum()) * 0
         return v + zero, initial_state if output_final_state else None
     scale = q.shape[-1] ** -0.5 if scale is None else scale
+    reference = config.experimental_state_format
+    reference_caps = None
+    if reference and state_quantizer is not None and state_quantizer.is_enabled:
+        clip = getattr(state_quantizer, "_state_clip", None)
+        if clip is None or getattr(clip, "format", None) != reference:
+            raise ValueError(
+                "K128 reference policy requires its saved cap module; refusing NVFP4 fallback"
+            )
+        # The peer computes caps once for the entire layer call. Accumulate their
+        # gradients in FP32 before the single cast into the BF16 phi parameter.
+        reference_caps = clip()
     compiled = _compile_recurrent_decode.get()
-    if compiled and (config.precision != "vllm" or g.ndim != 2 or gate_inputs is None):
+    if compiled and (config.precision != "vllm" or g.ndim != q.ndim - 1 or gate_inputs is None):
         raise ValueError("Compiled decode supports only the native vLLM GDN raw-gate profile")
     if config.precision == "replayssm_two_precision":
         return two_precision_decode(
@@ -194,7 +233,18 @@ def _recurrent_decode(
             from ._compiled_decode import compiled_chunk
 
             fn = compiled_chunk(q.device)
-        return fn(
+        clip = (
+            getattr(state_quantizer, "_state_clip", None)
+            if state_quantizer is not None and state_quantizer.is_enabled
+            else None
+        )
+        calibrating = clip is not None and clip.calibrating
+        # Calling the module here completes Megatron's parameter gather without tracing
+        # its layer-specific bucket lookup into the shared compiled recurrence.
+        clip_caps = reference_caps
+        if clip_caps is None and compiled and clip is not None and not calibrating:
+            clip_caps = clip()
+        output, next_state = fn(
             state,
             q,
             k,
@@ -202,14 +252,26 @@ def _recurrent_decode(
             g,
             beta,
             gates,
-            state_quantizer,
+            None if calibrating or clip_caps is not None else state_quantizer,
             config.state_block_v,
             config.precision,
             scale,
             use_qk_l2norm_in_kernel,
+            clip_caps,
+            getattr(clip, "format", None),
         )
+        # Observe chunk boundaries outside the captured recurrence, without mutating
+        # graph inputs or replacing unquantized calibration states with quantized ones.
+        if calibrating and clip is not None:
+            clip(next_state)
+        return output, next_state
 
-    state = _state_qdq(initial_state, state_quantizer, config.state_block_v)
+    # Igor's reference reads the first prefill state before the first decode write QDQ.
+    state = (
+        initial_state
+        if reference
+        else _state_qdq(initial_state, state_quantizer, config.state_block_v)
+    )
     with torch.autocast(device_type=q.device.type, enabled=False):
         recompute = (
             len(q) > 64

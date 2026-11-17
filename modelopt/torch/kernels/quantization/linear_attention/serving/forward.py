@@ -212,3 +212,34 @@ def validate_profile(gate_inputs, normalize, *, precision="vllm"):
             raise ValueError("vllm_kimi_k3 requires raw gate_inputs")
         if not normalize:
             raise ValueError("vLLM packed KDA decode requires Q/K normalization")
+
+
+def step_batched(q, k, v, state, scale, normalize, gate_inputs, *, precision="vllm"):
+    """Run native packed decode for ``n`` sequences, one token each, in a single launch.
+
+    GDN with raw gates only (the ``vllm`` profile). ``q``/``k`` are ``[n, H, K]``, ``v`` is
+    ``[n, H, V]``, ``state`` is ``[n, H, K, V]`` and ``gate_inputs`` is
+    ``(raw_g [n, H], raw_beta [n, H], A_log [H], dt_bias [H])``. Returns ``out [n, H, V]`` and the
+    working state ``[n, H, K, V]``. Sequence ``i`` uses cache slot ``i + 1``; slot zero is reserved.
+    """
+    gdn, _ = _kernels(precision)
+    count, heads, keys = q.shape
+    values = v.shape[-1]
+    raw_g, raw_beta, rate, bias = gate_inputs
+    # Slot 0 is the kernel's reserved slot: it is never read, so it is left uninitialized. One fresh buffer per
+    # call keeps the autograd inputs untouched; the allocation is small next to the launch.
+    native_state = state.new_empty(count + 1, heads, values, keys)
+    native_state[1:].copy_(state.transpose(-1, -2))
+    out, final = gdn.fused_recurrent_gated_delta_rule_packed_decode(
+        mixed_qkv=torch.cat([x.flatten(1) for x in (q, k, v)], dim=-1),
+        a=raw_g.bfloat16().contiguous(),
+        b=raw_beta.bfloat16().contiguous(),
+        A_log=rate.reshape(-1).contiguous(),
+        dt_bias=bias.contiguous(),
+        scale=scale,
+        initial_state=native_state,
+        out=torch.empty(count, 1, heads, values, dtype=v.dtype, device=v.device),
+        ssm_state_indices=torch.arange(1, count + 1, device=q.device, dtype=torch.int32),
+        use_qk_l2norm_in_kernel=normalize,
+    )
+    return out[:, 0], _state_layout(final[1:])

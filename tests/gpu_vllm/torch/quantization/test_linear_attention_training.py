@@ -28,6 +28,8 @@ from modelopt.torch.quantization.linear_attention import (
     gdn_state_qat,
     kda_state_qat,
 )
+from modelopt.torch.quantization.linear_attention.state_clip import NVFP4StateClip
+from modelopt.torch.quantization.linear_attention.utils import _state_qdq
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 vllm = pytest.importorskip("vllm")
@@ -200,8 +202,9 @@ def compiled_serving_case(request):
 
 @pytest.mark.parametrize("compiled_serving_case", ["gdn"], indirect=True, scope="module")
 @pytest.mark.parametrize("compile_decode", [False, True], ids=["eager", "inductor"])
+@pytest.mark.parametrize("learned_clip", [False, True], ids=["plain", "clipped"])
 def test_long_decode_checkpoint_preserves_state_and_gradients(
-    compiled_serving_case, monkeypatch, compile_decode
+    compiled_serving_case, monkeypatch, compile_decode, learned_clip
 ):
     from modelopt.torch.quantization.linear_attention import decode
 
@@ -218,7 +221,11 @@ def test_long_decode_checkpoint_preserves_state_and_gradients(
             pass_through_bwd=True,
         )
     ).cuda()
-    expected = _native_forward(inputs, quantizer, False, False)
+    if learned_clip:
+        object.__setattr__(
+            quantizer, "_state_clip", NVFP4StateClip(torch.full((1,), 0.25, device="cuda"))
+        )
+    expected = _native_forward(inputs, lambda state: _state_qdq(state, quantizer), False, False)
     if compile_decode:
         from modelopt.torch.kernels.quantization.linear_attention.serving import forward as native
 
@@ -232,12 +239,13 @@ def test_long_decode_checkpoint_preserves_state_and_gradients(
         decode._compile_recurrent_decode.reset(token)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     loss = actual[0][:, 65:].float().square().mean() + actual[1].square().mean()
-    gradients = torch.autograd.grad(loss, inputs)
+    differentiated = inputs + ([quantizer._state_clip.phi] if learned_clip else [])
+    gradients = torch.autograd.grad(loss, differentiated)
     # Bypass only recomputation to compare against the original retained autograd graph.
     monkeypatch.setattr(decode, "activation_checkpoint", lambda fn, *args, **kwargs: fn(*args))
     retained = forward(inputs=inputs, state_quantizer=quantizer)
     retained_loss = retained[0][:, 65:].float().square().mean() + retained[1].square().mean()
-    expected_gradients = torch.autograd.grad(retained_loss, inputs)
+    expected_gradients = torch.autograd.grad(retained_loss, differentiated)
     for actual_gradient, expected_gradient in zip(gradients, expected_gradients):
         torch.testing.assert_close(
             actual_gradient,
@@ -259,6 +267,21 @@ def test_long_decode_checkpoint_preserves_state_and_gradients(
             torch.testing.assert_close(repeated, expected, rtol=0, atol=0)
         finally:
             decode._compile_recurrent_decode.reset(token)
+
+
+@pytest.mark.parametrize("compiled_serving_case", ["gdn"], indirect=True, scope="module")
+def test_native_decode_meta_matches_strided_outputs(compiled_serving_case):
+    from modelopt.torch.quantization.linear_attention._compiled_decode import native_gdn_step
+
+    q, k, v, a, b, rate, bias = [x.detach() for x in compiled_serving_case[0]]
+    q, k, v, a, b = [x[0, 0] for x in (q, k, v, a, b)]
+    state = torch.randn(1, q.shape[-1], v.shape[-1], device="cuda").transpose(-1, -2)
+    g = -rate.exp() * torch.nn.functional.softplus(a.float() + bias)
+    torch.library.opcheck(
+        native_gdn_step,
+        (q, k, v, g, b.float().sigmoid(), state, q.shape[-1] ** -0.5, True, a, b, rate, bias),
+        test_utils=("test_schema", "test_faketensor"),
+    )
 
 
 def test_serving_state_qdq_and_handoff_gradient(compiled_serving_case):

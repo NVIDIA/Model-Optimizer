@@ -231,6 +231,8 @@ def _prefill_decode_forward(
     elif read_quantizer is not None and read_quantizer.is_enabled:
         raise ValueError("gdn_read_quantizer requires precision='replayssm_two_precision'")
     state_quantizer = _resolve_state_quantizer(state_quantizer, state_codec=policy.state_codec)
+    if policy.experimental_state_format and (g.ndim != 3 or q.shape[-1] != 128):
+        raise ValueError("K128 reference supports only GDN with K=128")
     if (state_quantizer is not None or read_mode != "s32_rs") and prefill_lengths is None:
         raise ValueError(
             "State quantization requires explicit prefill lengths through "
@@ -309,6 +311,10 @@ def _prefill_decode_forward(
         if states.shape != (len(sequences), heads, keys, values):
             raise ValueError("Initial state shape does not match sequence/head dimensions")
     outputs, finals = [], []
+    batched = (
+        bool(policy.experimental_state_format) and len(sequences) > 1 and not output_final_state
+    )
+    pending, pending_states, pending_rows = [], [], []
     for n, (b, start, storage_end) in enumerate(sequences):
         end = start + valid_lengths[n]
         split = start + prefixes[n]
@@ -355,6 +361,13 @@ def _prefill_decode_forward(
                 )
         # Keep the prefix state attached so suffix losses backpropagate through prefill.
         # The suffix applies configured state QDQ at the handoff and recurrent writes.
+        if batched:
+            outputs.append(prefix)
+            if split < end:
+                pending.append(tuple(x[b, split:end] for x in (q, k, v, g, beta, *gate_inputs[:2])))
+                pending_states.append(state)
+                pending_rows.append(n)
+            continue
         suffix, final_state = _recurrent_decode(
             *(x[b, split:end] for x in (q, k, v, g, beta)),
             config=policy,
@@ -382,6 +395,30 @@ def _prefill_decode_forward(
         outputs.append(torch.cat(pieces))
         if output_final_state:
             finals.append(final_state)
+    if batched:
+        suffix_outputs = {}
+        if pending:
+            # Padded rows have no loss and no cross-request state/scale interaction.
+            # Keeping a fixed batch shape lets the same CUDA graph serve all tokens.
+            packed = tuple(
+                torch.nn.utils.rnn.pad_sequence([row[j] for row in pending]) for j in range(7)
+            )
+            suffix, _ = _recurrent_decode(
+                *packed[:5],
+                config=policy,
+                state_quantizer=state_quantizer,
+                initial_state=torch.stack(pending_states),
+                gate_inputs=(*packed[5:], *gate_inputs[2:]),
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                scale=scale,
+            )
+            suffix_outputs = {
+                row: suffix[: len(pending[i][0]), i] for i, row in enumerate(pending_rows)
+            }
+        for n, (_, start, storage_end) in enumerate(sequences):
+            suffix = suffix_outputs.get(n, v.new_empty(0, heads, values))
+            padding = v.new_zeros(storage_end - start - valid_lengths[n], heads, values)
+            outputs[n] = torch.cat((outputs[n], suffix, padding))
     output = torch.stack(outputs) if boundaries is None else torch.cat(outputs).unsqueeze(0)
     final = torch.stack(finals) if output_final_state else None
     if final is not None and state_v_first:

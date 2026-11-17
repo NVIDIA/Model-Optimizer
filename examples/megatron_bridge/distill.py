@@ -201,6 +201,26 @@ def get_args():
     )
     parser.add_argument("--recompute_gdn", action="store_true", help="Recompute GDN activations.")
     parser.add_argument(
+        "--decode_tokens",
+        type=_positive_int,
+        help="Train on the last N response tokens with recurrent state QDQ.",
+    )
+    parser.add_argument(
+        "--state_clip_init",
+        type=str,
+        help="Calibrated per-head caps for experimental state QAD.",
+    )
+    parser.add_argument(
+        "--reference_k128",
+        action="store_true",
+        help="Reproduce Igor's K128 E2M1/FP32 research format (NOT NVIDIA NVFP4). Requires caps.",
+    )
+    parser.add_argument(
+        "--state_clip_calibrate",
+        action="store_true",
+        help="Observe unquantized state maxima in a validate-only run.",
+    )
+    parser.add_argument(
         "--compile_gdn_decode",
         action="store_true",
         help="Experimentally compile native GDN decode chunks; requires Inductor precision-cast emulation.",
@@ -316,6 +336,8 @@ def get_args():
     )
     parser.add_argument("--mbs", type=int, default=1, help="Micro-batch Size")
     parser.add_argument("--gbs", type=int, default=768, help="Global Batch Size")
+    parser.add_argument("--adam_beta2", type=float, default=0.95, help="Adam second-moment decay")
+    parser.add_argument("--weight_decay", type=float, default=None, help="Override weight decay")
     parser.add_argument(
         "--train_iters", type=int, required=True, help="Number of training iterations"
     )
@@ -582,6 +604,18 @@ def get_args():
         )
 
     if args.linear_attention_recipe:
+        if args.reference_k128 and (not args.state_clip_init or args.state_clip_calibrate):
+            raise ValueError("--reference_k128 requires the peer's converted cap-init sidecar")
+        if args.decode_tokens is not None and (not args.sft or args.prefill_tokens is not None):
+            raise ValueError("--decode_tokens requires SFT and data-derived prefix lengths")
+        if args.state_clip_init and args.state_clip_calibrate:
+            raise ValueError("Calibrate and learn state clipping in separate runs")
+        if args.state_clip_calibrate and not args.validate_only:
+            raise ValueError("State-clip calibration requires --validate_only")
+        if (args.state_clip_init or args.state_clip_calibrate) and (
+            args.cp_size != 1 or args.pp_size != 1
+        ):
+            raise ValueError("Experimental state clipping currently requires CP=PP=1")
         recipe = load_recipe(args.linear_attention_recipe)
         if not isinstance(recipe, ModelOptPTQRecipe) or not recipe.quantize.linear_attention:
             raise ValueError("--linear_attention_recipe must contain a linear-attention policy.")
@@ -602,6 +636,10 @@ def get_args():
         or args.teacher_serving_arithmetic
         or args.recompute_gdn
         or args.compile_gdn_decode
+        or args.decode_tokens is not None
+        or args.state_clip_init
+        or args.state_clip_calibrate
+        or args.reference_k128
     ):
         raise ValueError("Linear-attention options require --linear_attention_recipe.")
 
@@ -725,6 +763,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
+        if args.reference_k128:
+            provider.gradient_accumulation_fusion = False
+            provider.bias_activation_fusion = False
+            provider.bias_dropout_fusion = False
         if args.dsa_kernel_backend is not None:
             provider.dsa_kernel_backend = args.dsa_kernel_backend
         set_moe_expert_layout(provider, moe_grouped_gemm)
@@ -851,8 +893,14 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         lr_warmup_iters=args.lr_warmup_iters,
         max_lr=args.lr,
         min_lr=args.min_lr,
-        adam_beta2=0.95,
+        adam_beta2=args.adam_beta2,
     )
+    if args.reference_k128:
+        scheduler_config.lr_decay_iters = args.train_iters
+    if args.weight_decay is not None:
+        optimizer_config.weight_decay = args.weight_decay
+        scheduler_config.start_weight_decay = args.weight_decay
+        scheduler_config.end_weight_decay = args.weight_decay
 
     # Build dataset config
     dataset_kwargs = {
@@ -952,8 +1000,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         ddp=DistributedDataParallelConfig(
             check_for_nan_in_grad=True,
             grad_reduce_in_fp32=True,
-            overlap_grad_reduce=True,
-            overlap_param_gather=True,
+            overlap_grad_reduce=not args.reference_k128,
+            overlap_param_gather=not args.reference_k128,
             average_in_collective=not per_token_loss,
             use_distributed_optimizer=True,
         ),
@@ -1031,6 +1079,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                         teacher_serving_arithmetic=args.teacher_serving_arithmetic,
                         recompute_gdn=args.recompute_gdn,
                         compile_gdn_decode=args.compile_gdn_decode,
+                        decode_tokens=args.decode_tokens,
+                        state_clip_init=args.state_clip_init,
+                        state_clip_calibrate=args.state_clip_calibrate,
+                        reference_k128=args.reference_k128,
                     )
                 )
             # Restore before linear-attention setup, and before the KD conversion hook.

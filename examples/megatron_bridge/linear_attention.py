@@ -15,6 +15,7 @@
 
 """Linear-attention hooks for the standard Megatron Bridge training loop."""
 
+import sys
 from contextlib import ExitStack, contextmanager
 
 import torch
@@ -50,10 +51,23 @@ def linear_attention_training(
     teacher_serving_arithmetic=False,
     recompute_gdn=False,
     compile_gdn_decode=False,
+    decode_tokens=None,
+    state_clip_init=None,
+    state_clip_calibrate=False,
+    reference_k128=False,
 ):
     """Install quantization hooks and yield a phase-aware ModelOpt forward step."""
     if not quant_config.linear_attention:
         raise ValueError("A linear-attention quantization policy is required")
+    if reference_k128:
+        quant_config = quant_config.model_copy(deep=True)
+        for entry in quant_config.linear_attention:
+            entry.cfg = type(entry.cfg)(
+                **(
+                    entry.cfg.model_dump()
+                    | {"experimental_state_format": "e2m1_k128_fp32_reference"}
+                )
+            )
     operand_qat = any(entry.cfg.backend == "gdn_prefill" for entry in quant_config.linear_attention)
     data_lengths = prefill_tokens is None or isinstance(config.dataset, FinetuningDatasetConfig)
     if data_lengths and config.model.pipeline_model_parallel_size > 1:
@@ -64,6 +78,7 @@ def linear_attention_training(
         raise ValueError("prefill-tokens must leave at least one suffix label")
     fixed_phase = config.dataset.seq_length if operand_qat else prefill_tokens
     resume = config.checkpoint.load and has_modelopt_state(config.checkpoint.load)
+    attached_clips = []
     with ExitStack() as phases:
         if compile_gdn_decode:
             if any(
@@ -106,6 +121,14 @@ def linear_attention_training(
                         "The student checkpoint has no linear-attention training policy; "
                         "initialize state/operand quantization before resuming QAD"
                     )
+                expected_format = "e2m1_k128_fp32_reference" if reference_k128 else None
+                if any(
+                    layer.linear_attention_config.experimental_state_format != expected_format
+                    for layer in get_linear_attention_layers(student)
+                ):
+                    raise ValueError(
+                        "Checkpoint state format differs from the requested training profile"
+                    )
                 if recompute_gdn:
                     for layer in layers:
                         layer.recompute_gdn = True
@@ -131,6 +154,13 @@ def linear_attention_training(
                 # broadcasting tensor fields. Supplying None on non-source ranks crashes.
                 batch = dict(next(data_iterator))
                 prefix, valid, boundaries = phase_lengths(batch, prefill_tokens)
+                if decode_tokens is not None:
+                    prefix = [max(p, v - decode_tokens) for p, v in zip(prefix, valid)]
+                    # The peer includes the last prefix position's shifted label.
+                    # Ordinary state QAD scores only recurrent output positions.
+                    mask_prefix_labels(
+                        batch, prefix if reference_k128 else [p + 1 for p in prefix], boundaries
+                    )
                 if prefill_tokens is not None:
                     mask_prefix_labels(batch, prefix, boundaries)
                 with linear_attention_training_phase(
@@ -146,6 +176,19 @@ def linear_attention_training(
             )
 
         config.model.register_pre_wrap_hook(prepare_student, prepend=True)
+        if state_clip_init or state_clip_calibrate:
+
+            def prepare_clips(models):
+                # HF import is strict; add new parameters after import and before DDP/optimizer setup.
+                from linear_attention_clip import attach_state_clips
+
+                for student in unwrap_model(models):
+                    attached_clips.extend(
+                        attach_state_clips(student, state_clip_init, state_clip_calibrate)
+                    )
+                return models
+
+            config.model.register_pre_wrap_hook(prepare_clips)
         if teacher_provider is not None and teacher_serving_arithmetic:
 
             def prepare_teacher(models):
@@ -163,4 +206,18 @@ def linear_attention_training(
                 return models
 
             teacher_provider.register_pre_wrap_hook(prepare_teacher)
-        yield forward_step
+        try:
+            yield forward_step
+        finally:
+            error = sys.exc_info()[1]
+            clean_exit = error is None or (
+                isinstance(error, SystemExit) and error.code in (None, 0)
+            )
+            if attached_clips and clean_exit:
+                from linear_attention_clip import save_state_clips
+
+                save_state_clips(
+                    attached_clips,
+                    str(config.checkpoint.save) + "/state_clip.json",
+                    calibrated=state_clip_calibrate,
+                )

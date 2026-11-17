@@ -430,3 +430,29 @@ GEMM quantization and approximate inverse are outside this example.
 
 See [ReplaySSM state QAT](REPLAYSSM.md) for the optional INT8/Hadamard fork,
 its checkpoint window, and the proposed two-precision extension.
+
+## Experimental learned state clipping
+
+The standard `examples/megatron_bridge/distill.py` entrypoint also supports
+`--decode_tokens` to restrict state QAD to the end of each response and
+`--state_clip_init` to initialize per-head clipping thresholds. Calibrate the
+native NVFP4 profile separately with `--state_clip_calibrate --validate_only`.
+Calibration observes the prefill handoff and recurrent chunk boundaries; it does
+not collect every intermediate token state. Rank-local `state_clip.*.rank*.json`
+files must be combined in global head order before use as an initialization file.
+
+There are two distinct experimental formats:
+
+- Native NVFP4 uses E2M1 values, E4M3 scales for V16 blocks, and an FP32 outer scale
+  per request and head. Learned clipping adds one positive threshold per head.
+- `--reference_k128` reproduces the earlier capped K128 study: E2M1 values with
+  FP32 block scales, nearest rounding, and an identity state STE. It requires
+  the reference cap initialization file and is **not NVIDIA NVFP4**. Its first
+  decode step reads the unquantized prefill state. It does not implement the newer
+  `rne_norm` policy.
+
+Both profiles use floating QDQ state; these experiments establish no packed-cache
+capacity or serving speedup. The ordinary vLLM adapter rejects the K128 policy;
+serving a learned-clipping checkpoint requires an adapter that restores and uses
+the same caps. Exporting weights alone is not sufficient. These experimental
+paths are separate from the standard state-QDQ serving recipes above.

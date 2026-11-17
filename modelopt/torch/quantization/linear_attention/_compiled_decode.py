@@ -40,12 +40,27 @@ def compiled_chunk(device):
     # These cached buffers outlive a graph call, so allocate them outside its pool.
     from ...kernels.quantization.linear_attention.serving.forward import _decode_metadata
 
-    _decode_metadata(device)
-    return torch.compile(
+    compiled = torch.compile(
         _run_decode_chunk,
         fullgraph=True,
         options={"triton.cudagraphs": True, "emulate_precision_casts": True},
     )
+
+    def run(state, q, k, v, g, beta, gates, *quantization):
+        # A metadata-cache reset must not create persistent buffers inside a graph pool.
+        _decode_metadata(device)
+        # Bound compiler work without changing the 64-token recomputation boundary.
+        outputs = []
+        for start in range(0, len(q), 8):
+            sl = slice(start, start + 8)
+            chunk_gates = (gates[0][sl], gates[1][sl], *gates[2:]) if gates else None
+            output, state = compiled(
+                state, q[sl], k[sl], v[sl], g[sl], beta[sl], chunk_gates, *quantization
+            )
+            outputs.append(output)
+        return torch.cat(outputs), state
+
+    return run
 
 
 @torch.library.custom_op("modelopt::gdn_native_decode_step", mutates_args=())
@@ -71,4 +86,34 @@ def native_gdn_step(
 
 @native_gdn_step.register_fake
 def _native_gdn_step_fake(q, k, v, g, beta, state, scale, normalize, a, b, rate, bias):
-    return torch.empty_like(v), torch.empty_like(state)
+    # Native decode materializes both outputs, including for strided input views.
+    return (
+        torch.empty_like(v, memory_format=torch.contiguous_format),
+        torch.empty_like(state, memory_format=torch.contiguous_format),
+    )
+
+
+@torch.library.custom_op("modelopt::gdn_native_batched_step", mutates_args=())
+def native_gdn_batched_step(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    state: torch.Tensor,
+    scale: float,
+    normalize: bool,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    rate: torch.Tensor,
+    bias: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from ...kernels.quantization.linear_attention.serving.forward import step_batched
+
+    return step_batched(q, k, v, state, scale, normalize, (a, b, rate, bias))
+
+
+@native_gdn_batched_step.register_fake
+def _native_gdn_batched_step_fake(q, k, v, state, scale, normalize, a, b, rate, bias):
+    return (
+        torch.empty_like(v, memory_format=torch.contiguous_format),
+        torch.empty_like(state, memory_format=torch.contiguous_format),
+    )

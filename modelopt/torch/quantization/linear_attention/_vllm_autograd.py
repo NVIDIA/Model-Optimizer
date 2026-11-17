@@ -229,3 +229,31 @@ def step(q, k, v, gate, beta, state, scale, normalize=False, gate_inputs=None, p
     working = forward_value(decayed + k.unsqueeze(-1) * update.unsqueeze(-2), final)
     output = ((q * scale).unsqueeze(-1) * working).sum(-2)
     return forward_value(output, out), working
+
+
+def step_batched(
+    q, k, v, gate, beta, state, scale, normalize=False, gate_inputs=None, precision="vllm"
+):
+    """Share native launches across independent GDN sequences; preserve the same adjoint."""
+    if precision != "vllm" or gate_inputs is None:
+        raise ValueError("Batched recurrence requires native GDN with raw gates")
+    from ...kernels.quantization.linear_attention.serving.forward import step_batched as native
+
+    with torch.no_grad():
+        inputs = (q.bfloat16(), k.bfloat16(), v.bfloat16(), state.float(), scale, normalize)
+        if torch.compiler.is_compiling():
+            from ._compiled_decode import native_gdn_batched_step
+
+            out, final = native_gdn_batched_step(*inputs, *gate_inputs)
+        else:
+            out, final = native(*inputs, gate_inputs)
+    if not torch.is_grad_enabled():
+        return out.float(), final
+    if normalize:
+        q, k = normalized(q), normalized(k)
+    decayed = state * gate.exp()[..., None, None]
+    residual = v - (decayed * k.unsqueeze(-1)).sum(-2)
+    update = residual * beta.unsqueeze(-1)
+    working = forward_value(decayed + k.unsqueeze(-1) * update.unsqueeze(-2), final)
+    output = ((q * scale).unsqueeze(-1) * working).sum(-2)
+    return forward_value(output, out), working
