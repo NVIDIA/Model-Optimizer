@@ -30,6 +30,8 @@ Changelog
 
 *Quantization*
 
+- On Windows, ModelOpt's CUDA extensions (e.g. the MX/NVFP4 kernels) now load on the first call outside a Visual Studio developer prompt, as ModelOpt activates MSVC, with a warning, when ``cl`` is not on ``PATH``. If no Visual Studio C++ build tools are found, loading fails with a message saying how to install them. A failed load is now retried in full; it used to import whatever was on disk without checking it.
+
 *ONNX*
 
 *Speculative Decoding*
