@@ -67,8 +67,9 @@ produces an in-pipeline metric**, so what you check depends on the sheet:
   runs the DFlash backbone with the new head bypassed, and Domino ships no benchmark
   task at all) — do **not** go looking for a benchmark log. Report the training
   regression gate instead, and state plainly that acceptance quality requires a
-  separate evaluation of the exported checkpoint. Never report a backbone-only
-  acceptance rate as the model's result.
+  separate evaluation of the exported checkpoint (`measure-acceptance.md`, if vLLM
+  can serve the drafter). Never report a backbone-only acceptance rate as the
+  model's result.
 
 Where the gate is the training regression check (`check_regression.py` against
 `trainer_state.json`), confirm the `=== Regression Check ===` block is actually

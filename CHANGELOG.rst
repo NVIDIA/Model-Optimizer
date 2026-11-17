@@ -20,6 +20,8 @@ Changelog
 
 *Speculative Decoding*
 
+- The ``modelopt-speculative-decoding`` agent skill can now measure a drafter's acceptance length against a running vLLM server with AIPerf, and explains how that number relates to ``specdec_bench``'s ``Average_AL``.
+
 *Megatron Framework (M-LM / M-Bridge)*
 
 *Misc*

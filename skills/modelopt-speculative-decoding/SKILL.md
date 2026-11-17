@@ -4,10 +4,12 @@ description: >-
   Train, debug, and validate a speculative decoding draft model (EAGLE3, DFlash,
   DSpark, Domino) through the ModelOpt launcher pipeline. Use when the user wants
   to add a new model to a draft-training pipeline, asks why a pipeline run failed,
-  wants experiment logs reviewed, or wants to check whether a run's acceptance rate
-  meets threshold. Triggers on "EAGLE3", "DFlash", "DSpark", "Domino", "draft model",
-  "acceptance rate", "speculative decoding pipeline". Do NOT use for quantizing a
-  model (use modelopt-ptq) or serving a checkpoint (use modelopt-deployment).
+  wants experiment logs reviewed, wants to check whether a run's acceptance rate
+  meets threshold, or wants a drafter's acceptance length measured with AIPerf
+  against a vLLM server. Triggers on "EAGLE3", "DFlash", "DSpark", "Domino", "draft
+  model", "acceptance rate", "acceptance length", "speculative decoding pipeline".
+  Do NOT use for quantizing a model (use modelopt-ptq) or serving a checkpoint (use
+  modelopt-deployment).
 user_invocable: true
 ---
 
@@ -52,6 +54,7 @@ path: training invoked directly, without Slurm.
 | 2. Review logs | `references/stages/review-logs.md` | A run finished (or died) and you want a pass/fail summary |
 | 3. Triage | `references/stages/triage.md` | A task failed and you need root cause plus a fix |
 | 4. Validate | `references/stages/validate.md` | All tasks passed and you need to confirm the acceptance rate gate |
+| 5. Measure acceptance | `references/stages/measure-acceptance.md` | Measuring a drafter's acceptance length against a vLLM server with AIPerf, or publishing that result |
 
 Review-logs and triage overlap by design: review-logs is the fast sweep across all
 tasks, triage is the deep dive into one failing task. Start with review-logs unless
