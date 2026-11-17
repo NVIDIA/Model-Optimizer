@@ -273,6 +273,8 @@ def drop_search_scales(quantizer) -> None:
     if isinstance(num_bits, str) and hasattr(quantizer, _search_scales_name(num_bits)):
         delattr(quantizer, _search_scales_name(num_bits))
         quantizer._quantizer_cache = None
+
+
 def _source_name(format_name: str) -> str:
     """The buffer holding a pin's source fingerprint, ``[*rows, blocks, keys]``.
 

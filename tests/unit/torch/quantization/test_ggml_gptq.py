@@ -35,6 +35,7 @@ from modelopt.torch.quantization.algorithms import QuantRecipeHparam, _AutoQuant
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import (
     PIN_OVERRIDES_WEIGHT,
+    _pinned_search_scales,
     _row_keys,
     pin_packed_weight,
     pinned_importance,
@@ -530,7 +531,10 @@ def test_pin_survives_save_and_restore(num_bits, algorithm, dtype):
     output_before = restored(inputs).detach()
     importance = pinned_importance(restored.weight_quantizer, num_bits)
     importance_before = importance.clone() if importance is not None else None
+    if algorithm.get("method") == "imatrix":
+        assert _pinned_search_scales(restored.weight_quantizer, num_bits) is not None
     mtq.initialize_qdq_weights(restored)
+    assert _pinned_search_scales(restored.weight_quantizer, num_bits) is None
     if importance_before is not None:
         assert pinned_importance(restored.weight_quantizer, num_bits).dtype == torch.float32
         torch.testing.assert_close(
@@ -554,6 +558,28 @@ def test_pin_survives_save_and_restore(num_bits, algorithm, dtype):
     torch.testing.assert_close(restored.weight, expected, rtol=0, atol=0)
     assert restored.weight.dtype == dtype and restored.weight_quantizer.is_enabled
     assert torch.equal(pinned_packed_weight(restored.weight_quantizer, num_bits), pinned)
+    optimizer = torch.optim.SGD(restored.parameters(), lr=0)
+    restored.weight.grad = torch.ones_like(restored.weight)
+    optimizer.step()
+    torch.testing.assert_close(restored(inputs), output_before, rtol=0, atol=0)
+    optimizer.param_groups[0]["lr"] = 0.125
+    optimizer.step()
+    assert not torch.equal(restored.weight, expected)
+    if ggml_format.payload_scales is not None:
+        updated = ggml_format.pack(restored.weight, restored.weight_quantizer)
+        torch.testing.assert_close(
+            ggml_format.payload_scales(updated.reshape(-1, ggml_format.block_bytes)),
+            ggml_format.payload_scales(pinned.reshape(-1, ggml_format.block_bytes)),
+            rtol=0,
+            atol=0,
+        )
+    if importance_before is not None:
+        torch.testing.assert_close(
+            pinned_importance(restored.weight_quantizer, num_bits),
+            importance_before,
+            rtol=0,
+            atol=0,
+        )
 
 
 def test_pin_is_dropped_once_the_weight_changes():

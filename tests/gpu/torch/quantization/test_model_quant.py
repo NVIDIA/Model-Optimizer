@@ -95,6 +95,8 @@ def compiled_quantization_extensions(request):
                     ],
                     "algorithm": "max"
                     if algorithm == "ptq"
+                    else {"method": "imatrix"}
+                    if algorithm == "imatrix"
                     else {
                         "method": "gptq",
                         "block_size": 256,
@@ -105,7 +107,7 @@ def compiled_quantization_extensions(request):
                 id=f"{name}-{algorithm}",
             )
             for name in GGML_FORMAT_REGISTRY
-            for algorithm in ["ptq", "gptq"]
+            for algorithm in ["ptq", "gptq", "imatrix"]
         ],
     ],
 )
@@ -139,8 +141,12 @@ def test_initialize_cuda_weight_formats(config, record_property):
     record_property("effective_weight_changed_elements", (effective_after != expected).sum().item())
     if getattr(model.weight_quantizer, "backend", None) == "ggml":
         torch.testing.assert_close(effective_after, expected, rtol=0, atol=0)
+    buffers_after = dict(model.named_buffers())
     for name, value in buffers.items():
-        torch.testing.assert_close(dict(model.named_buffers())[name], value, rtol=0, atol=0)
+        if name.endswith("_search_scales"):
+            assert name not in buffers_after
+        else:
+            torch.testing.assert_close(buffers_after[name], value, rtol=0, atol=0)
     model(inputs).float().square().mean().backward()
     assert model.weight.grad is not None and torch.isfinite(model.weight.grad).all()
 

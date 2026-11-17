@@ -36,7 +36,6 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_dir,
 )
 from torch.distributed.checkpoint import FileSystemReader
-from torch.distributed.elastic.multiprocessing.errors import ChildFailedError
 
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
