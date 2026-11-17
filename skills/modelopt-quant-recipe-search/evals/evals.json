@@ -1,0 +1,19 @@
+[
+  {
+    "id": "plan-nvfp4-recipe-search",
+    "question": "Plan a ModelOpt quantization recipe search for Qwen3-8B. Minimize checkpoint storage using NVFP4 while keeping GPQA and IFBench accuracy within 1 percentage point of a matching BF16 baseline. There are no previous experiments. Use at most three quantized candidates, with the same calibration dataset and 128 calibration samples each. AutoQuant is available. Only produce the experiment plan; do not download models, generate checkpoints, submit jobs, or run evaluations. Do not use QAD.",
+    "expected_skill": "modelopt-quant-recipe-search",
+    "expected_script": null,
+    "ground_truth": "Plan a BF16 reference plus three quantized candidates: a near-lossless FP8 baseline, an NVFP4 AutoQuant candidate, and a manual or sensitivity-guided NVFP4 candidate. Start from applicable modelopt_recipes and keep calibration data and sample count controlled. Rank eligible candidates by measured checkpoint storage including quantization metadata, accepting only candidates within 1 percentage point of BF16 on both benchmarks. Checkpoint generation alone cannot establish the best recipe. Delegate future checkpoint generation and validation to modelopt-ptq, evaluation to modelopt-evaluation, and comparable score analysis to modelopt-compare-results. No execution or QAD is authorized.",
+    "expected_behavior": [
+      "Reads modelopt-quant-recipe-search/SKILL.md and its references/recipe_iteration.md before proposing candidates.",
+      "Includes BF16 as the reference and no more than three quantized candidates: FP8, NVFP4 AutoQuant, and a manual or sensitivity-guided NVFP4 recipe.",
+      "Starts from applicable modelopt_recipes and preserves the shared calibration dataset and 128-sample budget.",
+      "Defines storage accounting including quantization metadata and requires both GPQA and IFBench to remain within 1 percentage point of matching BF16 results.",
+      "Plans checkpoint coverage, metadata, and runtime-fusion compatibility checks before evaluation, with matching benchmark configurations for all candidates.",
+      "Names the PTQ, evaluation, and comparison skill handoffs without executing those workflows.",
+      "Returns a candidate portfolio and experiment sequence without inventing measured scores, storage sizes, or a winning recipe.",
+      "Does not download models, generate checkpoints, submit jobs, run evaluations, or start QAD."
+    ]
+  }
+]
