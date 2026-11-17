@@ -49,6 +49,55 @@ class TestIsSensitiveKey:
     def test_non_sensitive_names_pass(self, key):
         assert _is_sensitive_key(key) is False
 
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("num_speculative_tokens", 8),
+            ("max_num_batched_tokens", 8192),
+            ("dbo_decode_token_threshold", 32),
+            ("skip_tokenizer_init", False),
+            ("spec_tokens", None),
+            # Real vLLM configs hold a list here, not a scalar.
+            ("encoder_cudagraph_token_budgets", [256, 512]),
+            ("encoder_cudagraph_token_budgets", []),
+        ],
+    )
+    def test_engine_knobs_survive(self, key, value):
+        """Engine config whose name trips the substring match but whose value
+        can't hold a credential. A serving_config contributes a dozen of these
+        and the list grows with each engine release, so the value's type — not
+        an enumerated allowlist — is what keeps them."""
+        assert _is_sensitive_key(key, value) is False
+
+    @pytest.mark.parametrize("value", ["hf_abc123", ["a", "b"], {"k": "v"}])
+    def test_string_and_container_values_still_redact(self, value):
+        assert _is_sensitive_key("hf_token", value) is True
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("hf_token", 1234),
+            ("api_key", 99),
+            ("aws_secret_access_key", 0),
+            ("password", True),
+            ("hf_token", None),
+            # Separator-free and hyphenated spellings of the same names.
+            ("hfToken", 1234),
+            ("apiKey", 99),
+            ("accessKey", 0),
+            ("hf-token", 1234),
+            ("api-key", 99),
+        ],
+    )
+    def test_credential_names_ignore_value_shape(self, key, value):
+        """An all-digit token is still a token. The scalar exception applies
+        only to names that are ambiguous, never to outright credentials."""
+        assert _is_sensitive_key(key, value) is True
+
+    def test_name_only_call_keeps_legacy_verdict(self):
+        """Callers with no value in hand (argv scanning) must still redact."""
+        assert _is_sensitive_key("hf_token") is True
+
 
 class TestRedactValue:
     def test_top_level_secret(self):
@@ -81,6 +130,37 @@ class TestRedactValue:
     def test_primitive_passthrough(self):
         for v in [None, 0, 1.5, "plain-string", True]:
             assert _redact_value(v) == v
+
+    def test_speculative_config_survives_beside_secret(self):
+        """The engine's own num_speculative_tokens is the cross-check on the
+        recorded speculation width, so it has to reach configuration.json —
+        while a real credential in the same subtree still does not."""
+        cfg = {
+            "serving_config": {
+                "speculative_config": {
+                    "method": "dflash",
+                    "num_speculative_tokens": 8,
+                    "target_model_config": {
+                        "hf_token": "supersecret",
+                        "skip_tokenizer_init": False,
+                    },
+                }
+            }
+        }
+        spec = _redact_value(cfg)["serving_config"]["speculative_config"]
+        assert spec["num_speculative_tokens"] == 8
+        assert spec["target_model_config"]["skip_tokenizer_init"] is False
+        assert spec["target_model_config"]["hf_token"] == REDACTED
+
+    def test_list_valued_knob_survives(self):
+        """A sensitive-key hit replaces the whole subtree, so a knob holding a
+        list of ints has to clear on its contents or it never recurses."""
+        out = _redact_value({"encoder_cudagraph_token_budgets": [256, 512]})
+        assert out["encoder_cudagraph_token_budgets"] == [256, 512]
+
+    def test_list_of_strings_under_credential_name_redacts(self):
+        out = _redact_value({"hf_token": ["abc", "def"]})
+        assert out["hf_token"] == REDACTED
 
 
 class TestRedactArgv:
