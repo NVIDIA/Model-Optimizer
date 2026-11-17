@@ -89,6 +89,7 @@ hf = [
     # TensorRT-LLM 1.3.0 ships transformers 5.5; keep in sync with modelopt/torch/__init__.py and noxfile.py
     "transformers>=5.5,<5.19",
     "wonderwords",
+    "zstandard", # reads the zstd-compressed pile calibration dataset (monology/pile-uncopyrighted)
 ]
 
 puzzletron = [ # Dependedencies for modelopt.torch.puzzletron subpackage
