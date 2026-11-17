@@ -168,8 +168,13 @@ def _resolve_state_quantizer(state_quantizer, *, state_codec="tile"):
 
 def _state_qdq(state: torch.Tensor, state_quantizer: TensorQuantizer | None, block_v: int = 64):
     """Apply state QDQ; TensorQuantizer owns the format, scales, and backward rule."""
-    if state_quantizer is None:
+    if state_quantizer is None or not state_quantizer.is_enabled:
         return state
+    clip = getattr(state_quantizer, "_state_clip", None)
+    if clip is not None:
+        if not state_quantizer.is_nvfp4_dynamic:
+            raise ValueError("Learned state clipping requires dynamic NVFP4")
+        return clip(state)
     if state_quantizer.block_sizes is not None:
         if state_quantizer.is_nvfp4_dynamic:
             # TensorQuantizer's NVFP4 global amax is scalar per call. Quantize each

@@ -92,6 +92,10 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     replay_window: int = Field(default=1, ge=1, le=64, strict=True)
     state_block_v: Literal[16, 32, 64, 128] = ModeloptField(default=64)
     solve: LinearAttentionSolveConfig = ModeloptField(default=LinearAttentionSolveConfig())
+    # Explicit saved override: TensorQuantizer only enables QDQ in this research profile.
+    experimental_state_format: Literal["e2m1_k128_fp32_reference"] | None = ModeloptField(
+        default=None
+    )
 
     @property
     def state_codec(self):
@@ -100,6 +104,10 @@ class LinearAttentionConfig(ModeloptBaseConfig):
 
     @model_validator(mode="after")
     def _validate_profile(self):
+        if self.experimental_state_format is not None and (
+            self.backend != "serving" or self.precision != "vllm" or self.replay_window != 1
+        ):
+            raise ValueError("K128 reference requires native GDN per-token state QDQ")
         if self.backend == "gdn_prefill" or self.precision == "gdn_prefill":
             if self.backend != "gdn_prefill" or self.precision != "gdn_prefill":
                 raise ValueError(

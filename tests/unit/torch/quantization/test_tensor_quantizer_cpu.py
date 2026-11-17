@@ -15,6 +15,8 @@
 
 """Tests of tensor quantizer."""
 
+import io
+
 import pytest
 import torch
 import torch.nn as nn
@@ -25,6 +27,10 @@ from _test_utils.torch.quantization.tensor_quantizer_common import (
 )
 
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.linear_attention.state_clip import (
+    NVFP4StateClip,
+    ReferenceK128StateClip,
+)
 from modelopt.torch.quantization.nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
 
 
@@ -38,6 +44,32 @@ class TestBlockQuantCPU(BlockQuantTester):
 
 class TestSequentialQuantizerCPU(SequentialQuantizerTester):
     device = "cpu"
+
+
+@pytest.mark.parametrize("clip_type", [NVFP4StateClip, ReferenceK128StateClip])
+def test_state_clip_metadata_does_not_serialize_flat_parameter_storage(clip_type):
+    def owner():
+        module = nn.Module()
+        module.state_clip = clip_type(torch.ones(12)).to(dtype=torch.bfloat16)
+        module.quantizer = TensorQuantizer()
+        object.__setattr__(module.quantizer, "_state_clip", module.state_clip)
+        return module
+
+    source = owner()
+    # DDP assigns parameters views into one large buffer; metadata must not copy it.
+    storage = torch.zeros(2**18, dtype=source.state_clip.phi.dtype)
+    source.state_clip.phi.data = storage[17:29]
+    with torch.no_grad():
+        source.state_clip.phi.copy_(torch.linspace(-0.0004, 0.0004, 12))
+    metadata = io.BytesIO()
+    torch.save(source.quantizer.get_modelopt_state(), metadata)
+    assert metadata.tell() < 8192
+    metadata.seek(0)
+    restored = owner()
+    restored.quantizer.set_from_modelopt_state(torch.load(metadata, weights_only=True))
+    restored.load_state_dict(source.state_dict())
+    assert restored.quantizer._state_clip is restored.state_clip
+    torch.testing.assert_close(restored.state_clip.caps(), source.state_clip.caps(), rtol=0, atol=0)
 
 
 def test_grouped_quantizer_forward_uses_representative_quantizer():
