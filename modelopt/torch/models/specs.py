@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     import torch.nn as nn
 
 __all__ = [
+    "BypassSpec",
     "EPSpec",
     "ExportSpec",
     "MoESpec",
@@ -358,6 +359,22 @@ class PTQSpec(SpecSection):
 
 
 @dataclass(kw_only=True)
+class BypassSpec(SpecSection):
+    """Model-owned text decoder, document independence and replay facts for Bypass.
+
+    ``adapter_path`` optionally names a ModuleBypassAdapter subclass for unusual
+    replay side state. Ordinary models need only these architecture facts.
+    """
+
+    decoder_paths: tuple[str, ...] = ()
+    feedforward_names: tuple[str, ...] = ("mlp", "moe", "ffn", "block_sparse_moe")
+    isolated_documents: bool = True
+    batch_packed_documents: bool = False
+    functional_children: tuple[str, ...] = ()
+    adapter_path: str | None = None
+
+
+@dataclass(kw_only=True)
 class ModelSpec:
     """The one global per-model descriptor, holding each section as an attribute.
 
@@ -388,6 +405,9 @@ class ModelSpec:
     A fact about the model, not about any one subsystem: it decides whether the classes
     named in this spec can be imported at all, so ``model_type`` is a remote-code
     spelling rather than a transformers one, and loading the model needs the flag."""
+
+    bypass_spec: BypassSpec | None = None
+    """Text decoder/replay facts for IQ Bypass, independent of optional modeling imports."""
 
     moe_spec: MoESpec | None = None
     """The model's MoE architecture facts, or ``None`` for a dense model."""

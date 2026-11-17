@@ -27,13 +27,23 @@ export's MoE-block handling skips them. Sharing the sections is left to a follow
 
 from ..deepseek.specs import GENERATION_UNSUPPORTED
 from ..deepseek_v3.specs import BASE_MODEL_EP_PLAN
-from ..specs import EPSpec, ModelSpec, PTQSpec, register
+from ..specs import BypassSpec, EPSpec, ModelSpec, PTQSpec, register
 from .ep import DECOMPRESSED_FORMATS, make_buildable, prepare, prepare_refusal
 
 __all__: list[str] = []
 
 register(
     ModelSpec(
+        bypass_spec=BypassSpec(
+            decoder_paths=(
+                "model.language_model.layers",
+                "language_model.layers",
+                "model.layers",
+                "layers",
+            ),
+            batch_packed_documents=False,
+            functional_children=(),
+        ),
         model_type="kimi_k25",
         # transformers ships Kimi-K2.5 itself from 5.13, so modeling_source stays "transformers": the
         # registry pairs it with that release, and a "remote_code" claim would be stale from 5.13 on.

@@ -15,7 +15,7 @@
 
 """Nemotron-H specs (HF model type ``nemotron_h``)."""
 
-from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, PTQSpec, register
+from ..specs import BypassSpec, EPSpec, ExportSpec, ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
 
@@ -38,6 +38,12 @@ GENERATION_UNSUPPORTED = (
 
 register(
     ModelSpec(
+        bypass_spec=BypassSpec(
+            adapter_path="modelopt.torch.models.nemotron_h.bypass.NemotronHBypassAdapter",
+            decoder_paths=("backbone.layers", "model.layers", "layers"),
+            batch_packed_documents=True,
+            functional_children=(),
+        ),
         model_type="nemotron_h",
         min_transformers_version="5.5",
         ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),

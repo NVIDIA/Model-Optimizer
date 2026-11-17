@@ -30,12 +30,18 @@ every step those lookups gate leaves a fused container as it is.
 
 from ..nemotron_h.specs import BASE_MODEL_EP_PLAN
 from ..nemotron_h_nano_vl_v2.specs import NO_AUTO_DEVICE_MAP
-from ..specs import EPSpec, ModelSpec, PTQSpec, register
+from ..specs import BypassSpec, EPSpec, ModelSpec, PTQSpec, register
 
 __all__: list[str] = []
 
 register(
     ModelSpec(
+        bypass_spec=BypassSpec(
+            decoder_paths=("language_model.model.layers", "model.layers", "layers"),
+            adapter_path="modelopt.torch.models.nemotron_h.bypass.NemotronHBypassAdapter",
+            batch_packed_documents=False,
+            functional_children=(),
+        ),
         model_type="nemotron_h_omni",
         # transformers ships the Omni VLM itself from 5.18. The checkpoint's own code
         # (``trust_remote_code=True``) names the language-model config ``llm_config``, and

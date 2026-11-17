@@ -1,0 +1,435 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""ModelSpec-driven text-only Bypass on stable Transformers 5.23.x."""
+
+import importlib
+from dataclasses import replace
+from importlib.metadata import PackageNotFoundError, version
+
+import torch
+from packaging.version import Version
+from torch import nn
+
+from modelopt.torch.models.specs import BypassSpec, get_spec
+from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
+
+from ..._bypass_capture import (
+    BypassUnit,
+    ModuleBypassAdapter,
+    _valid_token_mask,
+    has_iq_weights,
+    validate_unit_ownership,
+)
+from .output_head import bypass_head_context
+from .packing import batch_documents, document_batches
+
+
+def _require_transformers():
+    try:
+        installed = Version(version("transformers"))
+    except PackageNotFoundError as exc:
+        raise ImportError("Transformers Bypass requires transformers~=5.23.0") from exc
+    if installed.release[:2] != (5, 23) or installed.is_prerelease or installed.is_devrelease:
+        raise ImportError(f"Transformers Bypass requires stable 5.23.x; found {installed}")
+
+
+def _model_spec(model):
+    config = getattr(model, "config", None)
+    candidates = [getattr(config, "model_type", None)]
+    getter = getattr(config, "get_text_config", None)
+    if callable(getter):
+        candidates.append(getattr(getter(), "model_type", None))
+    for name in candidates:
+        spec = get_spec(name) if isinstance(name, str) else None
+        if spec is not None and spec.bypass_spec is not None:
+            return spec.bypass_spec
+    return BypassSpec()
+
+
+class TransformersBypassAdapter(ModuleBypassAdapter):
+    """Adopt native text decoders and caller-owned placement, without a family registry."""
+
+    def __init__(self, device_mesh=None):
+        """Require the tested integration version only when this adapter is used."""
+        _require_transformers()
+        self.device_mesh = device_mesh
+        self.student = None
+        self._providers = {}
+
+    def _provider(self, model):
+        spec = _model_spec(model)
+        if spec.adapter_path is None:
+            return None
+        if id(model) not in self._providers:
+            module, _, attribute = spec.adapter_path.rpartition(".")
+            self._providers[id(model)] = getattr(importlib.import_module(module), attribute)()
+        return self._providers[id(model)]
+
+    def _decoder_layers(self, model):
+        provider = self._provider(model)
+        if provider is not None and hasattr(provider, "decoder_layers"):
+            return provider.decoder_layers(model)
+        spec = _model_spec(model)
+        for path in spec.decoder_paths:
+            try:
+                layers = model.get_submodule(path)
+            except AttributeError:
+                continue
+            if isinstance(layers, (nn.ModuleList, nn.ModuleDict)):
+                return layers
+        if spec.decoder_paths:
+            raise ValueError("No text decoder matches this model's BypassSpec.decoder_paths")
+        # Unknown ordinary models use public decoder roots and conservative document isolation.
+        queue, seen = [model], set()
+        getter = getattr(model, "get_decoder", None)
+        if callable(getter):
+            try:
+                decoder = getter()
+                if isinstance(decoder, nn.Module):
+                    queue.insert(0, decoder)
+            except (AttributeError, NotImplementedError):
+                pass
+        while queue:
+            root = queue.pop(0)
+            if id(root) in seen:
+                continue
+            seen.add(id(root))
+            for name in ("layers", "h", "block"):
+                layers = getattr(root, name, None)
+                if isinstance(layers, (nn.ModuleList, nn.ModuleDict)):
+                    return layers
+            queue.extend(
+                child
+                for name in (
+                    "thinker",
+                    "language_model",
+                    "text_model",
+                    "decoder",
+                    "model",
+                    "backbone",
+                    "transformer",
+                )
+                if isinstance(child := getattr(root, name, None), nn.Module)
+                and id(child) not in seen
+            )
+        raise ValueError(
+            "No text decoder found; provide exact modules or a ModelSpec Bypass adapter"
+        )
+
+    def _layers(self, model):
+        layers = self._decoder_layers(model)
+        names = {id(module): name for name, module in model.named_modules()}
+        items = layers.items() if isinstance(layers, nn.ModuleDict) else enumerate(layers)
+        return [(int(index), names[id(module)], module) for index, module in items]
+
+    def _selected_paths(self, model, config, *, quantized_only=True):
+        try:
+            layers = self._layers(model)
+        except ValueError:
+            if config.modules is None or config.layer_indices is not None:
+                raise
+            layers = None
+        selected = config.layer_indices
+        if selected is not None:
+            available = {index for index, _, _ in layers}
+            if (
+                not selected
+                or len(selected) != len(set(selected))
+                or not set(selected).issubset(available)
+            ):
+                raise ValueError(
+                    "layer_indices must select distinct existing logical decoder positions"
+                )
+        paths = config.modules
+        if paths is None:
+            roles, provider = _model_spec(model).feedforward_names, self._provider(model)
+            paths = []
+            for index, path, block in layers:
+                if selected is not None and index not in selected:
+                    continue
+                attributes = (
+                    provider.unit_attributes(block)
+                    if provider is not None and hasattr(provider, "unit_attributes")
+                    else roles
+                )
+                for name in attributes:
+                    child = block._modules.get(name)
+                    if child is not None and (not quantized_only or has_iq_weights(child)):
+                        paths.append(path + "." + name)
+            paths = [
+                path
+                for path in paths
+                if not any(path.startswith(parent + ".") for parent in paths if parent != path)
+            ]
+        elif selected is not None:
+            positions = {
+                path: next(
+                    (
+                        index
+                        for index, block, _ in layers
+                        if path == block or path.startswith(block + ".")
+                    ),
+                    None,
+                )
+                for path in paths
+            }
+            if any(index is None for index in positions.values()):
+                raise ValueError(
+                    "Every module intersected with layer_indices must belong to one decoder position"
+                )
+            paths = [path for path in paths if positions[path] in selected]
+        if not paths:
+            raise ValueError("Bypass selectors produced no eligible text boundaries")
+        return layers, paths
+
+    def weight_patterns(self, model, config=None):
+        """Derive ordinary ModelOpt PTQ weight globs from the same selected boundaries."""
+        from modelopt.torch.quantization.repair import _router_paths
+
+        from ...config import BypassConfig
+
+        config = config if isinstance(config, BypassConfig) else BypassConfig(**(config or {}))
+        _, paths = self._selected_paths(model, config, quantized_only=False)
+        patterns = []
+        for path in paths:
+            owner = model.get_submodule(path)
+            routers = _router_paths(owner)
+            for relative, module in owner.named_modules():
+                if any(
+                    relative == router or relative.startswith(router + ".") for router in routers
+                ):
+                    continue
+                if any(parameter.ndim >= 2 for parameter in module.parameters(recurse=False)):
+                    patterns.append(".".join(filter(None, (path, relative, "*weight_quantizer*"))))
+        return list(dict.fromkeys(patterns))
+
+    def resolve_units(self, student, teacher, config):
+        """Select dense/MoE owners and map their exact logical positions to the teacher."""
+        self.student = student
+        layers, paths = self._selected_paths(student, config)
+        targets = (
+            {index: path for index, path, _ in self._layers(teacher)} if layers is not None else {}
+        )
+        units = []
+        for path in paths:
+            target = path
+            for index, block, _ in layers or ():
+                if path == block or path.startswith(block + "."):
+                    if index not in targets:
+                        raise ValueError("Teacher is missing a selected logical decoder position")
+                    target = targets[index] + path[len(block) :]
+                    break
+            units.append(BypassUnit(path, path, target))
+        validate_unit_ownership(student, teacher, units)
+        return units
+
+    def microbatches(self, batch, size):
+        """Preserve [RoPE axes,batch,sequence] wrapper positions when slicing samples."""
+        positions = batch.get("position_ids") if isinstance(batch, dict) else None
+        if not isinstance(positions, torch.Tensor) or positions.ndim != 3:
+            yield from super().microbatches(batch, size)
+            return
+        if positions.shape[1:] != batch["input_ids"].shape:
+            raise ValueError("mRoPE positions must have [axes,batch,sequence] shape")
+        rest = {k: v for k, v in batch.items() if k != "position_ids"}
+        for index, microbatch in enumerate(super().microbatches(rest, size)):
+            yield {**microbatch, "position_ids": positions[:, index * size : (index + 1) * size]}
+
+    def snapshot_unit_state(self, unit, module, batch):
+        """Delegate exceptional side inputs to the model-owned adapter."""
+        provider = self._provider(self.student)
+        return None if provider is None else provider.snapshot_unit_state(unit, module, batch)
+
+    def replay(self, module, record):
+        """Replay the actual selected module with model-owned side state if needed."""
+        provider = self._provider(self.student)
+        return (
+            super().replay(module, record) if provider is None else provider.replay(module, record)
+        )
+
+    def capture(self, unit, args, kwargs, output, batch):
+        """Align token masks for a native expert container that flattens token axes."""
+        record = super().capture(unit, args, kwargs, output, batch)
+        mask = record.valid_mask
+        if mask is not None and record.target.ndim == 2 and record.target.shape[0] == mask.numel():
+            record = replace(record, valid_mask=mask.flatten())
+        return record
+
+    def _validate_text_batch(self, batch):
+        if any(
+            batch.get(name) is not None
+            for name in ("past_key_values", "past_key_value", "cache_params")
+        ):
+            raise ValueError("Independent Bypass batches cannot consume generation caches")
+        if any(
+            batch.get(name) is not None
+            for name in ("pixel_values", "pixel_values_videos", "input_features", "audio_values")
+        ):
+            raise ValueError("Transformers Bypass currently supports text-only inputs")
+
+    def prepare_batch(self, model, batch):
+        """Convert compact document IDs into an HF block-causal attention mask."""
+        self._validate_text_batch(batch)
+        result = {
+            key: value
+            for key, value in batch.items()
+            if key
+            not in (
+                "valid_mask",
+                "_packed_seq_ids",
+                "labels",
+                "loss_mask",
+                "sample_ids",
+                "document_ids",
+            )
+        }
+        attention = result.get("attention_mask")
+        if (
+            isinstance(attention, torch.Tensor)
+            and attention.ndim == 4
+            and not (attention.dtype == torch.bool or attention.is_floating_point())
+        ):
+            raise ValueError("A 4D attention mask must be Boolean or floating additive bias.")
+        config = getattr(model, "config", None)
+        if config is not None and callable(getattr(config, "get_text_config", None)):
+            config = config.get_text_config()
+        if (
+            isinstance(attention, torch.Tensor)
+            and attention.ndim == 4
+            and attention.dtype == torch.bool
+            and getattr(config, "_attn_implementation", None) == "eager"
+        ):
+            if not bool(attention.any(dim=-1).all()):
+                raise ValueError(
+                    "Fully masked Boolean query rows require an SDPA attention backend."
+                )
+            dtype = next(model.parameters()).dtype
+            dtype = dtype if dtype.is_floating_point else torch.float32
+            attention = torch.zeros_like(attention, dtype=dtype).masked_fill(
+                ~attention, torch.finfo(dtype).min
+            )
+            result["attention_mask"] = attention
+        documents = batch.get("_packed_seq_ids")
+        if isinstance(documents, torch.Tensor):
+            if documents.ndim != 2 or documents.shape != batch["input_ids"].shape:
+                raise ValueError("Packed document IDs must match [batch, sequence] token IDs.")
+            attention = result.get("attention_mask")
+            if bool((documents > 1).any()) or (
+                isinstance(attention, torch.Tensor) and attention.ndim == 4
+            ):
+                n = documents.shape[1]
+                causal = torch.arange(n, device=documents.device)
+                allowed = (
+                    (documents[:, None, :, None] == documents[:, None, None, :])
+                    & documents[:, None, :, None].gt(0)
+                    & documents[:, None, None, :].gt(0)
+                    & (causal[:, None] >= causal[None, :])
+                )
+                if isinstance(attention, torch.Tensor):
+                    if attention.ndim == 2:
+                        allowed = allowed & attention[:, None, None, :].bool()
+                    elif attention.ndim == 4 and attention.dtype == torch.bool:
+                        allowed = allowed & attention
+                    elif attention.ndim != 4:
+                        raise ValueError("Packed attention masks must have two or four dimensions.")
+                # HF eager attention adds its mask to scores; a Boolean mask
+                # would add zeros/ones rather than exclude document boundaries.
+                if (
+                    isinstance(attention, torch.Tensor)
+                    and attention.ndim == 4
+                    and attention.is_floating_point()
+                ):
+                    additive = attention.clone()
+                else:
+                    dtype = next(model.parameters()).dtype
+                    dtype = dtype if dtype.is_floating_point else torch.float32
+                    additive = torch.zeros(allowed.shape, device=documents.device, dtype=dtype)
+                    if isinstance(attention, torch.Tensor) and attention.ndim == 4:
+                        additive = additive.masked_fill(~attention, float("-inf"))
+                result["attention_mask"] = torch.minimum(
+                    additive,
+                    additive.masked_fill(~allowed, torch.finfo(additive.dtype).min),
+                )
+            else:
+                result["attention_mask"] = documents.ne(0) & (
+                    attention.bool() if isinstance(attention, torch.Tensor) else True
+                )
+        return result
+
+    def _batch_documents(self, model):
+        spec = _model_spec(model)
+        if not spec.batch_packed_documents:
+            return False
+        # Unknown activation transforms or dynamic position scaling may couple rows.
+        for module in model.modules():
+            if isinstance(module, QuantModule):
+                for name in ("input_quantizer", "output_quantizer"):
+                    quantizer = getattr(module, name, None)
+                    if isinstance(quantizer, TensorQuantizer) and quantizer.is_enabled:
+                        return False
+        config = getattr(model, "config", None)
+        getter = getattr(config, "get_text_config", None)
+        config = getter() if callable(getter) else config
+        pending = [getattr(config, name, None) for name in ("rope_scaling", "rope_parameters")]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                if value.get("rope_type", value.get("type")) in ("dynamic", "longrope"):
+                    return False
+                pending.extend(value.values())
+        return True
+
+    def forward_teacher(self, teacher, args, kwargs):
+        """Run the native text task, retaining outer hooks for wrapped text models."""
+        target = getattr(teacher, "thinker", teacher)
+        if target is teacher:
+            return super().forward_teacher(teacher, args, kwargs)
+        had_override, previous = "forward" in teacher.__dict__, teacher.__dict__.get("forward")
+        teacher.forward = lambda *args, **kwargs: target(*args, **kwargs)
+        try:
+            return super().forward_teacher(teacher, args, {**kwargs, "use_cache": False})
+        finally:
+            if had_override:
+                teacher.forward = previous
+            else:
+                delattr(teacher, "forward")
+
+    def teacher_microbatch(self, teacher, units, batch, consume):
+        """Preserve independent document recurrence and stream each native boundary."""
+        self._validate_text_batch(batch)
+        task = getattr(teacher, "thinker", teacher)
+        getter = getattr(task, "get_output_embeddings", None)
+        try:
+            head = getter() if callable(getter) else None
+        except NotImplementedError:
+            head = None
+        spec = _model_spec(teacher)
+        documents = document_batches(batch) if spec.isolated_documents else [batch]
+        if (
+            spec.isolated_documents
+            and self._batch_documents(teacher)
+            and self._batch_documents(self.student)
+        ):
+            documents = batch_documents(documents, batch["input_ids"].numel())
+        with bypass_head_context(teacher, units, head):
+            for document in documents:
+                prepared = self.prepare_batch(teacher, document)
+                # Validity metadata belongs to the capture, not the model's forward kwargs.
+                raw = {
+                    **prepared,
+                    "valid_mask": _valid_token_mask(document),
+                }
+                super().teacher_microbatch(teacher, units, raw, consume)

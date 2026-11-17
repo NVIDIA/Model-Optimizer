@@ -57,9 +57,13 @@ def bypass(
         torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
     ):
         raise ValueError("Distributed Bypass requires its native placement integration")
+    adapter: ModuleBypassAdapter
     if getattr(getattr(student, "config", None), "model_type", None):
-        raise ValueError("Transformers Bypass requires its 5.23.x integration")
-    adapter = ModuleBypassAdapter()
+        from .plugins.transformers import TransformersBypassAdapter
+
+        adapter = TransformersBypassAdapter(device_mesh)
+    else:
+        adapter = ModuleBypassAdapter()
     units = adapter.resolve_units(student, teacher, config)
     plan = plan_iq_repair([student.get_submodule(u.student_path) for u in units])
     logging.getLogger(__name__).info("Bypass selected boundaries: %s", [u.name for u in units])

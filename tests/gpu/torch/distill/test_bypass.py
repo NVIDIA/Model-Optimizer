@@ -160,6 +160,12 @@ def test_bypass_refuses_aliases_and_cleans_failed_replay():
     original = copy.deepcopy(student.state_dict())
     with pytest.raises(ValueError):
         mtd.bypass(student, teacher, batches, {"num_steps": 0, "modules": ["", "mlp"]})
+    shared = copy.deepcopy(student)
+    shared.moe.input_quantizer = shared.mlp.input_quantizer
+    shared.mlp.input_quantizer._if_calib = True
+    with pytest.raises(ValueError):
+        mtd.bypass(shared, teacher, batches, {"num_steps": 0})
+    assert shared.mlp.input_quantizer._if_calib
     teacher.mlp.weight = nn.Parameter(student.mlp.weight.detach())
     with pytest.raises(ValueError):
         mtd.bypass(student, teacher, batches, {"num_steps": 0, "modules": ["mlp"]})

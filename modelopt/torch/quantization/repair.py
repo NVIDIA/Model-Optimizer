@@ -79,7 +79,7 @@ def _router_paths(unit):
         ".".join(filter(None, (path, name)))
         for path, module in unit.named_modules()
         if any(hasattr(module, attr) for attr in ("experts", "routed_experts"))
-        for name in ("router", "gate")
+        for name in ("router", "gate", "shared_expert_gate", "shared_experts_gate")
         if name in module._modules
     }
 

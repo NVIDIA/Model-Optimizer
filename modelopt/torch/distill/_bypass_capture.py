@@ -96,7 +96,7 @@ def validate_unit_ownership(student, teacher, units):
         if span is not None:
             key, start, stop = span
             teacher_storage.setdefault(key, []).append((start, stop))
-    owned, teacher_owners = set(), set()
+    owned, teacher_owners, quantizer_owners = set(), set(), set()
     for unit in units:
         try:
             module = student.get_submodule(unit.student_path)
@@ -107,6 +107,13 @@ def validate_unit_ownership(student, teacher, units):
             if id(tensor) in teacher_owners:
                 raise ValueError("Teacher Bypass boundaries share ownership")
             teacher_owners.add(id(tensor))
+        for child in module.modules():
+            if isinstance(child, TensorQuantizer):
+                if id(child) in quantizer_owners:
+                    raise ValueError(
+                        "Bypass boundaries share mutable quantizer state; select their common owner"
+                    )
+                quantizer_owners.add(id(child))
         for tensor in [*module.parameters(), *module.buffers()]:
             if id(tensor) in owned:
                 raise ValueError("Student Bypass boundaries share ownership")
