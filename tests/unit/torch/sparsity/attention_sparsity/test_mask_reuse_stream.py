@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Exact-prefix and dense-exclusion contracts; no GPU performance evidence."""
 
 import copy
@@ -24,6 +21,12 @@ from dataclasses import asdict
 
 import pytest
 
+from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_compact import (
+    CompactMaskReuseCapture,
+)
+from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_topology import (
+    TopologyDiscoveryCapture,
+)
 from modelopt.torch.sparsity.attention_sparsity.plugins import mask_reuse_capture, mask_reuse_stream
 from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_capture import (
     CaptureContractError,
@@ -33,6 +36,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_capture impor
     source_capture_sha256,
 )
 from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_stream import (
+    build_analytical_dense_capture,
     build_capture_stream,
     capture_stream_prompts,
     read_capture_stream_spools,
@@ -236,3 +240,51 @@ def test_ack_requires_exact_request_and_tp_membership():
     values[1]["rank"] = 0
     with pytest.raises(CaptureContractError, match="exactly once"):
         validate_stream_acknowledgements(values, request, expected_world_size=2)
+
+
+@pytest.mark.parametrize("tamper", [None, "mass", "retained", "threshold", "claim_measured"])
+def test_analytical_dense_is_explicit_and_exact(tamper):
+    request = _request(_prompt(16384), a=8192.0, b=0.0)
+    raw = build_analytical_dense_capture(
+        request,
+        request["chunks"][0],
+        fit=_fit(8192.0, 0.0),
+        measured_template={
+            "global_num_heads": 2,
+            "attention_layers": [0, 2, 4],
+            "max_reuse_span": 2,
+        },
+    )
+    if tamper == "mass":
+        raw["consumer_candidates_by_layer"]["2"]["0"]["dropped_mass"][0][0] = 0.001
+    elif tamper == "retained":
+        raw["anchor_stats_by_layer"]["0"]["retained_tiles"][0] -= 1
+    elif tamper == "threshold":
+        raw["invocation"].update(threshold_log2_hex=(-1.0).hex(), threshold_lambda_hex=(0.5).hex())
+    elif tamper == "claim_measured":
+        raw["analytical_dense"]["measured"] = True
+    if tamper:
+        with pytest.raises(ValueError, match="analytical"):
+            TopologyDiscoveryCapture.from_mapping(raw)
+        return
+    parsed = TopologyDiscoveryCapture.from_mapping(raw)
+    assert parsed.threshold_lambda == 1.0 and parsed.threshold_log2 == 0.0
+    compact = {
+        key: raw[key]
+        for key in (
+            "analytical_dense",
+            "invocation",
+            "geometry",
+            "global_num_heads",
+            "eligible_tiles",
+        )
+    }
+    compact.update(
+        compact_capture_schema_version=2,
+        anchor_stats_by_layer={"0": raw["anchor_stats_by_layer"]["0"]},
+        consumer_layers={
+            str(layer): {"anchor_layer": 0, "dropped_mass": [[0.0, 0.0], [0.0, 0.0]]}
+            for layer in (2, 4)
+        },
+    )
+    assert CompactMaskReuseCapture.from_mapping(compact).threshold_lambda == 1.0

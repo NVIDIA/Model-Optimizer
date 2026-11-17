@@ -77,6 +77,31 @@ data representative of the entire prefill. `--validate-dense-output` is a
 FA4-only bitwise shadow check; the reference provider needs its own accuracy
 validation.
 
+## Discover anchors, then freeze the topology
+
+For discovery, collect with a `*_topology_discovery` plan and an explicit
+`--max-reuse-span`. The span bounds the number of consecutive consumers between
+anchors; it does not change the objective within that search space.
+
+```bash
+python calibrate_mask_reuse_topology.py --checkpoint <CHECKPOINT> \
+  --checkpoint-manifest checkpoint-manifest.json \
+  --captures discovery.jsonl --capture-manifest discovery.jsonl.manifest.json \
+  --vanilla-config sparse_attention_config.json --prompt-plan prompts.jsonl \
+  --reuse-dropped-mass-report-threshold 0.02 --target-bmm1-skip-ratio 0.50 \
+  --output topology.json
+```
+
+Discovery enforces the BMM1 target in **every context range**, rather than only
+over pooled prompts. It rejects duplicate prompt sources and inconsistent
+layer sets or spans. It uses the same risk objective and exact solver contract
+as refitting. A pooled maximum-saving diagnostic is not a per-range guarantee.
+
+Freeze the exported `anchors` and `nearest` assignments. Collect refit statistics
+using that topology, then pass the complete discovery artifact directly to
+`--topology` below. Checkpoint identity, head count, layer coverage, and target
+status are checked before refitting. Discovery never selects using held-out data.
+
 ## Refit a fixed topology
 
 ```bash
