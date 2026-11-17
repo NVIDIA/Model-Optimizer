@@ -373,6 +373,8 @@ class BypassSpec(SpecSection):
     batch_packed_documents: bool = False
     functional_children: tuple[str, ...] = ()
     adapter_path: str | None = None
+    logits_transform_path: str | None = None
+    """Optional model-owned post-head transform for exact chunked diagnostics."""
 
 
 @dataclass(kw_only=True)

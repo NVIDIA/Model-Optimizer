@@ -16,7 +16,7 @@
 
 """Gemma 2 specs (HF model type ``gemma2``)."""
 
-from ..specs import ExportSpec, ModelSpec, register
+from ..specs import BypassSpec, ExportSpec, ModelSpec, register
 
 __all__: list[str] = []
 
@@ -24,6 +24,9 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="gemma2",
+        bypass_spec=BypassSpec(
+            logits_transform_path="modelopt.torch.distill.plugins.transformers.output_head.softcapped_logits"
+        ),
         min_transformers_version="5.5",
         export_spec=ExportSpec(weight_plus_one_norm_names=("Gemma2RMSNorm",)),
     )
