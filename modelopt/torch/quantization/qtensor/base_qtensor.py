@@ -49,6 +49,16 @@ def _refuse_dtensor(tensor: torch.Tensor, packer: str) -> None:
         )
 
 
+_NATIVE_TENSOR_CLASSES = {}
+
+
+def get_native_tensor_class(name):
+    """Resolve an already imported native codec; checkpoints cannot import arbitrary code."""
+    if name not in _NATIVE_TENSOR_CLASSES:
+        raise ValueError(f"Native codec {name!r} is not registered; import its format provider")
+    return _NATIVE_TENSOR_CLASSES[name]
+
+
 class BaseQuantizedTensor:
     """Base class for quantized tensors, providing methods for quantization and dequantization.
 
@@ -82,6 +92,10 @@ class BaseQuantizedTensor:
         It can be used to load the quantized tensor with torch.load(weights_only=True) in safe_load().
         """
         super().__init_subclass__(**kwargs)
+        previous = _NATIVE_TENSOR_CLASSES.get(cls.__name__)
+        if previous is not None and previous is not cls:
+            raise ValueError(f"Native codec name {cls.__name__!r} is already registered")
+        _NATIVE_TENSOR_CLASSES[cls.__name__] = cls
         torch.serialization.add_safe_globals([cls])
 
     @classmethod
@@ -143,10 +157,14 @@ class QTensorWrapper(torch.nn.Parameter):
         )
 
     def get_qtensor(self):
-        """Get the quantized tensor class from QTensorWrapper."""
-        return self.metadata["qtensor_class"](
+        """Return the codec's payload with its complete native metadata."""
+        native = self.metadata["qtensor_class"](
             self.metadata["shape"], self.metadata["dtype"], self.data
         )
+        native.metadata.update(
+            {key: value for key, value in self.metadata.items() if key != "qtensor_class"}
+        )
+        return native
 
     def get_state(self):
         """Get the state of the QTensorWrapper."""
