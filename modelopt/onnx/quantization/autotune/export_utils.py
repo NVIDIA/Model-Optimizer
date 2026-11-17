@@ -359,6 +359,7 @@ def insert_qdq_at_tensors(
     config: Config,
     *,
     tensor_users_map: dict[str, list[int]] | None = None,
+    fp8_conversion: bool = False,
 ) -> None:
     """Insert Q/DQ (Quantize/Dequantize) node pairs at specified locations.
 
@@ -370,6 +371,8 @@ def insert_qdq_at_tensors(
         resolved_insertion_points: Set of ResolvedInsertionPoint specifying where to insert Q/DQ.
         config: Config with default_q_scale, default_q_zero_point, default_quant_type, default_dq_dtype.
         tensor_users_map: Optional precomputed tensor name -> list of node indices. If None, computed.
+        fp8_conversion: The INT8 Q/DQ inserted here are converted to FP8 afterwards, which
+            rescales them; keep the activation scales distinct after that conversion.
     """
     q_scale = config.default_q_scale
     q_zero_point = config.default_q_zero_point
@@ -394,7 +397,7 @@ def insert_qdq_at_tensors(
             quantized_activations,
             scale_group_map,
             bfloat16=config.default_dq_dtype == "bfloat16",
-            fp8=config.default_quant_type == "fp8",
+            fp8=fp8_conversion,
         )
 
     if tensor_users_map is None:
@@ -519,7 +522,9 @@ def export_qdq_onnx(
         if needs_fp8_conversion:
             logger.debug("FP8 conversion: creating INT8 model first")
             config_int8 = dataclasses.replace(config, default_quant_type="int8")
-            insert_qdq_at_tensors(graph_copy, resolved_insertion_points, config_int8)
+            insert_qdq_at_tensors(
+                graph_copy, resolved_insertion_points, config_int8, fp8_conversion=True
+            )
         else:
             insert_qdq_at_tensors(graph_copy, resolved_insertion_points, config)
         # A per-tensor Q/DQ on a rank-0 constant breaks TensorRT's ONNX parser

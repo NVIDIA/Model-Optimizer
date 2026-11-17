@@ -20,6 +20,7 @@ import onnx_graphsurgeon as gs
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
+import modelopt.onnx.quantization.autotune.export_utils as export_utils
 from modelopt.onnx.quantization.autotune.common import Config
 from modelopt.onnx.quantization.autotune.export_utils import (
     _ACTIVATION_SCALE_RANGE,
@@ -147,6 +148,23 @@ def test_fp8_scales_stay_distinct_after_conversion():
     stored = np.array(list(scales.values()), dtype=np.float16)
     converted = ((stored * 448.0) / 127.0).astype(np.float16)
     assert len(set(converted.tolist())) == len(scales)
+
+
+@pytest.mark.parametrize("needs_fp8_conversion", [False, True])
+def test_fp8_export_checks_scales_after_conversion(model, monkeypatch, needs_fp8_conversion):
+    """export_qdq_onnx inserts INT8 Q/DQ before converting to FP8; the intent must reach the scales."""
+    calls = []
+    build = export_utils.build_activation_scales
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(export_utils, "build_activation_scales", spy)
+    points = _points(model, [("conv2", 0, "p1"), ("conv3", 0, "cat")])
+    config = Config(default_quant_type="fp8" if needs_fp8_conversion else "int8")
+    export_qdq_onnx(model, points, config, needs_fp8_conversion=needs_fp8_conversion)
+    assert [call["fp8"] for call in calls] == [needs_fp8_conversion]
 
 
 def test_more_groups_than_scales_stay_in_range():
