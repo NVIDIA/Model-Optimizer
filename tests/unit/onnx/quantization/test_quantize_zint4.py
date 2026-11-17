@@ -441,6 +441,7 @@ def test_awq_no_temp_file_leak(tmp_path, monkeypatch, calibration_method, use_ex
         if use_external_data_format:
             assert not os.path.exists(augmented_path + "_data"), f"Leaked: {augmented_path}_data"
 
+
 def _reference_weight_scale(weight: np.ndarray, block_size: int) -> np.ndarray:
     """Per-block-max scale using consecutive, non-overlapping row blocks."""
     ci, co = weight.shape
@@ -528,6 +529,4 @@ def test_get_x_w_mean_for_subgraph_matches_reference(ci, co_parts):
     expected_x_m = (np.abs(x).sum(axis=0) / x.shape[0]).reshape(-1)
     np.testing.assert_allclose(x_m, expected_x_m, rtol=1e-6)
     assert w_m.shape == (ci,)
-    np.testing.assert_allclose(
-        w_m, _reference_subgraph_w_mean(concatenated, block_size), rtol=1e-5
-    )
+    np.testing.assert_allclose(w_m, _reference_subgraph_w_mean(concatenated, block_size), rtol=1e-5)
