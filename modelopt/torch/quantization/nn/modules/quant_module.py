@@ -173,6 +173,9 @@ class QuantModule(DynamicModule):
 
     @torch.no_grad()
     def _initialize_qdq_weights(self, trainable_only, initialized):
+        # Imported here: ggml/__init__ imports its backend, which imports these modules.
+        from ...ggml.common import drop_search_scales
+
         for weight, quantizer in self._iter_weights_for_initialization(trainable_only):
             key = self._weight_initialization_key(weight)
             if key in initialized:
@@ -187,6 +190,9 @@ class QuantModule(DynamicModule):
                 if member.pre_quant_scale is not None:
                     decoded.div_(member.pre_quant_scale)
             local.copy_(decoded)
+            # The weight is its decoding now, which a GGML pin encodes again at its stored scales.
+            for member in members:
+                drop_search_scales(member)
             initialized.add(key)
 
     @staticmethod
