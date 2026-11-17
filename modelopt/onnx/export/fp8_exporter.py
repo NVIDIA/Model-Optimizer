@@ -209,7 +209,8 @@ class FP8QuantExporter(ONNXQuantExporter):
                 continue
             scale_val = (amax / _FP8_E4M3_MAX).item()
             scale_data = np.array(scale_val, dtype=weight_input.values.dtype)
-            # Round up so normalizing by the serialized scale stays within the FP8 range.
+            # Round up so normalizing by the serialized scale stays within the FP8 range. Compare in
+            # float: ml_dtypes>=0.7 casts a Python float to the array dtype, so the check never fired.
             if float(scale_data) < scale_val:
                 np.nextafter(
                     scale_data,
