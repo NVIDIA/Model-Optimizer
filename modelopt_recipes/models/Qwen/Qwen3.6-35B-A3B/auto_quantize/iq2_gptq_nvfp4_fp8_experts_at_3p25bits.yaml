@@ -32,4 +32,4 @@ auto_quantize:
   constraints:
     effective_bits: 3.25
   # Score at the operating point: every other expert layer at the IQ2_S candidate.
-  method_options: {context: 2}
+  method_options: {context_quant_level: 2}

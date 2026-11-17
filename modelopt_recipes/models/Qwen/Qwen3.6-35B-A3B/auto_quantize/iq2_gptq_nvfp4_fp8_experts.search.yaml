@@ -61,7 +61,7 @@ module_search_spaces:
 # Score each candidate's output KL with every other expert layer at IQ2_XXS: at these budgets a
 # layer's damage compounds with the others', which BF16-context scores underrate for late layers.
 auto_quantize_method: kl_div
-method_options: {context: lowest}
+method_options: {context_quant_level: lowest}
 # Once the formats are frozen, sequential GPTQ calibrates each layer on its quantized predecessors.
 finalize_algorithm:
   - method: gptq

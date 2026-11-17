@@ -641,10 +641,11 @@ quantization. The
 use this setup:
 
 - **Score KL in a low-bit context:** `auto_quantize_method: kl_div` with
-  `method_options: {context: lowest}`. Default scoring prices each layer with every other layer in
-  BF16. At 2 bits, that rates early layers ~30× more sensitive than late ones and starves the late
-  layers. A context scores every candidate with the other searched layers at their lowest-bit
-  format. At NVFP4/FP8 budgets, context scoring did not beat the default gradient scoring in our tests.
+  `method_options: {context_quant_level: lowest}`. Default scoring prices each layer with every
+  other layer in BF16. At 2 bits, that rates early layers ~30× more sensitive than late ones and
+  starves the late layers. A context scores every candidate with the other searched layers at their
+  lowest-bit format. At NVFP4/FP8 budgets, context scoring did not beat the default gradient
+  scoring in our tests.
 - **Finalize with sequential GPTQ:** calibrate the IQ candidates with local GPTQ + imatrix and set
   `finalize_algorithm` to sequential GPTQ + imatrix. That gives ~20% lower KL than imatrix alone.
 - **Search the MoE experts, and keep the other layers fixed.** On Nemotron 3.5 Bolt, also searching
