@@ -87,7 +87,9 @@ def get_cuda_ext_ggml(raise_if_failed: bool = False):
     ``iq1_s_pack(input, grid, scales, importance=None, choices=None, every_choice=False)``, the
     same for ``iq1_m_pack``, ``iq2_xs_pack``, ``iq2_xxs_pack`` and ``iq2_s_pack``, and
     ``q8_0_pack(input)``. Each IQ format also has ``<format>_unpack(payload, grid, dtype)``, and
-    ``search_choices(errors, hessian, groups, sweeps)`` runs the local-Hessian choice search.
+    ``search_choices(errors, hessian, groups, sweeps)`` runs the local-Hessian choice search, and
+    ``fit_scales(input, importance, group, top, levels, magnitudes)`` derives the IQ super-block
+    scales.
     """
     if not hasattr(get_cuda_ext_ggml, "extension") or (
         raise_if_failed and get_cuda_ext_ggml.extension is None
@@ -103,6 +105,7 @@ def get_cuda_ext_ggml(raise_if_failed: bool = False):
                 kernels_ggml / "iq1_m.cu",
                 kernels_ggml / "q8_0.cu",
                 kernels_ggml / "choice_search.cu",
+                kernels_ggml / "scale_fit.cu",
             ],
             cuda_version_specifiers=">=11.8",
             fail_msg="GGML IQ CUDA packing extension is unavailable.",

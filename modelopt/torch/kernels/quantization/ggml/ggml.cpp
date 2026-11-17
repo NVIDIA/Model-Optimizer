@@ -22,6 +22,10 @@
 
 #include "common.cuh"
 
+#include <pybind11/stl.h>
+
+#include <vector>
+
 at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
                            std::optional<at::Tensor> importance, std::optional<at::Tensor> choices,
                            bool every_choice);
@@ -40,6 +44,8 @@ at::Tensor iq1_m_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
 at::Tensor q8_0_pack_cuda(at::Tensor input);
 at::Tensor search_choices_cuda(at::Tensor errors, at::Tensor hessian, int64_t groups,
                                int64_t sweeps);
+at::Tensor fit_scales_cuda(at::Tensor input, std::optional<at::Tensor> importance, int64_t group,
+                           int64_t top, std::vector<double> levels, bool magnitudes);
 at::Tensor iq1_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
 at::Tensor iq1_m_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
 at::Tensor iq2_xxs_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
@@ -137,6 +143,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              "sweeps passes revisiting the groups in turn. Returns int64 [rows, groups].",
              pybind11::arg("errors"), pybind11::arg("hessian"), pybind11::arg("groups"),
              pybind11::arg("sweeps"));
+  module.def("fit_scales", &fit_scales_cuda,
+             "Each 256-value block's derived FP16 super-block scale: every group-value sub-block "
+             "is fit in weighted least squares by one scale times each ascending level triple, "
+             "over every split of its sorted values into three runs, and the block takes its "
+             "largest fit over top. Values are magnitudes when magnitudes is set. Element weights "
+             "are sqrt(mean(x^2) + x^2), times the root of an optional float32 importance "
+             "[blocks per row, 256] whose row i % rows weights flattened block i. Returns float16 "
+             "[numel / 256], bit-identical to the PyTorch reference.",
+             pybind11::arg("input"), pybind11::arg("importance"), pybind11::arg("group"),
+             pybind11::arg("top"), pybind11::arg("levels"), pybind11::arg("magnitudes"));
   module.def("q8_0_pack", &q8_0_pack,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
              "dimension is a multiple of 32. Returns uint8 [numel / 32, 34] on the input device. "

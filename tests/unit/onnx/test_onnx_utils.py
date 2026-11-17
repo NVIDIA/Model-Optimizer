@@ -858,6 +858,20 @@ def test_infer_types_falls_back_to_standalone_when_onnx_fails():
     assert output_types.get("out") == onnx.TensorProto.FLOAT
 
 
+def test_unset_input_dimension_keeps_its_rank():
+    value_info = make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 4, 3])
+    value_info.type.tensor_type.shape.dim[1].ClearField("dim_value")
+    graph = make_graph(
+        [make_node("Relu", ["X"], ["Y"], name="relu")],
+        "unset_dim",
+        [value_info],
+        [make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [1, 4, 3])],
+    )
+    model = make_model(graph, producer_name="modelopt test", opset_imports=[make_opsetid("", 17)])
+
+    assert onnx_utils.get_input_shapes(model)["X"] == [1, 1, 3]
+
+
 def test_get_shapes_keep_rank_for_unknown_dims():
     # A dim with neither dim_value nor dim_param is valid ONNX and must still count as a dim.
     tensor = make_tensor_value_info("t", onnx.TensorProto.FLOAT, ["batch", None, 8, -1])
