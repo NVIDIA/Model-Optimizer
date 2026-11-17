@@ -45,6 +45,73 @@ def _native_scale_kernels(tensor):
     return repair
 
 
+def _packed_projection_qualified(inputs, name, shape):
+    # GB300 forward/backward qualification: packed IQ is ~1.5x faster and
+    # saves 31-36 MiB here. At 32K tokens, materialized GEMM is 15-80x faster.
+    return (
+        inputs.is_cuda
+        and inputs.dtype == torch.bfloat16
+        and name in ("iq1_m", "iq2_xxs")
+        and tuple(shape) == (2048, 4096)
+        and 0 < inputs.numel() // shape[-1] <= 8
+        and torch.cuda.get_device_capability(inputs.device) == (10, 3)
+    )
+
+
+def repair_linear(quantizer, inputs, bias=None):
+    """Try the prepared representation without bypassing quantizer post-transforms."""
+    state = getattr(quantizer, "_local_repair_state", None)
+    if not isinstance(state, IQScaleState) or getattr(quantizer, "rotate_back_is_enabled", False):
+        return None
+    return state.linear(inputs, bias)
+
+
+def repair_grouped_linear(quantizers, inputs, offsets, bias=None, *, is_transposed=False):
+    """Try compatible native expert banks; heterogeneous/frozen banks keep their forward."""
+    from torch.distributed.tensor import DTensor
+
+    states: list[IQScaleState] = []
+    for quantizer in quantizers:
+        state = getattr(quantizer, "_local_repair_state", None)
+        if not isinstance(state, IQScaleState):
+            return None
+        states.append(state)
+    if is_transposed or isinstance(inputs, DTensor) or len(states) != 4:
+        return None
+    first = states[0]
+    if not _packed_projection_qualified(inputs, first.name, first.weight_shape) or any(
+        state.name != first.name
+        or state.weight_shape != first.weight_shape
+        or getattr(q, "rotate_back_is_enabled", False)
+        for state, q in zip(states, quantizers, strict=True)
+    ):
+        return None
+    from modelopt.torch.kernels.quantization.iq_grouped_gemm import iq_grouped_linear
+
+    packed = [state.packed for state in states]
+    key = tuple((p.data_ptr(), p._version) for p in packed)
+    cached = getattr(first, "_grouped_pointers", None)
+    if cached is None or cached[0] != key:
+        pointers = torch.tensor(
+            [p.data_ptr() for p in packed], device=inputs.device, dtype=torch.int64
+        )
+        # One immutable pointer table per owning representation, never projected fields/weights.
+        first._grouped_pointers = key, pointers
+    else:
+        pointers = cached[1]
+    first.projection_counts["packed_grouped"] = first.projection_counts.get("packed_grouped", 0) + 1
+    return iq_grouped_linear(
+        inputs,
+        packed,
+        torch.stack([state.projected_steps() for state in states]),
+        offsets,
+        first.name,
+        first.weight_shape,
+        bias,
+        packed_pointers=pointers,
+    )
+
+
 class IQScaleState(nn.Module):
     """FP32 log-scale masters projected onto legal native FP16/integer fields."""
 
@@ -55,6 +122,7 @@ class IQScaleState(nn.Module):
         self.format = IQ_FORMAT_REGISTRY[self.name]
         self.weight_shape = tuple(weight_shape)
         self.field_prefix = field_prefix
+        self.projection_counts = {}
         packed = (
             self.format.pack(processed_weight, quantizer)
             .detach()
@@ -109,6 +177,7 @@ class IQScaleState(nn.Module):
 
     def forward(self, inputs):
         """Decode only this replay's weight and release its expanded levels afterward."""
+        self.projection_counts["materialized"] = self.projection_counts.get("materialized", 0) + 1
         kernels = _native_scale_kernels(inputs)
         if kernels is not None and self.name not in kernels.SUPPORTED_FORMATS:
             kernels = None
@@ -124,6 +193,21 @@ class IQScaleState(nn.Module):
             -1, steps.shape[-1], self.format.int8_group_size
         ).float() * steps.unsqueeze(-1)
         return values.reshape(inputs.shape).to(inputs.dtype)
+
+    def linear(self, inputs, bias=None):
+        """Use packed GEMM only in a numerically and empirically qualified regime."""
+        from torch.distributed.tensor import DTensor
+
+        if isinstance(inputs, DTensor) or not _packed_projection_qualified(
+            inputs, self.name, self.weight_shape
+        ):
+            return None
+        from modelopt.torch.kernels.quantization.iq_gemm import iq_linear
+
+        self.projection_counts["packed_dense"] = self.projection_counts.get("packed_dense", 0) + 1
+        return iq_linear(
+            inputs, self.packed, self.projected_steps(), self.name, self.weight_shape, bias
+        )
 
     @torch.no_grad()
     def project_(self):

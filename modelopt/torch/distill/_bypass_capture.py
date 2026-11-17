@@ -177,18 +177,28 @@ def mse_statistics(prediction, target, valid_mask=None):
     """FP32 squared error sum and the exact count of valid feature elements."""
     if prediction.shape != target.shape:
         raise ValueError("Student and teacher boundary output shapes differ")
-    difference = prediction.float() - target.float()
-    if valid_mask is None:
-        return difference.square().sum(), target.new_tensor(target.numel(), dtype=torch.int64)
-    if valid_mask.ndim >= target.ndim or tuple(valid_mask.shape) != tuple(
-        target.shape[: valid_mask.ndim]
+    if valid_mask is not None and (
+        valid_mask.ndim >= target.ndim
+        or tuple(valid_mask.shape) != tuple(target.shape[: valid_mask.ndim])
     ):
         raise ValueError("Valid-token masks must match the boundary's token dimensions")
-    features = math.prod(target.shape[valid_mask.ndim :])
-    mask = valid_mask.to(device=target.device, dtype=torch.bool).reshape(
-        *valid_mask.shape, *((1,) * (target.ndim - valid_mask.ndim))
+    features = 1 if valid_mask is None else math.prod(target.shape[valid_mask.ndim :])
+    mask = None if valid_mask is None else valid_mask.to(device=target.device, dtype=torch.bool)
+    count = (
+        target.new_tensor(target.numel(), dtype=torch.int64)
+        if mask is None
+        else mask.sum(dtype=torch.int64) * features
     )
-    return torch.where(mask, difference, 0).square().sum(), mask.sum(dtype=torch.int64) * features
+    from modelopt.torch.quantization.repair_formats import _native_scale_kernels
+
+    kernels = _native_scale_kernels(prediction)
+    if kernels is not None:
+        return kernels.masked_mse_sum(prediction, target, mask, features), count
+    difference = prediction.float() - target.float()
+    if mask is not None:
+        mask = mask.reshape(*mask.shape, *((1,) * (target.ndim - mask.ndim)))
+        difference = torch.where(mask, difference, 0)
+    return difference.square().sum(), count
 
 
 class ModuleBypassAdapter:

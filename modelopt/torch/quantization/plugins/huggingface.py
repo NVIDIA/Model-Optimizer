@@ -1009,20 +1009,20 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             if self._down_proj_linear:
                 idx = self._current_expert_idx
                 input = self.down_proj_input_quantizer(input)
-                weight = self._quantized_weight(
-                    "down_proj", self.down_proj_weight_quantizers, idx, input.dtype
-                )
+                name, quantizers = "down_proj", self.down_proj_weight_quantizers
             else:
                 idx = self._get_expert_idx_from_first_proj(weight)
                 self._current_expert_idx = idx
                 input = first_input_q(input)
-                weight = self._quantized_weight(
-                    self._first_proj_attr,
-                    first_weight_qs,
-                    idx,
-                    input.dtype,
-                )
+                name, quantizers = self._first_proj_attr, first_weight_qs
             self._down_proj_linear = not self._down_proj_linear
+            if getattr(quantizers[idx], "_local_repair_active", False):
+                from ..repair_formats import repair_linear
+
+                output = repair_linear(quantizers[idx], input, bias)
+                if output is not None:
+                    return output
+            weight = self._quantized_weight(name, quantizers, idx, input.dtype)
             return _orig_linear(input, weight, bias)
 
         replacements: list[tuple] = [(torch.nn.functional, "linear", _quantized_linear)]
@@ -1058,8 +1058,16 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                     self.down_proj_input_quantizer if self._down_proj_linear else first_input_q
                 )
                 input = self._quantize_grouped_input(input, offs, input_quantizer)
-                weight = self._quantize_grouped_weight(weight, quantizers)
                 self._down_proj_linear = not self._down_proj_linear
+                if any(getattr(q, "_local_repair_active", False) for q in quantizers):
+                    from ..repair_formats import repair_grouped_linear
+
+                    output = repair_grouped_linear(
+                        quantizers, input, offs, bias, is_transposed=is_transposed
+                    )
+                    if output is not None:
+                        return output
+                weight = self._quantize_grouped_weight(weight, quantizers)
                 return _orig_grouped_linear(
                     input, weight, offs, bias=bias, is_transposed=is_transposed
                 )
