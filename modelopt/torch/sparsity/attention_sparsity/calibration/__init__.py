@@ -17,10 +17,56 @@
 
 from .calibrate import calibrate_sparse_attention
 from .calibrator import DynamicThresholdCalibrator
+from .checkpoint_manifest import (
+    CHECKPOINT_MANIFEST_NAME,
+    CheckpointManifestError,
+    StableFileSnapshot,
+    VerifiedCheckpointManifest,
+    create_checkpoint_manifest,
+    read_stable_file_snapshot,
+    stable_file_sha256,
+    verify_checkpoint_manifest,
+)
+from .mask_reuse import (
+    AnchorLayerStats,
+    MaskReuseCalibrationError,
+    canonical_prefill_threshold_scale_factor,
+)
+from .mask_reuse_compact import (
+    CompactMaskReuseCapture,
+    CompactMaskReuseCaptureSource,
+    calibrate_compact_mask_reuse_policy,
+    load_compact_mask_reuse_captures,
+)
+from .mask_reuse_solver import (
+    MaskReuseAllocationPause,
+    MaskReuseSolverConfig,
+    MaskReuseSolverError,
+    MaskReuseSolverFailure,
+)
 from .ruler_dataset import RulerDatasetBuilder
 
 __all__ = [
+    "CHECKPOINT_MANIFEST_NAME",
+    "AnchorLayerStats",
+    "CheckpointManifestError",
+    "CompactMaskReuseCapture",
+    "CompactMaskReuseCaptureSource",
     "DynamicThresholdCalibrator",
+    "MaskReuseAllocationPause",
+    "MaskReuseCalibrationError",
+    "MaskReuseSolverConfig",
+    "MaskReuseSolverError",
+    "MaskReuseSolverFailure",
     "RulerDatasetBuilder",
+    "StableFileSnapshot",
+    "VerifiedCheckpointManifest",
+    "calibrate_compact_mask_reuse_policy",
     "calibrate_sparse_attention",
+    "canonical_prefill_threshold_scale_factor",
+    "create_checkpoint_manifest",
+    "load_compact_mask_reuse_captures",
+    "read_stable_file_snapshot",
+    "stable_file_sha256",
+    "verify_checkpoint_manifest",
 ]

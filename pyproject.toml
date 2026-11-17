@@ -51,6 +51,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mask-reuse = [
+    "highspy>=1.15.1,<2", # MIT; exact offline mask-reuse selection
+]
 onnx = [
     "cppimport",
     "lief",
@@ -130,6 +133,7 @@ dev-test = [
     "pytest-xdist~=3.8.0",
     "uv",
     # test-specific dependencies
+    "nvidia-modelopt[mask-reuse]",
     "psutil", # tools/resource_monitor.py sidecar (tests/unit/tools)
     "timm",
     "torchprofile==0.0.4", # optional dependency for modelopt.torch
