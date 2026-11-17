@@ -14,16 +14,24 @@
 # limitations under the License.
 
 import copy
+from functools import partial
 
 import pytest
 import yaml
 from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
-from megatron.bridge.utils.instantiate_utils import instantiate
+from megatron.bridge.utils.instantiate_utils import instantiate, register_allowed_target_prefix
 from megatron.bridge.utils.yaml_utils import dump_dataclass_to_yaml
+from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_stack_spec
 from megatron.core.transformer.enums import AttnMaskType
+from megatron.core.transformer.identity_op import IdentityOp
+from megatron.core.transformer.moe.moe_layer import MoELayer
+from megatron.core.transformer.spec_utils import get_submodules
 
 from modelopt.torch.utils.plugins.mbridge import set_moe_expert_layout
+from modelopt.torch.utils.plugins.megatron_layer_specs import hybrid_stack_spec_sequential_mlp
+
+register_allowed_target_prefix(f"{__name__}.")
 
 
 def _round_trip(value):
@@ -47,8 +55,9 @@ def _round_trip(value):
         ),
     ],
 )
+@pytest.mark.parametrize("stack_spec", [None, hybrid_stack_spec], ids=["default", "generic-spec"])
 def test_set_moe_expert_layout_survives_run_config_round_trip(
-    moe_grouped_gemm, expected_experts, expected_target
+    moe_grouped_gemm, expected_experts, expected_target, stack_spec
 ):
     """A provider's stack spec must still build real submodules after a run_config round trip.
 
@@ -56,6 +65,7 @@ def test_set_moe_expert_layout_survives_run_config_round_trip(
     ``run_config.yaml``, so ``set_moe_expert_layout`` stores a factory function instead.
     """
     provider = HybridModelProvider(num_layers=2, hidden_size=64, num_attention_heads=4)
+    provider.hybrid_stack_spec = stack_spec
     set_moe_expert_layout(provider, moe_grouped_gemm=moe_grouped_gemm)
     assert provider.moe_grouped_gemm == moe_grouped_gemm
 
@@ -78,26 +88,103 @@ def test_set_moe_expert_layout_survives_run_config_round_trip(
     assert getattr(moe.experts, "func", moe.experts).__name__ == expected_experts
 
 
-def _custom_hybrid_stack_spec():
+class CustomMoELayer(MoELayer):
+    """A model-specific MoE implementation that layout selection must preserve."""
+
+
+def custom_hybrid_stack_spec():
     spec = copy.deepcopy(hybrid_stack_spec)
     spec.submodules.attention_layer.submodules.self_attention.params["attn_mask_type"] = (
         AttnMaskType.padding
     )
+    mlp = spec.submodules.moe_layer.submodules.mlp
+    spec.submodules.moe_layer.submodules.mlp = partial(CustomMoELayer, **mlp.keywords)
+    shared = get_submodules(spec.submodules.moe_layer.submodules.mlp).shared_experts
+    shared.keywords["name"] = "custom_shared_experts"
     return spec
 
 
-def test_custom_hybrid_stack_survives_layout_changes_and_run_config_round_trip():
+def config_custom_hybrid_stack_spec(config):
+    assert isinstance(config, HybridModelProvider)
+    return custom_hybrid_stack_spec()
+
+
+def dense_custom_hybrid_stack_spec():
+    spec = custom_hybrid_stack_spec()
+    spec.submodules.moe_layer = IdentityOp
+    return spec
+
+
+def local_custom_hybrid_stack_spec():
+    spec = custom_hybrid_stack_spec()
+    get_submodules(spec.submodules.moe_layer.submodules.mlp).experts = get_submodules(
+        get_moe_module_spec(use_te=False, num_experts=8, moe_grouped_gemm=False)
+    ).experts
+    return spec
+
+
+@pytest.mark.parametrize(
+    ("stack_spec_factory", "binding"),
+    [
+        (custom_hybrid_stack_spec, "plain"),
+        (config_custom_hybrid_stack_spec, "plain"),
+        (custom_hybrid_stack_spec, "positional"),
+        (custom_hybrid_stack_spec, "keyword"),
+        (dense_custom_hybrid_stack_spec, "plain"),
+        (local_custom_hybrid_stack_spec, "plain"),
+    ],
+)
+def test_custom_hybrid_stack_survives_layout_changes_and_run_config_round_trip(
+    stack_spec_factory, binding
+):
     provider = HybridModelProvider(num_layers=2, hidden_size=64, num_attention_heads=4)
-    provider.hybrid_stack_spec = _custom_hybrid_stack_spec
-    original = _custom_hybrid_stack_spec()
+    provider.hybrid_stack_spec = stack_spec_factory
+    original = provider._resolve_hybrid_stack_spec()
+    if binding == "positional":
+        provider.hybrid_stack_spec = partial(hybrid_stack_spec_sequential_mlp, stack_spec_factory)
+    elif binding == "keyword":
+        provider.hybrid_stack_spec = partial(
+            hybrid_stack_spec_sequential_mlp, stack_spec_factory=stack_spec_factory
+        )
+
     for grouped in (False, False, True, False):
         set_moe_expert_layout(provider, moe_grouped_gemm=grouped)
-        _, factory = _round_trip(provider.hybrid_stack_spec)
+        target, factory = _round_trip(provider.hybrid_stack_spec)
+        if not grouped:
+            assert target == (
+                "modelopt.torch.utils.plugins.megatron_layer_specs.hybrid_stack_spec_sequential_mlp"
+            )
         provider.hybrid_stack_spec = factory
         spec = provider._resolve_hybrid_stack_spec()
+        assert provider.moe_grouped_gemm == grouped
         assert spec.submodules.mamba_layer == original.submodules.mamba_layer
         assert spec.submodules.attention_layer == original.submodules.attention_layer
-        moe = spec.submodules.moe_layer.submodules.mlp.keywords["submodules"]
-        assert getattr(moe.experts, "func", moe.experts).__name__ == (
-            "TEGroupedMLP" if grouped else "SequentialMLP"
-        )
+        if original.submodules.moe_layer is IdentityOp:
+            assert spec.submodules.moe_layer is IdentityOp
+            continue
+
+        mlp = spec.submodules.moe_layer.submodules.mlp
+        moe = get_submodules(mlp)
+        original_moe = get_submodules(original.submodules.moe_layer.submodules.mlp)
+        assert mlp.func is CustomMoELayer
+        assert moe.shared_experts.func is original_moe.shared_experts.func
+        assert moe.shared_experts.keywords == original_moe.shared_experts.keywords
+        assert moe.router is original_moe.router
+        if stack_spec_factory is local_custom_hybrid_stack_spec:
+            assert moe.experts.func is original_moe.experts.func
+            assert moe.experts.keywords == original_moe.experts.keywords
+        else:
+            assert getattr(moe.experts, "func", moe.experts).__name__ == (
+                "TEGroupedMLP" if grouped else "SequentialMLP"
+            )
+
+
+def test_custom_hybrid_stack_object_requires_a_factory():
+    provider = HybridModelProvider(num_layers=2, hidden_size=64, num_attention_heads=4)
+    provider.hybrid_stack_spec = custom_hybrid_stack_spec()
+    original = provider.hybrid_stack_spec
+    original_grouped = provider.moe_grouped_gemm
+    with pytest.raises(ValueError):
+        set_moe_expert_layout(provider, moe_grouped_gemm=False)
+    assert provider.hybrid_stack_spec is original
+    assert provider.moe_grouped_gemm == original_grouped

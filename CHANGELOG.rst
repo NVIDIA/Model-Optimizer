@@ -108,6 +108,7 @@ Changelog
 
 **Bug Fixes**
 
+- Preserve model-specific hybrid stack components when selecting the MoE expert layout in Megatron-Bridge.
 - Fix gradients propagated between TTT steps being multiplied by the tensor-parallel size in Megatron EAGLE training with ``use_aux_hidden_state=False`` and ``sequence_parallel=True``. This also corrects runs with hidden-state mixing disabled; reported losses are unchanged.
 - Fix gradient accumulation averaging for Hugging Face EAGLE, Medusa and external draft training. Logged loss and gradient norms now use the corrected scale.
 - Fix EAGLE3 training to normalize raw draft hidden states independently of token embeddings, matching the exported architecture. Re-train drafts trained before this fix if acceptance rate is lower than expected.
