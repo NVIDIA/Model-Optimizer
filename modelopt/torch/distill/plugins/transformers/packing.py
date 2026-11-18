@@ -19,7 +19,7 @@ from itertools import pairwise
 
 import torch
 
-__all__ = ["batch_documents", "document_batches"]
+__all__ = ["batch_documents", "document_batches", "empty_document_batch"]
 
 
 def batch_documents(documents, token_budget, *, max_documents=8):
@@ -151,3 +151,14 @@ def document_batches(batch):
             document.setdefault("valid_mask", document["_packed_seq_ids"].bool())
             result.append(document)
     return result
+
+
+def empty_document_batch(batch):
+    """Execute a zero-valid token when another distributed rank has more documents."""
+    tokens = batch["input_ids"][:1, :1]
+    return {
+        "input_ids": tokens,
+        "position_ids": torch.zeros_like(tokens),
+        "_packed_seq_ids": torch.ones_like(tokens),
+        "valid_mask": torch.zeros_like(tokens, dtype=torch.bool),
+    }
