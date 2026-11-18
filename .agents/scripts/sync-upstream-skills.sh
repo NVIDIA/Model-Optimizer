@@ -26,14 +26,14 @@
 #
 # Requires: gh, base64, awk. Run from the repo root.
 #
-# The script overwrites plugins/modelopt/skills/<skill>/ through the
+# The script overwrites skills/<skill>/ through the
 # .agents/skills compatibility symlink and
 # re-applies our provenance lines into each SKILL.md frontmatter. If you have
 # local changes to a vendored skill, they will be lost — that is expected,
 # since vendored-verbatim skills should not be modified locally.
 #
 # Note: .claude/skills/ (and other agent-specific skill dirs) are symlinks to
-# plugins/modelopt/skills/ — see .agents/README.md.
+# root skills/ — see .agents/README.md.
 
 set -euo pipefail
 
@@ -85,7 +85,9 @@ fetch_skill_recursive() {
         fi
 
         if [[ "$type" == "file" ]]; then
-            local dst="$DEST_BASE/$skill/$rel_path"
+            local local_path="$rel_path"
+            [[ "$local_path" == "tests.json" ]] && local_path="evals/evals.json"
+            local dst="$DEST_BASE/modelopt-$skill/$local_path"
             echo "  fetch: $dst"
             fetch_file "$UPSTREAM_BASE/$skill/$rel_path" "$dst"
         elif [[ "$type" == "dir" ]]; then
@@ -99,7 +101,7 @@ fetch_skill_recursive() {
 inject_provenance() {
     local skill="$1"
     local extra_note="${2:-}"
-    local path="$DEST_BASE/$skill/SKILL.md"
+    local path="$DEST_BASE/modelopt-$skill/SKILL.md"
 
     awk -v sha="$SHA" -v short="$SHORT_SHA" -v skill="$skill" -v extra="$extra_note" '
         BEGIN { in_fm = 0; injected = 0; fm_end_seen = 0 }
@@ -111,6 +113,7 @@ inject_provenance() {
         /^# Note: this skill depends on the mlflow-mcp/ && in_fm && !fm_end_seen { next }
         /^# configured in the user/ && in_fm && !fm_end_seen { next }
         {
+            if (in_fm && !fm_end_seen && $0 ~ /^name: /) $0 = "name: modelopt-" skill
             print
             if ($0 == "---") {
                 if (in_fm == 0) { in_fm = 1 }
@@ -135,8 +138,11 @@ inject_provenance() {
 for skill in launching-evals accessing-mlflow; do
     echo ""
     echo "== $skill =="
-    rm -rf "${DEST_BASE:?}/$skill"
+    rm -rf "${DEST_BASE:?}/modelopt-$skill"
     fetch_skill_recursive "$skill"
+    if [[ -f "$DEST_BASE/modelopt-$skill/evals/evals.json" ]]; then
+        ln -s evals/evals.json "$DEST_BASE/modelopt-$skill/tests.json"
+    fi
 
     case "$skill" in
         accessing-mlflow)
@@ -150,5 +156,5 @@ for skill in launching-evals accessing-mlflow; do
 done
 
 echo ""
-echo "Done. Review with: git diff $DEST_BASE/launching-evals $DEST_BASE/accessing-mlflow"
+echo "Done. Review with: git diff $DEST_BASE/modelopt-launching-evals $DEST_BASE/modelopt-accessing-mlflow"
 echo "If the SHA changed, update DEFAULT_SHA at the top of this script before committing."

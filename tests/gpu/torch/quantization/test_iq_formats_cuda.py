@@ -36,6 +36,7 @@ from modelopt.torch.quantization.ggml import (
     IQ2_XS_BLOCK_BYTES,
     IQ2_XXS_BLOCK_BYTES,
     IQ_FORMAT_REGISTRY,
+    common,
 )
 
 # module, packer name, per-block payload size
@@ -212,6 +213,30 @@ def test_cuda_float64_matches_pytorch_encoder(monkeypatch, name):
     monkeypatch.setattr(module, "get_cuda_ext_ggml", lambda: None)
     reference, _ = getattr(module, f"quantize_{name}")(weight)
     assert torch.equal(reference, packed)
+
+
+@pytest.mark.parametrize("statistic", [None, 1.0, 2.0**118], ids=["unweighted", "weighted", "huge"])
+@pytest.mark.parametrize("name", sorted(FORMATS))
+def test_cuda_scale_fit_matches_pytorch_reference(monkeypatch, name, statistic):
+    """The derived super-block scales are bit-identical to the reference at scale, ties included."""
+    fmt = IQ_FORMAT_REGISTRY[name]
+    generator = torch.Generator(device="cuda").manual_seed(11)
+    # Cubed normals are heavy-tailed, and BF16 rounding leaves many tied values per sub-block.
+    weight = torch.randn((64, 4096), generator=generator, device="cuda").pow(3).bfloat16()
+    weight[0, :256] = 0.0
+    weight[1, :64] = -0.0
+    weight[2, :3] = torch.tensor([float("nan"), float("inf"), float("-inf")])
+    weight[3, 5] = 3.0e38  # squares overflow unless the block is scaled first
+    moments = torch.rand(4096, generator=generator, device="cuda").mul(6).exp()
+    if statistic is not None:  # 2**118: finite, but the weighted sums overflow unless scaled
+        moments = moments * statistic
+    columns = common.importance_blocks(moments if statistic else None, weight, name.upper())
+    blocks = weight.reshape(-1, 256)
+
+    scales = common._derived_scales(fmt, blocks, columns)
+    monkeypatch.setattr(common, "get_cuda_ext_ggml", lambda: None)
+    assert scales.dtype == torch.float16
+    assert torch.equal(scales, common._derived_scales(fmt, blocks, columns))
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16, torch.float64])

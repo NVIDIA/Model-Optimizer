@@ -37,6 +37,7 @@ FIRST_IMPORTS = [
     "modelopt.torch.models.nemotron_h.modeling_ptq",
     "modelopt.torch.models.step3p5.modeling_ptq",
     "modelopt.torch.models.step3p7.modeling_ptq",
+    "modelopt.torch.models.t5.modeling_ptq",
     "modelopt.torch.quantization",
     "modelopt.torch.export",
 ]
@@ -51,9 +52,14 @@ importlib.import_module(sys.argv[1])
 from modelopt.torch.models.falcon.modeling_ptq import register_falcon_linears_on_the_fly
 from modelopt.torch.models.nemotron_h.modeling_ptq import is_nemotron_h_model
 from modelopt.torch.models.step3p5.modeling_ptq import register_moe_linear_on_the_fly
+from modelopt.torch.models.t5.modeling_ptq import _T5QuantAttention
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.custom import CUSTOM_MODEL_PLUGINS
-from modelopt.torch.quantization.plugins.huggingface import is_homogeneous_hf_model
+from modelopt.torch.quantization.plugins.huggingface import (
+    _QUANT_ATTENTION_WRAPPERS,
+    _QuantAttention,
+    is_homogeneous_hf_model,
+)
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 try:
@@ -85,6 +91,10 @@ else:
 
 assert register_falcon_linears_on_the_fly in CUSTOM_MODEL_PLUGINS, "Falcon callback missing"
 assert register_moe_linear_on_the_fly in CUSTOM_MODEL_PLUGINS, "Step callback missing"
+
+# The attention-interface wrapper is tried first; T5's gets only the classes it rejects.
+assert _QUANT_ATTENTION_WRAPPERS.count(_T5QuantAttention) == 1, _QUANT_ATTENTION_WRAPPERS
+assert _QUANT_ATTENTION_WRAPPERS[0] is _QuantAttention, _QUANT_ATTENTION_WRAPPERS
 
 # The first matching decoder discoverer wins, so Nemotron-H's must precede the generic one.
 predicates = [is_supported for is_supported, _ in LayerActivationCollector._decoder_layer_support]

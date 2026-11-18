@@ -14,8 +14,8 @@
 # limitations under the License.
 
 # QuantizeConfig preset for IQ2_XXS weight-only quantization of MoE routed experts only, calibrated
-# with imatrix, which weights each expert's search by the inputs routed to it, collected in a
-# single forward pass.
+# with local_hessian, which picks each group's local scale by the layer-output error under the
+# Hessian of the inputs routed to each expert, collected in a single forward pass.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
@@ -24,7 +24,7 @@ imports:
   iq2_xxs: configs/numerics/iq2_xxs
 
 algorithm:
-  method: imatrix
+  method: local_hessian
 quant_cfg:
   - $import: base_disable_all
   - quantizer_name: '*.experts.*weight_quantizer'

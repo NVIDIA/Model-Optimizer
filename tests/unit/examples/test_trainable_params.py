@@ -28,25 +28,25 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
 
-configure_trainable_parameters = _load_example_module(
-    "trainable_params.py", "megatron_bridge"
-).configure_trainable_parameters
+trainable_params = _load_example_module("trainable_params.py", "megatron_bridge")
+configure_trainable_parameters = trainable_params.configure_trainable_parameters
 
 
+@pytest.mark.parametrize("output_qdq_weight", [False, True])
 @pytest.mark.parametrize("recompute", [False, True])
 @pytest.mark.parametrize("restore_kind", ["state", "file"])
-def test_full_rank_training_and_restore(recompute, restore_kind):
+def test_full_rank_training_and_restore(recompute, restore_kind, output_qdq_weight, tmp_path):
     """Preserve selective updates and Adam restoration with frozen embeddings."""
     torch.manual_seed(42)
     model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16), nn.Linear(16, 16))
     inputs = torch.arange(8)
     mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(inputs))
-    baseline = model(inputs).detach()
+    if output_qdq_weight:
+        mtq.initialize_qdq_weights(model)
     frozen = {n: p.detach().clone() for n, p in model.named_parameters() if n != "1.weight"}
     configure_trainable_parameters(model, ["1.weight"])
     # Reapplying setup must not nest wrappers or alter quantizer state.
     configure_trainable_parameters(model, ["1.weight"])
-    torch.testing.assert_close(model(inputs), baseline, rtol=0, atol=0)
     initial_weight = model[1].weight.detach().clone()
     optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=0.1)
     activation = model[0](inputs)

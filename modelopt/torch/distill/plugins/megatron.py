@@ -17,6 +17,7 @@
 
 """Distillation loss function(s)."""
 
+import copy
 import logging
 import re
 import warnings
@@ -32,6 +33,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 from megatron.core import parallel_state
+from megatron.core.models.gpt import GPTModel
 from megatron.core.pipeline_parallel.schedules import get_tensor_shapes
 from megatron.core.transformer import MegatronModule, TransformerLayer
 from megatron.core.utils import get_model_config
@@ -76,6 +78,10 @@ class DistillationConfig:
             it and ``False`` keeps it training. ``None`` (default) freezes it only when
             ``kd_loss_alpha == 1.0`` and the student is quantized except for its MTP head, since
             there is then no quantization error for the MTP loss to recover.
+        skip_frozen_mtp: Skip the frozen MTP head (its layers and its extra output-layer pass) in the
+            student's and teacher's training forwards; evaluation still runs it and its weights are
+            kept. Needs the student's MTP head frozen (see ``freeze_mtp``), a GPTModel and no pipeline
+            parallelism. The gradients lose only what the MTP layers add through MoE auxiliary losses.
     """
 
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)
@@ -88,6 +94,7 @@ class DistillationConfig:
     freeze_mtp: bool | None = None
     criterion: Criterion | None = None
     loss_balancer: mtd.DistillationLossBalancer | None = None
+    skip_frozen_mtp: bool = False
 
     def __new__(cls, *args, **kwargs):
         """Reject removed fields with a migration hint before the dataclass ``__init__`` runs.
@@ -121,6 +128,9 @@ class DistillationConfig:
             assert self.logit_kl_topk is not None, "logit_kl_top_p requires logit_kl_topk"
             assert 0 < self.logit_kl_top_p <= 1, f"{self.logit_kl_top_p=}"
         assert self.logit_kl_top_p_min_k >= 1, f"{self.logit_kl_top_p_min_k=}"
+        assert not (self.skip_frozen_mtp and self.freeze_mtp is False), (
+            "skip_frozen_mtp skips the MTP head, which freeze_mtp=False keeps training."
+        )
 
     @staticmethod
     def parse_intermediate_entry(entry: tuple[str, ...]) -> tuple[str, str, Callable]:
@@ -758,18 +768,50 @@ def _has_quantized_backbone_with_unquantized_mtp(model: nn.Module) -> bool:
     return has_mtp and backbone_quantized and not mtp_quantized
 
 
+def _mtp_models_to_skip(
+    model: mtd.DistillationModel, distill_cfg: DistillationConfig, mtp_frozen: bool
+) -> list[GPTModel]:
+    """Return the student and teacher whose MTP head ``skip_frozen_mtp`` skips; raise where it can't."""
+    if parallel_state.get_pipeline_model_parallel_world_size() > 1:
+        # The last stage's embedding copy is used only by MTP there: skipped, it gets no gradient.
+        raise ValueError("skip_frozen_mtp does not support pipeline parallelism.")
+    # The criterion holds every KD pair, however they were given; it is unset only without setup.
+    pairs = distill_cfg.criterion or [pair[:2] for pair in distill_cfg.intermediate_layer_pairs]
+    if any("mtp" in name.split(".") for pair in pairs for name in pair):
+        raise ValueError("skip_frozen_mtp skips the MTP heads, which a KD loss reads.")
+    models = []
+    for module in (model, model.teacher_model):
+        with model.hide_teacher_model(enable=module is model):
+            mtp = [m for name, m in module.named_modules() if "mtp" in name.split(".")]
+        if not mtp:
+            continue
+        if module is model and not mtp_frozen:
+            raise ValueError(
+                "skip_frozen_mtp needs the student's MTP head frozen (freeze_mtp=True)."
+            )
+        # Megatron resets a training router's micro-batch quantile-balancing bias when it saw no tokens.
+        if module is model and any(getattr(m, "qb_beta_accum", None) is not None for m in mtp):
+            raise ValueError(
+                "skip_frozen_mtp would reset the MTP routers' quantile-balancing bias (qb_beta)."
+            )
+        if not isinstance(module, GPTModel):
+            raise NotImplementedError(
+                f"skip_frozen_mtp supports GPTModel, not {type(module).__name__}."
+            )
+        if getattr(module.config, "cuda_graph_impl", "none") != "none" or getattr(
+            module.config, "overlap_moe_expert_parallel_comm", False
+        ):
+            raise ValueError(
+                "skip_frozen_mtp does not support CUDA graphs or overlap_moe_expert_parallel_comm."
+            )
+        models.append(module)
+    return models
+
+
 def adjust_distillation_model_for_mcore(
     model: mtd.DistillationModel, distill_cfg: DistillationConfig
 ):
     """Extra modifications to ``mtd.DistillationModel`` required for Megatron-Core."""
-
-    # Hide teacher during `sharded_state_dict` method.
-    def _sharded_state_dict(self, *args, **kwargs) -> "ShardedStateDict":
-        with self.hide_teacher_model():
-            return type(self).sharded_state_dict(self, *args, **kwargs)
-
-    model.sharded_state_dict = MethodType(_sharded_state_dict, model)
-
     # Skip `lm_loss` bypassing it when training if not needed for backprop.
     # Uses a per-forward call counter so that MTP head calls (which always precede the
     # main LM head call in _postprocess) still receive real CE loss even when
@@ -783,6 +825,20 @@ def adjust_distillation_model_for_mcore(
             skip_mtp_loss = skip_lm_loss and _has_quantized_backbone_with_unquantized_mtp(model)
     else:
         skip_mtp_loss = distill_cfg.freeze_mtp
+    # Checked before anything is patched or frozen, so that a refusal leaves the model as it was.
+    skipped_mtp_models = (
+        _mtp_models_to_skip(model, distill_cfg, skip_mtp_loss)
+        if distill_cfg.skip_frozen_mtp
+        else []
+    )
+
+    # Hide teacher during `sharded_state_dict` method.
+    def _sharded_state_dict(self, *args, **kwargs) -> "ShardedStateDict":
+        with self.hide_teacher_model():
+            return type(self).sharded_state_dict(self, *args, **kwargs)
+
+    model.sharded_state_dict = MethodType(_sharded_state_dict, model)
+
     if skip_mtp_loss:
         # Freeze the untrained MTP head: DDP's overlapped grad reduce asserts on params with no grad.
         num_frozen = 0
@@ -816,6 +872,28 @@ def adjust_distillation_model_for_mcore(
     model.teacher_model.compute_language_model_loss = MethodType(
         _compute_teacher_lm_loss, model.teacher_model
     )
+
+    def _postprocess_without_mtp(self, *args, **kwargs):
+        if not model.training:  # follow the DistillationModel: the teacher always runs in eval()
+            return type(self)._postprocess(self, *args, **kwargs)
+        # Hide `mtp_num_layers`, which runs the MTP loss, from this call only: the config is shared
+        # by all submodules, and Megatron-Bridge mirrors writes to the student's onto the teacher's.
+        config = self.config
+        self.config = copy.copy(config)
+        object.__setattr__(self.config, "mtp_num_layers", None)
+        try:
+            return type(self)._postprocess(self, *args, **{**kwargs, "mtp_in_postprocess": False})
+        finally:
+            self.config = config
+
+    for module in skipped_mtp_models:
+        module._postprocess = MethodType(_postprocess_without_mtp, module)
+    if distill_cfg.skip_frozen_mtp:
+        warn_rank_0(
+            "Training forwards skip the MTP head (skip_frozen_mtp); evaluation still runs it."
+            if skipped_mtp_models
+            else "skip_frozen_mtp is set but no model has an MTP head: nothing to skip."
+        )
 
     # HACK: Pipeline-parallel Distillation requires splitting input tensor into student and teacher parts.
     def _set_student_input_tensor_shape(self, shapes: list[tuple[int]]):

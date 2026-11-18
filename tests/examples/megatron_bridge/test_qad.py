@@ -37,6 +37,9 @@ from _test_utils.torch.transformers_models import (
 )
 from torch.distributed.checkpoint import FileSystemReader
 
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import TensorQuantizer
+
 
 def _load_checkpoint_tensors(
     checkpoint_path: Path, *, include_optimizer: bool = False
@@ -119,7 +122,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
     # Step 1: PTQ the model and save its quantizers and optional adapters.
     quantize_cmd = extend_cmd_parts(
         # QAD below must load this checkpoint at the same TP, so size the PTQ run to tp_size.
-        ["torchrun", f"--nproc_per_node={tp_size}", "quantize.py", "--skip_generate"],
+        ["torchrun", f"--nproc_per_node={tp_size}", "quantize.py", "--skip_generate"]
+        + (["--output_qdq_weight"] if full_rank else []),
         hf_model_name_or_path=hf_model_path,
         recipe="general/ptq/nvfp4_default-kv_fp8"
         if lora_rank
@@ -188,6 +192,14 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
         }
         frozen = parameters - selected
         assert selected and any(".self_attention." in name for name in frozen)
+        # Warmup starts at zero LR: the first saved weights expose initialization before updates.
+        initialized = _load_checkpoint_tensors(distilled_megatron_path / "iter_0000001")
+        for name in selected:
+            quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), axis=None))
+            quantizer.amax = initial[name.removesuffix("weight") + "weight_quantizer._amax"]
+            # QDQ was already written by PTQ. A zero-LR QAD step must retain those weights.
+            torch.testing.assert_close(initial[name], quantizer(initial[name]), rtol=0, atol=0)
+            torch.testing.assert_close(initialized[name], initial[name], rtol=0, atol=0, msg=name)
         for name in frozen:
             assert torch.equal(initial[name].view(torch.uint8), trained[name].view(torch.uint8)), (
                 name
