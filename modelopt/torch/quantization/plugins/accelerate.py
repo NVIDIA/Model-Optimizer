@@ -24,7 +24,7 @@ import torch
 import transformers
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from accelerate.hooks import AlignDevicesHook, SequentialHook
-from accelerate.utils import get_max_memory, infer_auto_device_map
+from accelerate.utils import get_max_memory, infer_auto_device_map, named_module_tensors
 from accelerate.utils.dataclasses import CustomDtype
 from accelerate.utils.offload import PrefixedDataset
 
@@ -182,9 +182,17 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
         hook = _get_offload_hook(mod._hf_hook)
         if hook is None:
             continue
-        # Only call pre_forward if weights need materializing; already-materialized
-        # weights would be overwritten with stale CPU state_dict values.
-        needs_materialize = any(p.device.type == "meta" for p in mod.parameters())
+        # Inspect only this hook's tensors; a descendant's meta buffers must not reload
+        # already-materialized parent weights from stale CPU state_dict values.
+        needs_materialize = any(
+            tensor.device.type == "meta"
+            for _, tensor in named_module_tensors(
+                mod,
+                include_buffers=hook.offload_buffers,
+                recurse=hook.place_submodules,
+                remove_non_persistent=True,
+            )
+        )
         if needs_materialize:
             _carry_quantizers_with_offload(hook)
             hook.pre_forward(mod)

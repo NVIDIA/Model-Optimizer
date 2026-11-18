@@ -15,6 +15,9 @@
 
 """Native IQ field gradients, frozen downstream projections, and ordinary persistence."""
 
+import json
+import time
+
 import pytest
 import torch
 from _test_utils.torch.distributed.utils import DistributedWorkerPool
@@ -26,6 +29,7 @@ from torch.nn import functional as F
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.repair import IQRepairPolicy
 from modelopt.torch.quantization.repair_formats import _ReplayScales
 
@@ -127,6 +131,35 @@ def test_iq_scales_backpropagate_through_frozen_projection(frozen_format):
         torch.testing.assert_close(after[name], value, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Native padded IQ replay requires CUDA")
+@pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
+def test_iq_padded_native_repair_lifecycle(name):
+    torch.manual_seed(107)
+    model = nn.Linear(300, 4, bias=False, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(8, 300, device="cuda", dtype=torch.bfloat16)
+    quant_cfg = _iq("weight_quantizer", name)
+    quant_cfg["cfg"]["block_sizes"] = {-1: 256}
+    mtq.quantize(model, _config([quant_cfg]), lambda m: m(x))
+    baseline = model(x).detach()
+    policy = IQRepairPolicy()
+    try:
+        fields = policy.prepare(model)
+        torch.testing.assert_close(model(x), baseline, rtol=0, atol=0)
+        optimizer = torch.optim.SGD(fields, lr=10)
+        model(x).float().square().mean().backward()
+        assert fields and any(
+            field.grad is not None and field.grad.count_nonzero() for field in fields
+        )
+        optimizer.step()
+        policy.project_()
+        expected = model(x).detach()
+        assert not torch.equal(expected, baseline)
+        policy.finalize_()
+    finally:
+        policy.close()
+    torch.testing.assert_close(model(x), expected, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for peak memory")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_native_replay_peak_memory_and_vjp(dtype, record_property):
@@ -172,6 +205,95 @@ def test_native_replay_peak_memory_and_vjp(dtype, record_property):
     torch.testing.assert_close(actual_vjp, expected_vjp, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is required for finalization memory"
+)
+@torch.no_grad()
+def test_native_finalization_peak_memory_and_outputs(record_property, capsys):
+    """Measure the real three-projection transaction, including decode, pinning and CPU backups."""
+    torch.manual_seed(106)
+    rows, columns, projections = 4096, 14336, 3
+    dtype, device = torch.float16, "cuda"
+    fmt = IQ_FORMAT_REGISTRY["iq2_s"]
+    model = nn.ModuleList(
+        [
+            nn.Linear(columns, rows, bias=False, device=device, dtype=dtype)
+            for _ in range(projections)
+        ]
+    )
+    mtq.quantize(model, {**_config([_iq("*weight_quantizer", "iq2_s")]), "algorithm": None})
+    blocks = rows * columns // fmt.block_size
+    for module in model:
+        native = torch.randint(
+            0,
+            256,
+            (rows, columns // fmt.block_size, fmt.block_bytes),
+            device=device,
+            dtype=torch.uint8,
+        )
+        native = fmt.replace_payload_scales(
+            native.reshape(-1, fmt.block_bytes),
+            torch.full((blocks,), 2**-8, device=device, dtype=dtype),
+        ).reshape_as(native)
+        module.weight.copy_(fmt.dequantize(native, torch.tensor(module.weight.shape), dtype=dtype))
+        pin_packed_weight(module.weight_quantizer, fmt.name, native, source=module.weight)
+
+    packed_bytes = projections * blocks * fmt.block_bytes
+    source_key_bytes = projections * blocks * 24
+    decoded_bytes = rows * columns * torch.empty((), dtype=dtype).element_size()
+    finite_check_budget_bytes = rows * columns
+    scratch_bytes = 64 * 1024**2
+    budget_bytes = (
+        packed_bytes + source_key_bytes + decoded_bytes + finite_check_budget_bytes + scratch_bytes
+    )
+    raw_rollback_cpu_bytes = projections * decoded_bytes
+    inputs = torch.randn(2, columns, device=device, dtype=dtype)
+    policy = IQRepairPolicy()
+    try:
+        fields = policy.prepare(model)
+        for parameter in fields:
+            parameter.add_(0.01)
+        policy.project_()
+        expected = [module(inputs).detach() for module in model]
+        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
+        baseline = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        wall_start = time.perf_counter()
+        start.record()
+        policy.finalize_()
+        end.record()
+        torch.cuda.synchronize()
+        wall_ms = (time.perf_counter() - wall_start) * 1000
+        peak_bytes = torch.cuda.max_memory_allocated() - baseline
+        metrics = {
+            "finalize_device": torch.cuda.get_device_name(),
+            "finalize_dtype": str(dtype),
+            "finalize_projection_shape": [rows, columns],
+            "finalize_projections": projections,
+            "finalize_cuda_ms": start.elapsed_time(end),
+            "finalize_wall_ms": wall_ms,
+            "finalize_baseline_allocated_bytes": baseline,
+            "finalize_extra_peak_bytes": peak_bytes,
+            "finalize_extra_budget_bytes": budget_bytes,
+            "finalize_packed_publication_bytes": packed_bytes,
+            "finalize_source_key_publication_bytes": source_key_bytes,
+            "finalize_largest_decoded_bytes": decoded_bytes,
+            "finalize_finite_check_budget_bytes": finite_check_budget_bytes,
+            "finalize_scratch_budget_bytes": scratch_bytes,
+            "finalize_raw_rollback_cpu_bytes_computed": raw_rollback_cpu_bytes,
+        }
+        for name, value in metrics.items():
+            record_property(name, value)
+        with capsys.disabled():
+            print("Bypass finalize metrics: " + json.dumps(metrics, sort_keys=True), flush=True)
+        assert peak_bytes <= budget_bytes
+        for module, reference in zip(model, expected, strict=True):
+            torch.testing.assert_close(module(inputs), reference, rtol=0, atol=0)
+    finally:
+        policy.close()
+
+
 def _repair_expert_sharded_dtensor_job(rank, size):
     # Transformers is optional; only the Gloo workers construct its fused expert bank.
     from _test_utils.torch.transformers_models import get_tiny_mixtral
@@ -180,13 +302,17 @@ def _repair_expert_sharded_dtensor_job(rank, size):
     from modelopt.torch.quantization.plugins.huggingface import _QuantFusedExperts
 
     mesh = init_device_mesh("cpu", (size,))
-    for local_experts in (True, False):
+    for total_experts, local_experts, local_counts in (
+        (4, True, (2, 2)),
+        (4, False, (2, 2)),
+        (1, False, (1, 0)),
+    ):
         model = get_tiny_mixtral(
             hidden_size=256,
             intermediate_size=16,
             num_hidden_layers=1,
-            num_local_experts=4,
-            num_experts_per_tok=2,
+            num_local_experts=total_experts,
+            num_experts_per_tok=min(2, total_experts),
             vocab_size=32,
             dtype=torch.float32,
         )
@@ -203,14 +329,14 @@ def _repair_expert_sharded_dtensor_job(rank, size):
             weight = getattr(bank, name)
             setattr(bank, name, nn.Parameter(distribute_tensor(weight.detach(), mesh, [Shard(0)])))
         if local_experts:
-            bank.num_experts = 4 // size
+            bank.num_experts = total_experts // size
             start = rank * bank.num_experts
             for name in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
                 quantizers = getattr(bank, name)
                 setattr(bank, name, nn.ModuleList(quantizers[start : start + bank.num_experts]))
         first = bank.gate_up_proj
         assert isinstance(first, DTensor) and first.placements == (Shard(0),)
-        assert first.shape[0] == 4 and first.to_local().shape[0] == 4 // size
+        assert first.shape[0] == total_experts and first.to_local().shape[0] == local_counts[rank]
         assert len(bank.gate_up_proj_weight_quantizers) == bank.num_experts
         assert len(bank.down_proj_weight_quantizers) == bank.num_experts
         before = {
@@ -229,6 +355,7 @@ def _repair_expert_sharded_dtensor_job(rank, size):
                 except ValueError:
                     refused = True
             assert refused == (not local_experts), (
+                total_experts,
                 local_experts,
                 refused,
                 dict(comms.get_comm_counts()),

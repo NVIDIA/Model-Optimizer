@@ -22,6 +22,8 @@ from .ggml.common import pin_packed_weight, pinned_importance
 from .ggml.registry import IQ_FORMAT_REGISTRY
 from .ggml.scale_fields import decode_scale_fields, replace_scale_fields
 
+__all__: list[str] = []
+
 
 def _ste(value, projected):
     return projected.detach() + (value - value.detach())
@@ -63,20 +65,25 @@ class _ReplayScales(torch.autograd.Function):
 
 
 class IQScaleState(nn.Module):
-    """FP32 log-scale masters projected onto legal native FP16/integer fields."""
+    """FP32 native scale masters at an existing valid IQ PTQ boundary."""
 
     def __init__(self, quantizer, processed_weight, weight_shape):
-        """Capture the PTQ payload in logical projection coordinates."""
+        """Capture the PTQ payload, including the quantizer's padded coordinates."""
         super().__init__()
         self.name = quantizer.num_bits
         self.format = IQ_FORMAT_REGISTRY[self.name]
         self.weight_shape = tuple(weight_shape)
+        self.codec_shape = (
+            tuple(quantizer._original_shape)
+            if quantizer.is_static_block_quant
+            else self.weight_shape
+        )
         packed = (
             self.format.pack(processed_weight, quantizer)
             .detach()
             .reshape(
-                *self.weight_shape[:-1],
-                self.weight_shape[-1] // self.format.block_size,
+                *self.codec_shape[:-1],
+                self.codec_shape[-1] // self.format.block_size,
                 self.format.block_bytes,
             )
         )
@@ -122,7 +129,7 @@ class IQScaleState(nn.Module):
     def forward(self, inputs):
         """Decode only this replay's weight and release its expanded levels afterward."""
         with torch.no_grad():
-            levels, _ = self.format.decode_int8(self.packed, torch.tensor(self.weight_shape))
+            levels, _ = self.format.decode_int8(self.packed, torch.tensor(self.codec_shape))
         steps = self.projected_steps()
         levels = levels.reshape(-1, steps.shape[-1], self.format.int8_group_size)
         return _ReplayScales.apply(levels, steps, inputs.dtype).reshape(inputs.shape)
@@ -145,16 +152,25 @@ class IQScaleState(nn.Module):
     def finalize_(self, quantizer, weight, *, native=None):
         """Bake processed coordinates once and persist the exact native codes/scales."""
         native = self.native_payload() if native is None else native
-        values = self.format.dequantize(native, torch.tensor(self.weight_shape), dtype=weight.dtype)
-        if not torch.isfinite(values).all():
-            raise ValueError(f"Decoded {self.name} weights must be finite in {weight.dtype}")
+        values = self.format.dequantize(native, torch.tensor(self.codec_shape), dtype=weight.dtype)
+        padded = self.codec_shape != self.weight_shape
+        if padded:
+            values = quantizer._reset_to_original_shape(values)
+        if values.numel():
+            minimum, maximum = (
+                torch.aminmax(values) if values.is_contiguous() else (values.amin(), values.amax())
+            )
+            if not (torch.isfinite(minimum) & torch.isfinite(maximum)):
+                raise ValueError(f"Decoded {self.name} weights must be finite in {weight.dtype}")
         quantizer._enable_pre_quant_scale = False
         quantizer.disable_rotate()
         weight.copy_(values.reshape(weight.shape))
+        # Future forwards recreate zero padding, even when the payload's tail decodes nonzero.
+        source = quantizer._process_for_blockquant(weight) if padded else weight
         pin_packed_weight(
             quantizer,
             self.name,
             native,
             pinned_importance(quantizer, self.name),
-            source=weight if self.format.payload_scales is not None else None,
+            source=source,
         )

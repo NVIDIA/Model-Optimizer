@@ -61,8 +61,12 @@ def _resolved_weights(bindings, *, materialize=True):
                 isinstance(parameter, DTensor)
                 and parameter.ndim > 2
                 and parameter.shape[0] == getattr(module, "num_experts", None)
-                and parameter.to_local().shape[0] != module.num_experts
-                and any(p.is_shard() and p.dim % parameter.ndim == 0 for p in parameter.placements)
+                and any(
+                    placement.is_shard()
+                    and placement.dim % parameter.ndim == 0
+                    and parameter.device_mesh.size(mesh_dim) > 1
+                    for mesh_dim, placement in enumerate(parameter.placements)
+                )
             ):
                 raise ValueError("Materialize globally indexed expert shards before IQ repair")
         remaining = set(selected)
@@ -279,6 +283,8 @@ class IQRepairPolicy:
     The runner owns the units until close; logical weights and quantizer settings
     must stay fixed. Native weight-access contexts may replace temporary views.
     Masters stay outside model checkpoints; Bypass checkpoints own training state.
+    Packed payloads and scale masters stay on their preparation device. A commit
+    retains host rollback weights for this policy's selected boundary until success.
     """
 
     def __init__(self):
@@ -318,6 +324,16 @@ class IQRepairPolicy:
                         module._block_sizes,
                         getattr(module, "_consumed_block_sizes", None),
                         getattr(module._calibrator, "_axis", None),
+                        {
+                            name: (hasattr(module, name), getattr(module, name, None))
+                            for name in (
+                                "_original_shape",
+                                "_block_reshape_size",
+                                "_padding",
+                                "_slices",
+                                "_amax_shape_for_export",
+                            )
+                        },
                     ),
                 )
                 module._local_repair_properties = {
@@ -359,6 +375,7 @@ class IQRepairPolicy:
                     raise ValueError("Close quantization cache scopes before preparing IQ Bypass")
                 state = IQScaleState(quantizer, captured[0], weight.shape)
                 object.__setattr__(quantizer, "_local_repair_state", state)
+                quantizer._local_repair_active = True
                 quantizer._fake_quantize = MethodType(_repair_fake_quantize, quantizer)
                 self.adapters.append((binding, state, had_override, previous))
                 fields.extend(state.parameters())
@@ -420,6 +437,7 @@ class IQRepairPolicy:
             else:
                 delattr(quantizer, "_fake_quantize")
             delattr(quantizer, "_local_repair_state")
+            delattr(quantizer, "_local_repair_active")
         self.adapters.clear()
         for quantizer, flag in self._calibration_flags.items():
             quantizer._if_calib = flag
@@ -430,11 +448,16 @@ class IQRepairPolicy:
             else:
                 delattr(module, "allow_real_quant_gemm")
         self._gemm_flags.clear()
-        for quantizer, (axis, blocks, consumed, calibrator_axis) in self._layouts.items():
+        for quantizer, (axis, blocks, consumed, calibrator_axis, metadata) in self._layouts.items():
             quantizer._axis, quantizer._block_sizes = axis, blocks
             quantizer._consumed_block_sizes = consumed
             if quantizer._calibrator is not None:
                 quantizer._calibrator._axis = calibrator_axis
+            for name, (existed, value) in metadata.items():
+                if existed:
+                    setattr(quantizer, name, value)
+                elif hasattr(quantizer, name):
+                    delattr(quantizer, name)
             delattr(quantizer, "_local_repair_properties")
         self._layouts.clear()
         for (module, name), flag in self._flags.items():
