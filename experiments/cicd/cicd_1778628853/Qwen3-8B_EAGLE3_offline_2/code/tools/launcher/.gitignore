@@ -1,0 +1,22 @@
+# Virtual environment
+.venv/
+
+# nemo-run state
+.slurm_jobs
+.docker_jobs.json
+.local_jobs.json
+
+# Experiment artifacts (generated at runtime)
+experiments/
+local_experiments/
+
+# uv lock (generated, not portable)
+uv.lock
+
+# Python cache
+__pycache__/
+
+# Editor swap files
+*.swp
+*.swo
+*~
