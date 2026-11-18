@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import weakref
 from unittest import mock
 
 import pytest
@@ -426,7 +425,7 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size):
     owned = _fsdp2_owned_params(model)
     assert _fsdp2_owns(owned, model.dense.weight) and _fsdp2_owns(owned, sharded)
     # An id kept for a parameter does not make another object at that address FSDP2's.
-    assert not _fsdp2_owns({id(sharded): weakref.ref(model.dense.weight)}, sharded)
+    assert not _fsdp2_owns({id(sharded): owned[id(model.dense.weight)]}, sharded)
     layer.unshard()
     unsharded = layer.weight
     try:
@@ -434,6 +433,10 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size):
         assert _fsdp2_owns(_fsdp2_owned_params(model, refresh=True), unsharded)
     finally:
         layer.reshard()
+    with fsdp2_weight_access_and_writeback_context(model, model, writeback=False):
+        for child in (model.dense, model.layer):
+            local = child.weight.to_local() if isinstance(child.weight, DTensor) else child.weight
+            assert local.shape == (8, 8)
     # The set is kept for the unit: opening the window again costs the module's parameters only.
     with mock.patch.object(core_utils, "_fsdp2_param_groups", wraps=_fsdp2_param_groups) as scans:
         for _ in range(3):

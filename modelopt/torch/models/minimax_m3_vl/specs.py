@@ -34,6 +34,7 @@ register(
                 "layers",
             ),
             batch_packed_documents=False,
+            functional_children=(),
         ),
         model_type="minimax_m3_vl",
         min_transformers_version="5.13",
