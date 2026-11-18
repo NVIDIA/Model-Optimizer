@@ -31,6 +31,9 @@ from _test_utils.torch.transformers_models import (
     get_tiny_llama,
     tf_modelopt_state_and_output_tester,
 )
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
+from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import create_mask
 from transformers import AutoModelForCausalLM
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -1593,8 +1596,48 @@ def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, draft_
         n for n, p in model.dflash_module.named_parameters() if p.requires_grad and p.grad is None
     ]
     assert not ungraded, f"no gradient for {ungraded}"
-    assert len(outputs) == int(draft_runs)
+    # DFlash runs the draft on every batch; Domino still returns before it without a block.
+    assert len(outputs) == int(draft_runs or head == "dflash")
     assert all(output.grad is not None for output in outputs)
+
+
+def _fsdp2_rank_without_labels_job(rank, size):
+    input_ids = torch.randint(1, 32, (2, SEQ_LEN), generator=torch.Generator().manual_seed(0))
+
+    def train_step(labels, sharded):
+        torch.manual_seed(0)
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        model.float().train()
+        if sharded:
+            # The draft as its own unit, as accelerate wraps it when listed in the wrap policy.
+            mesh = init_device_mesh("cpu", (size,))
+            fully_shard(model.dflash_module, mesh=mesh)
+            fully_shard(model, mesh=mesh)
+        torch.manual_seed(1)
+        out = model(input_ids=input_ids, labels=labels)
+        out.loss.backward()
+        grads = {
+            name: p.grad.full_tensor() if isinstance(p.grad, DTensor) else p.grad
+            for name, p in model.named_parameters()
+            if p.requires_grad
+        }
+        return out.loss.detach(), grads
+
+    supervised_loss, supervised_grads = train_step(input_ids, sharded=False)
+    labels = input_ids if rank == 0 else torch.full_like(input_ids, -100)
+    loss, grads = train_step(labels, sharded=True)
+
+    torch.testing.assert_close(loss, supervised_loss if rank == 0 else torch.zeros_like(loss))
+    assert grads.keys() == supervised_grads.keys()
+    for name, grad in grads.items():
+        # FSDP2 averages over the ranks, and the rank without labels adds zero.
+        torch.testing.assert_close(grad, supervised_grads[name] / size, msg=name)
+
+
+def test_fsdp2_rank_without_labels_joins_the_draft_collectives(cpu_dist_workers):
+    """A rank that skips the draft unit puts its all-gather and reduce-scatter out of step."""
+    cpu_dist_workers.run(_fsdp2_rank_without_labels_job)
 
 
 @pytest.mark.parametrize("shift_label", [True, False])

@@ -58,6 +58,8 @@ Changelog
 
 *Speculative Decoding*
 
+- Fix DFlash training crashing or hanging under FSDP2 when ``DFlashModule`` is wrapped as its own unit and a rank's batch has no supervised tokens.
+
 *Megatron Framework (M-LM / M-Bridge)*
 
 - Preserve model-specific hybrid stacks when selecting MoE expert layouts in Megatron-Bridge, and reject grouped GEMM when a custom factory returns sequential experts. Custom built stack ``ModuleSpec`` values are now rejected; assign a named factory function instead.

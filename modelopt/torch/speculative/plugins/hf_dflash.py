@@ -1167,13 +1167,14 @@ class HFDFlashModel(DFlashModel):
         )
         n_blocks = anchor_positions.shape[1]
 
-        if n_blocks == 0 or not block_keep_mask.any():
-            # An all-masked answer-only batch: nothing to train, but DDP still reduces.
+        if n_blocks == 0:
+            # Only dflash_num_anchors=0, alike on every rank: there is no block to draft.
             return ModelOutput(
                 loss=self._draft_zero_loss(device), logits=base_outputs.logits, train_acc=[[0.0]]
             )
 
-        # 4. Build draft inputs
+        # 4. Build draft inputs. A batch with no kept block still runs the draft, for a zero
+        # loss through its outputs: an FSDP2 draft unit's collectives span every rank.
         noise_embedding = self._build_noise_embedding(
             input_ids, anchor_positions, block_keep_mask, n_blocks
         )
