@@ -2102,6 +2102,7 @@ def _is_plain_fake_quant(q: nn.Module) -> TypeGuard[TensorQuantizer]:
         and not q._use_constant_amax
         # Nothing applied around the quantization itself.
         and q.backend is None
+        and getattr(q, "_native_weight_meta", None) is None
         and q.pre_quant_scale is None
         and q.bias is None
         and not q.rotate_is_enabled
