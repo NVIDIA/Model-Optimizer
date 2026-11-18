@@ -1110,7 +1110,14 @@ def auto_quantize(
             (default; uses gradient-based loss estimation, linear programming search, and requires
             ``loss_func`` or ``forward_backward_step``), ``"kl_div"`` (uses KL divergence between
             unquantized and quantized outputs, relies on threshold-based binary search, and only
-            requires ``forward_step`` returning logits), and ``"aumann_shapley"`` (path-integral
+            requires ``forward_step`` returning logits. Its ``"context_quant_level"`` option sets
+            the format the other searched groups take while one group's candidates are scored:
+            ``None`` (default) leaves them unquantized, ``"lowest"`` puts each at its lowest-bit
+            format, and an int ``k`` at its ``k``-th quantized format from the lowest, counting
+            from 0 (so ``0`` is ``"lowest"``), not counting BF16 and capped at the highest. With
+            such a context, every candidate, BF16 included, is measured in it and the search uses
+            linear programming, e.g. ``{"method": "kl_div", "context_quant_level": "lowest"}``),
+            and ``"aumann_shapley"`` (path-integral
             damage attributions, calibrated against a directly measured reference point; label-free
             like ``"kl_div"``, and additionally reports a ``predicted_damage`` estimate for the
             selected recipe). For example, use
@@ -1348,8 +1355,9 @@ def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint
     ``format_shard``) to restore every format's calibration and scores and solve. The shard files
     are memory-mapped on the CPU, so any host can merge them, and the restore moves each
     calibration onto the model's devices. Under distributed scoring, merge each rank's files
-    separately. Shards that recorded different search setups (formats, groups, method, cost, or
-    calibration and scoring step counts) are refused; running every shard on the same weights
+    separately. Shards that recorded different search setups (formats, groups, method, scoring
+    options such as the KL context, cost, or calibration and scoring step counts) are refused;
+    running every shard on the same weights
     and batches is up to the caller.
 
     Args:
@@ -1470,30 +1478,36 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
 
 
 @torch.no_grad()
-def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) -> nn.Module:
+def initialize_qdq_weights(model: nn.Module) -> nn.Module:
     """Initialize floating latent weights from their configured fake-quantized values.
 
-    Call once after calibration/restoration, before distributed wrapping and optimizer
-    construction. Quantizers, calibration buffers, parameter objects and dtypes are retained.
+    Call once in the PTQ pipeline after calibration/restoration and before saving an
+    uncompressed checkpoint for QAD. Quantizers, calibration buffers, parameter objects
+    and dtypes are retained.
     Pre-scales and rotations are inverted before storing values, so subsequent forwards
     continue to apply those transforms exactly once. This is initialization, not folding:
     quantizers remain enabled. Uses already-restored calibration state without rerunning
-    calibration or GPTQ. Never call on a resumed training checkpoint. Dynamic scales/code
-    searches and low-precision inverse transforms can change the subsequent effective weight;
+    calibration or GPTQ. Never call on a resumed training checkpoint. GGML IQ PTQ pins its
+    initial super-block scales for QAD; local scale indices, codes and signs can still change.
+    Existing GPTQ/imatrix scales and importance buffers are preserved.
+    Other dynamic quantizers and low-precision inverse transforms can change the effective weight;
     this API does not guarantee bitwise-identical forwards.
 
     Args:
         model: Calibrated fake-quantized model with uncompressed floating weights.
-        trainable_only: Initialize only weights whose ``requires_grad`` is true.
     """
     if not is_quantized(model):
         raise ValueError("Weight initialization requires a calibrated fake-quantized model.")
     if has_quant_lora(model):
-        raise ValueError("Weight initialization requires an adapter-free student.")
+        raise ValueError("Weight initialization requires an adapter-free model.")
     if any(isinstance(module, FSDPModule) for module in model.modules()):
         raise ValueError("Initialize quantized weights before FSDP wrapping.")
+    # Deferred: GGML backend registration imports the quantization API.
+    from .ggml.common import pinned_packed_weight
+
     seen = {}
     storage_ranges = {}
+    initialization_owners = {}
     for module in model.modules():
         uses = (
             list(module.iter_weights_for_calibration()) if isinstance(module, QuantModule) else []
@@ -1515,7 +1529,7 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
                 module._initialization_members(quantizer) if isinstance(module, QuantModule) else ()
             )
             selected = isinstance(module, QuantModule) and module._is_selected_for_initialization(
-                weight, quantizer, trainable_only
+                weight, quantizer
             )
             if selected and not validated:
                 module._validate_fold_weight()
@@ -1531,6 +1545,20 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
                     )
                 continue
             for member in members if selected else []:
+                if (
+                    member.backend == "ggml"
+                    and pinned_packed_weight(member, member.num_bits) is None
+                ):
+                    if len(members) != 1:
+                        raise ValueError(
+                            "GGML PTQ initialization needs a single quantizer per weight."
+                        )
+                    owner = QuantModule._weight_initialization_key(weight)
+                    if member in initialization_owners and initialization_owners[member] != owner:
+                        raise ValueError(
+                            "GGML PTQ initialization needs a separate quantizer for each weight."
+                        )
+                    initialization_owners[member] = owner
                 if not member.fake_quant or member._if_calib:
                     raise ValueError(
                         "Restore calibrated fake quantizers before weight initialization."
@@ -1572,7 +1600,7 @@ def initialize_qdq_weights(model: nn.Module, *, trainable_only: bool = False) ->
         initialized = set()
         for module in model.modules():
             if isinstance(module, QuantModule):
-                module._initialize_qdq_weights(trainable_only, initialized)
+                module._initialize_qdq_weights(initialized)
     return model
 
 
