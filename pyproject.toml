@@ -43,7 +43,7 @@ dependencies = [
     "PyYAML>=6.0",
     "omegaconf>=2.3.0",
     "pulp<4.0",         # breaking changes in upcoming 4.0 release
-    "pydantic>=2.0",
+    "pydantic>=2.5.0",
     "regex",
     "rich",
     "safetensors",

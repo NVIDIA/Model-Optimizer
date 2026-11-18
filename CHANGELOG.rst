@@ -249,6 +249,7 @@ Changelog
 - Fix the Puzzletron memory objective pricing the KV cache with ``hidden_size // num_attention_heads`` instead of the model's ``head_dim``, which misestimated it for models such as Mistral-Small, GPT-OSS and Gemma-3 and for every candidate with a pruned hidden size. Recompute subblock statistics produced with earlier versions.
 - The ``evaluation`` agent skill's NeMo Gym MRCR recipe no longer passes ``HF_TOKEN`` on the command line, where other users on the node could read it, and keeps its rollout script in a private temporary directory instead of a fixed ``/tmp`` path.
 - Fix ``ModuleNotFoundError: No module named 'huggingface_hub'`` when importing ``modelopt.torch`` without the optional ``hf`` extra. Install the ``hf`` extra to use Hugging Face checkpointing. Affects 0.44 through 0.48.
+- Require Pydantic 2.5.0 or newer to prevent configuration-schema errors when importing ``modelopt.torch`` with older releases.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^
