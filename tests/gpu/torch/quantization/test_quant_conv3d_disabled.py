@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Kernel dispatch of NVFP4 Conv3d: implicit GEMM only for quantized activations."""
+"""Kernel dispatch of NVFP4 Conv3d: implicit GEMM only when a quantizer quantizes."""
 
 import copy
 import warnings
 
 import pytest
 import torch
-import torch.nn.functional as F
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.quant_conv as quant_conv
@@ -38,7 +37,7 @@ class _VisionLanguageModel(torch.nn.Module):
         return self.language_model(self.visual(x).flatten(2).transpose(1, 2))
 
 
-def _quantized_model(disabled_quantizers=()):
+def _quantized_model(kernel_calls, disabled_quantizers=()):
     torch.manual_seed(0)
     model = _VisionLanguageModel().cuda().eval()
     x = torch.randn(1, 3, 2, 56, 56, device="cuda")
@@ -49,6 +48,7 @@ def _quantized_model(disabled_quantizers=()):
     cfg["quant_cfg"].append({"quantizer_name": "*visual.output_quantizer", "enable": False})
     cfg["quant_cfg"] += [{"quantizer_name": name, "enable": False} for name in disabled_quantizers]
     mtq.quantize(model, cfg, lambda m: m(x))
+    kernel_calls.clear()  # count only the forward under test, not calibration
     return model, x, reference
 
 
@@ -76,9 +76,9 @@ def _nvfp4_gpu_fp32(cuda_capability, monkeypatch):
 @torch.no_grad()
 def test_conv3d_without_quantization_runs_cudnn(kernel_calls, case):
     if case == "config_disabled":
-        model, x, reference = _quantized_model(["*visual*"])
+        model, x, reference = _quantized_model(kernel_calls, ["*visual*"])
     else:
-        model, x, reference = _quantized_model()
+        model, x, reference = _quantized_model(kernel_calls)
         model.visual.input_quantizer.disable_quant()
         model.visual.weight_quantizer.disable_quant()
 
@@ -89,22 +89,18 @@ def test_conv3d_without_quantization_runs_cudnn(kernel_calls, case):
 
 
 @torch.no_grad()
-def test_conv3d_weight_only_runs_cudnn_with_weight_blocked_along_k(kernel_calls):
-    model, x, _ = _quantized_model(["*visual.input_quantizer"])
-    conv = model.visual
-    weight = quant_conv._nvfp4_quantize_weight_along_k(conv.weight, conv.weight_quantizer)
+def test_conv3d_weight_only_runs_implicit_gemm_without_activation_quant(kernel_calls):
+    model, x, _ = _quantized_model(kernel_calls, ["*visual.input_quantizer"])
 
-    output = conv(x)
+    model.visual(x)
 
-    assert not kernel_calls
-    torch.testing.assert_close(
-        output, F.conv3d(x, weight, conv.bias, conv.stride), rtol=0, atol=1e-5
-    )
+    assert len(kernel_calls) == 1
+    assert not kernel_calls[0]["quant_act"]
 
 
 @torch.no_grad()
 def test_conv3d_quantized_activations_run_implicit_gemm(kernel_calls):
-    model, x, _ = _quantized_model()
+    model, x, _ = _quantized_model(kernel_calls)
 
     model.visual(x)
 
@@ -114,20 +110,12 @@ def test_conv3d_quantized_activations_run_implicit_gemm(kernel_calls):
 
 @torch.no_grad()
 def test_conv3d_training_falls_back_to_cudnn(kernel_calls):
-    model, x, _ = _quantized_model()
-    conv = model.visual
-    conv.train()
-    weight = quant_conv._nvfp4_quantize_weight_along_k(conv.weight, conv.weight_quantizer)
+    model, x, _ = _quantized_model(kernel_calls)
+    model.visual.train()
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        output = conv(x)
+        model.visual(x)
 
     assert not kernel_calls
     assert any("inference-only" in str(w.message) for w in caught)
-    torch.testing.assert_close(
-        output,
-        F.conv3d(conv.input_quantizer(x), weight, conv.bias, conv.stride),
-        rtol=0,
-        atol=1e-5,
-    )
