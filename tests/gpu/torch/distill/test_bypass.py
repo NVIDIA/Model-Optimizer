@@ -460,6 +460,86 @@ def test_public_bypass_preserves_caller_state_and_seeds_initial_reader(fail, tea
         previous = (data.draws, copy.deepcopy(student.state_dict()))
 
 
+def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch):
+    from modelopt.torch.distill._bypass_optimizer import Lion
+    from modelopt.torch.quantization.repair import IQRepairPolicy
+
+    student, teacher, batches = _problem()
+    reference = copy.deepcopy(student)
+    x = batches[0]
+    valid = torch.tensor([[True, True, True], [True, False, False]])
+    policy = IQRepairPolicy()
+    try:
+        fields = policy.prepare(reference.mlp)
+        # Match projection shapes so this isolates normalization from BLAS batch-shape roundoff.
+        prediction = torch.cat([reference.mlp(sample) for sample in x.split(1)])
+        target = torch.cat([teacher.mlp(sample) for sample in x.split(1)]).detach()
+        torch.nn.functional.mse_loss(prediction[valid], target[valid]).backward()
+        expected = [p.grad.detach().clone() for p in fields]
+    finally:
+        policy.close()
+    observed = []
+    original_step = Lion.step
+
+    def record_actual_gradients(optimizer, *args, **kwargs):
+        observed.extend(
+            p.grad.detach().clone() for g in optimizer.param_groups for p in g["params"]
+        )
+        return original_step(optimizer, *args, **kwargs)
+
+    monkeypatch.setattr(Lion, "step", record_actual_gradients)
+    mtd.bypass(
+        student,
+        teacher,
+        [{"hidden_states": x, "valid_mask": valid}],
+        {
+            "modules": ["mlp"],
+            "num_steps": 1,
+            "global_batch_size": 2,
+            "micro_batch_size": 1,
+            "sequence_length": 3,
+            "max_grad_norm": 1e9,
+            "scheduler": "constant",
+            "warmup_fraction": 0,
+        },
+    )
+    assert len(observed) == len(expected)
+    for actual, wanted in zip(observed, expected):
+        torch.testing.assert_close(actual, wanted, rtol=1e-5, atol=1e-10)
+
+
+@pytest.mark.timeout(180)
+def test_native_valid_token_mse_bounds_saved_state():
+    pytest.importorskip("triton")
+    from modelopt.torch.kernels.quantization.repair import masked_mse_sum
+
+    if not torch.cuda.is_available():
+        pytest.skip("Fused MSE requires CUDA")
+    torch.manual_seed(113)
+    for empty in (False, True):
+        prediction = (
+            torch.randn(1, 32768, 512, device="cuda", dtype=torch.bfloat16)[..., ::2]
+            .detach()
+            .requires_grad_(True)
+        )
+        target = torch.randn_like(prediction)
+        valid = torch.rand(1, 32768, device="cuda") > 0.2
+        if empty:
+            valid.zero_()
+        reference = prediction.detach().float().requires_grad_(True)
+        oracle = torch.where(valid[..., None], reference - target.float(), 0).square().sum()
+        expected = torch.autograd.grad(oracle, reference)[0].to(prediction.dtype)
+        saved = []
+        with torch.autograd.graph.saved_tensors_hooks(
+            lambda x: saved.append((x.shape, x.dtype)) or x, lambda x: x
+        ):
+            actual = masked_mse_sum(prediction, target, valid, 256)
+        torch.testing.assert_close(actual, oracle, rtol=1e-6, atol=0)
+        observed = torch.autograd.grad(actual, prediction)[0]
+        torch.testing.assert_close(observed, expected, rtol=0, atol=0)
+        assert (prediction.shape, torch.float32) not in saved
+
+
 @pytest.mark.parametrize("offload", ["cpu", "disk"])
 def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_path):
     accelerate = pytest.importorskip("accelerate")
