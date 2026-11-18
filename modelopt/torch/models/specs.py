@@ -368,22 +368,36 @@ class BypassSpec(SpecSection):
 
     decoder_paths: tuple[str, ...] = ()
     """Candidate decoder containers in priority order; the first ModuleList/ModuleDict wins."""
+
     feedforward_names: tuple[str, ...] = ("mlp", "moe", "ffn", "block_sparse_moe")
     """Decoder child names that own ordinary dense or routed feed-forward repair boundaries."""
+
     isolated_documents: bool = True
     """Run packed documents independently when recurrence or pooling can cross mask boundaries."""
+
     causal_context_parallel: bool = False
     """Opt in to validated native causal SDPA context sharding; otherwise replay full context."""
 
     batch_packed_documents: bool = False
     """Permit independent documents in padded rows when activation and position policies agree."""
+
     functional_children: tuple[str, ...] = ()
     """Paths relative to each decoder block whose parent reads their parameters without calling them.
 
     Native FSDP separates these children and enters their forward lifecycle around the parent math.
     """
+
     adapter_path: str | None = None
     """Optional qualified ModuleBypassAdapter factory for model-owned replay side inputs."""
+    logits_transform_path: str | None = None
+    """Optional ``(model, logits)`` callable for native post-head diagnostic math.
+
+    Transforms that reduce across vocabulary entries use a complete vocabulary per
+    token chunk. Elementwise transforms may opt into vocabulary slicing below.
+    """
+
+    logits_transform_slices: bool = False
+    """Whether the transform preserves its result when applied to a vocabulary slice."""
 
 
 @dataclass(kw_only=True)

@@ -102,6 +102,38 @@ def test_bypass_streams_independent_units_and_finalizes(tmp_path):
     torch.testing.assert_close(restored(batches[0]), student(batches[0]), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("offload", ["cpu", "disk"])
+def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_path):
+    accelerate = pytest.importorskip("accelerate")
+    student, teacher, batches = _problem()
+    student.mlp, teacher.mlp = nn.Sequential(student.mlp), nn.Sequential(teacher.mlp)
+    reference = copy.deepcopy(student)
+    config = {
+        "num_steps": 2,
+        "global_batch_size": 2,
+        "micro_batch_size": 1,
+        "sequence_length": 3,
+        "modules": ["mlp"],
+    }
+    mtd.bypass(reference, teacher, batches, config)
+    if offload == "cpu":
+        accelerate.cpu_offload(student, execution_device="cpu", offload_buffers=True)
+    else:
+        accelerate.disk_offload(
+            student, tmp_path / "offload", execution_device="cpu", offload_buffers=True
+        )
+    assert not hasattr(student.mlp, "_hf_hook")
+    devices = {name: parameter.device for name, parameter in student.named_parameters()}
+    flags = {name: parameter.requires_grad for name, parameter in student.named_parameters()}
+    assert mtd.bypass(student, teacher, batches, config) is student
+    assert {name: parameter.device for name, parameter in student.named_parameters()} == devices
+    assert {
+        name: parameter.requires_grad for name, parameter in student.named_parameters()
+    } == flags
+    assert not hasattr(student.mlp[0].weight_quantizer, "_local_repair_state")
+    torch.testing.assert_close(student(batches[0]), reference(batches[0]), rtol=0, atol=0)
+
+
 def test_bypass_refuses_aliases_and_cleans_failed_replay():
     student, teacher, batches = _problem()
     original = copy.deepcopy(student.state_dict())
@@ -388,35 +420,3 @@ def test_native_valid_token_mse_bounds_saved_state():
         observed = torch.autograd.grad(actual, prediction)[0]
         torch.testing.assert_close(observed, expected, rtol=0, atol=0)
         assert (prediction.shape, torch.float32) not in saved
-
-
-@pytest.mark.parametrize("offload", ["cpu", "disk"])
-def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_path):
-    accelerate = pytest.importorskip("accelerate")
-    student, teacher, batches = _problem()
-    student.mlp, teacher.mlp = nn.Sequential(student.mlp), nn.Sequential(teacher.mlp)
-    reference = copy.deepcopy(student)
-    config = {
-        "num_steps": 2,
-        "global_batch_size": 2,
-        "micro_batch_size": 1,
-        "sequence_length": 3,
-        "modules": ["mlp"],
-    }
-    mtd.bypass(reference, teacher, batches, config)
-    if offload == "cpu":
-        accelerate.cpu_offload(student, execution_device="cpu", offload_buffers=True)
-    else:
-        accelerate.disk_offload(
-            student, tmp_path / "offload", execution_device="cpu", offload_buffers=True
-        )
-    assert not hasattr(student.mlp, "_hf_hook")
-    devices = {name: parameter.device for name, parameter in student.named_parameters()}
-    flags = {name: parameter.requires_grad for name, parameter in student.named_parameters()}
-    assert mtd.bypass(student, teacher, batches, config) is student
-    assert {name: parameter.device for name, parameter in student.named_parameters()} == devices
-    assert {
-        name: parameter.requires_grad for name, parameter in student.named_parameters()
-    } == flags
-    assert not hasattr(student.mlp[0].weight_quantizer, "_local_repair_state")
-    torch.testing.assert_close(student(batches[0]), reference(batches[0]), rtol=0, atol=0)

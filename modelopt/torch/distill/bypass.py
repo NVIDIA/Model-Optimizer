@@ -49,8 +49,9 @@ def bypass(
         device_mesh: Caller-owned placement mesh, adopted by supported integrations.
 
     Returns:
-        The supplied student, finalized for ordinary ModelOpt save/export. Temporary
-        fields, hooks, modes and gradient flags are restored on every exit.
+        The supplied student, finalized in its original placement. Unsharded
+        students support ordinary ModelOpt save/export. Temporary fields, hooks,
+        modes and gradient flags are restored on every exit.
     """
     config = config if isinstance(config, BypassConfig) else BypassConfig(**(config or {}))
     if (
