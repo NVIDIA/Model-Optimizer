@@ -67,7 +67,7 @@ class _ReplayScales(torch.autograd.Function):
 class IQScaleState(nn.Module):
     """FP32 native scale masters at an existing valid IQ PTQ boundary."""
 
-    def __init__(self, quantizer, processed_weight, weight_shape):
+    def __init__(self, quantizer, processed_weight, weight_shape, field_prefix):
         """Capture the PTQ payload, including the quantizer's padded coordinates."""
         super().__init__()
         self.name = quantizer.num_bits
@@ -78,6 +78,7 @@ class IQScaleState(nn.Module):
             if quantizer.is_static_block_quant
             else self.weight_shape
         )
+        self.field_prefix = field_prefix
         packed = (
             self.format.pack(processed_weight, quantizer)
             .detach()
@@ -102,6 +103,10 @@ class IQScaleState(nn.Module):
         basis = None if local is None else (self.local_multiplier * local + self.local_bias).float()
         self.register_buffer("local_base", basis)
         self.local_delta = None if local is None else nn.Parameter(torch.zeros_like(local.float()))
+
+    def values(self):
+        """Return canonical IDs and FP32 masters for ownership and checkpointing."""
+        return {f"{self.field_prefix}.{name}": p for name, p in self.named_parameters()}
 
     def scales(self):
         """Project global and local fields with straight-through native rounding."""
