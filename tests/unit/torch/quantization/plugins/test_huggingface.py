@@ -51,7 +51,6 @@ from modelopt.torch.quantization.plugins.huggingface import (
     get_homogeneous_hf_decoder_layers,
     is_homogeneous_hf_model,
 )
-from modelopt.torch.quantization.repair import IQRepairPolicy
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
@@ -64,6 +63,8 @@ from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
 from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 from transformers.models.llama4.modeling_llama4 import Llama4TextExperts
+
+from modelopt.torch.quantization.repair import IQRepairPolicy
 
 
 class HFModel(nn.Module):
@@ -423,118 +424,6 @@ def test_is_homogeneous_hf_model_gpt_oss():
     assert is_homogeneous_hf_model(model)
 
 
-@pytest.mark.parametrize("sequential", [False, True])
-@pytest.mark.parametrize("expert_cls", [Llama4TextExperts, GptOssExperts])
-def test_transposed_experts_calibration_and_repair_gradients(expert_cls, sequential):
-    """Expert forwards use the calibrated layout and train native IQ masters while weights freeze."""
-    set_seed(17)
-    config_cls = Llama4TextConfig if expert_cls is Llama4TextExperts else GptOssConfig
-    experts = expert_cls(
-        config_cls(
-            hidden_size=256,
-            intermediate_size=512,
-            num_local_experts=2,
-            num_experts_per_tok=1,
-        )
-    )
-    weight_config = {"num_bits": "iq2_s", "backend": "ggml", "block_sizes": {-1: 256}}
-    mtq.quantize(
-        experts,
-        {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "*weight_quantizer",
-                    "cfg": [{"num_bits": 8}, weight_config] if sequential else weight_config,
-                },
-            ],
-            "algorithm": None,
-        },
-    )
-    fmt = GGML_FORMAT_REGISTRY["iq2_s"]
-    with torch.no_grad():
-        for parameter in experts.parameters():
-            parameter.zero_()
-        for name in ("gate_up_proj", "down_proj"):
-            weight = experts._parameters[name]
-            container = getattr(experts, name + "_weight_quantizer")
-            if sequential:
-                container[0].disable()
-            quantizer = container[1] if sequential else container
-            shape = weight.transpose(-1, -2).shape
-            packed = torch.randint(
-                0,
-                256,
-                (*shape[:-1], shape[-1] // fmt.block_size, fmt.block_bytes),
-                dtype=torch.uint8,
-            )
-            packed = fmt.replace_payload_scales(
-                packed.reshape(-1, fmt.block_bytes),
-                torch.full((weight.numel() // fmt.block_size,), 2**-6, dtype=torch.float16),
-            ).reshape_as(packed)
-            weight.copy_(
-                fmt.dequantize(packed, torch.tensor(shape), dtype=weight.dtype).transpose(-1, -2)
-            )
-            quantizer._setup_for_blockquant(weight.transpose(-1, -2))
-            processed = quantizer._process_for_blockquant(weight.transpose(-1, -2))
-            pin_packed_weight(quantizer, fmt.name, packed, source=processed)
-
-    yielded = {q: w for w, q in experts.iter_weights_for_calibration()}
-    assert (
-        yielded[experts.gate_up_proj_weight_quantizer].shape
-        == experts.gate_up_proj.transpose(-1, -2).shape
-    )
-    assert (
-        yielded[experts.down_proj_weight_quantizer].shape
-        == experts.down_proj.transpose(-1, -2).shape
-    )
-    inputs = (torch.randn(4, 256) * 0.05).requires_grad_()
-    routing = (
-        {"router_indices": torch.tensor([[0], [1], [0], [1]]), "routing_weights": torch.ones(4, 1)}
-        if expert_cls is GptOssExperts
-        else {}
-    )
-    policy = IQRepairPolicy()
-    try:
-        fields = policy.prepare(experts)
-        before = experts(inputs, **routing)
-        before.square().sum().backward()
-        assert all(field.grad is not None and field.grad.abs().sum() > 0 for field in fields)
-        assert all(parameter.grad is None for parameter in experts.parameters())
-        if expert_cls is GptOssExperts and sequential:
-            with pytest.raises(RuntimeError):
-                experts(inputs[:, :-1], **routing)
-            for name, (weight, _) in zip(
-                ("gate_up_proj", "down_proj"), experts.iter_weights_for_calibration(), strict=True
-            ):
-                assert (
-                    weight.untyped_storage().data_ptr()
-                    == experts._parameters[name].untyped_storage().data_ptr()
-                )
-        with torch.no_grad():
-            for field in fields:
-                field.add_(field.grad, alpha=-0.01)
-        policy.project_()
-        updated = experts(inputs, **routing).detach()
-        assert not torch.equal(before, updated)
-        native = {
-            binding.quantizer: state.native_payload().clone()
-            for binding, state, _, _ in policy.adapters
-        }
-        policy.finalize_()
-        ordinary = experts(inputs, **routing)
-        torch.testing.assert_close(ordinary, updated, rtol=1e-5, atol=1e-6)
-        gradients = torch.autograd.grad(
-            ordinary.sum(),
-            tuple(experts._parameters[name] for name in ("gate_up_proj", "down_proj")),
-        )
-        assert all(gradient.abs().sum() > 0 for gradient in gradients)
-        for quantizer, expected in native.items():
-            assert torch.equal(pinned_packed_weight(quantizer, fmt.name), expected)
-    finally:
-        policy.close()
-
-
 def test_transposed_experts_calib_mixin_yields_transposed_views():
     """Unit-level guard for the shared ``_TransposedExpertsCalibMixin`` (no GPU / no model
     conversion needed): it must yield the transposed ``(num_experts, out, in)`` weight view
@@ -655,3 +544,115 @@ def test_initialize_qdq_weights_hf_roundtrip(tmp_path, num_bits, gptq):
         parameter.grad = torch.ones_like(parameter)
     optimizer.step()
     torch.testing.assert_close(restored(inputs).logits, before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("sequential", [False, True])
+@pytest.mark.parametrize("expert_cls", [Llama4TextExperts, GptOssExperts])
+def test_transposed_experts_calibration_and_repair_gradients(expert_cls, sequential):
+    """Expert forwards use the calibrated layout and train native IQ masters while weights freeze."""
+    set_seed(17)
+    config_cls = Llama4TextConfig if expert_cls is Llama4TextExperts else GptOssConfig
+    experts = expert_cls(
+        config_cls(
+            hidden_size=256,
+            intermediate_size=512,
+            num_local_experts=2,
+            num_experts_per_tok=1,
+        )
+    )
+    weight_config = {"num_bits": "iq2_s", "backend": "ggml", "block_sizes": {-1: 256}}
+    mtq.quantize(
+        experts,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": [{"num_bits": 8}, weight_config] if sequential else weight_config,
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+    fmt = GGML_FORMAT_REGISTRY["iq2_s"]
+    with torch.no_grad():
+        for parameter in experts.parameters():
+            parameter.zero_()
+        for name in ("gate_up_proj", "down_proj"):
+            weight = experts._parameters[name]
+            container = getattr(experts, name + "_weight_quantizer")
+            if sequential:
+                container[0].disable()
+            quantizer = container[1] if sequential else container
+            shape = weight.transpose(-1, -2).shape
+            packed = torch.randint(
+                0,
+                256,
+                (*shape[:-1], shape[-1] // fmt.block_size, fmt.block_bytes),
+                dtype=torch.uint8,
+            )
+            packed = fmt.replace_payload_scales(
+                packed.reshape(-1, fmt.block_bytes),
+                torch.full((weight.numel() // fmt.block_size,), 2**-6, dtype=torch.float16),
+            ).reshape_as(packed)
+            weight.copy_(
+                fmt.dequantize(packed, torch.tensor(shape), dtype=weight.dtype).transpose(-1, -2)
+            )
+            quantizer._setup_for_blockquant(weight.transpose(-1, -2))
+            processed = quantizer._process_for_blockquant(weight.transpose(-1, -2))
+            pin_packed_weight(quantizer, fmt.name, packed, source=processed)
+
+    yielded = {q: w for w, q in experts.iter_weights_for_calibration()}
+    assert (
+        yielded[experts.gate_up_proj_weight_quantizer].shape
+        == experts.gate_up_proj.transpose(-1, -2).shape
+    )
+    assert (
+        yielded[experts.down_proj_weight_quantizer].shape
+        == experts.down_proj.transpose(-1, -2).shape
+    )
+    inputs = (torch.randn(4, 256) * 0.05).requires_grad_()
+    routing = (
+        {"router_indices": torch.tensor([[0], [1], [0], [1]]), "routing_weights": torch.ones(4, 1)}
+        if expert_cls is GptOssExperts
+        else {}
+    )
+    policy = IQRepairPolicy()
+    try:
+        fields = policy.prepare(experts)
+        before = experts(inputs, **routing)
+        before.square().sum().backward()
+        assert all(field.grad is not None and field.grad.abs().sum() > 0 for field in fields)
+        assert all(parameter.grad is None for parameter in experts.parameters())
+        if expert_cls is GptOssExperts and sequential:
+            with pytest.raises(RuntimeError):
+                experts(inputs[:, :-1], **routing)
+            for name, (weight, _) in zip(
+                ("gate_up_proj", "down_proj"), experts.iter_weights_for_calibration(), strict=True
+            ):
+                assert (
+                    weight.untyped_storage().data_ptr()
+                    == experts._parameters[name].untyped_storage().data_ptr()
+                )
+        with torch.no_grad():
+            for field in fields:
+                field.add_(field.grad, alpha=-0.01)
+        policy.project_()
+        updated = experts(inputs, **routing).detach()
+        assert not torch.equal(before, updated)
+        native = {
+            binding.quantizer: state.native_payload().clone()
+            for binding, state, _, _ in policy.adapters
+        }
+        policy.finalize_()
+        ordinary = experts(inputs, **routing)
+        torch.testing.assert_close(ordinary, updated, rtol=1e-5, atol=1e-6)
+        gradients = torch.autograd.grad(
+            ordinary.sum(),
+            tuple(experts._parameters[name] for name in ("gate_up_proj", "down_proj")),
+        )
+        assert all(gradient.abs().sum() > 0 for gradient in gradients)
+        for quantizer, expected in native.items():
+            assert torch.equal(pinned_packed_weight(quantizer, fmt.name), expected)
+    finally:
+        policy.close()

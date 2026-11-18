@@ -1,6 +1,5 @@
 Changelog
-=========
-
+==
 0.50.0 (2027-01-xx)
 ^^^^^^^^^^^^^^^^^^^
 
@@ -37,6 +36,7 @@ Changelog
 
 - Move agent skills to the repository-root ``skills/`` directory, with symlinks for agent discovery.
 - Prefix agent skill names with ``modelopt-``; existing names remain available as forwarding stubs.
+- Add ``modelopt.torch.distill.bypass`` for streaming IQ scale-only repair with Lion, a direct 0.001 peak learning rate, and fractional warmup.
 
 **Backward Breaking Changes**
 
