@@ -139,7 +139,10 @@ def repair_grouped_linear(quantizers, inputs, offsets, bias=None, *, is_transpos
         return None
     first = states[0]
     if not _packed_projection_qualified(inputs, first.name, first.weight_shape) or any(
-        state.name != first.name or state.weight_shape != first.weight_shape for state in states
+        state.codec_shape != state.weight_shape
+        or state.name != first.name
+        or state.weight_shape != first.weight_shape
+        for state in states
     ):
         return None
     if (
@@ -277,8 +280,10 @@ class IQScaleState(nn.Module):
         """Use packed GEMM only in a numerically and empirically qualified regime."""
         from torch.distributed.tensor import DTensor
 
-        if isinstance(inputs, DTensor) or not _packed_projection_qualified(
-            inputs, self.name, self.weight_shape
+        if (
+            self.codec_shape != self.weight_shape
+            or isinstance(inputs, DTensor)
+            or not _packed_projection_qualified(inputs, self.name, self.weight_shape)
         ):
             return None
         from modelopt.torch.kernels.quantization.iq_gemm import iq_linear
