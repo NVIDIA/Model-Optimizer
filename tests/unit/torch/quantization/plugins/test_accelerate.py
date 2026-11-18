@@ -21,7 +21,7 @@ import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.nn import QuantLinearConvBase, TensorQuantizer
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 try:
     from accelerate import cpu_offload
@@ -31,30 +31,46 @@ except ImportError:
 
 
 def test_linear_with_accelerate_monkey_patched_forward():
+    calls = []
+
+    class RecordingHook(ModelHook):
+        def pre_forward(self, module, *args, **kwargs):
+            calls.append("pre")
+            return (args[0] + 0.5,), kwargs
+
+        def post_forward(self, module, output):
+            calls.append("post")
+            return output * 2
+
     module_test = nn.Linear(16, 16)
-    add_hook_to_module(module_test, ModelHook())
+    add_hook_to_module(module_test, RecordingHook())
 
     mtq.replace_quant_module(module_test)
-    assert module_test._old_forward.__func__ == QuantLinearConvBase.forward
-
-    module_test.input_quantizer.enable_calib()
-    module_test.weight_quantizer.enable_calib()
 
     module_ref = nn.Linear(16, 16)
     mtq.replace_quant_module(module_ref)
-
     module_ref.load_state_dict(module_test.state_dict())
+    for module in (module_test, module_ref):
+        module.input_quantizer.enable_calib()
+        module.weight_quantizer.enable_calib()
 
-    x = torch.randn(1, 16)
+    x = torch.randn(1, 16, requires_grad=True)
+    ref_x = x.detach().clone().requires_grad_()
     out1 = module_test(x)
-    out2 = module_ref(x)
-    assert torch.allclose(out1, out2)
+    out2 = module_ref(ref_x + 0.5) * 2
+    torch.testing.assert_close(out1, out2)
+    assert calls == ["pre", "post"]
+    actual = torch.autograd.grad(out1.sum(), (x, module_test.weight, module_test.bias))
+    expected = torch.autograd.grad(out2.sum(), (ref_x, module_ref.weight, module_ref.bias))
+    for actual_grad, expected_grad in zip(actual, expected):
+        torch.testing.assert_close(actual_grad, expected_grad)
 
-    module_test.input_quantizer.load_calib_amax()
-    module_test.weight_quantizer.load_calib_amax()
-
-    assert module_test.input_quantizer.amax is not None
-    assert module_test.weight_quantizer.amax is not None
+    for name in ("input_quantizer", "weight_quantizer"):
+        quantizer, reference = getattr(module_test, name), getattr(module_ref, name)
+        quantizer.load_calib_amax()
+        reference.load_calib_amax()
+        assert quantizer.amax is not None
+        torch.testing.assert_close(quantizer.amax, reference.amax)
 
 
 def test_tensor_quantizer_modelopt_state_with_accelerate_hook():
