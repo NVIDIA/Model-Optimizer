@@ -1,9 +1,11 @@
-Guidelines for Evaluating Models Efficiently During Optimization Experiments
-============================================================================
+:orphan:
 
-.. contents:: Contents
-   :local:
-   :depth: 2
+Evaluating Models Efficiently During Optimization Experiments
+#############################################################
+
+:Author: Daniel Korzekwa
+:Date: November 18, 2026
+:Tags: evaluation, docs, quantization
 
 Introduction
 ------------
@@ -17,7 +19,7 @@ You may assume that reliable evaluation requires many repetitions. But could rep
 waste time? How many questions and repetitions do you need to measure improvements and rule out
 regressions?
 
-This guide helps you evaluate models quickly and reliably during optimization experiments.
+This article helps you evaluate models quickly and reliably during optimization experiments.
 
 For standardized evaluation and acceptance checks before releasing optimized models, follow the
 `ModelOpt evaluation
@@ -342,3 +344,9 @@ held-out subtasks, with ten matched repetitions—110 responses per model.
 
 The focused held-out subset detects fewer candidate cap hits with 110 responses per model. Use it
 for a quick check of known weaknesses, then evaluate broader accuracy and reliability separately.
+
+.. toctree::
+   :hidden:
+   :maxdepth: 1
+
+   Reproducibility notes <reproducibility/index>

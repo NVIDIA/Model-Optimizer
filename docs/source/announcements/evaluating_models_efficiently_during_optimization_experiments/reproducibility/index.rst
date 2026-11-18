@@ -2,7 +2,7 @@ Reproducibility notes
 =====================
 
 These notes describe how the checkpoints were prepared and evaluated for the
-:doc:`evaluation guidelines <../evaluation_guidelines>`.
+:doc:`evaluation article <../index>`.
 
 Baseline and Candidate checkpoints
 ----------------------------------
@@ -58,7 +58,7 @@ a ``131072``-token completion cap, and a ``262144``-token context window.
 .. _evaluation-aa-grading:
 
 AA-Omniscience grading
-~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~
 
 For AA-Omniscience, the Codex assistant graded each response using the reference answer, without
 being told whether Baseline or Candidate produced it. The reported grading model was GPT-6.1 Sol
