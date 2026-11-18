@@ -90,6 +90,7 @@ from . import (  # isort: skip
     deepseek_v3,
     deepseek_v32,
     deepseek_v4,
+    deepseek_v41,
     diffusion_gemma,
     falcon,
     gemma,
