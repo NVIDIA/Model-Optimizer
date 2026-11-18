@@ -15,6 +15,9 @@
 
 """Tests for the pseudo-random activation scales used in autotune candidates."""
 
+import functools
+import itertools
+
 import numpy as np
 import onnx_graphsurgeon as gs
 import pytest
@@ -29,6 +32,7 @@ from modelopt.onnx.quantization.autotune.export_utils import (
     export_qdq_onnx,
 )
 from modelopt.onnx.quantization.autotune.insertion_points import ResolvedInsertionPoint
+from modelopt.onnx.quantization.precision_utils import _convert_to_runtime_precision
 
 
 def _weight(name, shape, seed):
@@ -161,21 +165,60 @@ def test_fp8_scales_stay_distinct_after_conversion(scale_type, groups):
     assert len(set(converted.view(np.uint16).tolist())) == len(scales)
 
 
-@pytest.mark.parametrize("needs_fp8_conversion", [False, True])
-def test_fp8_export_checks_scales_after_conversion(model, monkeypatch, needs_fp8_conversion):
-    """export_qdq_onnx inserts INT8 Q/DQ before converting to FP8; the intent must reach the scales."""
-    calls = []
-    build = export_utils.build_activation_scales
+def _names_merged_by_fp8_rescale(scale_type):
+    """First two tensor names whose hashed scales differ but are equal after the FP8 rescale."""
+    bfloat16 = scale_type == TensorProto.BFLOAT16
+    dtype = helper.tensor_dtype_to_np_dtype(scale_type)
+    first_by_converted = {}
+    for i in itertools.count():
+        name = f"t{i}"
+        bits = export_utils._to_grid(export_utils._hashed_scale(name), bfloat16)
+        scale = np.array([bits], dtype=np.uint16).view(dtype)
+        converted = int(((scale * 448.0) / 127.0).astype(dtype).view(np.uint16)[0])
+        other, other_bits = first_by_converted.setdefault(converted, (name, bits))
+        if other_bits != bits:
+            return other, name
 
-    def spy(*args, **kwargs):
-        calls.append(kwargs)
-        return build(*args, **kwargs)
 
-    monkeypatch.setattr(export_utils, "build_activation_scales", spy)
-    points = _points(model, [("conv2", 0, "p1"), ("conv3", 0, "cat")])
-    config = Config(default_quant_type="fp8" if needs_fp8_conversion else "int8")
-    export_qdq_onnx(model, points, config, needs_fp8_conversion=needs_fp8_conversion)
-    assert [call["fp8"] for call in calls] == [needs_fp8_conversion]
+@pytest.mark.parametrize(
+    ("scale_type", "high_precision_dtype", "default_dq_dtype"),
+    [(TensorProto.FLOAT16, "fp16", "float16"), (TensorProto.BFLOAT16, "bf16", "bfloat16")],
+    ids=["float16", "bfloat16"],
+)
+def test_fp8_export_keeps_converted_scales_distinct(
+    scale_type, high_precision_dtype, default_dq_dtype
+):
+    """Groups whose scales int8_to_fp8 would merge keep distinct scales in the exported candidate."""
+    a, b = _names_merged_by_fp8_rescale(scale_type)
+    graph = helper.make_graph(
+        [
+            helper.make_node("Relu", ["x"], [a], name="relu"),
+            helper.make_node("Sigmoid", ["x"], [b], name="sigmoid"),
+            helper.make_node("Add", [a, b], ["y"], name="add"),
+        ],
+        "fp8_pair",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 8])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 8])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    # The Config and the precision conversion that quantize(autotune=...) uses for FP8.
+    exported = export_qdq_onnx(
+        model,
+        _points(model, [("add", 0, a), ("add", 1, b)]),
+        Config(default_quant_type="fp8", default_dq_dtype=default_dq_dtype),
+        needs_fp8_conversion=True,
+        model_transform=functools.partial(
+            _convert_to_runtime_precision,
+            quantize_mode="fp8",
+            high_precision_dtype=high_precision_dtype,
+        ),
+    )
+    inits = {i.name: i for i in exported.graph.initializer}
+    quantize_nodes = [n for n in exported.graph.node if n.op_type == "QuantizeLinear"]
+    assert {inits[n.input[1]].data_type for n in quantize_nodes} == {scale_type}
+    assert {inits[n.input[2]].data_type for n in quantize_nodes} == {TensorProto.FLOAT8E4M3FN}
+    scales = _activation_scales(exported)
+    assert scales[a] != scales[b]
 
 
 def test_more_groups_than_scales_stay_in_range():
