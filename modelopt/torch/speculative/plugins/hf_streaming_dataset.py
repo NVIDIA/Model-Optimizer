@@ -61,6 +61,7 @@ __all__ = [
     "EagleFetchPayload",
     "EagleVllmStreamingConfig",
     "EagleVllmStreamingDataset",
+    "MegatronEagleVllmStreamingDataset",
     "StreamingConfig",
     "StreamingDataset",
 ]
@@ -690,22 +691,23 @@ class EagleVllmStreamingDataset(StreamingDataset):
             return torch.cat([loss_mask, pad], dim=0)
         return loss_mask
 
-    def _format(self, fetched: EagleFetchPayload) -> dict[str, torch.Tensor]:
-        token_ids = fetched["token_ids"]
-        hidden_states = fetched["hidden_states"]
-        loss_mask = fetched["loss_mask"]
-
+    def _split_hidden_states(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # The last plane is always the base (KD-target) hidden. It is normally an extra
         # plane on top of the aux features; when the draft's top aux layer already is the
         # base's final layer the producer cannot emit a distinct extra plane, so the same
         # plane serves both roles (see ``final_aux_is_base_hidden``).
-        base_model_hidden_states = hidden_states[:, -1, :]
         aux_planes = (
             hidden_states if self.config.final_aux_is_base_hidden else hidden_states[:, :-1, :]
         )
-        aux_hidden_states = aux_planes.reshape(hidden_states.shape[0], -1)
+        return hidden_states[:, -1, :], aux_planes
 
-        input_ids = token_ids.to(torch.int64)
+    def _format(self, fetched: EagleFetchPayload) -> dict[str, torch.Tensor]:
+        base_model_hidden_states, aux_planes = self._split_hidden_states(fetched["hidden_states"])
+        aux_hidden_states = aux_planes.flatten(1)
+
+        input_ids = fetched["token_ids"].to(torch.int64)
         labels = torch.full_like(input_ids, IGNORE_TOKEN_ID)
         labels[..., :-1] = input_ids[..., 1:]
 
@@ -714,7 +716,48 @@ class EagleVllmStreamingDataset(StreamingDataset):
             "base_model_hidden_states": base_model_hidden_states,
             "aux_hidden_states": aux_hidden_states,
             "attention_mask": torch.ones_like(input_ids),
-            "loss_mask": loss_mask,
+            "loss_mask": fetched["loss_mask"],
             "labels": labels,
             "base_hidden_prenorm": self.config.base_hidden_prenorm,
+        }
+
+
+class MegatronEagleVllmStreamingDataset(EagleVllmStreamingDataset):
+    """Stream BF16 features in the layout used by Megatron-LM EAGLE finetuning.
+
+    Token IDs and the unshifted supervision mask have ``max_seq_len + 1`` entries.
+    Megatron builds next-token labels from these, so both feature tensors have only
+    ``max_seq_len`` rows. All padding is excluded from supervision.
+    """
+
+    def _tokenize_entry(self, entry: dict) -> dict | None:
+        sample = super()._tokenize_entry(entry)
+        if sample is not None and not sample["loss_mask"][1:].any():
+            self._warn_unfit(sample["cid"], "no supervised next-token labels")
+            return None
+        return sample
+
+    def _format(self, fetched: EagleFetchPayload) -> dict[str, torch.Tensor]:
+        seq_length = self.config.max_seq_len
+        token_ids = fetched["token_ids"][: seq_length + 1]
+        hidden_states, aux_planes = self._split_hidden_states(fetched["hidden_states"][:seq_length])
+        if hidden_states.shape[0] != min(token_ids.numel(), seq_length):
+            raise ValueError("Streamed hidden states and token IDs are not aligned")
+        if hidden_states.dtype != torch.bfloat16 or not aux_planes.shape[1]:
+            raise ValueError("Megatron EAGLE streaming requires BF16 base and auxiliary features")
+
+        token_padding = seq_length + 1 - token_ids.numel()
+        feature_padding = seq_length - hidden_states.shape[0]
+        if feature_padding:
+            aux_planes = torch.nn.functional.pad(aux_planes, (0, 0, 0, 0, 0, feature_padding))
+            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, feature_padding))
+        return {
+            "input_ids": torch.nn.functional.pad(
+                token_ids, (0, token_padding), value=self.tokenizer.eos_token_id
+            ),
+            "loss_mask": torch.nn.functional.pad(
+                fetched["loss_mask"][: seq_length + 1].long(), (0, token_padding)
+            ),
+            "aux_hidden_states": aux_planes.flatten(1),
+            "hidden_states": hidden_states,
         }
