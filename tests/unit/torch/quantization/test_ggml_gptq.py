@@ -244,7 +244,7 @@ def test_local_hessian_scales_lower_the_output_error_of_correlated_inputs():
 
 def test_a_module_calibration_never_reached_gets_the_plain_search():
     # An MoE expert that no calibration token reaches keeps a zero Hessian. Weighting by its
-    # diagonal would make every code score zero error, so GPTQ must fall back to the plain search.
+    # diagonal would make every code score zero error, so it gets the encode its forwards give.
     torch.manual_seed(0)
     model = torch.nn.ModuleDict(
         {"used": torch.nn.Linear(512, 8, bias=False), "unused": torch.nn.Linear(512, 8, bias=False)}
@@ -254,7 +254,7 @@ def test_a_module_calibration_never_reached_gets_the_plain_search():
     algorithm = {**GPTQ, "importance_weighted": True}
     mtq.quantize(model, _iq_config(algorithm, "iq2_xxs"), forward_loop=lambda m: m["used"](inputs))
 
-    packed, shape = IQ2_XXS.quantize(original)
+    packed, shape = IQ2_XXS.plain_quantize(original)
     plain = IQ2_XXS.dequantize(packed, shape, dtype=original.dtype)
     pinned = pinned_packed_weight(model["unused"].weight_quantizer, "iq2_xxs")
     decoded = IQ2_XXS.dequantize(pinned, shape, dtype=original.dtype)
@@ -370,6 +370,25 @@ def test_gptq_drops_each_fused_experts_weights_before_the_next_window(monkeypatc
     assert updated
 
 
+@pytest.mark.parametrize("num_bits", ["iq1_s", "iq2_xs"])
+def test_gptq_gives_each_row_a_gain_of_one_under_its_hessian(num_bits):
+    # As a least-squares fit GPTQ shrinks each row's output; one factor per row on its stored
+    # scales undoes that under the damped Hessian GPTQ minimized.
+    torch.manual_seed(0)
+    model = torch.nn.Linear(512, 16, bias=False)
+    original = model.weight.detach().double()
+    inputs = _inputs()
+    mtq.quantize(model, _iq_config(GPTQ, num_bits), forward_loop=lambda m: m(inputs))
+    ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    pinned = pinned_packed_weight(model.weight_quantizer, num_bits)
+    decoded = ggml_format.dequantize(pinned, torch.tensor(original.shape), dtype=torch.float64)
+
+    hessian = inputs.double().T @ inputs.double()
+    hessian.diagonal().add_(0.3 * hessian.diagonal().mean())
+    gain = ((decoded @ hessian) * original).sum(-1) / ((original @ hessian) * original).sum(-1)
+    torch.testing.assert_close(gain, torch.ones_like(gain), rtol=0, atol=2e-3)
+
+
 @pytest.mark.parametrize("num_bits", ["iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s"])
 def test_a_format_that_keeps_its_scales_encodes_gptqs_weight_to_the_pin(num_bits):
     ggml_format = GGML_FORMAT_REGISTRY[num_bits]
@@ -384,15 +403,19 @@ def test_a_format_that_keeps_its_scales_encodes_gptqs_weight_to_the_pin(num_bits
     assert torch.equal(ggml_format.pack(decoded, quantizer), pinned)
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
 
-    # A QAD update re-encodes under the pinned scales and importance.
+    # A QAD update searches again at the scales GPTQ searched at, under the pinned importance, and
+    # keeps the pinned, raised scales.
     with torch.no_grad():
         model.weight.add_(torch.randn_like(model.weight) * 0.01)
     scales = ggml_format.payload_scales(pinned.reshape(-1, ggml_format.block_bytes))
     expected, _ = ggml_format.quantize(
         model.weight.detach(),
-        scales=scales,
+        scales=_pinned_search_scales(quantizer, num_bits),
         importance=pinned_importance(quantizer, num_bits),
     )
+    expected = ggml_format.replace_payload_scales(
+        expected.reshape(-1, ggml_format.block_bytes), scales
+    ).reshape(expected.shape)
     packed = ggml_format.pack(model.weight, quantizer)
     assert torch.equal(packed, expected)
     assert torch.equal(
