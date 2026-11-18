@@ -290,12 +290,20 @@ def _source_name(format_name: str) -> str:
 def _block_keys(
     weight: torch.Tensor, blocks_shape: tuple[int, ...], dtype: torch.dtype | None = None
 ) -> torch.Tensor:
-    """A :func:`_row_keys` hash of each 256-value block of ``weight`` as float32, ``blocks_shape``.
+    """A :func:`_row_keys` hash of each native block of ``weight`` as float32, ``blocks_shape``.
 
     Hashing float32 values lets a lossless upcast of the weight, as folding hands over, match.
     With ``dtype``, each block is first rounded to it, as a cast of the weight would.
     """
-    blocks = weight.reshape(-1, GGML_BLOCK_SIZE)
+    count = math.prod(blocks_shape)
+    if count == 0:
+        if weight.numel():
+            raise ValueError("A nonempty source cannot fingerprint an empty block grid")
+        return torch.empty(blocks_shape, dtype=torch.int64, device=weight.device)
+    block_size = weight.numel() // count
+    if not block_size or weight.numel() % count:
+        raise ValueError("The native block grid must evenly split its source")
+    blocks = weight.reshape(-1, block_size)
     keys = torch.empty(blocks.shape[0], dtype=torch.int64, device=weight.device)
     for start in range(0, blocks.shape[0], _KEY_BLOCKS_PER_CHUNK):
         chunk = blocks[start : start + _KEY_BLOCKS_PER_CHUNK]
