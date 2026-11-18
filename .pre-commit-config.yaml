@@ -109,6 +109,7 @@ repos:
         exclude: >
           (?x)^(
               modelopt/torch/quantization/utils/calib_utils.py|
+              modelopt/torch/models/deepseek_v41/(_hf_attention|_hf_engram|_hf_math|_hf_parallel|modeling_hf).py|
               modelopt/torch/quantization/ggml/codebooks.py|
               modelopt/onnx/quantization/operators.py|
               modelopt/onnx/quantization/ort_calibration.py|
