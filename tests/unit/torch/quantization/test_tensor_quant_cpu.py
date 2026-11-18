@@ -668,6 +668,58 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
     assert restored_states == original_states
 
 
+def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(monkeypatch):
+    """Entries naming one quantizer each, as a finalized AutoQuantize search's, act as wildcards do."""
+
+    def quantized():
+        model = torch.nn.Sequential(*(torch.nn.Linear(4, 4) for _ in range(8)))
+        return mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+
+    quant_cfg = [{"quantizer_name": "*", "enable": False}]
+    for layer in range(8):
+        quant_cfg.append({"quantizer_name": f"{layer}.weight_quantizer", "cfg": {"num_bits": 4}})
+        quant_cfg.append({"quantizer_name": f"{layer}.input_quantizer", "enable": True})
+    # Replacing a quantizer with a SequentialQuantizer, and back, changes the names to find.
+    quant_cfg.append({"quantizer_name": "2.weight_quantizer", "cfg": [{"num_bits": 4}] * 2})
+    quant_cfg.append({"quantizer_name": "2.weight_quantizer.1", "enable": False})
+    quant_cfg.append({"quantizer_name": "3.weight_quantizer", "cfg": [{"num_bits": 8}] * 2})
+    quant_cfg.append({"quantizer_name": "3.weight_quantizer", "cfg": {"num_bits": 8}})
+    # The same names as one-character wildcards, matched by walking the model.
+    walked_cfg = [quant_cfg[0]] + [
+        {**entry, "quantizer_name": f"[{entry['quantizer_name'][0]}]{entry['quantizer_name'][1:]}"}
+        for entry in quant_cfg[1:]
+    ]
+
+    def states(model):
+        return {
+            name: (
+                type(module),
+                isinstance(module, TensorQuantizer)
+                and module.get_modelopt_state(properties_only=True),
+            )
+            for name, module in model.named_modules()
+            if isinstance(module, (TensorQuantizer, SequentialQuantizer))
+        }
+
+    walked = quantized()
+    mtq.set_quantizer_by_cfg(walked, walked_cfg)
+    named = quantized()
+    walks = 0
+    named_modules = torch.nn.Module.named_modules
+
+    def count_walks(self, *args, **kwargs):
+        nonlocal walks
+        walks += self is named
+        return named_modules(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.Module, "named_modules", count_walks)
+    mtq.set_quantizer_by_cfg(named, quant_cfg)
+    monkeypatch.undo()
+    assert states(named) == states(walked)
+    # The "*" entry, the index, and its rebuilds after each replacement: not one per entry.
+    assert walks <= 4 < len(quant_cfg)
+
+
 @pytest.mark.parametrize(
     "attribute_cfg",
     [

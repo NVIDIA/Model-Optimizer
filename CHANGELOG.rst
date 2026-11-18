@@ -22,6 +22,7 @@ Changelog
 *Quantization - Recipes*
 
 - Add a sub-4-bit AutoQuantize recipe for Qwen3.6-35B-A3B at 2.75 bits, which searches the routed experts over GGML IQ2 formats with GPTQ and imatrix, weight-only NVFP4 and FP8, and BF16. Select it under ``models/Qwen/Qwen3.6-35B-A3B/auto_quantize/``.
+- Add a sub-4-bit AutoQuantize recipe for NVIDIA Nemotron 3.5 Bolt 74B-A9B at 2.0625 expert bits, under ``models/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16/auto_quantize/``. ``examples/hf_ptq/hf_ptq.py`` now loads, searches and finalizes this checkpoint, with ``--trust_remote_code``.
 
 *Speculative Decoding*
 
@@ -36,6 +37,8 @@ Changelog
 **Bug Fixes**
 
 *Quantization*
+
+- Applying a finalized AutoQuantize config to a large MoE with one module per expert no longer takes hours: ``mtq.set_quantizer_by_cfg`` now finds a quantizer that an entry names exactly without walking the model.
 
 *ONNX*
 

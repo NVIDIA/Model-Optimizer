@@ -68,6 +68,10 @@ def get_nemotron_h_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
             if layers and hasattr(layers[0], "block_type"):
                 return layers
 
+    # An Omni VLM, which a recipe quantizes whole, holds them in its language model.
+    language_model = getattr(model, "language_model", None)
+    if isinstance(language_model, nn.Module) and language_model is not model:
+        return get_nemotron_h_decoder_layers(language_model)
     return None
 
 

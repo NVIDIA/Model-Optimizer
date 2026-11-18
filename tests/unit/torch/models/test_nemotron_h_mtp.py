@@ -26,7 +26,7 @@ import torch
 pytest.importorskip("transformers")
 
 from huggingface_hub import constants as hub_constants
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from transformers import AutoModelForCausalLM, PreTrainedModel
 
 import modelopt.torch.quantization as mtq
@@ -44,6 +44,7 @@ from modelopt.torch.quantization.model_calib import (
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
 @pytest.mark.parametrize(
@@ -532,3 +533,98 @@ def test_calibration_removes_capture_hook_on_error(tiny_checkpoint, failure):
     with pytest.raises((ValueError, RuntimeError), match=r"exactly one|cannot be multiplied"):
         model(input_ids=None if failure == "base" else torch.tensor([[1, 2]]), use_cache=False)
     assert not language_model.model.norm_f._forward_pre_hooks
+
+
+def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch):
+    """A puzzle Omni checkpoint (Nemotron 3.5 Bolt) loads in its own code and keeps its names."""
+    native = pytest.importorskip("transformers.models.nemotron_h.modeling_nemotron_h")
+    from transformers import PretrainedConfig, conversion_mapping
+
+    if not hasattr(conversion_mapping, "USER_REGISTERED_MAPPINGS"):
+        pytest.skip("older transformers applies a sub-model's renames to every key")
+    # Leave transformers' registry as the test found it.
+    monkeypatch.setattr(conversion_mapping, "_checkpoint_conversion_mapping_cache", None)
+    monkeypatch.setattr(conversion_mapping, "USER_REGISTERED_MAPPINGS", set())
+
+    class PuzzleConfig(native.NemotronHConfig):
+        model_type = "nemotron_h_puzzle"
+
+    class PuzzleForCausalLM(native.NemotronHForCausalLM):
+        config_class = PuzzleConfig
+
+    class OmniConfig(PretrainedConfig):
+        model_type = "nemotron_h_omni"
+
+    class TinyOmni(PreTrainedModel):
+        config_class = OmniConfig
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.language_model = PuzzleForCausalLM(config.llm_config)
+            self.vision_projector = torch.nn.ModuleDict({"mlp1": torch.nn.LayerNorm(32)})
+            self.post_init()
+
+    # The class name transformers keys its own port's projector renames under.
+    omni_class = type("NemotronH_Omni_Reasoning_V3", (TinyOmni,), {})
+    # As the checkpoint's code does, for its root model type.
+    conversion_mapping.register_checkpoint_conversion_mapping(
+        "nemotron_h_omni",
+        [conversion_mapping.WeightRenaming(r"^mlp1\.0\.", "vision_projector.mlp1.")],
+        overwrite=True,
+    )
+    llm_config = PuzzleConfig(
+        vocab_size=32,
+        hidden_size=32,
+        intermediate_size=32,
+        layers_block_type=["attention"],
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        use_mamba_kernels=False,
+    )
+    config = OmniConfig(llm_config=llm_config)
+    source = omni_class(config).eval()
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.uniform_(-0.1, 0.1)
+    # The checkpoint's names: the language model's base model under ``backbone``, and ``mlp1.0``.
+    checkpoint = {
+        name.replace("language_model.model.", "language_model.backbone.").replace(
+            "vision_projector.mlp1.", "mlp1.0."
+        ): tensor.clone()
+        for name, tensor in source.state_dict().items()
+    }
+    save_file(checkpoint, tmp_path / "model.safetensors")
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": [omni_class.__name__],
+                "model_type": "nemotron_h_omni",
+                "llm_config": {"model_type": "nemotron_h_puzzle"},
+            }
+        )
+    )
+
+    def loaded_source_tensors(model):
+        state = model.state_dict()
+        return {
+            name for name, tensor in source.state_dict().items() if torch.equal(state[name], tensor)
+        }
+
+    without_hook = loaded_source_tensors(omni_class.from_pretrained(tmp_path, config=config))
+    assert not any(name.startswith("language_model.model.") for name in without_hook)
+    # transformers 5.18 adds renames for its port of the Omni class, which the load must bypass.
+    port_renames = conversion_mapping.get_checkpoint_conversion_mapping(omni_class.__name__)
+    with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
+        loaded = omni_class.from_pretrained(tmp_path, config=config)
+    assert loaded_source_tensors(loaded) == set(source.state_dict())
+    # A recipe quantizes the whole VLM, layer by layer for sequential GPTQ.
+    layers = LayerActivationCollector.get_decoder_layers(loaded)
+    assert layers is loaded.language_model.model.layers
+    restored = conversion_mapping.get_checkpoint_conversion_mapping(omni_class.__name__)
+    assert repr(restored) == repr(port_renames)
+    loaded.save_pretrained(tmp_path / "saved")
+    assert set(load_file(tmp_path / "saved" / "model.safetensors")) == set(checkpoint)
+    # The checkpoint's code, not transformers' port of its Omni class, can hold a puzzle model.
+    remote = type("Config", (PretrainedConfig,), {"__module__": "transformers_modules.bolt.cfg"})
+    assert hf.prefers_bundled_code("nemotron_h_omni", remote(llm_config=llm_config), tmp_path, {})

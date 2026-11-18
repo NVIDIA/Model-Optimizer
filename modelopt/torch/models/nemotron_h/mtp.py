@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Checkpoint loading and calibration support for the Nemotron-H MTP tail."""
+"""Checkpoint loading and calibration support for the Nemotron-H MTP tail and puzzle models."""
 
 import copy
 import inspect
@@ -68,15 +68,28 @@ def has_mtp_weights(checkpoint_path: str) -> bool:
     return _get_mtp_layout(_resolve_checkpoint_path(checkpoint_path)) is not None
 
 
+def _has_puzzle_language_model(config) -> bool:
+    """Whether an Omni config (a dict or a config object) holds a puzzle language model."""
+
+    def get(cfg, key):
+        return cfg.get(key) if isinstance(cfg, dict) else getattr(cfg, key, None)
+
+    language = get(config, "llm_config") or get(config, "text_config")
+    return get(language, "model_type") == "nemotron_h_puzzle"
+
+
 def prefers_bundled_code(hf_config, checkpoint_path: str, config_kwargs: dict) -> bool:
     """True for a remote-code config the built-in Nemotron-H class cannot represent.
 
     Built-in Nemotron-H implements only the MoE variant on some Transformers releases, so a
-    dense checkpoint's config fails to parse as a built-in one and needs its bundled code.
+    dense checkpoint's config fails to parse as a built-in one and needs its bundled code. Nor
+    does it represent a puzzle language model, whose layers differ in size (Nemotron 3.5 Bolt).
     """
-    if getattr(hf_config, "model_type", None) != "nemotron_h":
-        return False
     if not type(hf_config).__module__.startswith("transformers_modules"):
+        return False
+    if _has_puzzle_language_model(hf_config):
+        return True
+    if getattr(hf_config, "model_type", None) != "nemotron_h":
         return False
     builtin_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
     try:
@@ -195,12 +208,50 @@ class _NemotronHMTP(torch.nn.Module):
 
 
 @contextmanager
+def _puzzle_renames(config: dict):
+    """Load a puzzle Omni checkpoint (Nemotron 3.5 Bolt) with its own code's weight renames.
+
+    Its code registers them under names transformers 5.18 does not use: none reaches its
+    ``nemotron_h_puzzle`` language model, which so loads none of its ``backbone.*`` weights, and
+    its Omni class's name selects transformers' renames for transformers' own port of that class,
+    which send the projector's weights elsewhere. ``from_pretrained`` records the renames it ran,
+    and the export reverts them.
+    """
+    if not _has_puzzle_language_model(config):
+        yield
+        return
+    from transformers import conversion_mapping
+
+    if conversion_mapping.get_checkpoint_conversion_mapping("nemotron_h_puzzle") is None:
+        conversion_mapping.register_checkpoint_conversion_mapping(
+            "nemotron_h_puzzle", [conversion_mapping.WeightRenaming("backbone.", "model.")]
+        )
+    # Built by the lookup above. Hidden for this load only: a load of the port still needs them.
+    cache = conversion_mapping._checkpoint_conversion_mapping_cache
+    hidden = {name: cache.pop(name) for name in config.get("architectures") or () if name in cache}
+    try:
+        yield
+    finally:
+        cache.update(hidden)
+
+
+@contextmanager
 def prepare_for_loading(checkpoint_path: str, trust_remote_code: bool, *, model_class=None):
-    """Scope MTP construction to the selected class, or resolve the default AutoModel class."""
+    """Scope MTP construction and a puzzle checkpoint's weight renames to the load."""
     local_path = _resolve_checkpoint_path(checkpoint_path)
     layout = _get_mtp_layout(local_path)
     config_path = local_path / "config.json"
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    with (
+        _puzzle_renames(config),
+        _mtp_construction(checkpoint_path, trust_remote_code, model_class, layout, config),
+    ):
+        yield
+
+
+@contextmanager
+def _mtp_construction(checkpoint_path, trust_remote_code, model_class, layout, config):
+    """Scope MTP construction to the selected class, or resolve the default AutoModel class."""
     if layout is None:
         configs = (config, config.get("llm_config") or {}, config.get("text_config") or {})
         if any((cfg.get("num_nextn_predict_layers") or 0) > 0 for cfg in configs):
