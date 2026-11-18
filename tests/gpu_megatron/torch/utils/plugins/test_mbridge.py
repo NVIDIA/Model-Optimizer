@@ -26,7 +26,7 @@ from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_stack_spec
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.moe.moe_layer import MoELayer
-from megatron.core.transformer.spec_utils import get_submodules
+from megatron.core.transformer.spec_utils import ModuleSpec, get_submodules
 
 from modelopt.torch.utils.plugins.mbridge import set_moe_expert_layout
 from modelopt.torch.utils.plugins.megatron_layer_specs import hybrid_stack_spec_sequential_mlp
@@ -116,6 +116,12 @@ def dense_custom_hybrid_stack_spec():
     return spec
 
 
+def wrapped_dense_custom_hybrid_stack_spec():
+    spec = dense_custom_hybrid_stack_spec()
+    spec.submodules.moe_layer = ModuleSpec(module=IdentityOp)
+    return spec
+
+
 def local_custom_hybrid_stack_spec():
     spec = custom_hybrid_stack_spec()
     get_submodules(spec.submodules.moe_layer.submodules.mlp).experts = get_submodules(
@@ -132,6 +138,7 @@ def local_custom_hybrid_stack_spec():
         (custom_hybrid_stack_spec, "positional"),
         (custom_hybrid_stack_spec, "keyword"),
         (dense_custom_hybrid_stack_spec, "plain"),
+        (wrapped_dense_custom_hybrid_stack_spec, "plain"),
         (local_custom_hybrid_stack_spec, "plain"),
     ],
 )
@@ -164,8 +171,11 @@ def test_custom_hybrid_stack_survives_layout_changes_and_run_config_round_trip(
         spec = provider._resolve_hybrid_stack_spec()
         assert spec.submodules.mamba_layer == original.submodules.mamba_layer
         assert spec.submodules.attention_layer == original.submodules.attention_layer
-        if original.submodules.moe_layer is IdentityOp:
-            assert spec.submodules.moe_layer is IdentityOp
+        if stack_spec_factory in (
+            dense_custom_hybrid_stack_spec,
+            wrapped_dense_custom_hybrid_stack_spec,
+        ):
+            assert spec.submodules.moe_layer == original.submodules.moe_layer
             continue
 
         mlp = spec.submodules.moe_layer.submodules.mlp

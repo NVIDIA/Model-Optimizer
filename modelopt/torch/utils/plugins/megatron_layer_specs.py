@@ -82,7 +82,11 @@ def _hybrid_stack_spec_with_expert_layout(stack_spec_factory, config, moe_groupe
         else stack_spec_factory()
     )
     moe_layer = stack_spec.submodules.moe_layer
-    if moe_layer is None or moe_layer is IdentityOp:
+    if (
+        moe_layer is None
+        or moe_layer is IdentityOp
+        or getattr(moe_layer, "module", None) is IdentityOp
+    ):
         return stack_spec
 
     moe = get_submodules(moe_layer.submodules.mlp)
@@ -91,7 +95,8 @@ def _hybrid_stack_spec_with_expert_layout(stack_spec_factory, config, moe_groupe
         if expert_type is not TEGroupedMLP:
             raise ValueError(
                 "Grouped GEMM requires a custom hybrid factory that returns TEGroupedMLP experts; "
-                "use moe_grouped_gemm=False for SequentialMLP experts"
+                "use moe_grouped_gemm=False (or --no_moe_grouped_gemm in scripts) "
+                "for SequentialMLP experts"
             )
         return stack_spec
     if expert_type is SequentialMLP:
