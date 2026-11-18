@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  iq1_m: configs/numerics/iq1_m
+  iq2_xxs: configs/numerics/iq2_xxs
+  iq2_xs: configs/numerics/iq2_xs
+  iq2_s: configs/numerics/iq2_s
+  q8_0: configs/numerics/q8_0
+  w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
+  fp8: configs/numerics/fp8
+
+metadata:
+  description: >-
+    NVIDIA-Nemotron-3.5-Bolt-74B-A9B routed and shared experts searched over IQ1_M/IQ2_XXS/IQ2_XS/
+    IQ2_S (local GPTQ + imatrix), NVFP4, FP8 and BF16 at 2.0625 effective bits over the experts,
+    the size of the 24GB release's IQ2_XXS experts. The other linears keep the release's formats:
+    Mamba in/out_proj W4A16 NVFP4, and attention, MoE latent projections and lm_head Q8_0.
+    Sequential GPTQ finalizes the selected formats: run once to search, then rerun the same command
+    to finalize and export (shared --auto_quantize_checkpoint).
+quantize:
+  quant_cfg:
+    - quantizer_name: "*"
+      enable: false
+auto_quantize:
+  constraints:
+    effective_bits: 2.0625
+  module_search_spaces:
+    - module_name_patterns: ["*mixer.experts.*", "*mixer.shared_experts.*"]
+      candidate_formats:
+        # GPTQ on BF16 inputs (local): a layer's score must not depend on earlier layers' picks.
+        - algorithm: &local_gptq
+            - method: gptq
+              block_size: 256
+              perc_damp: 0.3
+              importance_weighted: true
+              layerwise: {enable: true, get_qdq_activations_from_prev_layer: false}
+            - method: imatrix
+          quant_cfg:
+            - &disable_all {quantizer_name: "*", enable: false}
+            - quantizer_name: "*weight_quantizer"
+              cfg: {$import: iq1_m}
+        - algorithm: *local_gptq
+          quant_cfg:
+            - *disable_all
+            - quantizer_name: "*weight_quantizer"
+              cfg: {$import: iq2_xxs}
+        - algorithm: *local_gptq
+          quant_cfg:
+            - *disable_all
+            - quantizer_name: "*weight_quantizer"
+              cfg: {$import: iq2_xs}
+        - algorithm: *local_gptq
+          quant_cfg:
+            - *disable_all
+            - quantizer_name: "*weight_quantizer"
+              cfg: {$import: iq2_s}
+        - $import: w4a16_nvfp4
+        - quant_cfg:
+            - *disable_all
+            - quantizer_name: "*weight_quantizer"
+              cfg: {$import: fp8}
+      allow_no_quant: true
+    # The release's formats, held: one candidate each and no BF16.
+    - module_name_patterns: ["*mixer.in_proj", "*mixer.out_proj"]
+      candidate_formats:
+        - $import: w4a16_nvfp4
+      allow_no_quant: false
+    - module_name_patterns:
+        - "*mixer.q_proj"
+        - "*mixer.k_proj"
+        - "*mixer.v_proj"
+        - "*mixer.o_proj"
+        - "*latent_proj"
+        - "*lm_head*"
+      candidate_formats:
+        - algorithm: max
+          quant_cfg:
+            - *disable_all
+            - quantizer_name: "*weight_quantizer"
+              cfg: {$import: q8_0}
+      allow_no_quant: false
+  # Score each expert candidate's output KL with every other expert layer at IQ2_XXS, the
+  # second-lowest candidate ("lowest" would be IQ1_M), and the held layers at their formats.
+  auto_quantize_method: kl_div
+  method_options: {context_quant_level: 1}
+  # Once the formats are frozen, sequential GPTQ calibrates each layer on its quantized predecessors.
+  finalize_algorithm:
+    - method: gptq
+      block_size: 256
+      perc_damp: 0.3
+      importance_weighted: true
+      layerwise: {enable: true}
+    - method: imatrix
+  # The budget counts the experts only, like the release's 2.0625 bits.
+  cost_excluded_layers:
+    - "*embed*"
+    - "*lm_head*"
+    - "*mixer.in_proj"
+    - "*mixer.out_proj"
+    - "*mixer.q_proj"
+    - "*mixer.k_proj"
+    - "*mixer.v_proj"
+    - "*mixer.o_proj"
+    - "*latent_proj"
+    - "*conv1d*"
+    - "*vision*"
