@@ -41,6 +41,29 @@ class _QuantLinear(QuantLinearConvBase):
 
     default_quant_desc_weight = tensor_quant.QUANT_DESC_8BIT_LINEAR_WEIGHT_PER_ROW
 
+    def forward(self, input, *args, **kwargs):
+        """Try native packed fields before the dynamic weight attribute expands them."""
+        quantizer = self.weight_quantizer
+        state = getattr(quantizer, "_local_repair_state", None)
+        if (
+            state is not None
+            and self.original_cls.forward is nn.Linear.forward
+            and not hasattr(self, "_forward_pre_dm")
+            and not args
+            and not kwargs
+            and not getattr(quantizer, "rotate_back_is_enabled", False)
+        ):
+            from ...repair_formats import _packed_projection_qualified, repair_linear
+
+            if _packed_projection_qualified(input, state.name, state.weight_shape):
+                value = self.input_quantizer(input)
+                output = repair_linear(quantizer, value, self.bias)
+                if output is None:
+                    with self.quantize_weight():
+                        output = F.linear(value, self.weight, self.bias)
+                return self.output_quantizer(output)
+        return super().forward(input, *args, **kwargs)
+
     @staticmethod
     def quantized_linear_fn(package, func_name, self, input, weight, *args, **kwargs):
         """Quantized version of a generic linear functional."""
