@@ -229,7 +229,7 @@ class IQRepairPolicy:
                         delattr(quantizer, "_fake_quantize")
                 if len(captured) != 1:
                     raise ValueError("Close quantization cache scopes before preparing IQ Bypass")
-                state = IQScaleState(quantizer, captured[0], weight.shape)
+                state = IQScaleState(quantizer, captured[0], weight.shape, binding.name)
                 quantizer.add_module("_local_repair_state", state)
                 quantizer._local_repair_active = True
                 quantizer._fake_quantize = MethodType(_repair_fake_quantize, quantizer)
