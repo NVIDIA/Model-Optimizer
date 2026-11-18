@@ -182,10 +182,7 @@ Abstention
 
 `AA-Omniscience public
 v1 <https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public>`__ distinguishes
-abstention from incorrect guessing. The Codex assistant graded responses against reference answers,
-blinded to checkpoint identity. The reported configuration was GPT-6.1 Sol (xhigh); a pinned judge
-snapshot was not independently verified. Deliberate abstentions exclude empty answers and uncertain
-guesses.
+abstention from incorrect guessing. Deliberate abstentions exclude empty answers and uncertain guesses.
 
 +---------------+---------------+---------------+---------------+---------------+---------------+
 | Measure       | Baseline      | Candidate     | Difference    | Candidate     | Candidate     |
@@ -209,6 +206,9 @@ guesses.
 
 The candidate abstained more often (p = 0.009), with no evidence of fewer incorrect answers (p =
 0.322).
+
+Compare outcomes on the same questions to check whether Candidate abstains where Baseline answers
+correctly or incorrectly.
 
 Measure inference efficiency
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

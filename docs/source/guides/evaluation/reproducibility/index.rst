@@ -55,6 +55,11 @@ Evaluation setup
 For benchmark evaluation, both models generated responses with temperature ``0.6``, top-p ``0.95``,
 a ``131072``-token completion cap, and a ``262144``-token context window.
 
+.. _evaluation-aa-grading:
+
+AA-Omniscience grading
+~~~~~~~~~~~~~~~~~~~~~
+
 For AA-Omniscience, the Codex assistant graded each response using the reference answer, without
 being told whether Baseline or Candidate produced it. The reported grading model was GPT-6.1 Sol
 with xhigh reasoning effort. Deliberate abstention means choosing not to answer; empty answers and
