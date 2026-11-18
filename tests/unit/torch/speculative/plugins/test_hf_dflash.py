@@ -395,8 +395,8 @@ class TestDFlashLazyRotaryEmb:
     The laziness exists for one reason — ``__init__`` runs on the meta device during
     ``from_pretrained`` restore, and building ``inv_freq`` there produces a meta buffer.
     That reason only applies on meta, and deferring everywhere else costs a correctness
-    property under DDP: ``inv_freq`` is non-persistent, so a rank whose batch has no
-    valid anchor returns before running the draft and ends the step one buffer short.
+    property under DDP: ``inv_freq`` is non-persistent, so a rank that had not run the
+    draft yet would end the step one buffer short.
     ``broadcast_buffers`` then coalesces mismatched buffer lists across ranks and hangs
     rather than raising, which single-node runs never reproduce.
 
@@ -1563,9 +1563,9 @@ _ZERO_LOSS_HEADS = {
 }
 
 
-@pytest.mark.parametrize("draft_runs", [False, True], ids=["no_block", "zero_weight"])
+@pytest.mark.parametrize("kept_block", [False, True], ids=["no_block", "zero_weight"])
 @pytest.mark.parametrize("head", list(_ZERO_LOSS_HEADS))
-def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, draft_runs):
+def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, kept_block):
     """DDP needs each trainable draft parameter's gradient on every rank, even at zero loss.
 
     Once the draft has run, the loss must reach it through its output, which an FSDP2 unit
@@ -1585,7 +1585,7 @@ def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, draft_
     model.dflash_module.register_forward_hook(keep_output)
     input_ids = torch.randint(1, model.config.vocab_size, (2, SEQ_LEN))
     loss_mask = torch.zeros(2, SEQ_LEN)
-    if draft_runs:
+    if kept_block:
         # Anchors are drawn from the loss mask, so each row keeps one block, anchored at 2
         # or 9, and none of its labels is in the mask.
         loss_mask[:, [2, 9]] = 1.0
@@ -1596,23 +1596,42 @@ def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, draft_
         n for n, p in model.dflash_module.named_parameters() if p.requires_grad and p.grad is None
     ]
     assert not ungraded, f"no gradient for {ungraded}"
-    # DFlash runs the draft on every batch; Domino still returns before it without a block.
-    assert len(outputs) == int(draft_runs or head == "dflash")
+    assert len(outputs) == 1
     assert all(output.grad is not None for output in outputs)
 
 
-def _fsdp2_rank_without_labels_job(rank, size):
+_FSDP2_EMPTY_RANK_HEADS = {
+    "dflash": ({}, {}),
+    "dspark": (
+        {"projector_type": "dspark", "markov_rank": 4, "use_confidence_head": True},
+        {"dflash_confidence_head_alpha": 1.0},
+    ),
+    "dspark_unweighted_confidence": (
+        {"projector_type": "dspark", "markov_rank": 4, "use_confidence_head": True},
+        {"dflash_confidence_head_alpha": 0.0},
+    ),
+    "domino": ({"projector_type": "domino", "gru_hidden_dim": 8, "emb_dim": 8}, {}),
+}
+
+
+def _fsdp2_rank_without_labels_job(rank, size, head):
     input_ids = torch.randint(1, 32, (2, SEQ_LEN), generator=torch.Generator().manual_seed(0))
+    architecture, options = _FSDP2_EMPTY_RANK_HEADS[head]
 
     def train_step(labels, sharded):
         torch.manual_seed(0)
         model = get_tiny_llama(num_hidden_layers=4)
-        mtsp.convert(model, [("dflash", get_dflash_config())])
+        config = get_dflash_config()
+        config["dflash_architecture_config"].update(architecture)
+        config.update(options)
+        mtsp.convert(model, [("dflash", config)])
         model.float().train()
         if sharded:
-            # The draft as its own unit, as accelerate wraps it when listed in the wrap policy.
+            # DSpark and Domino call their heads outside the draft's forward, so only its layers
+            # can be units; DFlash's whole draft can, as accelerate wraps it from the wrap policy.
             mesh = init_device_mesh("cpu", (size,))
-            fully_shard(model.dflash_module, mesh=mesh)
+            for unit in [model.dflash_module] if head == "dflash" else model.dflash_module.layers:
+                fully_shard(unit, mesh=mesh)
             fully_shard(model, mesh=mesh)
         torch.manual_seed(1)
         out = model(input_ids=input_ids, labels=labels)
@@ -1620,7 +1639,7 @@ def _fsdp2_rank_without_labels_job(rank, size):
         grads = {
             name: p.grad.full_tensor() if isinstance(p.grad, DTensor) else p.grad
             for name, p in model.named_parameters()
-            if p.requires_grad
+            if p.grad is not None
         }
         return out.loss.detach(), grads
 
@@ -1635,9 +1654,10 @@ def _fsdp2_rank_without_labels_job(rank, size):
         torch.testing.assert_close(grad, supervised_grads[name] / size, msg=name)
 
 
-def test_fsdp2_rank_without_labels_joins_the_draft_collectives(cpu_dist_workers):
-    """A rank that skips the draft unit puts its all-gather and reduce-scatter out of step."""
-    cpu_dist_workers.run(_fsdp2_rank_without_labels_job)
+@pytest.mark.parametrize("head", list(_FSDP2_EMPTY_RANK_HEADS))
+def test_fsdp2_rank_without_labels_joins_the_draft_collectives(cpu_dist_workers, head):
+    """A rank that skips a draft unit puts its all-gather and reduce-scatter out of step."""
+    cpu_dist_workers.run(_fsdp2_rank_without_labels_job, head=head)
 
 
 @pytest.mark.parametrize("shift_label", [True, False])

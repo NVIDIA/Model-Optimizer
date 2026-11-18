@@ -58,7 +58,7 @@ Changelog
 
 *Speculative Decoding*
 
-- Fix DFlash training crashing or hanging under FSDP2 when ``DFlashModule`` is wrapped as its own unit and a rank's batch has no supervised tokens.
+- Fix DFlash, DFlash2, LiLiCorr, DSpark and Domino training crashing or hanging under FSDP2 when a rank's batch has no supervised tokens.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
