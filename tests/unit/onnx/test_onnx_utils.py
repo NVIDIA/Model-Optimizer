@@ -870,3 +870,13 @@ def test_unset_input_dimension_keeps_its_rank():
     model = make_model(graph, producer_name="modelopt test", opset_imports=[make_opsetid("", 17)])
 
     assert onnx_utils.get_input_shapes(model)["X"] == [1, 1, 3]
+
+
+def test_get_shapes_keep_rank_for_unknown_dims():
+    # A dim with neither dim_value nor dim_param is valid ONNX and must still count as a dim.
+    tensor = make_tensor_value_info("t", onnx.TensorProto.FLOAT, ["batch", None, 8, -1])
+    graph = make_graph([], "unknown_dims", [tensor], [tensor])
+    model = make_model(graph, opset_imports=[make_opsetid("", 17)])
+
+    assert onnx_utils.get_input_shapes(model) == {"t": [1, 1, 8, 1]}
+    assert onnx_utils.get_output_shapes(model) == {"t": [1, 1, 8, 1]}
