@@ -65,7 +65,8 @@ def test_set_moe_expert_layout_survives_run_config_round_trip(
     ``run_config.yaml``, so ``set_moe_expert_layout`` stores a factory function instead.
     """
     provider = HybridModelProvider(num_layers=2, hidden_size=64, num_attention_heads=4)
-    provider.hybrid_stack_spec = stack_spec
+    if stack_spec is not None:
+        provider.hybrid_stack_spec = stack_spec
     set_moe_expert_layout(provider, moe_grouped_gemm=moe_grouped_gemm)
     assert provider.moe_grouped_gemm == moe_grouped_gemm
 
@@ -150,13 +151,17 @@ def test_custom_hybrid_stack_survives_layout_changes_and_run_config_round_trip(
     for grouped in (False, False, True, False):
         set_moe_expert_layout(provider, moe_grouped_gemm=grouped)
         target, factory = _round_trip(provider.hybrid_stack_spec)
-        if not grouped:
-            assert target == (
-                "modelopt.torch.utils.plugins.megatron_layer_specs.hybrid_stack_spec_sequential_mlp"
-            )
+        expected_factory = (
+            "hybrid_stack_spec_grouped_mlp" if grouped else "hybrid_stack_spec_sequential_mlp"
+        )
+        assert target == f"modelopt.torch.utils.plugins.megatron_layer_specs.{expected_factory}"
         provider.hybrid_stack_spec = factory
-        spec = provider._resolve_hybrid_stack_spec()
         assert provider.moe_grouped_gemm == grouped
+        if grouped and stack_spec_factory is local_custom_hybrid_stack_spec:
+            with pytest.raises(ValueError):
+                provider._resolve_hybrid_stack_spec()
+            continue
+        spec = provider._resolve_hybrid_stack_spec()
         assert spec.submodules.mamba_layer == original.submodules.mamba_layer
         assert spec.submodules.attention_layer == original.submodules.attention_layer
         if original.submodules.moe_layer is IdentityOp:

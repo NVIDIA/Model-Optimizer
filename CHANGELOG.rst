@@ -43,6 +43,8 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
+- Preserve model-specific hybrid stacks when selecting MoE expert layouts in Megatron-Bridge, and reject grouped GEMM when a custom factory returns sequential experts. Custom built ``ModuleSpec`` values are now rejected; assign a named factory function instead.
+
 *Misc*
 
 0.49.0 (2026-12-xx)
@@ -243,7 +245,6 @@ Changelog
 - Nested ``only_student_forward()`` and ``only_teacher_forward()`` contexts now preserve the enclosing execution mode, including when an inner context is disabled or raises an exception.
 - Fix Megatron Top-K/Top-P distillation gradients being multiplied by the tensor-parallel size when tensor parallelism is enabled; reported loss values are unchanged.
 - Fix Megatron Top-K/Top-P distillation running out of memory at long sequence lengths with large vocabularies: since 0.48 its full-vocabulary normalizers kept several float32 copies of the logits alive. It now adds about one copy of the logits in their own dtype, and stays accurate for logits with a large common offset.
-- Preserve model-specific hybrid stack components when selecting the MoE expert layout in Megatron-Bridge.
 
 *Misc*
 

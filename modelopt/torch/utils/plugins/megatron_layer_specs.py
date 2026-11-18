@@ -27,7 +27,11 @@ from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.spec_utils import ModuleSpec, get_submodules
 
-__all__ = ["hybrid_stack_spec_sequential_mlp", "te_hybrid_stack_spec_sequential_mlp"]
+__all__ = [
+    "hybrid_stack_spec_grouped_mlp",
+    "hybrid_stack_spec_sequential_mlp",
+    "te_hybrid_stack_spec_sequential_mlp",
+]
 
 
 def te_hybrid_stack_spec_sequential_mlp() -> ModuleSpec:
@@ -58,6 +62,20 @@ def hybrid_stack_spec_sequential_mlp(
     Its module path and name are written into ``run_config.yaml`` as a ``_target_``, so moving or
     renaming it breaks saved custom-stack checkpoints.
     """
+    return _hybrid_stack_spec_with_expert_layout(stack_spec_factory, config, moe_grouped_gemm=False)
+
+
+def hybrid_stack_spec_grouped_mlp(
+    stack_spec_factory: Callable[..., ModuleSpec], config=None
+) -> ModuleSpec:
+    """Preserve a model-specific hybrid stack and require TEGroupedMLP experts.
+
+    Its module path and name are checkpoint targets and must remain stable.
+    """
+    return _hybrid_stack_spec_with_expert_layout(stack_spec_factory, config, moe_grouped_gemm=True)
+
+
+def _hybrid_stack_spec_with_expert_layout(stack_spec_factory, config, moe_grouped_gemm):
     stack_spec = copy.deepcopy(
         stack_spec_factory(config)
         if inspect.signature(stack_spec_factory).parameters
@@ -69,6 +87,13 @@ def hybrid_stack_spec_sequential_mlp(
 
     moe = get_submodules(moe_layer.submodules.mlp)
     expert_type = getattr(moe.experts, "func", moe.experts)
+    if moe_grouped_gemm:
+        if expert_type is not TEGroupedMLP:
+            raise ValueError(
+                "Grouped GEMM requires a custom hybrid factory that returns TEGroupedMLP experts; "
+                "use moe_grouped_gemm=False for SequentialMLP experts"
+            )
+        return stack_spec
     if expert_type is SequentialMLP:
         return stack_spec
     if expert_type is not TEGroupedMLP:

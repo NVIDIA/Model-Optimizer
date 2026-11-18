@@ -45,13 +45,14 @@ from transformers import AutoConfig, AutoTokenizer
 from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.megatron_layer_specs import (
+    hybrid_stack_spec_grouped_mlp,
     hybrid_stack_spec_sequential_mlp,
     te_hybrid_stack_spec_sequential_mlp,
 )
 
-# ``set_moe_expert_layout`` records ``te_hybrid_stack_spec_sequential_mlp`` in a SequentialMLP
-# checkpoint's ``run_config.yaml``, and rebuilding that config resolves the target against this
-# allowlist. Only a process that imports this module registers it, so such a checkpoint must be
+# ``set_moe_expert_layout`` records ModelOpt factories in hybrid checkpoints' ``run_config.yaml``,
+# and rebuilding that config resolves these targets against this allowlist. Only a process that
+# imports this module registers it, so such a checkpoint must be
 # converted through a ModelOpt entrypoint, not stock ``scripts/conversion/convert.sh``. The prefix
 # covers all of ``modelopt`` rather than one module, which assumes a ``run_config.yaml`` is trusted
 # input -- it comes from a checkpoint the caller is already choosing to load.
@@ -133,8 +134,8 @@ def set_moe_expert_layout(provider, moe_grouped_gemm: bool) -> None:
     drop custom layers (e.g. Qwen3.5's GatedDeltaNet or Gemma3's custom spec). A hybrid provider
     additionally needs its stack spec updated, since the native one pins ``TEGroupedMLP``.
     Generic stacks use named factories for each layout. Custom factories, accepting either no
-    arguments or the provider, are preserved for grouped GEMM and wrapped for SequentialMLP;
-    the wrapper copies the stack and replaces only its experts.
+    arguments or the provider, are wrapped to validate grouped experts or replace only the
+    experts with SequentialMLP. A custom factory fixed to SequentialMLP cannot select grouped GEMM.
 
     Assign a *factory function*, never a built ``ModuleSpec``: the provider is serialized into
     every checkpoint's ``run_config.yaml``, and Megatron-LM's YAML writer drops the fields of a
@@ -144,7 +145,10 @@ def set_moe_expert_layout(provider, moe_grouped_gemm: bool) -> None:
     """
     if isinstance(provider, HybridModelProvider):
         factory = provider.hybrid_stack_spec
-        if isinstance(factory, partial) and factory.func is hybrid_stack_spec_sequential_mlp:
+        if isinstance(factory, partial) and factory.func in (
+            hybrid_stack_spec_grouped_mlp,
+            hybrid_stack_spec_sequential_mlp,
+        ):
             factory = factory.args[0] if factory.args else factory.keywords["stack_spec_factory"]
         if factory is hybrid_stack_spec:
             factory = None
@@ -154,10 +158,12 @@ def set_moe_expert_layout(provider, moe_grouped_gemm: bool) -> None:
         ):
             if isinstance(factory, ModuleSpec) or not callable(factory):
                 raise ValueError("A custom hybrid stack must be a serializable factory function")
-            if not moe_grouped_gemm:
-                provider.hybrid_stack_spec = partial(hybrid_stack_spec_sequential_mlp, factory)
-            else:
-                provider.hybrid_stack_spec = factory
+            provider.hybrid_stack_spec = partial(
+                hybrid_stack_spec_grouped_mlp
+                if moe_grouped_gemm
+                else hybrid_stack_spec_sequential_mlp,
+                factory,
+            )
             provider.moe_grouped_gemm = moe_grouped_gemm
             return
         # The grouped-GEMM factory is Megatron-Bridge's, and returns Megatron-Core's
