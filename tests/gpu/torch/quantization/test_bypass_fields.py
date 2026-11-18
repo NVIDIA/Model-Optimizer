@@ -81,6 +81,7 @@ def test_iq_scales_backpropagate_through_frozen_projection(frozen_format):
         _config(
             [
                 _iq("shared.*weight_quantizer", "iq2_s"),
+                _iq("router.weight_quantizer", "iq2_s"),
                 _iq("experts.*.gate.weight_quantizer", "iq1_m"),
                 _iq("experts.*.up.weight_quantizer", "iq1_m"),
                 {"quantizer_name": "experts.*.down.weight_quantizer", "cfg": frozen_cfg},

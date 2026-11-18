@@ -25,5 +25,8 @@ from .losses import *
 from .registry import *
 
 # isort: off
+# Bypass imports quantizers, whose Trainer plugin imports the completed KD API.
+from .bypass import *
+
 # Import plugins last to avoid circular imports
 from . import plugins

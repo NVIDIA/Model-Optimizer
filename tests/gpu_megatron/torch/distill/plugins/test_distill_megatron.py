@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import dataclasses
+import subprocess
+import sys
 import warnings
 from functools import partial
 from types import SimpleNamespace
@@ -43,6 +45,23 @@ from modelopt.torch.distill.plugins.megatron import (
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 SEED = 1234
+
+
+@pytest.mark.timeout(240)
+def test_distill_import_initializes_optional_megatron_plugin():
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import modelopt.torch.distill as mtd; "
+                "assert 'modelopt.torch.distill.plugins.megatron' in sys.modules; "
+                "assert hasattr(mtd.plugins, 'megatron')"
+            ),
+        ],
+        check=True,
+        timeout=180,
+    )
 
 
 def _test_logits_kl_loss(rank, size):
