@@ -306,8 +306,16 @@ def test_bypass_refuses_selected_state_shared_with_excluded_owners(alias):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_public_bypass_rng_scope_preserves_caller_and_seeds_initial_reader(fail):
+@pytest.mark.parametrize("teacher_offload", [False, True], ids=["resident", "cpu-offload"])
+def test_public_bypass_preserves_caller_state_and_seeds_initial_reader(fail, teacher_offload):
     initial, teacher, batches = _problem()
+    teacher.head.weight.requires_grad_(False)
+    if teacher_offload:
+        pytest.importorskip("accelerate").cpu_offload(teacher, execution_device="cpu")
+    teacher_flags = {
+        name: parameter.requires_grad for name, parameter in teacher.named_parameters()
+    }
+    teacher_modes = {module: module.training for module in teacher.modules()}
 
     class RandomBatches:
         def __init__(self):
@@ -352,6 +360,10 @@ def test_public_bypass_rng_scope_preserves_caller_and_seeds_initial_reader(fail)
                 mtd.bypass(student, teacher, data, recipe)
         else:
             mtd.bypass(student, teacher, data, recipe)
+        assert {
+            name: parameter.requires_grad for name, parameter in teacher.named_parameters()
+        } == teacher_flags
+        assert all(module.training == mode for module, mode in teacher_modes.items())
         assert random.getstate() == caller[0]
         actual_numpy = np.random.get_state()
         assert actual_numpy[0] == caller[1][0]

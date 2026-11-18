@@ -138,7 +138,11 @@ class _BypassRunner:
             for root in (self.student, self.teacher)
             for module in root.modules()
         }
-        teacher_flags = {p: p.requires_grad for p in self.teacher.parameters()}
+        teacher_flags = [
+            (module, name, parameter.requires_grad)
+            for module in self.teacher.modules()
+            for name, parameter in module.named_parameters(recurse=False, remove_duplicate=False)
+        ]
         try:
             self.student.eval()
             self.teacher.eval().requires_grad_(False)
@@ -167,7 +171,7 @@ class _BypassRunner:
         finally:
             for policy in self.policies.values():
                 policy.close()
-            for parameter, flag in teacher_flags.items():
-                parameter.requires_grad_(flag)
+            for module, name, flag in teacher_flags:
+                module.get_parameter(name).requires_grad_(flag)
             for module, mode in modes.items():
                 module.training = mode
