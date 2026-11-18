@@ -181,6 +181,21 @@ _NVFP4_BLOCK_SIZES = {-1: _NVFP4_BLOCK, "type": "dynamic", "scale_bits": (4, 3)}
 _PUBLISHED_RECIPE = "models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention"
 _EXPERT_WEIGHT_QUANTIZER = "*block_sparse_moe.experts.*weight_quantizer"
 _EXPERT_INPUT_QUANTIZER = "*block_sparse_moe.experts.*input_quantizer"
+# ModelOpt applies ``parent_class`` entries by module type, which the converter
+# cannot see from tensor names. Disabling these classes, as the
+# default_disabled_quantizers unit does, cannot reach a module the converter
+# writes; any other class-scoped entry is rejected.
+_NOOP_DISABLED_PARENT_CLASSES = frozenset(
+    {
+        "nn.BatchNorm1d",
+        "nn.BatchNorm2d",
+        "nn.BatchNorm3d",
+        "nn.SyncBatchNorm",
+        "nn.LeakyReLU",
+        "nn.Embedding",
+        "nn.LayerNorm",
+    }
+)
 # Quantizer attributes that change the numerics. The converter reproduces only
 # their defaults, so e.g. a rotated or per-channel MXFP8 entry is rejected.
 _DEFAULT_NUMERICS = {
@@ -334,6 +349,24 @@ def _recipe_module_formats(quant_cfg: list[Any], weight_keys) -> dict[str, str]:
     the serving kernels implement; any other combination, module or quantizer
     type the recipe enables is rejected rather than silently written as BF16.
     """
+    class_scoped = sorted(
+        {
+            entry["parent_class"]
+            for entry in quant_cfg
+            if isinstance(entry, dict)
+            and entry.get("parent_class") is not None
+            and (
+                entry.get("enable", True)
+                or entry["parent_class"] not in _NOOP_DISABLED_PARENT_CLASSES
+            )
+        }
+    )
+    if class_scoped:
+        raise ValueError(
+            "recipe has class-scoped entries the streaming converter cannot apply: "
+            f"{class_scoped}; select those modules by quantizer_name instead"
+        )
+
     formats: dict[str, str] = {}
     candidates: list[str] = []
     matched: set[int] = set()
@@ -344,7 +377,7 @@ def _recipe_module_formats(quant_cfg: list[Any], weight_keys) -> dict[str, str]:
         [
             f"{base}.{q}"
             for base in experts + linears
-            for q in ("weight_quantizer", "input_quantizer")
+            for q in ("weight_quantizer", "input_quantizer", "output_quantizer")
         ],
         matched,
     )
@@ -392,11 +425,25 @@ def _recipe_module_formats(quant_cfg: list[Any], weight_keys) -> dict[str, str]:
         if isinstance(entry, dict)
         and entry.get("enable", True)
         and entry.get("quantizer_name") not in (_EXPERT_WEIGHT_QUANTIZER, _EXPERT_INPUT_QUANTIZER)
-        and (i not in matched or entry.get("parent_class") is not None)
+        and i not in matched
     )
     if unused:
         raise ValueError(
             f"recipe enables quantizers the streaming converter does not support: {unused}"
+        )
+
+    # The converter writes weights and input scales only, so an enabled output
+    # quantizer, even one enabled by a pattern that also names supported
+    # quantizers, would make the checkpoint differ from the recipe.
+    outputs = sorted(
+        name
+        for name, cfg in resolved.items()
+        if name.endswith(".output_quantizer") and cfg is not None
+    )
+    if outputs:
+        raise ValueError(
+            "recipe enables output quantizers the streaming converter does not write: "
+            f"{outputs[:3]}{' ...' if len(outputs) > 3 else ''}"
         )
 
     # Fused runtime linears hold one weight format.

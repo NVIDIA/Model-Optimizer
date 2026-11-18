@@ -64,22 +64,37 @@ quantize:
     - quantizer_name: "*block_sparse_moe.shared_experts.*input_quantizer"
       cfg: *mxfp8
     # KDA projections. q/k/v/b/f_a exist only on KDA layers; vLLM fuses them
-    # with g_proj into in_proj_qkvgfab, so all six share one format.
-    - quantizer_name: "*self_attn.q_proj*_quantizer"
+    # with g_proj into in_proj_qkvgfab, so all six share one format. Patterns
+    # name the weight and input quantizers so output quantizers stay disabled.
+    - quantizer_name: "*self_attn.q_proj*weight_quantizer"
       cfg: *mxfp8
-    - quantizer_name: "*self_attn.k_proj*_quantizer"
+    - quantizer_name: "*self_attn.q_proj*input_quantizer"
       cfg: *mxfp8
-    - quantizer_name: "*self_attn.v_proj*_quantizer"
+    - quantizer_name: "*self_attn.k_proj*weight_quantizer"
       cfg: *mxfp8
-    - quantizer_name: "*self_attn.b_proj*_quantizer"
+    - quantizer_name: "*self_attn.k_proj*input_quantizer"
       cfg: *mxfp8
-    - quantizer_name: "*self_attn.f_a_proj*_quantizer"
+    - quantizer_name: "*self_attn.v_proj*weight_quantizer"
+      cfg: *mxfp8
+    - quantizer_name: "*self_attn.v_proj*input_quantizer"
+      cfg: *mxfp8
+    - quantizer_name: "*self_attn.b_proj*weight_quantizer"
+      cfg: *mxfp8
+    - quantizer_name: "*self_attn.b_proj*input_quantizer"
+      cfg: *mxfp8
+    - quantizer_name: "*self_attn.f_a_proj*weight_quantizer"
+      cfg: *mxfp8
+    - quantizer_name: "*self_attn.f_a_proj*input_quantizer"
       cfg: *mxfp8
     # o_proj / g_proj exist on both attention types: enable everywhere, then
     # turn them back off on the 24 MLA layers below.
-    - quantizer_name: "*self_attn.o_proj*_quantizer"
+    - quantizer_name: "*self_attn.o_proj*weight_quantizer"
       cfg: *mxfp8
-    - quantizer_name: "*self_attn.g_proj*_quantizer"
+    - quantizer_name: "*self_attn.o_proj*input_quantizer"
+      cfg: *mxfp8
+    - quantizer_name: "*self_attn.g_proj*weight_quantizer"
+      cfg: *mxfp8
+    - quantizer_name: "*self_attn.g_proj*input_quantizer"
       cfg: *mxfp8
     - {quantizer_name: "*.layers.3.self_attn.*", enable: false}
     - {quantizer_name: "*.layers.7.self_attn.*", enable: false}

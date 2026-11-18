@@ -30,6 +30,8 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from modelopt.torch.quantization.conversion import replace_quant_module, set_quantizer_by_cfg
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor import FP8QTensor, MXFP4QTensor, MXFP8QTensor
 
 _SCRIPT = (
@@ -74,6 +76,40 @@ def _module_formats(recipe: str, quantize=None) -> dict[str, str]:
     quantize = quantize or k3_cast.load_recipe(recipe).quantize.model_dump()
     settings = k3_cast._conversion_settings_from_quantize_config(quantize)
     return k3_cast._recipe_module_formats(settings["quant_cfg"], _WEIGHT_KEYS)
+
+
+def _modelopt_enabled_quantizers(quant_cfg: list) -> set[str]:
+    """Quantizers ModelOpt itself enables when the recipe is applied to the BF16 linears."""
+    model = torch.nn.Module()
+    for key in _WEIGHT_KEYS:
+        if not key.endswith(".weight"):
+            continue
+        *path, leaf = key.removesuffix(".weight").split(".")
+        parent = model
+        for name in path:
+            if not hasattr(parent, name):
+                parent.add_module(name, torch.nn.Module())
+            parent = getattr(parent, name)
+        parent.add_module(leaf, torch.nn.Linear(32, 32, bias=False))
+    replace_quant_module(model)
+    set_quantizer_by_cfg(model, quant_cfg)
+    return {
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer) and module.is_enabled
+    }
+
+
+@pytest.mark.parametrize("recipe", [k3_cast._PUBLISHED_RECIPE, _K31_PRO_RECIPE])
+def test_recipe_module_formats_match_modelopt_quantizer_state(recipe):
+    formats = _module_formats(recipe)
+    # Block FP8 is weight-only; MXFP8 quantizes weights and inputs; no outputs.
+    expected = {f"{base}.weight_quantizer" for base in formats} | {
+        f"{base}.input_quantizer" for base, fmt in formats.items() if fmt == "mxfp8"
+    }
+
+    quant_cfg = k3_cast.load_recipe(recipe).quantize.model_dump()["quant_cfg"]
+    assert _modelopt_enabled_quantizers(quant_cfg) == expected
 
 
 def test_published_recipe_resolves_to_streaming_conversion_settings():
@@ -144,6 +180,15 @@ def test_k31_pro_recipe_scopes_mxfp8_to_kda_layers_and_shared_experts():
             {"quantizer_name": "*.layers.1.self_attn.b_proj*", "enable": False},
             "must share one format",
         ),
+        # ModelOpt also enables q_proj's output quantizer, which the converter cannot write.
+        ({"quantizer_name": "*self_attn.q_proj*_quantizer", "cfg": _MXFP8}, "output quantizers"),
+        ({"quantizer_name": "*output_quantizer", "enable": True}, "output quantizers"),
+        # ModelOpt disables these Linears by class; the converter cannot see classes.
+        (
+            {"parent_class": "nn.Linear", "quantizer_name": "*self_attn*", "enable": False},
+            "class-scoped",
+        ),
+        ({"parent_class": "nn.Linear", "quantizer_name": "*", "cfg": _MXFP8}, "class-scoped"),
     ],
 )
 def test_recipe_rejects_layouts_the_converter_cannot_write(entry, match):
