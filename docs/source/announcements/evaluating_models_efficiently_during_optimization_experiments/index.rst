@@ -80,13 +80,15 @@ a fixed benchmark, ModelOpt uses unpaired Welch t-tests on independent, complete
 estimate uncertainty from variation between runs of those exact questions.
 
 Our primary question is whether Candidate is better than Baseline. A one-sided paired t-test can
-detect improvement with less data than a two-sided test for any difference. “Yes” marks p < 0.05;
-“no evidence” means improvement was not established. Reverse-direction p-values are reported for
-context.
+detect improvement with less data than a two-sided test for any difference. Reverse-direction
+p-values are reported for context.
 
 Choose test directions before inspecting results. We use p < 0.05 for each test, without a stricter
 threshold for testing multiple metrics. Testing more metrics gives noise more opportunities to
 appear as an improvement.
+
+“Yes” means evidence of higher Candidate accuracy (p < 0.05); “no evidence” means higher accuracy
+was not established.
 
 +----------------+----------+-----------+------------------+------------------+------------------+
 | Benchmark      | Baseline | Candidate | Difference [95%  | Candidate        | Baseline higher, |
@@ -110,7 +112,8 @@ Check for regressions
 
 No evidence of a difference does not establish no regression. Choose an acceptable accuracy-loss
 margin, then use a non-inferiority test to assess whether the loss is smaller. The checks below use
-one-sided paired t-tests.
+one-sided paired t-tests. “Yes” means the stated accuracy loss is ruled out (p < 0.05);
+“no evidence” means it has not been ruled out.
 
 ============================ =================== =============== ======================
 Rule out an accuracy loss of MMLU-Pro p-value    SciCode p-value AA-Omniscience p-value
@@ -149,6 +152,8 @@ Doomed reasoning loops
 ^^^^^^^^^^^^^^^^^^^^^^
 
 The candidate has fewer cap hits on both SciCode and AA-Omniscience (p < 0.001).
+“Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05); “no evidence” means a lower
+rate was not established.
 
 +----------------+---------------+---------------+---------------+---------------+---------------+
 | Benchmark      | Baseline cap  | Candidate cap | Difference    | Candidate     | Candidate     |
@@ -170,6 +175,8 @@ Missing final answers
 ^^^^^^^^^^^^^^^^^^^^^
 
 The candidate also reduced missing final answers on SciCode and AA-Omniscience (p < 0.001).
+“Yes” means evidence of a lower Candidate missing-answer rate (p < 0.05); “no evidence” means a
+reduction was not established.
 
 +----------------+---------------+---------------+---------------+---------------+---------------+
 | Benchmark      | Baseline      | Candidate     | Difference    | Candidate     | Candidate     |
@@ -194,6 +201,9 @@ Abstention
 v1 <https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public>`__ distinguishes
 abstention from incorrect guessing. Deliberate abstentions exclude empty answers and uncertain guesses.
 
+“Yes” means evidence of a higher Candidate abstention rate (p < 0.05); “no evidence” means an
+increase was not established.
+
 +---------------+---------------+---------------+---------------+---------------+---------------+
 | Measure       | Baseline      | Candidate     | Difference    | Candidate     | Candidate     |
 |               |               |               | [95% CI], pp  | higher,       | lower,        |
@@ -203,6 +213,9 @@ abstention from incorrect guessing. Deliberate abstentions exclude empty answers
 | Deliberate    | 13.30%        | 14.55%        | +1.25 [+0.23, | 0.009 — yes   | 0.993         |
 | abstention    | (798/6,000)   | (873/6,000)   | +2.27]        |               |               |
 +---------------+---------------+---------------+---------------+---------------+---------------+
+
+“Yes” means evidence of a lower Candidate incorrect-answer rate (p < 0.05); “no evidence” means a
+reduction was not established.
 
 +---------------+---------------+---------------+---------------+---------------+---------------+
 | Measure       | Baseline      | Candidate     | Difference    | Candidate     | Candidate     |
@@ -227,7 +240,8 @@ Compare mean and median completion tokens, including reasoning, to assess how mu
 answer requires.
 
 For mean length, we use the same question-level paired t-tests and t-based 95% confidence intervals
-as accuracy.
+as accuracy. “Yes” means evidence of shorter Candidate completions on average (p < 0.05);
+“no evidence” means a lower mean length was not established.
 
 +----------------+-------------+-------------+-------------+-------------+-------------+-------------+
 | Benchmark      | Baseline:   | Candidate:  | Change:     | Mean change | Candidate   | Candidate   |
@@ -335,6 +349,8 @@ Test known weaknesses on a focused subset
 
 Freeze a subset from earlier baseline failures to screen for targeted improvements. We report the 11
 held-out subtasks, with ten matched repetitions—110 responses per model.
+“Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05); “no evidence” means a lower
+rate was not established.
 
 +----------------+---------------+---------------+---------------+---------------+---------------+
 | Benchmark      | Baseline cap  | Candidate cap | Difference    | Candidate     | Candidate     |
