@@ -372,8 +372,14 @@ class BypassSpec(SpecSection):
     """Decoder child names that own ordinary dense or routed feed-forward repair boundaries."""
     isolated_documents: bool = True
     """Run packed documents independently when recurrence or pooling can cross mask boundaries."""
+
     batch_packed_documents: bool = False
     """Permit independent documents in padded rows when activation and position policies agree."""
+    functional_children: tuple[str, ...] = ()
+    """Paths relative to each decoder block whose parent reads their parameters without calling them.
+
+    Native FSDP separates these children and enters their forward lifecycle around the parent math.
+    """
     adapter_path: str | None = None
     """Optional qualified ModuleBypassAdapter factory for model-owned replay side inputs."""
 
