@@ -245,6 +245,34 @@ def representative_weight_quantizer(module: nn.Module, weight_name: str = "weigh
     return None
 
 
+def _weight_quantizer_owners(module, selected):
+    """Map selected quantizers to physical parameters using the layouts below."""
+    from ..nn import GroupedQuantizer  # ..nn imports this utils package at module scope
+
+    owners = {}
+    for name in weight_attr_names(module):
+        qname = quantizer_attr_names(name).weight_quantizer
+        container = getattr(module, qname, None)
+        if container is None:
+            container = getattr(module, qname + "s", None)
+        if container is None and name == getattr(module, "_first_proj_attr", None):
+            container = getattr(module, "gate_up_proj_weight_quantizers", None)
+        pairs = (
+            [(f"weight{i}", q) for i, q in enumerate(container)]
+            if isinstance(container, GroupedQuantizer)
+            else [(name, container)]
+        )
+        for parameter_name, quantizers in pairs:
+            if quantizers is None:
+                continue
+            matches = selected.intersection(id(q) for q in quantizers.modules())
+            if matches and module._parameters.get(parameter_name) is not None:
+                owners.update(dict.fromkeys(matches, parameter_name))
+    if owners.keys() != selected:
+        raise ValueError("Selected quantizers have unsupported physical weight ownership")
+    return owners
+
+
 def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     """Get the weight param attribute names in a converted module, non-recursive.
 
@@ -541,6 +569,18 @@ def _fsdp2_param_groups(module: nn.Module):
     }.values()
 
 
+def _fsdp2_persistent_parameters(module: nn.Module) -> dict[tuple[nn.Module, str], nn.Parameter]:
+    """Map logical registrations to persistent shards without retaining unsharded views."""
+    parameters = {}
+    for group in _fsdp2_param_groups(module):
+        for parameter in group.fsdp_params:
+            info = parameter._module_info
+            parameters[info.module, info.param_name] = parameter.sharded_param
+            for owner, name in zip(info.shared_modules, info.shared_param_names, strict=True):
+                parameters[owner, name] = parameter.sharded_param
+    return parameters
+
+
 # Per FSDP2 unit, the parameters _fsdp2_owned_params found: the weight-access window opens once per
 # quantized module, and a scan walks the unit's whole parameter group.
 _FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
@@ -614,66 +654,93 @@ def fsdp2_weight_access_and_writeback_context(
     originals: dict[str, tuple] = {}
     owned = _fsdp2_owned_params(fsdp_module)
     refreshed = False
-    for name, param in module.named_parameters():
-        if not isinstance(param, torch.distributed.tensor.DTensor):
-            continue
-        if not _fsdp2_owns(owned, param) and not refreshed:
-            # Once per window: nothing here changes a unit's state, and a DTensor FSDP2 does not own
-            # (every expert-parallel weight) misses each time.
-            owned, refreshed = _fsdp2_owned_params(fsdp_module, refresh=True), True
-        if not _fsdp2_owns(owned, param):
-            # Not FSDP's shard: a DTensor FSDP2 does not manage, such as an expert-parallel weight
-            # that fully_shard was told to ignore. Gathering it would hand every rank every expert,
-            # which its module indexes by local expert.
-            continue
-        original_placements = param.placements
-        original_device_mesh = param.device_mesh
-        if fsdp_dim != original_device_mesh.ndim:
-            assert (
-                fsdp_device_mesh.mesh_dim_names == original_device_mesh.mesh_dim_names[:fsdp_dim]
-            ), "FSDP2 mesh should be a slice of DTensor's device mesh."
-        unsharded_dtensor = param.redistribute(
-            placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
-            device_mesh=original_device_mesh,
-        )
-        unsharded_tensor = unsharded_dtensor.to_local()
-        # cpu_offload: gathered shard is on CPU; mirror to GPU for forward.
-        needs_gpu_copy = unsharded_tensor.device.type == "cpu" and torch.cuda.is_available()
-        gpu_tensor = (
-            unsharded_tensor.to(torch.cuda.current_device()) if needs_gpu_copy else unsharded_tensor
-        )
-        cpu_writeback_tensor = unsharded_tensor if needs_gpu_copy else None
-        originals[name] = (
-            param,
-            unsharded_dtensor,
-            original_placements,
-            original_device_mesh,
-            cpu_writeback_tensor,
-            gpu_tensor,
-        )
-        _set_parameter(module, name, nn.Parameter(gpu_tensor))
+    ready = propagating = False
+    error = None
+
+    def record_error(exc):
+        nonlocal error
+        if error is None:
+            error = exc
+        elif exc is not error:
+            error.add_note(f"FSDP2 weight-access cleanup also failed: {exc!r}")
 
     try:
-        yield
-    finally:
-        # Write back and restore original DTensor parameters. Runs on both success
-        # and exception so the module never lingers with the temporary local params.
-        for name, (
-            original_param,
-            unsharded_dtensor,
-            original_placements,
-            original_device_mesh,
-            cpu_writeback_tensor,
-            gpu_tensor,
-        ) in originals.items():
-            if cpu_writeback_tensor is not None:
-                cpu_writeback_tensor.data.copy_(gpu_tensor.data.to(cpu_writeback_tensor.device))
-            original_param.to_local().data.copy_(
-                unsharded_dtensor.redistribute(
-                    placements=original_placements, device_mesh=original_device_mesh
-                ).to_local()
+        for name, param in module.named_parameters():
+            if not isinstance(param, torch.distributed.tensor.DTensor):
+                continue
+            if not _fsdp2_owns(owned, param) and not refreshed:
+                # Once per window: unmanaged expert weights miss the same kept set.
+                owned, refreshed = _fsdp2_owned_params(fsdp_module, refresh=True), True
+            if not _fsdp2_owns(owned, param):
+                continue
+            original_placements = param.placements
+            original_device_mesh = param.device_mesh
+            if fsdp_dim != original_device_mesh.ndim:
+                assert (
+                    fsdp_device_mesh.mesh_dim_names
+                    == original_device_mesh.mesh_dim_names[:fsdp_dim]
+                ), "FSDP2 mesh should be a slice of DTensor's device mesh."
+            unsharded_dtensor = param.redistribute(
+                placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
+                device_mesh=original_device_mesh,
             )
-            _set_parameter(module, name, original_param)
+            unsharded_tensor = unsharded_dtensor.to_local()
+            # CPU offload gathers on the host; mirror to the execution device for forward.
+            needs_gpu_copy = unsharded_tensor.device.type == "cpu" and torch.cuda.is_available()
+            gpu_tensor = (
+                unsharded_tensor.to(torch.cuda.current_device())
+                if needs_gpu_copy
+                else unsharded_tensor
+            )
+            cpu_writeback_tensor = unsharded_tensor if needs_gpu_copy else None
+            originals[name] = (
+                param,
+                unsharded_dtensor,
+                original_placements,
+                original_device_mesh,
+                cpu_writeback_tensor,
+                gpu_tensor,
+            )
+            _set_parameter(module, name, nn.Parameter(gpu_tensor))
+        ready = True
+        yield
+    except BaseException as exc:
+        error, propagating = exc, True
+        raise
+    finally:
+        if ready:
+            # Attempt each writeback in owner order, even after a local failure.
+            for (
+                original_param,
+                unsharded_dtensor,
+                original_placements,
+                original_device_mesh,
+                cpu_writeback_tensor,
+                gpu_tensor,
+            ) in originals.values():
+                try:
+                    if cpu_writeback_tensor is not None:
+                        cpu_writeback_tensor.data.copy_(
+                            gpu_tensor.data.to(cpu_writeback_tensor.device)
+                        )
+                    original_param.to_local().data.copy_(
+                        unsharded_dtensor.redistribute(
+                            placements=original_placements, device_mesh=original_device_mesh
+                        ).to_local()
+                    )
+                except BaseException as exc:
+                    record_error(exc)
+        # Entry failures never publish partial temporaries. Every registration is restored
+        # independently of entry, body, and repartitioning failures.
+        for name, original in originals.items():
+            try:
+                _set_parameter(module, name, original[0])
+            except BaseException as exc:
+                record_error(exc)
+        originals.clear()
+        original = unsharded_dtensor = unsharded_tensor = cpu_writeback_tensor = gpu_tensor = None
+        if error is not None and not propagating:
+            raise error
 
 
 @contextmanager
@@ -703,15 +770,15 @@ def enable_weight_access_and_writeback(
     ):
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
-    elif hasattr(module, "_hf_hook"):
+    elif has_accelerate_offload(module):
         from ..plugins.accelerate import weight_access_and_writeback_context
 
         context = weight_access_and_writeback_context(module, writeback)
     else:
         context = nullcontext()
 
-    with context:
-        yield
+    with context as owner_rollback:
+        yield owner_rollback
 
 
 def requires_weight_materialization(module, root_model, names: "ModuleNames | None" = None) -> bool:

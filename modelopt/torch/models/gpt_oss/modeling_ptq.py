@@ -21,7 +21,7 @@ from functools import partial
 import torch
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
 
-from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.custom import _QuantFunctionalMixin
 from modelopt.torch.quantization.plugins.huggingface import (
     _transposed_quantize,
@@ -42,9 +42,11 @@ class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
     """
 
     @staticmethod
-    def _get_quantized_weight(quantizer, module, weight):
+    def _get_quantized_weight(quantizer_name, module, weight):
         # MoE weight is accessed for each expert in one forward pass. so lets cache it
         if module._enable_weight_quantization:
+            # Configuration may replace the quantizer with a sequential container.
+            quantizer = getattr(module, quantizer_name)
             if hasattr(quantizer, "_cached_quant_val"):
                 return getattr(quantizer, "_cached_quant_val")
             quantizer._cached_quant_val = _transposed_quantize(weight, quantizer)
@@ -53,10 +55,10 @@ class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
 
     def _setup_for_weight_quantization(self):
         self._register_dynamic_attribute(
-            "gate_up_proj", partial(self._get_quantized_weight, self.gate_up_proj_weight_quantizer)
+            "gate_up_proj", partial(self._get_quantized_weight, "gate_up_proj_weight_quantizer")
         )
         self._register_dynamic_attribute(
-            "down_proj", partial(self._get_quantized_weight, self.down_proj_weight_quantizer)
+            "down_proj", partial(self._get_quantized_weight, "down_proj_weight_quantizer")
         )
 
     def _setup(self):
@@ -103,10 +105,13 @@ class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
         try:
             yield
         finally:
+            self._enable_weight_quantization = False
+            self._down_proj_mul = False
             for module in self.modules():
-                if isinstance(module, TensorQuantizer) and hasattr(module, "_cached_quant_val"):
+                if isinstance(module, (TensorQuantizer, SequentialQuantizer)) and hasattr(
+                    module, "_cached_quant_val"
+                ):
                     delattr(module, "_cached_quant_val")
-        self._enable_weight_quantization = False
 
     def forward(
         self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None
