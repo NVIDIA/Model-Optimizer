@@ -55,7 +55,7 @@ from ._auto_quantize_cost import (
 from .config import LayerwiseConfig, QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
 from .ggml import GGML_FORMAT_REGISTRY
-from .ggml.common import PIN_OVERRIDES_WEIGHT
+from .ggml.common import PIN_OVERRIDES_WEIGHT, drop_search_scales
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
 
@@ -868,6 +868,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     # Hands back the unconverted model for a failure before calibration; ``auto_quantize`` sets it
     # and ``before_search`` drops it once the checks before calibration pass.
     restore_unconverted: Callable[[], None] | None = None
+    # Method options that change what a stored score means; saved so a re-solve can honor them.
+    scoring_config_keys: frozenset[str] = frozenset()
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
@@ -929,8 +931,32 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "format_shard": None,
             "num_calib_steps": None,
             "num_score_steps": None,
+            "scoring_config": {},
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
+
+    def scoring_config_from(self, options: dict | None) -> dict:
+        """The scoring options in ``options``, with the defaults for those it does not set."""
+        defaults = self.default_search_config
+        options = options or {}
+        return {key: options.get(key, defaults[key]) for key in sorted(self.scoring_config_keys)}
+
+    def unknown_scoring_options(self, state: dict) -> list[str]:
+        """Scoring options ``state`` records that this searcher does not know, e.g. a renamed one."""
+        return sorted(set(state.get("scoring_config") or {}) - self.scoring_config_keys)
+
+    def scoring_mismatch(self, state: dict) -> str | None:
+        """How the scores in ``state`` were taken other than this search's config takes them.
+
+        Options a checkpoint does not record count as the defaults it was scored with.
+        """
+        if unknown := self.unknown_scoring_options(state):
+            return f"Checkpoint scoring options {unknown} are not known to this search."
+        restored = self.scoring_config_from(state.get("scoring_config"))
+        current = self.scoring_config_from(self.config)
+        if restored != current:
+            return f"Checkpoint scoring options {restored} do not match current {current}."
+        return None
 
     def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
         """Sanitize the search config dict."""
@@ -955,8 +981,31 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     def validate_search_input(self, constraints, config) -> None:
         """Validate method-specific inputs before quantizing the model."""
+        # Refuse scores of another method or scoring options before the model is converted, so the
+        # caller can retry the same model with another checkpoint. The search restores the state
+        # read here rather than reading the checkpoint again.
+        self.config = config
+        self._preloaded_state = None
+        self.reset_search()
+        loaded = self.load_search_checkpoint()
+        state = self.state_dict()
+        self._preloaded_state = state if loaded else {}
+        if not state["candidate_stats"]:
+            return
+        if state.get("method") not in (None, self.method_name):
+            raise ValueError(
+                f"Checkpoint method '{state['method']}' does not match current method "
+                f"'{self.method_name}'. Use a different checkpoint path."
+            )
+        if mismatch := self.scoring_mismatch(state):
+            raise ValueError(f"{mismatch} Use a different checkpoint path.")
 
     def load_search_checkpoint(self) -> bool:
+        state, self._preloaded_state = getattr(self, "_preloaded_state", None), None
+        if state is not None:  # read by validate_search_input; search() reset the attributes
+            for key, value in state.items():
+                setattr(self, key, value)
+            return bool(state)
         loaded = super().load_search_checkpoint(strict=False)
         # safe_save stores the defaultdict as a dict, which scoring after a resume fills by name.
         self.candidate_stats = defaultdict(dict, self.candidate_stats)
@@ -1349,12 +1398,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 continue
 
             formats, raw_scores, scores, costs = [], [], [], []
-            scored = set(hparam.scored_choices)
             for recipe in hparam.solver_choices:
                 formats.append(recipe)
                 # A format shard leaves other shards' formats unscored; their merge fills them.
-                unscored = recipe not in scored and not recipe.is_no_quant
-                raw_scores.append(None if unscored else hparam.get_score(recipe))
+                scored = self._scores_recipe(hparam, recipe)
+                raw_scores.append(hparam.get_score(recipe) if scored else None)
                 costs.append(hparam.get_cost(recipe))
             scores = _monotone_scores(raw_scores)
 
@@ -1408,7 +1456,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if not hparam.is_configurable
             for recipe in hparam.choices
         }
-        return set(searched) - owned - held
+        return set(searched) - owned - held - self._shared_calibration_recipes(quant_recipe_hparams)
+
+    def _shared_calibration_recipes(self, quant_recipe_hparams) -> set:
+        """Recipes every format shard calibrates besides its own (e.g. a scoring context)."""
+        return set()
+
+    def _scores_recipe(self, hparam, recipe) -> bool:
+        """Whether this process scores ``recipe`` of ``hparam``; BF16 scores 0 by construction."""
+        return recipe.is_no_quant or recipe in hparam.scored_choices
 
     def _snapshot_source_weights(self, quant_recipe_hparams, search_recipes):
         """CPU copies of the weights candidates' calibrations will rewrite, or None if none will.
@@ -1478,6 +1534,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                                     quantizer, weight
                                 )
                             )
+                            # A decoding encodes to its codes at the pinned scales.
+                            drop_search_scales(quantizer)
                 # Including the candidates not selected, which would otherwise replay their codes
                 # over the selected weights if made active again.
                 for _, _, quantizer in hparam._iter_quantizer_choices():
@@ -1518,7 +1576,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 f"current=({self.config['cost_model']}, {self.config['active_moe_expert_ratio']}). "
                 "Use a different checkpoint path."
             )
+        mismatch = self.scoring_mismatch(self.state_dict()) if self.candidate_stats else None
+        if mismatch:
+            raise ValueError(f"{mismatch} Use a different checkpoint path.")
         self.method = self.method_name
+        self.scoring_config = self.scoring_config_from(self.config)
         self.cost_model = self.config["cost_model"]
         self.cost = self.config["cost"]
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]
@@ -1887,6 +1949,7 @@ def _monotone_scores(raw_scores):
 
 _SHARD_INVARIANT_STATE = (
     "method",
+    "scoring_config",
     "cost_model",
     "cost",
     "active_moe_expert_ratio",
@@ -1934,7 +1997,8 @@ def merge_auto_quantize_shards(shard_states: Sequence[dict]) -> dict:
                 current = target["raw_scores"][i]
                 if score is None or current == score:
                     continue
-                # Every shard scores BF16 and fixed groups alike (0); a sharded format only once.
+                # Every shard scores fixed groups alike (0), and BF16 too unless a KL context has
+                # shard 0 alone measure it; a sharded format is scored only once.
                 if current is not None:
                     raise ValueError(f"Two format shards scored {target['formats'][i]} for {name}.")
                 target["raw_scores"][i] = score
@@ -2330,13 +2394,14 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBackwardScoringSearcher):
 
 @torch.compile(dynamic=True)
 def _get_log_softmax_dist(logits: torch.Tensor, tp_group) -> torch.Tensor:
-    dtype = logits.dtype
+    # In fp32 like the unsharded path: a KL context adds one large base to every score, and a bf16
+    # KL would round away the candidates' differences.
     max_logits = torch.amax(logits, dim=-1, keepdim=True)
     torch.distributed.all_reduce(max_logits, op=torch.distributed.ReduceOp.MAX, group=tp_group)
-    logits = (logits - max_logits).float()
+    logits = logits.float() - max_logits
     sum_exp_logits = torch.exp(torch.logsumexp(logits, dim=-1, keepdim=True))
     torch.distributed.all_reduce(sum_exp_logits, op=torch.distributed.ReduceOp.SUM, group=tp_group)
-    return (logits - torch.log(sum_exp_logits)).to(dtype)
+    return logits - torch.log(sum_exp_logits)
 
 
 def _get_log_prob(logits: torch.Tensor, lm_head: nn.Module = None) -> torch.Tensor:
@@ -2369,14 +2434,27 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
     """A searcher for AutoQuantize algorithm that uses KL-Divergence loss based score estimation."""
 
     method_name = "kl_div"
+    method_config_keys = frozenset({"context_quant_level"})
+    scoring_config_keys = frozenset({"context_quant_level"})
 
     @property
     def default_search_config(self):
-        """Get the default config for the searcher."""
+        """Get the default config for the searcher.
+
+        ``context_quant_level``: the format the other searched groups take while one group's
+        candidates are scored (the scoring context). ``None`` (default) leaves them unquantized.
+        ``"lowest"`` quantizes each to its lowest-bit quantized candidate, and an int ``k`` to the
+        ``k``-th from the lowest, counting from 0 (so ``0`` is ``"lowest"``) and capped at its
+        highest. A score is then the KL at that operating point and also counts how a group's
+        error compounds with the others'; every candidate, BF16 included, is measured.
+        ``"lowest"`` is a good default; in our sub-4-bit tests a context nearer the budget
+        measured the same.
+        """
         config = super().default_search_config
         config.update(
             {
                 "forward_step": None,
+                "context_quant_level": None,
             }
         )
         return config
@@ -2396,7 +2474,39 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
             "`forward_step` must be provided for KL-Divergence loss based `auto_quantize`. "
             "`forward_step(model, data)` should return model logits."
         )
+        level = config["context_quant_level"]
+        if not (level in (None, "lowest") or (type(level) is int and level >= 0)):
+            raise ValueError(
+                f"kl_div context_quant_level must be None, 'lowest' or an int >= 0, got {level!r}."
+            )
         return config
+
+    def scoring_config_from(self, options: dict | None) -> dict:
+        """``0`` scores as ``"lowest"``; record one spelling so each reuses the other's scores."""
+        config = super().scoring_config_from(options)
+        if type(config["context_quant_level"]) is int and config["context_quant_level"] == 0:
+            config["context_quant_level"] = "lowest"
+        return config
+
+    def _context_recipe(self, hparam):
+        """The recipe ``hparam`` holds while other groups are scored; no-quant without a context."""
+        level = self.config["context_quant_level"]
+        if level is None:
+            return QuantRecipe(quant_cfg=None)
+        # choices are sorted by compression, so they run from lowest bits up to no-quant.
+        quantized = [recipe for recipe in hparam.choices if not recipe.is_no_quant]
+        return quantized[min(0 if level == "lowest" else level, len(quantized) - 1)]
+
+    def _shared_calibration_recipes(self, quant_recipe_hparams) -> set:
+        if self.config["context_quant_level"] is None:
+            return set()
+        return {self._context_recipe(h) for h in quant_recipe_hparams if h.is_configurable}
+
+    def _scores_recipe(self, hparam, recipe) -> bool:
+        if recipe.is_no_quant and self.config["context_quant_level"] is not None:
+            # BF16 is measured in the quantized context; one shard measures it for the merge.
+            return self.format_shard is None or self.format_shard[0] == 0
+        return super()._scores_recipe(hparam, recipe)
 
     @torch.inference_mode()
     def estimate_sensitivity_scores(self):
@@ -2404,13 +2514,20 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
 
         Higher score means more sensitive to quantization.
         """
+        no_quant = QuantRecipe(quant_cfg=None)
+        context = self.config["context_quant_level"]
 
-        def set_to_unquantized():
+        context_recipe = self._context_recipe
+
+        def set_to(recipe_of):
             for name, hparam in named_hparams(self.model, unique=True):
                 if not isinstance(hparam, QuantRecipeHparam):
                     continue
                 if hparam.is_configurable:
-                    hparam.active = QuantRecipe(quant_cfg=None)
+                    hparam.active = recipe_of(hparam)
+
+        def set_to_unquantized():
+            set_to(lambda hparam: no_quant)
 
         self.model.eval()
         num_iters = self.config["num_score_steps"]
@@ -2423,30 +2540,52 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
             logits_unquant = self.config["forward_step"](self.model, data)
             log_prob_unquant = _get_log_prob(logits_unquant, lm_head=_get_lm_head(self.model))
 
-            for name, hparam in tqdm(
-                list(named_hparams(self.model, configurable=True)), desc="Evaluating hparams"
+            def kl_to_unquantized():
+                logits_quant = self.config["forward_step"](self.model, data)
+                return _get_kl_div_loss(log_prob_unquant, logits_quant, _get_lm_head(self.model))
+
+            set_to(context_recipe)
+            hparams = [
+                hparam
+                for _, hparam in named_hparams(self.model, configurable=True)
+                if isinstance(hparam, QuantRecipeHparam)
+            ]
+            # A group at its own context recipe leaves the model in the context, so one forward
+            # scores that recipe for every group.
+            context_score = None
+            if context is not None and any(
+                self._scores_recipe(hparam, context_recipe(hparam)) for hparam in hparams
             ):
-                if not isinstance(hparam, QuantRecipeHparam):
-                    continue
-                for recipe in hparam.scored_choices:
-                    if recipe == QuantRecipe(quant_cfg=None):
+                context_score = kl_to_unquantized()
+
+            for hparam in tqdm(hparams, desc="Evaluating hparams"):
+                for recipe in hparam.solver_choices:
+                    if recipe == no_quant and context is None:
+                        continue  # scores 0 by construction
+                    if not self._scores_recipe(hparam, recipe):
                         continue
-                    hparam.active = recipe
-                    logits_quant = self.config["forward_step"](self.model, data)
-                    score = _get_kl_div_loss(
-                        log_prob_unquant, logits_quant, _get_lm_head(self.model)
-                    )
-                    if hparam._importance_dict[recipe][hparam.score_modules[0]] is None:
-                        hparam._importance_dict[recipe][hparam.score_modules[0]] = score
+                    if context_score is not None and recipe == context_recipe(hparam):
+                        score = context_score
                     else:
-                        hparam._importance_dict[recipe][hparam.score_modules[0]] += score
-                hparam.active = QuantRecipe(quant_cfg=None)
+                        hparam.active = recipe
+                        score = kl_to_unquantized()
+                    scores = hparam._importance_dict[recipe]
+                    previous = scores[hparam.score_modules[0]]
+                    scores[hparam.score_modules[0]] = (
+                        score if previous is None else previous + score
+                    )
+                hparam.active = context_recipe(hparam)
+            set_to_unquantized()
 
     def run_search_with_stats(self, max_weight_size, verbose=False):
         """Run threshold-based binary search for KLDivergence loss based auto_quantize.
 
         We use binary search to minimize the max(per-layer score) while meeting the constraint.
+        A scoring context adds the same base damage to every candidate of every group, so a
+        threshold on raw scores is meaningless; those scores are ranked by their sum instead.
         """
+        if self.config["context_quant_level"] is not None:
+            return self._run_linear_program_search(max_weight_size, verbose)
         # Collect all sensitivity scores to determine initial threshold bounds
         all_scores = [
             score for name in self.candidate_stats for score in self.candidate_stats[name]["scores"]
@@ -2678,6 +2817,8 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
             f"Expected one of {sorted(AUTO_QUANTIZE_SEARCHERS)}."
         )
     searcher = AUTO_QUANTIZE_SEARCHERS[method]()
+    if unknown := searcher.unknown_scoring_options(search_state):
+        raise ValueError(f"Search state scoring options {unknown} are not known to {method!r}.")
     searcher.candidate_stats = candidate_stats
     searcher.cost_model = search_state.get("cost_model", COST_MODEL_WEIGHT)
     searcher.cost = search_state.get("cost", {})
@@ -2693,6 +2834,7 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
         "cost_model": searcher.cost_model,
         "cost": searcher.cost,
         "active_moe_expert_ratio": searcher.active_moe_expert_ratio,
+        **search_state.get("scoring_config", {}),
     }
     for key in searcher.default_state_dict:
         if key in search_state and not hasattr(searcher, key):

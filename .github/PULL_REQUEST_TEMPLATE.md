@@ -2,7 +2,13 @@
 
 Type of change: ? <!-- Use one of the following: Bug fix, new feature, new example, new tests, documentation. -->
 
-<!-- Details about the change. -->
+**Problem:** <!-- What is broken, missing, or slow, and for whom? Start here so reviewers see why this PR is needed before reading the diff. -->
+
+**Fix:** <!-- How this PR fixes it, in a sentence or two. Keep root cause and numbers to what supports the why; don't restate the diff file by file. -->
+
+### Modules touched
+
+<!-- Only if the PR changes more than one module (tests and docs that only follow the change don't count); otherwise delete this section. One line per module: why the fix cannot be made without changing it. A module you cannot justify belongs in a separate PR. -->
 
 ### Usage
 
