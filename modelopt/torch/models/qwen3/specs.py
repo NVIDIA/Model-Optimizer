@@ -22,6 +22,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         bypass_spec=BypassSpec(
+            causal_context_parallel=True,
             decoder_paths=("model.layers", "layers"),
             batch_packed_documents=True,
             functional_children=(),
