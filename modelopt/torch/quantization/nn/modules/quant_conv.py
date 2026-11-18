@@ -17,11 +17,13 @@
 
 import warnings
 
+import torch
 import torch.nn as nn
 
 from modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda import conv3d_implicit_gemm_cuda
 
 from ... import tensor_quant
+from ...utils import is_torch_export_mode
 from .quant_module import QuantLinearConvBase, QuantModuleRegistry, _LegacyQuantLinearConvBaseMixin
 
 __all__ = [
@@ -94,12 +96,20 @@ class _QuantConv3d(QuantLinearConvBase):
     """Quantized 3D convolution.
 
     For NVFP4, the weight is block-quantized along the GEMM K dimension
-    (``Cin * kD * kH * kW``). Quantized activations need the same blocking over the
-    im2col patches, which only the fused implicit GEMM kernel does; every other NVFP4
-    case runs cuDNN. For all other configs, the default cuDNN path is used.
+    (``Cin * kD * kH * kW``) on every path. Quantized activations need the same blocking
+    over the im2col patches, which only the fused implicit GEMM kernel does, so it runs
+    when the activations are quantized. All other cases use the default cuDNN path.
     """
 
     default_quant_desc_weight = tensor_quant.QUANT_DESC_8BIT_CONV3D_WEIGHT_PER_CHANNEL
+
+    @staticmethod
+    def _get_quantized_weight(module: "_QuantConv3d", weight: torch.Tensor) -> torch.Tensor:
+        if module._is_nvfp4_conv() and (
+            module._enable_weight_quantization or is_torch_export_mode()
+        ):
+            return _nvfp4_quantize_weight_along_k(weight, module.weight_quantizer)
+        return QuantLinearConvBase._get_quantized_weight(module, weight)
 
     def _is_nvfp4_conv(self):
         """Check if both quantizers are configured for NVFP4 and the conv is not grouped."""
@@ -131,35 +141,23 @@ class _QuantConv3d(QuantLinearConvBase):
             padding=self.padding,
             dilation=self.dilation,
             act_amax=act_amax,
-            quant_act=True,
+            quant_act=self.input_quantizer.is_enabled and self.input_quantizer._if_quant,
             fp4_block_size=fp4_block_size,
         )
         return self.output_quantizer(output)
 
-    def _nvfp4_forward(self, input):
-        """NVFP4 forward: implicit GEMM for quantized activations, cuDNN otherwise.
-
-        Input may already be padded.
-        """
+    def forward(self, input, *args, **kwargs):
+        """Forward with implicit GEMM for quantized NVFP4 activations, default path otherwise."""
         if self._should_use_implicit_gemm():
             if not self.training:
                 return self._implicit_gemm_forward(input)
             warnings.warn(
                 "Implicit GEMM Conv3D kernel is inference-only and does not support training. "
-                "Falling back to cuDNN, which quantizes activations along the input's last "
-                "dimension instead of the GEMM K dimension and could produce different numerics.",
-                stacklevel=3,
+                "Falling back to the default cuDNN quantization path, which could produce "
+                "different numerics.",
+                stacklevel=2,
             )
-        # The input quantizer still runs: it collects statistics during calibration.
-        input = self.input_quantizer(input)
-        weight = _nvfp4_quantize_weight_along_k(self.weight, self.weight_quantizer)
-        return self.output_quantizer(self._conv_forward(input, weight, self.bias))
-
-    def forward(self, input, *args, **kwargs):
-        """Forward with the NVFP4 paths for NVFP4 configs, default path otherwise."""
-        if not self._is_nvfp4_conv():
-            return super().forward(input, *args, **kwargs)
-        return self._nvfp4_forward(input)
+        return super().forward(input, *args, **kwargs)
 
 
 class QuantConv3d(_LegacyQuantLinearConvBaseMixin, nn.Conv3d):

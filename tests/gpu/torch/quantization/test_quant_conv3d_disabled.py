@@ -115,11 +115,19 @@ def test_conv3d_quantized_activations_run_implicit_gemm(kernel_calls):
 @torch.no_grad()
 def test_conv3d_training_falls_back_to_cudnn(kernel_calls):
     model, x, _ = _quantized_model()
-    model.visual.train()
+    conv = model.visual
+    conv.train()
+    weight = quant_conv._nvfp4_quantize_weight_along_k(conv.weight, conv.weight_quantizer)
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model.visual(x)
+        output = conv(x)
 
     assert not kernel_calls
     assert any("inference-only" in str(w.message) for w in caught)
+    torch.testing.assert_close(
+        output,
+        F.conv3d(conv.input_quantizer(x), weight, conv.bias, conv.stride),
+        rtol=0,
+        atol=1e-5,
+    )
