@@ -5,7 +5,7 @@ Evaluating Models Efficiently During Optimization Experiments
 
 :Author: Daniel Korzekwa
 :Date: November 18, 2026
-:Tags: evaluation, docs, quantization
+:Tags: evaluation, docs, quantization, qad, fast-experimentation
 
 Introduction
 ------------

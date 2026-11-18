@@ -1,7 +1,7 @@
 Evaluation
 ==========
 
-* **ModelOpt skills:** for standardized evaluation and acceptance checks before
+* ModelOpt skills: for standardized evaluation and acceptance checks before
   releasing optimized models, follow the
   `ModelOpt evaluation skill <https://github.com/NVIDIA/Model-Optimizer/blob/main/skills/modelopt-evaluation/SKILL.md>`__
   and
