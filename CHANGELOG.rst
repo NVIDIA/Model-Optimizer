@@ -9,6 +9,7 @@ Changelog
 *Quantization - ONNX*
 
 - The Windows ONNX LLM quantization example supports text calibration for hybrid decoder inputs, including embedding-only exports and linear-attention states, and keeps small constants inline when exporting external weights. Install the example requirements with Transformers ``>=5.5,<5.19`` (previously ``<5.0.0``).
+- Add opt-in ``awqlite_reuse_activations`` (default: False) to share calibration activations across adjacent weights with the same input in per-node ONNX AWQ Lite/Full. For stochastic graphs, enabling reuse shares captured samples across those weights.
 
 *Quantization - Algorithms*
 
