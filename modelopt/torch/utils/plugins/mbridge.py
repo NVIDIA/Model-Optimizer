@@ -54,6 +54,7 @@ register_allowed_target_prefix("modelopt.")
 
 __all__ = [
     "get_language_model",
+    "is_language_model_only_checkpoint",
     "is_vlm_config",
     "load_mbridge_model_from_hf",
     "load_modelopt_megatron_checkpoint",
@@ -93,6 +94,7 @@ def use_moe_grouped_gemm(
     hf_model_name_or_path: str,
     trust_remote_code: bool = False,
     force_sequential: bool = False,
+    force_grouped: bool = False,
 ) -> bool:
     """Pick the MoE expert layout: grouped GEMM unless that would not be HF-exportable.
 
@@ -100,6 +102,10 @@ def use_moe_grouped_gemm(
     rule can be converted to HuggingFace from it. Every script that builds the model must agree,
     since the layout is baked into the Megatron checkpoint -- hence a pure function of the config.
     """
+    if force_sequential and force_grouped:
+        raise ValueError("Grouped and sequential expert layouts are mutually exclusive.")
+    if force_grouped:
+        return True
     if force_sequential:
         return False
     config = _hf_config(hf_model_name_or_path, trust_remote_code)
@@ -226,8 +232,20 @@ def _checkpoint_keys(checkpoint_path: str) -> list[str]:
     return list(FileSystemReader(checkpoint_path).read_metadata().state_dict_metadata)
 
 
+def is_language_model_only_checkpoint(megatron_path: str) -> bool:
+    """Whether a checkpoint omits the full VLM wrapper's language_model prefix."""
+    return not any(
+        key.startswith("language_model.")
+        for key in _checkpoint_keys(_get_modelopt_checkpoint_path(megatron_path))
+    )
+
+
 def load_modelopt_megatron_checkpoint(
-    model: list[MegatronModule], megatron_path: str, restore_modelopt_state: bool = True
+    model: list[MegatronModule],
+    megatron_path: str,
+    restore_modelopt_state: bool = True,
+    *,
+    preserve_checkpoint_dtype: bool = False,
 ) -> list[MegatronModule]:
     """Load Megatron checkpoint weights (with modelopt_state).
 
@@ -237,6 +255,8 @@ def load_modelopt_megatron_checkpoint(
         restore_modelopt_state: Whether to restore the ModelOpt state (e.g. quantizers) before loading
             weights. Set ``False`` to load weights only -- e.g. to reload a full-precision distilled
             student without reconstructing the ``kd_loss`` mode (which would require a teacher model).
+        preserve_checkpoint_dtype: Match floating destination tensors to checkpoint storage before
+            DCP copies values, preserving mixed native precision during deployment export.
 
     Returns:
         The modules loaded into: ``.language_model`` for a language-model-only VLM checkpoint,
@@ -301,5 +321,35 @@ def load_modelopt_megatron_checkpoint(
                 "The state was dropped when the checkpoint was written -- re-run the step that "
                 "produced it."
             )
+    if preserve_checkpoint_dtype:
+        from megatron.core.dist_checkpointing import load_tensors_metadata
+
+        _restore_checkpoint_dtypes(model, load_tensors_metadata(checkpoint_path))
     _load_model_weights_from_checkpoint(checkpoint_path, model)
     return model
+
+
+def _restore_checkpoint_dtypes(model, metadata):
+    # DCP copies into destination storage; an FP32 checkpoint must not round through BF16.
+    for chunk in unwrap_model(model):
+        destinations = {}
+
+        def collect(value):
+            if isinstance(value, dict):
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, (tuple, list)):
+                for child in value:
+                    collect(child)
+            elif isinstance(getattr(value, "data", None), torch.Tensor):
+                destinations[value.data.data_ptr()] = value.key
+
+        collect(chunk.sharded_state_dict())
+        for _, tensor in (*chunk.named_parameters(), *chunk.named_buffers()):
+            key = destinations.get(tensor.data_ptr())
+            if (
+                key in metadata
+                and tensor.is_floating_point()
+                and tensor.dtype != metadata[key].dtype
+            ):
+                tensor.data = tensor.data.to(dtype=metadata[key].dtype)

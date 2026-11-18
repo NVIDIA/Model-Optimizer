@@ -13,13 +13,50 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
 import pytest
+import torch
 import yaml
 from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
 from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.bridge.utils.yaml_utils import dump_dataclass_to_yaml
 
-from modelopt.torch.utils.plugins.mbridge import set_moe_expert_layout
+from modelopt.torch.utils.plugins.mbridge import _restore_checkpoint_dtypes, set_moe_expert_layout
+
+
+def test_checkpoint_storage_precision_is_restored_before_copy():
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
+            self.register_buffer("state", torch.ones(2, dtype=torch.float32))
+            self.register_buffer("indices", torch.ones(2, dtype=torch.int32))
+
+        def sharded_state_dict(self):
+            return {
+                "nested": [
+                    SimpleNamespace(key="weights", data=self.weight),
+                    SimpleNamespace(key="state", data=self.state),
+                    SimpleNamespace(key="indices", data=self.indices),
+                ]
+            }
+
+    model = Model()
+    metadata = {
+        name: SimpleNamespace(dtype=dtype)
+        for name, dtype in {
+            "weights": torch.float32,
+            "state": torch.bfloat16,
+            "indices": torch.int64,
+        }.items()
+    }
+    _restore_checkpoint_dtypes([model], metadata)
+    source = torch.tensor([1 + 2**-14, 1 + 2**-13])
+    model.weight.data.copy_(source)
+    assert torch.equal(model.weight, source)
+    assert model.state.dtype == torch.bfloat16
+    assert model.indices.dtype == torch.int32
 
 
 def _round_trip(value):
