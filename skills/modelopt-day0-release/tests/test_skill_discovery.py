@@ -50,4 +50,24 @@ def test_compatibility_entrypoints(canonical):
             continue
         legacy_path = stub.parent / resource.name
         assert legacy_path.is_symlink()
-        assert legacy_path.resolve(strict=True) == resource
+        assert legacy_path.resolve(strict=True) == resource.resolve(strict=True)
+
+
+@pytest.mark.parametrize(
+    ("name", "legacy"),
+    [
+        ("compare-results", "tests/evals.json"),
+        ("day0-release", "tests/evals.json"),
+        ("deployment", "tests/evals.json"),
+        ("evaluation", "tests/evals.json"),
+        ("launching-evals", "tests.json"),
+        ("ptq", "tests.json"),
+    ],
+)
+def test_legacy_dataset_paths(name, legacy):
+    """Old checkout paths still reach the dataset consumed by SkillEvaluator."""
+    canonical = _SKILLS / f"modelopt-{name}" / "evals/evals.json"
+    assert canonical.is_file() and not canonical.is_symlink()
+    for root in (_SKILLS, _ROOT / ".agents/skills", _ROOT / ".claude/skills"):
+        for skill in (name, f"modelopt-{name}"):
+            assert (root / skill / legacy).resolve(strict=True) == canonical

@@ -644,19 +644,15 @@ class TestQuantFusedExperts:
         converted, quantizers, expert_type = self._make_rotated_fused_experts(monkeypatch)
         try:
             converted.down_proj.requires_grad_(False)
-            frozen = converted.down_proj.detach().clone()
             expected = [
-                q(weight).detach().clone()
-                for weight, q in converted.iter_weights_for_calibration()
-                if weight.requires_grad
+                q(weight).detach().clone() for weight, q in converted.iter_weights_for_calibration()
             ]
-            mtq.initialize_qdq_weights(converted, trainable_only=True)
+            mtq.initialize_qdq_weights(converted)
             for (weight, _), value in zip(
-                [(w, q) for w, q in converted.iter_weights_for_calibration() if w.requires_grad],
+                list(converted.iter_weights_for_calibration()),
                 expected,
             ):
                 torch.testing.assert_close(weight, value, rtol=0, atol=0)
-            torch.testing.assert_close(converted.down_proj, frozen, rtol=0, atol=0)
             assert all(q.is_enabled and q.rotate_is_enabled for q in quantizers)
         finally:
             self._cleanup_registry(expert_type)
