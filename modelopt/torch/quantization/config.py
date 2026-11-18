@@ -1560,7 +1560,10 @@ def normalize_quant_cfg_list(
     if isinstance(v, Mapping):
         _warn_legacy()
         # Legacy "default" was applied before every other key, wherever it appeared in the dict.
-        v = [{k: val} for k, val in sorted(v.items(), key=lambda kv: kv[0] != "default")]
+        legacy_entries = [{k: val} for k, val in v.items() if k != "default"]
+        if "default" in v:
+            legacy_entries.insert(0, {"default": v["default"]})
+        v = legacy_entries
     elif not isinstance(v, Sequence) or isinstance(v, (str, bytes)):
         raise ValueError(
             f"quant_cfg must be a sequence of entries (or a legacy flat mapping), got "
