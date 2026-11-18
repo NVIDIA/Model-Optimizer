@@ -1894,3 +1894,135 @@ def _native_ep_transport_policy_worker(rank, size):
 def test_native_ep_transport_policy_reaches_hf_dispatcher(bypass_cpu_workers):
     pytest.importorskip("transformers", minversion="5.23")
     bypass_cpu_workers.run(_native_ep_transport_policy_worker)
+
+
+def _context_worker(rank, size, fallback):
+    from torch.distributed.device_mesh import init_device_mesh
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from modelopt.torch.distill._bypass_optimizer import Lion
+    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+    from modelopt.torch.quantization.ggml.scale_fields import (
+        decode_scale_fields,
+        replace_scale_fields,
+    )
+
+    torch.cuda.set_device(rank)
+    torch.manual_seed(71)
+    device = torch.device("cuda", rank)
+    config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=256,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        use_cache=False,
+    )
+    config._attn_implementation = "sdpa"
+    teacher = LlamaForCausalLM(config).to(device=device, dtype=torch.bfloat16).eval()
+    batches = [{"input_ids": torch.randint(3, 32, (1, 8), device=device)} for _ in range(8)]
+    if fallback:
+        for batch in batches:
+            batch["attention_mask"] = torch.ones(1, 1, 8, 8, dtype=torch.bool, device=device).tril()
+            batch["valid_mask"] = torch.ones(1, 8, dtype=torch.bool, device=device)
+    student = mtq.quantize(
+        copy.deepcopy(teacher),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*mlp*weight_quantizer",
+                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda m: m(**{k: v for k, v in batches[0].items() if k != "valid_mask"}),
+    )
+    recipe = {
+        "num_steps": 2,
+        "global_batch_size": 4,
+        "sequence_length": 8,
+        "scheduler": "constant",
+        "warmup_fraction": 0,
+    }
+    reference = copy.deepcopy(student)
+    single = init_device_mesh("cuda", (size, 1), mesh_dim_names=("owners", "dp"))["dp"]
+    gradients = []
+    original_step = Lion.step
+
+    def observed_step(optimizer, closure=None):
+        gradients.append(
+            [
+                p.grad.detach().float().cpu()
+                for group in optimizer.param_groups
+                for p in group["params"]
+            ]
+        )
+        return original_step(optimizer, closure)
+
+    Lion.step = observed_step
+    try:
+        mtd.bypass(reference, copy.deepcopy(teacher), batches, recipe, device_mesh=single)
+    finally:
+        Lion.step = original_step
+    expected_gradients = gradients[:]
+    gradients.clear()
+    mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("dp", "cp"))
+    adapter = TransformersBypassAdapter(mesh)
+    adapter.parallelize(student)
+    adapter.parallelize(teacher)
+    local = [
+        batches[step * 4 + index]
+        for step in range(2)
+        for index in range(mesh["dp"].get_local_rank(), 4, 2)
+    ]
+    Lion.step = observed_step
+    try:
+        mtd.bypass(student, teacher, local, recipe, device_mesh=mesh)
+    finally:
+        Lion.step = original_step
+    # BF16 dW rounds before each CP owner's sum; native attention also changes
+    # its reduction tree. Validate the actual normalized VJP, rather than
+    # demanding bitwise scale updates after Lion amplifies a near-zero sign.
+    for actual, expected in zip(gradients, expected_gradients, strict=True):
+        for a, b in zip(actual, expected, strict=True):
+            relative_error = (a - b).norm() / b.norm().clamp_min(1e-20)
+            assert relative_error < 0.03, relative_error.item()
+    assert student._modelopt_bypass_execution["context_parallel_modes"] == [
+        "replicated_full_context" if fallback else "native_sdpa"
+    ]
+    for name, module in student.named_modules():
+        if isinstance(module, TensorQuantizer) and module.backend == "ggml":
+            fmt = IQ_FORMAT_REGISTRY["iq2_s"]
+            actual = module._ggml_pinned_iq2_s
+            expected = reference.get_submodule(name)._ggml_pinned_iq2_s
+            global_scale, local_scale, _ = decode_scale_fields(expected, fmt)
+            assert torch.equal(
+                replace_scale_fields(actual, fmt, global_scale, local_scale), expected
+            )
+            shape = torch.tensor((actual.shape[0], actual.shape[1] * fmt.block_size))
+            torch.testing.assert_close(
+                fmt.dequantize(actual, shape, dtype=torch.float32),
+                fmt.dequantize(expected, shape, dtype=torch.float32),
+                rtol=0.006,
+                atol=1e-6,
+            )
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.timeout(300)
+def test_native_context_and_replicated_fallback_match_reference(native_workers, fallback):
+    import importlib
+
+    if not fallback:
+        try:
+            native = importlib.import_module(
+                "torch.distributed.tensor.experimental._context_parallel._attention"
+            )
+        except ImportError:
+            pytest.skip("Native CP needs Torch's scoped module-wrapper attention API")
+        if not hasattr(native, "_ContextParallel"):
+            pytest.skip("Native CP needs Torch's scoped module-wrapper attention API")
+    native_workers.run(_context_worker, fallback)
