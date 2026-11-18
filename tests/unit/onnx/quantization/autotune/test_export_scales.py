@@ -142,12 +142,23 @@ def test_distinct_groups_never_share_a_scale(bfloat16, count):
         assert np.array_equal(values.astype(np.float16).astype(np.float32), values)
 
 
-def test_fp8_scales_stay_distinct_after_conversion():
-    """int8_to_fp8 rescales by 448/127 in float16, which merges some adjacent grid values."""
-    scales = build_activation_scales({f"t{i}" for i in range(3000)}, {}, fp8=True)
-    stored = np.array(list(scales.values()), dtype=np.float16)
-    converted = ((stored * 448.0) / 127.0).astype(np.float16)
-    assert len(set(converted.tolist())) == len(scales)
+@pytest.mark.parametrize(
+    ("scale_type", "groups"),
+    [(TensorProto.FLOAT16, 3000), (TensorProto.BFLOAT16, 1500)],
+    ids=["float16", "bfloat16"],
+)
+def test_fp8_scales_stay_distinct_after_conversion(scale_type, groups):
+    """int8_to_fp8 rescales by 448/127 in the scale dtype, which merges some adjacent grid values."""
+    dtype = helper.tensor_dtype_to_np_dtype(scale_type)
+    scales = build_activation_scales(
+        {f"t{i}" for i in range(groups)},
+        {},
+        bfloat16=scale_type == TensorProto.BFLOAT16,
+        fp8=True,
+    )
+    stored = np.array(list(scales.values())).astype(dtype)
+    converted = ((stored * 448.0) / 127.0).astype(dtype)
+    assert len(set(converted.view(np.uint16).tolist())) == len(scales)
 
 
 @pytest.mark.parametrize("needs_fp8_conversion", [False, True])

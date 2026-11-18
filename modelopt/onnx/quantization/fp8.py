@@ -53,6 +53,11 @@ from modelopt.onnx.quantization.qdq_graph import (
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes
 
 
+def _rescale_int8_scales_to_fp8(np_scale: np.ndarray, dtype: np.dtype) -> np.ndarray:
+    """Return the scales :func:`int8_to_fp8` writes in place of ``np_scale``, cast to ``dtype``."""
+    return ((np_scale * 448.0) / 127.0).astype(dtype)
+
+
 def int8_to_fp8(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     """Converts the INT8 quantized model to FP8 quantized model.
 
@@ -75,9 +80,8 @@ def int8_to_fp8(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
 
     def _int8_scale_to_fp8_scale(scale: np.ndarray, scale_name: str):
         np_scale = onnx.numpy_helper.to_array(scale)
-        np_fp8_scale = (np_scale * 448.0) / 127.0
         dtype = onnx.helper.tensor_dtype_to_np_dtype(scale.data_type)
-        return numpy_helper.from_array(np_fp8_scale.astype(dtype), scale_name)
+        return numpy_helper.from_array(_rescale_int8_scales_to_fp8(np_scale, dtype), scale_name)
 
     def _update_tensor_type(tensor_name):
         tensor = onnx_utils.get_tensor_by_name(onnx_model, tensor_name)

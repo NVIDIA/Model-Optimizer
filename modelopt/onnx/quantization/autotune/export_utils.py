@@ -29,7 +29,7 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
     ResolvedInsertionPoint,
     merge_resolved_insertion_points,
 )
-from modelopt.onnx.quantization.fp8 import int8_to_fp8
+from modelopt.onnx.quantization.fp8 import _rescale_int8_scales_to_fp8, int8_to_fp8
 from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
 from modelopt.onnx.quantization.qdq_graph import remove_scalar_input_qdq
 from modelopt.onnx.utils import export_onnx
@@ -286,14 +286,6 @@ def _from_grid(bits: int, bfloat16: bool) -> float:
     return float(np.array(bits, dtype=np.uint16).view(np.float16))
 
 
-def _fp8_scale_bits(bits: int, bfloat16: bool) -> int:
-    """Grid bits of the scale ``int8_to_fp8`` derives from this one, ``scale * 448 / 127``."""
-    if bfloat16:
-        return _to_grid(_from_grid(bits, True) * 448.0 / 127.0, True)
-    scale = np.array([bits], dtype=np.uint16).view(np.float16)
-    return int(((scale * 448.0) / 127.0).astype(np.float16).view(np.uint16)[0])
-
-
 def build_activation_scales(
     quantized_tensors: set[str],
     scale_group_map: dict[str, str],
@@ -337,8 +329,16 @@ def build_activation_scales(
             "available; some unrelated groups will share a scale"
         )
 
+    grid_dtype = onnx.helper.tensor_dtype_to_np_dtype(
+        onnx.TensorProto.BFLOAT16 if bfloat16 else onnx.TensorProto.FLOAT16
+    )
+
     def final_bits(bits: int) -> int:
-        return _fp8_scale_bits(bits, bfloat16) if fp8 else bits
+        """Grid bits of the scale the candidate carries, after ``int8_to_fp8`` for FP8."""
+        if not fp8:
+            return bits
+        scale = np.array([bits], dtype=np.uint16).view(grid_dtype)
+        return int(_rescale_int8_scales_to_fp8(scale, grid_dtype).view(np.uint16)[0])
 
     taken: set[int] = set()
     group_scales: dict[str, float] = {}
