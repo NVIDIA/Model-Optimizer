@@ -30,10 +30,16 @@ generation = importlib.import_module("modelopt.torch.utils.plugins.megatron_gene
 
 
 @pytest.mark.parametrize("padding_side", ["left", "right"])
-def test_pretokenized_calibration_preserves_ids_and_masks(tmp_path, monkeypatch, padding_side):
+@pytest.mark.parametrize("single_batch", [False, True])
+def test_pretokenized_calibration_preserves_ids_and_masks(
+    tmp_path, monkeypatch, padding_side, single_batch
+):
     path = tmp_path / "tokens.jsonl"
     rows = [{"input_ids": [11, 12]}, {"input_ids": [21, 22, 23], "attention_mask": [1, 1, 0]}]
-    path.write_text("\n".join(map(json.dumps, rows)))
+    written = (
+        [{key: [value] for key, value in row.items()} for row in rows] if single_batch else rows
+    )
+    path.write_text("\n".join(map(json.dumps, written)))
     monkeypatch.setattr(calibration.mpu, "get_data_parallel_world_size", lambda: 1)
     monkeypatch.setattr(calibration.mpu, "get_data_parallel_rank", lambda: 0)
     tokenizer = SimpleNamespace(pad_token="pad", pad_token_id=0, padding_side=padding_side)

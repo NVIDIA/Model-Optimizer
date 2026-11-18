@@ -83,7 +83,11 @@ def get_megatron_calibration_dataloader(
                 if line.strip():
                     row = json.loads(line)
                     ids = row["input_ids"]
+                    if len(ids) == 1 and isinstance(ids[0], list):
+                        ids = ids[0]
                     mask = row.get("attention_mask", [1] * len(ids))
+                    if len(mask) == 1 and isinstance(mask[0], list):
+                        mask = mask[0]
                     if (
                         not ids
                         or any(type(token) is not int or token < 0 for token in ids)
