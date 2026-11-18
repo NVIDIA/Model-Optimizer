@@ -71,6 +71,11 @@ these paired question-level differences. Changes are reported in percentage poin
 relative percentages. For simplicity, this example treats questions and SciCode subtasks as
 independent.
 
+We use paired question-level tests here to compare models across the domain represented by the
+benchmark. Pairing can reduce variation caused by question difficulty. For standardized reporting on
+a fixed benchmark, ModelOpt uses unpaired Welch t-tests on independent, complete-run scores to
+estimate uncertainty from variation between runs of those exact questions.
+
 Our primary question is whether Candidate is better than Baseline. A one-sided paired t-test can
 detect improvement with less data than a two-sided test for any difference. “Yes” marks p < 0.05;
 “no evidence” means improvement was not established. Reverse-direction p-values are reported for
