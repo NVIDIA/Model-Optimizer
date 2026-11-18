@@ -293,54 +293,6 @@ def test_iq_plan_protects_frozen_owners_and_allows_shared_nonwrite_parameters(al
     assert all(parameter.requires_grad for parameter in model.parameters())
 
 
-@pytest.mark.parametrize(
-    ("alias", "offload"),
-    [
-        ("parameter", False),
-        ("storage", False),
-        ("buffer", False),
-        ("parameter", True),
-        ("storage", True),
-        ("buffer", True),
-        ("resident_parameter", True),
-    ],
-)
-def test_iq_plan_refuses_shared_weights_outside_selected_boundaries(alias, offload):
-    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
-    mtq.quantize(model, {**_config([_iq("0.weight_quantizer", "iq1_s")]), "algorithm": None})
-    if alias == "resident_parameter":
-        resident_weight = model[1].weight.detach()
-    elif alias == "buffer":
-        model[1].register_buffer("frozen_weight", model[0].weight.detach())
-    else:
-        model[1].weight = (
-            model[0].weight if alias == "parameter" else nn.Parameter(model[0].weight.detach())
-        )
-    before = copy.deepcopy(model.state_dict())
-    if offload:
-        pytest.importorskip("accelerate").cpu_offload(
-            model, execution_device="cpu", offload_buffers=True
-        )
-    if alias == "resident_parameter":
-        model[0].weight = nn.Parameter(resident_weight)
-        before["0.weight"] = before["1.weight"]
-    parameters = dict(model.named_parameters(remove_duplicate=False))
-    flags = {name: parameter.requires_grad for name, parameter in parameters.items()}
-    with pytest.raises(ValueError):
-        plan_iq_repair([model[0]], root_model=model)
-    assert all(
-        parameter is parameters[name]
-        for name, parameter in model.named_parameters(remove_duplicate=False)
-    )
-    assert {
-        name: parameter.requires_grad
-        for name, parameter in model.named_parameters(remove_duplicate=False)
-    } == flags
-    with enable_weight_access_and_writeback(model, model, writeback=False):
-        assert all(torch.equal(value, before[name]) for name, value in model.state_dict().items())
-    assert not hasattr(model[0].weight_quantizer, "_local_repair_state")
-
-
 def test_iq_policy_restores_first_flags_of_shared_frozen_modules():
     shared = nn.Linear(2, 2)
     units = nn.ModuleList([nn.Sequential(nn.Linear(256, 2), shared) for _ in range(2)])
@@ -615,3 +567,51 @@ def test_preparing_units_streams_each_expert_and_returns_new_fields(monkeypatch)
         assert materializations == [2 * count for count in expected]
     finally:
         policy.close()
+
+
+@pytest.mark.parametrize(
+    ("alias", "offload"),
+    [
+        ("parameter", False),
+        ("storage", False),
+        ("buffer", False),
+        ("parameter", True),
+        ("storage", True),
+        ("buffer", True),
+        ("resident_parameter", True),
+    ],
+)
+def test_iq_plan_refuses_shared_weights_outside_selected_boundaries(alias, offload):
+    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
+    mtq.quantize(model, {**_config([_iq("0.weight_quantizer", "iq1_s")]), "algorithm": None})
+    if alias == "resident_parameter":
+        resident_weight = model[1].weight.detach()
+    elif alias == "buffer":
+        model[1].register_buffer("frozen_weight", model[0].weight.detach())
+    else:
+        model[1].weight = (
+            model[0].weight if alias == "parameter" else nn.Parameter(model[0].weight.detach())
+        )
+    before = copy.deepcopy(model.state_dict())
+    if offload:
+        pytest.importorskip("accelerate").cpu_offload(
+            model, execution_device="cpu", offload_buffers=True
+        )
+    if alias == "resident_parameter":
+        model[0].weight = nn.Parameter(resident_weight)
+        before["0.weight"] = before["1.weight"]
+    parameters = dict(model.named_parameters(remove_duplicate=False))
+    flags = {name: parameter.requires_grad for name, parameter in parameters.items()}
+    with pytest.raises(ValueError):
+        plan_iq_repair([model[0]], root_model=model)
+    assert all(
+        parameter is parameters[name]
+        for name, parameter in model.named_parameters(remove_duplicate=False)
+    )
+    assert {
+        name: parameter.requires_grad
+        for name, parameter in model.named_parameters(remove_duplicate=False)
+    } == flags
+    with enable_weight_access_and_writeback(model, model, writeback=False):
+        assert all(torch.equal(value, before[name]) for name, value in model.state_dict().items())
+    assert not hasattr(model[0].weight_quantizer, "_local_repair_state")
