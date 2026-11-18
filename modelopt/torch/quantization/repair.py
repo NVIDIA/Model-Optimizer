@@ -439,7 +439,7 @@ class IQRepairPolicy:
                         f"IQ preprocessing changes the weight dtype for {binding.name}; "
                         "native publication must preserve its dtype"
                     )
-                state = IQScaleState(quantizer, captured[0], weight.shape)
+                state = IQScaleState(quantizer, captured[0], weight.shape, binding.name)
                 object.__setattr__(quantizer, "_local_repair_state", state)
                 quantizer._local_repair_active = True
                 quantizer._fake_quantize = MethodType(_repair_fake_quantize, quantizer)
