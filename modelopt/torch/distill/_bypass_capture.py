@@ -297,6 +297,7 @@ class ModuleBypassAdapter:
     """Resolve ordinary callable Torch boundaries without a Transformers dependency."""
 
     feedforward_names = ("mlp", "moe", "ffn", "block_sparse_moe")
+    context: Any = None
 
     def resolve_units(self, student, teacher, config):
         """Use explicit paths or disjoint named MLP/MoE owners containing IQ weights."""

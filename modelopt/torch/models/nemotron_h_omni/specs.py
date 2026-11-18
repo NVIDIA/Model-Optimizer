@@ -40,6 +40,7 @@ register(
             decoder_paths=("language_model.model.layers", "model.layers", "layers"),
             adapter_path="modelopt.torch.models.nemotron_h.bypass.NemotronHBypassAdapter",
             batch_packed_documents=False,
+            functional_children=(),
         ),
         model_type="nemotron_h_omni",
         # transformers ships the Omni VLM itself from 5.18. The checkpoint's own code

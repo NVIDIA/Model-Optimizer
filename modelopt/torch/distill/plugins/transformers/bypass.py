@@ -36,7 +36,7 @@ from ..._bypass_capture import (
     validate_unit_ownership,
 )
 from .output_head import bypass_head_context
-from .packing import batch_documents, document_batches
+from .packing import batch_documents, document_batches, empty_document_batch
 
 
 def _require_transformers():
@@ -82,7 +82,8 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         self.device_mesh = device_mesh
         self.context = None
         if device_mesh is not None:
-            from .parallel import native_mesh_context, torch_mesh_context
+            from ..._bypass_parallel import torch_mesh_context
+            from .parallel import native_mesh_context
 
             self.context = (
                 native_mesh_context(device_mesh)
@@ -593,27 +594,47 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             else:
                 delattr(teacher, "forward")
 
+    def _synchronize_error(self, error):
+        from ..._bypass_parallel import _all_rank_values
+
+        errors = sorted({value for value in _all_rank_values(self.context, error) if value})
+        if errors:
+            raise ValueError("; ".join(errors))
+
+    def _document_teacher(self, teacher, units, document, consume):
+        prepared, error = None, None
+        try:
+            prepared = {
+                **self.prepare_batch(teacher, document),
+                "valid_mask": _valid_token_mask(document),
+            }
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        self._synchronize_error(error)
+        return super().teacher_microbatch(teacher, units, prepared, consume)
+
     def teacher_microbatch(self, teacher, units, batch, consume):
-        """Preserve independent document recurrence and stream each native boundary."""
-        batch = self._batch_with_validity(batch)
-        self._validate_text_batch(batch)
-        facts = self._facts(teacher)
-        spec = facts.spec
-        documents = document_batches(batch) if spec.isolated_documents else [batch]
-        if (
-            "input_ids" in batch
-            and spec.isolated_documents
-            and self._batch_documents(teacher, spec, facts.modules)
-        ):
-            student_facts = self._facts(self.student)
-            if self._batch_documents(self.student, student_facts.spec, student_facts.modules):
-                documents = batch_documents(documents, batch["input_ids"].numel())
+        """Keep document recurrence faithful and match every rank's forward schedule."""
+        from ..._bypass_parallel import _all_rank_values
+
+        documents, error = [], None
+        try:
+            batch = self._batch_with_validity(batch)
+            self._validate_text_batch(batch)
+            facts = self._facts(teacher)
+            spec = facts.spec
+            documents = document_batches(batch) if spec.isolated_documents else [batch]
+            if "input_ids" in batch and spec.isolated_documents and self._batch_documents(teacher, spec, facts.modules):
+                student_facts = self._facts(self.student)
+                if self._batch_documents(self.student, student_facts.spec, student_facts.modules):
+                    documents = batch_documents(documents, batch["input_ids"].numel())
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        self._synchronize_error(error)
+        slots = max(_all_rank_values(self.context, len(documents)))
         with bypass_head_context(teacher, units, facts.head, head_paths=facts.head_paths):
-            for document in documents:
-                prepared = self.prepare_batch(teacher, document)
-                # Validity metadata belongs to the capture, not the model's forward kwargs.
-                raw = {
-                    **prepared,
-                    "valid_mask": _valid_token_mask(document),
-                }
-                super().teacher_microbatch(teacher, units, raw, consume)
+            for index in range(slots):
+                document = (
+                    documents[index] if index < len(documents) else empty_document_batch(batch)
+                )
+                self._document_teacher(teacher, units, document, consume)
