@@ -255,10 +255,13 @@ def bypass(session):
         ],
         ["tests/examples/bypass"],
     )
+    cov_args = _cov_args()
     for paths in groups:
         existing = [path for path in paths if os.path.exists(path)]
         if existing:
-            session.run("python", "-m", "pytest", *existing, *_cov_args(), *session.posargs)
+            session.run("python", "-m", "pytest", *existing, *cov_args, *session.posargs)
+            if cov_args:
+                cov_args = ["--cov", "--cov-append"]
 
 
 # Container: nvcr.io/nvidia/nemo:26.10 or later
