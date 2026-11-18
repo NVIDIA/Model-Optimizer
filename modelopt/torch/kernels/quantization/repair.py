@@ -30,10 +30,82 @@ from modelopt.torch.quantization.ggml.iq2_s import iq2_s_grid
 from modelopt.torch.quantization.ggml.iq2_xs import iq2_xs_grid
 from modelopt.torch.quantization.ggml.iq2_xxs import iq2_xxs_grid
 
-__all__ = ["apply_block_scales", "decode_iq_levels"]
+__all__ = ["apply_block_scales", "decode_iq_levels", "masked_mse_sum"]
 
 # Codec registration alone does not establish a packed CUDA implementation.
 SUPPORTED_FORMATS = frozenset(("iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s"))
+
+
+@triton.jit
+def _mse(P, T, MASK, SUM, N, FEATURES: tl.constexpr, MASKED: tl.constexpr):
+    index = tl.program_id(0).to(tl.int64) * 1024 + tl.arange(0, 1024)
+    active = index < N
+    if MASKED:
+        active &= tl.load(MASK + index // FEATURES, index < N, 0)
+    difference = tl.load(P + index, active, 0).to(tl.float32) - tl.load(T + index, active, 0).to(
+        tl.float32
+    )
+    tl.store(SUM + tl.program_id(0), tl.sum(difference * difference, 0))
+
+
+@triton.jit
+def _mse_backward(P, T, MASK, G, DP, N, FEATURES: tl.constexpr, MASKED: tl.constexpr):
+    index = tl.program_id(0).to(tl.int64) * 1024 + tl.arange(0, 1024)
+    active = index < N
+    if MASKED:
+        active &= tl.load(MASK + index // FEATURES, index < N, 0)
+    difference = tl.load(P + index, active, 0).to(tl.float32) - tl.load(T + index, active, 0).to(
+        tl.float32
+    )
+    value = difference * (2 * tl.load(G).to(tl.float32))
+    tl.store(DP + index, value, index < N)
+
+
+class _MaskedMSE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, prediction, target, mask, features):
+        prediction, target = prediction.contiguous(), target.contiguous()
+        mask = None if mask is None else mask.contiguous()
+        partial = torch.empty(
+            triton.cdiv(prediction.numel(), 1024), device=prediction.device, dtype=torch.float32
+        )
+        if partial.numel():
+            _mse[(partial.numel(),)](
+                prediction,
+                target,
+                mask,
+                partial,
+                prediction.numel(),
+                features,
+                mask is not None,
+                enable_fp_fusion=False,
+            )
+        ctx.save_for_backward(prediction, target, mask)
+        ctx.features = features
+        return partial.sum()
+
+    @staticmethod
+    def backward(ctx, gradient):
+        prediction, target, mask = ctx.saved_tensors
+        dp = torch.empty_like(prediction)
+        if prediction.numel():
+            _mse_backward[(triton.cdiv(prediction.numel(), 1024),)](
+                prediction,
+                target,
+                mask,
+                gradient,
+                dp,
+                prediction.numel(),
+                ctx.features,
+                mask is not None,
+                enable_fp_fusion=False,
+            )
+        return dp, -dp.to(target.dtype) if ctx.needs_input_grad[1] else None, None, None
+
+
+def masked_mse_sum(prediction, target, mask=None, features=1):
+    """Sum valid squared errors while saving only the original narrow activations."""
+    return _MaskedMSE.apply(prediction, target, mask, features)
 
 
 @triton.jit
