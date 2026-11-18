@@ -224,6 +224,7 @@ class HFDSpineModel(HFDFlashModel):
             attention_mask=attention_mask,
             block_token_ids=block_ids,
             replace_mask=replace_mask,
+            refine_predecessor_ids=block_ids[..., :-1],
         )
 
         targets = _block_targets(
@@ -247,10 +248,9 @@ class HFDSpineModel(HFDFlashModel):
 
         per_block = (
             predicted(out.hidden_states),
-            predicted(out.pre_injection),
+            out.refined,
             out.layer_features.permute(1, 2, 0, 3, 4)[..., 1:, :],  # [B, N, L, bs - 1, C]
             labels,
-            block_ids[..., :-1],
             targets.positions[..., 1:],
             weights,
             supervised,
@@ -309,10 +309,9 @@ class HFDSpineModel(HFDFlashModel):
     def _objective_chunk(
         self,
         hidden,
-        pre_injection,
+        refined,
         layer_features,
         labels,
-        predecessors,
         label_positions,
         weights,
         supervised,
@@ -321,15 +320,14 @@ class HFDSpineModel(HFDFlashModel):
     ):
         """The objective's sums over one chunk of blocks, plus its backbone and refined picks.
 
-        Per predicted position ``[B, n, bs - 1]``: ``hidden`` / ``pre_injection`` (..., H) are
-        the final draft states and the last layer's pre-write states, ``layer_features``
-        ([B, n, L, bs - 1, C]) every layer's codes, ``predecessors`` the true previous tokens.
+        Per predicted position ``[B, n, bs - 1]``: ``hidden`` / ``refined`` (..., H) are the
+        final draft states and their refinement with the true previous tokens, and
+        ``layer_features`` ([B, n, L, bs - 1, C]) every layer's codes.
         """
         draft = self.dflash_module
         # The block slices are strided; F.linear sends a strided input to a batched kernel
         # that is ~20x slower at the vocab-wide head.
-        hidden, pre_injection = hidden.contiguous(), pre_injection.contiguous()
-        head_logits = F.linear(hidden, head_weight)
+        head_logits = F.linear(hidden.contiguous(), head_weight)
         # Same candidates as on the float32 upcast below, at a fraction of the cost.
         candidates = head_logits.detach().topk(draft.head_topk, dim=-1).indices
         logits = head_logits.float()
@@ -341,7 +339,6 @@ class HFDSpineModel(HFDFlashModel):
         ce = ce.view_as(labels)
         l1 = _l1_to(logits, target_probs)
 
-        refined = draft.refine(pre_injection, predecessors)
         scores = torch.einsum("...h,...kh->...k", refined, F.embedding(candidates, head_weight))
         scores = scores.float()
         covered = candidates == labels.unsqueeze(-1)
@@ -392,14 +389,17 @@ class HFDSpineModel(HFDFlashModel):
         out = self.dflash_module(**inputs, block_token_ids=block_ids)
 
         draft = self.dflash_module
-        head_weight = self._base_model_lm_head.weight
-        backbone_logits = F.linear(out.hidden_states, head_weight)
+        lm_head = self._base_model_lm_head
+        # Called as a module so that device_map dispatch hooks run when the head sits elsewhere.
+        backbone_logits = lm_head(out.hidden_states)
         prev_token = block_ids[:, 0, 0]
         draft_tokens = []
         for t in range(1, 1 + min(steps, self.dflash_block_size - 1)):
             candidates = backbone_logits[:, t].topk(draft.head_topk, dim=-1).indices
+            rows = lm_head.weight[candidates].to(device)
+            candidates = candidates.to(device)
             refined = draft.refine(out.pre_injection[:, t], prev_token)
-            scores = torch.einsum("bh,bkh->bk", refined, head_weight[candidates])
+            scores = torch.einsum("bh,bkh->bk", refined, rows)
             prev_token = candidates.gather(-1, scores.argmax(dim=-1, keepdim=True)).squeeze(-1)
             draft_tokens.append(prev_token)
         return base_token, torch.stack(draft_tokens, dim=1).to(input_ids.device)

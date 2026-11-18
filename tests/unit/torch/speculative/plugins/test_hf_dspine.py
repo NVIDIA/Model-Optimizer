@@ -22,6 +22,9 @@ import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
+from torch.distributed.tensor import DTensor
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
@@ -199,6 +202,41 @@ def test_objective_is_chunk_invariant(monkeypatch):
     for grad_a, grad_b in zip(grads_a, grads_b):
         torch.testing.assert_close(grad_a, grad_b)
     assert metrics_a == pytest.approx(metrics_b)
+
+
+def _fsdp2_train_step_job(rank, size):
+    input_ids = torch.randint(1, 32, (2, SEQ_LEN), generator=torch.Generator().manual_seed(0))
+    results = []
+    for sharded in (False, True):
+        torch.manual_seed(0)
+        model = _dspine_model().float()
+        _randomize_writes(model)
+        model.train()
+        model.set_training_progress(step=0, total_steps=10, lr_warmup_steps=2)
+        if sharded:
+            # The draft as its own unit, as accelerate wraps it when listed in the wrap policy.
+            mesh = init_device_mesh("cpu", (size,))
+            fully_shard(model.dflash_module, mesh=mesh)
+            fully_shard(model, mesh=mesh)
+        torch.manual_seed(1)
+        out = model(input_ids=input_ids, labels=input_ids)
+        out.loss.backward()
+        grads = {
+            name: p.grad.full_tensor() if isinstance(p.grad, DTensor) else p.grad
+            for name, p in model.named_parameters()
+            if p.requires_grad
+        }
+        results.append((out.loss.detach(), grads))
+    (loss, grads), (sharded_loss, sharded_grads) = results
+    torch.testing.assert_close(sharded_loss, loss)
+    assert sharded_grads.keys() == grads.keys()
+    for name, grad in grads.items():
+        torch.testing.assert_close(sharded_grads[name], grad, msg=name)
+
+
+def test_fsdp2_train_step_matches_unsharded(cpu_dist_workers):
+    """FSDP2 gathers a unit's weights only around its forward, which must cover the refinement."""
+    cpu_dist_workers.run(_fsdp2_train_step_job)
 
 
 def test_schedule():

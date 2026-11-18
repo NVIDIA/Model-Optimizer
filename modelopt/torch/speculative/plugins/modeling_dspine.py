@@ -73,6 +73,7 @@ class DSpineDraftOutput(NamedTuple):
     hidden_states: torch.Tensor  # final-normed draft hidden states [B, N*bs, H]
     pre_injection: torch.Tensor  # last layer's output before its write [B, N*bs, H]
     layer_features: torch.Tensor  # each layer's post-write codes [L, B, N, bs, C]
+    refined: torch.Tensor | None = None  # refine() of positions 1..bs-1 [B, N, bs-1, H]
 
 
 class _ZeroTerminalProjection(nn.Module):
@@ -268,8 +269,14 @@ class DSpineModule(DFlashModule):
         *,
         block_token_ids,
         replace_mask=None,
+        refine_predecessor_ids=None,
     ) -> DSpineDraftOutput:
-        """Run the draft over ``N`` blocks; ``block_token_ids`` [B, N, bs] as in :class:`DSpineCodeBridge`."""
+        """Run the draft over ``N`` blocks; ``block_token_ids`` [B, N, bs] as in :class:`DSpineCodeBridge`.
+
+        ``refine_predecessor_ids`` [B, N, bs - 1], the tokens before positions ``1..bs-1``, also
+        returns their :meth:`refine` states. Training refines here so that FSDP2, which gathers
+        the draft's weights only around ``forward``, covers it.
+        """
         # Outside the compiled body: lazy rotary init mutates the module.
         self._maybe_init_rotary_emb(device=noise_embedding.device)
         return self._body()(
@@ -279,6 +286,7 @@ class DSpineModule(DFlashModule):
             attention_mask,
             block_token_ids,
             replace_mask,
+            refine_predecessor_ids,
         )
 
     def _forward_body(
@@ -289,6 +297,7 @@ class DSpineModule(DFlashModule):
         attention_mask,
         block_token_ids,
         replace_mask=None,
+        refine_predecessor_ids=None,
     ):
         """Feature fusion, then each decoder layer followed by its code write, then the final norm."""
         bsz, n_blocks, block_size = block_token_ids.shape
@@ -308,7 +317,11 @@ class DSpineModule(DFlashModule):
             )
             features.append(bridge.feature(injected, index))
             hidden = injected.view(bsz, n_blocks * block_size, -1)
-        return DSpineDraftOutput(self.norm(hidden), pre_injection, torch.stack(features))
+        refined = None
+        if refine_predecessor_ids is not None:
+            successors = pre_injection.view(bsz, n_blocks, block_size, -1)[:, :, 1:]
+            refined = self.refine(successors.contiguous(), refine_predecessor_ids)
+        return DSpineDraftOutput(self.norm(hidden), pre_injection, torch.stack(features), refined)
 
     def refine(self, pre_injection: torch.Tensor, predecessor_ids: torch.Tensor) -> torch.Tensor:
         """Redo the last layer's write with each row's exact predecessor token, then final-norm.
