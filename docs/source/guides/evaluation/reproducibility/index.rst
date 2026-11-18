@@ -106,6 +106,8 @@ percentage points; length differences are in tokens, including reasoning tokens.
   intervals by sampling questions with replacement, keeping each question's repetitions and both
   models together. MMLU-Pro and SciCode use 100,000 resamples; AA uses 50,000, preserving 100
   questions per domain. The interval endpoints are the 2.5th and 97.5th percentiles.
+  If neither model has an observed failure, bootstrapping gives a [0, 0] interval. This does not
+  establish that failures cannot occur or that the models have equal failure rates.
 
 The question-level tests treat questions and SciCode subtasks as independent. Related subtasks from
 the same parent problem may need to be analyzed together.
