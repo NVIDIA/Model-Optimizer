@@ -199,21 +199,47 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
             )
         materialized.append((mod, hook, needs_materialize))
 
-    for mod, hook, needs_materialize in materialized:
-        if needs_materialize:
-            _carry_quantizers_with_offload(hook)
-            hook.pre_forward(mod)
-        hook.offload = False
-
+    entered = []
+    ready = False
+    error = None
+    propagating = False
     try:
+        for mod, hook, needs_materialize in materialized:
+            if needs_materialize:
+                _carry_quantizers_with_offload(hook)
+            # pre_forward can fail after loading only part of this owner's tensors.
+            entered.append((mod, hook, needs_materialize))
+            if needs_materialize:
+                hook.pre_forward(mod)
+            hook.offload = False
+        ready = True
         yield
+    except BaseException as exc:
+        error = exc
+        propagating = True
+        raise
     finally:
-        for mod, hook, was_materialized in materialized:
+        for mod, hook, was_materialized in reversed(entered):
             hook.offload = True
-            if writeback:
-                _writeback_params_to_weights_map(mod, hook)
-            if was_materialized:
-                hook.post_forward(mod, None)
+            try:
+                if ready and writeback:
+                    _writeback_params_to_weights_map(mod, hook)
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+                else:
+                    error.add_note(f"Accelerate weight-access cleanup failed: {exc!r}")
+            finally:
+                try:
+                    if was_materialized:
+                        hook.post_forward(mod, None)
+                except BaseException as exc:
+                    if error is None:
+                        error = exc
+                    else:
+                        error.add_note(f"Accelerate weight-access cleanup failed: {exc!r}")
+        if error is not None and not propagating:
+            raise error
 
 
 @contextmanager

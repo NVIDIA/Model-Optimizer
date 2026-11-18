@@ -87,8 +87,7 @@ def test_tensor_quantizer_modelopt_state_with_accelerate_hook():
 
 
 @pytest.mark.parametrize("offload_mode", ["direct_hook", "cpu_offload"])
-@pytest.mark.parametrize("mixed_entry", [False, True])
-def test_buffer_registered_during_weight_access_survives_buffer_offload(offload_mode, mixed_entry):
+def test_buffer_registered_during_weight_access_survives_buffer_offload(offload_mode):
     """GPTQ's payload pin is registered while the offloaded weight is materialized; the hook must
     still be able to reload it after offloading the module again."""
     torch.manual_seed(0)
@@ -121,24 +120,84 @@ def test_buffer_registered_during_weight_access_survives_buffer_offload(offload_
         weights_map[pin_key], torch.tensor((8, 512)), dtype=torch.float32
     )
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
-    if mixed_entry:
-        resident_name = "weight" if offload_mode == "direct_hook" else pin_key
-        updated = weights_map[resident_name].clone().add_(1)
-        set_module_tensor_to_device(model, resident_name, "cpu", value=updated)
-        devices = {name: tensor.device for name, tensor in model.state_dict().items()}
-        hooks = [
-            hook
-            for module in model.modules()
-            if hasattr(module, "_hf_hook")
-            for hook in getattr(module._hf_hook, "hooks", (module._hf_hook,))
-            if isinstance(hook, AlignDevicesHook) and hook.offload
-        ]
-        with (
-            pytest.raises(ValueError),
-            enable_weight_access_and_writeback(model, model, writeback=False),
-        ):
-            pass
+
+
+@pytest.mark.parametrize("offload_mode", ["direct_hook", "cpu_offload"])
+def test_weight_access_restores_owners_after_later_onload_failure(offload_mode):
+    model = nn.Sequential(*(nn.Linear(4, 4, bias=False) for _ in range(4)))
+    for owner in model:
+        owner.register_buffer("scale", torch.ones(4))
+    originals = [
+        {name: value.detach().clone() for name, value in owner.state_dict().items()}
+        for owner in model
+    ]
+    if offload_mode == "cpu_offload":
+        weights_map = {name: value.detach().clone() for name, value in model.state_dict().items()}
+        cpu_offload(model, execution_device="cpu", offload_buffers=True, state_dict=weights_map)
+        backings = [(weights_map, f"{index}.") for index in range(len(model))]
+    else:
+        add_hook_to_module(model, ModelHook())
+        backings = []
+        for owner, original in zip(model, originals, strict=True):
+            weights_map = {name: value.clone() for name, value in original.items()}
+            add_hook_to_module(
+                owner,
+                AlignDevicesHook(
+                    execution_device="cpu",
+                    offload=True,
+                    offload_buffers=True,
+                    weights_map=weights_map,
+                ),
+            )
+            backings.append((weights_map, ""))
+    hooks = [owner._hf_hook for owner in model]
+
+    # The caller already owns this resident update; entering must not reload its stale map.
+    for name, value in originals[0].items():
+        set_module_tensor_to_device(model[0], name, "cpu", value=value.clone().add_(1))
+    resident_weight = model[0].weight.detach().clone()
+    mixed_name = "weight" if offload_mode == "direct_hook" else "scale"
+    updated = originals[2][mixed_name].clone().add_(2)
+    set_module_tensor_to_device(model[2], mixed_name, "cpu", value=updated)
+    devices = {name: tensor.device for name, tensor in model.state_dict().items()}
+    with (
+        pytest.raises(ValueError),
+        enable_weight_access_and_writeback(model, model, writeback=False),
+    ):
+        pass
+    assert {name: tensor.device for name, tensor in model.state_dict().items()} == devices
+    assert all(hook.offload for hook in hooks)
+    torch.testing.assert_close(getattr(model[2], mixed_name), updated, rtol=0, atol=0)
+    set_module_tensor_to_device(model[2], mixed_name, "meta")
+
+    # Owner 1 onloads successfully; owner 2 loads its weight then fails on its buffer.
+    backing, prefix = backings[2]
+    missing_key = prefix + "scale"
+    missing = backing.pop(missing_key)
+    devices = {name: tensor.device for name, tensor in model.state_dict().items()}
+    try:
+        with pytest.raises(KeyError) as error, enable_weight_access_and_writeback(model, model):
+            pytest.fail("Weight access yielded after an incomplete onload")
+        assert error.value.args == (missing_key,)
         assert {name: tensor.device for name, tensor in model.state_dict().items()} == devices
         assert all(hook.offload for hook in hooks)
-        resident = model.weight if resident_name == "weight" else model.get_buffer(resident_name)
-        torch.testing.assert_close(resident, updated, rtol=0, atol=0)
+        torch.testing.assert_close(model[0].weight, resident_weight, rtol=0, atol=0)
+        for index, (owner_backing, owner_prefix) in enumerate(backings):
+            for name, value in originals[index].items():
+                if index != 2 or name != "scale":
+                    torch.testing.assert_close(
+                        owner_backing[owner_prefix + name], value, rtol=0, atol=0
+                    )
+    finally:
+        backing[missing_key] = missing
+
+    with enable_weight_access_and_writeback(model, model):
+        assert all(not tensor.is_meta for tensor in model.state_dict().values())
+        torch.testing.assert_close(model[0].weight, resident_weight, rtol=0, atol=0)
+    assert {name: tensor.device for name, tensor in model.state_dict().items()} == devices
+    assert all(hook.offload for hook in hooks)
+    inputs = torch.randn(2, 4)
+    expected = inputs @ resident_weight.T
+    for original in originals[1:]:
+        expected = expected @ original["weight"].T
+    torch.testing.assert_close(model(inputs), expected)
