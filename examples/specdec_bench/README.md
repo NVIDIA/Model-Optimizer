@@ -64,6 +64,8 @@ python3 run.py \
 
 ### Running [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) on Llama 3.3 70B + Eagle 3
 
+The `prepare_data.py` script now supports SPEED-Bench v1.1. SPEED-Bench v1.0 is no longer supported.
+
 1. Install the requirements file using `pip install -r requirements.txt`
 
 2. Prepare the data using the provided script:

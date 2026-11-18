@@ -31,6 +31,7 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
 from modelopt.onnx.quantization.fp8 import int8_to_fp8
 from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
 from modelopt.onnx.quantization.qdq_graph import remove_scalar_input_qdq
+from modelopt.onnx.utils import export_onnx
 
 __all__ = [
     "build_tensor_map",
@@ -340,7 +341,7 @@ def export_qdq_onnx(
     if isinstance(source, onnx.ModelProto):
         graph_copy = gs.import_onnx(source)
     else:
-        graph_copy = gs.import_onnx(gs.export_onnx(source))
+        graph_copy = gs.import_onnx(export_onnx(source))
     graph_copy.toposort()
 
     if insert_qdq and resolved_insertion_points:
@@ -356,7 +357,7 @@ def export_qdq_onnx(
         remove_scalar_input_qdq(graph_copy)
 
     logger.debug("Serializing to ONNX format")
-    model = gs.export_onnx(graph_copy)
+    model = export_onnx(graph_copy)
 
     if insert_qdq and resolved_insertion_points:
         fix_zero_point_initializers(model)

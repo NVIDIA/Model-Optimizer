@@ -81,7 +81,7 @@ def _command(script, num_gpus, options, *, snippet=None):
             id="readme",
         ),
         # MoE: routed experts used to be dropped silently from the export. Calibrates with context
-        # parallelism (not on the VLM: M-RoPE CP needs nemo:26.10).
+        # parallelism.
         (
             create_tiny_qwen3_moe_dir,
             _DENSE_KWARGS,
@@ -107,7 +107,8 @@ def _command(script, num_gpus, options, *, snippet=None):
         # across ranks (EP), resharded from the TP-quantized checkpoint.
         (
             create_tiny_nemotron_h_dir,
-            {},
+            # head_dim=64: FlashAttention-4 (used by TE on sm_120) cannot compile the default head_dim=8
+            {"head_dim": 64},
             {"recipe": "general/ptq/nvfp4_default-kv_fp8"},
             False,
             "tp_size",

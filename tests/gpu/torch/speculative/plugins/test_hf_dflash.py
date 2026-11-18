@@ -395,3 +395,36 @@ class TestDFlashFlexAttentionGPU:
         ]
         assert grads, "no draft gradients were produced"
         assert all(torch.isfinite(g).all() for g in grads)
+
+    def test_compiled_flex_matches_eager_flex(self):
+        """The DFlash2 recipe's compile + flex pair trains: eager flex's loss, finite grads."""
+        # The recipe's DFlash2 draft and objective, sized for this model.
+        dflash2 = {
+            "dflash_self_logit_distillation": False,
+            "dflash_lk_loss_type": "lambda",
+            "dflash_architecture_config": {
+                "num_hidden_layers": 2,
+                "projector_type": "dflash2",
+                "conv_kernel_size": 2,
+                "conv_group_size": 16,
+                "selector_rank": 8,
+                "selector_top_k": 5,
+            },
+        }
+        eager = self._model(dflash_use_flex_attention=True, **dflash2)
+        compiled = self._model(
+            dflash_use_flex_attention=True, dflash_use_torch_compile=True, **dflash2
+        )
+        compiled.dflash_module.load_state_dict(eager.dflash_module.state_dict())
+        input_ids, attention_mask = self._inputs()
+
+        torch.manual_seed(1234)
+        loss_eager = eager(input_ids=input_ids, attention_mask=attention_mask).loss
+        torch.manual_seed(1234)
+        loss = compiled(input_ids=input_ids, attention_mask=attention_mask).loss
+        torch.testing.assert_close(loss, loss_eager, rtol=2e-2, atol=2e-2)
+
+        loss.backward()
+        grads = [p.grad for p in compiled.dflash_module.parameters() if p.grad is not None]
+        assert grads, "no draft gradients were produced"
+        assert all(torch.isfinite(g).all() for g in grads)

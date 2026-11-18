@@ -21,10 +21,12 @@ from functools import partial
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn as nn
-from _test_utils.torch.distributed.utils import synchronize_state_dict
+from _test_utils.torch.distributed.utils import bounded_collectives, synchronize_state_dict
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.tensor import DTensor
+from torch.utils.data import DataLoader
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.model_calib as model_calib
@@ -35,7 +37,13 @@ from modelopt.torch.quantization.utils import (
     persistent_materialization,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
-from modelopt.torch.utils.dataset_utils import _forward_loop
+from modelopt.torch.utils.dataset_utils import _forward_loop, get_max_batch_size
+from modelopt.torch.utils.distributed import (
+    DistributionPlan,
+    distributed_forward_loop,
+    set_distribution_plan,
+    shard_dataloader,
+)
 
 
 def _test_fsdp2_simple_linear(rank, size):
@@ -461,3 +469,65 @@ def _test_sharded_root_calibration(rank, size):
 
 def test_sharded_root_calibration(dist_workers):
     dist_workers.run(_test_sharded_root_calibration)
+
+
+def _test_planned_batch_size_then_max_calibration(rank, size):
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, 64)).cuda(rank)
+    synchronize_state_dict(model)
+    fully_shard(model[0])
+    fully_shard(model[2])
+    model = fully_shard(model)
+    set_distribution_plan(model, DistributionPlan(size, dense="fsdp"))
+    forwards = []
+    model.register_forward_pre_hook(lambda module, args: forwards.append(rank))
+    # What a sample holds in the measured forward: a fortieth of rank 0's free GPU memory, so its
+    # own estimate is about 40 samples, and a sixth of every other rank's, about 6 (4 regulated).
+    held = torch.cuda.mem_get_info()[0] // (40 if rank == 0 else 6)
+
+    def forward_step(model, inputs):
+        model(inputs)
+        return torch.empty(held, dtype=torch.uint8, device=inputs.device)
+
+    # A rank left waiting in the batch size's reduction, or in a gather below, gives up in seconds.
+    with bounded_collectives(seconds=60):
+        batch_size = get_max_batch_size(
+            model, sample_input_single_batch=torch.ones(1, 64).cuda(rank), forward_step=forward_step
+        )
+        sizes = [None] * size
+        dist.all_gather_object(sizes, batch_size)
+        # Every rank takes the smallest any rank's GPU allows, not its own (rank 0's is about 40).
+        assert sizes == [batch_size] * size and batch_size <= 4, sizes
+
+        # An uneven split, which the shard pads so that every rank runs the same steps.
+        data = torch.randn(
+            2 * size * batch_size + 1, 64, generator=torch.Generator().manual_seed(1)
+        )
+        loader = DataLoader(
+            data, batch_size=batch_size, collate_fn=lambda rows: {"input": torch.stack(rows)}
+        )
+        forwards.clear()
+        forward_loop = distributed_forward_loop(
+            model, shard_dataloader(loader, rank, size), device=torch.device("cuda", rank)
+        )
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+        amaxes = {
+            name: module.amax.float().cpu()
+            for name, module in model.named_modules()
+            if isinstance(module, TensorQuantizer) and module.is_enabled and module.amax is not None
+        }
+        gathered = [None] * size
+        dist.all_gather_object(gathered, (len(forwards), amaxes))
+
+    assert amaxes, "no quantizer was calibrated"
+    for steps, theirs in gathered:
+        assert steps == len(forwards) == 3, gathered  # two whole batches and one of one sample
+        assert theirs.keys() == amaxes.keys()
+        assert all(torch.equal(theirs[name], amax) for name, amax in amaxes.items()), theirs
+
+
+def test_planned_batch_size_then_max_calibration(need_2_gpus, dist_workers):
+    """A model whose plan spreads it over several ranks sizes its calibration batch once for all of
+    them, the smallest any rank's GPU allows, then calibrates each rank's shard with it: every rank
+    runs the same steps, and max calibration gives every rank the same scales."""
+    dist_workers.run(_test_planned_batch_size_then_max_calibration)

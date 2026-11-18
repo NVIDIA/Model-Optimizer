@@ -140,6 +140,67 @@ class QuantModule(DynamicModule):
             yield weight_quantizer
 
     @staticmethod
+    def _initialization_members(quantizer):
+        if quantizer is None:
+            return ()
+        return tuple(quantizer) if isinstance(quantizer, SequentialQuantizer) else (quantizer,)
+
+    @classmethod
+    def _is_selected_for_initialization(cls, weight, quantizer):
+        return (
+            isinstance(weight, torch.Tensor)
+            and weight.numel() > 0
+            and any(q.is_enabled and q._if_quant for q in cls._initialization_members(quantizer))
+        )
+
+    def _iter_weights_for_initialization(self):
+        for weight, quantizer in self.iter_weights_for_calibration():
+            if self._is_selected_for_initialization(weight, quantizer):
+                yield weight, quantizer
+
+    @staticmethod
+    def _weight_initialization_key(weight):
+        local = weight.to_local() if hasattr(weight, "to_local") else weight
+        return (
+            local.device,
+            local.untyped_storage().data_ptr(),
+            local.storage_offset(),
+            tuple(local.shape),
+            tuple(local.stride()),
+            local.dtype,
+        )
+
+    @torch.no_grad()
+    def _initialize_qdq_weights(self, initialized):
+        # Imported here: ggml/__init__ imports its backend, which imports these modules.
+        from ...ggml.common import drop_search_scales
+
+        for weight, quantizer in self._iter_weights_for_initialization():
+            key = self._weight_initialization_key(weight)
+            if key in initialized:
+                continue
+            local = weight.to_local() if hasattr(weight, "to_local") else weight
+            members = self._initialization_members(quantizer)
+            for member in members:
+                member._qdq_initialization_shape = tuple(local.shape)
+            try:
+                decoded = quantizer(local).detach().clone()
+            finally:
+                for member in members:
+                    del member._qdq_initialization_shape
+            # Return from the quantizer's transformed coordinates to the latent weight domain.
+            for member in reversed(members):
+                if member.rotate_is_enabled and not member.rotate_back_is_enabled:
+                    decoded = member._rotate_inputs(decoded)
+                if member.pre_quant_scale is not None:
+                    decoded.div_(member.pre_quant_scale)
+            local.copy_(decoded)
+            # The weight is its decoding now, which a GGML pin encodes again at its stored scales.
+            for member in members:
+                drop_search_scales(member)
+            initialized.add(key)
+
+    @staticmethod
     @torch.no_grad()
     def _fold_weight_quantizer(
         quantizer: TensorQuantizer | SequentialQuantizer,

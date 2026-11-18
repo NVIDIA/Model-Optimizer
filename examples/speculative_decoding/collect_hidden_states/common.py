@@ -99,8 +99,9 @@ def add_answer_only_loss_args(parser: argparse.ArgumentParser) -> None:
         "--answer-only-loss",
         action="store_true",
         help=(
+            # argparse %-interpolates help strings, so the Jinja tags escape their %.
             "If set, compute an assistant-token mask via the tokenizer's "
-            "{% generation %} tags and save it as 'loss_mask' in each .pt file. "
+            "{%% generation %%} tags and save it as 'loss_mask' in each .pt file. "
             "Downstream offline training uses this to apply loss only on "
             "assistant-produced tokens."
         ),
@@ -112,7 +113,7 @@ def add_answer_only_loss_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Path to a Jinja chat template file that overrides tokenizer.chat_template. "
             "Required with --answer-only-loss if the model's default template lacks "
-            "{% generation %} / {% endgeneration %} tags."
+            "{%% generation %%} / {%% endgeneration %%} tags."
         ),
     )
 

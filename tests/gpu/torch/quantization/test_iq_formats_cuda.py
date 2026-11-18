@@ -16,8 +16,7 @@
 """CUDA encoders for every GGML IQ format.
 
 Parametrized over the family rather than written per format, so a behaviour asserted
-for one is asserted for all. IQ1_S is the odd one out only in its entry point: it
-derives the block scale in its own kernel instead of taking a precomputed one.
+for one is asserted for all.
 """
 
 import pytest
@@ -37,15 +36,16 @@ from modelopt.torch.quantization.ggml import (
     IQ2_XS_BLOCK_BYTES,
     IQ2_XXS_BLOCK_BYTES,
     IQ_FORMAT_REGISTRY,
+    common,
 )
 
-# module, packer name, per-block payload size, whether the packer takes precomputed scales
+# module, packer name, per-block payload size
 FORMATS = {
-    "iq1_s": (iq1_s_module, "iq1_s_pack", IQ1_S_BLOCK_BYTES, False),
-    "iq1_m": (iq1_m_module, "iq1_m_pack", IQ1_M_BLOCK_BYTES, True),
-    "iq2_xxs": (iq2_xxs_module, "iq2_xxs_pack", IQ2_XXS_BLOCK_BYTES, True),
-    "iq2_xs": (iq2_xs_module, "iq2_xs_pack", IQ2_XS_BLOCK_BYTES, True),
-    "iq2_s": (iq2_s_module, "iq2_s_pack", IQ2_S_BLOCK_BYTES, True),
+    "iq1_s": (iq1_s_module, "iq1_s_pack", IQ1_S_BLOCK_BYTES),
+    "iq1_m": (iq1_m_module, "iq1_m_pack", IQ1_M_BLOCK_BYTES),
+    "iq2_xxs": (iq2_xxs_module, "iq2_xxs_pack", IQ2_XXS_BLOCK_BYTES),
+    "iq2_xs": (iq2_xs_module, "iq2_xs_pack", IQ2_XS_BLOCK_BYTES),
+    "iq2_s": (iq2_s_module, "iq2_s_pack", IQ2_S_BLOCK_BYTES),
 }
 
 
@@ -56,10 +56,8 @@ def _extension():
 
 
 def _pack(name, weight):
-    module, packer, _, takes_scales = FORMATS[name]
+    module, packer, _ = FORMATS[name]
     grid = getattr(module, f"{name}_grid")("cuda")
-    if not takes_scales:
-        return getattr(_extension(), packer)(weight, grid)
     blocks = weight.contiguous().reshape(-1, 256)
     scales = getattr(module, f"_predict_{name}_scales")(blocks)
     return getattr(_extension(), packer)(weight, grid, scales)
@@ -76,7 +74,7 @@ def test_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch, name):
     error, and favours neither encoder --
     see ``test_cuda_pack_reconstruction_matches_pytorch_at_scale``.
     """
-    module, _, block_bytes, _ = FORMATS[name]
+    module, _, block_bytes = FORMATS[name]
     generator = torch.Generator(device="cuda").manual_seed(1234)
     weight = torch.randn((8, 512), generator=generator, device="cuda", dtype=torch.bfloat16)
 
@@ -97,6 +95,27 @@ def test_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch, name):
 
 
 @pytest.mark.parametrize("name", sorted(FORMATS))
+def test_cuda_fixed_choices_match_pytorch_encoder(monkeypatch, name):
+    fmt = IQ_FORMAT_REGISTRY[name]
+    generator = torch.Generator(device="cuda").manual_seed(5)
+    weight = torch.randn((8, 512), generator=generator, device="cuda", dtype=torch.bfloat16)
+    shape = (8, 2, fmt.choice_groups)
+    choices = torch.randint(0, fmt.num_choices, shape, generator=generator, device="cuda")
+    importance = torch.rand(512, generator=generator, device="cuda") + 0.5
+
+    packed, _ = fmt.quantize(weight, choices=choices)
+    # The one-pass every_choice kernel must reproduce each forced encode, the payload it stands for,
+    # with an importance and without one, which the local-Hessian search passes when it has none.
+    for weighting in ({"importance": importance}, {}):
+        every, _ = fmt.quantize(weight, every_choice=True, **weighting)
+        for choice in range(fmt.num_choices):
+            forced = torch.full_like(choices, choice)
+            assert torch.equal(every[choice], fmt.quantize(weight, choices=forced, **weighting)[0])
+    monkeypatch.setattr(FORMATS[name][0], "get_cuda_ext_ggml", lambda: None)
+    assert torch.equal(packed, fmt.quantize(weight, choices=choices)[0])
+
+
+@pytest.mark.parametrize("name", sorted(FORMATS))
 def test_cuda_pack_is_deterministic_on_one_device(name):
     """The contract reproducibility actually needs: same machine, same bytes."""
     generator = torch.Generator(device="cuda").manual_seed(7)
@@ -109,7 +128,7 @@ def test_cuda_pack_is_deterministic_on_one_device(name):
 @pytest.mark.parametrize("name", sorted(FORMATS))
 def test_cuda_pack_reconstruction_matches_pytorch_at_scale(monkeypatch, name):
     """Over many blocks the encoders may disagree on a near-tied scale, but not on quality."""
-    module, _, block_bytes, _ = FORMATS[name]
+    module, _, block_bytes = FORMATS[name]
     generator = torch.Generator(device="cuda").manual_seed(11)
     weight = torch.randn((128, 2048), generator=generator, device="cuda", dtype=torch.bfloat16)
     blocks = weight.shape[0] * weight.shape[1] // 256
@@ -143,7 +162,7 @@ def test_cuda_pack_reconstruction_matches_pytorch_at_scale(monkeypatch, name):
 
 @pytest.mark.parametrize("name", sorted(FORMATS))
 def test_cuda_zero_encoding_matches_ggml_block_layout(name):
-    module, _, block_bytes, _ = FORMATS[name]
+    module, _, block_bytes = FORMATS[name]
     weight = torch.zeros((1, 256), device="cuda", dtype=torch.bfloat16)
     packed = _pack(name, weight).reshape(1, 1, block_bytes)
     shape = torch.tensor(weight.shape, device="cuda")
@@ -154,7 +173,7 @@ def test_cuda_zero_encoding_matches_ggml_block_layout(name):
 
 @pytest.mark.parametrize("name", sorted(FORMATS))
 def test_cuda_nonfinite_policy_matches_pytorch_encoder(monkeypatch, name):
-    module, _, _, _ = FORMATS[name]
+    module, _, _ = FORMATS[name]
     weight = torch.zeros((1, 256), device="cuda", dtype=torch.float32)
     weight[0, 0] = float("nan")
     weight[0, 1] = float("inf")
@@ -169,7 +188,7 @@ def test_cuda_nonfinite_policy_matches_pytorch_encoder(monkeypatch, name):
 @pytest.mark.parametrize("name", sorted(FORMATS))
 def test_cuda_falls_back_to_pytorch_encoder(monkeypatch, name):
     """Without the extension the format still packs, through the torch search."""
-    module, _, block_bytes, _ = FORMATS[name]
+    module, _, block_bytes = FORMATS[name]
     monkeypatch.setattr(module, "get_cuda_ext_ggml", lambda: None)
     generator = torch.Generator(device="cuda").manual_seed(5)
     weight = torch.randn((2, 256), generator=generator, device="cuda", dtype=torch.bfloat16)
@@ -186,7 +205,7 @@ def test_cuda_falls_back_to_pytorch_encoder(monkeypatch, name):
 
 @pytest.mark.parametrize("name", sorted(FORMATS))
 def test_cuda_float64_matches_pytorch_encoder(monkeypatch, name):
-    module, _, _, _ = FORMATS[name]
+    module, _, _ = FORMATS[name]
     generator = torch.Generator(device="cuda").manual_seed(99)
     weight = torch.randn((2, 256), generator=generator, device="cuda", dtype=torch.float64)
 
@@ -196,11 +215,35 @@ def test_cuda_float64_matches_pytorch_encoder(monkeypatch, name):
     assert torch.equal(reference, packed)
 
 
+@pytest.mark.parametrize("statistic", [None, 1.0, 2.0**118], ids=["unweighted", "weighted", "huge"])
+@pytest.mark.parametrize("name", sorted(FORMATS))
+def test_cuda_scale_fit_matches_pytorch_reference(monkeypatch, name, statistic):
+    """The derived super-block scales are bit-identical to the reference at scale, ties included."""
+    fmt = IQ_FORMAT_REGISTRY[name]
+    generator = torch.Generator(device="cuda").manual_seed(11)
+    # Cubed normals are heavy-tailed, and BF16 rounding leaves many tied values per sub-block.
+    weight = torch.randn((64, 4096), generator=generator, device="cuda").pow(3).bfloat16()
+    weight[0, :256] = 0.0
+    weight[1, :64] = -0.0
+    weight[2, :3] = torch.tensor([float("nan"), float("inf"), float("-inf")])
+    weight[3, 5] = 3.0e38  # squares overflow unless the block is scaled first
+    moments = torch.rand(4096, generator=generator, device="cuda").mul(6).exp()
+    if statistic is not None:  # 2**118: finite, but the weighted sums overflow unless scaled
+        moments = moments * statistic
+    columns = common.importance_blocks(moments if statistic else None, weight, name.upper())
+    blocks = weight.reshape(-1, 256)
+
+    scales = common._derived_scales(fmt, blocks, columns)
+    monkeypatch.setattr(common, "get_cuda_ext_ggml", lambda: None)
+    assert scales.dtype == torch.float16
+    assert torch.equal(scales, common._derived_scales(fmt, blocks, columns))
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16, torch.float64])
 @pytest.mark.parametrize("name", sorted(FORMATS))
 def test_cuda_decoder_matches_pytorch_decoder(monkeypatch, name, dtype):
     """Fake quant decodes on every forward; the CUDA decoder must be the PyTorch one, bit for bit."""
-    module, _, block_bytes, _ = FORMATS[name]
+    module, _, block_bytes = FORMATS[name]
     assert hasattr(_extension(), f"{name}_unpack")
     dequantize = getattr(module, f"dequantize_{name}")
     generator = torch.Generator().manual_seed(5)
@@ -223,7 +266,7 @@ def test_cuda_decoder_matches_pytorch_decoder(monkeypatch, name, dtype):
 @pytest.mark.parametrize("name", sorted(FORMATS))
 def test_cuda_decoder_matches_llama_cpp_on_captured_blocks(name):
     """The CUDA decoder reproduces llama.cpp's own values for bytes we did not produce."""
-    module, _, block_bytes, _ = FORMATS[name]
+    module, _, block_bytes = FORMATS[name]
     blocks = torch.from_numpy(packed_blocks(name)).cuda()
     count = blocks.shape[0]
     decoded = getattr(module, f"dequantize_{name}")(
@@ -244,7 +287,7 @@ WEIGHTED = sorted(name for name, fmt in IQ_FORMAT_REGISTRY.items() if fmt.weight
 @pytest.mark.parametrize("name", WEIGHTED)
 def test_cuda_weighted_pack_matches_pytorch_encoder(monkeypatch, name):
     """The weighted search agrees with the reference as closely as the unweighted one does."""
-    module, _, _, _ = FORMATS[name]
+    module, _, _ = FORMATS[name]
     quantize = getattr(module, f"quantize_{name}")
     dequantize = getattr(module, f"dequantize_{name}")
     generator = torch.Generator(device="cuda").manual_seed(0)
@@ -270,12 +313,11 @@ def test_cuda_weighted_pack_matches_pytorch_encoder(monkeypatch, name):
 
 @pytest.mark.parametrize("name", WEIGHTED)
 def test_cuda_packer_rejects_importance_that_does_not_tile_the_blocks(name):
-    module, packer, _, takes_scales = FORMATS[name]
+    module, packer, _ = FORMATS[name]
     weight = torch.randn((4, 512), device="cuda")
     blocks = weight.reshape(-1, 256)
     grid = getattr(module, f"{name}_grid")("cuda")
-    # IQ1_S predicts its block scales inside the packer.
-    scales = (getattr(module, f"_predict_{name}_scales")(blocks),) if takes_scales else ()
+    scales = getattr(module, f"_predict_{name}_scales")(blocks)
 
     with pytest.raises(RuntimeError, match="importance must be float32"):
-        getattr(_extension(), packer)(blocks, grid, *scales, torch.ones(3, 256, device="cuda"))
+        getattr(_extension(), packer)(blocks, grid, scales, torch.ones(3, 256, device="cuda"))

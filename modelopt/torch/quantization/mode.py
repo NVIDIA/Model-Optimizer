@@ -311,6 +311,10 @@ class BaseCalibrateModeDescriptor(ModeDescriptor):
     # cannot run per decoder layer (e.g. needs ModeloptStateManager on the root).
     _supports_layerwise: bool = True
 
+    # Whether the mode calibrates correctly when every rank calibrates on its own data. A mode that
+    # declares neither True nor False is refused on a model distributed over several ranks.
+    _distributed_calibration: bool | None = None
+
     def __init__(self, *args, **kwargs):
         """Initialize Base calibrate mode descriptor."""
         assert issubclass(self.config_class, QuantizeAlgorithmConfig), (
@@ -332,6 +336,22 @@ class BaseCalibrateModeDescriptor(ModeDescriptor):
     def name(self) -> str:
         """Returns the value (str representation) of the mode."""
         return self._get_mode_name(self.config_class().method)
+
+    def _rank_local_parts(self, config: QuantizeAlgorithmConfig) -> list[str]:
+        """What of this mode, with ``config`` and its nested algorithms, stays on the rank."""
+        method = self.name.removesuffix("_calibrate")
+        if self._distributed_calibration is None:
+            found = [f"{method} (no declared distributed support)"]
+        elif not self._distributed_calibration:
+            found = [method]
+        elif not getattr(config, "distributed_sync", True):  # None skips the sync too
+            found = [f"{method} with distributed_sync={config.distributed_sync}"]
+        else:
+            found = []
+        for key in ("weight_scale_algorithm", "scale_algorithm"):
+            if getattr(config, key, None) is not None:
+                found += _rank_local_calibrations(getattr(config, key))
+        return found
 
     @property
     @abstractmethod
@@ -413,6 +433,18 @@ class _CalibrateModeRegistryCls(_ModeRegistryCls):
 CalibrateModeRegistry = _CalibrateModeRegistryCls("calibrate_algos")
 
 
+def _rank_local_calibrations(algorithm: QuantizeAlgoCfgType) -> list[str]:
+    """The calibrations ``algorithm`` runs, nested ones too, that keep statistics on the rank."""
+    found = []
+    for mode, options in get_modelike_from_algo_cfg(algorithm):
+        descriptor = CalibrateModeRegistry[mode]
+        assert isinstance(descriptor, BaseCalibrateModeDescriptor)
+        # The options as the calibration reads them, through its mode's schema: a string such as
+        # "false" is coerced, and a default counts as if spelled out.
+        found += descriptor._rank_local_parts(descriptor.config_class.model_validate(options))
+    return found
+
+
 @CalibrateModeRegistry.register_mode
 class NoneCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
     """Mode for no calibration algorithm."""
@@ -423,6 +455,7 @@ class NoneCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return QuantizeAlgorithmConfig
 
     _calib_func = None
+    _distributed_calibration = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -435,6 +468,7 @@ class MaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MaxCalibConfig
 
     _calib_func = max_calibrate
+    _distributed_calibration = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -452,6 +486,7 @@ class NVFP4ActHeadroomCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return NVFP4ActHeadroomCalibConfig
 
     _calib_func = nvfp4_act_headroom_calibrate
+    _distributed_calibration = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -464,6 +499,7 @@ class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MseCalibConfig
 
     _calib_func = mse_calibrate
+    _distributed_calibration = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -480,6 +516,7 @@ class LocalHessianModeDescriptor(BaseCalibrateModeDescriptor):
         return LocalHessianCalibConfig
 
     _calib_func = local_hessian_calibrate
+    _distributed_calibration = False  # its distributed_sync syncs only the max amax it starts from
 
 
 @CalibrateModeRegistry.register_mode
@@ -492,6 +529,7 @@ class SmoothQuantModeDescriptor(BaseCalibrateModeDescriptor):
         return SmoothQuantCalibConfig
 
     _calib_func = smoothquant
+    _distributed_calibration = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -504,6 +542,7 @@ class AWQLiteModeDescriptor(BaseCalibrateModeDescriptor):
         return AWQLiteCalibConfig
 
     _calib_func = awq
+    _distributed_calibration = False
 
 
 @CalibrateModeRegistry.register_mode
@@ -516,6 +555,7 @@ class AWQClipModeDescriptor(BaseCalibrateModeDescriptor):
         return AWQClipCalibConfig
 
     _calib_func = awq
+    _distributed_calibration = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -528,6 +568,7 @@ class AWQFullModeDescriptor(BaseCalibrateModeDescriptor):
         return AWQFullCalibConfig
 
     _calib_func = awq
+    _distributed_calibration = False
 
 
 @CalibrateModeRegistry.register_mode
@@ -540,6 +581,7 @@ class SVDQuantModeDescriptor(BaseCalibrateModeDescriptor):
         return SVDQuantConfig
 
     _calib_func = svdquant
+    _distributed_calibration = False
     # create_and_replace_svdquant_linear_on_the_fly reads ModeloptStateManager from the
     # root model, which is not present when layerwise_calibrate dispatches per decoder layer.
     _supports_layerwise = False
@@ -560,6 +602,7 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQCalibConfig
 
     _calib_func = gptq
+    _distributed_calibration = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -572,6 +615,7 @@ class ImatrixModeDescriptor(BaseCalibrateModeDescriptor):
         return ImatrixCalibConfig
 
     _calib_func = imatrix_calibrate
+    _distributed_calibration = False
 
 
 @CalibrateModeRegistry.register_mode
@@ -584,3 +628,4 @@ class LSQModeDescriptor(BaseCalibrateModeDescriptor):
         return LSQConfig
 
     _calib_func = lsq
+    _distributed_calibration = True

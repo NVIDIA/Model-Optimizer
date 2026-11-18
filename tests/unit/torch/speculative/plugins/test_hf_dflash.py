@@ -428,6 +428,29 @@ class TestDFlashLazyRotaryEmb:
         assert dflash_mod.rotary_emb is first
         assert not any(b.is_meta for b in dflash_mod.rotary_emb.buffers())
 
+    def test_restore_draft_precision_keeps_fp32_rope_after_convert(self):
+        """On a fresh convert the draft is already placed; re-casting would round RoPE to bf16."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        inv_freq = model.dflash_module.rotary_emb.inv_freq.clone()
+        assert inv_freq.dtype == torch.float32
+
+        model.restore_draft_precision()
+
+        assert model.dflash_module.rotary_emb.inv_freq.dtype == torch.float32
+        assert torch.equal(model.dflash_module.rotary_emb.inv_freq, inv_freq)
+
+    def test_restore_draft_precision_places_draft_converted_on_meta(self):
+        """After a meta-device convert (the from_pretrained path) it still places the draft."""
+        model = get_tiny_llama(num_hidden_layers=4).to("meta")
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        model.to_empty(device="cpu")  # stands in for from_pretrained loading the weights
+
+        model.restore_draft_precision()
+
+        assert model.dflash_module.rotary_emb.inv_freq.dtype == torch.float32
+        assert all(p.dtype == torch.bfloat16 for p in model.dflash_module.parameters())
+
 
 class TestBuildTargetLayerIds:
     """Test target layer selection."""
@@ -1572,6 +1595,49 @@ def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, draft_
     assert not ungraded, f"no gradient for {ungraded}"
     assert len(outputs) == int(draft_runs)
     assert all(output.grad is not None for output in outputs)
+
+
+@pytest.mark.parametrize("shift_label", [True, False])
+@pytest.mark.parametrize(
+    "head_fields",
+    [
+        {},
+        {"projector_type": "dspark", "markov_rank": 4},
+        {"projector_type": "domino", "emb_dim": 8, "gru_hidden_dim": 8},
+    ],
+    ids=["dflash", "dspark", "domino"],
+)
+def test_deprecated_shift_label(head_fields, shift_label):
+    """projector_type fixes the label alignment, so convert drops a shift_label matching it with
+    a warning and refuses any other, which never took effect.
+
+    Restore drops either unchecked: DSpark used to accept the field and ignore it in training,
+    and the Domino recipe set it, so checkpoints carry it in their modelopt_state.
+    """
+    config = get_dflash_config()
+    config["dflash_architecture_config"].update(head_fields)
+    model = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(model, [("dflash", config)])
+
+    state = mto.modelopt_state(model)
+    saved_config = state["modelopt_state_dict"][0][1]["config"]
+    saved_config["dflash_architecture_config"]["shift_label"] = shift_label
+    restored = mto.restore_from_modelopt_state(get_tiny_llama(num_hidden_layers=4), state)
+    assert restored._label_shift == model._label_shift
+
+    config["dflash_architecture_config"]["shift_label"] = shift_label
+    legacy = get_tiny_llama(num_hidden_layers=4)
+    if shift_label != bool(model._label_shift):
+        base_cls = type(legacy)
+        with pytest.raises(ValueError, match="shift_label"):
+            mtsp.convert(legacy, [("dflash", config)])
+        assert type(legacy) is base_cls  # refused before converting
+        return
+    with pytest.warns(FutureWarning, match="shift_label"):
+        mtsp.convert(legacy, [("dflash", config)])
+    assert legacy._label_shift == model._label_shift
+    legacy_config = mto.modelopt_state(legacy)["modelopt_state_dict"][0][1]["config"]
+    assert "shift_label" not in legacy_config["dflash_architecture_config"]
 
 
 class TestTeacherLogits:

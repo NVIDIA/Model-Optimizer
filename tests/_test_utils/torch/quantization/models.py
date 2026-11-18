@@ -174,15 +174,13 @@ TOY_MOE_INTERMEDIATE = 256
 class ToyFusedExperts(nn.Module):
     """HF transformers 5 fused-experts layout: one ``F.linear`` pair per routed expert."""
 
-    def __init__(self):
+    def __init__(self, hidden=TOY_MOE_HIDDEN, intermediate=TOY_MOE_INTERMEDIATE):
         super().__init__()
         self.num_experts = TOY_MOE_EXPERTS
         self.gate_up_proj = nn.Parameter(
-            torch.randn(TOY_MOE_EXPERTS, 2 * TOY_MOE_INTERMEDIATE, TOY_MOE_HIDDEN) * 0.02
+            torch.randn(TOY_MOE_EXPERTS, 2 * intermediate, hidden) * 0.02
         )
-        self.down_proj = nn.Parameter(
-            torch.randn(TOY_MOE_EXPERTS, TOY_MOE_HIDDEN, TOY_MOE_INTERMEDIATE) * 0.02
-        )
+        self.down_proj = nn.Parameter(torch.randn(TOY_MOE_EXPERTS, hidden, intermediate) * 0.02)
 
     def forward(self, hidden_states, expert_of_token):
         output = torch.zeros_like(hidden_states)
@@ -198,10 +196,10 @@ class ToyFusedExperts(nn.Module):
 class ToyMoEBlock(nn.Module):
     """Routes token ``t`` to expert ``t % 3``, so the last expert receives no token."""
 
-    def __init__(self):
+    def __init__(self, hidden=TOY_MOE_HIDDEN, intermediate=TOY_MOE_INTERMEDIATE):
         super().__init__()
-        self.experts = ToyFusedExperts()
-        self.shared_expert = nn.Linear(TOY_MOE_HIDDEN, TOY_MOE_HIDDEN, bias=False)
+        self.experts = ToyFusedExperts(hidden, intermediate)
+        self.shared_expert = nn.Linear(hidden, hidden, bias=False)
 
     def forward(self, hidden_states):
         routed = self.experts(hidden_states, torch.arange(len(hidden_states)) % 3)
@@ -209,9 +207,9 @@ class ToyMoEBlock(nn.Module):
 
 
 class ToyMoE(nn.Module):
-    def __init__(self):
+    def __init__(self, hidden=TOY_MOE_HIDDEN, intermediate=TOY_MOE_INTERMEDIATE):
         super().__init__()
-        self.mlp = ToyMoEBlock()
+        self.mlp = ToyMoEBlock(hidden, intermediate)
 
     def forward(self, hidden_states):
         return self.mlp(hidden_states)

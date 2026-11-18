@@ -22,6 +22,7 @@ import pytest
 import torch
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.utils import calib_utils
 from modelopt.torch.quantization.utils.calib_utils import GPTQHelper, update_hessian
 from modelopt.torch.utils.distributed import ParallelState
@@ -181,6 +182,30 @@ def test_bf16_hessian_input_on_cpu_gives_the_float32_result_and_warns_once():
         assert len(fallbacks) == (hessian_input_dtype == "bfloat16")
         weights[hessian_input_dtype] = quantized.weight
     assert torch.equal(weights["float32"], weights["bfloat16"])
+
+
+def test_a_windowed_linear_updates_before_a_later_one_sharing_its_weight(monkeypatch):
+    """Each update of a shared weight reads the last one's result, so a tensor-parallel linear tied
+    to a later plain one updates first, as it does when every linear is tensor-parallel."""
+    torch.manual_seed(0)
+    inputs = torch.randn(16, 32)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+        ],
+        "algorithm": {"method": "gptq", "block_size": 16},
+    }
+    weights = []
+    for parallel in (2, 1):  # every linear, then only the first
+        torch.manual_seed(0)
+        model = torch.nn.Sequential(*(torch.nn.Linear(32, 32, bias=False) for _ in range(2)))
+        model[1].weight = model[0].weight  # the second sees the first's output
+        windowed = set(model[:parallel])
+        monkeypatch.setattr(model_calib, "is_quantized_parallel_linear", lambda m: m in windowed)
+        mtq.quantize(model, config, lambda m: m(inputs))
+        weights.append(model[0].weight)
+    assert torch.equal(*weights)
 
 
 def _gptq_hessian_dp_sync_helper(rank, size, token_counts):
