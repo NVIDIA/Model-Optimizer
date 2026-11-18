@@ -286,8 +286,9 @@ def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch):
     policy = IQRepairPolicy()
     try:
         fields = policy.prepare(reference.mlp)
-        prediction = reference.mlp(x)
-        target = teacher.mlp(x).detach()
+        # Match projection shapes so this isolates normalization from BLAS batch-shape roundoff.
+        prediction = torch.cat([reference.mlp(sample) for sample in x.split(1)])
+        target = torch.cat([teacher.mlp(sample) for sample in x.split(1)]).detach()
         torch.nn.functional.mse_loss(prediction[valid], target[valid]).backward()
         expected = [p.grad.detach().clone() for p in fields]
     finally:
