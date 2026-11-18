@@ -251,6 +251,7 @@ Changelog
 - Fix ``ModuleNotFoundError: No module named 'huggingface_hub'`` when importing ``modelopt.torch`` without the optional ``hf`` extra. Install the ``hf`` extra to use Hugging Face checkpointing. Affects 0.44 through 0.48.
 - Require Pydantic 2.5.0 or newer to prevent configuration-schema errors when importing ``modelopt.torch`` with older releases.
 - Require Wonderwords 2.2.0 or newer in the ``hf`` extra to prevent RULER calibration failures during random-word generation with older releases.
+- ``mts.sparsify(model, "sparsegpt")`` now writes the SparseGPT weight update into the kept weights, as documented. It applied only the 2:4 mask and kept the dense values of the unpruned weights. Re-run SparseGPT on affected models.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^
