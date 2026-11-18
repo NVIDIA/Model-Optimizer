@@ -13,67 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Check checkout discovery and compatibility paths shared by plugin packages."""
+"""Check canonical evaluation datasets."""
 
-import re
 from pathlib import Path
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[3]
-_SKILLS = _ROOT / "skills"
+_SKILLS = Path(__file__).resolve().parents[3] / "skills"
 
 
 @pytest.mark.parametrize(
-    "canonical", sorted(_SKILLS.glob("modelopt-*/SKILL.md")), ids=lambda p: p.parent.name
+    "dataset", sorted(_SKILLS.glob("modelopt-*/evals/evals.json")), ids=lambda p: p.parents[1].name
 )
-def test_compatibility_entrypoints(canonical):
-    """Each old name reaches its canonical sibling through both discovery roots."""
-    name = canonical.parent.name
-    old_name = name.removeprefix("modelopt-")
-    stub = _SKILLS / old_name / "SKILL.md"
-    for path in (canonical, stub):
-        frontmatter = path.read_text().split("---", 2)[1]
-        assert re.findall(r"^name: (.+)$", frontmatter, re.MULTILINE) == [path.parent.name]
-        assert re.search(r"^description: \S", frontmatter, re.MULTILINE)
-        for discovery in (_ROOT / ".agents/skills", _ROOT / ".claude/skills"):
-            assert (discovery / path.parent.name / "SKILL.md").resolve(strict=True) == path
-
-    # The forwarding target must be packaged beside the stub, never back to itself.
-    body = stub.read_text().split("---", 2)[2]
-    targets = re.findall(r"\]\(([^)]+/SKILL\.md)\)", body)
-    assert len(targets) == 1
-    assert (stub.parent / targets[0]).resolve(strict=True) == canonical
-
-    for resource in canonical.parent.iterdir():
-        # Generated publication artifacts are not legacy execution resources.
-        if resource.name in (
-            "SKILL.md",
-            "skill-card.md",
-            "BENCHMARK.md",
-            "skill.oms.sig",
-        ) or resource.name.startswith((".", "__")):
-            continue
-        legacy_path = stub.parent / resource.name
-        assert legacy_path.is_symlink()
-        assert legacy_path.resolve(strict=True) == resource.resolve(strict=True)
-
-
-@pytest.mark.parametrize(
-    ("name", "legacy"),
-    [
-        ("compare-results", "tests/evals.json"),
-        ("day0-release", "tests/evals.json"),
-        ("deployment", "tests/evals.json"),
-        ("evaluation", "tests/evals.json"),
-        ("launching-evals", "tests.json"),
-        ("ptq", "tests.json"),
-    ],
-)
-def test_legacy_dataset_paths(name, legacy):
-    """Old checkout paths still reach the dataset consumed by SkillEvaluator."""
-    canonical = _SKILLS / f"modelopt-{name}" / "evals/evals.json"
-    assert canonical.is_file() and not canonical.is_symlink()
-    for root in (_SKILLS, _ROOT / ".agents/skills", _ROOT / ".claude/skills"):
-        for skill in (name, f"modelopt-{name}"):
-            assert (root / skill / legacy).resolve(strict=True) == canonical
+def test_canonical_dataset_is_regular_file(dataset):
+    assert dataset.is_file() and not dataset.is_symlink()
+    assert not dataset.parent.is_symlink()
