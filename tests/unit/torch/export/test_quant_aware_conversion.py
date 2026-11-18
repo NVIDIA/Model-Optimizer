@@ -1243,6 +1243,21 @@ def test_stacked_experts_guard():
     _assert_experts_pre_expanded(bad, [])
 
 
+def test_weights_that_are_3d_without_stacking_experts_still_revert():
+    # A short convolution's weight is [channels, 1, kernel] and an expanded expert's GGML payload is
+    # [rows, blocks, bytes]; neither stacks experts, so neither may force the in-memory-name fallback.
+    conv = torch.arange(24.0).reshape(6, 1, 4)
+    sd = {"model.layers.0.self_attn.conv1d.weight": conv}
+    rule = SplitRule(".conv1d", (".q_conv1d", ".k_conv1d", ".v_conv1d"), dim=0)
+    reverted = apply_reverse_rules(sd, [rule], [])
+    parts = [reverted[f"model.layers.0.self_attn.{p}_conv1d.weight"] for p in "qkv"]
+    assert torch.equal(torch.cat(parts), conv)
+
+    payload = torch.zeros(8, 2, 74, dtype=torch.uint8)
+    expanded = {"model.layers.3.mlp.experts.0.gate_proj.weight": payload}
+    _assert_experts_pre_expanded(expanded, ["gate_up_proj", "down_proj"])
+
+
 def test_sharded_export_keeps_a_renamed_vlm_part_wildcard():
     """A wildcard over a renamed VLM part stays one entry, not every module beneath it."""
     pytest.importorskip("transformers.core_model_loading")
