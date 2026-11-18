@@ -319,78 +319,6 @@ def test_weight_access_writeback_failure_preserves_backing_maps(
     torch.testing.assert_close(model(inputs), expected)
 
 
-@pytest.mark.parametrize("mapping_mode", ["shared_userdict", "independent_userdict", "unknown"])
-def test_iq_plan_checks_resident_offload_mapping_backings(mapping_mode):
-    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
-    mtq.quantize(
-        model,
-        {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "*weight_quantizer",
-                    "cfg": {"num_bits": "iq1_m", "backend": "ggml"},
-                },
-            ],
-            "algorithm": None,
-        },
-    )
-
-    class LazyWeights(Mapping):
-        def __getitem__(self, key):
-            pytest.fail("Ownership inspection read an unknown lazy backing")
-
-        def __iter__(self):
-            return iter(("weight",))
-
-        def __len__(self):
-            return 1
-
-    shared = model[0].weight.detach()
-    for owner in model:
-        weights = UserDict(owner.state_dict())
-        if mapping_mode == "shared_userdict":
-            weights["weight"] = shared
-        add_hook_to_module(
-            owner,
-            AlignDevicesHook(
-                execution_device="cpu",
-                offload=True,
-                weights_map=LazyWeights() if mapping_mode == "unknown" else weights,
-            ),
-        )
-    if mapping_mode == "independent_userdict":
-        plan_iq_repair([model[0]], root_model=model)
-    else:
-        with pytest.raises(ValueError):
-            plan_iq_repair([model[0]], root_model=model)
-
-
-def test_weight_access_keeps_buffer_persistence_local_to_its_owner():
-    model = nn.Linear(4, 4, bias=False)
-    model.register_buffer("scale", torch.ones(4))
-    model.child = nn.Module()
-    model.child.register_buffer("scale", torch.full((4,), 2.0), persistent=False)
-    add_hook_to_module(
-        model,
-        AlignDevicesHook(
-            execution_device="cpu",
-            offload=True,
-            offload_buffers=True,
-            weights_map=model.state_dict(),
-        ),
-    )
-    devices = {name: tensor.device for name, tensor in model.named_buffers()}
-    keys = model.state_dict().keys()
-    persistence = {owner: owner._non_persistent_buffers_set.copy() for owner in model.modules()}
-    with enable_weight_access_and_writeback(model, model):
-        torch.testing.assert_close(model.scale, torch.ones(4))
-        torch.testing.assert_close(model.child.scale, torch.full((4,), 2.0))
-    assert model.state_dict().keys() == keys
-    assert {name: tensor.device for name, tensor in model.named_buffers()} == devices
-    assert {owner: owner._non_persistent_buffers_set for owner in model.modules()} == persistence
-
-
 @pytest.mark.parametrize("offload_mode", ["cpu_offload", "disk_offload"])
 @pytest.mark.parametrize("failure_stage", ["local_writeback", "peer"])
 def test_iq_finalize_writeback_failure_restores_state_for_retry(
@@ -498,3 +426,75 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
         assert all(parameter.requires_grad for parameter in model.parameters())
     finally:
         policy.close()
+
+
+@pytest.mark.parametrize("mapping_mode", ["shared_userdict", "independent_userdict", "unknown"])
+def test_iq_plan_checks_resident_offload_mapping_backings(mapping_mode):
+    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": "iq1_m", "backend": "ggml"},
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+
+    class LazyWeights(Mapping):
+        def __getitem__(self, key):
+            pytest.fail("Ownership inspection read an unknown lazy backing")
+
+        def __iter__(self):
+            return iter(("weight",))
+
+        def __len__(self):
+            return 1
+
+    shared = model[0].weight.detach()
+    for owner in model:
+        weights = UserDict(owner.state_dict())
+        if mapping_mode == "shared_userdict":
+            weights["weight"] = shared
+        add_hook_to_module(
+            owner,
+            AlignDevicesHook(
+                execution_device="cpu",
+                offload=True,
+                weights_map=LazyWeights() if mapping_mode == "unknown" else weights,
+            ),
+        )
+    if mapping_mode == "independent_userdict":
+        plan_iq_repair([model[0]], root_model=model)
+    else:
+        with pytest.raises(ValueError):
+            plan_iq_repair([model[0]], root_model=model)
+
+
+def test_weight_access_keeps_buffer_persistence_local_to_its_owner():
+    model = nn.Linear(4, 4, bias=False)
+    model.register_buffer("scale", torch.ones(4))
+    model.child = nn.Module()
+    model.child.register_buffer("scale", torch.full((4,), 2.0), persistent=False)
+    add_hook_to_module(
+        model,
+        AlignDevicesHook(
+            execution_device="cpu",
+            offload=True,
+            offload_buffers=True,
+            weights_map=model.state_dict(),
+        ),
+    )
+    devices = {name: tensor.device for name, tensor in model.named_buffers()}
+    keys = model.state_dict().keys()
+    persistence = {owner: owner._non_persistent_buffers_set.copy() for owner in model.modules()}
+    with enable_weight_access_and_writeback(model, model):
+        torch.testing.assert_close(model.scale, torch.ones(4))
+        torch.testing.assert_close(model.child.scale, torch.full((4,), 2.0))
+    assert model.state_dict().keys() == keys
+    assert {name: tensor.device for name, tensor in model.named_buffers()} == devices
+    assert {owner: owner._non_persistent_buffers_set for owner in model.modules()} == persistence

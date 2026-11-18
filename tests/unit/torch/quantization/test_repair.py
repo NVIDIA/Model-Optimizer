@@ -293,158 +293,6 @@ def test_iq_plan_protects_frozen_owners_and_allows_shared_nonwrite_parameters(al
     assert all(parameter.requires_grad for parameter in model.parameters())
 
 
-@pytest.mark.parametrize(
-    ("alias", "offload"),
-    [
-        ("parameter", False),
-        ("storage", False),
-        ("buffer", False),
-        ("quantizer", False),
-        ("parameter", True),
-        ("storage", True),
-        ("buffer", True),
-        ("quantizer", True),
-        ("resident_parameter", True),
-    ],
-)
-def test_iq_plan_refuses_shared_weights_outside_selected_boundaries(alias, offload):
-    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
-    mtq.quantize(model, {**_config([_iq("0.weight_quantizer", "iq1_s")]), "algorithm": None})
-    if alias == "resident_parameter":
-        resident_weight = model[1].weight.detach()
-    elif alias == "quantizer":
-        model[1].weight_quantizer = model[0].weight_quantizer
-    elif alias == "buffer":
-        model[1].register_buffer("frozen_weight", model[0].weight.detach())
-    else:
-        model[1].weight = (
-            model[0].weight if alias == "parameter" else nn.Parameter(model[0].weight.detach())
-        )
-    before = copy.deepcopy(model.state_dict())
-    if offload:
-        pytest.importorskip("transformers")
-        pytest.importorskip("accelerate").cpu_offload(
-            model, execution_device="cpu", offload_buffers=True
-        )
-    if alias == "resident_parameter":
-        model[0].weight = nn.Parameter(resident_weight)
-        before["0.weight"] = before["1.weight"]
-    parameters = dict(model.named_parameters(remove_duplicate=False))
-    flags = {name: parameter.requires_grad for name, parameter in parameters.items()}
-    with pytest.raises(ValueError):
-        plan_iq_repair([model[0]], root_model=model)
-    assert all(
-        parameter is parameters[name]
-        for name, parameter in model.named_parameters(remove_duplicate=False)
-    )
-    assert {
-        name: parameter.requires_grad
-        for name, parameter in model.named_parameters(remove_duplicate=False)
-    } == flags
-    with enable_weight_access_and_writeback(model, model, writeback=False):
-        assert all(torch.equal(value, before[name]) for name, value in model.state_dict().items())
-    assert not hasattr(model[0].weight_quantizer, "_local_repair_state")
-
-
-@pytest.mark.parametrize(
-    ("overlap", "timing"), [(False, "prepare"), (True, "prepare"), (True, "finalize")]
-)
-def test_iq_sliced_experts_require_disjoint_write_views(overlap, timing):
-    class Experts(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = nn.Parameter(torch.randn(4, 256) * 0.02)
-
-    class QuantExperts(QuantModule):
-        def _setup(self):
-            self.overlap = overlap and timing == "prepare"
-            self.weight_quantizers = nn.ModuleList([TensorQuantizer() for _ in range(2)])
-            for quantizer in self.weight_quantizers:
-                quantizer.set_from_attribute_config({"num_bits": "iq1_s", "backend": "ggml"})
-
-        def iter_weight_quantizers_for_calibration(self):
-            yield from self.weight_quantizers
-
-        def iter_weights_for_calibration(self):
-            yield self.weight[:2], self.weight_quantizers[0]
-            start = 1 if self.overlap else 2
-            yield self.weight[start : start + 2], self.weight_quantizers[1]
-
-        def forward(self, inputs):
-            return torch.cat(
-                [
-                    nn.functional.linear(inputs, q(weight))
-                    for weight, q in self.iter_weights_for_calibration()
-                ],
-                dim=-1,
-            )
-
-    model = QuantExperts.convert(Experts())
-    inputs = torch.randn(2, 256)
-    baseline = model(inputs).detach()
-    before = copy.deepcopy(model.state_dict())
-    policy = IQRepairPolicy()
-    try:
-        if overlap and timing == "prepare":
-            with pytest.raises(ValueError):
-                policy.prepare(model)
-            torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
-            torch.testing.assert_close(model(inputs), baseline, rtol=0, atol=0)
-        else:
-            fields = policy.prepare(model)
-            model(inputs).square().mean().backward()
-            assert all(field.grad is not None and field.grad.count_nonzero() for field in fields)
-            with torch.no_grad():
-                for field in fields:
-                    field.add_(0.5)
-            expected = model(inputs).detach()
-            assert not torch.equal(expected, baseline)
-            if overlap:
-                model.overlap = True
-                with pytest.raises(ValueError):
-                    policy.finalize_()
-                torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
-                model.overlap = False
-            policy.finalize_()
-            torch.testing.assert_close(model(inputs), expected, rtol=0, atol=0)
-    finally:
-        policy.close()
-    assert model.weight.requires_grad
-    assert all(not hasattr(q, "_local_repair_state") for q in model.weight_quantizers)
-
-
-@pytest.mark.parametrize("scale_dtype", [torch.bfloat16, torch.float32])
-def test_iq_preparation_requires_preservable_preprocessing_dtype(scale_dtype):
-    model = nn.Linear(256, 2, bias=False, dtype=torch.bfloat16)
-    mtq.quantize(model, {**_config([_iq("weight_quantizer", "iq1_s")]), "algorithm": None})
-    model.weight_quantizer.pre_quant_scale = torch.linspace(0.5, 1.5, 256, dtype=scale_dtype)
-    inputs = torch.randn(2, 256, dtype=scale_dtype)
-    baseline = model(inputs).detach()
-    before = copy.deepcopy(model.state_dict())
-    policy = IQRepairPolicy()
-    try:
-        if scale_dtype != model.weight.dtype:
-            with pytest.raises(ValueError):
-                policy.prepare(model)
-            torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
-            assert model.weight_quantizer._enable_pre_quant_scale
-            torch.testing.assert_close(model(inputs), baseline, rtol=0, atol=0)
-        else:
-            fields = policy.prepare(model)
-            model(inputs).square().mean().backward()
-            assert any(field.grad is not None and field.grad.count_nonzero() for field in fields)
-            with torch.no_grad():
-                for field in fields:
-                    field.add_(0.5)
-            expected = model(inputs).detach()
-            policy.finalize_()
-            torch.testing.assert_close(model(inputs), expected, rtol=0, atol=0)
-    finally:
-        policy.close()
-    assert model.weight.requires_grad
-    assert not hasattr(model.weight_quantizer, "_local_repair_state")
-
-
 @pytest.mark.parametrize("separate_policies", [False, True])
 def test_iq_policy_restores_first_flags_of_shared_frozen_modules(separate_policies):
     shared = nn.Linear(2, 2)
@@ -722,3 +570,155 @@ def test_preparing_units_streams_each_expert_and_returns_new_fields(monkeypatch)
         assert materializations == [3 * count for count in expected]
     finally:
         policy.close()
+
+
+@pytest.mark.parametrize(
+    ("alias", "offload"),
+    [
+        ("parameter", False),
+        ("storage", False),
+        ("buffer", False),
+        ("quantizer", False),
+        ("parameter", True),
+        ("storage", True),
+        ("buffer", True),
+        ("quantizer", True),
+        ("resident_parameter", True),
+    ],
+)
+def test_iq_plan_refuses_shared_weights_outside_selected_boundaries(alias, offload):
+    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
+    mtq.quantize(model, {**_config([_iq("0.weight_quantizer", "iq1_s")]), "algorithm": None})
+    if alias == "resident_parameter":
+        resident_weight = model[1].weight.detach()
+    elif alias == "quantizer":
+        model[1].weight_quantizer = model[0].weight_quantizer
+    elif alias == "buffer":
+        model[1].register_buffer("frozen_weight", model[0].weight.detach())
+    else:
+        model[1].weight = (
+            model[0].weight if alias == "parameter" else nn.Parameter(model[0].weight.detach())
+        )
+    before = copy.deepcopy(model.state_dict())
+    if offload:
+        pytest.importorskip("transformers")
+        pytest.importorskip("accelerate").cpu_offload(
+            model, execution_device="cpu", offload_buffers=True
+        )
+    if alias == "resident_parameter":
+        model[0].weight = nn.Parameter(resident_weight)
+        before["0.weight"] = before["1.weight"]
+    parameters = dict(model.named_parameters(remove_duplicate=False))
+    flags = {name: parameter.requires_grad for name, parameter in parameters.items()}
+    with pytest.raises(ValueError):
+        plan_iq_repair([model[0]], root_model=model)
+    assert all(
+        parameter is parameters[name]
+        for name, parameter in model.named_parameters(remove_duplicate=False)
+    )
+    assert {
+        name: parameter.requires_grad
+        for name, parameter in model.named_parameters(remove_duplicate=False)
+    } == flags
+    with enable_weight_access_and_writeback(model, model, writeback=False):
+        assert all(torch.equal(value, before[name]) for name, value in model.state_dict().items())
+    assert not hasattr(model[0].weight_quantizer, "_local_repair_state")
+
+
+@pytest.mark.parametrize(
+    ("overlap", "timing"), [(False, "prepare"), (True, "prepare"), (True, "finalize")]
+)
+def test_iq_sliced_experts_require_disjoint_write_views(overlap, timing):
+    class Experts(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.randn(4, 256) * 0.02)
+
+    class QuantExperts(QuantModule):
+        def _setup(self):
+            self.overlap = overlap and timing == "prepare"
+            self.weight_quantizers = nn.ModuleList([TensorQuantizer() for _ in range(2)])
+            for quantizer in self.weight_quantizers:
+                quantizer.set_from_attribute_config({"num_bits": "iq1_s", "backend": "ggml"})
+
+        def iter_weight_quantizers_for_calibration(self):
+            yield from self.weight_quantizers
+
+        def iter_weights_for_calibration(self):
+            yield self.weight[:2], self.weight_quantizers[0]
+            start = 1 if self.overlap else 2
+            yield self.weight[start : start + 2], self.weight_quantizers[1]
+
+        def forward(self, inputs):
+            return torch.cat(
+                [
+                    nn.functional.linear(inputs, q(weight))
+                    for weight, q in self.iter_weights_for_calibration()
+                ],
+                dim=-1,
+            )
+
+    model = QuantExperts.convert(Experts())
+    inputs = torch.randn(2, 256)
+    baseline = model(inputs).detach()
+    before = copy.deepcopy(model.state_dict())
+    policy = IQRepairPolicy()
+    try:
+        if overlap and timing == "prepare":
+            with pytest.raises(ValueError):
+                policy.prepare(model)
+            torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
+            torch.testing.assert_close(model(inputs), baseline, rtol=0, atol=0)
+        else:
+            fields = policy.prepare(model)
+            model(inputs).square().mean().backward()
+            assert all(field.grad is not None and field.grad.count_nonzero() for field in fields)
+            with torch.no_grad():
+                for field in fields:
+                    field.add_(0.5)
+            expected = model(inputs).detach()
+            assert not torch.equal(expected, baseline)
+            if overlap:
+                model.overlap = True
+                with pytest.raises(ValueError):
+                    policy.finalize_()
+                torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
+                model.overlap = False
+            policy.finalize_()
+            torch.testing.assert_close(model(inputs), expected, rtol=0, atol=0)
+    finally:
+        policy.close()
+    assert model.weight.requires_grad
+    assert all(not hasattr(q, "_local_repair_state") for q in model.weight_quantizers)
+
+
+@pytest.mark.parametrize("scale_dtype", [torch.bfloat16, torch.float32])
+def test_iq_preparation_requires_preservable_preprocessing_dtype(scale_dtype):
+    model = nn.Linear(256, 2, bias=False, dtype=torch.bfloat16)
+    mtq.quantize(model, {**_config([_iq("weight_quantizer", "iq1_s")]), "algorithm": None})
+    model.weight_quantizer.pre_quant_scale = torch.linspace(0.5, 1.5, 256, dtype=scale_dtype)
+    inputs = torch.randn(2, 256, dtype=scale_dtype)
+    baseline = model(inputs).detach()
+    before = copy.deepcopy(model.state_dict())
+    policy = IQRepairPolicy()
+    try:
+        if scale_dtype != model.weight.dtype:
+            with pytest.raises(ValueError):
+                policy.prepare(model)
+            torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
+            assert model.weight_quantizer._enable_pre_quant_scale
+            torch.testing.assert_close(model(inputs), baseline, rtol=0, atol=0)
+        else:
+            fields = policy.prepare(model)
+            model(inputs).square().mean().backward()
+            assert any(field.grad is not None and field.grad.count_nonzero() for field in fields)
+            with torch.no_grad():
+                for field in fields:
+                    field.add_(0.5)
+            expected = model(inputs).detach()
+            policy.finalize_()
+            torch.testing.assert_close(model(inputs), expected, rtol=0, atol=0)
+    finally:
+        policy.close()
+    assert model.weight.requires_grad
+    assert not hasattr(model.weight_quantizer, "_local_repair_state")
