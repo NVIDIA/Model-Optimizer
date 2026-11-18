@@ -24,6 +24,7 @@ register(
         bypass_spec=BypassSpec(
             decoder_paths=("model.layers", "layers"),
             batch_packed_documents=True,
+            functional_children=("linear_attn.conv1d",),
         ),
         model_type="qwen3_next",
         min_transformers_version="5.5",

@@ -42,6 +42,7 @@ register(
             adapter_path="modelopt.torch.models.nemotron_h.bypass.NemotronHBypassAdapter",
             decoder_paths=("backbone.layers", "model.layers", "layers"),
             batch_packed_documents=True,
+            functional_children=(),
         ),
         model_type="nemotron_h",
         min_transformers_version="5.5",
