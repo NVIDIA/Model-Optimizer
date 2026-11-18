@@ -372,6 +372,8 @@ class BypassSpec(SpecSection):
     """Decoder child names that own ordinary dense or routed feed-forward repair boundaries."""
     isolated_documents: bool = True
     """Run packed documents independently when recurrence or pooling can cross mask boundaries."""
+    causal_context_parallel: bool = False
+    """Opt in to validated native causal SDPA context sharding; otherwise replay full context."""
 
     batch_packed_documents: bool = False
     """Permit independent documents in padded rows when activation and position policies agree."""
