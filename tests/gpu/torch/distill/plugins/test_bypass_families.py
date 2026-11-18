@@ -30,7 +30,7 @@ from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
 from modelopt.torch.quantization.nn import QuantModule
 
-_PORTED = {"deepseek_v41"}
+_PORTED = {"deepseek_v41", "kimi_k31"}
 
 
 @pytest.mark.parametrize(
