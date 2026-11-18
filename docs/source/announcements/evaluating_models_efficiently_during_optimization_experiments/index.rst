@@ -15,6 +15,7 @@ without overlooking regressions? Average accuracy can hide doomed reasoning loop
 reasoning that continues until the output-token limit is reached), missing answers, inappropriate
 guessing, or excessive output length.
 
+Because model generation is stochastic, we repeat evaluations to measure how scores vary between runs.
 You may assume that reliable evaluation requires many repetitions. But could repeating by default
 waste time? How many questions and repetitions do you need to measure improvements and rule out
 regressions?
