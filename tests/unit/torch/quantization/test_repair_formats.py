@@ -48,7 +48,9 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
         if quantizer.is_static_block_quant
         else model.weight
     )
-    state = IQScaleState(quantizer, processed_weight, model.weight.shape)
+    state = IQScaleState(
+        quantizer, processed_weight, model.weight.shape, field_prefix="weight_quantizer"
+    )
     if dtype == torch.float16:
         state.global_base.fill_(2**-24)
     reference = copy.deepcopy(state)
@@ -131,7 +133,9 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
         weight = model._parameters["weight"]
         before = quantizer(weight).detach()
         processed_weight = quantizer._process_for_blockquant(weight * quantizer.pre_quant_scale)
-        finite_state = IQScaleState(quantizer, processed_weight, weight.shape)
+        finite_state = IQScaleState(
+            quantizer, processed_weight, weight.shape, field_prefix="weight_quantizer"
+        )
         with torch.no_grad():
             finite_state.global_delta.fill_(0.25)
             finite_state.local_delta.fill_(1)
