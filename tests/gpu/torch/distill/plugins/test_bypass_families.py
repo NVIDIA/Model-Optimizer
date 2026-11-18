@@ -37,7 +37,7 @@ from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
 from modelopt.torch.quantization.nn import QuantModule
 
-_PORTED = {"deepseek_v41", "kimi_k31", "step5"}
+_PORTED = {"deepseek_v41", "kimi_k31", "step5", "mimo_v2"}
 
 
 @pytest.mark.parametrize(
@@ -224,3 +224,80 @@ def test_step5_release_sparse_geometry_bounds_saved_gather_memory(monkeypatch, r
     record_property("step5_sparse_memory", json.dumps(report))
     print(json.dumps(report))
     assert new_peak < old_peak * 0.9, report
+
+
+def _native_port_worker(rank, size, record):
+    from torch.distributed.device_mesh import init_device_mesh
+    from transformers.distributed.utils import TransformersDeviceMesh
+
+    assert size == 4
+    torch.cuda.set_device(rank)
+    torch.manual_seed(151)
+    device = torch.device("cuda", rank)
+    teacher = build_model(record, device)
+    # Equal router scores deliberately leave two of four expert owners empty.
+    with torch.no_grad():
+        for name, module in teacher.named_modules():
+            if name.endswith(".gate") and isinstance(getattr(module, "weight", None), torch.Tensor):
+                module.weight.zero_()
+    batches = [{"input_ids": torch.randint(3, 100, (1, 8), device=device)} for _ in range(8)]
+    adapter = TransformersBypassAdapter()
+    with hf_torch_kernels(teacher):
+        student = mtq.quantize(
+            copy.deepcopy(teacher),
+            {
+                "quant_cfg": [
+                    {"quantizer_name": "*", "enable": False},
+                    *[
+                        {"quantizer_name": p, "cfg": {"num_bits": "iq2_xxs", "backend": "ggml"}}
+                        for p in adapter.weight_patterns(teacher)
+                    ],
+                ],
+                "algorithm": "max",
+            },
+            lambda m: m(**batches[0]),
+        )
+        recipe = {"num_steps": 2, "global_batch_size": 4, "sequence_length": 8}
+        single = init_device_mesh("cuda", (size, 1), mesh_dim_names=("owners", "dp"))["dp"]
+        reference = copy.deepcopy(student)
+        mtd.bypass(reference, copy.deepcopy(teacher), batches, recipe, device_mesh=single)
+        with torch.no_grad():
+            expected = reference(**batches[0]).logits.detach().cpu()
+        del reference
+        manager = TransformersDeviceMesh(
+            init_device_mesh(
+                "cuda", (1, 1, 4, 1), mesh_dim_names=("pp", "dp_replicate", "fsdp", "tp")
+            ),
+            init_device_mesh(
+                "cuda", (1, 1, 1, 4), mesh_dim_names=("pp", "dp_replicate", "efsdp", "ep")
+            ),
+        )
+        adapter = TransformersBypassAdapter(manager)
+        adapter.parallelize(student)
+        adapter.parallelize(teacher)
+        before = {
+            n: p.to_local().clone() if hasattr(p, "to_local") else p.clone()
+            for n, p in teacher.state_dict().items()
+        }
+        local = [batches[step * 4 + rank] for step in range(2)]
+        assert mtd.bypass(student, teacher, local, recipe, device_mesh=manager) is student
+        assert all(
+            len(ids) == 1
+            for ids in adapter.context.parallel_metadata[id(student)]["expert_global_ids"].values()
+        )
+        for name, value in teacher.state_dict().items():
+            value = value.to_local() if hasattr(value, "to_local") else value
+            torch.testing.assert_close(value, before[name], rtol=0, atol=0)
+        with torch.no_grad():
+            actual = student(**batches[0]).logits
+        torch.testing.assert_close(actual.cpu(), expected, rtol=0.025, atol=0.03)
+
+
+@pytest.mark.parametrize(
+    "record",
+    list({r["family"]: r for r in release_cases() if r["family"] in _PORTED}.values()),
+    ids=lambda r: r["family"],
+)
+@pytest.mark.timeout(300)
+def test_native_port_updates_and_empty_expert_owners(native_workers, record):
+    native_workers.run(_native_port_worker, record)
