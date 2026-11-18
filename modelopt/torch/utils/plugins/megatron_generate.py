@@ -291,16 +291,23 @@ def megatron_prefill(
         )
         send_to_next_pipeline_rank(output.to(dtype=pp_dtype))
 
+    if skip_return_logits:
+        return None
+
     # .contiguous() is required because the slice is a view with the padded stride; the broadcast
     # below asserts contiguity when SP pads seq_length up to a multiple of TP.
     logits = output[:, :seq_length, :].detach().contiguous() if pp_last else None
 
-    if model.config.bf16:
-        logits_dtype = torch.bfloat16
-    elif model.config.fp16:
-        logits_dtype = torch.float16
-    else:
-        logits_dtype = torch.float32
+    if not is_pp:
+        return logits
+    logits_dtype = getattr(model.config, "logit_dtype", None)
+    if logits_dtype is None:
+        if model.config.bf16:
+            logits_dtype = torch.bfloat16
+        elif model.config.fp16:
+            logits_dtype = torch.float16
+        else:
+            logits_dtype = torch.float32
 
     # All PP ranks must participate in the broadcast to stay in sync.
     # VLM wrappers (e.g. Qwen3VLModel) hold the output layer on the inner language_model, so the
@@ -311,7 +318,7 @@ def megatron_prefill(
     result = broadcast_from_last_pipeline_stage(
         [batch_size, seq_length, vocab_size], logits_dtype, logits
     )
-    return None if skip_return_logits else result
+    return result
 
 
 def megatron_generate(

@@ -35,6 +35,8 @@ Changelog
 
 **Bug Fixes**
 
+- Preserve explicit FP32 logits in Megatron prefill and skip the unused output broadcast during calibration.
+
 - Add an explicit Megatron-Bridge PTQ attention backend override so calibration can allow fallback when a provider pins a fused backend.
 
 *Quantization*

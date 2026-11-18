@@ -100,3 +100,50 @@ def test_prefill_disables_auxiliary_training_head_and_applies_padding(monkeypatc
         skip_return_logits=True,
         padding_mask=torch.tensor([[0, 1, 1]]),
     )
+
+
+@pytest.mark.parametrize("pipeline", [False, True])
+@pytest.mark.parametrize("skip_return_logits", [False, True])
+def test_prefill_preserves_explicit_fp32_output(monkeypatch, pipeline, skip_return_logits):
+    monkeypatch.setattr(generation.mpu, "is_pipeline_first_stage", lambda: not pipeline)
+    monkeypatch.setattr(generation.mpu, "is_pipeline_last_stage", lambda: True)
+    monkeypatch.setattr(generation.mpu, "get_context_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(generation, "recv_from_prev_pipeline_rank_", lambda tensor: None)
+    received = []
+
+    def broadcast(shape, dtype, tensor):
+        assert dtype == tensor.dtype == torch.float32
+        received.append(tensor)
+        return tensor
+
+    monkeypatch.setattr(generation, "broadcast_from_last_pipeline_stage", broadcast)
+    expected = torch.full((1, 2, 3), 1 + 2**-14, dtype=torch.float32)
+
+    class Model(generation.MegatronModule):
+        vocab_size = 3
+
+        def set_input_tensor(self, tensor):
+            self.input_tensor = tensor
+
+        def forward(self, *args, **kwargs):
+            return expected
+
+    model = Model(
+        SimpleNamespace(
+            pipeline_dtype=torch.bfloat16,
+            sequence_parallel=False,
+            hidden_size=3,
+            bf16=True,
+            fp16=False,
+            logit_dtype=torch.float32,
+        )
+    )
+    actual = generation.megatron_prefill(
+        model, torch.tensor([[1, 2]]), skip_return_logits=skip_return_logits
+    )
+    if skip_return_logits:
+        assert actual is None and not received
+    else:
+        assert actual.dtype == torch.float32
+        assert torch.equal(actual, expected)
+        assert len(received) == int(pipeline)
