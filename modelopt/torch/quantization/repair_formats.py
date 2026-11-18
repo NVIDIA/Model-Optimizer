@@ -165,6 +165,7 @@ class IQScaleState(nn.Module):
         quantizer._enable_pre_quant_scale = False
         quantizer.disable_rotate()
         weight.copy_(values.reshape(weight.shape))
+        del values
         # Future forwards recreate zero padding, even when the payload's tail decodes nonzero.
         source = quantizer._process_for_blockquant(weight) if padded else weight
         pin_packed_weight(

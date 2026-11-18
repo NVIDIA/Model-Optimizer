@@ -22,10 +22,12 @@ import torch.nn as nn
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantLinearConvBase, TensorQuantizer
+from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
 
 try:
     from accelerate import cpu_offload
     from accelerate.hooks import AlignDevicesHook, ModelHook, add_hook_to_module
+    from accelerate.utils import set_module_tensor_to_device
 except ImportError:
     pytest.skip("accelerate not available", allow_module_level=True)
 
@@ -85,7 +87,8 @@ def test_tensor_quantizer_modelopt_state_with_accelerate_hook():
 
 
 @pytest.mark.parametrize("offload_mode", ["direct_hook", "cpu_offload"])
-def test_buffer_registered_during_weight_access_survives_buffer_offload(offload_mode):
+@pytest.mark.parametrize("mixed_entry", [False, True])
+def test_buffer_registered_during_weight_access_survives_buffer_offload(offload_mode, mixed_entry):
     """GPTQ's payload pin is registered while the offloaded weight is materialized; the hook must
     still be able to reload it after offloading the module again."""
     torch.manual_seed(0)
@@ -118,3 +121,24 @@ def test_buffer_registered_during_weight_access_survives_buffer_offload(offload_
         weights_map[pin_key], torch.tensor((8, 512)), dtype=torch.float32
     )
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
+    if mixed_entry:
+        resident_name = "weight" if offload_mode == "direct_hook" else pin_key
+        updated = weights_map[resident_name].clone().add_(1)
+        set_module_tensor_to_device(model, resident_name, "cpu", value=updated)
+        devices = {name: tensor.device for name, tensor in model.state_dict().items()}
+        hooks = [
+            hook
+            for module in model.modules()
+            if hasattr(module, "_hf_hook")
+            for hook in getattr(module._hf_hook, "hooks", (module._hf_hook,))
+            if isinstance(hook, AlignDevicesHook) and hook.offload
+        ]
+        with (
+            pytest.raises(ValueError),
+            enable_weight_access_and_writeback(model, model, writeback=False),
+        ):
+            pass
+        assert {name: tensor.device for name, tensor in model.state_dict().items()} == devices
+        assert all(hook.offload for hook in hooks)
+        resident = model.weight if resident_name == "weight" else model.get_buffer(resident_name)
+        torch.testing.assert_close(resident, updated, rtol=0, atol=0)

@@ -182,9 +182,8 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
         hook = _get_offload_hook(mod._hf_hook)
         if hook is None:
             continue
-        # Inspect only this hook's tensors; a descendant's meta buffers must not reload
-        # already-materialized parent weights from stale CPU state_dict values.
-        needs_materialize = any(
+        # Preflight every owner before loading: a mixed set would reload resident updates.
+        offloaded = [
             tensor.device.type == "meta"
             for _, tensor in named_module_tensors(
                 mod,
@@ -192,12 +191,19 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
                 recurse=hook.place_submodules,
                 remove_non_persistent=True,
             )
-        )
+        ]
+        needs_materialize = any(offloaded)
+        if needs_materialize and not all(offloaded):
+            raise ValueError(
+                "Accelerate weight access requires all managed tensors on meta or resident"
+            )
+        materialized.append((mod, hook, needs_materialize))
+
+    for mod, hook, needs_materialize in materialized:
         if needs_materialize:
             _carry_quantizers_with_offload(hook)
             hook.pre_forward(mod)
         hook.offload = False
-        materialized.append((mod, hook, needs_materialize))
 
     try:
         yield
