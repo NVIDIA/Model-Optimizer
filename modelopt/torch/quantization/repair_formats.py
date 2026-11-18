@@ -124,7 +124,7 @@ class IQScaleState(nn.Module):
         )
 
     def forward(self, inputs):
-        """Decode only this replay's weight and release its expanded levels afterward."""
+        """Replay native fields; inputs supplies only metadata such as shape and dtype."""
         with torch.no_grad():
             levels, _ = self.format.decode_int8(self.packed, torch.tensor(self.codec_shape))
         steps = self.projected_steps()

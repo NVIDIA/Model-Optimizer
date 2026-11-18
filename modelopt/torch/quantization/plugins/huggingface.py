@@ -615,7 +615,11 @@ class _TransposedQuantization(torch.autograd.Function):
         return grad_output, None
 
 
-_transposed_quantize = _TransposedQuantization.apply
+def _transposed_quantize(inputs, quantizer):
+    # The custom Function cannot track repair masters carried inside the quantizer object.
+    if any(getattr(module, "_local_repair_active", False) for module in quantizer.modules()):
+        return quantizer(inputs.transpose(-1, -2).contiguous()).transpose(-1, -2)
+    return _TransposedQuantization.apply(inputs, quantizer)
 
 
 class _TransposedExpertsCalibMixin:
