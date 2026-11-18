@@ -22,6 +22,8 @@ from collections import OrderedDict
 import numpy as np
 import pytest
 import torch
+from _test_utils.bypass import BypassNetwork as _Network
+from _test_utils.bypass import bypass_problem as _problem
 from torch import nn
 
 import modelopt.torch.distill as mtd
@@ -30,61 +32,6 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
-
-
-class _Network(nn.Sequential):
-    def forward(self, hidden_states, attention_mask=None):
-        return super().forward(hidden_states)
-
-
-def _problem():
-    torch.manual_seed(37)
-    student = _Network(
-        OrderedDict(
-            [
-                ("mlp", nn.Linear(256, 256, bias=False)),
-                ("activation", nn.SiLU()),
-                ("moe", nn.Linear(256, 256, bias=False)),
-                ("head", nn.Linear(256, 4, bias=False)),
-            ]
-        )
-    )
-    batches = [torch.randn(2, 3, 256) for _ in range(8)]
-    mtq.quantize(
-        student,
-        {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "mlp.weight_quantizer",
-                    "cfg": {"num_bits": "iq1_m", "backend": "ggml"},
-                },
-                {
-                    "quantizer_name": "moe.weight_quantizer",
-                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
-                },
-            ],
-            "algorithm": "max",
-        },
-        lambda m: m(batches[0]),
-    )
-    teacher = _Network(
-        OrderedDict(
-            [
-                ("mlp", nn.Linear(256, 256, bias=False)),
-                ("activation", nn.SiLU()),
-                ("moe", nn.Linear(256, 256, bias=False)),
-                ("head", nn.Linear(256, 4, bias=False)),
-            ]
-        )
-    )
-    with torch.no_grad():
-        for name in ("mlp", "moe"):
-            layer = student.get_submodule(name)
-            teacher.get_submodule(name).weight.copy_(layer.weight_quantizer(layer.weight) * 1.02)
-        teacher.head.weight.copy_(student.head.weight)
-    teacher.head.eval()
-    return student, teacher, batches
 
 
 def test_bypass_streams_independent_units_and_finalizes(tmp_path):
