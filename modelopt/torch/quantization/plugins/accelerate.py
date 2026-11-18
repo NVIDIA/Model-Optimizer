@@ -17,7 +17,9 @@
 import inspect
 import os
 import warnings
+from collections import UserDict
 from contextlib import contextmanager
+from itertools import chain
 from typing import Any
 
 import torch
@@ -26,7 +28,7 @@ from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from accelerate.hooks import AlignDevicesHook, SequentialHook
 from accelerate.utils import get_max_memory, infer_auto_device_map
 from accelerate.utils.dataclasses import CustomDtype
-from accelerate.utils.offload import PrefixedDataset
+from accelerate.utils.offload import OffloadedWeightsLoader, PrefixedDataset
 
 import modelopt.torch.quantization as mtq
 
@@ -47,30 +49,112 @@ def _get_offload_hook(hook):
     return None
 
 
-def _writeback_params_to_weights_map(module, align_hook):
+def _weights_map_and_prefix(align_hook):
+    weights_map = align_hook.weights_map
+    prefix = ""
+    while isinstance(weights_map, PrefixedDataset):
+        prefix = weights_map.prefix + prefix
+        weights_map = weights_map.dataset
+    return weights_map, prefix
+
+
+def _resident_weights_map(weights_map):
+    if isinstance(weights_map, OffloadedWeightsLoader):
+        weights_map = weights_map.state_dict
+    if isinstance(weights_map, UserDict):
+        weights_map = weights_map.data
+    if not isinstance(weights_map, dict):
+        raise ValueError("Accelerate weight access cannot safely inspect this offload mapping")
+    return weights_map
+
+
+def _managed_tensors(module, include_buffers=True, recurse=False):
+    """Inspect persistence at each registering owner, without Accelerate 1.6's set mutation."""
+    yield from module.named_parameters(recurse=recurse)
+    if include_buffers:
+        for name, tensor in module.named_buffers(recurse=recurse):
+            path, _, local_name = name.rpartition(".")
+            owner = module.get_submodule(path)
+            if local_name not in owner._non_persistent_buffers_set:
+                yield name, tensor
+
+
+def _offloaded_tensor_backings(module):
+    """Return resident CPU parameter and buffer backings without paging disk weights."""
+    backings = {}
+    for owner in module.modules():
+        hook = _get_offload_hook(getattr(owner, "_hf_hook", None))
+        if hook is None:
+            continue
+        weights_map, prefix = _weights_map_and_prefix(hook)
+        resident = None
+        children = (
+            owner.named_modules(remove_duplicate=False) if hook.place_submodules else (("", owner),)
+        )
+        for path, child in children:
+            for name, tensor in chain(
+                child._parameters.items(), child._buffers.items() if hook.offload_buffers else ()
+            ):
+                if tensor is None or not tensor.is_meta:
+                    continue
+                if resident is None:
+                    resident = _resident_weights_map(weights_map)
+                tensor = resident.get(prefix + (f"{path}." if path else "") + name)
+                if isinstance(tensor, torch.Tensor) and tensor.device.type == "cpu":
+                    backings[child, name] = tensor
+    return backings
+
+
+def _snapshot_aliased_weights(entered):
+    """Copy backing tensors that live CPU weights can mutate in place."""
+    tensors = [
+        (hook, name, tensor)
+        for mod, hook, _ in entered
+        for name, tensor in _managed_tensors(mod, recurse=True)
+    ]
+    live_storages = {
+        tensor.untyped_storage().data_ptr()
+        for _, _, tensor in tensors
+        if tensor.device.type == "cpu"
+    }
+    snapshots = {}
+    for hook, name, _ in tensors:
+        weights_map, prefix = _weights_map_and_prefix(hook)
+        tensor = _resident_weights_map(weights_map).get(prefix + name)
+        if (
+            tensor is not None
+            and tensor.device.type == "cpu"
+            and tensor.untyped_storage().data_ptr() in live_storages
+        ):
+            key = (
+                tensor.untyped_storage().data_ptr(),
+                tensor.storage_offset(),
+                tensor.shape,
+                tensor.stride(),
+                tensor.dtype,
+            )
+            if key not in snapshots:
+                snapshots[key] = tensor, tensor.detach().clone()
+    return snapshots.values()
+
+
+def _writeback_params_to_weights_map(module, align_hook, journal):
     """Write all non-meta parameters and buffers back to the hook's CPU weights_map."""
     buffer_names = {name for name, _ in module.named_buffers()}
+    dataset, prefix = _weights_map_and_prefix(align_hook)
+    w_map = _resident_weights_map(dataset)
     for name, tensor in module.state_dict(keep_vars=True).items():
         if tensor.device.type == "meta":
             continue
-        if isinstance(align_hook.weights_map, PrefixedDataset):
-            key = align_hook.weights_map.prefix + name
-            w_map = align_hook.weights_map.dataset.state_dict
-        else:
-            w_map = align_hook.weights_map
-            key = name
+        key = prefix + name
         if key in w_map:
-            w_map[key] = tensor.detach().to(w_map[key].device, dtype=w_map[key].dtype)
-        elif (
-            isinstance(align_hook.weights_map, PrefixedDataset)
-            and hasattr(align_hook.weights_map.dataset, "index")
-            and key in align_hook.weights_map.dataset.index
-        ):
+            value = tensor.detach().to(w_map[key].device, dtype=w_map[key].dtype)
+        elif isinstance(dataset, OffloadedWeightsLoader) and key in dataset.index:
             # Disk-offloaded weight: promote into state_dict so the next
             # pre_forward picks up the modified tensor instead of the stale
             # on-disk version.  OffloadedWeightsLoader.__getitem__ gives
             # state_dict priority over index, so this is sufficient.
-            w_map[key] = tensor.detach().cpu()
+            value = tensor.detach().cpu()
             warnings.warn(
                 "Accelerate disk-offload writeback is currently kept in CPU state_dict; "
                 "writing updates back to disk offload files is TODO.",
@@ -80,7 +164,11 @@ def _writeback_params_to_weights_map(module, align_hook):
         elif align_hook.offload_buffers and name in buffer_names:
             # A buffer first registered inside the context, such as a GPTQ payload pin: without a
             # backing value the hook cannot reload it after offloading the module again.
-            w_map[key] = tensor.detach().cpu()
+            value = tensor.detach().cpu()
+        else:
+            continue
+        journal.append((w_map, key, w_map.get(key)))
+        w_map[key] = value
 
 
 def _own_quantizers(module):
@@ -171,8 +259,12 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
     is True, writes materialized tensors back on exit. ``pre_forward`` is skipped on
     modules whose weights are already
     materialized (not on meta) to avoid overwriting them with stale CPU copies.
+    Failed windows restore backing maps and pre-window registrations and placement. The
+    yielded idempotent rollback callback also permits a caller to undo a locally successful
+    commit after a peer fails. CPU tensors sharing live weight storage require host snapshots;
+    other rollback state holds references and metadata, without copying execution-device weights.
     """
-    assert hasattr(module, "_hf_hook")
+    assert any(hasattr(child, "_hf_hook") for child in module.modules())
 
     materialized: list[tuple[torch.nn.Module, AlignDevicesHook, bool]] = []
     for mod in module.modules():
@@ -181,24 +273,129 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
         hook = _get_offload_hook(mod._hf_hook)
         if hook is None:
             continue
-        # Only call pre_forward if weights need materializing; already-materialized
-        # weights would be overwritten with stale CPU state_dict values.
-        needs_materialize = any(p.device.type == "meta" for p in mod.parameters())
-        if needs_materialize:
-            _carry_quantizers_with_offload(hook)
-            hook.pre_forward(mod)
-        hook.offload = False
+        # Preflight every owner before loading: a mixed set would reload resident updates.
+        offloaded = [
+            tensor.device.type == "meta"
+            for _, tensor in _managed_tensors(
+                mod,
+                include_buffers=hook.offload_buffers,
+                recurse=hook.place_submodules,
+            )
+        ]
+        needs_materialize = any(offloaded)
+        if needs_materialize and not all(offloaded):
+            raise ValueError(
+                "Accelerate weight access requires all managed tensors on meta or resident"
+            )
         materialized.append((mod, hook, needs_materialize))
 
+    entered = []
+    ready = False
+    error = None
+    propagating = False
+    snapshots = ()
+    journal = []
+    registrations = [
+        (mod, mod._parameters.copy(), mod._buffers.copy(), mod._non_persistent_buffers_set.copy())
+        for mod in module.modules()
+    ]
+    originals = {
+        id(tensor): (tensor, tensor.data)
+        for _, parameters, buffers, _ in registrations
+        for tensor in chain(parameters.values(), buffers.values())
+        if tensor is not None
+    }
+    ties = {
+        id(hook.tied_params_map): (
+            hook.tied_params_map,
+            {pointer: values.copy() for pointer, values in hook.tied_params_map.items()},
+        )
+        for _, hook, _ in materialized
+        if hook.tied_params_map is not None
+    }
+    rolled_back = False
+
+    def rollback():
+        nonlocal rolled_back
+        if rolled_back:
+            return
+        rollback_error = None
+
+        def attempt(action, *args):
+            nonlocal rollback_error
+            try:
+                action(*args)
+            except BaseException as exc:
+                if rollback_error is None:
+                    rollback_error = exc
+                else:
+                    rollback_error.add_note(f"Accelerate weight-access rollback failed: {exc!r}")
+
+        for weights_map, key, original in reversed(journal):
+            if original is None:
+                attempt(weights_map.pop, key, None)
+            else:
+                attempt(weights_map.__setitem__, key, original)
+        with torch.no_grad():
+            for original, snapshot in snapshots:
+                attempt(original.copy_, snapshot)
+            for tensor, data in originals.values():
+                attempt(setattr, tensor, "data", data)
+        for mod, parameters, buffers, nonpersistent in registrations:
+            mod._parameters = parameters.copy()
+            mod._buffers = buffers.copy()
+            mod._non_persistent_buffers_set = nonpersistent.copy()
+        for mapping, values in ties.values():
+            mapping.clear()
+            mapping.update({pointer: entries.copy() for pointer, entries in values.items()})
+        if rollback_error is not None:
+            raise rollback_error
+        rolled_back = True
+
     try:
-        yield
+        for mod, hook, needs_materialize in materialized:
+            if needs_materialize:
+                _carry_quantizers_with_offload(hook)
+            # pre_forward can fail after loading only part of this owner's tensors.
+            entered.append((mod, hook, needs_materialize))
+            if needs_materialize:
+                hook.pre_forward(mod)
+            hook.offload = False
+        if writeback:
+            snapshots = _snapshot_aliased_weights(entered)
+        ready = True
+        yield rollback
+    except BaseException as exc:
+        error = exc
+        propagating = True
+        raise
     finally:
-        for mod, hook, was_materialized in materialized:
+        for mod, hook, was_materialized in reversed(entered):
             hook.offload = True
-            if writeback:
-                _writeback_params_to_weights_map(mod, hook)
-            if was_materialized:
-                hook.post_forward(mod, None)
+            try:
+                if ready and writeback and not propagating:
+                    _writeback_params_to_weights_map(mod, hook, journal)
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+                else:
+                    error.add_note(f"Accelerate weight-access cleanup failed: {exc!r}")
+            finally:
+                try:
+                    if was_materialized:
+                        hook.post_forward(mod, None)
+                except BaseException as exc:
+                    if error is None:
+                        error = exc
+                    else:
+                        error.add_note(f"Accelerate weight-access cleanup failed: {exc!r}")
+        if error is not None:
+            try:
+                rollback()
+            except BaseException as exc:
+                error.add_note(f"Accelerate weight-access rollback failed: {exc!r}")
+        if error is not None and not propagating:
+            raise error
 
 
 @contextmanager
