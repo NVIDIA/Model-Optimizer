@@ -14,7 +14,7 @@ Recommended for publication based on the completed evaluation evidence in this r
 - Evaluator version: `1.6.10`
 - Agents: Claude Code (`aws/anthropic/bedrock-claude-opus-5-5`), Codex (`openai/openai/gpt-6.1-sol`)
 - Tasks: 1 evaluation tasks (1 positive)
-- Dataset digest: `sha256:21a605b90be2b09b997241a3439a192d69be2cd605d76a0fd6efb853e524ad4f` (skill-evaluator-dataset-snapshot/1)
+- Dataset digest: `sha256:964e367df033c49d035170f7088fb0571faaa64aafd97b993806832d305c1f1a` (skill-evaluator-dataset-snapshot/1)
 - Attempts per task: 1
 - Environment: `k8s-sandbox`
 - Tier 2 evidence: required for publication
@@ -50,12 +50,12 @@ The three-tier evaluation checks whether the skill:
 
 | Measure | Claude Code (Baseline → Skill Uplift) | Codex (Baseline → Skill Uplift) |
 |---|---:|---:|
-| Overall | 78.9% — baseline ran, but no comparable score was available; uplift unavailable | 87.2% — baseline ran, but no comparable score was available; uplift unavailable |
+| Overall | 96.0% — baseline ran, but no comparable score was available; uplift unavailable | 87.9% — baseline ran, but no comparable score was available; uplift unavailable |
 | Security | 100.0% → 100.0% (±0.0 points) | 100.0% → 100.0% (±0.0 points) |
-| Correctness | 60.0% → 80.0% (+20.0 points) | 80.0% → 80.0% (±0.0 points) |
+| Correctness | 100.0% → 100.0% (±0.0 points) | 100.0% → 100.0% (±0.0 points) |
 | Discoverability | 100.0% — baseline ran, but no comparable score was available; uplift unavailable | 95.0% — baseline ran, but no comparable score was available; uplift unavailable |
-| Effectiveness | 18.8% → 31.3% (+12.5 points) | 25.0% → 100.0% (+75.0 points) |
-| Efficiency | 83.0% — baseline ran, but no comparable score was available; uplift unavailable | 60.8% — baseline ran, but no comparable score was available; uplift unavailable |
+| Effectiveness | 16.7% → 83.3% (+66.6 points) | 75.0% → 66.7% (-8.3 points) |
+| Efficiency | 96.8% — baseline ran, but no comparable score was available; uplift unavailable | 78.0% — baseline ran, but no comparable score was available; uplift unavailable |
 
 **How to read this table:** baseline is the same task attempted without the target skill. Scores are rounded to one decimal; threshold-adjacent values use additional precision so their displayed band matches the verdict. Uplift is derived from those displayed scores and shown in percentage points.
 
@@ -68,9 +68,9 @@ Shared-source comparisons use the same signals and weights on both conditions. T
 | Agent | Dimension | Basis | Baseline → With skill (uplift) | Explanation |
 | --- | --- | --- | --- | --- |
 | claude-code | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
-| claude-code | Efficiency | Token-only comparison | 96.2% → 91.0% (-5.2 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
+| claude-code | Efficiency | Token-only comparison | 98.3% → 93.6% (-4.7 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
 | codex | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
-| codex | Efficiency | Token-only comparison | 77.5% → 81.6% (+4.1 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
+| codex | Efficiency | Token-only comparison | 83.6% → 89.3% (+5.7 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
 
 ## Token Usage
 
@@ -78,11 +78,11 @@ Actual Tier 3 execution usage is reported for every observed agent/case pair and
 
 | Agent | Dataset case | With skill | Without skill | Delta | Change | Coverage |
 |---|---|---:|---:|---:|---:|---|
-| claude-code | All cases | 173,167 | 112,296 | +60,871 | +54.21% | skill 1/1; base 1/1 |
-| claude-code | plan-nvfp4-recipe-search | 173,167 | 112,296 | +60,871 | +54.21% | skill 1/1; base 1/1 |
-| codex | All cases | 74,372 | 58,054 | +16,318 | +28.11% | skill 1/1; base 1/1 |
-| codex | plan-nvfp4-recipe-search | 74,372 | 58,054 | +16,318 | +28.11% | skill 1/1; base 1/1 |
-| ALL AGENTS | Dataset aggregate | 247,539 | 170,350 | +77,189 | +45.31% | skill 2/2; base 2/2 |
+| claude-code | All cases | 122,105 | 37,149 | +84,956 | +228.69% | skill 1/1; base 1/1 |
+| claude-code | outline-nvfp4-recipe-search | 122,105 | 37,149 | +84,956 | +228.69% | skill 1/1; base 1/1 |
+| codex | All cases | 53,216 | 39,335 | +13,881 | +35.29% | skill 1/1; base 1/1 |
+| codex | outline-nvfp4-recipe-search | 53,216 | 39,335 | +13,881 | +35.29% | skill 1/1; base 1/1 |
+| ALL AGENTS | Dataset aggregate | 175,321 | 76,484 | +98,837 | +129.23% | skill 2/2; base 2/2 |
 
 Prompt tokens include cached reads, so total tokens are `prompt + completion` (cached is not added twice). The Efficiency score uses `(prompt - cached) + completion`. Change is `100 * (with - without) / without`; negative means fewer tokens. N/A comparisons include their reason in the coverage column; coverage is never estimated.
 
@@ -100,19 +100,19 @@ Prompt tokens include cached reads, so total tokens are `prompt + completion` (c
 <summary>Show detailed findings and successful checks</summary>
 
 - **HIGH** DUPLICATE/duplicate: Duplicate content found across SKILL.md and references/recipe_iteration.md:
-  "## Problem" in SKILL.md (lines 25-45)
-  vs "## Design Workflow" in SKILL.md (lines 70-121)
-  vs "## Problem" in references/recipe_iteration.md (lines 3-18)
-  vs "## Design Workflow" in references/recipe_iteration.md (lines 112-155) (`SKILL.md:25`)
-- **HIGH** DUPLICATE/duplicate: Duplicate content found across SKILL.md and references/recipe_iteration.md:
   "## Skill Boundaries" in SKILL.md (lines 13-24)
   vs "## Delegating To Existing Skills" in references/recipe_iteration.md (lines 211-227) (`SKILL.md:13`)
+- **HIGH** DUPLICATE/duplicate: Duplicate content found across SKILL.md and references/recipe_iteration.md:
+  "## Search Space" in SKILL.md (lines 46-69)
+  vs "## Search Space" in references/recipe_iteration.md (lines 19-33) (`SKILL.md:46`)
 - **HIGH** DUPLICATE/duplicate: Duplicate content found across SKILL.md and references/recipe_iteration.md:
   "## Iteration Loop" in SKILL.md (lines 122-167)
   vs "## Iteration Loop" in references/recipe_iteration.md (lines 174-210) (`SKILL.md:122`)
 - **HIGH** DUPLICATE/duplicate: Duplicate content found across SKILL.md and references/recipe_iteration.md:
-  "## Search Space" in SKILL.md (lines 46-69)
-  vs "## Search Space" in references/recipe_iteration.md (lines 19-33) (`SKILL.md:46`)
+  "## Problem" in SKILL.md (lines 25-45)
+  vs "## Design Workflow" in SKILL.md (lines 70-121)
+  vs "## Problem" in references/recipe_iteration.md (lines 3-18)
+  vs "## Design Workflow" in references/recipe_iteration.md (lines 112-155) (`SKILL.md:25`)
 - **MEDIUM** QUALITY/quality_correctness: SKILL_SPEC recommended field missing: 'metadata.author' (`skills/modelopt-quant-recipe-search/SKILL.md`)
 - 11 additional finding(s) are available in the full evaluation artifacts.
 
