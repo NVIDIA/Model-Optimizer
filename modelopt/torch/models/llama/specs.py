@@ -15,12 +15,16 @@
 
 """Llama specs (HF model type ``llama``)."""
 
-from ..specs import ExportSpec, ModelSpec, register
+from ..specs import BypassSpec, ExportSpec, ModelSpec, register
 
 __all__: list[str] = []
 
 register(
     ModelSpec(
+        bypass_spec=BypassSpec(
+            decoder_paths=("model.layers", "layers"),
+            batch_packed_documents=True,
+        ),
         model_type="llama",
         min_transformers_version="5.5",
         export_spec=ExportSpec(
