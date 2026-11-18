@@ -225,6 +225,11 @@ def mse_statistics(prediction, target, valid_mask=None):
         if mask is None
         else mask.sum(dtype=torch.int64) * features
     )
+    from modelopt.torch.quantization.repair_formats import _native_scale_kernels
+
+    kernels = _native_scale_kernels(prediction)
+    if kernels is not None:
+        return kernels.masked_mse_sum(prediction, target, mask, features), count
     return _MaskedMSE.apply(prediction, target, mask, max(features, 1)), count
 
 
