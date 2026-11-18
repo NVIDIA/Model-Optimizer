@@ -347,9 +347,9 @@ def _restore_checkpoint_dtypes(model, metadata):
         collect(chunk.sharded_state_dict())
         for _, tensor in (*chunk.named_parameters(), *chunk.named_buffers()):
             key = destinations.get(tensor.data_ptr())
-            if (
-                key in metadata
-                and tensor.is_floating_point()
-                and tensor.dtype != metadata[key].dtype
-            ):
-                tensor.data = tensor.data.to(dtype=metadata[key].dtype)
+            if key in metadata and tensor.is_floating_point():
+                if tensor.dtype != metadata[key].dtype:
+                    tensor.data = tensor.data.to(dtype=metadata[key].dtype)
+                # Float16Module runs after loading; keep source FP32 storage through that cast.
+                # A source BF16 tensor must also clear a construction-time FP32 annotation.
+                tensor.keep_in_fp32 = metadata[key].dtype == torch.float32

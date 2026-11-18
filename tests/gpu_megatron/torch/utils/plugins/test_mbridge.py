@@ -21,6 +21,7 @@ import yaml
 from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
 from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.bridge.utils.yaml_utils import dump_dataclass_to_yaml
+from megatron.core.transformer.module import Float16Module
 
 from modelopt.torch.utils.plugins.mbridge import _restore_checkpoint_dtypes, set_moe_expert_layout
 
@@ -57,6 +58,14 @@ def test_checkpoint_storage_precision_is_restored_before_copy():
     assert torch.equal(model.weight, source)
     assert model.state.dtype == torch.bfloat16
     assert model.indices.dtype == torch.int32
+    # Later mixed-precision wrapping must honor checkpoint storage, including when
+    # the destination was already FP32 and no dtype conversion was needed above.
+    _restore_checkpoint_dtypes([model], metadata)
+    Float16Module(
+        SimpleNamespace(fp16=False, bf16=True, virtual_pipeline_model_parallel_size=None), model
+    )
+    assert torch.equal(model.weight, source)
+    assert model.state.dtype == torch.bfloat16
 
 
 def _round_trip(value):
