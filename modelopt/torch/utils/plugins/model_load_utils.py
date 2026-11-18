@@ -69,10 +69,11 @@ from transformers.core_model_loading import (
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
+from modelopt import env
 from modelopt.torch.export.model_utils import get_language_model_from_vl
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import env, moe
+from modelopt.torch.utils import moe
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ParallelState,
