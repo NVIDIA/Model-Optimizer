@@ -49,6 +49,11 @@ DFlash2DMRegistry = _DMRegistryCls(prefix="DFlash2")
 # ``dflash_architecture_config.projector_type == "lilicorr"`` and kept in its own
 # registry so its wrapper (HFLiLiCorrModel) does not overwrite HFDFlashModel.
 LiLiCorrDMRegistry = _DMRegistryCls(prefix="LiLiCorr")
+# DSpine also reuses the dflash mode/config/recipe, converting the base model to a causal
+# DFlash backbone with an adjacent causal injection after every draft layer. Selected via
+# ``dflash_architecture_config.projector_type == "dspine"`` and kept in its own registry so
+# its wrapper (HFDSpineModel) does not overwrite HFDFlashModel.
+DSpineDMRegistry = _DMRegistryCls(prefix="DSpine")
 
 # dflash_architecture_config.projector_type -> the registry holding that variant's wrapper.
 _REGISTRY_BY_PROJECTOR_TYPE = {
@@ -58,6 +63,7 @@ _REGISTRY_BY_PROJECTOR_TYPE = {
     "dspark": DSparkDMRegistry,
     "dflash2": DFlash2DMRegistry,
     "lilicorr": LiLiCorrDMRegistry,
+    "dspine": DSpineDMRegistry,
 }
 
 # Deprecated dflash_architecture_config keys (removed in 0.50), each with the model attribute

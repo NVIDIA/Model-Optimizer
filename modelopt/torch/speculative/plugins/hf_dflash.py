@@ -852,7 +852,11 @@ class HFDFlashModel(DFlashModel):
         return base_token, model_output.hidden_states
 
     def _draft_block(self, base_token, hidden_states):
-        """Draft hidden states [B, block_size, H] for the block that ``base_token`` anchors.
+        """Draft hidden states [B, block_size, H] for the block that ``base_token`` anchors."""
+        return self.dflash_module(**self._draft_block_inputs(base_token, hidden_states))
+
+    def _draft_block_inputs(self, base_token, hidden_states):
+        """The draft module's inputs for one block anchored by ``base_token`` after the context.
 
         Re-runs no base layer: the context is ``hidden_states`` from :meth:`_generation_base`.
         """
@@ -881,12 +885,12 @@ class HFDFlashModel(DFlashModel):
 
         attn_mask = self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device)
 
-        return self.dflash_module(
-            noise_embedding=noise_embedding,
-            target_hidden=target_hidden,
-            position_ids=pos_ids,
-            attention_mask=attn_mask,
-        )
+        return {
+            "noise_embedding": noise_embedding,
+            "target_hidden": target_hidden,
+            "position_ids": pos_ids,
+            "attention_mask": attn_mask,
+        }
 
     def _draft_zero_loss(self, device, through=()):
         """A zero loss with a backward path to the draft, for a step with nothing to train.
@@ -944,6 +948,40 @@ class HFDFlashModel(DFlashModel):
         logits = torch.einsum("...h,...kh->...k", rows, lm_head.weight[token_ids])
         bias = getattr(lm_head, "bias", None)
         return logits if bias is None else logits + bias[token_ids]
+
+    def _draft_loss(
+        self,
+        input_ids,
+        anchor_positions,
+        block_keep_mask,
+        loss_mask,
+        base_outputs,
+        *,
+        noise_embedding,
+        position_ids,
+        attention_mask,
+    ):
+        """Run the draft over the sampled blocks and return ``(loss, accuracy)``.
+
+        A variant whose draft reads more than these inputs, or whose loss reads the draft's
+        internals, overrides this rather than the whole training forward.
+        """
+        hidden = self.dflash_module(
+            noise_embedding=noise_embedding,
+            target_hidden=base_outputs.target_hidden,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+        )
+        logits = self._base_model_lm_head(hidden)
+        return self._compute_loss(
+            logits,
+            input_ids,
+            anchor_positions,
+            block_keep_mask,
+            loss_mask,
+            draft_hidden=hidden,
+            base_outputs=base_outputs,
+        )
 
     def _compute_loss(
         self,
@@ -1188,24 +1226,16 @@ class HFDFlashModel(DFlashModel):
             window=self.dflash_swa_window_size,
         )
 
-        # 5. Draft forward
-        hidden = self.dflash_module(
-            noise_embedding=noise_embedding,
-            target_hidden=target_hidden,
-            position_ids=full_pos,
-            attention_mask=attn_mask,
-        )
-
-        # 6. Compute loss and accuracy
-        logits = self._base_model_lm_head(hidden)
-        loss, accuracy = self._compute_loss(
-            logits,
+        # 5. Draft forward, loss and accuracy
+        loss, accuracy = self._draft_loss(
             input_ids,
             anchor_positions,
             block_keep_mask,
             loss_mask,
-            draft_hidden=hidden,
-            base_outputs=base_outputs,
+            base_outputs,
+            noise_embedding=noise_embedding,
+            position_ids=full_pos,
+            attention_mask=attn_mask,
         )
 
         return ModelOutput(

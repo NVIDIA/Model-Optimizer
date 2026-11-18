@@ -34,6 +34,7 @@ with import_plugin("transformers"):
     from .hf_dflash2 import *
     from .hf_domino import *
     from .hf_dspark import *
+    from .hf_dspine import *
     from .hf_eagle import *
     from .hf_external import *
     from .hf_lilicorr import *
