@@ -52,6 +52,18 @@ class _ReplayScales(torch.autograd.Function):
         return None, result.reshape(ctx.saved_tensors[0].shape[:-1]), None
 
 
+def _native_scale_kernels(tensor):
+    if not tensor.is_cuda:
+        return None
+    try:
+        from modelopt.torch.kernels.quantization import repair
+    except ModuleNotFoundError as exc:
+        if not (exc.name or "").startswith("triton"):
+            raise
+        return None
+    return repair
+
+
 class IQScaleState(nn.Module):
     """FP32 log-scale masters projected onto legal native FP16/integer fields."""
 
@@ -116,9 +128,17 @@ class IQScaleState(nn.Module):
 
     def forward(self, inputs):
         """Decode only this replay's weight and release its expanded levels afterward."""
+        kernels = _native_scale_kernels(inputs)
+        if kernels is not None and self.name not in kernels.SUPPORTED_FORMATS:
+            kernels = None
         with torch.no_grad():
-            levels, _ = self.format.decode_int8(self.packed, torch.tensor(self.weight_shape))
+            if kernels is not None:
+                levels = kernels.decode_iq_levels(self.packed, self.name, self.weight_shape)
+            else:
+                levels, _ = self.format.decode_int8(self.packed, torch.tensor(self.weight_shape))
         steps = self.projected_steps()
+        if kernels is not None:
+            return kernels.apply_block_scales(levels, steps, inputs.dtype).reshape(inputs.shape)
         levels = levels.reshape(-1, steps.shape[-1], self.format.int8_group_size)
         return _ReplayScales.apply(levels, steps, inputs.dtype).reshape(inputs.shape)
 
