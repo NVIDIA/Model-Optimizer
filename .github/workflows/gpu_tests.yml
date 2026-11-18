@@ -27,11 +27,13 @@ jobs:
         .github/workflows/gpu_tests.yml
         modelopt/**
         modelopt_recipes/**
+        examples/bypass/**
         noxfile.py
         pyproject.toml
         tests/_test_utils/**
         tests/conftest.py
         tests/gpu/**
+        tests/examples/bypass/**
         tests/gpu_megatron/**
         tests/gpu_trtllm/**
         tests/gpu_vllm/**
@@ -44,6 +46,9 @@ jobs:
       matrix:
         include:
           - example: gpu
+            timeout: 60
+            container_image: nvcr.io/nvidia/pytorch:26.09-py3
+          - example: bypass
             timeout: 60
             container_image: nvcr.io/nvidia/pytorch:26.09-py3
           - example: gpu_megatron
