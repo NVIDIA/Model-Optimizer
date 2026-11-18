@@ -17,6 +17,7 @@
 
 import functools
 import itertools
+import logging
 
 import numpy as np
 import onnx_graphsurgeon as gs
@@ -225,6 +226,14 @@ def test_more_groups_than_scales_stay_in_range():
     scales = build_activation_scales({f"t{i}" for i in range(2000)}, {}, bfloat16=True)
     low, high = _ACTIVATION_SCALE_RANGE
     assert all(low * 0.99 <= value <= high for value in scales.values())
+
+
+@pytest.mark.parametrize("fp8", [False, True])
+def test_warns_when_groups_exceed_distinct_scales(caplog, fp8):
+    """1,600 bfloat16 groups fit the 1,711 grid values but not the 1,523 left after the FP8 rescale."""
+    caplog.set_level(logging.WARNING, logger="modelopt.onnx")
+    build_activation_scales({f"t{i}" for i in range(1600)}, {}, bfloat16=True, fp8=fp8)
+    assert ("1600 activation scale groups exceed" in caplog.text) == fp8
 
 
 def test_scale_is_stable_across_candidates(model):

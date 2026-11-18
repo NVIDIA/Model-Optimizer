@@ -306,8 +306,8 @@ def build_activation_scales(
     one that another group already took moves to the next free grid value, wrapping within
     ``_ACTIVATION_SCALE_RANGE``. For FP8 candidates the check applies to the scale after
     ``int8_to_fp8`` rescales it, which merges some adjacent grid values. Groups share a
-    scale by accident only when they outnumber the distinct values in the range (about
-    13.7k for float16, fewer for FP8, 1.7k for bfloat16).
+    scale by accident only when they outnumber the distinct values in the range (13,683
+    for float16 and 1,711 for bfloat16; 12,194 and 1,523 after the FP8 rescale).
 
     Args:
         quantized_tensors: Names of the (activation) tensors that receive Q/DQ.
@@ -322,33 +322,34 @@ def build_activation_scales(
     """
     low = _to_grid(_ACTIVATION_SCALE_RANGE[0], bfloat16)
     high = _to_grid(_ACTIVATION_SCALE_RANGE[1], bfloat16)
+    grid = np.arange(low, high + 1, dtype=np.uint16)
+    if fp8:
+        grid_dtype = onnx.helper.tensor_dtype_to_np_dtype(
+            onnx.TensorProto.BFLOAT16 if bfloat16 else onnx.TensorProto.FLOAT16
+        )
+        carried = _rescale_int8_scales_to_fp8(grid.view(grid_dtype), grid_dtype).view(np.uint16)
+    else:
+        carried = grid
+    # final[bits - low]: bits of the scale the candidate carries for grid value ``bits``.
+    final: list[int] = carried.tolist()
+    capacity = len(set(final))
+
     roots = sorted({scale_group_map.get(t, t) for t in quantized_tensors})
-    if len(roots) > high - low + 1:
+    if len(roots) > capacity:
         logger.warning(
-            f"{len(roots)} activation scale groups exceed the {high - low + 1} distinct scales "
+            f"{len(roots)} activation scale groups exceed the {capacity} distinct scales "
             "available; some unrelated groups will share a scale"
         )
-
-    grid_dtype = onnx.helper.tensor_dtype_to_np_dtype(
-        onnx.TensorProto.BFLOAT16 if bfloat16 else onnx.TensorProto.FLOAT16
-    )
-
-    def final_bits(bits: int) -> int:
-        """Grid bits of the scale the candidate carries, after ``int8_to_fp8`` for FP8."""
-        if not fp8:
-            return bits
-        scale = np.array([bits], dtype=np.uint16).view(grid_dtype)
-        return int(_rescale_int8_scales_to_fp8(scale, grid_dtype).view(np.uint16)[0])
 
     taken: set[int] = set()
     group_scales: dict[str, float] = {}
     for root in roots:
         bits = _to_grid(_hashed_scale(root), bfloat16)
-        for _ in range(high - low + 1):
-            if final_bits(bits) not in taken:
+        for _ in range(len(final)):
+            if final[bits - low] not in taken:
                 break
             bits = low if bits >= high else bits + 1
-        taken.add(final_bits(bits))
+        taken.add(final[bits - low])
         group_scales[root] = _from_grid(bits, bfloat16)
     return {t: group_scales[scale_group_map.get(t, t)] for t in quantized_tensors}
 
