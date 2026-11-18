@@ -10,9 +10,9 @@ Evaluation
 
 * **ModelOpt skills:** for standardized evaluation and acceptance checks before
   releasing optimized models, follow the
-  `ModelOpt evaluation skill <https://github.com/NVIDIA/Model-Optimizer/blob/main/plugins/modelopt/skills/evaluation/SKILL.md>`__
+  `ModelOpt evaluation skill <https://github.com/NVIDIA/Model-Optimizer/blob/main/skills/modelopt-evaluation/SKILL.md>`__
   and
-  `ModelOpt results-comparison skill <https://github.com/NVIDIA/Model-Optimizer/blob/main/plugins/modelopt/skills/compare-results/SKILL.md>`__.
+  `ModelOpt results-comparison skill <https://github.com/NVIDIA/Model-Optimizer/blob/main/skills/modelopt-compare-results/SKILL.md>`__.
 
 .. toctree::
    :hidden:

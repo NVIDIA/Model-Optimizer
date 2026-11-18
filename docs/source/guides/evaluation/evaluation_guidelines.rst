@@ -21,9 +21,9 @@ This guide helps you evaluate models quickly and reliably during optimization ex
 
 For standardized evaluation and acceptance checks before releasing optimized models, follow the
 `ModelOpt evaluation
-skill <https://github.com/NVIDIA/Model-Optimizer/blob/main/plugins/modelopt/skills/evaluation/SKILL.md>`__
+skill <https://github.com/NVIDIA/Model-Optimizer/blob/main/skills/modelopt-evaluation/SKILL.md>`__
 and `ModelOpt results-comparison
-skill <https://github.com/NVIDIA/Model-Optimizer/blob/main/plugins/modelopt/skills/compare-results/SKILL.md>`__.
+skill <https://github.com/NVIDIA/Model-Optimizer/blob/main/skills/modelopt-compare-results/SKILL.md>`__.
 For benchmark commands, see the `LLM evaluation
 examples <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/llm_eval/README.md>`__.
 
