@@ -245,6 +245,34 @@ def representative_weight_quantizer(module: nn.Module, weight_name: str = "weigh
     return None
 
 
+def _weight_quantizer_owners(module, selected):
+    """Map selected quantizers to physical parameters using the layouts below."""
+    from ..nn import GroupedQuantizer  # ..nn imports this utils package at module scope
+
+    owners = {}
+    for name in weight_attr_names(module):
+        qname = quantizer_attr_names(name).weight_quantizer
+        container = getattr(module, qname, None)
+        if container is None:
+            container = getattr(module, qname + "s", None)
+        if container is None and name == getattr(module, "_first_proj_attr", None):
+            container = getattr(module, "gate_up_proj_weight_quantizers", None)
+        pairs = (
+            [(f"weight{i}", q) for i, q in enumerate(container)]
+            if isinstance(container, GroupedQuantizer)
+            else [(name, container)]
+        )
+        for parameter_name, quantizers in pairs:
+            if quantizers is None:
+                continue
+            matches = selected.intersection(id(q) for q in quantizers.modules())
+            if matches and module._parameters.get(parameter_name) is not None:
+                owners.update(dict.fromkeys(matches, parameter_name))
+    if owners.keys() != selected:
+        raise ValueError("Selected quantizers have unsupported physical weight ownership")
+    return owners
+
+
 def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     """Get the weight param attribute names in a converted module, non-recursive.
 
@@ -703,7 +731,7 @@ def enable_weight_access_and_writeback(
     ):
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
-    elif hasattr(module, "_hf_hook"):
+    elif has_accelerate_offload(module):
         from ..plugins.accelerate import weight_access_and_writeback_context
 
         context = weight_access_and_writeback_context(module, writeback)

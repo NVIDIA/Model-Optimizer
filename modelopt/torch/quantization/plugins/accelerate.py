@@ -18,13 +18,14 @@ import inspect
 import os
 import warnings
 from contextlib import contextmanager
+from itertools import chain
 from typing import Any
 
 import torch
 import transformers
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from accelerate.hooks import AlignDevicesHook, SequentialHook
-from accelerate.utils import get_max_memory, infer_auto_device_map
+from accelerate.utils import get_max_memory, infer_auto_device_map, named_module_tensors
 from accelerate.utils.dataclasses import CustomDtype
 from accelerate.utils.offload import PrefixedDataset
 
@@ -47,20 +48,82 @@ def _get_offload_hook(hook):
     return None
 
 
-def _writeback_params_to_weights_map(module, align_hook):
+def _weights_map_and_prefix(align_hook):
+    weights_map = align_hook.weights_map
+    if isinstance(weights_map, PrefixedDataset):
+        return getattr(weights_map.dataset, "state_dict", weights_map.dataset), weights_map.prefix
+    return weights_map, ""
+
+
+def _offloaded_tensor_backings(module):
+    """Return resident CPU parameter and buffer backings without paging disk weights."""
+    backings = {}
+    for owner in module.modules():
+        hook = _get_offload_hook(getattr(owner, "_hf_hook", None))
+        if hook is None:
+            continue
+        weights_map, prefix = _weights_map_and_prefix(hook)
+        weights_map = getattr(weights_map, "state_dict", weights_map)
+        if not isinstance(weights_map, dict):
+            continue
+        children = (
+            owner.named_modules(remove_duplicate=False) if hook.place_submodules else (("", owner),)
+        )
+        for path, child in children:
+            for name, tensor in chain(
+                child._parameters.items(), child._buffers.items() if hook.offload_buffers else ()
+            ):
+                if tensor is None:
+                    continue
+                tensor = weights_map.get(prefix + (f"{path}." if path else "") + name)
+                if isinstance(tensor, torch.Tensor) and tensor.device.type == "cpu":
+                    backings[child, name] = tensor
+    return backings
+
+
+def _snapshot_aliased_weights(entered):
+    """Copy backing tensors that live CPU weights can mutate in place."""
+    tensors = [
+        (hook, name, tensor)
+        for mod, hook, _ in entered
+        for name, tensor in named_module_tensors(mod, recurse=True, remove_non_persistent=True)
+    ]
+    live_storages = {
+        tensor.untyped_storage().data_ptr()
+        for _, _, tensor in tensors
+        if tensor.device.type == "cpu"
+    }
+    snapshots = {}
+    for hook, name, _ in tensors:
+        weights_map, prefix = _weights_map_and_prefix(hook)
+        tensor = weights_map.get(prefix + name)
+        if (
+            tensor is not None
+            and tensor.device.type == "cpu"
+            and tensor.untyped_storage().data_ptr() in live_storages
+        ):
+            key = (
+                tensor.untyped_storage().data_ptr(),
+                tensor.storage_offset(),
+                tensor.shape,
+                tensor.stride(),
+                tensor.dtype,
+            )
+            if key not in snapshots:
+                snapshots[key] = tensor, tensor.detach().clone()
+    return snapshots.values()
+
+
+def _writeback_params_to_weights_map(module, align_hook, journal):
     """Write all non-meta parameters and buffers back to the hook's CPU weights_map."""
     buffer_names = {name for name, _ in module.named_buffers()}
+    w_map, prefix = _weights_map_and_prefix(align_hook)
     for name, tensor in module.state_dict(keep_vars=True).items():
         if tensor.device.type == "meta":
             continue
-        if isinstance(align_hook.weights_map, PrefixedDataset):
-            key = align_hook.weights_map.prefix + name
-            w_map = align_hook.weights_map.dataset.state_dict
-        else:
-            w_map = align_hook.weights_map
-            key = name
+        key = prefix + name
         if key in w_map:
-            w_map[key] = tensor.detach().to(w_map[key].device, dtype=w_map[key].dtype)
+            value = tensor.detach().to(w_map[key].device, dtype=w_map[key].dtype)
         elif (
             isinstance(align_hook.weights_map, PrefixedDataset)
             and hasattr(align_hook.weights_map.dataset, "index")
@@ -70,7 +133,7 @@ def _writeback_params_to_weights_map(module, align_hook):
             # pre_forward picks up the modified tensor instead of the stale
             # on-disk version.  OffloadedWeightsLoader.__getitem__ gives
             # state_dict priority over index, so this is sufficient.
-            w_map[key] = tensor.detach().cpu()
+            value = tensor.detach().cpu()
             warnings.warn(
                 "Accelerate disk-offload writeback is currently kept in CPU state_dict; "
                 "writing updates back to disk offload files is TODO.",
@@ -80,7 +143,11 @@ def _writeback_params_to_weights_map(module, align_hook):
         elif align_hook.offload_buffers and name in buffer_names:
             # A buffer first registered inside the context, such as a GPTQ payload pin: without a
             # backing value the hook cannot reload it after offloading the module again.
-            w_map[key] = tensor.detach().cpu()
+            value = tensor.detach().cpu()
+        else:
+            continue
+        journal.append((w_map, key, w_map.get(key)))
+        w_map[key] = value
 
 
 def _own_quantizers(module):
@@ -171,8 +238,10 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
     is True, writes materialized tensors back on exit. ``pre_forward`` is skipped on
     modules whose weights are already
     materialized (not on meta) to avoid overwriting them with stale CPU copies.
+    Failed writeback windows restore all backing maps; CPU tensors sharing live weight
+    storage require host snapshots for in-place rollback.
     """
-    assert hasattr(module, "_hf_hook")
+    assert any(hasattr(child, "_hf_hook") for child in module.modules())
 
     materialized: list[tuple[torch.nn.Module, AlignDevicesHook, bool]] = []
     for mod in module.modules():
@@ -181,24 +250,83 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
         hook = _get_offload_hook(mod._hf_hook)
         if hook is None:
             continue
-        # Only call pre_forward if weights need materializing; already-materialized
-        # weights would be overwritten with stale CPU state_dict values.
-        needs_materialize = any(p.device.type == "meta" for p in mod.parameters())
-        if needs_materialize:
-            _carry_quantizers_with_offload(hook)
-            hook.pre_forward(mod)
-        hook.offload = False
+        # Preflight every owner before loading: a mixed set would reload resident updates.
+        offloaded = [
+            tensor.device.type == "meta"
+            for _, tensor in named_module_tensors(
+                mod,
+                include_buffers=hook.offload_buffers,
+                recurse=hook.place_submodules,
+                remove_non_persistent=True,
+            )
+        ]
+        needs_materialize = any(offloaded)
+        if needs_materialize and not all(offloaded):
+            raise ValueError(
+                "Accelerate weight access requires all managed tensors on meta or resident"
+            )
         materialized.append((mod, hook, needs_materialize))
 
+    entered = []
+    ready = False
+    error = None
+    propagating = False
+    snapshots = ()
+    journal = []
     try:
+        for mod, hook, needs_materialize in materialized:
+            if needs_materialize:
+                _carry_quantizers_with_offload(hook)
+            # pre_forward can fail after loading only part of this owner's tensors.
+            entered.append((mod, hook, needs_materialize))
+            if needs_materialize:
+                hook.pre_forward(mod)
+            hook.offload = False
+        if writeback:
+            snapshots = _snapshot_aliased_weights(entered)
+        ready = True
         yield
+    except BaseException as exc:
+        error = exc
+        propagating = True
+        raise
     finally:
-        for mod, hook, was_materialized in materialized:
+        for mod, hook, was_materialized in reversed(entered):
             hook.offload = True
-            if writeback:
-                _writeback_params_to_weights_map(mod, hook)
-            if was_materialized:
-                hook.post_forward(mod, None)
+            try:
+                if ready and writeback and not propagating:
+                    _writeback_params_to_weights_map(mod, hook, journal)
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+                else:
+                    error.add_note(f"Accelerate weight-access cleanup failed: {exc!r}")
+            finally:
+                try:
+                    if was_materialized:
+                        hook.post_forward(mod, None)
+                except BaseException as exc:
+                    if error is None:
+                        error = exc
+                    else:
+                        error.add_note(f"Accelerate weight-access cleanup failed: {exc!r}")
+        if error is not None:
+            for weights_map, key, original in reversed(journal):
+                try:
+                    if original is None:
+                        weights_map.pop(key, None)
+                    else:
+                        weights_map[key] = original
+                except BaseException as exc:
+                    error.add_note(f"Accelerate weight-access rollback failed: {exc!r}")
+            with torch.no_grad():
+                for original, snapshot in snapshots:
+                    try:
+                        original.copy_(snapshot)
+                    except BaseException as exc:
+                        error.add_note(f"Accelerate weight-access rollback failed: {exc!r}")
+        if error is not None and not propagating:
+            raise error
 
 
 @contextmanager

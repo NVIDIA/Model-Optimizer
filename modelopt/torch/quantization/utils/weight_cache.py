@@ -247,6 +247,8 @@ def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) 
     ``source`` is the tensor the quantizer received, from which ``inputs`` was derived (e.g. by
     padding). It keys the entry, so that a derived tensor made afresh on each call still hits.
     """
+    if getattr(quantizer, "_local_repair_active", False):
+        return quantizer._fake_quantize(inputs)
     session = _ACTIVE.get(quantizer) if _num_open_scopes else None
     if session is None:
         return quantizer._fake_quantize(inputs)
