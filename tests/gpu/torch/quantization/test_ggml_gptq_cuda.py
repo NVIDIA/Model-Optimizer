@@ -21,8 +21,11 @@ import torch
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, choice_search
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.ggml.gptq import compensated_block_hessian
+from modelopt.torch.quantization.utils.calib_utils import compute_hessian_inverse
 
 
 def _iq1_s_config(algorithm):
@@ -132,3 +135,53 @@ def test_auto_quantize_refuses_gptq_on_native_fp8_weights_and_hands_back_the_mod
         assert torch.equal(param, original)
     # The same model searches again with a calibration that leaves its weights alone.
     search("max")
+
+
+def test_format_shards_saved_on_gpus_merge_on_a_host_without_them(tmp_path, monkeypatch):
+    torch.manual_seed(0)
+    source = torch.nn.Sequential(torch.nn.Linear(512, 256), torch.nn.Linear(256, 256)).cuda()
+    inputs = _correlated_inputs()
+    iq1_s = _iq1_s_config({"method": "gptq", "block_size": 256})
+    iq1_s["quant_cfg"][1]["cfg"]["effective_bits"] = GGML_FORMAT_REGISTRY["iq1_s"].effective_bits
+
+    def search(checkpoint, format_shard=None):
+        return mtq.auto_quantize(
+            copy.deepcopy(source),
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[(iq1_s, "IQ1_S"), mtq.INT8_DEFAULT_CFG],
+            data_loader=[inputs],
+            forward_step=lambda m, x: m(x),
+            num_calib_steps=1,
+            num_score_steps=1,
+            method="kl_div",
+            checkpoint=str(checkpoint),
+            format_shard=format_shard,
+        )
+
+    reference, expected = search(tmp_path / "full.pth")
+    shards = [tmp_path / f"shard{i}.pth" for i in range(2)]
+    for i, shard in enumerate(shards):
+        search(shard, (i, 2))
+    # The shards hold GPU tensors (IQ1_S's pinned codes among them); merge them on a CPU node.
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.cuda, "is_available", lambda: False)
+        mtq.merge_auto_quantize_checkpoints(shards, str(tmp_path / "merged.pth"))
+
+    model, state = search(tmp_path / "merged.pth")
+    assert state["best"]["recipe"] == expected["best"]["recipe"]
+    torch.testing.assert_close(model(inputs), reference(inputs), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("num_bits", ["iq2_xxs", "iq2_xs", "iq2_s", "iq1_s", "iq1_m"])
+def test_fused_choice_search_matches_the_pytorch_search(monkeypatch, num_bits):
+    get_cuda_ext_ggml(raise_if_failed=True)  # without it, both searches would be the PyTorch one
+    ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    inputs = _correlated_inputs()
+    weight = torch.randn(64, 512, generator=torch.Generator().manual_seed(1)).cuda()
+    h_inv = compute_hessian_inverse(inputs.T @ inputs / len(inputs), weight, 0.3)
+    hessian = compensated_block_hessian(h_inv, slice(256, 512))[None]
+    block = weight[:, 256:].contiguous()
+
+    fused = choice_search.search_choices(ggml_format, block, hessian)
+    monkeypatch.setattr(choice_search, "get_cuda_ext_ggml", lambda: None)
+    assert torch.equal(fused, choice_search.search_choices(ggml_format, block, hessian))

@@ -321,6 +321,14 @@ def get_args():
         "--kd_loss_alpha is 1.0 and the student is quantized except for its MTP head.",
     )
     parser.add_argument(
+        "--skip_frozen_mtp",
+        action="store_true",
+        help="Skip the frozen MTP head (see --freeze_mtp) in the student's and teacher's training "
+        "forwards: its layers and its extra output-layer pass. Evaluation still runs it, and its "
+        "weights are saved unchanged. Supports GPTModel-based models (e.g. Qwen3.5 / Qwen3.6) "
+        "with --pp_size 1.",
+    )
+    parser.add_argument(
         "--moe_aux_loss_coeff",
         type=float,
         default=None,
@@ -487,6 +495,8 @@ def get_args():
         args.num_layers_in_first_pipeline_stage or args.num_layers_in_last_pipeline_stage
     ):
         raise ValueError("--num_layers_in_first/last_pipeline_stage require --pp_size > 1.")
+    if args.skip_frozen_mtp and args.pp_size > 1:
+        raise ValueError("--skip_frozen_mtp needs --pp_size 1.")
     if args.recompute_num_layers_per_stage is not None:
         if args.recompute_granularity != "full" or args.recompute_method != "block":
             raise ValueError(
@@ -545,8 +555,6 @@ def get_args():
         args.sft_add_bos = _tokenizer_prepends_bos(args)
 
     _check_shared_vocabulary(args)
-
-    print_args(masked_args(args))
 
     return args
 
@@ -745,6 +753,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         logit_kl_top_p=args.logit_kl_top_p,
         logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,
         freeze_mtp=args.freeze_mtp,
+        skip_frozen_mtp=args.skip_frozen_mtp,
     )
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
@@ -1027,9 +1036,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
 
 
 if __name__ == "__main__":
-    dist.setup()
     args = get_args()
+    dist.setup()
     try:
+        print_args(masked_args(args))
         # Entered inside the try: opening the run is fatal by design, and the peers of a rank
         # that exits without dist.abort() stay blocked on the first collective.
         with distill_run(args, DISTILL) as owns_the_run:

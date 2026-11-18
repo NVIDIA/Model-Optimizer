@@ -388,6 +388,14 @@ This keeps an extra BF16 copy of the student's quantized weights on every GPU. T
 uncached one. It needs a straight-through weight gradient (`pass_through_bwd`, the default). The more micro-batches
 per step, and the more expensive the weight format, the more it saves. It needs a [newer Megatron-Bridge](#pre-requisites) than `nemo:26.10`.
 
+A frozen MTP head (`--freeze_mtp`, or by default with `--kd_loss_alpha 1.0` and the MTP head left out of quantization)
+still runs at every training micro-batch, in the student and in the teacher: its layers and an extra pass through the
+output layer. `--skip_frozen_mtp` skips it in training. Evaluation still runs it, and its weights are saved and exported
+unchanged. The KD loss is unchanged. The gradients lose only what the MTP layers add through MoE auxiliary losses, and
+the MTP loss and acceptance-rate metrics are no longer logged, so check MTP acceptance after export. The logged
+TFLOP/s still counts the MTP head and the MoE load-balancing loss reads slightly lower, so compare step times instead.
+It supports GPTModel-based models such as Qwen3.5 / Qwen3.6 with `--pp_size 1`.
+
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 
 #### Evaluating a QAD checkpoint in vLLM with fake quantization
@@ -433,6 +441,37 @@ Reuse the selection and `--student_megatron_path` with ModelOpt state on native 
 selection fails if that state has not been restored before wrapping. Native checkpointing
 restores FP32 masters, Adam state, and training counters afterward.
 Use Bridge/Core versions with HybridModel support.
+
+### QDQ weights from PTQ
+
+Prepare QDQ-initialized weights during PTQ, before QAD starts:
+
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --recipe general/ptq/fp8_default-kv_fp8 \
+    --tp_size 2 --output_qdq_weight \
+    --export_megatron_path /output/qwen3_qdq
+```
+
+`--output_qdq_weight` saves decoded floating-point weights and quantization state for QAD.
+Use an uncompressed, adapter-free checkpoint and load it with
+`distill.py --student_megatron_path /output/qwen3_qdq`.
+PTQ prepares all enabled quantized weights; choose trainable parameters during QAD.
+
+- **GGML IQ PTQ:** keep the original super-block scales fixed during QAD; local scale indices,
+  codes, and signs can change.
+- **GPTQ / imatrix:** preserve the existing fixed super-block scales and FP32 importance.
+
+Shared or sequential GGML PTQ quantizers are unsupported.
+
+> **Note:** Super-block scale pinning applies to GGML IQ formats. Other formats retain their existing
+> quantization behavior; for example, dynamic NVFP4 reuses its calibrated global scale but
+> recomputes local scales for each 16-weight block. Exact round-trip equality is not guaranteed
+> for these formats or BF16 transforms.
+
+For custom PTQ, call `mtq.initialize_qdq_weights(model)` once after calibration or restoration,
+before saving the checkpoint. Do not repeat it during training or resume.
 
 ### LoRA QAD
 

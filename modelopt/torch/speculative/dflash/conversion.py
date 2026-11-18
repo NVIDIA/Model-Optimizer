@@ -15,6 +15,8 @@
 
 """DFlash conversion/restore utilities."""
 
+import warnings
+
 from torch import nn
 
 from modelopt.torch.opt.conversion import ModelLikeModule
@@ -58,6 +60,40 @@ _REGISTRY_BY_PROJECTOR_TYPE = {
     "lilicorr": LiLiCorrDMRegistry,
 }
 
+# Deprecated dflash_architecture_config keys (removed in 0.50), each with the model attribute
+# that now fixes its value, and why.
+_DEPRECATED_ARCHITECTURE_KEYS = {
+    "shift_label": (
+        "_label_shift",
+        (
+            "projector_type fixes the label alignment (dspark and domino predict the token at "
+            "anchor + k + 1, the others the token at anchor + k)"
+        ),
+    ),
+}
+
+
+def _drop_deprecated_keys(arch_config: dict, dm_cls: type) -> dict:
+    """Return ``arch_config`` without the deprecated keys, warning on each value ``dm_cls`` matches.
+
+    A value ``dm_cls`` contradicts raises instead: it never took effect, so the run would not
+    train what its config says.
+    """
+    for key in sorted(_DEPRECATED_ARCHITECTURE_KEYS.keys() & arch_config.keys()):
+        attr, reason = _DEPRECATED_ARCHITECTURE_KEYS[key]
+        if arch_config[key] != getattr(dm_cls, attr):
+            raise ValueError(
+                f"dflash_architecture_config.{key}={arch_config[key]!r} contradicts the model: "
+                f"{reason}. Remove it."
+            )
+        warnings.warn(
+            f"dflash_architecture_config.{key} is deprecated and will be removed in 0.50: "
+            f"{reason}. Remove it.",
+            FutureWarning,
+            stacklevel=2,
+        )
+    return {k: v for k, v in arch_config.items() if k not in _DEPRECATED_ARCHITECTURE_KEYS}
+
 
 def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertReturnType:
     """Convert the model to a DFlash (or Domino) model as per `config`."""
@@ -79,6 +115,9 @@ def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertRe
         )
 
     registry.register_subclass(type(model), "base_model_class")
+    config.dflash_architecture_config = _drop_deprecated_keys(
+        config.dflash_architecture_config, registry[type(model)]
+    )
 
     dflash_model = registry.convert(model)
     dflash_model.modify(config)
@@ -95,4 +134,10 @@ def restore_dflash_model(
     # Warm start is a one-time training-time init; the restored weights would overwrite it
     # anyway, and replaying it on the meta device would raise.
     config = config.model_copy(update={"dflash_init_checkpoint": None})
+    # Unchecked: checkpoints saved before the deprecation carry values that never took effect.
+    config.dflash_architecture_config = {
+        k: v
+        for k, v in config.dflash_architecture_config.items()
+        if k not in _DEPRECATED_ARCHITECTURE_KEYS
+    }
     return convert_to_dflash_model(model, config)[0]
