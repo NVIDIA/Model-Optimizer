@@ -16,6 +16,7 @@
 """Native IQ payload placement, mesh adoption and real four-GPU projection checks."""
 
 import copy
+from collections import OrderedDict
 from datetime import timedelta
 
 import pytest
@@ -29,6 +30,340 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
+
+
+def test_hybrid_fsdp_plan_wraps_only_present_functional_children():
+    pytest.importorskip("transformers", minversion="5.23")
+    from _test_utils.transformers_families import build_model, cases
+    from transformers.distributed.configuration_utils import DistributedConfig
+
+    from modelopt.torch.distill.plugins.transformers.functional_fsdp import extend_family_fsdp_plan
+
+    record = cases(["qwen3_next"])[0]
+    model = build_model(record, "meta")
+    plan = model._resolve_parallel_plans(DistributedConfig(fsdp_size=2))[2]
+    original = dict(plan)
+    extended = extend_family_fsdp_plan(model, plan)
+    modules = dict(model.named_modules())
+    children = {name for name in modules if name.endswith("linear_attn.conv1d")}
+    assert children and any(hasattr(block, "self_attn") for block in model.model.layers)
+    assert children <= extended.keys() <= modules.keys()
+    assert all(extended[name] == "free_full_weight" for name in children)
+    assert plan == original
+
+
+def _asymmetric_gradient_schedule_worker(rank, size, mismatch):
+    from torch.distributed.device_mesh import init_device_mesh
+
+    from modelopt.torch.distill._bypass_parallel import BypassMeshContext
+    from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
+
+    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("dp",))
+    runtime = DistributedBypassRuntime(
+        BypassMeshContext(device_mesh=mesh, data_mesh=mesh, data_context_mesh=mesh),
+        mtd.BypassConfig(global_batch_size=size),
+    )
+    parameter = torch.nn.Parameter(torch.ones(2 if rank == 0 or mismatch != "shape" else 3))
+    runtime.parameter_names = {id(parameter): "mlp.weight_quantizer.global_delta"}
+    runtime.parameter_meshes[id(parameter)] = [mesh]
+    fields = [] if mismatch == "missing-group" and rank else [parameter]
+    with pytest.raises(ValueError, match=r"gradient.*schedule"):
+        runtime.validate_gradient_schedules({"mlp": fields})
+
+
+@pytest.mark.parametrize("mismatch", ["missing-group", "shape"])
+def test_gradient_schedule_asymmetry_is_refused_before_reductions(bypass_cpu_workers, mismatch):
+    bypass_cpu_workers.run(_asymmetric_gradient_schedule_worker, mismatch)
+
+
+def _unique_batch_worker(rank, size, axis, unequal):
+    from torch.distributed.device_mesh import init_device_mesh
+
+    from modelopt.torch.distill._bypass_optimizer import Lion
+
+    torch.manual_seed(67)
+    teacher = torch.nn.Sequential(
+        OrderedDict(
+            [
+                ("mlp", torch.nn.Linear(256, 256, bias=False)),
+                ("activation", torch.nn.SiLU()),
+                ("moe", torch.nn.Linear(256, 256, bias=False)),
+            ]
+        )
+    )
+    batches = [torch.randn(1, 4, 256) for _ in range(4)]
+    student = mtq.quantize(
+        copy.deepcopy(teacher),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda m: m(batches[0]),
+    )
+    config = {
+        "num_steps": 2,
+        "global_batch_size": 2,
+        "micro_batch_size": 1,
+        "sequence_length": 4,
+        "warmup_fraction": 0,
+        "scheduler": "constant",
+        "max_grad_norm": 1e-8,
+    }
+    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=(axis,))
+    single = init_device_mesh("cpu", (size, 1), mesh_dim_names=("owners", "dp"))["dp"]
+    reference = copy.deepcopy(student)
+    gradients, norms = [], []
+    original_step = Lion.step
+
+    def observed_step(optimizer, closure=None):
+        values = [
+            p.grad.detach().clone() for group in optimizer.param_groups for p in group["params"]
+        ]
+        gradients.append(values)
+        norms.append(sum(g.square().sum() for g in values).sqrt())
+        return original_step(optimizer, closure)
+
+    Lion.step = observed_step
+    try:
+        mtd.bypass(reference, copy.deepcopy(teacher), batches, config, device_mesh=single)
+    finally:
+        Lion.step = original_step
+    expected_gradients = gradients[:]
+    gradients.clear()
+    local = batches[rank::size] if axis == "dp" else batches
+    if unequal and rank == 1:
+        local = local[:1]
+    if unequal:
+        before = copy.deepcopy(student.state_dict())
+        with pytest.raises(ValueError):
+            mtd.bypass(student, teacher, local, config, device_mesh=mesh)
+        # No partially assembled global update may advance native fields.
+        if axis == "dp":
+            assert not any("_local_repair_state" in key for key in student.state_dict())
+        assert all(torch.equal(value, before[name]) for name, value in student.state_dict().items())
+        return
+    Lion.step = observed_step
+    try:
+        mtd.bypass(student, teacher, local, config, device_mesh=mesh)
+    finally:
+        Lion.step = original_step
+    for actual, expected in zip(gradients, expected_gradients, strict=True):
+        for a, b in zip(actual, expected, strict=True):
+            torch.testing.assert_close(a, b, rtol=2e-5, atol=1e-14)
+    assert all(norm <= config["max_grad_norm"] for norm in norms)
+    for name, value in reference.state_dict().items():
+        if value.is_floating_point():
+            torch.testing.assert_close(student.state_dict()[name], value, rtol=0, atol=0)
+        else:
+            assert torch.equal(student.state_dict()[name], value), name
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(("axis", "unequal"), [("dp", False), ("cp", False), ("dp", True)])
+def test_distributed_bypass_matches_unique_batch(bypass_cpu_workers, axis, unequal):
+    bypass_cpu_workers.run(_unique_batch_worker, axis, unequal)
+
+
+def _validation_refusal_worker(rank, size, problem):
+    from _test_utils.torch.distributed.utils import bounded_collectives
+    from torch.distributed.device_mesh import init_device_mesh
+
+    group = dist.new_group(timeout=timedelta(seconds=10))
+
+    class CollectiveTeacher(torch.nn.Sequential):
+        def forward(self, inputs):
+            inputs = inputs.clone()
+            dist.all_reduce(inputs, group=group)
+            return super().forward(inputs / size)
+
+    class ResolveStudent(torch.nn.Sequential):
+        def get_submodule(self, target):
+            if getattr(self, "fail_lookup", False):
+                raise OSError()
+            return super().get_submodule(target)
+
+    torch.manual_seed(97)
+    teacher = CollectiveTeacher(OrderedDict([("mlp", torch.nn.Linear(256, 256, bias=False))]))
+    batch = torch.randn(2, 4, 256)
+    student = mtq.quantize(
+        ResolveStudent(OrderedDict([("mlp", copy.deepcopy(teacher.mlp))])),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda model: model(batch),
+    )
+    before = copy.deepcopy(student.state_dict())
+    student.fail_lookup = problem == "resolve" and rank == 1
+    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("cp",))
+
+    class Validation:
+        def __iter__(self):
+            if problem == "iterator" and rank == 1:
+                raise OSError("validation iterator failure")
+            return self.read()
+
+        def read(self):
+            yield batch[:1] if problem == "microbatches" and rank == 1 else batch
+            if problem == "advance" and rank == 1:
+                raise OSError("validation reader failure")
+            if problem != "length" or rank == 0:
+                yield batch
+
+    class Training:
+        def __iter__(self):
+            if problem == "train_advance" and rank == 1:
+                raise RuntimeError()
+            yield batch
+
+    validation = None if problem == "presence" and rank == 1 else Validation()
+    try:
+        with bounded_collectives(seconds=10), pytest.raises(ValueError):
+            mtd.bypass(
+                student,
+                teacher,
+                Training(),
+                {"num_steps": 1, "global_batch_size": 2, "sequence_length": 4},
+                validation_dataloader=validation,
+                device_mesh=mesh,
+            )
+        assert all(torch.equal(value, before[name]) for name, value in student.state_dict().items())
+        assert not any("_local_repair_state" in name for name in student.state_dict())
+    finally:
+        dist.destroy_process_group(group)
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    "problem",
+    ["presence", "iterator", "length", "advance", "microbatches", "train_advance", "resolve"],
+)
+def test_distributed_bypass_refuses_unequal_validation(bypass_cpu_workers, problem):
+    timeout = bypass_cpu_workers.job_timeout
+    try:
+        bypass_cpu_workers.job_timeout = 60
+        bypass_cpu_workers.run(_validation_refusal_worker, problem)
+    finally:
+        bypass_cpu_workers.job_timeout = timeout
+
+
+def _native_geometry_preflight_worker(rank, size):
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.tensor.placement_types import _StridedShard
+    from transformers import Qwen3MoeConfig
+    from transformers.distributed.expert_parallel import MoEParamShard
+    from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
+
+    from modelopt.torch.distill._bypass_parallel import (
+        _tp_quantizer_layouts,
+        apply_tp_quantizer_fields,
+    )
+    from modelopt.torch.distill.plugins.transformers.parallel import (
+        _validate_parameter_geometry,
+        apply_hf_tensor_parallelism,
+        validate_hf_tensor_parallelism,
+    )
+    from modelopt.torch.quantization.plugins.huggingface import register_fused_experts_on_the_fly
+
+    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("tp",))
+    expert_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("ep",))
+    torch.manual_seed(54)
+    config = Qwen3MoeConfig(
+        hidden_size=8, moe_intermediate_size=8, num_experts=4, num_experts_per_tok=1
+    )
+    config._experts_implementation = "eager"
+    original = torch.nn.Module()
+    original.experts = Qwen3MoeExperts(config)
+    with torch.no_grad():
+        for parameter in original.parameters():
+            parameter.normal_(std=0.3)
+    register_fused_experts_on_the_fly(original)
+    mtq.quantize(
+        original,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizers*",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda model: model.experts(
+            torch.randn(4, 8), torch.arange(4).reshape(4, 1), torch.ones(4, 1)
+        ),
+    )
+    before = copy.deepcopy(original.state_dict())
+    parameter = original.experts.gate_up_proj
+    quantizers = original.experts.gate_up_proj_weight_quantizers
+    with pytest.raises(ValueError, match="physical matrix or fused expert views"):
+        validate_hf_tensor_parallelism(original, mesh, {"experts.gate_up_proj": "grouped_gemm"})
+    # The same whole-expert placement is legal on EP and must remain metadata-only here.
+    _validate_parameter_geometry(
+        original.experts,
+        "gate_up_proj",
+        ALL_PARALLEL_STYLES["grouped_gemm"],
+        expert_mesh,
+        "experts.gate_up_proj",
+        allow_expert_axis=True,
+    )
+    with pytest.raises(ValueError, match="physical matrix or fused expert views"):
+        _validate_parameter_geometry(
+            original.experts,
+            "gate_up_proj",
+            MoEParamShard(_StridedShard(0, split_factor=2), shards_expert_dim=True),
+            expert_mesh,
+            "experts.gate_up_proj",
+            allow_expert_axis=True,
+        )
+    assert original.experts.gate_up_proj is parameter
+    assert original.experts.num_experts == 4 and len(quantizers) == 4
+    assert all(torch.equal(value, before[name]) for name, value in original.state_dict().items())
+    for style in ("packed_colwise", "rowwise"):
+        model = copy.deepcopy(original)
+        plan = {"experts.gate_up_proj": style}
+        validate_hf_tensor_parallelism(model, mesh, plan)
+        apply_hf_tensor_parallelism(model, mesh, plan)
+        for quantizer, fields, _, _ in _tp_quantizer_layouts(model):
+            apply_tp_quantizer_fields(quantizer, fields)
+        local = model.experts.gate_up_proj.to_local()
+        for index, quantizer in enumerate(model.experts.gate_up_proj_weight_quantizers):
+            reference_weight = quantizers[index](parameter[index])
+            amax = quantizers[index].amax
+            if style == "packed_colwise":
+                rows = torch.cat((torch.arange(4) + rank * 4, torch.arange(4) + 8 + rank * 4))
+                reference_weight, amax = reference_weight[rows], amax[rows]
+            else:
+                reference_weight = reference_weight[:, rank * 4 : (rank + 1) * 4]
+            torch.testing.assert_close(quantizer.amax, amax, rtol=0, atol=0)
+            inputs = torch.randn(3, local.shape[-1], requires_grad=True)
+            expected_inputs = inputs.detach().clone().requires_grad_()
+            actual = F.linear(inputs, quantizer(local[index]))
+            expected = F.linear(expected_inputs, reference_weight)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            actual.square().sum().backward()
+            expected.square().sum().backward()
+            torch.testing.assert_close(inputs.grad, expected_inputs.grad, rtol=0, atol=0)
+
+
+@pytest.mark.timeout(180)
+def test_native_geometry_preflight_matches_physical_field_ownership(bypass_cpu_workers):
+    pytest.importorskip("transformers", minversion="5.23")
+    bypass_cpu_workers.run(_native_geometry_preflight_worker)
 
 
 @pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
@@ -185,31 +520,13 @@ def test_native_mesh_adoption_preserves_forward_and_hooks(tmp_path):
         dist.destroy_process_group()
 
 
-@pytest.fixture
-def native_workers(_dist_pools):
-    if torch.cuda.device_count() < 4:
-        pytest.skip("Native overlapping TP/FSDP/EP projection checks require four GPUs")
-    from _test_utils.torch.distributed.utils import (
-        DistributedWorkerPool,
-        default_worker_teardown,
-        get_live_pool,
-    )
-
-    return get_live_pool(
-        _dist_pools,
-        4,
-        lambda: DistributedWorkerPool(
-            world_size=4, backend="nccl", teardown_fn=default_worker_teardown
-        ),
-    )
-
-
-def _native_projection_worker(rank, size, frozen_format):
+def _native_projection_worker(rank, size, frozen_format, layout=None):
     from _test_utils.transformers_families import build_model, cases
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.tensor import DTensor
     from transformers.distributed.utils import TransformersDeviceMesh
 
+    from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
     assert size == 4
@@ -218,7 +535,12 @@ def _native_projection_worker(rank, size, frozen_format):
     record = cases(["qwen3_moe"])[0]
     record["minimum_pattern_prefix"] = 2
     record["config"]["mlp_only_layers"] = [0]
+    record["config"]["num_experts"] = 4
+    record["config"]["num_experts_per_tok"] = 1
     model = build_model(record, torch.device("cuda", rank))
+    with torch.no_grad():
+        model.model.layers[1].mlp.gate.weight.zero_()
+    teacher = copy.deepcopy(model) if layout is not None else None
     batch = {"input_ids": torch.randint(3, 100, (2, 8), device=torch.device("cuda", rank))}
     frozen_cfg = (
         {"num_bits": (4, 3), "axis": None}
@@ -243,14 +565,108 @@ def _native_projection_worker(rank, size, frozen_format):
     )
     with torch.no_grad():
         expected = model(**batch).logits.detach().cpu()
+    batches = [
+        {"input_ids": torch.randint(3, 100, (1, 8), device=torch.device("cuda", rank))}
+        for _ in range(16)
+    ]
+    recipe = {
+        "num_steps": 2,
+        "global_batch_size": 8,
+        "sequence_length": 8,
+        "warmup_fraction": 0,
+        "scheduler": "constant",
+        "max_grad_norm": 1e-8,
+    }
+    traces, phase, trace_index = [], "reference", 0
+    original_clip = DistributedBypassRuntime.clip_gradients
+
+    def observed_clip(runtime, fields, max_norm):
+        nonlocal trace_index
+        selected = {id(p) for p in fields}
+        values = {}
+        for quantizer in runtime.student.modules():
+            state = getattr(quantizer, "_local_repair_state", None)
+            if state is None:
+                continue
+            for field, parameter in state.named_parameters():
+                if id(parameter) in selected:
+                    values[state.field_prefix + "." + field] = (
+                        None if parameter.grad is None else parameter.grad.detach().float().cpu(),
+                        state.weight_shape,
+                        state.format.block_size,
+                    )
+        norm = original_clip(runtime, fields, max_norm)
+        if phase == "reference":
+            traces.append((values, norm.detach().cpu()))
+        else:
+            expected_values, expected_norm = traces[trace_index]
+            trace_index += 1
+            torch.testing.assert_close(norm.detach().cpu(), expected_norm, rtol=0.03, atol=0)
+            for key, (actual, shape, block) in values.items():
+                expected, full_shape, _ = expected_values[key]
+                if expected is None:
+                    assert actual is None or not bool(actual.count_nonzero())
+                    continue
+                assert actual is not None
+                if shape != full_shape:
+                    # This fixture has ordinary gate/up/down matrices: align
+                    # native TP rows or complete K blocks with the full oracle.
+                    view = expected.reshape(
+                        full_shape[0], full_shape[1] // block, *expected.shape[1:]
+                    )
+                    dimension = 0 if shape[0] != full_shape[0] else 1
+                    expected = view.chunk(runtime.context.tensor_mesh.size(), dim=dimension)[
+                        runtime.context.tensor_mesh.get_local_rank()
+                    ].reshape_as(actual)
+                error = (actual - expected).norm() / expected.norm().clamp_min(1e-20)
+                assert error < 0.03, (key, error.item())
+        return norm
+
+    if layout is not None:
+        single = init_device_mesh("cuda", (4, 1), mesh_dim_names=("owners", "dp"))["dp"]
+        reference = copy.deepcopy(model)
+        DistributedBypassRuntime.clip_gradients = observed_clip
+        try:
+            mtd.bypass(reference, copy.deepcopy(teacher), batches, recipe, device_mesh=single)
+        finally:
+            DistributedBypassRuntime.clip_gradients = original_clip
+        with torch.no_grad():
+            expected = reference(**batch).logits.detach().cpu()
+    fsdp, tp, efsdp, ep = (4, 1, 2, 2) if layout == "ep2-replica2" else (2, 2, 1, 4)
     manager = TransformersDeviceMesh(
-        init_device_mesh("cuda", (1, 1, 2, 2), mesh_dim_names=("pp", "dp_replicate", "fsdp", "tp")),
         init_device_mesh(
-            "cuda", (1, 1, 1, 4), mesh_dim_names=("pp", "dp_replicate", "efsdp", "ep")
+            "cuda", (1, 1, fsdp, tp), mesh_dim_names=("pp", "dp_replicate", "fsdp", "tp")
+        ),
+        init_device_mesh(
+            "cuda", (1, 1, efsdp, ep), mesh_dim_names=("pp", "dp_replicate", "efsdp", "ep")
         ),
     )
     adapter = TransformersBypassAdapter(manager)
     adapter.parallelize(model)
+    metadata = adapter.context.parallel_metadata[id(model)]
+    assert all(len(ids) == 4 // ep for ids in metadata["expert_global_ids"].values())
+    if layout is not None:
+        adapter.parallelize(teacher)
+        frozen = {
+            name: value.detach().clone()
+            for name, value in model.state_dict().items()
+            if "experts.down_proj" in name or ".mlp.gate." in name
+        }
+        lane = adapter.context.data_mesh.get_local_rank()
+        local = [
+            batches[step * 8 + index]
+            for step in range(2)
+            for index in range(lane, 8, adapter.context.dp_size)
+        ]
+        phase = "native"
+        DistributedBypassRuntime.clip_gradients = observed_clip
+        try:
+            mtd.bypass(model, teacher, local, recipe, device_mesh=manager)
+        finally:
+            DistributedBypassRuntime.clip_gradients = original_clip
+        assert trace_index == len(traces)
+        for name, value in frozen.items():
+            torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
     with torch.no_grad():
         actual = model(**batch).logits
         actual = actual.full_tensor() if isinstance(actual, DTensor) else actual
@@ -263,111 +679,11 @@ def test_native_iq_placement_preserves_projection(native_workers, frozen_format)
     native_workers.run(_native_projection_worker, frozen_format)
 
 
-def _native_geometry_preflight_worker(rank, size):
-    from torch.distributed.device_mesh import init_device_mesh
-    from torch.distributed.tensor.placement_types import _StridedShard
-    from transformers import Qwen3MoeConfig
-    from transformers.distributed.expert_parallel import MoEParamShard
-    from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
-    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
-
-    from modelopt.torch.distill._bypass_parallel import (
-        _tp_quantizer_layouts,
-        apply_tp_quantizer_fields,
-    )
-    from modelopt.torch.distill.plugins.transformers.parallel import (
-        _validate_parameter_geometry,
-        apply_hf_tensor_parallelism,
-        validate_hf_tensor_parallelism,
-    )
-    from modelopt.torch.quantization.plugins.huggingface import register_fused_experts_on_the_fly
-
-    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("tp",))
-    expert_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("ep",))
-    torch.manual_seed(54)
-    config = Qwen3MoeConfig(
-        hidden_size=8, moe_intermediate_size=8, num_experts=4, num_experts_per_tok=1
-    )
-    config._experts_implementation = "eager"
-    original = torch.nn.Module()
-    original.experts = Qwen3MoeExperts(config)
-    with torch.no_grad():
-        for parameter in original.parameters():
-            parameter.normal_(std=0.3)
-    register_fused_experts_on_the_fly(original)
-    mtq.quantize(
-        original,
-        {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "*gate_up_proj_weight_quantizers*",
-                    "cfg": {"num_bits": 8, "axis": 0},
-                },
-            ],
-            "algorithm": "max",
-        },
-        lambda model: model.experts(
-            torch.randn(4, 8), torch.arange(4).reshape(4, 1), torch.ones(4, 1)
-        ),
-    )
-    before = copy.deepcopy(original.state_dict())
-    parameter = original.experts.gate_up_proj
-    quantizers = original.experts.gate_up_proj_weight_quantizers
-    with pytest.raises(ValueError, match="physical matrix or fused expert views"):
-        validate_hf_tensor_parallelism(original, mesh, {"experts.gate_up_proj": "grouped_gemm"})
-    # The same whole-expert placement is legal on EP and must remain metadata-only here.
-    _validate_parameter_geometry(
-        original.experts,
-        "gate_up_proj",
-        ALL_PARALLEL_STYLES["grouped_gemm"],
-        expert_mesh,
-        "experts.gate_up_proj",
-        allow_expert_axis=True,
-    )
-    with pytest.raises(ValueError, match="physical matrix or fused expert views"):
-        _validate_parameter_geometry(
-            original.experts,
-            "gate_up_proj",
-            MoEParamShard(_StridedShard(0, split_factor=2), shards_expert_dim=True),
-            expert_mesh,
-            "experts.gate_up_proj",
-            allow_expert_axis=True,
-        )
-    assert original.experts.gate_up_proj is parameter
-    assert original.experts.num_experts == 4 and len(quantizers) == 4
-    assert all(torch.equal(value, before[name]) for name, value in original.state_dict().items())
-    for style in ("packed_colwise", "rowwise"):
-        model = copy.deepcopy(original)
-        plan = {"experts.gate_up_proj": style}
-        validate_hf_tensor_parallelism(model, mesh, plan)
-        apply_hf_tensor_parallelism(model, mesh, plan)
-        for quantizer, fields, _, _ in _tp_quantizer_layouts(model):
-            apply_tp_quantizer_fields(quantizer, fields)
-        local = model.experts.gate_up_proj.to_local()
-        for index, quantizer in enumerate(model.experts.gate_up_proj_weight_quantizers):
-            reference_weight = quantizers[index](parameter[index])
-            amax = quantizers[index].amax
-            if style == "packed_colwise":
-                rows = torch.cat((torch.arange(4) + rank * 4, torch.arange(4) + 8 + rank * 4))
-                reference_weight, amax = reference_weight[rows], amax[rows]
-            else:
-                reference_weight = reference_weight[:, rank * 4 : (rank + 1) * 4]
-            torch.testing.assert_close(quantizer.amax, amax, rtol=0, atol=0)
-            inputs = torch.randn(3, local.shape[-1], requires_grad=True)
-            expected_inputs = inputs.detach().clone().requires_grad_()
-            actual = F.linear(inputs, quantizer(local[index]))
-            expected = F.linear(expected_inputs, reference_weight)
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            actual.square().sum().backward()
-            expected.square().sum().backward()
-            torch.testing.assert_close(inputs.grad, expected_inputs.grad, rtol=0, atol=0)
-
-
-@pytest.mark.timeout(180)
-def test_native_geometry_preflight_matches_physical_field_ownership(bypass_cpu_workers):
-    pytest.importorskip("transformers", minversion="5.23")
-    bypass_cpu_workers.run(_native_geometry_preflight_worker)
+@pytest.mark.parametrize("layout", ["tp2-fsdp2-ep4", "ep2-replica2"])
+@pytest.mark.parametrize("frozen_format", ["fp8", "nvfp4"])
+@pytest.mark.timeout(300)
+def test_native_owner_updates_match_reference(native_workers, layout, frozen_format):
+    native_workers.run(_native_projection_worker, frozen_format, layout)
 
 
 def _native_ep_transport_policy_worker(rank, size):

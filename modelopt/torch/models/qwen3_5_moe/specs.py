@@ -35,6 +35,7 @@ register(
                 "layers",
             ),
             batch_packed_documents=True,
+            functional_children=("linear_attn.conv1d",),
         ),
         model_type="qwen3_5_moe",
         min_transformers_version="5.5",
