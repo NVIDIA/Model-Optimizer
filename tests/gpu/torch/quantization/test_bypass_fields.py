@@ -242,7 +242,7 @@ def test_iq_padded_native_repair_lifecycle(name):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for peak memory")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_native_replay_peak_memory_and_vjp(dtype, record_property):
+def test_native_replay_peak_memory_and_vjp(dtype, record_property, capsys):
     """Measure fallback replay for a 4096-by-14336 projection, excluding packing/decoding."""
     torch.manual_seed(105)
     fmt = IQ_FORMAT_REGISTRY["iq1_s"]
@@ -269,11 +269,18 @@ def test_native_replay_peak_memory_and_vjp(dtype, record_property):
     torch.cuda.synchronize()
     peak_bytes = torch.cuda.max_memory_allocated() - baseline
     budget_bytes = elements * (1 + output.element_size()) + 8 * 262144
-    record_property("replay_dtype", str(dtype))
-    record_property("replay_elements", elements)
-    record_property("replay_forward_ms", start.elapsed_time(end))
-    record_property("replay_forward_peak_bytes", peak_bytes)
-    record_property("replay_forward_budget_bytes", budget_bytes)
+    metrics = {
+        "replay_device": torch.cuda.get_device_name(),
+        "replay_dtype": str(dtype),
+        "replay_elements": elements,
+        "replay_forward_ms": start.elapsed_time(end),
+        "replay_forward_peak_bytes": peak_bytes,
+        "replay_forward_budget_bytes": budget_bytes,
+    }
+    for name, value in metrics.items():
+        record_property(name, value)
+    with capsys.disabled():
+        print("Bypass replay metrics: " + json.dumps(metrics, sort_keys=True), flush=True)
     assert peak_bytes <= budget_bytes
 
     reference_steps = steps.detach().clone().requires_grad_()
