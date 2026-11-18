@@ -86,10 +86,13 @@ def validate_model_geometry(checkpoint, layers, heads) -> None:
     """Bind captured full-attention layers and query heads to the checkpoint config."""
     config = json.loads((checkpoint.checkpoint_root / "config.json").read_bytes())
     config = config.get("text_config", config)
+    types = config.get("layers_block_type", config.get("layer_types"))
     count = config.get("num_hidden_layers")
+    # Nemotron-H checkpoints declare the complete block list instead of a count.
+    if "num_hidden_layers" not in config and isinstance(types, list):
+        count = len(types)
     if type(count) is not int or count <= 0 or type(config.get("num_attention_heads")) is not int:
         raise ValueError("checkpoint config must declare layer and attention-head counts")
-    types = config.get("layers_block_type", config.get("layer_types"))
     pattern = config.get("hybrid_override_pattern")
     if types is not None:
         if not isinstance(types, list) or len(types) != count:

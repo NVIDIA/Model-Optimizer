@@ -20,8 +20,12 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from fractions import Fraction
 
 _FORMULA = "a * exp(b * target_sparsity)"
 
@@ -274,6 +278,7 @@ class _Selection:
     worst_prompt_total_dropped_mass: float = 0.0
     mean_prompt_total_dropped_mass: float = 0.0
     worst_individual_dropped_mass: float = 0.0
+    risk_objective: float | Fraction = 0.0
 
 
 @dataclass(slots=True)

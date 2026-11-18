@@ -40,12 +40,16 @@ from dataclasses import dataclass
 from functools import cache
 from hashlib import sha256
 from pathlib import Path
+from typing import TYPE_CHECKING
 from weakref import ref
 
 import numpy as np
 import pulp
 
 import modelopt
+
+if TYPE_CHECKING:
+    from fractions import Fraction
 
 from .analytical_dense import validate_analytical_dense
 from .checkpoint_manifest import VerifiedCheckpointManifest
@@ -720,6 +724,7 @@ class _FrozenSelection:
     worst_prompt_total_dropped_mass: float
     mean_prompt_total_dropped_mass: float
     worst_individual_dropped_mass: float
+    risk_objective: float | Fraction
     exact_reason: str | None = None
 
     @property
@@ -882,7 +887,7 @@ def _selection_pass(
         )
 
     def freeze_selection(
-        targets, anchors, nearest, choices, combined_tile_cost, minimum, target_met
+        targets, anchors, nearest, choices, combined_tile_cost, minimum, target_met, risk_objective
     ):
         prompt_risks: list[float] = []
         worst_individual_risk = 0.0
@@ -942,6 +947,7 @@ def _selection_pass(
                 sum(prompt_risks) / len(prompt_risks) if prompt_risks else 0.0
             ),
             worst_individual_dropped_mass=worst_individual_risk,
+            risk_objective=risk_objective,
         )
 
     def solve_path(
@@ -1396,7 +1402,7 @@ def _selection_pass(
             name: str,
             *,
             integral: bool,
-        ) -> float | None:
+        ) -> float | Fraction | None:
             # A fixed number cannot rank candidates; the risk solve below still
             # proves feasibility. Avoid PuLP's stale constant-objective dummy.
             if restricted and not len(pulp.lpSum([expression])):
@@ -1413,14 +1419,12 @@ def _selection_pass(
                 is None
             ):
                 return None
-        if (
-            minimize_and_fix(
-                worst_prompt_risk,
-                "fix_worst_prompt_total_dropped_mass",
-                integral=False,
-            )
-            is None
-        ):
+        risk_objective = minimize_and_fix(
+            worst_prompt_risk,
+            "fix_worst_prompt_total_dropped_mass",
+            integral=False,
+        )
+        if risk_objective is None:
             return None
         if minimize_and_fix(cost_expression, "fix_cost", integral=True) is None:
             raise MaskReuseSolverFailure(
@@ -1498,6 +1502,7 @@ def _selection_pass(
             combined_tile_cost,
             minimum_bmm1_skipped_tiles,
             target_met,
+            risk_objective,
         )
 
     frontier: list[Mapping[str, object]] = []
@@ -1541,7 +1546,8 @@ def _selection_pass(
         }
         if solved is not None:
             rank = (
-                solved.worst_prompt_total_dropped_mass,
+                # Rank with the solved objective, not its rounded reporting sum.
+                solved.risk_objective,
                 solved.combined_tile_cost,
                 len(solved.choices) - solved.fallback_count,
                 len(solved.anchors),
@@ -1581,7 +1587,7 @@ def _selection_pass(
             continue
         maximum_rank = (
             -maximum.bmm1_skipped_tiles,
-            maximum.worst_prompt_total_dropped_mass,
+            maximum.risk_objective,
             maximum.combined_tile_cost,
             len(maximum.choices) - maximum.fallback_count,
             len(maximum.anchors),
@@ -1616,6 +1622,7 @@ def _selection_pass(
             worst_prompt_total_dropped_mass=0.0,
             mean_prompt_total_dropped_mass=0.0,
             worst_individual_dropped_mass=0.0,
+            risk_objective=0.0,
             exact_reason="no_joint_target_and_topology_had_a_feasible_solver_solution",
         ),
         frontier,

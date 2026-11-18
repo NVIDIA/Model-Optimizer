@@ -970,7 +970,10 @@ def _selection_pass(
             -bmm1_skipped, "fix_maximum_bmm1_skips", integral=True
         ):
             return None
-        if not minimize_and_fix(worst_prompt_risk, "fix_worst_prompt_risk", integral=False):
+        risk_objective = session.minimize_and_fix(
+            problem, worst_prompt_risk, "fix_worst_prompt_risk", integral=False
+        )
+        if risk_objective is None:
             return None
         if not minimize_and_fix(retained_reuse, "fix_retained_reuse", integral=True):
             raise MaskReuseSolverFailure(
@@ -1047,6 +1050,7 @@ def _selection_pass(
             if total_risks
             else 0.0,
             worst_individual_dropped_mass=worst_total,
+            risk_objective=risk_objective,
         )
 
     selections: dict[Bucket, _Selection] = {}
@@ -1101,9 +1105,7 @@ def _selection_pass(
             )
             if selected is not None:
                 rank = (
-                    selected.worst_prompt_total_dropped_mass
-                    if max_anchor_dropped_mass is None
-                    else selected.worst_prompt_reuse_dropped_mass,
+                    selected.risk_objective,
                     combined_tile_cost,
                     len(selected.choices)
                     - sum(choice.fallback for choice in selected.choices.values()),
@@ -1134,9 +1136,7 @@ def _selection_pass(
                         (
                             (
                                 -maximum.bmm1_skipped_tiles,
-                                maximum.worst_prompt_total_dropped_mass
-                                if max_anchor_dropped_mass is None
-                                else maximum.worst_prompt_reuse_dropped_mass,
+                                maximum.risk_objective,
                                 2
                                 * sum(choice.retained_tiles for choice in maximum.choices.values())
                                 + anchor_evaluation.retained_tiles,
@@ -1170,6 +1170,7 @@ def _selection_pass(
                 worst_prompt_total_dropped_mass=selected.worst_prompt_total_dropped_mass,
                 mean_prompt_total_dropped_mass=selected.mean_prompt_total_dropped_mass,
                 worst_individual_dropped_mass=selected.worst_individual_dropped_mass,
+                risk_objective=selected.risk_objective,
             )
         elif maximum_candidates:
             _, selected = min(maximum_candidates, key=lambda item: item[0])
@@ -1186,6 +1187,7 @@ def _selection_pass(
                 worst_prompt_total_dropped_mass=selected.worst_prompt_total_dropped_mass,
                 mean_prompt_total_dropped_mass=selected.mean_prompt_total_dropped_mass,
                 worst_individual_dropped_mass=selected.worst_individual_dropped_mass,
+                risk_objective=selected.risk_objective,
             )
         else:
             target = dataset.menus[bucket][0]
