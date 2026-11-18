@@ -76,9 +76,19 @@ class _ReplayFacts:
 class TransformersBypassAdapter(ModuleBypassAdapter):
     """Adopt native text decoders and caller-owned placement, without a family registry."""
 
-    def __init__(self):
+    def __init__(self, device_mesh=None):
         """Require the tested integration version only when this adapter is used."""
         _require_transformers()
+        self.device_mesh = device_mesh
+        self.context = None
+        if device_mesh is not None:
+            from .parallel import native_mesh_context, torch_mesh_context
+
+            self.context = (
+                native_mesh_context(device_mesh)
+                if callable(getattr(device_mesh, "get_mesh", None))
+                else torch_mesh_context(device_mesh)
+            )
         self.student = None
         self._providers = weakref.WeakKeyDictionary()
         self._model_facts = weakref.WeakKeyDictionary()
@@ -103,6 +113,51 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             )
             self._model_facts[model] = facts
         return facts
+
+    def parallelize(self, model, *, initialize=None):
+        """Stage native fields before caller-owned HF TP/EP/FSDP, or validate adoption."""
+        self._model_facts.pop(model, None)
+        if self.context is None:
+            raise ValueError("parallelize requires the caller's actual device_mesh")
+        if self.context.mesh_manager is not None:
+            from .parallel import parallelize_native_transformers
+
+            parallelize_native_transformers(model, self.context, initialize=initialize)
+            return model
+        if initialize is not None:
+            raise ValueError("Native initialization callbacks require TransformersDeviceMesh")
+        from ..._bypass_parallel import _size, prepare_quantizer_partitions
+        from .parallel import apply_hf_tensor_parallelism, validate_hf_tensor_parallelism
+
+        if _size(self.context.pipeline_mesh) > 1:
+            raise ValueError("Native PP requires a validated family transport")
+        if _size(self.context.tensor_mesh) > 1 and not hasattr(
+            model, "_modelopt_bypass_torch_mesh"
+        ):
+            from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
+
+            validate_hf_tensor_parallelism(model, self.context.tensor_mesh)
+            prepare_packed_weights_for_tp(model)
+            apply_hf_tensor_parallelism(model, self.context.tensor_mesh)
+            prepare_quantizer_partitions(model, self.context)
+        model._modelopt_bypass_torch_mesh = self.device_mesh
+        return model
+
+    def adopt(self, model):
+        """Validate already realized placement without installing another set of hooks."""
+        if self.context is None:
+            return
+        if self.context.mesh_manager is not None:
+            if not getattr(model, "_mesh_manager", None) and self.context.device_mesh.size() > 1:
+                raise ValueError(
+                    "Prepare IQ placement with TransformersBypassAdapter.parallelize first"
+                )
+            self.parallelize(model)
+        elif (
+            getattr(model, "_modelopt_bypass_torch_mesh", None) is not self.device_mesh
+            and self.context.device_mesh.size() > 1
+        ):
+            raise ValueError("Already placed Torch models must use their exact caller-owned mesh")
 
     def _provider(self, model):
         spec = _model_spec(model)
