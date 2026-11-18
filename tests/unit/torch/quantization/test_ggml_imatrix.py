@@ -33,7 +33,11 @@ from modelopt.torch.export.moe_utils import _export_fused_experts
 from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.choice_search import search_choices
-from modelopt.torch.quantization.ggml.common import pinned_importance, pinned_packed_weight
+from modelopt.torch.quantization.ggml.common import (
+    _pinned_search_scales,
+    pinned_importance,
+    pinned_packed_weight,
+)
 
 IQ2_XXS = GGML_FORMAT_REGISTRY["iq2_xxs"]
 IMATRIX = {"method": "imatrix"}
@@ -121,8 +125,21 @@ def test_pins_the_codes_it_chose(algorithm):
     assert output_error(decoded) < output_error(plain.weight_quantizer(plain.weight))
 
 
+def _block_energy(algorithm, inputs, weight):
+    # imatrix keeps each block's energy under the second moments of its inputs, local_hessian under
+    # their damped block Hessian (perc_damp 0.3 by default).
+    x = inputs.double().reshape(len(inputs), -1, 256)
+    weight = weight.double().reshape(len(weight), -1, 256)
+    if algorithm is IMATRIX:
+        return (_floored(x.square().mean(dim=0)) * weight.square()).sum(-1)
+    hessian = torch.einsum("nbi,nbj->bij", x, x) / len(x)
+    hessian.diagonal(dim1=1, dim2=2).add_(0.3 * hessian.diagonal(dim1=1, dim2=2).mean())
+    return (torch.einsum("rbi,bij->rbj", weight, hessian) * weight).sum(-1)
+
+
+@ENCODERS
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float64])
-def test_imatrix_matches_each_blocks_energy_and_encodes_again_to_its_codes(dtype):
+def test_matches_each_blocks_energy_and_encodes_again_to_its_codes(algorithm, dtype):
     # The stored scales are raised after the search to keep each block's energy. Encoding the
     # weight again, as QAD does once it changes, searches at the scales the codes were searched at,
     # so it gives back the pinned codes rather than the smaller ones the raised scales would pick.
@@ -130,15 +147,17 @@ def test_imatrix_matches_each_blocks_energy_and_encodes_again_to_its_codes(dtype
     model = nn.Linear(512, 16, bias=False, dtype=dtype)
     original = model.weight.detach().clone()
     inputs = _inputs().to(dtype)
-    mtq.quantize(model, _config(IMATRIX), forward_loop=lambda m: m(inputs))
+    mtq.quantize(model, _config(algorithm), forward_loop=lambda m: m(inputs))
     quantizer = model.weight_quantizer
     assert torch.equal(model.weight.detach(), original)
 
-    second_moments = _floored(inputs.float().square().mean(dim=0)).reshape(2, 256)
-    decoded = _decoded(quantizer, original.shape).reshape(16, 2, 256)
-    energy = (second_moments * decoded.square()).sum(-1)
-    target = (second_moments * original.float().reshape(16, 2, 256).square()).sum(-1)
-    torch.testing.assert_close(energy, target, rtol=1e-2, atol=0)
+    decoded = _decoded(quantizer, original.shape)
+    torch.testing.assert_close(
+        _block_energy(algorithm, inputs, decoded),
+        _block_energy(algorithm, inputs, original),
+        rtol=1e-2,
+        atol=0,
+    )
     pinned = pinned_packed_weight(quantizer, "iq2_xxs")
     assert torch.equal(IQ2_XXS.pack(model.weight.detach(), quantizer), pinned)
     # Export packs the decoding pin_current_codes returns, whole as well as in rows, and the weight
@@ -148,7 +167,8 @@ def test_imatrix_matches_each_blocks_energy_and_encodes_again_to_its_codes(dtype
     assert torch.equal(IQ2_XXS.pack(model.weight.detach(), quantizer), pinned)
 
 
-def test_imatrix_encodes_alike_under_a_statistic_near_the_float32_maximum():
+@ENCODERS
+def test_encodes_alike_under_a_statistic_near_the_float32_maximum(algorithm):
     # Scaling every calibration input by a power of two scales the statistic, and so every weight
     # of the scale fit, the search and the energy match, alike, which changes none of them, even
     # where the statistic (2**118 here, about the largest its floor's mean accepts) is near the
@@ -158,7 +178,7 @@ def test_imatrix_encodes_alike_under_a_statistic_near_the_float32_maximum():
     for scale in (1.0, 2.0**59):
         torch.manual_seed(0)
         model = nn.Linear(512, 16, bias=False)
-        mtq.quantize(model, _config(IMATRIX), lambda m, scale=scale: m(signs * scale))
+        mtq.quantize(model, _config(algorithm), lambda m, scale=scale: m(signs * scale))
         pins.append(pinned_packed_weight(model.weight_quantizer, "iq2_xxs"))
     assert torch.equal(*pins)
 
@@ -344,7 +364,8 @@ def test_hf_export_writes_each_fused_expert_s_pinned_rows(moe, algorithm):
 
 def test_local_hessian_codes_hold_until_qad_changes_a_block():
     # Encoding again would re-pick the searched local scales, so the weight they were picked for
-    # keeps its codes; a block QAD changed is re-encoded under the pinned scale, as after GPTQ.
+    # keeps its codes; a block QAD changed is searched again at the scale its codes were searched
+    # at, and keeps its pinned, energy-matched scale.
     torch.manual_seed(0)
     model = nn.Linear(512, 16, bias=False)
     original = model.weight.detach().clone()
@@ -360,9 +381,13 @@ def test_local_hessian_codes_hold_until_qad_changes_a_block():
     packed = IQ2_XXS.pack(model.weight.detach().clone(), quantizer)
     rescanned, _ = IQ2_XXS.quantize(
         model.weight.detach(),
-        scales=IQ2_XXS.payload_scales(pinned.reshape(-1, IQ2_XXS.block_bytes)),
+        scales=_pinned_search_scales(quantizer, "iq2_xxs"),
         importance=pinned_importance(quantizer, "iq2_xxs"),
     )
+    pinned_scales = IQ2_XXS.payload_scales(pinned.reshape(-1, IQ2_XXS.block_bytes))
+    rescanned = IQ2_XXS.replace_payload_scales(
+        rescanned.reshape(-1, IQ2_XXS.block_bytes), pinned_scales
+    ).reshape(pinned.shape)
     others = [row for row in range(16) if row != 3]
     assert torch.equal(packed[others], pinned[others])
     assert torch.equal(packed[3], rescanned[3])
