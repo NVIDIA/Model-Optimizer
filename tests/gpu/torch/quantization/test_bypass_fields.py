@@ -162,6 +162,7 @@ def test_iq_scales_backpropagate_through_frozen_projection(frozen_format):
                 _iq("router.weight_quantizer", "iq2_s"),
                 _iq("experts.*.gate.weight_quantizer", "iq1_m"),
                 _iq("experts.*.up.weight_quantizer", "iq1_m"),
+                _iq("experts.1.up.weight_quantizer", "iq2_xxs"),
                 {"quantizer_name": "experts.*.down.weight_quantizer", "cfg": frozen_cfg},
             ]
         ),
@@ -371,3 +372,141 @@ def test_iq_repair_requires_local_expert_dtensor_ownership():
         pool.run(_repair_expert_sharded_dtensor_job)
     finally:
         pool.shutdown()
+
+
+@pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
+@pytest.mark.timeout(180)
+def test_grouped_iq_projection_matches_uneven_native_experts(name):
+    pytest.importorskip("triton")
+    from modelopt.torch.kernels.quantization.iq_grouped_gemm import iq_grouped_linear
+
+    if not torch.cuda.is_available():
+        pytest.skip("Native grouped IQ projections require CUDA")
+    torch.manual_seed(107)
+    model = nn.ModuleList([nn.Linear(512, 13, bias=False).cuda().bfloat16() for _ in range(3)])
+    mtq.quantize(model, _config([_iq("*weight_quantizer", name)]), None)
+    policy = IQRepairPolicy()
+    try:
+        policy.prepare(model)
+        states = [m.weight_quantizer._local_repair_state for m in model]
+        packeds = [s.packed for s in states]
+        pointers = torch.tensor([p.data_ptr() for p in packeds], device="cuda", dtype=torch.int64)
+        for counts in ((5, 0, 3), (0, 0, 0)):
+            ends = torch.tensor(counts, device="cuda", dtype=torch.int32).cumsum(0)
+            # An unowned EP tail must stay zero in both autograd directions.
+            x = torch.randn(
+                sum(counts) + 2, 512, device="cuda", dtype=torch.bfloat16, requires_grad=True
+            )
+            steps = torch.stack([s.projected_steps() for s in states]).detach().requires_grad_(True)
+            bias = torch.randn(3, 13, device="cuda", dtype=x.dtype, requires_grad=True)
+            actual = iq_grouped_linear(
+                x, packeds, steps, ends, name, (13, 512), bias, packed_pointers=pointers
+            )
+            reference_x = x.detach().requires_grad_(True)
+            reference_steps = steps.detach().requires_grad_(True)
+            reference_bias = bias.detach().requires_grad_(True)
+            pieces, start = [], 0
+            for index, count in enumerate(counts):
+                levels, _ = states[index].format.decode_int8(
+                    packeds[index], torch.tensor((13, 512))
+                )
+                weight = (
+                    (
+                        levels.reshape(
+                            -1, steps.shape[-1], states[index].format.int8_group_size
+                        ).float()
+                        * reference_steps[index].unsqueeze(-1)
+                    )
+                    .reshape(13, 512)
+                    .to(x.dtype)
+                )
+                pieces.append(
+                    F.linear(reference_x[start : start + count], weight, reference_bias[index])
+                )
+                start += count
+            expected = torch.cat([*pieces, reference_x[start:, :13] * 0])
+            torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015)
+            upstream = torch.randn_like(actual)
+            observed = torch.autograd.grad(actual, [x, steps, bias], upstream)
+            oracle = torch.autograd.grad(
+                expected, [reference_x, reference_steps, reference_bias], upstream
+            )
+            for a, b in zip(observed, oracle, strict=True):
+                torch.testing.assert_close(a, b, rtol=0.01, atol=0.015)
+    finally:
+        policy.close()
+
+
+@pytest.mark.parametrize("name", ["iq1_m", "iq2_xxs"])
+@pytest.mark.timeout(180)
+def test_automatic_packed_projection_matches_native_fields(name):
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 3):
+        pytest.skip("Automatic packed qualification is specific to GB300")
+    torch.manual_seed(127)
+    model = nn.Linear(4096, 2048, bias=True).cuda().bfloat16()
+    mtq.quantize(model, _config([_iq("*weight_quantizer", name)]), None)
+    policy = IQRepairPolicy()
+    try:
+        fields = policy.prepare(model)
+        state = model.weight_quantizer._local_repair_state
+        x = torch.randn(8, 4096, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        actual = model(x)
+        assert state.projection_counts == {"packed_dense": 1}
+        expected = F.linear(x, state(model.weight), model.bias)
+        torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015)
+        upstream = torch.randn_like(expected) / expected.numel()
+        observed = torch.autograd.grad(actual, [x, *fields], upstream)
+        oracle = torch.autograd.grad(expected, [x, *fields], upstream)
+        for a, b in zip(observed, oracle, strict=True):
+            error = (a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-20)
+            assert error < 5e-4, error.item()
+        # The long-context path must keep the faster materialized GEMM.
+        with torch.no_grad():
+            model(torch.zeros(32768, 4096, device="cuda", dtype=torch.bfloat16))
+        assert state.projection_counts == {"packed_dense": 1, "materialized": 2}
+        assert not any(
+            t.shape == model.weight.shape and t.is_floating_point() for t in state.buffers()
+        )
+    finally:
+        policy.close()
+
+
+@pytest.mark.parametrize("name", ["iq1_m", "iq2_xxs"])
+@pytest.mark.timeout(180)
+def test_automatic_grouped_projection_preserves_native_fields(name):
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 3):
+        pytest.skip("Automatic packed qualification is specific to GB300")
+    from transformers.integrations.moe import _grouped_linear
+
+    from modelopt.torch.quantization.repair_formats import repair_grouped_linear
+
+    torch.manual_seed(131)
+    bank = nn.ModuleList([nn.Linear(4096, 2048, bias=False).cuda().bfloat16() for _ in range(4)])
+    mtq.quantize(bank, _config([_iq("*weight_quantizer", name)]), None)
+    policy = IQRepairPolicy()
+    try:
+        fields = policy.prepare(bank)
+        quantizers = [m.weight_quantizer for m in bank]
+        x = torch.randn(8, 4096, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        ends = torch.tensor([5, 5, 8, 8], device="cuda", dtype=torch.int32)
+        actual = repair_grouped_linear(quantizers, x, ends)
+        assert actual is not None
+        expected = _grouped_linear(
+            x, torch.stack([q(m.weight) for q, m in zip(quantizers, bank, strict=True)]), ends
+        )
+        torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015)
+        upstream = torch.randn_like(expected) / expected.numel()
+        observed = torch.autograd.grad(actual, [x, *fields], upstream)
+        oracle = torch.autograd.grad(expected, [x, *fields], upstream)
+        for a, b in zip(observed, oracle, strict=True):
+            error = (a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-20)
+            assert error < 5e-4, error.item()
+        first = quantizers[0]._local_repair_state
+        assert first.projection_counts["packed_grouped"] == 1
+        pointers = first._grouped_pointers[1]
+        with torch.no_grad():
+            repair_grouped_linear(quantizers, x, ends)
+        assert first._grouped_pointers[1] is pointers
+        assert pointers.numel() == 4 and not pointers.requires_grad
+    finally:
+        policy.close()
