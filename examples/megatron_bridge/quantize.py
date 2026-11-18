@@ -64,6 +64,7 @@ from pathlib import Path
 
 import torch
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
+from megatron.core.transformer.enums import AttnBackend
 from mlflow_utils import NON_PARAMS, add_mlflow_args, mlflow_run, resolve_mlflow_args
 from transformers import AutoProcessor
 
@@ -166,6 +167,13 @@ def get_args() -> argparse.Namespace:
             "Fused kernels for DeepSeek sparse attention (e.g. GLM-5.x). The unfused fallback "
             "builds dense [seq, seq] scores per head, which does not fit at long sequence lengths."
         ),
+    )
+
+    parser.add_argument(
+        "--attention_backend",
+        choices=[backend.name for backend in AttnBackend],
+        default=None,
+        help="Override the provider attention backend; auto permits fallback during calibration.",
     )
 
     # Quantization arguments
@@ -382,6 +390,11 @@ def main(args: argparse.Namespace):
             "pipeline_dtype": torch.bfloat16,
             "seq_length": args.seq_length,
             "gradient_accumulation_fusion": False,  # not supported
+            **(
+                {"attention_backend": AttnBackend[args.attention_backend]}
+                if args.attention_backend is not None
+                else {}
+            ),
             **(
                 {"dsa_kernel_backend": args.dsa_kernel_backend}
                 if args.dsa_kernel_backend is not None
