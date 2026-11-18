@@ -582,11 +582,12 @@ def release_cases():
             text["first_k_dense_replace"] = 1
         if family in ("mimo_v2", "deepseek_v41", "step5", "kimi_k31"):
             record["modelopt_module"] = "modelopt.torch.models." + family
-        if family in ("deepseek_v41", "step5", "kimi_k31"):
+        if family in ("deepseek_v41", "step5", "kimi_k31", "mimo_v2"):
             record["modelopt_config_class"] = {
                 "deepseek_v41": "DeepseekV41Config",
                 "step5": "Step5Config",
                 "kimi_k31": "KimiK31Config",
+                "mimo_v2": "MiMoV2Config",
             }[family]
         result.append(record)
         seen.add(name)
