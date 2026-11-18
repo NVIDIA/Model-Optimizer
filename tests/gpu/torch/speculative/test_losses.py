@@ -23,18 +23,15 @@ from modelopt.torch.speculative.losses import masked_lk_lambda_loss
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("truncated", [False, True])
 @pytest.mark.parametrize("mask_kind", ["binary", "fractional", "empty"])
-def test_lk_compiled_cuda_matches_fp32_reference(dtype, truncated, mask_kind):
+def test_lk_compiled_cuda_matches_fp32_reference(dtype, mask_kind):
     torch.manual_seed(31)
-    teacher = torch.randn(2, 16, 128, device="cuda", dtype=dtype)
+    sequence_length = 1025
+    teacher = torch.randn(2, sequence_length, 128, device="cuda", dtype=dtype)
     teacher[..., ::7] = -torch.inf
-    indices = torch.randperm(128, device="cuda")[:64] if truncated else None
-    student = torch.randn(2, 16, 64 if truncated else 128, device="cuda", dtype=dtype)
-    student.masked_fill_(
-        torch.isneginf(teacher if indices is None else teacher[..., indices]), -torch.inf
-    )
-    mask = torch.randint(0, 2, (2, 16), device="cuda").float()
+    student = torch.randn(2, sequence_length, 128, device="cuda", dtype=dtype)
+    student.masked_fill_(torch.isneginf(teacher), -torch.inf)
+    mask = torch.randint(0, 2, (2, sequence_length), device="cuda").float()
     if mask_kind == "fractional":
         mask /= mask.numel()
     elif mask_kind == "empty":
@@ -45,9 +42,7 @@ def test_lk_compiled_cuda_matches_fp32_reference(dtype, truncated, mask_kind):
     if mask_kind != "binary":
         teacher.masked_fill_((mask == 0).unsqueeze(-1), torch.nan)
     reference_student = student.float().requires_grad_()
-    expected = masked_lk_lambda_loss(
-        teacher.float(), reference_student, mask, draft_vocab_indices=indices
-    )
+    expected = masked_lk_lambda_loss(teacher.float(), reference_student, mask)
     expected.backward()
     assert torch.isfinite(expected)
     assert torch.isfinite(reference_student.grad).all()
@@ -55,7 +50,7 @@ def test_lk_compiled_cuda_matches_fp32_reference(dtype, truncated, mask_kind):
     compiled = torch.compile(masked_lk_lambda_loss, fullgraph=True)
     for loss_fn in (masked_lk_lambda_loss, compiled):
         actual_student = student.detach().clone().requires_grad_()
-        actual = loss_fn(teacher, actual_student, mask, draft_vocab_indices=indices)
+        actual = loss_fn(teacher, actual_student, mask)
         actual.backward()
         torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-4)
         torch.testing.assert_close(

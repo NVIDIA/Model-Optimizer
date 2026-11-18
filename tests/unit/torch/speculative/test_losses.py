@@ -21,14 +21,11 @@ import torch
 from modelopt.torch.speculative.losses import masked_lk_lambda_loss
 
 
-def _reference(teacher, student, mask, eta, indices=None):
+def _reference(teacher, student, mask, eta):
     valid = mask != 0
     teacher, student, mask = teacher[valid], student[valid], mask[valid]
     p = teacher.detach().float().log_softmax(-1).exp()
     teacher = teacher.detach().float()
-    if indices is not None:
-        p = p[..., indices]
-        teacher = teacher[..., indices]
     log_p_conditional = teacher.log_softmax(-1)
     log_q = student.float().log_softmax(-1)
     q = log_q.exp()
@@ -40,7 +37,6 @@ def _reference(teacher, student, mask, eta, indices=None):
     return ((blend * kl + (1 - blend) * (1 - overlap)) * mask).sum() / count
 
 
-@pytest.mark.parametrize("truncated", [False, True])
 @pytest.mark.parametrize("eta", [0.0, 3.0])
 @pytest.mark.parametrize(
     "case",
@@ -54,38 +50,45 @@ def _reference(teacher, student, mask, eta, indices=None):
         "masked_nonfinite_teacher",
         "masked_nonfinite_student",
         "fractional_weights",
+        "chunked",
     ],
 )
-def test_lk_loss_matches_reference_and_only_differentiates_student(truncated, eta, case):
+def test_lk_loss_matches_reference_and_only_differentiates_student(eta, case):
     torch.manual_seed(17)
-    teacher = torch.randn(2, 5, 11)
+    sequence_length = 2051 if case == "chunked" else 5
+    teacher = torch.randn(2, sequence_length + 1, 11)[:, 1:]
     if case in ("zero_probability", "empty_mask"):
         teacher[..., 2] = -torch.inf
-    indices = torch.tensor([8, 2, 6, 0, 10]) if truncated else None
-    student = torch.randn(2, 5, 5 if truncated else 11)
+    student = torch.randn(2, sequence_length + 1, 11)[:, 1:]
     if case == "identical":
-        student = teacher.detach().clone() if indices is None else teacher.detach()[..., indices]
+        student = teacher.detach().clone()
     elif case == "extreme":
         student *= 1000
     mask = torch.tensor([[0, 1, 1, 0, 1], [1, 0, 1, 1, 0]], dtype=torch.float32)
+    if case == "chunked":
+        mask = mask.repeat(1, (sequence_length + 4) // 5)[:, :sequence_length]
+        # Unequal chunk acceptance and weights must still use one microbatch-wide blend.
+        student[:, 1024:2048] *= 7
+        mask[:, :1024] *= 0.03
+        mask[:, 2048:] = 0
     if case == "empty_mask":
         mask.zero_()
     elif case == "fractional_weights":
         mask *= torch.linspace(0.01, 0.09, mask.numel()).reshape_as(mask)
     if case in ("empty_mask", "masked_zero_student_probability"):
         student[..., 0].masked_fill_(mask == 0, -torch.inf)
-    if case in ("empty_mask", "masked_nonfinite_teacher"):
+    if case in ("empty_mask", "masked_nonfinite_teacher", "chunked"):
         teacher.masked_fill_((mask == 0).unsqueeze(-1), -torch.inf)
         teacher[0, 0] = torch.nan
-    if case in ("empty_mask", "masked_nonfinite_student"):
+    if case in ("empty_mask", "masked_nonfinite_student", "chunked"):
         student.masked_fill_((mask == 0).unsqueeze(-1), -torch.inf)
         student[0, 0] = torch.inf
     teacher.requires_grad_()
     student = student.requires_grad_()
     original_teacher = teacher.detach().clone()
     reference_student = student.detach().clone().requires_grad_()
-    expected = _reference(teacher, reference_student, mask, eta, indices)
-    actual = masked_lk_lambda_loss(teacher, student, mask, eta=eta, draft_vocab_indices=indices)
+    expected = _reference(teacher, reference_student, mask, eta)
+    actual = masked_lk_lambda_loss(teacher, student, mask, eta=eta)
     assert torch.isfinite(actual)
     torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
     (actual * 1.7).backward()
@@ -96,7 +99,7 @@ def test_lk_loss_matches_reference_and_only_differentiates_student(truncated, et
     torch.testing.assert_close(student.grad, reference_student.grad, atol=1e-6, rtol=1e-5)
     assert teacher.grad is None
     assert torch.count_nonzero(student.grad[mask == 0]) == 0
-    if case == "empty_mask" or (case == "identical" and not truncated):
+    if case in ("empty_mask", "identical"):
         torch.testing.assert_close(actual, torch.zeros_like(actual), atol=1e-6, rtol=0)
 
 
@@ -111,17 +114,12 @@ def test_lk_identical_zero_probabilities_have_zero_loss_and_gradients(mask_weigh
     assert teacher.grad is None
 
 
-def test_lk_truncated_overlap_keeps_missing_teacher_mass():
-    teacher = torch.tensor([[[0.1, 0.3, 0.2, 0.4]]]).log().requires_grad_()
-    indices = torch.tensor([3, 0, 1])
-    student = (teacher.detach()[..., indices].exp() / 0.8).log().requires_grad_()
-    actual = masked_lk_lambda_loss(teacher, student, torch.ones(1, 1), draft_vocab_indices=indices)
-    # Conditional KL is zero, but the true acceptance ceiling is 0.8, not 1.
-    expected = (1 - torch.exp(torch.tensor(-3.0 * 0.8))) * 0.2
-    torch.testing.assert_close(actual, expected)
-    actual.backward()
-    torch.testing.assert_close(student.grad, torch.zeros_like(student), atol=1e-6, rtol=0)
-    assert teacher.grad is None
+def test_lk_rejects_reduced_vocabulary():
+    teacher = torch.tensor([[[0.0, -torch.inf]]])
+    student = torch.zeros(1, 1, 1, requires_grad=True)
+    with pytest.raises(ValueError):
+        masked_lk_lambda_loss(teacher, student, torch.ones(1, 1))
+    assert student.grad is None
 
 
 def test_lk_probability_ties_match_reference_subgradient():

@@ -893,17 +893,11 @@ class HFEagleModel(EagleModel):
     ):
         """Function for EAGLE loss computing."""
         if self.eagle_loss_type == "lk_lambda":
-            draft_indices = None
-            if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
-                draft_indices = self.eagle_module.d2t + torch.arange(
-                    len(self.eagle_module.d2t), device=self.eagle_module.d2t.device
-                )
             classification_loss = masked_lk_lambda_loss(
                 base_output_targets,
                 eagle_logits,
                 loss_mask,
                 eta=self.eagle_lk_eta,
-                draft_vocab_indices=draft_indices,
             )
         else:
             classification_loss = masked_soft_target_cross_entropy(

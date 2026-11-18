@@ -658,7 +658,7 @@ class EagleConfig(ModeloptBaseConfig):
         default="soft_target_ce",
         description=(
             "Token distillation objective. Available options: soft_target_ce, lk_lambda. "
-            "LK lambda is only supported by the Hugging Face backend."
+            "LK lambda requires the Hugging Face backend and the full target vocabulary."
         ),
     )
 

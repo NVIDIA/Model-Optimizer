@@ -295,6 +295,29 @@ def test_offline_batch_and_empty_assistant_mask(tmp_path):
     with pytest.raises(ValueError):
         model(**collated)
 
+    draft_before = model.eagle_module.proj.weight.detach().clone()
+    frozen_before = model.embedding.weight.detach().clone()
+    trainer = Trainer(
+        model=model,
+        args=TrainingArguments(
+            output_dir=str(tmp_path / "training"),
+            use_cpu=True,
+            report_to=[],
+            max_steps=1,
+            per_device_train_batch_size=2,
+            remove_unused_columns=False,
+            save_strategy="no",
+            disable_tqdm=True,
+        ),
+        train_dataset=dataset,
+        data_collator=collator,
+    )
+    result = trainer.train()
+    assert result.global_step == 1
+    assert torch.isfinite(torch.tensor(result.training_loss))
+    assert not torch.equal(model.eagle_module.proj.weight, draft_before)
+    torch.testing.assert_close(model.embedding.weight, frozen_before, rtol=0, atol=0)
+
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("sharded", [False, True])

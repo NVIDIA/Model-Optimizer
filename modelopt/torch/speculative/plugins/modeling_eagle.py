@@ -143,7 +143,10 @@ class EagleModule(nn.Module):
         output_attentions: bool | None = False,
         input_ids: torch.LongTensor | None = None,
     ):
-        """Forward function for EagleModule."""
+        """Forward function for EagleModule.
+
+        ``input_ids`` is unused here; it supports the shared interface with native MTP.
+        """
         batch_size, seq_length, _ = hidden_states.shape
         seq_length_with_past = seq_length
         past_key_values_length = 0

@@ -45,7 +45,19 @@ def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertRetu
         "kimik2": kimik2_eagle_default_config,
     }[config.eagle_decoder_type]
     custom_config = config.eagle_architecture_config
-    config.eagle_architecture_config = {**default_arch_config, **custom_config}
+    arch_config = {**default_arch_config, **custom_config}
+    if config.eagle_loss_type == "lk_lambda":
+        base_config = (
+            getattr(model.config, "text_config", None)
+            or getattr(model.config, "llm_config", None)
+            or model.config
+        )
+        if arch_config.get("draft_vocab_size", base_config.vocab_size) != base_config.vocab_size:
+            raise ValueError(
+                "eagle_loss_type='lk_lambda' requires the full target vocabulary. "
+                "Use eagle_loss_type='soft_target_ce' for reduced-vocabulary EAGLE."
+            )
+    config.eagle_architecture_config = arch_config
 
     eagle_model = EagleDMRegistry.convert(model)
     eagle_model.modify(config)

@@ -417,7 +417,9 @@ module using target-model supervision. Only the MTP module is trained. LK lambda
 is the default loss; set `mtp_loss_type="soft_target_ce"` to use cross-entropy.
 
 The [Python API](../../modelopt/torch/speculative/mtp/adapter.py) currently requires
-a custom model adapter.
+a custom model adapter. When training from offline hidden-state data with Hugging
+Face Trainer, set `remove_unused_columns=False` in `TrainingArguments` so the
+collator receives the hidden-state features.
 
 ## Support Matrix
 
