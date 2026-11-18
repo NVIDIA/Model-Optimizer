@@ -537,6 +537,7 @@ EXPECTED_MOE_LAYOUTS = [
         ("gate_proj", "up_proj"),
     ),
     ("deepseek_v4", ("DeepseekV4SparseMoeBlock",), ("gate_up_proj", "down_proj"), True, None),
+    ("deepseek_v41", ("V41MoE", "DeepseekV41MoE"), ("w1", "w2", "w3"), False, ("w1", "w3")),
     (
         "gemma4",
         ("Gemma4TextDecoderLayer",),
@@ -706,7 +707,11 @@ def test_iterable_experts_matches_pre_refactor_support():
     """
     # Registered after the refactor: deepseek_v3/v4 are invisible to legacy detection
     # (DeepseekV3MoE calls its router ``gate``), so they had no legacy behavior to match.
-    added_after_refactor = {"deepseek_v3", "deepseek_v4"}
+    added_after_refactor = {
+        "deepseek_v3",
+        "deepseek_v4",
+        "deepseek_v41",
+    }
     legacy_substrings = (
         "mixtralforcausallm",
         "qwenmoeforcausallm",
@@ -722,6 +727,7 @@ def test_iterable_experts_matches_pre_refactor_support():
         "deepseek": "DeepseekForCausalLM",
         "deepseek_v3": "DeepseekV3ForCausalLM",
         "deepseek_v4": "DeepseekV4ForCausalLM",
+        "deepseek_v41": "DeepseekV41ForCausalLM",
         "gemma4": "Gemma4ForConditionalGeneration",
         "gemma4_text": "Gemma4TextForCausalLM",
         "gpt_oss": "GptOssForCausalLM",
