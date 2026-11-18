@@ -176,6 +176,10 @@ class TensorQuantizer(nn.Module):
         "pre_bwd_fn",
         # quantizer cache for custom backends, like luts
         "_quantizer_cache",
+        # Bypass masters and replay overrides belong to the active repair policy.
+        "_local_repair_state",
+        "_local_repair_active",
+        "_fake_quantize",
         # Runtime-only set of storage attributes tied to shared state. The tied
         # aliases are rebuilt from calibration config and tensor state during restore.
         "_shared_quant_tied_attrs",

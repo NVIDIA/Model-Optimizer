@@ -17,6 +17,7 @@
 """CPU lifecycle and ownership contracts for native IQ scale repair."""
 
 import copy
+import io
 
 import pytest
 import torch
@@ -25,9 +26,11 @@ from torch.nn import functional as F
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization import repair_formats
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight, pinned_packed_weight
 from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
+from modelopt.torch.quantization.nn import SequentialQuantizer
 from modelopt.torch.quantization.repair import IQRepairPolicy, plan_iq_repair
 
 
@@ -60,6 +63,7 @@ def test_iq_fields_finalize_and_reload(name, tmp_path):
         pin_packed_weight(model.weight_quantizer, name, native, source=model.weight)
     before = model(x).detach()
     original = fmt.pack(model.weight, model.weight_quantizer).clone()
+    parameters = {id(parameter) for parameter in model.parameters()}
     if name == "iq1_s":
         assert torch.signbit(decode_scale_fields(original, fmt)[0][0])
     policy = IQRepairPolicy()
@@ -67,6 +71,7 @@ def test_iq_fields_finalize_and_reload(name, tmp_path):
         fields = policy.prepare(model)
         assert torch.equal(model.weight_quantizer._local_repair_state.native_payload(), original)
         torch.testing.assert_close(model(x), before, rtol=0, atol=0)
+        assert {id(parameter) for parameter in model.parameters()} == parameters
         optimizer = torch.optim.SGD(fields, lr=0.01)
         model(x).square().mean().backward()
         assert model.weight.grad is None
@@ -75,6 +80,13 @@ def test_iq_fields_finalize_and_reload(name, tmp_path):
         policy.project_()
         changed = model(x).detach()
         assert not torch.equal(changed, before)
+        checkpoint = io.BytesIO()
+        mto.save(model, checkpoint)
+        checkpoint.seek(0)
+        active_restored = mto.restore(nn.Linear(256, 4, bias=False), checkpoint)
+        torch.testing.assert_close(active_restored(x), before, rtol=0, atol=0)
+        assert not hasattr(active_restored.weight_quantizer, "_local_repair_state")
+        assert "_fake_quantize" not in active_restored.weight_quantizer.__dict__
         policy.finalize_()
     finally:
         policy.close()
@@ -105,12 +117,174 @@ def test_iq_policy_refuses_aliases_and_restores_on_failure():
     policy = IQRepairPolicy()
     try:
         policy.prepare(model)
-        raise RuntimeError("replay failed")
-    except RuntimeError:
+        with pytest.raises(RuntimeError, match="replay failed"):
+            raise RuntimeError("replay failed")
+    finally:
         policy.close()
     assert model[0].weight.requires_grad
     torch.testing.assert_close(model(x), F.linear(x, model[0].weight_quantizer(model[0].weight)))
     assert all("repair" not in n for n, _ in model.named_modules())
+
+
+@pytest.mark.parametrize("change", ["replace_quantizer", "prepare_twice"])
+@pytest.mark.parametrize("sequential", [False, True])
+def test_iq_plan_rejects_stale_or_active_bindings_without_mutating_caller(change, sequential):
+    model = nn.Linear(256, 2, bias=False)
+    x = torch.randn(1, 256)
+    mtq.quantize(model, _config([_iq("weight_quantizer", "iq1_m")]), lambda m: m(x))
+    quantizer = model.weight_quantizer
+    if sequential:
+        disabled = copy.deepcopy(quantizer)
+        disabled.disable()
+        model.weight_quantizer = SequentialQuantizer(quantizer, disabled)
+    plan = plan_iq_repair([model])
+    policy = IQRepairPolicy()
+    try:
+        if change == "replace_quantizer":
+            previous = quantizer
+            model.weight_quantizer = copy.deepcopy(model.weight_quantizer)
+            quantizer = model.weight_quantizer[0] if sequential else model.weight_quantizer
+            expected_grad = True
+        else:
+            fields = policy.prepare_plan(plan, 0)
+            previous = quantizer._local_repair_state
+            expected_grad = False
+        with pytest.raises(ValueError):
+            policy.prepare_plan(plan, 0)
+        assert model.weight.requires_grad is expected_grad
+        if change == "replace_quantizer":
+            assert not hasattr(previous, "_local_repair_state")
+            assert not hasattr(quantizer, "_local_repair_state")
+        else:
+            assert quantizer._local_repair_state is previous
+            model(x).square().mean().backward()
+            assert any(field.grad is not None and field.grad.count_nonzero() for field in fields)
+    finally:
+        policy.close()
+    assert model.weight.requires_grad
+
+
+@pytest.mark.parametrize("alias", ["parameter", "storage", "frozen_bias"])
+@pytest.mark.parametrize("after_planning", [False, True])
+def test_iq_plan_protects_frozen_owners_and_allows_shared_nonwrite_parameters(
+    alias, after_planning
+):
+    model = nn.ModuleList([nn.Linear(256, 2), nn.Linear(256, 2)])
+    entries = [_iq("0.weight_quantizer", "iq1_s")]
+    if alias == "frozen_bias":
+        entries.append(_iq("1.weight_quantizer", "iq1_s"))
+    mtq.quantize(model, {**_config(entries), "algorithm": None})
+    plan = plan_iq_repair([model]) if after_planning else None
+    if alias == "parameter":
+        model[1].weight = model[0].weight
+    elif alias == "storage":
+        model[1].weight = nn.Parameter(model[0].weight.detach())
+    else:
+        model[1].bias = model[0].bias
+    before = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    policy = IQRepairPolicy()
+    if alias != "frozen_bias":
+        with pytest.raises(ValueError):
+            if plan is None:
+                plan_iq_repair([model])
+            else:
+                policy.prepare_plan(plan, 0)
+        policy.close()
+    else:
+        try:
+            fields = policy.prepare(model) if plan is None else policy.prepare_plan(plan, 0)
+            inputs = torch.randn(1, 256)
+            sum(module(inputs).square().mean() for module in model).backward()
+            assert all(field.grad is not None for field in fields)
+        finally:
+            policy.close()
+    assert all(torch.equal(parameter, before[name]) for name, parameter in model.named_parameters())
+    assert all(parameter.requires_grad for parameter in model.parameters())
+
+
+def test_iq_policy_restores_first_flags_of_shared_frozen_modules():
+    shared = nn.Linear(2, 2)
+    units = nn.ModuleList([nn.Sequential(nn.Linear(256, 2), shared) for _ in range(2)])
+    mtq.quantize(
+        units,
+        {**_config([_iq("*.0.weight_quantizer", "iq1_s")]), "algorithm": None},
+    )
+    shared.weight_quantizer._if_calib = True
+    shared.allow_real_quant_gemm = True
+    flags = {parameter: parameter.requires_grad for parameter in units.parameters()}
+    policy = IQRepairPolicy()
+    try:
+        plan = plan_iq_repair(units)
+        for index, unit in enumerate(units):
+            fields = policy.prepare_plan(plan, index)
+            unit(torch.randn(1, 256)).sum().backward()
+            assert all(field.grad is not None for field in fields)
+    finally:
+        policy.close()
+    assert all(parameter.requires_grad == flag for parameter, flag in flags.items())
+    assert shared.weight_quantizer._if_calib
+    assert shared.allow_real_quant_gemm
+
+
+def test_iq_prepare_close_preserves_unconsumed_layout():
+    model = nn.Linear(256, 2, bias=False)
+    mtq.quantize(model, {**_config([_iq("weight_quantizer", "iq1_s")]), "algorithm": None})
+    quantizer = model.weight_quantizer
+    quantizer.set_from_attribute_config({"block_sizes": {-1: None}})
+    layout = (quantizer.axis, quantizer.block_sizes.copy(), quantizer._calibrator._axis)
+    policy = IQRepairPolicy()
+    try:
+        policy.prepare(model)
+    finally:
+        policy.close()
+    assert (quantizer.axis, quantizer.block_sizes, quantizer._calibrator._axis) == layout
+    assert getattr(quantizer, "_consumed_block_sizes", None) is None
+
+
+@pytest.mark.parametrize("failure", ["invalid_scale", "publication"])
+def test_iq_finalization_failure_rolls_back_and_can_retry(monkeypatch, failure):
+    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
+    mtq.quantize(model, {**_config([_iq("*weight_quantizer", "iq1_s")]), "algorithm": None})
+    before = copy.deepcopy(model.state_dict())
+    original = repair_formats.pin_packed_weight
+    policy = IQRepairPolicy()
+    try:
+        fields = policy.prepare(model)
+        with torch.no_grad():
+            for field in fields:
+                field.add_(0.5)
+        if failure == "invalid_scale":
+            model[1].weight_quantizer._local_repair_state.global_delta.data.fill_(float("nan"))
+            error = ValueError
+        else:
+
+            def fail_after_publication(quantizer, *args, **kwargs):
+                original(quantizer, *args, **kwargs)
+                if quantizer is model[1].weight_quantizer:
+                    raise RuntimeError("pin publication failed")
+
+            monkeypatch.setattr(repair_formats, "pin_packed_weight", fail_after_publication)
+            error = RuntimeError
+        with pytest.raises(error):
+            policy.finalize_()
+        after = model.state_dict()
+        assert after.keys() == before.keys()
+        assert all(torch.equal(value, before[name]) for name, value in after.items())
+        assert all(module.weight_quantizer._enable_pre_quant_scale for module in model)
+        assert all(hasattr(module.weight_quantizer, "_local_repair_state") for module in model)
+        monkeypatch.setattr(repair_formats, "pin_packed_weight", original)
+        with torch.no_grad():
+            for field in fields:
+                field.fill_(0.5)
+        policy.finalize_()
+    finally:
+        policy.close()
+    assert all(
+        not torch.equal(module.weight, before[f"{index}.weight"])
+        for index, module in enumerate(model)
+    )
+    assert all(parameter.requires_grad for parameter in model.parameters())
+    assert all(not module.weight_quantizer._enable_pre_quant_scale for module in model)
 
 
 def test_preparing_units_streams_each_expert_and_returns_new_fields(monkeypatch):

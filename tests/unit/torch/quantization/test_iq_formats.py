@@ -36,6 +36,7 @@ import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 import modelopt.torch.quantization.ggml.iq2_xxs as iq2_xxs_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 # name -> (module, packed bytes per block, codebook entries, bits per weight)
@@ -233,10 +234,24 @@ def test_rejects_invalid_shape_metadata(name):
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_rejects_scalar_packed_payload(name):
-    _, _, dequantize, _, _, _, _ = _parts(name)
+@pytest.mark.parametrize("malformation", ["scalar", "dtype", "width"])
+def test_rejects_invalid_packed_payload(name, malformation):
+    _, _, dequantize, _, block_bytes, _, _ = _parts(name)
+    fmt = IQ_FORMAT_REGISTRY[name]
+    packed = torch.zeros((2, 1, block_bytes), dtype=torch.uint8)
+    global_scale, local, _ = decode_scale_fields(packed, fmt)
+    if malformation == "scalar":
+        packed = torch.tensor(0, dtype=torch.uint8)
+    elif malformation == "dtype":
+        packed = packed.to(torch.int16)
+    else:
+        packed = packed.reshape(1, 2 * block_bytes)
     with pytest.raises(ValueError, match="packed_weights"):
-        dequantize(torch.tensor(0, dtype=torch.uint8), torch.tensor([1, 256]))
+        dequantize(packed, torch.tensor([2, 256]))
+    with pytest.raises(ValueError):
+        decode_scale_fields(packed, fmt)
+    with pytest.raises(ValueError):
+        replace_scale_fields(packed, fmt, global_scale, local)
 
 
 @pytest.mark.parametrize("name", DISPATCHED)

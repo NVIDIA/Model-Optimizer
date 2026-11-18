@@ -29,15 +29,25 @@ def _ste(value, projected):
 
 def _relative_scale(base, delta):
     # Let a zero scale recover while keeping the initial native value exactly zero.
+    delta = delta.clamp(-20, 20)
     floor = torch.where(base == 0, torch.full_like(base, 2**-14), 0)
-    return (base * delta.exp() + floor * delta.expm1()).clamp_min(0)
+    scale = base * delta.exp() + floor * delta.expm1()
+    # Preserve the recovery derivative at zero across PyTorch clamp conventions.
+    return torch.where(scale < 0, 0, scale)
 
 
 class _ReplayScales(torch.autograd.Function):
     @staticmethod
     def forward(ctx, levels, steps, dtype):
         ctx.save_for_backward(levels)
-        return levels.float().mul_(steps.unsqueeze(-1)).to(dtype)
+        shape, width = levels.shape, levels.shape[-1]
+        levels, steps = levels.reshape(-1, width), steps.reshape(-1, 1)
+        result = torch.empty_like(levels, dtype=dtype)
+        rows = max(1, 262144 // width)
+        for start in range(0, len(levels), rows):
+            part = slice(start, start + rows)
+            torch.mul(levels[part], steps[part], out=result[part])
+        return result.reshape(shape)
 
     @staticmethod
     def backward(ctx, gradient):
@@ -121,8 +131,10 @@ class IQScaleState(nn.Module):
     def project_(self):
         """Bound log masters before native projection."""
         self.global_delta.clamp_(-20, 20)
+        self.global_delta.masked_fill_((self.global_base == 0) & (self.global_delta < 0), 0)
         if self.local_delta is not None:
             self.local_delta.clamp_(-20, 20)
+            self.local_delta.masked_fill_((self.local_base == 0) & (self.local_delta < 0), 0)
 
     @torch.no_grad()
     def native_payload(self):
@@ -130,9 +142,9 @@ class IQScaleState(nn.Module):
         return replace_scale_fields(self.packed, self.format, *self.scales())
 
     @torch.no_grad()
-    def finalize_(self, quantizer, weight):
+    def finalize_(self, quantizer, weight, *, native=None):
         """Bake processed coordinates once and persist the exact native codes/scales."""
-        native = self.native_payload()
+        native = self.native_payload() if native is None else native
         values = self.format.dequantize(native, torch.tensor(self.weight_shape), dtype=weight.dtype)
         quantizer._enable_pre_quant_scale = False
         quantizer.disable_rotate()

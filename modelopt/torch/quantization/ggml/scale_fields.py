@@ -20,6 +20,8 @@ from dataclasses import dataclass
 
 import torch
 
+__all__ = ["NativeScaleSpec", "decode_scale_fields", "replace_scale_fields"]
+
 
 @dataclass(frozen=True)
 class NativeScaleSpec:
@@ -55,13 +57,15 @@ class NativeScaleSpec:
         elif (
             local is None
             or local.shape != self.read_local(blocks).shape
-            or not torch.isfinite(local).all()
-            or (local < self.local_min).any()
-            or (local > self.local_max).any()
-            or not torch.equal(local, local.round())
+            or not (
+                torch.isfinite(local)
+                & (local >= self.local_min)
+                & (local <= self.local_max)
+                & (local == local.round())
+            ).all()
         ):
             raise ValueError("Local IQ scales must be legal native integer fields")
-        result = write_global(blocks, scale)
+        result = write_global(blocks, scale.reshape(-1))
         if self.write_local is not None:
             self.write_local(result, local)
         return result
@@ -73,9 +77,18 @@ def _native_scale_spec(fmt):
     return fmt.scale_spec
 
 
+def _scale_blocks(packed, fmt):
+    if packed.dim() == 0 or packed.dtype != torch.uint8 or packed.shape[-1] != fmt.block_bytes:
+        raise ValueError(
+            f"packed must be uint8 with last dimension {fmt.block_bytes}, "
+            f"got {packed.dtype} {tuple(packed.shape)}"
+        )
+    return packed.reshape(-1, fmt.block_bytes)
+
+
 def decode_scale_fields(packed, fmt):
     """Read fields using the codec descriptor, without decoding the full weight."""
-    return _native_scale_spec(fmt).read(packed.reshape(-1, fmt.block_bytes), fmt.payload_scales)
+    return _native_scale_spec(fmt).read(_scale_blocks(packed, fmt), fmt.payload_scales)
 
 
 @torch.no_grad()
@@ -83,8 +96,6 @@ def replace_scale_fields(packed, fmt, global_scale, local):
     """Return a native payload with only its legal scale fields replaced."""
     return (
         _native_scale_spec(fmt)
-        .replace(
-            packed.reshape(-1, fmt.block_bytes), global_scale, local, fmt.replace_payload_scales
-        )
+        .replace(_scale_blocks(packed, fmt), global_scale, local, fmt.replace_payload_scales)
         .reshape(packed.shape)
     )

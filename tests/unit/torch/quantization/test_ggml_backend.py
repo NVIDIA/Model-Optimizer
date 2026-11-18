@@ -561,21 +561,32 @@ def test_ggml_initialization_refuses_ambiguous_ptq_quantizers_before_writing(sha
 
 
 @pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
-def test_native_iq_fields_preserve_codes_and_match_reference(name):
+@pytest.mark.parametrize("payload_layout", ["native", "flat", "odd_offset"])
+def test_native_iq_fields_preserve_codes_and_match_reference(name, payload_layout):
     """Edit captured native bytes and independently reconstruct the new scale geometry."""
     fmt = GGML_FORMAT_REGISTRY[name]
     packed = torch.from_numpy(packed_blocks(name).copy())
     expected = torch.from_numpy(expected_values(name).copy())
+    if payload_layout != "native":
+        packed, expected = packed[:1], expected[:1]
+        if payload_layout == "flat":
+            packed = packed.reshape(-1)
+        else:
+            storage = torch.empty(packed.numel() + 1, dtype=torch.uint8)
+            storage[1:] = packed.reshape(-1)
+            packed = storage[1:].reshape(1, 1, fmt.block_bytes)
+    original = packed.clone()
     shape = torch.tensor(expected.shape)
     torch.testing.assert_close(
-        fmt.dequantize(packed, shape, dtype=torch.float32), expected, rtol=1e-6, atol=1e-8
+        fmt.dequantize(original, shape, dtype=torch.float32), expected, rtol=1e-6, atol=1e-8
     )
     spec = fmt.scale_spec
     global_scale, local, local_max = decode_scale_fields(packed, fmt)
     changed_global = global_scale * 2
     changed_local = (local + 1).clamp_max(local_max)
-    edited = replace_scale_fields(packed, fmt, changed_global, changed_local)
-    assert torch.equal(replace_scale_fields(edited, fmt, global_scale, local), packed)
+    edited = replace_scale_fields(packed, fmt, changed_global[:, None], changed_local)
+    assert torch.equal(packed, original)
+    assert torch.equal(replace_scale_fields(edited, fmt, global_scale, local), original)
 
     # Explicit bit masks come from GGML's layouts, independently of NativeScaleSpec.
     allowed = torch.zeros_like(packed).reshape(-1, fmt.block_bytes)
@@ -589,8 +600,8 @@ def test_native_iq_fields_preserve_codes_and_match_reference(name):
             allowed[:, 9::8] = 240
         elif name in {"iq2_xs", "iq2_s"}:
             allowed[:, 66 if name == "iq2_xs" else 74 :] = 255
-    assert not ((edited.reshape_as(allowed) ^ packed.reshape_as(allowed)) & ~allowed).any()
-    levels, _ = fmt.decode_int8(packed, shape)
+    assert not ((edited.reshape_as(allowed) ^ original.reshape_as(allowed)) & ~allowed).any()
+    levels, _ = fmt.decode_int8(original, shape)
     steps = changed_global[:, None]
     steps = steps * (spec.local_multiplier * changed_local + spec.local_bias) / spec.divisor
     reconstructed = levels.reshape(len(steps), -1, fmt.int8_group_size).float() * steps.unsqueeze(
@@ -602,6 +613,13 @@ def test_native_iq_fields_preserve_codes_and_match_reference(name):
         rtol=1e-6,
         atol=1e-8,
     )
+    if payload_layout == "native":
+        for value in (float("nan"), float("inf"), -1, local_max + 1, 0.5):
+            illegal_local = local.float().clone()
+            illegal_local[0, 0] = value
+            with pytest.raises(ValueError):
+                replace_scale_fields(packed, fmt, changed_global, illegal_local)
+        assert torch.equal(packed, original)
     for accessor in ("read_local", "write_local"):
         with pytest.raises(ValueError):
             dataclasses.replace(spec, **{accessor: None})

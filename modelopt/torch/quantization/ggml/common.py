@@ -999,7 +999,10 @@ def _energy_factors(
 
 def leading_fp16_scales(blocks: torch.Tensor) -> torch.Tensor:
     """The FP16 super-block scale in the first two bytes of each ``[blocks, block_bytes]`` row."""
-    return blocks[:, :2].contiguous().view(torch.float16).reshape(-1)
+    # contiguous() can retain an odd storage offset for a single block.
+    return (
+        blocks[:, :2].clone(memory_format=torch.contiguous_format).view(torch.float16).reshape(-1)
+    )
 
 
 def with_leading_fp16_scales(blocks: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:

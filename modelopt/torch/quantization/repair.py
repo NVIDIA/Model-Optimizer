@@ -18,14 +18,18 @@
 from dataclasses import dataclass
 from itertools import islice
 from types import MethodType
+from weakref import ref
 
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 
 from .ggml.registry import IQ_FORMAT_REGISTRY
-from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn import GroupedQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .repair_formats import IQScaleState
+from .utils import quantizer_attr_names, weight_attr_names
+
+__all__ = ["IQRepairPlan", "IQRepairPolicy", "plan_iq_repair"]
 
 
 @dataclass(frozen=True)
@@ -44,16 +48,24 @@ class IQRepairPlan:
     bindings: tuple[tuple[_WeightBinding, ...], ...]
 
 
-def _resolved_weights(bindings):
+def _resolved_weights(bindings, *, materialize=True):
     """Yield selected weight views once per module, within the caller's onload scope."""
     modules = {}
     for binding in bindings:
         modules.setdefault(binding.module, {})[binding.index] = binding
     for module, selected in modules.items():
         remaining = set(selected)
-        weights = islice(module.iter_weights_for_calibration(), max(selected) + 1)
-        for index, (weight, _) in enumerate(weights):
+        weights = (
+            module.iter_weights_for_calibration()
+            if materialize
+            else ((None, q) for q in module.iter_weight_quantizers_for_calibration())
+        )
+        for index, (weight, container) in enumerate(islice(weights, max(selected) + 1)):
             if index in selected:
+                if _iq_quantizer(container) is not selected[index].quantizer:
+                    raise ValueError(
+                        "The module's weight quantizer changed after IQ repair planning"
+                    )
                 remaining.remove(index)
                 yield selected[index], weight.to_local() if isinstance(weight, DTensor) else weight
         if remaining:
@@ -112,21 +124,73 @@ def _storage_span(tensor):
     return (tensor.device, tensor.untyped_storage().data_ptr()), start, start + size
 
 
+def _write_owners(module, selected):
+    owners, mapped = set(), set()
+    for name in weight_attr_names(module):
+        qname = quantizer_attr_names(name).weight_quantizer
+        container = getattr(module, qname, None)
+        if container is None:
+            container = getattr(module, qname + "s", None)
+        if container is None and name == getattr(module, "_first_proj_attr", None):
+            container = getattr(module, "gate_up_proj_weight_quantizers", None)
+        pairs = (
+            [(f"weight{i}", q) for i, q in enumerate(container)]
+            if isinstance(container, GroupedQuantizer)
+            else [(name, container)]
+        )
+        for parameter_name, quantizers in pairs:
+            if quantizers is None:
+                continue
+            matches = selected.intersection(id(q) for q in quantizers.modules())
+            if matches and module._parameters.get(parameter_name) is not None:
+                owners.add(parameter_name)
+                mapped.update(matches)
+    if mapped != selected:
+        raise ValueError("The module's IQ quantizers have unsupported physical weight ownership")
+    return owners
+
+
+def _validate_ownership(units, plans):
+    selected = {}
+    for bindings in plans:
+        for binding in bindings:
+            selected.setdefault(binding.module, set()).add(id(binding.quantizer))
+    seen_parameters = {}
+    storage_ranges = {}
+    for unit in units:
+        for _, module in unit.named_modules(remove_duplicate=False):
+            owners = _write_owners(module, selected[module]) if module in selected else set()
+            for name, parameter in module.named_parameters(recurse=False, remove_duplicate=False):
+                write = name in owners
+                identity = id(parameter)
+                if identity in seen_parameters and (write or seen_parameters[identity]):
+                    raise ValueError("Selected Bypass boundaries share physical weight ownership")
+                seen_parameters[identity] = write
+                span = _storage_span(parameter)
+                if span is not None:
+                    key, start, stop = span
+                    previous = storage_ranges.setdefault(key, [])
+                    if any(
+                        start < end and begin < stop and (write or previous_write)
+                        for begin, end, previous_write in previous
+                    ):
+                        raise ValueError("Selected Bypass weights overlap physical storage")
+                    previous.append((start, stop, write))
+
+
 def plan_iq_repair(units):
     """Refuse ambiguous ownership before changing flags or materializing weight views."""
     units = tuple(units)
-    plans, seen_quantizers, seen_parameters = [], set(), set()
-    storage_ranges = {}
+    plans, seen_quantizers = [], set()
     for unit_index, unit in enumerate(units):
         bindings = []
         routers = _router_paths(unit)
         for path, module in unit.named_modules(remove_duplicate=False):
-            if any(path == router or path.startswith(router + ".") for router in routers):
-                continue
-            if not isinstance(module, QuantModule):
-                continue
-            selected = False
-            for index, container in enumerate(module.iter_weight_quantizers_for_calibration()):
+            eligible = isinstance(module, QuantModule) and not any(
+                path == router or path.startswith(router + ".") for router in routers
+            )
+            containers = module.iter_weight_quantizers_for_calibration() if eligible else ()
+            for index, container in enumerate(containers):
                 quantizer = _iq_quantizer(container)
                 if quantizer is None:
                     continue
@@ -146,27 +210,12 @@ def plan_iq_repair(units):
                 bindings.append(
                     _WeightBinding(module, index, quantizer, f"{unit_index}.{path}.{index}")
                 )
-                selected = True
-            if selected:
-                for parameter in module.parameters(recurse=False):
-                    identity = id(parameter)
-                    if identity in seen_parameters:
-                        raise ValueError(
-                            "Selected Bypass boundaries share physical weight ownership"
-                        )
-                    seen_parameters.add(identity)
-                    span = _storage_span(parameter)
-                    if span is not None:
-                        key, start, stop = span
-                        previous = storage_ranges.setdefault(key, [])
-                        if any(start < end and begin < stop for begin, end in previous):
-                            raise ValueError("Selected Bypass weights overlap physical storage")
-                        previous.append((start, stop))
         if not bindings:
             raise ValueError("A selected Bypass boundary has no enabled native IQ weights")
         plans.append(tuple(bindings))
     if not plans:
         raise ValueError("Bypass requires at least one eligible boundary")
+    _validate_ownership(units, plans)
     return IQRepairPlan(units, tuple(plans))
 
 
@@ -175,7 +224,11 @@ def _repair_fake_quantize(quantizer, inputs):
 
 
 class IQRepairPolicy:
-    """Train native IQ fields and retain input autograd through every frozen projection."""
+    """Train native IQ fields while frozen projections retain input autograd.
+
+    Masters belong to the policy, outside model checkpoints and parameter traversal.
+    Finalize before exporting repaired weights; an active model save retains its PTQ weights.
+    """
 
     def __init__(self):
         """Initialize an inactive, model-independent repair policy."""
@@ -183,6 +236,7 @@ class IQRepairPolicy:
         self._flags = {}
         self._calibration_flags = {}
         self._gemm_flags = {}
+        self._layouts = {}
 
     def prepare(self, unit):
         """Freeze ordinary parameters and return only native IQ scale masters."""
@@ -191,24 +245,41 @@ class IQRepairPolicy:
     def prepare_plan(self, plan, index):
         """Materialize one unit and return only its masters inside its owner's onload scope."""
         unit = plan.units[index]
-        self._flags.update({p: p.requires_grad for p in unit.parameters()})
+        bindings = plan.bindings[index]
+        if any(hasattr(binding.quantizer, "_local_repair_state") for binding in bindings):
+            raise ValueError("An IQ repair operation is already active")
+        list(_resolved_weights(bindings, materialize=False))
+        _validate_ownership(plan.units, plan.bindings)
+        for parameter in unit.parameters():
+            key = id(parameter)
+            if key not in self._flags or self._flags[key][0]() is None:
+                self._flags[key] = ref(parameter), parameter.requires_grad
         unit.requires_grad_(False)
         for module in unit.modules():
             if isinstance(module, TensorQuantizer):
-                self._calibration_flags[module] = module._if_calib
+                self._calibration_flags.setdefault(module, module._if_calib)
                 module._if_calib = False
             if hasattr(module, "allow_real_quant_gemm"):
-                self._gemm_flags[module] = (
-                    "allow_real_quant_gemm" in module.__dict__,
-                    module.allow_real_quant_gemm,
+                self._gemm_flags.setdefault(
+                    module,
+                    ("allow_real_quant_gemm" in module.__dict__, module.allow_real_quant_gemm),
                 )
                 # Some packed forwards have no matching quantized-weight input backward.
                 # Native decode + differentiable linear retains the exact frozen operator.
                 module.allow_real_quant_gemm = False
         fields = []
         try:
-            for binding, weight in _resolved_weights(plan.bindings[index]):
+            for binding, weight in _resolved_weights(bindings):
                 quantizer = binding.quantizer
+                self._layouts.setdefault(
+                    quantizer,
+                    (
+                        quantizer._axis,
+                        quantizer._block_sizes,
+                        getattr(quantizer, "_consumed_block_sizes", None),
+                        quantizer._calibrator._axis,
+                    ),
+                )
                 had_override = "_fake_quantize" in quantizer.__dict__
                 previous = quantizer.__dict__.get("_fake_quantize")
                 captured = []
@@ -229,7 +300,7 @@ class IQRepairPolicy:
                 if len(captured) != 1:
                     raise ValueError("Close quantization cache scopes before preparing IQ Bypass")
                 state = IQScaleState(quantizer, captured[0], weight.shape)
-                quantizer.add_module("_local_repair_state", state)
+                object.__setattr__(quantizer, "_local_repair_state", state)
                 quantizer._fake_quantize = MethodType(_repair_fake_quantize, quantizer)
                 self.adapters.append((binding, state, had_override, previous))
                 fields.extend(state.parameters())
@@ -246,13 +317,36 @@ class IQRepairPolicy:
 
     @torch.no_grad()
     def finalize_(self):
-        """Persist native scales, then restore all temporary behavior and flags."""
+        """Commit this policy's native scales, rolling back a failed publication for retry."""
+        states = {binding: state for binding, state, _, _ in self.adapters}
+        native = {binding: state.native_payload() for binding, state in states.items()}
+        list(_resolved_weights(states, materialize=False))
+        backups = {}
         try:
-            states = {binding: state for binding, state, _, _ in self.adapters}
             for binding, weight in _resolved_weights(states):
-                states[binding].finalize_(binding.quantizer, weight)
-        finally:
-            self.close()
+                quantizer = binding.quantizer
+                # Keep rollback weights on the host, never retain gathered/onloaded tensors.
+                backups[binding] = (
+                    weight.to(device="cpu", copy=True),
+                    quantizer._buffers.copy(),
+                    quantizer._non_persistent_buffers_set.copy(),
+                    quantizer._quantizer_cache,
+                    quantizer._enable_pre_quant_scale,
+                    quantizer._rotate,
+                )
+                states[binding].finalize_(quantizer, weight, native=native[binding])
+        except BaseException:
+            for binding, weight in _resolved_weights(backups):
+                original, buffers, nonpersistent, cache, pre_scale, rotate = backups[binding]
+                weight.copy_(original)
+                quantizer = binding.quantizer
+                quantizer._buffers = buffers
+                quantizer._non_persistent_buffers_set = nonpersistent
+                quantizer._quantizer_cache = cache
+                quantizer._enable_pre_quant_scale = pre_scale
+                quantizer._rotate = rotate
+            raise
+        self.close()
 
     def close(self):
         """Idempotently restore quantizers and caller gradient/calibration/GEMM flags."""
@@ -273,6 +367,12 @@ class IQRepairPolicy:
             else:
                 delattr(module, "allow_real_quant_gemm")
         self._gemm_flags.clear()
-        for parameter, flag in self._flags.items():
-            parameter.requires_grad_(flag)
+        for quantizer, (axis, blocks, consumed, calibrator_axis) in self._layouts.items():
+            quantizer._axis, quantizer._block_sizes = axis, blocks
+            quantizer._consumed_block_sizes = consumed
+            quantizer._calibrator._axis = calibrator_axis
+        self._layouts.clear()
+        for reference, flag in self._flags.values():
+            if (parameter := reference()) is not None:
+                parameter.requires_grad_(flag)
         self._flags.clear()

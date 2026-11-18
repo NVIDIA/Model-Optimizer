@@ -36,10 +36,11 @@ def _iq(path, name):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
-def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype):
+@pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
+def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, name):
     torch.manual_seed(104)
     model = nn.Linear(512, 2, bias=False).to(dtype)
-    mtq.quantize(model, _config([_iq("weight_quantizer", "iq1_s")]))
+    mtq.quantize(model, _config([_iq("weight_quantizer", name)]))
     policy = IQRepairPolicy()
     try:
         policy.prepare(model)
@@ -53,7 +54,7 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype):
         ):
             # TensorQuantizer can expose an equivalent block view of the logical weight.
             actual = state(model._parameters["weight"].reshape(4, 256))
-        fmt = IQ_FORMAT_REGISTRY["iq1_s"]
+        fmt = IQ_FORMAT_REGISTRY[name]
         levels, _ = fmt.decode_int8(reference.packed, torch.tensor(reference.weight_shape))
         steps = reference.projected_steps()
         expected = (
@@ -67,6 +68,41 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype):
         expected_gradients = torch.autograd.grad(expected, tuple(reference.parameters()), gradient)
         for actual_gradient, expected_gradient in zip(actual_gradients, expected_gradients):
             torch.testing.assert_close(actual_gradient, expected_gradient, rtol=0, atol=0)
+        assert (model.weight.numel(), torch.int8) in saved
         assert (model.weight.numel(), torch.float32) not in saved
+
+        # An initial update favoring a smaller scale must not prevent a later increase.
+        with torch.no_grad():
+            state.global_base.fill_(2**-5)
+            state.global_base[0] = 0
+        direction = levels.float().reshape(-1, fmt.block_size)
+        direction = direction / direction.square().sum(-1, keepdim=True)
+        direction = (direction * state.global_sign[:, None]).reshape(actual.shape)
+        weight = model._parameters["weight"]
+        before = state(weight).detach().reshape(-1, fmt.block_size)
+        optimizer = torch.optim.SGD([state.global_delta], lr=1024)
+        for sign in (1, -1):
+            state.zero_grad(set_to_none=True)
+            (sign * (state(weight).float().reshape_as(direction) * direction).sum()).backward()
+            optimizer.step()
+            policy.project_()
+            updated = state(weight).detach().reshape(-1, fmt.block_size)
+            if sign == 1:
+                assert updated[0].count_nonzero() == 0
+                assert updated[1:].norm() < before[1:].norm()
+        assert torch.isfinite(updated).all()
+        assert updated[0].count_nonzero() > 0
+
+        with torch.no_grad():
+            state.global_delta.fill_(1000)
+            state.local_delta.fill_(1000)
+        global_scale, local_scale = state.scales()
+        assert torch.isfinite(global_scale).all()
+        assert torch.isfinite(local_scale).all()
+        state.native_payload()
+        with torch.no_grad():
+            state.global_delta[0] = float("nan")
+        with pytest.raises(ValueError):
+            state.native_payload()
     finally:
         policy.close()
