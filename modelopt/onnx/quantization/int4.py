@@ -352,11 +352,21 @@ def quantize_rtn(
             for name in scales:
                 scales[name] = np.asnumpy(scales[name])
         scales = reshape_scales_for_per_channel_nodes(scales, block_size, layer_info)
-        qdq.insert_qdq_nodes(graph, scales, weight_map=gemm_tensors, layer_info=layer_info)
+        qdq.insert_qdq_nodes(
+            graph,
+            scales,
+            weight_map=gemm_tensors,
+            layer_info=layer_info,
+            attributes={"axis": 0, "block_size": block_size},
+        )
         if gather_w_map is not None:
             assert gather_s_map is not None, "scale-map not found for quantizable gather nodes"
             qdq.insert_qdq_nodes(
-                graph, gather_s_map, weight_map=gather_w_map, layer_info=layer_info
+                graph,
+                gather_s_map,
+                weight_map=gather_w_map,
+                layer_info=layer_info,
+                attributes={"axis": gather_quantize_axis, "block_size": gather_block_size},
             )
 
     logger.info(f"RTN quantization completed in {time.time() - t_start:.2f} seconds")
