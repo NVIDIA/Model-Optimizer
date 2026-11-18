@@ -8,6 +8,8 @@ Changelog
 
 *Quantization - ONNX*
 
+- The Windows ONNX LLM quantization example supports text calibration for hybrid decoder inputs, including embedding-only exports and linear-attention states, and keeps small constants inline when exporting external weights. Install the example requirements with Transformers ``>=5.5,<5.19`` (previously ``<5.0.0``).
+
 *Quantization - Algorithms*
 
 *Quantization - QAT / QAD*
