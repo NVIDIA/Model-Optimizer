@@ -21,7 +21,8 @@ python examples/hf_ptq/hf_ptq.py \
   --export_path <output-path>
 ```
 
-To score the six formats in parallel, run format shards and merge them as described in
+To score the five quantized formats in parallel, run up to five format shards and merge them as
+described in
 [Scoring and finalizing AutoQuantize in separate runs](../../../../../examples/hf_ptq/README.md#scoring-and-finalizing-autoquantize-in-separate-runs).
 
 ## Results
