@@ -55,6 +55,7 @@ __all__ = [
     "stream_chunk_identity",
     "validate_capture_stream",
     "validate_stream_acknowledgements",
+    "validate_whole_prefill_captures",
     "validate_whole_prefill_evidence",
 ]
 
@@ -458,6 +459,7 @@ def validate_whole_prefill_evidence(raw):
     ):
         raise CaptureContractError("whole-prefill evidence schema or coverage differs")
     validate_context_buckets([tuple(b) for b in whole["coverage_ranges"]])
+    parents, fingerprints, requests = {}, {}, set()
     for request in whole["requests"]:
         validate_capture_stream(request)
         if [list(b) for b in request.get("coverage_ranges", WHOLE_PREFILL_RANGES)] != whole[
@@ -471,6 +473,16 @@ def validate_whole_prefill_evidence(raw):
             or parent["target_sparsity_hex"] not in raw["target_sparsity_hex"]
         ):
             raise CaptureContractError("whole-prefill request and manifest identities differ")
+        identity = (parent["split"], parent["prompt_id"])
+        metadata = {key: value for key, value in parent.items() if key != "target_sparsity_hex"}
+        if parents.setdefault(identity, metadata) != metadata:
+            raise CaptureContractError("whole-prefill parent changes across targets")
+        if fingerprints.setdefault(parent["source_capture_sha256"], identity) != identity:
+            raise CaptureContractError("one full source fingerprint names multiple parent prompts")
+        target_key = (*identity, parent["target_sparsity_hex"])
+        if target_key in requests:
+            raise CaptureContractError("whole-prefill plan repeats a parent target")
+        requests.add(target_key)
     chunks = [chunk for request in whole["requests"] for chunk in request["chunks"]]
     measured = sum(chunk["invocation"] is not None for chunk in chunks)
     analytical = whole.get("analytical_dense_capture_count", 0)
@@ -483,6 +495,46 @@ def validate_whole_prefill_evidence(raw):
         or raw["capture_count"] != measured + analytical
     ):
         raise CaptureContractError("whole-prefill evidence omits measured or dense work")
+
+
+def validate_whole_prefill_captures(captures, raw):
+    """Bind every typed capture to its planned parent before allowing shared prefixes."""
+    validate_whole_prefill_evidence(raw)
+    expected = {}
+    fields = _PARENT_FIELDS - {"prompt_id", "sample_length", "source_capture_sha256"}
+    for request in raw["whole_prefill"]["requests"]:
+        parent = request["parent_invocation"]
+        for chunk in request["chunks"]:
+            if chunk["invocation"] is None and chunk["dense_reason"] != "threshold_disabled":
+                continue
+            geometry = chunk["geometry"]
+            prefix = f"{parent['prompt_id']}@prefix-{geometry['kv_tokens']}"
+            key = (parent["split"], prefix, parent["target_sparsity_hex"])
+            expected[key] = {
+                **{field: parent[field] for field in fields},
+                "prompt_id": prefix,
+                "sample_length": geometry["kv_tokens"],
+                "source_capture_sha256": chunk["prefix_source_capture_sha256"],
+                "geometry": geometry,
+                "bucket": _range_for(
+                    geometry["kv_tokens"], request.get("coverage_ranges", WHOLE_PREFILL_RANGES)
+                ),
+            }
+    for capture in captures:
+        target = capture.target_sparsity.hex()
+        key = (capture.split, capture.prompt_id, target)
+        actual = {
+            **{
+                field: getattr(capture, field) for field in _PARENT_FIELDS - {"target_sparsity_hex"}
+            },
+            "target_sparsity_hex": target,
+            "geometry": capture.geometry,
+            "bucket": capture.bucket,
+        }
+        if expected.pop(key, None) != actual:
+            raise CaptureContractError("capture does not match its whole-prefill parent plan")
+    if expected:
+        raise CaptureContractError("captures omit planned whole-prefill observations")
 
 
 def build_analytical_dense_capture(request, chunk, *, fit, measured_template):

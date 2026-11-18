@@ -437,6 +437,30 @@ def _validate_donor_head_mode(mode: str) -> None:
         raise MaskReuseCalibrationError("donor_head_mode must be calibrated or same_index")
 
 
+def _validate_shared_prefix_provenance(allow, provenance):
+    if type(allow) is not bool:
+        raise MaskReuseCalibrationError("allow_same_group_prefixes must be boolean")
+    if allow:
+        if (provenance or {}).get("capture_scope") != "whole_prefill":
+            raise MaskReuseCalibrationError(
+                "shared prefixes require explicit whole-prefill provenance"
+            )
+        _sha256((provenance or {}).get("whole_prefill_plan_sha256"), "whole_prefill_plan_sha256")
+
+
+def _capture_fingerprint_owner(capture, allow_same_group_prefixes):
+    if not allow_same_group_prefixes:
+        return capture.bucket, capture.prompt_id
+    return (
+        capture.bucket,
+        capture.source_group_sha256,
+        capture.partition,
+        capture.inner_fold,
+        capture.source,
+        tuple(sorted(capture.geometry.items())),
+    )
+
+
 def _donor_head_candidates(mode: str, consumer_head: int, global_num_heads: int):
     return (consumer_head,) if mode == "same_index" else range(global_num_heads)
 

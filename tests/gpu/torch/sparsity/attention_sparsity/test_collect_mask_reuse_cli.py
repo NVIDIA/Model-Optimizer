@@ -922,11 +922,23 @@ def test_whole_prefill_collector_output_runs_through_refit(
     for i, row in enumerate(rows):
         tokens = list(range(i, i + 40960))
         row.update(prompt_token_ids=tokens, prompt_token_ids_sha256=source_capture_sha256(tokens))
+    # Different-length parents deliberately share their early chunks. Preserve
+    # every planned observation without admitting duplicate full prompts.
+    for row in list(rows):
+        tokens = row["prompt_token_ids"][:32768]
+        rows.append(
+            {
+                **row,
+                "prompt_id": row["prompt_id"] + "-short",
+                "prompt_token_ids": tokens,
+                "prompt_token_ids_sha256": source_capture_sha256(tokens),
+            }
+        )
     prompts.write_text("".join(json.dumps(row) + "\n" for row in rows))
     capture, manifest = collect_mask_reuse_cli.run(args)
     evidence = json.loads(manifest.read_text())
-    assert evidence["capture_count"] == 30
-    assert evidence["whole_prefill"]["analytical_dense_capture_count"] == 8
+    assert evidence["capture_count"] == 54
+    assert evidence["whole_prefill"]["analytical_dense_capture_count"] == 16
     # Old whole-prefill manifests could silently omit all-dense prefixes.
     from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_stream import (
         validate_whole_prefill_evidence,
@@ -934,7 +946,7 @@ def test_whole_prefill_collector_output_runs_through_refit(
 
     omitted = json.loads(manifest.read_text())
     omitted["whole_prefill"]["analytical_dense_capture_count"] = 0
-    omitted["capture_count"] -= 8
+    omitted["capture_count"] -= 16
     with pytest.raises(collect_mask_reuse_cli.CaptureContractError):
         validate_whole_prefill_evidence(omitted)
     topology = tmp_path / "topology.json"
@@ -992,7 +1004,7 @@ def test_whole_prefill_collector_output_runs_through_refit(
         )
         == 0
     )
-    assert json.loads(policy.read_text())["provenance"]["input_capture_count"] == 30
+    assert json.loads(policy.read_text())["provenance"]["input_capture_count"] == 54
 
 
 @pytest.mark.parametrize("hard_kill", [False, True])

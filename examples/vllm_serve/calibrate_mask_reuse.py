@@ -75,6 +75,7 @@ from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_solver im
     MaskReuseSolverError,
 )
 from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_stream import (
+    validate_whole_prefill_captures,
     validate_whole_prefill_evidence,
 )
 
@@ -489,6 +490,9 @@ def main(argv: list[str] | None = None) -> int:
             if capture_manifest.get("capture_mode") == "topology_discovery"
             else load_compact_mask_reuse_captures(args.compact_captures)
         )
+        whole_prefill = "whole_prefill" in capture_manifest
+        if whole_prefill:
+            validate_whole_prefill_captures(source, capture_manifest)
         first = next(iter(source), None)
         if first is None:
             raise ValueError("capture file is empty")
@@ -511,6 +515,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             reuse_dropped_mass_report_threshold=(args.reuse_dropped_mass_report_threshold),
             target_bmm1_skip_ratio=args.target_bmm1_skip_ratio,
+            allow_same_group_prefixes=whole_prefill,
             source_provenance={
                 "capture_manifest_sha256": capture_manifest_sha256,
                 "topology_file_sha256": topology_sha256,

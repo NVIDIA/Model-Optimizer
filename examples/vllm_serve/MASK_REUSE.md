@@ -93,9 +93,12 @@ python calibrate_mask_reuse_topology.py --checkpoint <CHECKPOINT> \
 ```
 
 Discovery enforces the BMM1 target in **every context range**, rather than only
-over pooled prompts. It rejects duplicate prompt sources and inconsistent
+over pooled prompts. It rejects duplicate full prompt sources and inconsistent
 layer sets or spans. It uses the same risk objective and solver optimality checks
 as refitting. A pooled maximum-saving diagnostic is not a per-range guarantee.
+Both calibrators verify each whole-prefill observation against its parent plan.
+Different-length prompts may share prefixes within one source group; all planned
+observations retain their original multiplicities.
 
 Freeze the exported `anchors` and `nearest` assignments. Pass the discovery
 capture file and its manifest to the refit command below, with the complete

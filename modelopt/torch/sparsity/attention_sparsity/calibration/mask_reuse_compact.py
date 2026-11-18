@@ -54,6 +54,7 @@ from .mask_reuse import (
     _AnchorEvaluation,
     _bucket_key,
     _canonical_evidence,
+    _capture_fingerprint_owner,
     _Choice,
     _donor_head_candidates,
     _dropped_mass_matrix,
@@ -65,6 +66,7 @@ from .mask_reuse import (
     _Selection,
     _sha256,
     _validate_donor_head_mode,
+    _validate_shared_prefix_provenance,
     canonical_prefill_threshold_scale_factor,
 )
 from .mask_reuse_contracts import (
@@ -672,18 +674,7 @@ def _validate_dataset(
         if capture_sources.setdefault(prompt_key, source_identity) != source_identity:
             raise MaskReuseCalibrationError("prompt metadata differs across target sparsities")
         owner_key = (capture.split, capture.source_capture_sha256)
-        owner = (
-            (
-                capture.bucket,
-                capture.source_group_sha256,
-                capture.partition,
-                capture.inner_fold,
-                capture.source,
-                tuple(sorted(capture.geometry.items())),
-            )
-            if allow_same_group_prefixes
-            else (capture.bucket, capture.prompt_id)
-        )
+        owner = _capture_fingerprint_owner(capture, allow_same_group_prefixes)
         if fingerprint_owner.setdefault(owner_key, owner) != owner:
             raise MaskReuseCalibrationError("one source fingerprint names multiple prompt captures")
         geometry_identity = (
@@ -1320,16 +1311,7 @@ def calibrate_compact_mask_reuse_policy(
     their original request multiplicities are preserved, not deduplicated.
     """
     _validate_donor_head_mode(donor_head_mode)
-    if type(allow_same_group_prefixes) is not bool:
-        raise MaskReuseCalibrationError("allow_same_group_prefixes must be boolean")
-    if allow_same_group_prefixes:
-        if (source_provenance or {}).get("capture_scope") != "whole_prefill":
-            raise MaskReuseCalibrationError(
-                "shared prefixes require explicit whole-prefill provenance"
-            )
-        _sha256(
-            (source_provenance or {}).get("whole_prefill_plan_sha256"), "whole_prefill_plan_sha256"
-        )
+    _validate_shared_prefix_provenance(allow_same_group_prefixes, source_provenance)
     if not isinstance(checkpoint_manifest, VerifiedCheckpointManifest):
         raise MaskReuseCalibrationError(
             "checkpoint_manifest must be returned by verify_checkpoint_manifest"

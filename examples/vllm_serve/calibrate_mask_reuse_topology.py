@@ -60,6 +60,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_capture impor
     parse_vanilla_prefill_fit,
 )
 from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_stream import (
+    validate_whole_prefill_captures,
     validate_whole_prefill_evidence,
 )
 
@@ -291,6 +292,17 @@ def run(args: argparse.Namespace) -> Path:
         fit=fit,
     )
     source = load_topology_discovery_captures(captures_path)
+    whole_prefill = "whole_prefill" in manifest
+    source_provenance = {
+        "capture_manifest_sha256": manifest_snapshot.sha256,
+        "capture_provider": capture_source_provenance(manifest),
+        "capture_scope": "whole_prefill" if whole_prefill else "final_chunk_diagnostic",
+    }
+    if whole_prefill:
+        validate_whole_prefill_captures(source, manifest)
+        source_provenance["whole_prefill_plan_sha256"] = canonical_json_sha256(
+            manifest["whole_prefill"]
+        )
     first = next(iter(source), None)
     if first is None:
         raise ValueError("topology capture file is empty")
@@ -316,17 +328,13 @@ def run(args: argparse.Namespace) -> Path:
         ),
         reuse_dropped_mass_report_threshold=args.reuse_dropped_mass_report_threshold,
         target_bmm1_skip_ratio=args.target_bmm1_skip_ratio,
+        allow_same_group_prefixes=whole_prefill,
+        source_provenance=source_provenance,
     )
     provenance = result["provenance"]
     if not isinstance(provenance, dict):
         raise ValueError("selected topology provenance must be an object")
-    provenance["source"] = {
-        "capture_manifest_sha256": manifest_snapshot.sha256,
-        "capture_provider": capture_source_provenance(manifest),
-        "capture_scope": "final_chunk_diagnostic"
-        if getattr(args, "diagnostic_final_chunk", False)
-        else "whole_prefill",
-    }
+    provenance["source"] = source_provenance
     if provenance["input_capture_count"] != manifest["capture_count"]:
         raise ValueError("capture manifest count does not match capture records")
     final_inputs = (

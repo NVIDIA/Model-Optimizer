@@ -17,7 +17,7 @@
 
 import copy
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -43,6 +43,8 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_stream import
     stream_chunk_identity,
     validate_capture_stream,
     validate_stream_acknowledgements,
+    validate_whole_prefill_captures,
+    validate_whole_prefill_evidence,
 )
 
 
@@ -94,6 +96,67 @@ def test_stream_invocations_equal_independent_exact_prefixes():
         assert prefix.source_group_sha256 == prompt.source_group_sha256
         assert PromptSpec.from_mapping(json.loads(json.dumps(asdict(prefix)))) == prefix
     assert [c["geometry"]["q_tokens"] for c in request["chunks"]] == [8192, 8192, 129]
+
+
+@pytest.mark.parametrize(
+    "corruption", ["full_alias", "duplicate_request", "unknown_prefix", "missing"]
+)
+def test_shared_prefix_admission_requires_complete_parent_bound_captures(corruption):
+    prompt = _prompt(16384)
+    short = replace(
+        prompt,
+        prompt_id="short",
+        prompt_token_ids=prompt.prompt_token_ids[:8192],
+        prompt_token_ids_sha256=source_capture_sha256(prompt.prompt_token_ids[:8192]),
+    )
+    requests = [_request(p, a=32768.0, b=0.0) for p in (prompt, short)]
+    template = {
+        "global_num_heads": 1,
+        "anchor_stats_by_layer": {"0": {}},
+        "consumer_layers": {},
+    }
+    captures = [
+        CompactMaskReuseCapture.from_mapping(
+            build_analytical_dense_capture(
+                request, chunk, fit=_fit(32768.0, 0.0), measured_template=template
+            )
+        )
+        for request in requests
+        for chunk in request["chunks"]
+    ]
+    raw = {
+        "model": "toy",
+        "checkpoint_manifest_sha256": "c" * 64,
+        "target_sparsity_hex": [(0.7).hex()],
+        "capture_count": len(captures),
+        "whole_prefill": {
+            "schema_version": 1,
+            "coverage_ranges": requests[0]["coverage_ranges"],
+            "requests": requests,
+            "dense_exclusion_count": len(captures),
+            "measured_capture_count": 0,
+            "analytical_dense_capture_count": len(captures),
+            "target_scope": "model_wide",
+            "work_by_request": [mask_reuse_stream.capture_stream_work(r) for r in requests],
+        },
+    }
+    validate_whole_prefill_captures(captures, raw)
+    if corruption == "full_alias":
+        alias = _request(replace(prompt, prompt_id="alias"), a=32768.0, b=0.0)
+        raw["whole_prefill"]["requests"].append(alias)
+        with pytest.raises(CaptureContractError, match="full source fingerprint"):
+            validate_whole_prefill_evidence(raw)
+    elif corruption == "duplicate_request":
+        raw["whole_prefill"]["requests"].append(requests[0])
+        with pytest.raises(CaptureContractError, match="repeats a parent target"):
+            validate_whole_prefill_evidence(raw)
+    else:
+        if corruption == "unknown_prefix":
+            captures[0] = replace(captures[0], prompt_id="unknown@prefix-8192")
+        else:
+            captures.pop()
+        with pytest.raises(CaptureContractError):
+            validate_whole_prefill_captures(captures, raw)
 
 
 @pytest.mark.parametrize("dense_prefix", [False, True])

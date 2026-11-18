@@ -55,6 +55,7 @@ from .mask_reuse import (
     MaskReuseCalibrationError,
     _AnchorEvaluation,
     _bucket_key,
+    _capture_fingerprint_owner,
     _Choice,
     _donor_head_candidates,
     _dropped_mass_matrix,
@@ -64,6 +65,7 @@ from .mask_reuse import (
     _risk_variant,
     _sha256,
     _validate_donor_head_mode,
+    _validate_shared_prefix_provenance,
     canonical_prefill_threshold_scale_factor,
 )
 from .mask_reuse_compact import (
@@ -359,9 +361,11 @@ class TopologyDiscoveryCaptureSource:
 
     path: Path
 
-    def validated_dataset(self, *, fit: Mapping[str, object]) -> _Dataset:
+    def validated_dataset(
+        self, *, fit: Mapping[str, object], allow_same_group_prefixes: bool = False
+    ) -> _Dataset:
         """Validate records; verified coefficient sources can reuse this result."""
-        return _validate_dataset(self, fit=fit)
+        return _validate_dataset(self, fit=fit, allow_same_group_prefixes=allow_same_group_prefixes)
 
     def __iter__(self) -> Iterator[TopologyDiscoveryCapture]:
         with self.path.open(encoding="utf-8") as handle:
@@ -514,6 +518,7 @@ def _validate_dataset(
     source: TopologyDiscoveryCaptureSource,
     *,
     fit: Mapping[str, object],
+    allow_same_group_prefixes: bool = False,
 ) -> _Dataset:
     models: set[str] = set()
     checkpoint_identities: set[str] = set()
@@ -528,7 +533,7 @@ def _validate_dataset(
     split_fingerprints: dict[str, set[str]] = defaultdict(set)
     group_assignments: dict[str, tuple[str, int | None]] = {}
     fingerprint_groups: dict[str, str] = {}
-    fingerprint_owners: dict[tuple[str, str], tuple[Bucket, str]] = {}
+    fingerprint_owners: dict[tuple[str, str], tuple[object, ...]] = {}
     prompt_buckets: dict[tuple[str, str], Bucket] = {}
     prompt_metadata: dict[tuple[Bucket, str, str], tuple[object, ...]] = {}
     prompt_source_rows: dict[tuple[Bucket, str, str], Mapping[str, object]] = {}
@@ -566,7 +571,7 @@ def _validate_dataset(
         split_prompt_ids[capture.split].add(capture.prompt_id)
         split_fingerprints[capture.split].add(capture.source_capture_sha256)
         prompt_identity = (capture.split, capture.prompt_id)
-        owner = (capture.bucket, capture.prompt_id)
+        owner = _capture_fingerprint_owner(capture, allow_same_group_prefixes)
         if (
             fingerprint_owners.setdefault((capture.split, capture.source_capture_sha256), owner)
             != owner
@@ -1734,6 +1739,8 @@ def calibrate_mask_reuse_topology(
     solver_config: MaskReuseSolverConfig | None = None,
     donor_head_mode: str = "calibrated",
     anchor_stride_choices: Sequence[int] | None = None,
+    allow_same_group_prefixes: bool = False,
+    source_provenance: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Select a global candidate topology and evaluate it without held-out tuning.
 
@@ -1751,9 +1758,12 @@ def calibrate_mask_reuse_topology(
     retaining exact fallback. Optional anchor strides refer to full-attention
     layer positions and restrict selection to one complete stride topology.
 
+    Shared prefixes require separately verified whole-prefill parent provenance;
+    original request multiplicities are preserved, not deduplicated.
     """
     solver_session = _SolverSession(solver_config)
     _validate_donor_head_mode(donor_head_mode)
+    _validate_shared_prefix_provenance(allow_same_group_prefixes, source_provenance)
     if not isinstance(checkpoint_manifest, VerifiedCheckpointManifest):
         raise MaskReuseCalibrationError(
             "checkpoint_manifest must be returned by verify_checkpoint_manifest"
@@ -1770,7 +1780,11 @@ def calibrate_mask_reuse_topology(
         "min_observed_sparsity",
         "max_observed_sparsity",
     } <= params.keys()
-    dataset = source.validated_dataset(fit=fit)
+    dataset = (
+        source.validated_dataset(fit=fit, allow_same_group_prefixes=True)
+        if allow_same_group_prefixes
+        else source.validated_dataset(fit=fit)
+    )
     if any(hi is None for _, hi in dataset.buckets):
         raise MaskReuseCalibrationError("calibration context ranges require finite maximum lengths")
     stride_paths = _stride_paths(
