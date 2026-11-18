@@ -151,7 +151,7 @@ class IQScaleState(nn.Module):
             kernels = None
         with torch.no_grad():
             if kernels is not None:
-                levels = kernels.decode_iq_levels(self.packed, self.name, self.weight_shape)
+                levels = kernels.decode_iq_levels(self.packed, self.name, self.codec_shape)
             else:
                 levels, _ = self.format.decode_int8(self.packed, torch.tensor(self.codec_shape))
         steps = self.projected_steps()
