@@ -16,7 +16,7 @@
 """DeepSeek-V4 specs (HF model type ``deepseek_v4``)."""
 
 from ..deepseek.specs import GENERATION_UNSUPPORTED
-from ..specs import ModelSpec, MoESpec, PTQSpec, register
+from ..specs import BypassSpec, ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
 
@@ -26,6 +26,10 @@ __all__: list[str] = []
 # (get_experts_list) does not apply -- both fields keep their defaults.
 register(
     ModelSpec(
+        bypass_spec=BypassSpec(
+            decoder_paths=("model.layers", "layers"),
+            batch_packed_documents=False,
+        ),
         model_type="deepseek_v4",
         min_transformers_version="5.8",
         ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),
