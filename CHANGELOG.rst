@@ -27,6 +27,8 @@ Changelog
 
 *Misc*
 
+- Add ``modelopt.torch.distill.bypass`` for streaming IQ scale-only repair with Lion, a direct 0.001 peak learning rate, and fractional warmup.
+
 **Backward Breaking Changes**
 
 **Deprecations**
