@@ -24,7 +24,7 @@ import torch
 import transformers
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from accelerate.hooks import AlignDevicesHook, SequentialHook
-from accelerate.utils import get_max_memory, infer_auto_device_map
+from accelerate.utils import get_max_memory, infer_auto_device_map, named_module_tensors
 from accelerate.utils.dataclasses import CustomDtype
 from accelerate.utils.offload import PrefixedDataset
 
@@ -55,7 +55,8 @@ def _writeback_params_to_weights_map(module, align_hook):
             continue
         if isinstance(align_hook.weights_map, PrefixedDataset):
             key = align_hook.weights_map.prefix + name
-            w_map = align_hook.weights_map.dataset.state_dict
+            dataset = align_hook.weights_map.dataset
+            w_map = getattr(dataset, "state_dict", dataset)
         else:
             w_map = align_hook.weights_map
             key = name
@@ -181,24 +182,64 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
         hook = _get_offload_hook(mod._hf_hook)
         if hook is None:
             continue
-        # Only call pre_forward if weights need materializing; already-materialized
-        # weights would be overwritten with stale CPU state_dict values.
-        needs_materialize = any(p.device.type == "meta" for p in mod.parameters())
-        if needs_materialize:
-            _carry_quantizers_with_offload(hook)
-            hook.pre_forward(mod)
-        hook.offload = False
+        # Preflight every owner before loading: a mixed set would reload resident updates.
+        offloaded = [
+            tensor.device.type == "meta"
+            for _, tensor in named_module_tensors(
+                mod,
+                include_buffers=hook.offload_buffers,
+                recurse=hook.place_submodules,
+                remove_non_persistent=True,
+            )
+        ]
+        needs_materialize = any(offloaded)
+        if needs_materialize and not all(offloaded):
+            raise ValueError(
+                "Accelerate weight access requires all managed tensors on meta or resident"
+            )
         materialized.append((mod, hook, needs_materialize))
 
+    entered = []
+    ready = False
+    error = None
+    propagating = False
     try:
+        for mod, hook, needs_materialize in materialized:
+            if needs_materialize:
+                _carry_quantizers_with_offload(hook)
+            # pre_forward can fail after loading only part of this owner's tensors.
+            entered.append((mod, hook, needs_materialize))
+            if needs_materialize:
+                hook.pre_forward(mod)
+            hook.offload = False
+        ready = True
         yield
+    except BaseException as exc:
+        error = exc
+        propagating = True
+        raise
     finally:
-        for mod, hook, was_materialized in materialized:
+        for mod, hook, was_materialized in reversed(entered):
             hook.offload = True
-            if writeback:
-                _writeback_params_to_weights_map(mod, hook)
-            if was_materialized:
-                hook.post_forward(mod, None)
+            try:
+                if ready and writeback:
+                    _writeback_params_to_weights_map(mod, hook)
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+                else:
+                    error.add_note(f"Accelerate weight-access cleanup failed: {exc!r}")
+            finally:
+                try:
+                    if was_materialized:
+                        hook.post_forward(mod, None)
+                except BaseException as exc:
+                    if error is None:
+                        error = exc
+                    else:
+                        error.add_note(f"Accelerate weight-access cleanup failed: {exc!r}")
+        if error is not None and not propagating:
+            raise error
 
 
 @contextmanager
