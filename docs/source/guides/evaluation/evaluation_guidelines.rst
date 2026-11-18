@@ -1,5 +1,5 @@
-Guidelines for Efficient Evaluation During Model Optimization Experiments
-=========================================================================
+Guidelines for Evaluating Models Efficiently During Optimization Experiments
+============================================================================
 
 .. contents:: Contents
    :local:
