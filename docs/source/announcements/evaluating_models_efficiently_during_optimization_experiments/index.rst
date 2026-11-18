@@ -20,6 +20,8 @@ waste time? How many questions and repetitions do you need to measure improvemen
 regressions?
 
 This article helps you evaluate models quickly and reliably during optimization experiments.
+We illustrate these guidelines using real evaluation results from two NVFP4 Qwen3.6-35B-A3B
+checkpoints.
 
 For standardized evaluation and acceptance checks before releasing optimized models, follow the
 `ModelOpt evaluation
