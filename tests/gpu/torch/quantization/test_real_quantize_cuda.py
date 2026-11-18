@@ -17,18 +17,20 @@
 
 import copy
 import fnmatch
+import shutil
 
 import pytest
 import torch
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quant_utils import get_model_size
 from _test_utils.torch.quantization.quantize_common import save_restore_test
-from _test_utils.torch.transformers_models import create_tiny_llama_dir
+from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_qwen3_moe_dir
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.qtensor import QTensorWrapper
 
@@ -217,6 +219,8 @@ def test_compress_config(model_cls, quant_config, compress_config):
         pytest.param({"local_files_only": True}, False, torch.bfloat16, id="hub_kwargs"),
         # The checkpoint sits in a subfolder of the path passed.
         pytest.param({"subfolder": "tiny_llama"}, False, torch.bfloat16, id="subfolder"),
+        # dispatch_model() options still reach it.
+        pytest.param({"offload_buffers": True}, False, torch.bfloat16, id="dispatch_kwargs"),
     ],
 )
 def test_real_quantize_linear(
@@ -243,6 +247,52 @@ def test_real_quantize_linear(
             and not module.weight_quantizer.fake_quant
         ):
             assert isinstance(module.weight, QTensorWrapper)
+
+
+@pytest.mark.parametrize("case", ["bin_checkpoint", "disk_device_map", "loader_only_kwarg"])
+def test_init_quantized_weights_refuses_what_it_cannot_load(case, tmp_path, monkeypatch):
+    """The context's loader reads safetensors onto the device map it computed: a checkpoint it
+    cannot read, a device map that offloads to disk, and an accelerate loader option it has no
+    counterpart for are each refused by name, instead of silently dropped or failing downstream."""
+    tiny_llama_dir = create_tiny_llama_dir(tmp_path)
+    load_kwargs: dict = {}
+    if case == "bin_checkpoint":
+        state = AutoModelForCausalLM.from_pretrained(tiny_llama_dir).state_dict()
+        shutil.copy(tiny_llama_dir / "config.json", tmp_path / "config.json")
+        torch.save(state, tmp_path / "pytorch_model.bin")
+        tiny_llama_dir, expected = tmp_path, pytest.raises(RuntimeError, match="safetensors")
+    elif case == "disk_device_map":
+        monkeypatch.setattr(
+            accelerate_plugin, "infer_auto_device_map", lambda *a, **k: {"": "disk"}
+        )
+        expected = pytest.raises(ValueError, match="disk")
+    else:
+        load_kwargs["offload_folder"] = str(tmp_path / "offload")
+        expected = pytest.raises(ValueError, match="offload_folder")
+
+    with init_quantized_weights(mtq.FP8_DEFAULT_CFG), expected:
+        AutoModelForCausalLM.from_pretrained(tiny_llama_dir, **load_kwargs)
+
+
+def test_real_quantize_fused_moe(tmp_path):
+    """transformers stores a MoE's experts as fused 3-D parameters that it merges the checkpoint's
+    per-expert keys into on load: the context's loader must replay that merge, and compress must
+    leave the per-expert quantizers of the unpacked experts fake-quant."""
+    moe_dir = create_tiny_qwen3_moe_dir(tmp_path)
+    reference = AutoModelForCausalLM.from_pretrained(moe_dir)
+    with init_quantized_weights(mtq.NVFP4_DEFAULT_CFG):
+        model = AutoModelForCausalLM.from_pretrained(moe_dir)
+    assert not any(t.is_meta for t in [*model.parameters(), *model.buffers()])
+    for layer, ref_layer in zip(model.model.layers, reference.model.layers):
+        for name in ("gate_up_proj", "down_proj"):
+            loaded = getattr(layer.mlp.experts, name).detach().cpu()
+            assert torch.equal(loaded, getattr(ref_layer.mlp.experts, name).detach())
+        assert isinstance(layer.self_attn.q_proj.weight, QTensorWrapper)
+        assert all(q.fake_quant for q in layer.mlp.experts.gate_up_proj_weight_quantizers)
+
+    input_ids = torch.randint(0, model.config.vocab_size, (2, 8), device=model.device)
+    mtq.calibrate(model, "max", lambda m: m(input_ids))
+    assert torch.isfinite(model(input_ids).logits).all()
 
 
 def _test_mtq_compress_fsdp_module(
