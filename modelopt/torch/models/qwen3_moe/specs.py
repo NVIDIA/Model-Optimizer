@@ -15,12 +15,16 @@
 
 """Qwen3-MoE specs (HF model type ``qwen3_moe``)."""
 
-from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, register
+from ..specs import BypassSpec, EPSpec, ExportSpec, ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
 register(
     ModelSpec(
+        bypass_spec=BypassSpec(
+            decoder_paths=("model.layers", "layers"),
+            batch_packed_documents=True,
+        ),
         model_type="qwen3_moe",
         min_transformers_version="5.5",
         ep_spec=EPSpec(
