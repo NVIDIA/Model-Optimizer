@@ -57,8 +57,8 @@ Baseline using Kahneman–Tversky Optimization (KTO), which learns from desirabl
 responses, aiming to reduce those loops while preserving accuracy. We use MMLU-Pro, SciCode and
 AA-Omniscience to illustrate these evaluation guidelines. See the :doc:`reproducibility notes <reproducibility/index>`.
 
-Prefer Candidate if it improves at least one metric and meets your non-inferiority criteria for the
-others. Regressions highlight areas to improve.
+Choose a primary improvement metric before inspecting results. Prefer Candidate if it improves that
+metric and meets your non-inferiority criteria for the others. Regressions highlight areas to improve.
 
 Show where the model improves or worsens
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
