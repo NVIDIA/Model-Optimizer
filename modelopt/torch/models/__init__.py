@@ -128,6 +128,7 @@ from . import (  # isort: skip
     qwen4_exp,
     step3p5,
     step3p7,
+    step5,
     t5,
     whisper,
 )

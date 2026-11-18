@@ -34,7 +34,7 @@ from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
 from modelopt.torch.quantization.nn import QuantModule
 
-_PORTED = {"deepseek_v41", "kimi_k31"}
+_PORTED = {"deepseek_v41", "kimi_k31", "step5"}
 
 
 @pytest.mark.parametrize(
@@ -73,6 +73,13 @@ def test_release_text_bypass_and_native_reload(record, tmp_path):
             },
             lambda model: model(**forward),
         )
+        if record["family"] == "step5":
+            shared = [
+                q
+                for n, q in student.named_modules()
+                if ("share_expert" in n or "shared_experts" in n) and n.endswith("weight_quantizer")
+            ]
+            assert shared and all(q.is_enabled and q.num_bits == "iq2_xxs" for q in shared)
         original = {}
         fmt = IQ_FORMAT_REGISTRY["iq2_xxs"]
         for module in student.modules():
