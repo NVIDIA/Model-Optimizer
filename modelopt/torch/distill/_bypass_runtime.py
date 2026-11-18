@@ -34,6 +34,7 @@ from modelopt.torch.quantization.utils.core_utils import (
 from ._bypass_parallel import (
     _all_rank_max,
     _all_rank_values,
+    _model_group,
     _size,
     _synchronize_error,
     prepare_quantizer_partitions,
@@ -74,6 +75,18 @@ class DistributedBypassRuntime:
 
     def synchronize_error(self, error):
         _synchronize_error(self.context, error)
+
+    def checkpoint_group(self):
+        return _model_group(self.context)
+
+    def checkpoint_topology(self):
+        return {
+            "axes": self.context.device_mesh.mesh_dim_names,
+            "ranks": self.context.device_mesh.mesh.tolist(),
+            "expert_ranks": None
+            if self.context.moe_mesh is None
+            else self.context.moe_mesh.mesh.tolist(),
+        }
 
     def initialize(self, student, teacher, units, adapter, batch):
         self.student, self.names = student, module_name_maps(student)
