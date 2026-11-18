@@ -57,6 +57,7 @@ from .common import (
     validate_weight,
 )
 from .iq1_s import _IQ1_LEVELS, _search_shifted_grid, iq1_s_grid
+from .scale_fields import NativeScaleSpec
 
 __all__ = [
     "IQ1_M_BLOCK_BYTES",
@@ -313,8 +314,27 @@ def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return levels.reshape(count, IQ1_M_BLOCK_SIZE), steps
 
 
+def _read_local_scales(blocks: torch.Tensor) -> torch.Tensor:
+    shifts = torch.tensor([0, 3, 6, 9], device=blocks.device)
+    return ((_scale_words(blocks).unsqueeze(-1) >> shifts) & 7).reshape(-1, 16)
+
+
+def _write_local_scales(blocks: torch.Tensor, local: torch.Tensor) -> None:
+    shifts = torch.tensor([0, 3, 6, 9], device=blocks.device)
+    words = (local.int().reshape(-1, 4, 4) << shifts).sum(-1)
+    _write_scale_words(blocks, words, _payload_scales(blocks))
+
+
 IQ1_M_FORMAT = GGMLFormat(
     name="iq1_m",
+    scale_spec=NativeScaleSpec(
+        local_max=7,
+        local_multiplier=2,
+        local_bias=1,
+        divisor=8,
+        read_local=_read_local_scales,
+        write_local=_write_local_scales,
+    ),
     block_size=IQ1_M_BLOCK_SIZE,
     block_bytes=IQ1_M_BLOCK_BYTES,
     quantize=quantize_iq1_m,

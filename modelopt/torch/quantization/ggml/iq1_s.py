@@ -54,6 +54,7 @@ from .common import (
     validate_weight,
     with_leading_fp16_scales,
 )
+from .scale_fields import NativeScaleSpec
 
 __all__ = [
     "IQ1_S_BLOCK_BYTES",
@@ -348,8 +349,24 @@ def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return levels.reshape(-1, IQ1_S_BLOCK_SIZE), steps
 
 
+def _read_local_scales(blocks: torch.Tensor) -> torch.Tensor:
+    return (blocks[:, 35:50:2].int() >> 4) & 7
+
+
+def _write_local_scales(blocks: torch.Tensor, local: torch.Tensor) -> None:
+    blocks[:, 35:50:2] = (blocks[:, 35:50:2] & 143) | (local.to(torch.uint8) << 4)
+
+
 IQ1_S_FORMAT = GGMLFormat(
     name="iq1_s",
+    scale_spec=NativeScaleSpec(
+        local_max=7,
+        local_multiplier=2,
+        local_bias=1,
+        divisor=8,
+        read_local=_read_local_scales,
+        write_local=_write_local_scales,
+    ),
     block_size=IQ1_S_BLOCK_SIZE,
     block_bytes=IQ1_S_BLOCK_BYTES,
     quantize=quantize_iq1_s,
