@@ -15,7 +15,7 @@
 
 """Qwen3.5-MoE specs (HF model type ``qwen3_5_moe``)."""
 
-from ..specs import ModelSpec, MoESpec, register
+from ..specs import BypassSpec, ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
@@ -27,6 +27,15 @@ __all__: list[str] = []
 # behavior change and belongs in its own PR with validation.
 register(
     ModelSpec(
+        bypass_spec=BypassSpec(
+            decoder_paths=(
+                "model.language_model.layers",
+                "language_model.layers",
+                "model.layers",
+                "layers",
+            ),
+            batch_packed_documents=True,
+        ),
         model_type="qwen3_5_moe",
         min_transformers_version="5.5",
         moe_spec=MoESpec(

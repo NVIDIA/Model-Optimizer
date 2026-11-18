@@ -15,10 +15,13 @@
 
 """Independent mathematical checks for Bypass updates."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from modelopt.torch.distill._bypass_capture import _MSE_CHUNK_ELEMENTS, mse_statistics
+from modelopt.torch.distill.plugins.transformers.bypass import TransformersBypassAdapter
 
 
 def test_lion_conflicting_gradients_and_effective_schedule():
@@ -62,3 +65,50 @@ def test_masked_mse_keeps_narrow_saved_activations_and_fp32_vjp(monkeypatch, chu
     for actual_gradient, expected_gradient in zip(actual_gradients, expected_gradients):
         torch.testing.assert_close(actual_gradient, expected_gradient, rtol=0, atol=0)
     assert (prediction.numel(), torch.float32) not in saved
+
+
+def test_packed_attention_refuses_backends_without_block_masks():
+    model = torch.nn.Linear(1, 1)
+    model.config = SimpleNamespace(_attn_implementation="flash_attention_2")
+    batch = {"input_ids": torch.tensor([[1, 2, 3]]), "_packed_seq_ids": torch.tensor([[1, 1, 2]])}
+    adapter = object.__new__(TransformersBypassAdapter)
+    with pytest.raises(ValueError, match="attention backend"):
+        adapter.prepare_batch(model, batch)
+
+
+@pytest.mark.parametrize("kind", ["none", "boolean", "additive"])
+def test_packed_attention_preserves_stronger_masks_and_positive_biases(kind):
+    model = torch.nn.Linear(1, 1)
+    model.config = SimpleNamespace(_attn_implementation="sdpa")
+    batch = {"input_ids": torch.tensor([[1, 2, 3]]), "_packed_seq_ids": torch.tensor([[1, 1, 2]])}
+    smallest = torch.finfo(torch.float32).min
+    expected = [[0, smallest, smallest], [0, 0, smallest], [smallest, smallest, 0]]
+    if kind == "boolean":
+        batch["attention_mask"] = torch.tensor(
+            [[[[True, True, False], [True, True, True], [False, True, True]]]]
+        )
+        expected[0][2] = expected[2][0] = float("-inf")
+    elif kind == "additive":
+        batch["attention_mask"] = torch.tensor(
+            [[[[0.5, 1, float("-inf")], [0.25, -0.5, 0], [float("-inf"), 0, 2]]]]
+        )
+        expected = [
+            [0.5, smallest, float("-inf")],
+            [0.25, -0.5, smallest],
+            [float("-inf"), smallest, 2],
+        ]
+    adapter = object.__new__(TransformersBypassAdapter)
+    actual = adapter.prepare_batch(model, batch)["attention_mask"]
+    torch.testing.assert_close(actual, torch.tensor([[expected]]), rtol=0, atol=0)
+
+
+def test_thinker_without_a_use_cache_argument_keeps_outer_hooks():
+    model = torch.nn.Module()
+    model.thinker = torch.nn.Linear(1, 1)
+    calls = []
+    model.register_forward_hook(lambda *_: calls.append(1))
+    inputs = torch.ones(2, 1)
+    adapter = object.__new__(TransformersBypassAdapter)
+    actual = adapter.forward_teacher(model, (inputs,), {})
+    torch.testing.assert_close(actual, model.thinker(inputs), rtol=0, atol=0)
+    assert calls == [1]
