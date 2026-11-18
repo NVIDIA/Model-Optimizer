@@ -25,7 +25,7 @@ from megatron.core.models.hybrid.hybrid_layer_specs import (
 )
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
-from megatron.core.transformer.spec_utils import ModuleSpec, get_submodules
+from megatron.core.transformer.spec_utils import ModuleSpec, get_module, get_submodules
 
 __all__ = [
     "hybrid_stack_spec_grouped_mlp",
@@ -90,7 +90,11 @@ def _hybrid_stack_spec_with_expert_layout(stack_spec_factory, config, moe_groupe
         return stack_spec
 
     moe = get_submodules(moe_layer.submodules.mlp)
-    expert_type = getattr(moe.experts, "func", moe.experts)
+    expert_type = (
+        get_module(moe.experts)
+        if isinstance(moe.experts, ModuleSpec)
+        else getattr(moe.experts, "func", moe.experts)
+    )
     if moe_grouped_gemm:
         if expert_type is not TEGroupedMLP:
             raise ValueError(

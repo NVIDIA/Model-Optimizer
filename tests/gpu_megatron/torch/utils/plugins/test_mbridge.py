@@ -130,6 +130,28 @@ def local_custom_hybrid_stack_spec():
     return spec
 
 
+def module_spec_custom_hybrid_stack_spec():
+    return _with_module_spec_experts(custom_hybrid_stack_spec())
+
+
+def module_spec_local_custom_hybrid_stack_spec():
+    return _with_module_spec_experts(local_custom_hybrid_stack_spec())
+
+
+def _with_module_spec_experts(spec):
+    moe = get_submodules(spec.submodules.moe_layer.submodules.mlp)
+    experts = moe.experts
+    params = dict(experts.keywords)
+    submodules = params.pop("submodules")
+    moe.experts = ModuleSpec(
+        module=experts.func,
+        params=params,
+        submodules=submodules,
+        metainfo={"source": "custom_factory"},
+    )
+    return spec
+
+
 @pytest.mark.parametrize(
     ("stack_spec_factory", "binding"),
     [
@@ -140,6 +162,8 @@ def local_custom_hybrid_stack_spec():
         (dense_custom_hybrid_stack_spec, "plain"),
         (wrapped_dense_custom_hybrid_stack_spec, "plain"),
         (local_custom_hybrid_stack_spec, "plain"),
+        (module_spec_custom_hybrid_stack_spec, "plain"),
+        (module_spec_local_custom_hybrid_stack_spec, "plain"),
     ],
 )
 def test_custom_hybrid_stack_survives_layout_changes_and_run_config_round_trip(
@@ -148,6 +172,10 @@ def test_custom_hybrid_stack_survives_layout_changes_and_run_config_round_trip(
     provider = HybridModelProvider(num_layers=2, hidden_size=64, num_attention_heads=4)
     provider.hybrid_stack_spec = stack_spec_factory
     original = provider._resolve_hybrid_stack_spec()
+    sequential_only = stack_spec_factory in (
+        local_custom_hybrid_stack_spec,
+        module_spec_local_custom_hybrid_stack_spec,
+    )
     if binding == "positional":
         provider.hybrid_stack_spec = partial(hybrid_stack_spec_sequential_mlp, stack_spec_factory)
     elif binding == "keyword":
@@ -164,7 +192,7 @@ def test_custom_hybrid_stack_survives_layout_changes_and_run_config_round_trip(
         assert target == f"modelopt.torch.utils.plugins.megatron_layer_specs.{expected_factory}"
         provider.hybrid_stack_spec = factory
         assert provider.moe_grouped_gemm == grouped
-        if grouped and stack_spec_factory is local_custom_hybrid_stack_spec:
+        if grouped and sequential_only:
             with pytest.raises(ValueError):
                 provider._resolve_hybrid_stack_spec()
             continue
@@ -185,7 +213,9 @@ def test_custom_hybrid_stack_survives_layout_changes_and_run_config_round_trip(
         assert moe.shared_experts.func is original_moe.shared_experts.func
         assert moe.shared_experts.keywords == original_moe.shared_experts.keywords
         assert moe.router is original_moe.router
-        if stack_spec_factory is local_custom_hybrid_stack_spec:
+        if isinstance(original_moe.experts, ModuleSpec) and (grouped or sequential_only):
+            assert moe.experts == original_moe.experts
+        elif sequential_only:
             assert moe.experts.func is original_moe.experts.func
             assert moe.experts.keywords == original_moe.experts.keywords
         else:
