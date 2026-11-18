@@ -304,6 +304,8 @@ def _tensor_parallel_sync_helper(rank, size, case):
             linear.input_quantizer.set_from_attribute_config({"axis": None})
 
     try:
+        # A rank that skips every sync must wait for its peers to finish connecting.
+        dist.barrier(group=tp_group)
         max_calibrate(model, forward_loop)
     finally:
         dist.destroy_process_group(tp_group)

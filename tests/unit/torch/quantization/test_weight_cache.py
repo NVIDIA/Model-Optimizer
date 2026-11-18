@@ -20,7 +20,9 @@ import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization import qtensor as qtensor_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import (
     SequentialQuantizer,
@@ -29,11 +31,16 @@ from modelopt.torch.quantization.nn import (
     register_quant_backend,
     unregister_quant_backend,
 )
+from modelopt.torch.quantization.qtensor import FP8QTensor, base_qtensor
 from modelopt.torch.quantization.utils import (
     disable_weight_cache,
     enable_weight_cache,
     invalidate_weight_cache,
     weight_cache_scope,
+)
+from modelopt.torch.quantization.utils.native_weight import (
+    get_pinned_native_weight,
+    pin_native_weight,
 )
 
 BACKEND_CALLS = []
@@ -115,6 +122,96 @@ def test_weight_and_quantizer_changes_recompute():
         invalidate_weight_cache(model)
         assert torch.equal(model(x), copy.deepcopy(model)(x))
     assert (stats.misses, stats.invalidations) == (5, 3)
+
+
+def test_pinned_native_weight_reuses_the_step_cache(monkeypatch):
+    model = _quantized_mlp(num_bits=(4, 3))
+    linear = model[0]
+    native, scales = FP8QTensor.quantize(linear.weight.detach(), axis=0)
+    linear.weight_quantizer._set_buffer("_scale", scales)
+    pin_native_weight(linear.weight_quantizer, native, linear.weight)
+    batches = [torch.randn(4, 16) for _ in range(3)]
+    expected_outputs, expected_gradients = _accumulate(model, batches)
+    decoded = []
+    dequantize = FP8QTensor.dequantize
+
+    def observed(self, *args, **kwargs):
+        decoded.append(1)
+        return dequantize(self, *args, **kwargs)
+
+    monkeypatch.setattr(FP8QTensor, "dequantize", observed)
+    enable_weight_cache(model)
+    with weight_cache_scope(model) as stats:
+        outputs, gradients = _accumulate(model, batches)
+    for actual, expected in zip(outputs + gradients, expected_outputs + expected_gradients):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert len(decoded) == 1
+    assert (stats.misses, stats.hits) == (2, 10)
+
+
+def test_native_codec_identity_survives_custom_names_and_checkpoint_reload(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        base_qtensor, "_NATIVE_TENSOR_CLASSES", dict(base_qtensor._NATIVE_TENSOR_CLASSES)
+    )
+    builtin = qtensor_module.FP8QTensor
+
+    class FP8QTensor(builtin):
+        pass
+
+    def first_provider():
+        class PluginTensor(builtin):
+            pass
+
+        return PluginTensor
+
+    def second_provider():
+        class PluginTensor(builtin):
+            pass
+
+        return PluginTensor
+
+    first, second = first_provider(), second_provider()
+    assert base_qtensor.get_native_tensor_class("FP8QTensor") is builtin
+    for index, codec in enumerate((builtin, FP8QTensor, first, second)):
+        model = _quantized_mlp(num_bits=(4, 3))
+        linear = model[0]
+        native, scales = codec.quantize(linear.weight.detach(), axis=0)
+        linear.weight_quantizer._set_buffer("_scale", scales)
+        pin_native_weight(linear.weight_quantizer, native, linear.weight)
+        identity = f"{codec.__module__}.{codec.__qualname__}"
+        assert linear.weight_quantizer._native_weight_meta["class"] == identity
+        if codec is builtin:
+            # Existing checkpoints used the reserved built-in short name.
+            linear.weight_quantizer._native_weight_meta["class"] = "FP8QTensor"
+        batches = [torch.randn(2, 16, requires_grad=True)]
+        expected, gradients = _accumulate(model, batches)
+        inputs_gradient = batches[0].grad.clone()
+        path = tmp_path / f"native-{index}.pt"
+        mto.save(model, path)
+        restored = mto.restore(nn.Sequential(nn.Linear(16, 32), nn.ReLU(), nn.Linear(32, 16)), path)
+        payload = get_pinned_native_weight(restored[0].weight_quantizer, restored[0].weight)
+        assert type(payload) is codec
+        assert torch.equal(
+            payload._quantized_data.view(torch.uint8), native._quantized_data.view(torch.uint8)
+        )
+        restored_inputs = [batches[0].detach().clone().requires_grad_(True)]
+        actual, actual_gradients = _accumulate(restored, restored_inputs)
+        for value, wanted in zip(actual + actual_gradients, expected + gradients):
+            torch.testing.assert_close(value, wanted, rtol=0, atol=0)
+        torch.testing.assert_close(restored_inputs[0].grad, inputs_gradient, rtol=0, atol=0)
+    reloaded = first_provider()
+    assert reloaded is not first
+    assert (
+        base_qtensor.get_native_tensor_class(f"{first.__module__}.{first.__qualname__}") is reloaded
+    )
+    quantizer, source = restored[0].weight_quantizer, restored[0].weight
+    for identity, reason in (
+        ("PluginTensor", "ambiguous"),
+        ("unimported.provider.Codec", "not registered"),
+    ):
+        quantizer._native_weight_meta["class"] = identity
+        with pytest.raises(ValueError, match=reason):
+            get_pinned_native_weight(quantizer, source)
 
 
 def test_weight_cache_contract(ste_round_backend):

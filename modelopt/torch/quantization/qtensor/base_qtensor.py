@@ -49,6 +49,29 @@ def _refuse_dtensor(tensor: torch.Tensor, packer: str) -> None:
         )
 
 
+_NATIVE_TENSOR_CLASSES = {}
+
+
+def get_native_tensor_class(name):
+    """Resolve an already imported native codec; checkpoints cannot import arbitrary code."""
+    if name in _NATIVE_TENSOR_CLASSES:
+        return _NATIVE_TENSOR_CLASSES[name]
+    candidates = [codec for codec in _NATIVE_TENSOR_CLASSES.values() if codec.__name__ == name]
+    # Preserve built-in checkpoint aliases when an unrelated provider reuses a short name.
+    builtin = [
+        codec
+        for codec in candidates
+        if codec.__module__.startswith(__package__ + ".") and codec.__qualname__ == name
+    ]
+    if len(builtin) == 1:
+        return builtin[0]
+    if not candidates:
+        raise ValueError(f"Native codec {name!r} is not registered; import its format provider")
+    if len(candidates) != 1:
+        raise ValueError(f"Native codec {name!r} is ambiguous; use its qualified name")
+    return candidates[0]
+
+
 class BaseQuantizedTensor:
     """Base class for quantized tensors, providing methods for quantization and dequantization.
 
@@ -82,6 +105,7 @@ class BaseQuantizedTensor:
         It can be used to load the quantized tensor with torch.load(weights_only=True) in safe_load().
         """
         super().__init_subclass__(**kwargs)
+        _NATIVE_TENSOR_CLASSES[f"{cls.__module__}.{cls.__qualname__}"] = cls
         torch.serialization.add_safe_globals([cls])
 
     @classmethod
@@ -143,10 +167,14 @@ class QTensorWrapper(torch.nn.Parameter):
         )
 
     def get_qtensor(self):
-        """Get the quantized tensor class from QTensorWrapper."""
-        return self.metadata["qtensor_class"](
+        """Return the codec's payload with its complete native metadata."""
+        native = self.metadata["qtensor_class"](
             self.metadata["shape"], self.metadata["dtype"], self.data
         )
+        native.metadata.update(
+            {key: value for key, value in self.metadata.items() if key != "qtensor_class"}
+        )
+        return native
 
     def get_state(self):
         """Get the state of the QTensorWrapper."""
