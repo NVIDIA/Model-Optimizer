@@ -106,6 +106,8 @@ from . import (  # isort: skip
     llama4,
     llama_nemotron_nano_vl,
     minimax,
+    mistral_large4,
+    muse_spark,
     mimo_v2,
     mixtral,
     phimoe,

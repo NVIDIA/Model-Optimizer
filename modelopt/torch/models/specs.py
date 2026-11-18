@@ -393,6 +393,16 @@ class BypassSpec(SpecSection):
     adapter_path: str | None = None
     """Optional qualified ModuleBypassAdapter factory for model-owned replay side inputs."""
 
+    logits_transform_path: str | None = None
+    """Optional ``(model, logits)`` callable for native post-head diagnostic math.
+
+    Transforms that reduce across vocabulary entries use a complete vocabulary per
+    token chunk. Elementwise transforms may opt into vocabulary slicing below.
+    """
+
+    logits_transform_slices: bool = False
+    """Whether the transform preserves its result when applied to a vocabulary slice."""
+
 
 @dataclass(kw_only=True)
 class ModelSpec:
