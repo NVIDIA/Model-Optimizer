@@ -58,6 +58,8 @@ Changelog
 
 *Speculative Decoding*
 
+- Fix the built-in DFlash2, Domino, DSpark, and LiLiCorr speculative decoding recipes failing with Transformers 5.15 and later. A ``training.warmup_ratio`` in your own recipes or overrides now loads as the same ``training.warmup_steps`` fraction.
+
 *Megatron Framework (M-LM / M-Bridge)*
 
 - Preserve model-specific hybrid stacks when selecting MoE expert layouts in Megatron-Bridge, and reject grouped GEMM when a custom factory returns sequential experts. Custom built stack ``ModuleSpec`` values are now rejected; assign a named factory function instead.

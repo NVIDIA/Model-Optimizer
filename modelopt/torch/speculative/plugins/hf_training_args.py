@@ -139,3 +139,19 @@ class TrainingArguments(BaseModel):
     # CP and full_determinism force it on. Mirrors HF's field (transformers>=5.15) so older
     # versions accept it.
     dataloader_in_order: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _translate_warmup_ratio(cls, data):
+        # main.py hands extras to HF, and transformers>=5.15 removed warmup_ratio. Below 1,
+        # warmup_steps is the same fraction on every supported version.
+        if isinstance(data, dict) and "warmup_ratio" in data:
+            if "warmup_steps" in data:
+                raise ValueError(
+                    "Got both training.warmup_ratio and training.warmup_steps; set the warmup with "
+                    "training.warmup_steps only (a value in (0, 1) is a fraction of the total "
+                    "training steps)."
+                )
+            data = dict(data)
+            data["warmup_steps"] = data.pop("warmup_ratio")
+        return data

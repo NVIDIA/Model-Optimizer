@@ -84,7 +84,7 @@ Everything in `dflash.md` applies. DFlash2 adds:
 path never forms.
 
 Recipe defaults that differ from DFlash's: `block_size` 16, `num_anchors` 256,
-`num_train_epochs` 6, `training_seq_len` 3072, `warmup_ratio` 0.04,
+`num_train_epochs` 6, `training_seq_len` 3072, `warmup_steps` 0.04,
 `learning_rate` 6.0e-4, `loss_decay_factor` 7.0.
 
 `training.ddp_find_unused_parameters` is `true` by design — the selector parameters

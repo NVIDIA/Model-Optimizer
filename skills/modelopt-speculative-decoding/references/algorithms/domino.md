@@ -55,7 +55,7 @@ Everything in `dflash.md` applies. Domino adds:
 `dflash_self_logit_distillation` is **false** — Domino trains its own base/final CE
 losses rather than distilling target logits. Recipe defaults also differ from
 DFlash's: `block_size` 16, `num_anchors` 256, `num_train_epochs` 6,
-`training_seq_len` 3072, `warmup_ratio` 0.04, `dflash_loss_decay_factor` 7.0.
+`training_seq_len` 3072, `warmup_steps` 0.04, `dflash_loss_decay_factor` 7.0.
 `max_grad_norm: 1.0` is stated explicitly in the recipe but is *not* a delta — it is the
 `transformers.TrainingArguments` default that `dflash.yaml` inherits by not setting it.
 
