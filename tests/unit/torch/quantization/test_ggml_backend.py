@@ -561,8 +561,11 @@ def test_ggml_initialization_refuses_ambiguous_ptq_quantizers_before_writing(sha
 
 
 @pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
-@pytest.mark.parametrize("payload_layout", ["native", "flat", "odd_offset"])
-def test_native_iq_fields_preserve_codes_and_match_reference(name, payload_layout):
+@pytest.mark.parametrize(
+    ("payload_layout", "scale_layout"),
+    [("native", "column"), ("flat", "column"), ("odd_offset", "column"), ("flat", "strided_fp16")],
+)
+def test_native_iq_fields_preserve_codes_and_match_reference(name, payload_layout, scale_layout):
     """Edit captured native bytes and independently reconstruct the new scale geometry."""
     fmt = GGML_FORMAT_REGISTRY[name]
     packed = torch.from_numpy(packed_blocks(name).copy())
@@ -584,7 +587,12 @@ def test_native_iq_fields_preserve_codes_and_match_reference(name, payload_layou
     global_scale, local, local_max = decode_scale_fields(packed, fmt)
     changed_global = global_scale * 2
     changed_local = (local + 1).clamp_max(local_max)
-    edited = replace_scale_fields(packed, fmt, changed_global[:, None], changed_local)
+    replacement_scale = changed_global[:, None]
+    if scale_layout == "strided_fp16":
+        storage = torch.empty(2 * changed_global.numel(), dtype=torch.float16)
+        storage[::2] = changed_global
+        replacement_scale = storage[::2]
+    edited = replace_scale_fields(packed, fmt, replacement_scale, changed_local)
     assert torch.equal(packed, original)
     assert torch.equal(replace_scale_fields(edited, fmt, global_scale, local), original)
 
@@ -614,6 +622,10 @@ def test_native_iq_fields_preserve_codes_and_match_reference(name, payload_layou
         atol=1e-8,
     )
     if payload_layout == "native":
+        for value in (float("nan"), float("inf"), 65520, 1 + 2j):
+            illegal_global = torch.full(global_scale.shape, value)
+            with pytest.raises(ValueError):
+                replace_scale_fields(packed, fmt, illegal_global, local)
         for value in (float("nan"), float("inf"), -1, local_max + 1, 0.5):
             illegal_local = local.float().clone()
             illegal_local[0, 0] = value

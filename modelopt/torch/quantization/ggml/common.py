@@ -1007,8 +1007,12 @@ def leading_fp16_scales(blocks: torch.Tensor) -> torch.Tensor:
 
 def with_leading_fp16_scales(blocks: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     """``[blocks, block_bytes]`` rows with their leading FP16 super-block scales replaced."""
+    scales = scales.to(torch.float16).contiguous()
+    # contiguous() can preserve a singleton's non-unit stride.
+    if scales.stride(-1) != 1:
+        scales = scales.clone(memory_format=torch.contiguous_format)
     replaced = blocks.clone()
-    replaced[:, :2] = scales.to(torch.float16).contiguous().view(torch.uint8).reshape(-1, 2)
+    replaced[:, :2] = scales.view(torch.uint8).reshape(-1, 2)
     return replaced
 
 

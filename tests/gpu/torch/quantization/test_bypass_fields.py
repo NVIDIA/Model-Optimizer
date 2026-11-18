@@ -17,7 +17,11 @@
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import DistributedWorkerPool
 from torch import nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
+from torch.distributed.tensor.debug import CommDebugMode
 from torch.nn import functional as F
 
 import modelopt.torch.quantization as mtq
@@ -166,3 +170,125 @@ def test_native_replay_peak_memory_and_vjp(dtype, record_property):
     (actual_vjp,) = torch.autograd.grad(output, steps, gradient)
     (expected_vjp,) = torch.autograd.grad(expected, reference_steps, gradient)
     torch.testing.assert_close(actual_vjp, expected_vjp, rtol=0, atol=0)
+
+
+def _repair_expert_sharded_dtensor_job(rank, size):
+    # Transformers is optional; only the Gloo workers construct its fused expert bank.
+    from _test_utils.torch.transformers_models import get_tiny_mixtral
+    from transformers.models.mixtral.modeling_mixtral import MixtralExperts
+
+    from modelopt.torch.quantization.plugins.huggingface import _QuantFusedExperts
+
+    mesh = init_device_mesh("cpu", (size,))
+    for local_experts in (True, False):
+        model = get_tiny_mixtral(
+            hidden_size=256,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_local_experts=4,
+            num_experts_per_tok=2,
+            vocab_size=32,
+            dtype=torch.float32,
+        )
+        bank = next(module for module in model.modules() if isinstance(module, MixtralExperts))
+        mtq.quantize(
+            bank,
+            {
+                **_config([_iq("*gate_up_proj_weight_quantizers*", "iq1_s")]),
+                "algorithm": None,
+            },
+        )
+        assert isinstance(bank, _QuantFusedExperts)
+        for name in ("gate_up_proj", "down_proj"):
+            weight = getattr(bank, name)
+            setattr(bank, name, nn.Parameter(distribute_tensor(weight.detach(), mesh, [Shard(0)])))
+        if local_experts:
+            bank.num_experts = 4 // size
+            start = rank * bank.num_experts
+            for name in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
+                quantizers = getattr(bank, name)
+                setattr(bank, name, nn.ModuleList(quantizers[start : start + bank.num_experts]))
+        first = bank.gate_up_proj
+        assert isinstance(first, DTensor) and first.placements == (Shard(0),)
+        assert first.shape[0] == 4 and first.to_local().shape[0] == 4 // size
+        assert len(bank.gate_up_proj_weight_quantizers) == bank.num_experts
+        assert len(bank.down_proj_weight_quantizers) == bank.num_experts
+        before = {
+            name: getattr(bank, name).to_local().detach().clone()
+            for name in ("gate_up_proj", "down_proj")
+        }
+        flags = {parameter: parameter.requires_grad for parameter in bank.parameters()}
+        quantizers = list(bank.iter_weight_quantizers_for_calibration())
+        quantizer_flags = [(q._if_calib, q._enable_pre_quant_scale, q._rotate) for q in quantizers]
+        policy = IQRepairPolicy()
+        try:
+            refused = False
+            with CommDebugMode() as comms:
+                try:
+                    fields = policy.prepare(bank)
+                except ValueError:
+                    refused = True
+            assert refused == (not local_experts), (
+                local_experts,
+                refused,
+                dict(comms.get_comm_counts()),
+            )
+            assert comms.get_total_counts() == 0, dict(comms.get_comm_counts())
+            if refused:
+                assert all(parameter.requires_grad == flag for parameter, flag in flags.items())
+                assert [
+                    (q._if_calib, q._enable_pre_quant_scale, q._rotate) for q in quantizers
+                ] == quantizer_flags
+                assert all(
+                    not hasattr(q, "_local_repair_state") and "_fake_quantize" not in q.__dict__
+                    for q in quantizers
+                )
+                for name, expected in before.items():
+                    torch.testing.assert_close(
+                        getattr(bank, name).to_local(), expected, rtol=0, atol=0
+                    )
+                continue
+
+            inputs = torch.randn(2, 256)
+            projected = [
+                quantizer(weight)
+                for weight, quantizer in bank.iter_weights_for_calibration()
+                if quantizer.is_enabled
+            ]
+            before_replay = torch.stack([weight.detach() for weight in projected])
+            loss = sum(F.linear(inputs, weight).square().mean() for weight in projected)
+            loss.backward()
+            assert fields and any(
+                field.grad is not None and field.grad.count_nonzero() for field in fields
+            )
+            assert all(parameter.grad is None for parameter in bank.parameters())
+            optimizer = torch.optim.SGD(fields, lr=10)
+            optimizer.step()
+            policy.project_()
+            expected = torch.stack(
+                [
+                    quantizer(bank.get_expert_weight("gate_up_proj", index)).detach()
+                    for index, quantizer in enumerate(bank.gate_up_proj_weight_quantizers)
+                ]
+            )
+            assert not torch.equal(expected, before_replay)
+            policy.finalize_()
+            assert bank.gate_up_proj is first
+            assert not torch.equal(first.to_local(), before["gate_up_proj"])
+            torch.testing.assert_close(first.to_local(), expected, rtol=0, atol=0)
+            torch.testing.assert_close(
+                bank.down_proj.to_local(), before["down_proj"], rtol=0, atol=0
+            )
+        finally:
+            policy.close()
+
+
+@pytest.mark.timeout(300)
+def test_iq_repair_requires_local_expert_dtensor_ownership():
+    pytest.importorskip("transformers")
+    pool = DistributedWorkerPool(world_size=2, backend="gloo")
+    try:
+        pool.job_timeout = 180
+        pool.run(_repair_expert_sharded_dtensor_job)
+    finally:
+        pool.shutdown()

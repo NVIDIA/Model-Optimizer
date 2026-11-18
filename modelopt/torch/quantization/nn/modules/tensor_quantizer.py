@@ -180,6 +180,7 @@ class TensorQuantizer(nn.Module):
         "_local_repair_state",
         "_local_repair_active",
         "_fake_quantize",
+        "_local_repair_properties",
         # Runtime-only set of storage attributes tied to shared state. The tied
         # aliases are rebuilt from calibration config and tensor state during restore.
         "_shared_quant_tied_attrs",
@@ -1408,6 +1409,7 @@ class TensorQuantizer(nn.Module):
         modelopt_state = {}
         for k in self._get_properties_for_modelopt_state():
             modelopt_state[k] = getattr(self, k)
+        modelopt_state.update(getattr(self, "_local_repair_properties", {}))
 
         if properties_only:
             return modelopt_state

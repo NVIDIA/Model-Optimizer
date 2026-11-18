@@ -24,6 +24,7 @@ from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantLinearConvBase, TensorQuantizer
 
 try:
+    from accelerate import cpu_offload
     from accelerate.hooks import AlignDevicesHook, ModelHook, add_hook_to_module
 except ImportError:
     pytest.skip("accelerate not available", allow_module_level=True)
@@ -83,7 +84,8 @@ def test_tensor_quantizer_modelopt_state_with_accelerate_hook():
     pickle.dumps(state)
 
 
-def test_buffer_registered_during_weight_access_survives_buffer_offload():
+@pytest.mark.parametrize("offload_mode", ["direct_hook", "cpu_offload"])
+def test_buffer_registered_during_weight_access_survives_buffer_offload(offload_mode):
     """GPTQ's payload pin is registered while the offloaded weight is materialized; the hook must
     still be able to reload it after offloading the module again."""
     torch.manual_seed(0)
@@ -96,14 +98,17 @@ def test_buffer_registered_during_weight_access_survives_buffer_offload():
     ]
     mtq.quantize(model, {"quant_cfg": quant_cfg, "algorithm": "max"}, lambda m: m(inputs))
     weights_map = {name: value.detach().clone() for name, value in model.state_dict().items()}
-    hook = AlignDevicesHook(
-        execution_device="cpu",
-        offload=True,
-        offload_buffers=True,
-        place_submodules=True,
-        weights_map=weights_map,
-    )
-    add_hook_to_module(model, hook)
+    if offload_mode == "cpu_offload":
+        cpu_offload(model, execution_device="cpu", offload_buffers=True, state_dict=weights_map)
+    else:
+        hook = AlignDevicesHook(
+            execution_device="cpu",
+            offload=True,
+            offload_buffers=True,
+            place_submodules=True,
+            weights_map=weights_map,
+        )
+        add_hook_to_module(model, hook)
 
     gptq = {"method": "gptq", "block_size": 256, "perc_damp": 0.3}
     mtq.calibrate(model, algorithm=gptq, forward_loop=lambda m: m(inputs))

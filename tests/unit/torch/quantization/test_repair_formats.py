@@ -24,6 +24,7 @@ from torch import nn
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.repair import IQRepairPolicy
 
 
@@ -99,7 +100,19 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
         global_scale, local_scale = state.scales()
         assert torch.isfinite(global_scale).all()
         assert torch.isfinite(local_scale).all()
-        state.native_payload()
+        native = state.native_payload()
+        if dtype == torch.float16:
+            decoded = fmt.dequantize(native, torch.tensor(state.weight_shape), dtype=dtype)
+            assert torch.isinf(decoded).any()
+            quantizer = model.weight_quantizer
+            raw_before = weight.detach().clone()
+            flags = quantizer._enable_pre_quant_scale, copy.deepcopy(quantizer._rotate)
+            pinned_before = pinned_packed_weight(quantizer, name)
+            with pytest.raises(ValueError):
+                state.finalize_(quantizer, weight, native=native)
+            torch.testing.assert_close(weight, raw_before, rtol=0, atol=0)
+            assert (quantizer._enable_pre_quant_scale, quantizer._rotate) == flags
+            assert pinned_packed_weight(quantizer, name) is pinned_before
         with torch.no_grad():
             state.global_delta[0] = float("nan")
         with pytest.raises(ValueError):

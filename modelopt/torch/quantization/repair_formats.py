@@ -146,6 +146,8 @@ class IQScaleState(nn.Module):
         """Bake processed coordinates once and persist the exact native codes/scales."""
         native = self.native_payload() if native is None else native
         values = self.format.dequantize(native, torch.tensor(self.weight_shape), dtype=weight.dtype)
+        if not torch.isfinite(values).all():
+            raise ValueError(f"Decoded {self.name} weights must be finite in {weight.dtype}")
         quantizer._enable_pre_quant_scale = False
         quantizer.disable_rotate()
         weight.copy_(values.reshape(weight.shape))

@@ -49,7 +49,11 @@ class NativeScaleSpec:
 
     def replace(self, blocks, scale, local, write_global):
         """Replace scale bits in a copy, refusing nonrepresentable local fields."""
-        if scale.numel() != len(blocks) or not torch.isfinite(scale.half()).all():
+        if (
+            scale.is_complex()
+            or scale.numel() != len(blocks)
+            or not torch.isfinite(scale.half()).all()
+        ):
             raise ValueError("Global IQ scales must be finite FP16 values, one per block")
         if self.read_local is None:
             if local is not None:
