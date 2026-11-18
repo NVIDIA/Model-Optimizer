@@ -539,6 +539,13 @@ EXPECTED_MOE_LAYOUTS = [
     ("deepseek_v4", ("DeepseekV4SparseMoeBlock",), ("gate_up_proj", "down_proj"), True, None),
     ("deepseek_v41", ("DeepseekV41MoE",), ("w1", "w2", "w3"), False, ("w1", "w3")),
     (
+        "kimi_k31",
+        ("KimiK31MoE",),
+        ("gate_proj", "up_proj", "down_proj"),
+        False,
+        ("gate_proj", "up_proj"),
+    ),
+    (
         "gemma4",
         ("Gemma4TextDecoderLayer",),
         ("gate_proj", "down_proj", "up_proj"),
@@ -711,6 +718,7 @@ def test_iterable_experts_matches_pre_refactor_support():
         "deepseek_v3",
         "deepseek_v4",
         "deepseek_v41",
+        "kimi_k31",
     }
     legacy_substrings = (
         "mixtralforcausallm",
@@ -728,6 +736,7 @@ def test_iterable_experts_matches_pre_refactor_support():
         "deepseek_v3": "DeepseekV3ForCausalLM",
         "deepseek_v4": "DeepseekV4ForCausalLM",
         "deepseek_v41": "DeepseekV41ForCausalLM",
+        "kimi_k31": "KimiK31ForCausalLM",
         "gemma4": "Gemma4ForConditionalGeneration",
         "gemma4_text": "Gemma4TextForCausalLM",
         "gpt_oss": "GptOssForCausalLM",

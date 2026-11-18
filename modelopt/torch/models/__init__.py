@@ -100,6 +100,7 @@ from . import (  # isort: skip
     gemma4_text,
     gpt_oss,
     kimi_k2,
+    kimi_k31,
     llama,
     llava_llama,
     llama4,
