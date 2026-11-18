@@ -41,6 +41,61 @@ __all__ = []
 _NATIVE_TP_CODECS = (FP8QTensor, NVFP4QTensor)
 
 
+def requires_full_context_activations(model):
+    """Detect activation fields or statistics that cannot follow native token-sharded CP."""
+    weights = {
+        id(quantizer)
+        for module in model.modules()
+        if isinstance(module, QuantModule)
+        for container in module.iter_weight_quantizers_for_calibration()
+        for quantizer in container.modules()
+        if isinstance(quantizer, TensorQuantizer)
+    }
+    return any(
+        isinstance(quantizer, TensorQuantizer)
+        and id(quantizer) not in weights
+        and _requires_full_context_activation(quantizer)
+        for quantizer in model.modules()
+    )
+
+
+def _requires_full_context_activation(quantizer):
+    scale = quantizer.pre_quant_scale
+    if scale is not None and scale.ndim >= 2 and scale.shape[-2] > 1:
+        return True
+    if not quantizer.is_enabled:
+        return False
+    blocks = quantizer.block_sizes or {}
+    if quantizer.is_static_block_quant and any(
+        isinstance(axis, int) and size is not None for axis, size in blocks.items()
+    ):
+        return True
+    # Registered backends and dynamic bias do not declare independent token-row statistics.
+    if quantizer.backend is not None or (quantizer.bias or {}).get("type") == "dynamic":
+        return True
+    bias = getattr(quantizer, "_bias_value", None)
+    if bias is not None and bias.ndim >= 2 and bias.shape[-2] > 1:
+        return True
+    if quantizer.is_mx_format:
+        return False
+    amax = getattr(quantizer, "_amax", None)
+    if isinstance(amax, torch.Tensor):
+        return amax.ndim >= 2 and amax.shape[-2] > 1
+    if quantizer._use_constant_amax:
+        return False
+    if blocks.get("type") == "dynamic":
+        # FP8 block scales also depend on a maximum over all token rows.
+        return True
+    consumed = getattr(quantizer, "_consumed_block_sizes", None) or blocks
+    axes = {axis for axis, size in consumed.items() if isinstance(axis, int) and size is None}
+    if axes and all(axis < 0 for axis in axes) and -2 not in axes:
+        return False
+    retained = quantizer.axis
+    retained = (retained,) if isinstance(retained, int) else retained or ()
+    # Negative -2 names the token axis for linear inputs and QKV tensors alike.
+    return -2 not in retained
+
+
 @dataclass(frozen=True)
 class NativeWeightPartition:
     """Describe ordinary or packed gate/up ownership of a logical matrix."""
