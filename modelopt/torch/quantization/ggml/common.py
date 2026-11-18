@@ -27,6 +27,7 @@ import torch
 from torch.optim.optimizer import register_optimizer_step_post_hook
 
 from ..extensions import get_cuda_ext_ggml
+from .scale_fields import NativeScaleSpec
 
 GGML_BLOCK_SIZE = 256
 _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
@@ -450,6 +451,8 @@ class GGMLFormat:
     # back into ``[blocks, block_bytes]`` payload rows.
     scale_fit: ScaleFit | None = None
     replace_payload_scales: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
+
+    scale_spec: NativeScaleSpec | None = None
 
     def __post_init__(self):
         if (self.scale_fit is None) != (self.replace_payload_scales is None):

@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from _test_utils.torch.quantization.iq_llama_cpp_vectors import expected_values, packed_blocks
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -29,7 +30,7 @@ import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 import modelopt.torch.quantization.ggml.q8_0 as q8_0_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.backend import ggml_fake_quant
 from modelopt.torch.quantization.ggml.common import (
     PIN_OVERRIDES_WEIGHT,
@@ -38,6 +39,7 @@ from modelopt.torch.quantization.ggml.common import (
     pinned_importance,
     pinned_packed_weight,
 )
+from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
 from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.custom import _ParallelLinear
 
@@ -556,3 +558,59 @@ def test_ggml_initialization_refuses_ambiguous_ptq_quantizers_before_writing(sha
         mtq.initialize_qdq_weights(model)
     for m, expected in zip(model, before):
         torch.testing.assert_close(m.weight, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
+def test_native_iq_fields_preserve_codes_and_match_reference(name):
+    """Edit captured native bytes and independently reconstruct the new scale geometry."""
+    fmt = GGML_FORMAT_REGISTRY[name]
+    packed = torch.from_numpy(packed_blocks(name).copy())
+    expected = torch.from_numpy(expected_values(name).copy())
+    shape = torch.tensor(expected.shape)
+    torch.testing.assert_close(
+        fmt.dequantize(packed, shape, dtype=torch.float32), expected, rtol=1e-6, atol=1e-8
+    )
+    spec = fmt.scale_spec
+    global_scale, local, local_max = decode_scale_fields(packed, fmt)
+    changed_global = global_scale * 2
+    changed_local = (local + 1).clamp_max(local_max)
+    edited = replace_scale_fields(packed, fmt, changed_global, changed_local)
+    assert torch.equal(replace_scale_fields(edited, fmt, global_scale, local), packed)
+
+    # Explicit bit masks come from GGML's layouts, independently of NativeScaleSpec.
+    allowed = torch.zeros_like(packed).reshape(-1, fmt.block_bytes)
+    if name == "iq1_m":
+        allowed[:, 48:] = 255
+    else:
+        allowed[:, :2] = 255
+        if name == "iq1_s":
+            allowed[:, 35:50:2] = 112
+        elif name == "iq2_xxs":
+            allowed[:, 9::8] = 240
+        elif name in {"iq2_xs", "iq2_s"}:
+            allowed[:, 66 if name == "iq2_xs" else 74 :] = 255
+    assert not ((edited.reshape_as(allowed) ^ packed.reshape_as(allowed)) & ~allowed).any()
+    levels, _ = fmt.decode_int8(packed, shape)
+    steps = changed_global[:, None]
+    steps = steps * (spec.local_multiplier * changed_local + spec.local_bias) / spec.divisor
+    reconstructed = levels.reshape(len(steps), -1, fmt.int8_group_size).float() * steps.unsqueeze(
+        -1
+    )
+    torch.testing.assert_close(
+        fmt.dequantize(edited, shape, dtype=torch.float32),
+        reconstructed.reshape(expected.shape),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+    for accessor in ("read_local", "write_local"):
+        with pytest.raises(ValueError):
+            dataclasses.replace(spec, **{accessor: None})
+    with pytest.raises(ValueError):
+        decode_scale_fields(packed, dataclasses.replace(fmt, payload_scales=None))
+    with pytest.raises(ValueError):
+        replace_scale_fields(
+            packed,
+            dataclasses.replace(fmt, scale_fit=None, replace_payload_scales=None),
+            changed_global,
+            changed_local,
+        )

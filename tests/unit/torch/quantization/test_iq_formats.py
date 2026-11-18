@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Behaviour every GGML IQ format shares, exercised identically for each of them.
+"""Shared IQ1/IQ2 catalog contracts, exercised identically for each of them.
 
 The formats differ only in codebook size, payload layout and bits per weight. Anything that
 should hold for one should hold for all, so the contract lives here once and is parametrized
@@ -47,8 +47,7 @@ FORMATS = {
     "iq2_s": (iq2_s_module, 82, 1024, 2.5625),
 }
 NAMES = sorted(FORMATS)
-# The formats backend dispatch can reach. A codec can land before it is registered, so the
-# tests that go through TensorQuantizer iterate these rather than every codec above.
+# The formats backend dispatch can reach.
 DISPATCHED = sorted(IQ_FORMAT_REGISTRY)
 # IQ1 grids are ternary; IQ2 grids hold the magnitudes 8, 25 and 43.
 TERNARY = {"iq1_s", "iq1_m"}
