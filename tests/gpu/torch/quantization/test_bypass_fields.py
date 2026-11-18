@@ -38,6 +38,84 @@ def _iq(path, name):
     return {"quantizer_name": path, "cfg": {"num_bits": name, "backend": "ggml"}}
 
 
+@pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
+@pytest.mark.parametrize("input_grad", [False, True])
+@pytest.mark.timeout(180)
+def test_packed_iq_linear_matches_native_vjp(name, input_grad):
+    pytest.importorskip("triton")
+    from modelopt.torch.kernels.quantization.iq_gemm import iq_linear
+    from modelopt.torch.kernels.quantization.repair import apply_block_scales, decode_iq_levels
+
+    if not torch.cuda.is_available():
+        pytest.skip("Packed IQ projection math requires CUDA")
+    torch.manual_seed(103)
+    shape = (13, 512)
+    model = nn.Linear(shape[1], shape[0], bias=False).cuda().bfloat16()
+    mtq.quantize(
+        model,
+        _config([_iq("*weight_quantizer", name)]),
+        lambda m: m(torch.randn(1, shape[1], device="cuda", dtype=torch.bfloat16)),
+    )
+    policy = IQRepairPolicy()
+    try:
+        policy.prepare(model)
+        state = model.weight_quantizer._local_repair_state
+        fmt = IQ_FORMAT_REGISTRY[name]
+        native = fmt.dequantize(state.native_payload(), torch.tensor(shape), dtype=torch.bfloat16)
+        levels, _ = fmt.decode_int8(state.packed, torch.tensor(shape))
+        fused_levels = decode_iq_levels(state.packed, name, shape)
+        torch.testing.assert_close(fused_levels, levels.reshape(shape), rtol=0, atol=0)
+        for tokens in (7, 0):
+            x = (
+                torch.randn(tokens, shape[1] * 2, device="cuda", dtype=torch.bfloat16)[:, ::2]
+                .detach()
+                .requires_grad_(input_grad)
+            )
+            bias = torch.randn(shape[0], device="cuda", dtype=x.dtype, requires_grad=True)
+            steps = state.projected_steps().detach().requires_grad_(True)
+            saved = []
+
+            def observe(value):
+                saved.append((value.shape, value.dtype))
+                return value
+
+            with torch.autograd.graph.saved_tensors_hooks(observe, lambda value: value):
+                actual = iq_linear(x, state.packed, steps, name, shape, bias)
+            reference_weight = native.detach().requires_grad_(True)
+            reference_x = x.detach().requires_grad_(input_grad)
+            reference_bias = bias.detach().requires_grad_(True)
+            expected = F.linear(reference_x, reference_weight, reference_bias)
+            torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015)
+            upstream = torch.randn_like(expected)
+            actual_grad = torch.autograd.grad(
+                actual, [steps, bias, *([x] if input_grad else [])], upstream
+            )
+            reference_grad = torch.autograd.grad(
+                expected,
+                [reference_weight, reference_bias, *([reference_x] if input_grad else [])],
+                upstream,
+            )
+            group = fmt.int8_group_size
+            groups = (-1, steps.shape[-1], group)
+            expected_scale = (
+                (reference_grad[0].reshape(groups).float() * levels.reshape(groups).float())
+                .sum(-1, keepdim=True)
+                .reshape_as(steps)
+            )
+            torch.testing.assert_close(actual_grad[0], expected_scale, rtol=5e-4, atol=2e-3)
+            fused_steps = steps.detach().requires_grad_(True)
+            fused_weight = apply_block_scales(fused_levels, fused_steps, x.dtype)
+            torch.testing.assert_close(fused_weight, native, rtol=0, atol=0)
+            fused_gradient = torch.autograd.grad(fused_weight, fused_steps, reference_grad[0])[0]
+            torch.testing.assert_close(fused_gradient, expected_scale, rtol=0, atol=0)
+            torch.testing.assert_close(actual_grad[1], reference_grad[1], rtol=0, atol=0)
+            if input_grad:
+                torch.testing.assert_close(actual_grad[2], reference_grad[2], rtol=0.01, atol=0.015)
+            assert (torch.Size(shape), x.dtype) not in saved
+    finally:
+        policy.close()
+
+
 class _Expert(nn.Module):
     def __init__(self):
         super().__init__()
