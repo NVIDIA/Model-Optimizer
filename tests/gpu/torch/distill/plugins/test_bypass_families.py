@@ -19,12 +19,16 @@ import copy
 
 import pytest
 import torch
-from _test_utils.transformers_families import build_model, hf_torch_kernels, release_cases
+
+pytest.importorskip("transformers", minversion="5.23")
+
+from _test_utils.transformers_families import build_model, cases, hf_torch_kernels, release_cases
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+from modelopt.torch.models import get_spec
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
@@ -33,14 +37,18 @@ from modelopt.torch.quantization.nn import QuantModule
 _PORTED = {"deepseek_v41", "kimi_k31", "step5", "mimo_v2"}
 
 
-@pytest.mark.parametrize(
-    "record", [r for r in release_cases() if r["family"] in _PORTED], ids=lambda r: r["model_id"]
-)
+@pytest.mark.parametrize("record", release_cases(), ids=lambda r: r["model_id"])
 @pytest.mark.timeout(300)
 def test_release_text_bypass_and_native_reload(record, tmp_path):
+    assert record["revision"]
     torch.manual_seed(149)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     teacher = build_model(record, device)
+    if record["family"] in _PORTED:
+        spec = get_spec(record["family"])
+        assert spec is not None
+        layout = spec.moe_spec
+        assert layout is not None and any(layout.matches(module) for module in teacher.modules())
     teacher_before = {n: p.detach().clone() for n, p in teacher.state_dict().items()}
     ids = torch.randint(3, 100, (2, 8), device=device)
     batch = {
@@ -185,7 +193,8 @@ def _native_port_worker(rank, size, record):
 
 @pytest.mark.parametrize(
     "record",
-    list({r["family"]: r for r in release_cases() if r["family"] in _PORTED}.values()),
+    list({r["family"]: r for r in release_cases() if r["family"] in _PORTED}.values())
+    + cases(["qwen3_next"]),
     ids=lambda r: r["family"],
 )
 @pytest.mark.timeout(300)

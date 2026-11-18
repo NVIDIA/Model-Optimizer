@@ -17,6 +17,8 @@ Changelog
 
 *Quantization - QAT / QAD*
 
+- Add ``modelopt.torch.distill.bypass`` for streaming IQ scale-only repair with Lion, mixed frozen FP8/NVFP4 input gradients, native parallel ownership and exact resume. The stable Transformers 5.23 integration includes a Cascade preparation and held-out evaluation tutorial.
+
 *Quantization - Export & Deployment*
 
 *Quantization - Recipes*

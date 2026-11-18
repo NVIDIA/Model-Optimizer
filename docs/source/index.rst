@@ -142,6 +142,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    guides/2_save_load
    guides/3_pruning
    guides/4_distillation
+   guides/bypass
    guides/5_speculative_decoding
    guides/6_sparsity
    guides/7_nas
