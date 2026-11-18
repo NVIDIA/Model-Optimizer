@@ -94,7 +94,7 @@ come from, and they must agree:
 
 | Field | Meaning |
 |---|---|
-| `modeling_source` | `"transformers"` (default), or `"remote_code"` when the code ships with the checkpoint and needs `trust_remote_code=True` |
+| `modeling_source` | `"transformers"` (default), `"remote_code"` for checkpoint code requiring `trust_remote_code=True`, or `"modelopt"` for a lazy local differentiable port |
 | `min_transformers_version` | Earliest `transformers` release whose definitions match this spec; `None` for a `remote_code` model |
 
 Clamp `min_transformers_version` at the repo's minimum supported transformers (`tf_min`
