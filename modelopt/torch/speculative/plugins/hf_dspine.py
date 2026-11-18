@@ -390,17 +390,18 @@ class HFDSpineModel(HFDFlashModel):
 
         draft = self.dflash_module
         lm_head = self._base_model_lm_head
-        # Called as a module so that device_map dispatch hooks run when the head sits elsewhere.
+        # Only the head's forward can read its weight: device_map may place it elsewhere or offload
+        # it to meta between calls.
         backbone_logits = lm_head(out.hidden_states)
         prev_token = block_ids[:, 0, 0]
         draft_tokens = []
         for t in range(1, 1 + min(steps, self.dflash_block_size - 1)):
             candidates = backbone_logits[:, t].topk(draft.head_topk, dim=-1).indices
-            rows = lm_head.weight[candidates].to(device)
-            candidates = candidates.to(device)
-            refined = draft.refine(out.pre_injection[:, t], prev_token)
-            scores = torch.einsum("bh,bkh->bk", refined, rows)
-            prev_token = candidates.gather(-1, scores.argmax(dim=-1, keepdim=True)).squeeze(-1)
+            scores = lm_head(draft.refine(out.pre_injection[:, t], prev_token)).gather(
+                -1, candidates
+            )
+            picks = scores.argmax(dim=-1, keepdim=True)
+            prev_token = candidates.gather(-1, picks).squeeze(-1).to(device)
             draft_tokens.append(prev_token)
         return base_token, torch.stack(draft_tokens, dim=1).to(input_ids.device)
 
