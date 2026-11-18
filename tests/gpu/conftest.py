@@ -55,3 +55,20 @@ def calib_jsonl(tmp_path_factory):
     path = write_calib_jsonl(calib_dir / "calib.jsonl")
     with assert_unmodified_tree(calib_dir):
         yield path
+
+
+@pytest.fixture
+def bypass_cpu_workers(_dist_pools):
+    from _test_utils.torch.distributed.utils import (
+        DistributedWorkerPool,
+        default_worker_teardown,
+        get_live_pool,
+    )
+
+    return get_live_pool(
+        _dist_pools,
+        ("bypass_cpu", 2),
+        lambda: DistributedWorkerPool(
+            world_size=2, backend="gloo", teardown_fn=default_worker_teardown
+        ),
+    )
