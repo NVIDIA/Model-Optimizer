@@ -20,7 +20,7 @@ Covers the transformers-native V3 family (V3, R1, V3.1). The remote-code
 """
 
 from ..deepseek.specs import GENERATION_UNSUPPORTED
-from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, PTQSpec, register
+from ..specs import BypassSpec, EPSpec, ExportSpec, ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
 
@@ -46,6 +46,10 @@ BASE_MODEL_EP_PLAN = {
 # get_expert_linear_names and never consults this naming -- the same split as Mixtral.
 register(
     ModelSpec(
+        bypass_spec=BypassSpec(
+            decoder_paths=("model.layers", "layers"),
+            batch_packed_documents=False,
+        ),
         model_type="deepseek_v3",
         min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),

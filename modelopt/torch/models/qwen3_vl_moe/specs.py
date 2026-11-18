@@ -15,7 +15,7 @@
 
 """Qwen3-VL-MoE specs (HF model type ``qwen3_vl_moe``)."""
 
-from ..specs import ModelSpec, MoESpec, register
+from ..specs import BypassSpec, ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
@@ -24,6 +24,15 @@ __all__: list[str] = []
 # (gate, up) pair left to fuse and no per-expert grouping for export.
 register(
     ModelSpec(
+        bypass_spec=BypassSpec(
+            decoder_paths=(
+                "model.language_model.layers",
+                "language_model.layers",
+                "model.layers",
+                "layers",
+            ),
+            batch_packed_documents=False,
+        ),
         model_type="qwen3_vl_moe",
         min_transformers_version="5.5",
         moe_spec=MoESpec(
