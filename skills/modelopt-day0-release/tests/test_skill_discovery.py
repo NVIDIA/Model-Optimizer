@@ -46,7 +46,13 @@ def test_compatibility_entrypoints(canonical):
     assert (stub.parent / targets[0]).resolve(strict=True) == canonical
 
     for resource in canonical.parent.iterdir():
-        if resource.name in ("SKILL.md", "skill-card.md") or resource.name.startswith((".", "__")):
+        # Generated publication artifacts are not legacy execution resources.
+        if resource.name in (
+            "SKILL.md",
+            "skill-card.md",
+            "BENCHMARK.md",
+            "skill.oms.sig",
+        ) or resource.name.startswith((".", "__")):
             continue
         legacy_path = stub.parent / resource.name
         assert legacy_path.is_symlink()
