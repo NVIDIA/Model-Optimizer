@@ -27,6 +27,7 @@ register(
         bypass_spec=BypassSpec(
             decoder_paths=("model.layers", "layers"),
             batch_packed_documents=True,
+            functional_children=(),
         ),
         model_type="deepseek_v32",
         min_transformers_version="5.11",
