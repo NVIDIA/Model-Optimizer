@@ -53,16 +53,17 @@ def bypass(
         fields, hooks, modes and gradient flags are restored on every exit.
     """
     config = config if isinstance(config, BypassConfig) else BypassConfig(**(config or {}))
-    if device_mesh is not None or (
-        torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
-    ):
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
         raise ValueError("Distributed Bypass requires its native placement integration")
     adapter: ModuleBypassAdapter
     if getattr(getattr(student, "config", None), "model_type", None):
         from .plugins.transformers import TransformersBypassAdapter
 
-        adapter = TransformersBypassAdapter()
+        adapter = TransformersBypassAdapter(device_mesh)
+        adapter.adopt(student)
     else:
+        if device_mesh is not None:
+            raise ValueError("Generic Torch mesh adoption requires the distributed Bypass runtime")
         adapter = ModuleBypassAdapter()
     units = adapter.resolve_units(student, teacher, config)
     plan = plan_iq_repair([student.get_submodule(u.student_path) for u in units])
