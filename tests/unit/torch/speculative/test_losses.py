@@ -18,7 +18,10 @@
 import pytest
 import torch
 
-from modelopt.torch.speculative.losses import masked_lk_lambda_loss
+from modelopt.torch.speculative.losses import (
+    masked_lk_lambda_loss,
+    masked_soft_target_cross_entropy,
+)
 
 
 def _reference(teacher, student, mask, eta):
@@ -147,3 +150,36 @@ def test_lk_retains_only_inputs_and_compact_statistics(vocab_size):
     inputs = {teacher.data_ptr(), student.data_ptr()}
     assert all(t.data_ptr() in inputs or t.numel() <= 10 for t in saved)
     loss.backward()
+
+
+@pytest.mark.parametrize("case", ["finite", "zero_target", "mixed_mask", "empty_mask"])
+def test_soft_target_ce_values_and_teacher_student_gradients(case):
+    teacher = torch.tensor([[[0.25, 0.75, 0.0], [1.0, 0.0, 0.0], [0.0, 0.5, 0.5]]])
+    student = torch.tensor([[[0.2, -0.3, 1.1], [0.0, -2.0, -3.0], [0.4, -0.2, 0.7]]])
+    mask = torch.tensor([[1.0, 0.5, 0.25]])
+    if case != "finite":
+        student[0, 1, 1:] = -torch.inf
+    if case == "mixed_mask":
+        mask[0, 2] = 0
+        student[0, 2] = -torch.inf
+    elif case == "empty_mask":
+        mask.zero_()
+        student.fill_(-torch.inf)
+    teacher.requires_grad_()
+    student.requires_grad_()
+    valid = mask != 0
+    p = teacher.detach()[valid]
+    log_q = student.detach()[valid].log_softmax(-1)
+    weights = mask[valid, None] / (mask.sum() + 1e-5)
+    positive = p > 0
+    expected = -(p * weights)[positive].mul(log_q[positive]).sum()
+    expected_student_grad = torch.zeros_like(student)
+    expected_student_grad[valid] = (log_q.exp() - p) * weights
+    expected_teacher_grad = torch.zeros_like(teacher)
+    expected_teacher_grad[valid] = -log_q.nan_to_num(neginf=0) * weights
+
+    loss = masked_soft_target_cross_entropy(teacher, student, mask)
+    torch.testing.assert_close(loss, expected)
+    loss.backward()
+    torch.testing.assert_close(student.grad, expected_student_grad)
+    torch.testing.assert_close(teacher.grad, expected_teacher_grad)

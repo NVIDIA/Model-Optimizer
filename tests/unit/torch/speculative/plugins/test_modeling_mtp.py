@@ -306,6 +306,7 @@ def test_offline_batch_and_empty_assistant_mask(tmp_path):
             max_steps=1,
             per_device_train_batch_size=2,
             remove_unused_columns=False,
+            logging_nan_inf_filter=False,
             save_strategy="no",
             disable_tqdm=True,
         ),
@@ -315,6 +316,7 @@ def test_offline_batch_and_empty_assistant_mask(tmp_path):
     result = trainer.train()
     assert result.global_step == 1
     assert torch.isfinite(torch.tensor(result.training_loss))
+    assert torch.isfinite(model.eagle_module.proj.weight).all()
     assert not torch.equal(model.eagle_module.proj.weight, draft_before)
     torch.testing.assert_close(model.embedding.weight, frozen_before, rtol=0, atol=0)
 

@@ -166,7 +166,12 @@ def masked_soft_target_cross_entropy(
     Callers with a frozen teacher must detach its probabilities.
     """
     loss_mask = loss_mask[:, : student_logits.shape[1], None]
+    student_logits = student_logits.masked_fill(loss_mask == 0, 0)
     student_log_probabilities = torch.log_softmax(student_logits, dim=2)
+    # Exclude 0 * -inf without changing teacher gradients at finite log-probabilities.
+    student_log_probabilities = student_log_probabilities.masked_fill(
+        (teacher_probabilities == 0) & torch.isneginf(student_log_probabilities), 0
+    )
     return -torch.sum(
         torch.sum(loss_mask * teacher_probabilities * student_log_probabilities, dim=2)
     ) / (loss_mask.sum() + 1e-5)
