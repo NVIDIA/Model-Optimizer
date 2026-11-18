@@ -35,7 +35,7 @@ Changelog
 
 *Quantization*
 
-- NVFP4 weight export without TensorRT-LLM now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so exported checkpoints match the dynamic fake-quantized weights instead of occasionally rounding a weight to a neighboring FP4 value. The Triton fake quant and FP8 scale sweep can differ from before at exact E2M1 and FP8 rounding boundaries. Re-export affected NVFP4 checkpoints.
+- NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
 
 *ONNX*
 

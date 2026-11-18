@@ -438,10 +438,14 @@ def quantize(
     # Reshape the weight and scale factors
     input = input.reshape((*tuple(input.shape[:-1]), -1, block_size))
 
-    # Scale weights
-    scaled_weight = input / (
-        np.expand_dims(weights_scaling_factor, axis=-1) * weights_scaling_factor_2
+    # Multiply by the correctly rounded reciprocal, as NVFP4QTensor.quantize does: division can pick
+    # a different E2M1 code at a rounding boundary. The clamp keeps the reciprocal of a tiny scale
+    # finite, so zeros stay zero.
+    inv_scale = np.minimum(
+        np.reciprocal(np.expand_dims(weights_scaling_factor, axis=-1) * weights_scaling_factor_2),
+        np.finfo(np.float32).max,
     )
+    scaled_weight = input * inv_scale
 
     # Reshape weights to original and return
     return scaled_weight.reshape(scaled_weight.shape[0], -1)
