@@ -241,6 +241,19 @@ def _suspend_weight_cache(model: nn.Module):
         _ACTIVE.update(sessions)
 
 
+def _pinned_native_value(quantizer, inputs, source):
+    if getattr(quantizer, "_native_weight_meta", None) and not getattr(
+        quantizer, "_local_repair_active", False
+    ):
+        # Deferred: native_weight imports GGML metadata through the quantization package.
+        from .native_weight import dequantize_pinned_native, get_pinned_native_weight
+
+        native = get_pinned_native_weight(quantizer, source)
+        if native is not None:
+            return dequantize_pinned_native(quantizer, native, inputs.dtype).reshape(inputs.shape)
+    return None
+
+
 def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) -> torch.Tensor:
     """``quantizer._fake_quantize(inputs)``, reused while ``quantizer`` is in an open scope.
 
@@ -251,7 +264,12 @@ def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) 
         return quantizer._fake_quantize(inputs)
     session = _ACTIVE.get(quantizer) if _num_open_scopes else None
     if session is None:
-        return quantizer._fake_quantize(inputs)
+        value = _pinned_native_value(quantizer, inputs, source)
+        return (
+            quantizer._fake_quantize(inputs)
+            if value is None
+            else _CachedIdentity.apply(inputs, value)
+        )
 
     key = _input_key(source)
     entry = session.entries.get(quantizer)
@@ -260,7 +278,9 @@ def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) 
         entry = None
     if entry is None:
         with torch.no_grad():
-            value = quantizer._fake_quantize(inputs)
+            value = _pinned_native_value(quantizer, inputs, source)
+            if value is None:
+                value = quantizer._fake_quantize(inputs)
         if (value.shape, value.dtype, value.device) != (inputs.shape, inputs.dtype, inputs.device):
             raise ValueError("A cached fake quant must keep the weight's shape, dtype and device.")
         if value.untyped_storage().data_ptr() == inputs.untyped_storage().data_ptr():

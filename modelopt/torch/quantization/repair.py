@@ -359,6 +359,7 @@ class IQRepairPolicy:
                     raise ValueError("Close quantization cache scopes before preparing IQ Bypass")
                 state = IQScaleState(quantizer, captured[0], weight.shape)
                 object.__setattr__(quantizer, "_local_repair_state", state)
+                quantizer._local_repair_active = True
                 quantizer._fake_quantize = MethodType(_repair_fake_quantize, quantizer)
                 self.adapters.append((binding, state, had_override, previous))
                 fields.extend(state.parameters())
@@ -420,6 +421,7 @@ class IQRepairPolicy:
             else:
                 delattr(quantizer, "_fake_quantize")
             delattr(quantizer, "_local_repair_state")
+            delattr(quantizer, "_local_repair_active")
         self.adapters.clear()
         for quantizer, flag in self._calibration_flags.items():
             quantizer._if_calib = flag
