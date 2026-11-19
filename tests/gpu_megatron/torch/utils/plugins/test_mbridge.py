@@ -62,8 +62,8 @@ def test_expert_layout_selection_preserves_native_defaults(
 
 
 @pytest.mark.parametrize("grouped", [False, True])
-@pytest.mark.parametrize("with_config", [False, True])
-def test_saved_expert_layout_wins_over_hf_defaults(tmp_path, grouped, with_config):
+@pytest.mark.parametrize("config_layout", [None, False, True])
+def test_saved_expert_layout_wins_over_hf_defaults(tmp_path, grouped, config_layout):
     source, checkpoint = tmp_path / "source", tmp_path / "checkpoint"
     architecture = "Qwen3MoeForCausalLM" if grouped else "NemotronHForCausalLM"
     Qwen3MoeConfig(architectures=[architecture], num_experts=2).save_pretrained(source)
@@ -73,9 +73,9 @@ def test_saved_expert_layout_wins_over_hf_defaults(tmp_path, grouped, with_confi
         else "decoder.layers.0.mlp.experts.local_experts.0.linear_fc1.weight"
     )
     save({key: torch.ones(2)}, checkpoint_id=checkpoint)
-    if with_config:
+    if config_layout is not None:
         (checkpoint / "run_config.yaml").write_text(
-            yaml.safe_dump({"model": {"moe_grouped_gemm": grouped}})
+            yaml.safe_dump({"model": {"moe_grouped_gemm": config_layout}})
         )
     for backend in ("modelopt", "bridge"):
         assert (

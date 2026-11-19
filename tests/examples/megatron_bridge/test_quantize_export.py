@@ -47,7 +47,7 @@ _DENSE_KWARGS = {
 }
 
 
-def test_ptq_and_bridge_checkpoint_export(tmp_path):
+def test_ptq_and_bridge_checkpoint_export(tmp_path, num_gpus):
     source = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, **_DENSE_KWARGS)
     calibration = tmp_path / "calibration.jsonl"
     calibration.write_text("\n".join(json.dumps({"text": "Hello world! " * 16}) for _ in range(4)))
@@ -60,7 +60,7 @@ def test_ptq_and_bridge_checkpoint_export(tmp_path):
             "--skip_generate",
         ],
         hf_model_name_or_path=source,
-        recipe="general/ptq/nvfp4_default",
+        recipe="general/ptq/nvfp4_default-kv_fp8",
         calib_dataset_name=calibration,
         calib_num_samples=4,
         seq_length=16,

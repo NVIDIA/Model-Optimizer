@@ -38,6 +38,7 @@ from megatron.bridge.training.utils.checkpoint_utils import (
     read_run_config,
 )
 from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
+from megatron.core.dist_checkpointing import load_tensors_metadata
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.transformer.module import MegatronModule
@@ -254,6 +255,14 @@ def _checkpoint_keys(checkpoint_path: str) -> list[str]:
 
 def _checkpoint_moe_expert_layout(megatron_path: str) -> bool | None:
     checkpoint_path = _get_modelopt_checkpoint_path(megatron_path)
+    # Native stack specs can disagree with moe_grouped_gemm; stored keys define the layout.
+    keys = _checkpoint_keys(checkpoint_path)
+    grouped = any(_GROUPED_EXPERT_WEIGHT.search(key) for key in keys)
+    sequential = any(".local_experts." in key for key in keys)
+    if grouped and sequential:
+        raise ValueError("Checkpoint mixes grouped and sequential expert layouts.")
+    if grouped or sequential:
+        return grouped
     run_config = get_checkpoint_run_config_filename(checkpoint_path)
     if file_exists(run_config):
         layout = read_run_config(run_config).get("model", {}).get("moe_grouped_gemm")
@@ -261,13 +270,7 @@ def _checkpoint_moe_expert_layout(megatron_path: str) -> bool | None:
             if not isinstance(layout, bool):
                 raise ValueError("Checkpoint model.moe_grouped_gemm must be a boolean.")
             return layout
-    # Older checkpoints may omit run_config.yaml; their tensor keys still identify the layout.
-    keys = _checkpoint_keys(checkpoint_path)
-    grouped = any(_GROUPED_EXPERT_WEIGHT.search(key) for key in keys)
-    sequential = any(".local_experts." in key for key in keys)
-    if grouped and sequential:
-        raise ValueError("Checkpoint mixes grouped and sequential expert layouts.")
-    return True if grouped else False if sequential else None
+    return None
 
 
 def is_language_model_only_checkpoint(megatron_path: str) -> bool:
@@ -359,8 +362,6 @@ def load_modelopt_megatron_checkpoint(
                 "produced it."
             )
     if preserve_checkpoint_dtype:
-        from megatron.core.dist_checkpointing import load_tensors_metadata
-
         _restore_checkpoint_dtypes(model, load_tensors_metadata(checkpoint_path))
     _load_model_weights_from_checkpoint(checkpoint_path, model)
     return model

@@ -105,8 +105,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
     train_iters = 3
     early_exit_iter = 2
     calib_dataset = "cnn_dailymail"
-    if lora_rank or full_rank:
-        # Keep selective-training coverage independent of dataset downloads on the GPU node.
+    if lora_rank or full_rank or is_vlm:
+        # Keep checkpoint-restore coverage independent of dataset downloads on the GPU node.
         calib_path = tmp_path / "calibration.jsonl"
         calib_path.write_text(
             "\n".join(
@@ -123,7 +123,9 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
     quantize_cmd = extend_cmd_parts(
         # QAD below must load this checkpoint at the same TP, so size the PTQ run to tp_size.
         ["torchrun", f"--nproc_per_node={tp_size}", "quantize.py", "--skip_generate"]
-        + (["--output_qdq_weight"] if full_rank else []),
+        + (["--output_qdq_weight"] if full_rank else [])
+        # Cover QAD loading an older SequentialMLP checkpoint despite a grouped default.
+        + (["--no_moe_grouped_gemm"] if is_vlm else []),
         hf_model_name_or_path=hf_model_path,
         recipe="general/ptq/nvfp4_default-kv_fp8"
         if lora_rank
@@ -139,6 +141,10 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
     )
     run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert_has_modelopt_state(quantized_megatron_path)
+    if is_vlm:
+        checkpoint = max(quantized_megatron_path.glob("iter_*"))
+        keys = FileSystemReader(checkpoint).read_metadata().state_dict_metadata
+        assert any(".local_experts." in key for key in keys)
     # Megatron names these differently from HF, so the recipe's patterns must have aliases.
     assert_no_quantizers_matching(quantized_megatron_path, "conv1d", "mlp.router", "output_layer")
 
