@@ -8,6 +8,7 @@ Changelog
 
 *Quantization - ONNX*
 
+
 *Quantization - Algorithms*
 
 *Quantization - QAT / QAD*
@@ -32,6 +33,7 @@ Changelog
 
 *ONNX*
 
+
 *Speculative Decoding*
 
 *Megatron Framework (M-LM / M-Bridge)*
@@ -45,8 +47,12 @@ Changelog
 
 *Quantization - ONNX*
 
+- The Windows ONNX LLM quantization example supports text calibration for hybrid decoder inputs, including embedding-only exports and linear-attention states, and keeps small constants inline when exporting external weights. Install the example requirements with Transformers ``>=5.5,<5.19`` (previously ``<5.0.0``).
+- Add opt-in ``awqlite_reuse_activations`` (default: False) to share calibration activations across adjacent weights with the same input in per-node ONNX AWQ Lite/Full. For stochastic graphs, enabling reuse shares captured samples across those weights.
 - ONNX AutoTune can now upload its remote safety engine to a chosen path with ``autotune_remote_model_path`` / ``--autotune_remote_model_path`` (``--remote_model_path`` in the AutoTune CLI); its unique temporary filename remains the default.
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
+- ONNX AutoCast can now calibrate node by node with ``--calibrate_per_node`` or
+  ``calibrate_per_node=True``, reducing peak memory at the cost of longer calibration time.
 
 *Quantization - Algorithms*
 
@@ -167,6 +173,7 @@ Changelog
 - Hugging Face fused MoE experts stored transposed, ``(num_experts, in_dim, out_dim)``, without a quantized wrapper of their own (for example Aria's) are now left unquantized with a warning. They were quantized with gate and up split along the wrong axis, so their exported weights were wrong; the Hugging Face export now refuses such a model's MoE block instead.
 - Calibrating a Megatron-Core model now gives the projections vLLM and TensorRT-LLM fuse into one GEMM one per-tensor input and weight range: MLA's and DeepSeek-V4's down-projections, and HF-named ones such as Kimi K3's MLA and KDA input projections with their gates; static NVFP4 also shares one global weight range between ``q_a_proj`` and ``kv_a_proj_with_mqa`` of Hugging Face DeepSeek-style models. Re-calibrate existing checkpoints to get the shared ranges.
 - Calibrating a Megatron-Core model with pipeline parallelism no longer hangs on, or mixes ranges across stages of, its ``TELinear`` layers (e.g. MLA down-projections, DSA indexer and latent-MoE projections). They now sync ranges over their own pipeline stage's tensor-, data- and context-parallel ranks instead of all ranks.
+- Fix ONNX INT4 RTN Q/DQ exports missing blocked quantization attributes, which prevented inference with ONNX Runtime CUDA and CPU execution providers. Re-export affected models.
 - ``export_mcore_gpt_to_hf`` and ``capture_kv_cache_export_state`` now write NVFP4 KV-cache ``k_scale`` / ``v_scale`` as amax / 448, like the HF exporter and as vLLM and TensorRT-LLM expect. They wrote amax / (6 * 448), which overflows in the attention kernels. Re-export Megatron checkpoints with an NVFP4 KV cache.
 - Loading a quantized Megatron-Core checkpoint into a model whose weights are not initialized yet, as Megatron-Bridge's ``load_megatron_model`` does, no longer fails with ``detected nan values in amax``. It failed whenever that memory held NaNs, e.g. on CPU or with pipeline parallelism.
 - Preserve accumulated histogram counts when computing an entropy calibration threshold with NumPy histograms.
@@ -202,6 +209,8 @@ Changelog
 
 *ONNX*
 
+- ONNX AutoCast now keeps the variance of decomposed RMSNorm and unfused LayerNorm in FP32 for both FP16 and BF16 conversion, so FP16 models converted without calibration data no longer give wrong outputs on execution providers such as TensorRT-RTX. Reconvert affected models.
+- Fix ONNX AutoCast inference shape mismatches caused by incorrectly shared symbolic dimensions, and preserve intermediate shapes when using standalone type inference. Reconvert affected models.
 - Fix ONNX loading and quantization graph exports failing on individual initializers larger than 2 GiB, while preserving nested scopes and sequence/optional value types.
 - Saving ONNX external weights to another directory no longer removes a same-named weight file from the working directory. Existing external weights remain intact when saving a model loaded without weight data.
 - ONNX autotuner file exports now save external weight data without serializing the full model to bytes first.
@@ -211,6 +220,7 @@ Changelog
 - Fix ONNX quantization with the default ``concat_elimination`` pass crashing in calibration with ``KeyError: '<tensor>_ReduceMin'`` when a ``Concat`` input is a constant, such as the class token of a ViT.
 - Fix ONNX INT4 quantization ending the Python process when the INT4 packing extension fails to build, for example without a C++ compiler. It now falls back to the Python implementation.
 - Fix the column-major ``DequantizeLinear`` surgery leaving a negative or default ``axis`` attribute unchanged while transposing the weight it refers to, which changed the model's output. Re-run the surgery on affected models.
+- Fix BF16-to-FP8 ONNX export with ``ml_dtypes`` 0.7.0 producing NaN FP8 weights for very small convolution weights.
 
 *Speculative Decoding*
 
@@ -237,6 +247,8 @@ Changelog
 - Fix the Puzzletron memory objective pricing the KV cache with ``hidden_size // num_attention_heads`` instead of the model's ``head_dim``, which misestimated it for models such as Mistral-Small, GPT-OSS and Gemma-3 and for every candidate with a pruned hidden size. Recompute subblock statistics produced with earlier versions.
 - The ``evaluation`` agent skill's NeMo Gym MRCR recipe no longer passes ``HF_TOKEN`` on the command line, where other users on the node could read it, and keeps its rollout script in a private temporary directory instead of a fixed ``/tmp`` path.
 - Fix ``ModuleNotFoundError: No module named 'huggingface_hub'`` when importing ``modelopt.torch`` without the optional ``hf`` extra. Install the ``hf`` extra to use Hugging Face checkpointing. Affects 0.44 through 0.48.
+- Require Pydantic 2.5.0 or newer to prevent configuration-schema errors when importing ``modelopt.torch`` with older releases.
+- Require Wonderwords 2.2.0 or newer in the ``hf`` extra to prevent RULER calibration failures during random-word generation with older releases.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^
