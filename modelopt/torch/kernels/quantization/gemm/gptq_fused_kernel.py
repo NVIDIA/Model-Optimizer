@@ -128,6 +128,9 @@ def gptq_fused_block_scalar(
             block_start,
             block_size,
             BLOCK_SIZE=triton.next_power_of_2(block_size),
+            # Each column's update reduces over one row's block; within one warp that needs no
+            # shared-memory round trip, which made 4 warps 2-3x slower for the same values.
+            num_warps=1,
         )
 
     return qw_block, err_block
