@@ -1239,6 +1239,11 @@ def test_stacked_experts_guard():
     with pytest.raises(QuantConversionUnsupportedError, match="not pre-expanded"):
         _assert_experts_pre_expanded(bad, fused_leaves)
 
+    # A stacked 3-D expert leaf the mapping does not fuse, with no per-expert index -> raise too.
+    stacked = {"model.language_model.layers.10.mlp.experts.w1.weight": torch.zeros(2, 8, 16)}
+    with pytest.raises(QuantConversionUnsupportedError, match="not pre-expanded"):
+        _assert_experts_pre_expanded(stacked, fused_leaves)
+
     # No expert converters in the mapping -> guard is a no-op even for 3-D tensors.
     _assert_experts_pre_expanded(bad, [])
 

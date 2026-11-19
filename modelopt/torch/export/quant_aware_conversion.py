@@ -515,6 +515,8 @@ def _is_stacked_expert_key(key: str) -> bool:
     """Whether ``key`` holds the experts stacked: an expert key with no per-expert index.
 
     An expanded expert's tensors may be 3-D too, as a GGML payload's ``[rows, blocks, bytes]`` is.
+    Like the expert leaf renames, this relies on transformers naming fused expert modules
+    ``experts``. Split rules come only from dense ``Chunk`` converters, which never target experts.
     """
     return ".experts." in key and re.search(r"\.experts\.\d+\.", key) is None
 
