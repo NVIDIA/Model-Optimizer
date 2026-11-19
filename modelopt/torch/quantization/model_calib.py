@@ -85,6 +85,7 @@ from .utils.calib_utils import (
     track_calib_forward_memory,
     update_expert_weights,
 )
+from .utils.packed_experts import is_packed
 
 __all__ = [
     "CalibratorFactory",
@@ -1187,6 +1188,13 @@ def _refuse_packed_fused_expert_weights(name, module, method, updates):
     ``method`` writes the weight that quantizer belongs to.
     """
     for weight_name, weight, quantizers, _ in _fused_expert_projections(module):
+        if is_packed(module) and any(updates(q) for q in quantizers):
+            # Packed in any format, the experts read as copies decompressed for the read.
+            raise ValueError(
+                f"{method} updates {name}.{weight_name} in place, but the experts are kept packed "
+                "as the checkpoint stores them, so the update would be lost. Load the checkpoint "
+                "with its experts decompressed (keep_compressed=False)."
+            )
         if weight.element_size() == 1 and any(updates(q) for q in quantizers):
             raise ValueError(
                 f"{method} updates {name}.{weight_name} in place, but it is stored in 8 bits "

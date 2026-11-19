@@ -430,6 +430,7 @@ def test_installing_twice_wraps_the_loader_once(monkeypatch):
         "unreadable-scheme",
         "nothing-to-decompress",
         "compressed-differently",
+        "zero-points-kept-packed",
         None,
     ],
 )
@@ -446,6 +447,8 @@ def test_decompression_refusal_finds_what_the_install_refuses(monkeypatch, refus
             raise NotImplementedError("the checkpoint has 2 compressed-tensors config groups")
         if refused == "nothing-to-decompress":
             return None
+        if refused == "zero-points-kept-packed":  # a zero point would not fuse with gate and up
+            return (_ScaledCompressor, None, (*PACKED, "weight_zero_point"), "stub-format")
         return getattr(cfg, "compression", first)
 
     monkeypatch.setattr(onfly, "_read_compression", read)
@@ -462,7 +465,8 @@ def test_decompression_refusal_finds_what_the_install_refuses(monkeypatch, refus
     asked = {"text_config": {}} if refused == "raw-dict" else config
     hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
 
-    why = onfly.decompression_refusal(asked)
+    keep = refused == "zero-points-kept-packed"
+    why = onfly.decompression_refusal(asked, keep_packed=keep)
 
     assert (mu.get_model_conversion_mapping, cml.spawn_materialize) == hooks
     if refused is None:
@@ -471,7 +475,7 @@ def test_decompression_refusal_finds_what_the_install_refuses(monkeypatch, refus
     else:
         assert why
         with pytest.raises((NotImplementedError, ValueError, RuntimeError, TypeError)):
-            onfly.install_onfly_decompress(asked)
+            onfly.install_onfly_decompress(asked, keep_packed=keep, ckpt_path="/unread")
 
 
 @pytest.mark.usefixtures("restore_loader_hooks")
@@ -1119,3 +1123,57 @@ def test_a_load_the_decompressor_did_not_mark_casts_as_before(tmp_path):
 
     assert model.model.norm.weight.dtype == torch.bfloat16
     assert torch.equal(model.model.norm.weight, torch.full_like(model.model.norm.weight, 3))
+
+
+@pytest.mark.usefixtures("restore_loader_hooks")
+@pytest.mark.parametrize("fmt", sorted(_FORMATS))
+def test_experts_kept_packed_calibrate_and_export_as_decompressed_ones(tmp_path, fmt):
+    """Kept packed, a compressed checkpoint's experts load as stored, compute what the decompressing
+    load's experts compute, before and after calibration, and export the same checkpoint."""
+    pytest.importorskip(
+        "compressed_tensors",
+        minversion="0.16",
+        reason="needs compressed-tensors (CI's unit session installs it)",
+    )
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.export import export_hf_checkpoint
+    from modelopt.torch.quantization.plugins.huggingface import _transposed_experts
+    from modelopt.torch.quantization.utils.packed_experts import is_packed
+
+    _compressed_mixtral(tmp_path / "ckpt", fmt)
+    inputs = torch.randint(0, 64, (2, 12), generator=torch.Generator().manual_seed(1))
+    logits, exported = {}, {}
+    for keep in (True, False):
+        config = AutoConfig.from_pretrained(tmp_path / "ckpt")
+        onfly.install_onfly_decompress(config, keep_packed=keep, ckpt_path=tmp_path / "ckpt")
+        del config.quantization_config  # as the expert-parallel load does
+        model = AutoModelForCausalLM.from_pretrained(
+            tmp_path / "ckpt", config=config, dtype=torch.bfloat16
+        )
+        experts = model.model.layers[0].mlp.experts
+        assert is_packed(experts) is keep
+        if keep:  # stored as the checkpoint stores them, no bf16 copy
+            assert not experts.gate_up_proj.is_floating_point()
+            # Read by their decompressed shapes, or quantization would register their class as
+            # transposed and leave it unquantized, unless a decompressed load registered it first.
+            assert not _transposed_experts([experts])
+            # Wrapped again, as transformers' expert parallelism wraps the forward, which
+            # quantizer insertion then replaces.
+            inner = experts.forward
+            experts.forward = lambda *args, **kwargs: inner(*args, **kwargs)
+        with torch.no_grad():
+            before = model(inputs).logits
+        mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop=lambda m: m(inputs))
+        # Read decompressed outside any window too.
+        assert {w.dtype for w, _ in experts.iter_weights_for_calibration()} == {torch.bfloat16}
+        with torch.no_grad():
+            logits[keep] = (before, model(inputs).logits)
+        export_hf_checkpoint(model, export_dir=tmp_path / str(keep))
+        exported[keep] = load_file(tmp_path / str(keep) / "model.safetensors")
+    for decompressed, kept in zip(logits[False], logits[True]):
+        assert torch.equal(decompressed, kept)
+    assert exported[True].keys() == exported[False].keys()
+    for key, tensor in exported[False].items():
+        assert torch.equal(
+            tensor.reshape(-1).view(torch.uint8), exported[True][key].reshape(-1).view(torch.uint8)
+        ), key
