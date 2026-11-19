@@ -217,6 +217,12 @@ def run_on_each_gpu(gpus, next_item, run):
 def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
     """Update hessian matrix with new input samples using incremental formula.
 
+    A float64 ``hessian`` (:func:`hessian_dtype`) instead accumulates the raw sum ``2 X^T X``, which
+    the caller divides by the returned sample count once every input is in
+    (:meth:`GPTQHelper.sync_hessian_across_dp` does): the running average's rescaling rounds at
+    every batch, while the float64 sum of the products of bfloat16 inputs is mostly exact, so it
+    does not depend on the order of the batches.
+
     Args:
         input: Input tensor (batch_size, ..., features)
         hessian: Current Hessian matrix to update in-place
@@ -235,6 +241,14 @@ def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
 
     if batch_size == 0:  # in MOEs some experts receive no tokens
         return hessian, n_samples
+
+    if hessian.dtype == torch.float64:
+        input_flat = input_flat.to(torch.float64)
+        if hessian.device == input_flat.device:
+            hessian.addmm_(input_flat.t(), input_flat, alpha=2)
+        else:
+            hessian.add_((input_flat.t() @ input_flat).to(hessian.device), alpha=2)
+        return hessian, n_samples + batch_size
 
     # Incremental averaging, H = H * n / (n + b) + (2 / (n + b)) * X^T X, in one GEMM: this runs
     # once per expert per forward, and separate scale and add passes each rewrite all of H.
@@ -270,13 +284,50 @@ def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
     return hessian, n_samples
 
 
+def round_to_covariance_precision_(hessian: torch.Tensor, bits: int = 20) -> torch.Tensor:
+    """Round a Gram matrix in place to a grid of about ``2**-bits * sqrt(H_ii * H_jj)``.
+
+    That fraction of the product of an entry's two standard deviations is as precisely as a
+    float64 sum of many products pins the entry down, whatever the entry's own size: where its
+    terms cancel, as in a nearly uncorrelated pair, sums in another batching differ by about 1e-15
+    of that product, far more than of the entry, and a cast to float32 would put some of those
+    entries on the other side of a rounding boundary. The grid is far coarser than that, so the
+    rounded matrix is the same for almost every batching, and far finer than the statistical error
+    of a Hessian. Its step is a power of two, which makes the rounding exact and the result exact
+    in float32 too. Accepts ``[..., n, n]``.
+    """
+    # A copy: every row block reads the original diagonal.
+    std = hessian.diagonal(dim1=-2, dim2=-1).clamp_min(0).sqrt()
+    # A block of rows at a time bounds the temporaries.
+    for start in range(0, hessian.shape[-2], 256):
+        rows = slice(start, start + 256)
+        scale = std[..., rows].unsqueeze(-1) * std.unsqueeze(-2)  # 0 on a dead channel's row
+        step = torch.ldexp(torch.ones_like(scale), torch.frexp(scale).exponent - bits)
+        hessian[..., rows, :] = (hessian[..., rows, :] / step).round() * step
+    return hessian
+
+
+def hessian_dtype() -> torch.dtype:
+    """The dtype Hessians accumulate in: float64 under deterministic algorithms, else float32.
+
+    A float32 sum depends on the order of its terms, so a Hessian, and what is searched or
+    quantized with it, change with how the calibration tokens are batched; the float64 sum of the
+    same products agrees across batchings to far below float32's resolution.
+    """
+    return torch.float64 if torch.are_deterministic_algorithms_enabled() else torch.float32
+
+
 def bfloat16_hessian_gemm(input_dtype: torch.dtype, inputs: torch.Tensor) -> bool:
     """Whether a Hessian GEMM over ``inputs`` runs on bfloat16 with float32 output.
 
     True when ``input_dtype`` asks for bfloat16 and the inputs' GPU has such GEMMs; when they are
-    missing, warns once per device and returns False, so the caller computes in float32.
+    missing, warns once per device and returns False, so the caller computes in float32. Also
+    False, with a warning, under deterministic algorithms: its float32 sums depend on the batching.
     """
     if input_dtype != torch.bfloat16:
+        return False
+    if hessian_dtype() != torch.float32:
+        _warn_bfloat16_hessian_not_deterministic()
         return False
     if inputs.is_cuda and _has_float32_out_gemm(inputs.device):
         return True
@@ -295,6 +346,14 @@ def _has_float32_out_gemm(device: torch.device) -> bool:
     except (TypeError, RuntimeError):
         return False
     return True
+
+
+@functools.cache
+def _warn_bfloat16_hessian_not_deterministic() -> None:
+    warn_rank_0(
+        "hessian_input_dtype='bfloat16' accumulates in float32, whose sums change with the order of "
+        "the calibration batches; computing its Hessians in float64 under deterministic algorithms."
+    )
 
 
 @functools.cache
@@ -389,13 +448,15 @@ class GPTQHelper:
         weight = module.weight if weight is None else weight
         in_features = weight.shape[-1]
         device = weight.device
+        dtype = hessian_dtype()
         if device.type == "meta":
             device = torch.device("cpu")
         elif offload_to_cpu and device.type == "cuda":
             index = torch.cuda.current_device() if device.index is None else device.index
-            if not _gpu_has_room(index, 4 * in_features**2):
-                device = _hessian_offload_device(4 * in_features**2)
-        self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
+            nbytes = dtype.itemsize * in_features**2
+            if not _gpu_has_room(index, nbytes):
+                device = _hessian_offload_device(nbytes)
+        self.hessian = torch.zeros(in_features, in_features, dtype=dtype, device=device)
         self.n_samples = 0
         # Set by update_weights(); listed here for documentation.
         self.weight: torch.Tensor | None = None
@@ -438,7 +499,16 @@ class GPTQHelper:
         unpatch_forward_method(self.module, self.CACHE_NAME)
 
     def sync_hessian_across_dp(self):
-        """Merge the Hessians of this module's data-parallel replicas, which saw different data."""
+        """End the collection: normalize the Hessian, then merge the data-parallel replicas'.
+
+        A float64 Hessian is the raw sum of :func:`update_hessian`: divided here once, rounded to
+        the precision a covariance has (:func:`round_to_covariance_precision_`) and handed to the
+        float32 solvers. The replicas of a module saw different data.
+        """
+        if self.hessian.dtype == torch.float64:
+            if self.n_samples:
+                self.hessian.div_(self.n_samples)
+            self.hessian = round_to_covariance_precision_(self.hessian).float()
         parallel_state = getattr(self.module, "parallel_state", None)
         group = parallel_state.data_parallel_group if parallel_state is not None else None
         if group is None or not group.is_initialized() or group.world_size() == 1:
@@ -485,7 +555,7 @@ class GPTQHelper:
         """
         weight = self.module.weight if weight is None else weight
         device = weight.device if device is None else device
-        hessian = self.hessian.to(device)
+        hessian = self.hessian.to(device, torch.float32)
         self.weight = weight.data.to(device, torch.float32, copy=True)
         self._prepare_hessian_inverse(hessian, perc_damp)
         self._blockwise_update(block_size)
