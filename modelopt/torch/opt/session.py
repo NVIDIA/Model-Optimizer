@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     # defines for installs without torch.
     from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
+    from modelopt.torch.export.layerwise_export import LayerwiseExporter
     from modelopt.torch.export.registry import ExportContext
     from modelopt.torch.utils.distributed import DistributionPlan
 
@@ -75,11 +76,15 @@ class ModelBinding:
 class RunState:
     """The live objects one call of a workflow, or one step of it, creates and a later one uses.
 
+    ``layerwise_exporter`` is the :class:`~modelopt.torch.export.layerwise_export.LayerwiseExporter`
+    a layerwise calibration wrote every layer's shard through, for the export to finalize.
+
     ``export_context`` is the :class:`~modelopt.torch.export.registry.ExportContext` of the export
     in progress. The export keeps it here from its setup until it ends, and each of its steps and
     handlers gets it here. A layerwise export's is here while it writes a layer, or the tail.
     """
 
+    layerwise_exporter: "LayerwiseExporter | None" = None
     export_context: "ExportContext | None" = None
 
 
@@ -90,12 +95,16 @@ class ModelOptSession:
     Each field belongs to the calls that read it, and a call works out a field left unset as it
     would without a session. A call's own argument for the same thing wins over the field.
 
+    * ``export``: whether the workflow exports the model with
+      :func:`~modelopt.torch.export.export_hf_checkpoint`. Set, ``mtq.quantize``, ``mtq.calibrate``
+      and ``mtq.auto_quantize`` refuse a model the export could not write before calibrating it.
     * ``distribution``: the :class:`~modelopt.torch.utils.distributed.DistributionPlan` to load the
       model by. ``load_pretrained`` loads by it where its ``distribution=`` is not passed, and
       records here the plan the load used, or, while none is held, the plan a load was given.
 
-    ``runtime`` (:class:`RunState`) holds the live objects one step of a call hands to the next,
-    such as the context of the export in progress.
+    ``runtime`` (:class:`RunState`) holds the live objects one call hands to a later one, such as
+    the layerwise exporter calibration writes through and the export finalizes, and those one step
+    of a call hands to the next, such as the context of the export in progress.
 
     ``with ModelOptSession():`` makes it the process's active session for the block, and every
     ModelOpt call in the block runs in it. Opening another while one is active raises: a workflow
@@ -112,6 +121,7 @@ class ModelOptSession:
     there reads what it needs off the model it is given.
     """
 
+    export: bool = False
     distribution: "DistributionPlan | None" = None
     runtime: RunState = field(default_factory=RunState, init=False, repr=False)
     _bindings: dict[ModelName, ModelBinding] = field(default_factory=dict, init=False, repr=False)

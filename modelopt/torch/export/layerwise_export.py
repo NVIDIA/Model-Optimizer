@@ -27,7 +27,7 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from modelopt.torch.models import hf_model_type, is_moe
+from modelopt.torch.models import hf_model_type
 from modelopt.torch.opt.session import ModelOptSession
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils.core_utils import (
@@ -49,11 +49,11 @@ from .quant_utils import (
     get_quantization_format,
     seed_carried_over_exclusions,
 )
-from .registry import PrepareMoEInputsRegistry
 from .unified_export_hf import (
     _dispatch_export_handler,
     _fuse_shared_input_modules,
     _prepare_moe_inputs,
+    _refuse_unexportable_moe,
     _resolve_export_dtype,
     _resolve_source,
     _start_export,
@@ -240,17 +240,7 @@ class LayerwiseExporter:
                 "model must contain exactly the layers being calibrated."
             )
 
-        model_type = hf_model_type(model)
-        for _, sub_module in model.named_modules():
-            if (
-                is_moe(sub_module, model_type)
-                and hasattr(sub_module, "experts")
-                and PrepareMoEInputsRegistry.match(sub_module.experts) is None
-            ):
-                raise NotImplementedError(
-                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is "
-                    "not supported in export."
-                )
+        _refuse_unexportable_moe(model, hf_model_type(model))
         self._layers = layers
         layer_ids = {id(m): i for i, m in enumerate(layers)}
         self._layer_names: dict[int, str] = {}
@@ -496,6 +486,11 @@ class LayerwiseExporter:
             if getattr(module, LAYERWISE_EXPORTER_ATTR, None) is self:
                 delattr(module, LAYERWISE_EXPORTER_ATTR)
         self._announced_on.clear()
+        # Nor does the workflow's session hold it: finalized, it holds nothing a later call needs,
+        # but it does hold the model.
+        runtime = ModelOptSession.active().runtime
+        if runtime.layerwise_exporter is self:
+            runtime.layerwise_exporter = None
 
         warnings.warn(
             "The exported checkpoint is complete, but per-layer export leaves the model in "

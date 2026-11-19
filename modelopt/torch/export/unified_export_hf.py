@@ -25,7 +25,7 @@ import traceback
 import warnings
 from builtins import ValueError
 from collections import defaultdict
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -171,9 +171,34 @@ from .quant_utils import (
     sync_tied_input_amax,
     to_quantized_weight,
 )
-from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
+from .registry import ExportContext, ExportHandler, ExportModuleRegistry, PrepareMoEInputsRegistry
 
 __all__ = ["export_hf_checkpoint", "export_speculative_decoding"]
+
+
+def _refuse_unexportable_moe(model: nn.Module, model_type: str | None) -> None:
+    """Raise as the export would for an MoE block whose experts no input-preparing handler takes."""
+    for _ in _moe_blocks(model, model_type):
+        pass
+
+
+def _moe_blocks(
+    model: nn.Module, model_type: str | None
+) -> Iterator[tuple[str, nn.Module, ExportHandler]]:
+    """Each MoE block of ``model``, by name, with the handler preparing its experts' inputs.
+
+    An MoE block whose experts no handler takes is refused.
+    """
+    for name, sub_module in model.named_modules():
+        if is_moe(sub_module, model_type) and hasattr(sub_module, "experts"):
+            handler = PrepareMoEInputsRegistry.match(sub_module.experts)
+            if handler is None:
+                raise NotImplementedError(
+                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is not "
+                    "supported in export. Please file an issue or add support for this model "
+                    "architecture."
+                )
+            yield name, sub_module, handler
 
 
 def _is_enabled_quantizer(quantizer):
@@ -990,16 +1015,8 @@ def _prepare_moe_inputs(model: nn.Module) -> None:
     of the export in progress.
     """
     ctx = ExportContext.current()
-    for name, sub_module in model.named_modules():
-        if is_moe(sub_module, ctx.model_type) and hasattr(sub_module, "experts"):
-            handler = PrepareMoEInputsRegistry.match(sub_module.experts)
-            if handler is None:
-                # Unsupported MoE model structure
-                raise NotImplementedError(
-                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is not supported in export."
-                    f"Please file an issue or add support for this model architecture."
-                )
-            handler(name, sub_module, ctx)
+    for name, sub_module, handler in _moe_blocks(model, ctx.model_type):
+        handler(name, sub_module, ctx)
 
 
 def _warn_on_unsynced_moe_gate_up(model: nn.Module, model_type: str | None) -> None:
@@ -1883,11 +1900,39 @@ def _named_source(model: nn.Module) -> SourceCheckpoint | None:
 
 
 def _layerwise_exporter(model: Any) -> Any:
-    """The layerwise exporter this export finalizes, if the model was calibrated through one."""
+    """The layerwise exporter this export finalizes, if the model was calibrated through one.
+
+    That is the one the workflow's session holds, else the one announced on the model, as a
+    calibration made in a session of its own, outside the workflow's, leaves it. One the session
+    holds writes its own model, so it is refused for a model that is neither that one nor a part of
+    it, as a VLM is not of an exporter built on its language model.
+    """
     # Local import breaks the cycle: layerwise_export imports this module.
     from .layerwise_export import LAYERWISE_EXPORTER_ATTR
 
-    return getattr(model, LAYERWISE_EXPORTER_ATTR, None)
+    held = ModelOptSession.active().runtime.layerwise_exporter
+    announced = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
+    if held is not None and announced is not None and announced is not held:
+        raise ValueError(
+            "The workflow's ModelOpt session and the model itself hold different layerwise "
+            "exporters, so the export cannot tell which one wrote the layers."
+        )
+    if (
+        held is not None
+        and announced is None
+        and not any(m is model for m in held._model.modules())
+    ):
+        raise ValueError(
+            f"The workflow's ModelOpt session holds a layerwise export of a "
+            f"{type(held._model).__name__}, which this {type(model).__name__} is neither, nor a part "
+            "of, so finalizing it would not write this model, and the layers it wrote stay packed: "
+            "to export a model calibrated through a part, as a VLM through its language model, run "
+            "the workflow again with modelopt.torch.export.layerwise_export.LayerwiseExporter("
+            "model, export_dir) built on the whole model before calibrating, as hf_ptq does, into "
+            "a new export_dir and checkpoint_dir, since a resume would take the part's layer "
+            "shards as they are."
+        )
+    return held if held is not None else announced
 
 
 def _resolve_source(
@@ -2163,7 +2208,9 @@ def export_hf_checkpoint(
 
     The tensors of the source checkpoint that the model has no parameter for, such as an MTP head,
     are carried into the export unchanged, and the checkpoint's non-model files are copied: the
-    checkpoint the model's load recorded on it, else its ``config._name_or_path``.
+    checkpoint the model's load recorded on it, else its ``config._name_or_path``. The export
+    finalizes the layerwise exporter the session holds, the one the model's layerwise calibration
+    wrote its layers through.
 
     Args:
         model: The model to export: a module, such as a transformers model (e.g.,
@@ -2186,6 +2233,8 @@ def export_hf_checkpoint(
             runtime compatibility; other diffusion components omit them.
             Transformers components always retain them for KV-cache scales.
     """
+    # The workflow, as its session holds it; an argument passed here wins over it.
+    session = ModelOptSession.active()
     exporter = _layerwise_exporter(model)
     # A layerwise export resolved its source before calibration packed the first layer.
     source = getattr(exporter, "_source", None) if exporter is not None else None
@@ -2294,6 +2343,8 @@ def export_hf_checkpoint(
             )
         # Per-layer export wrote the shards during calibration; this writes the rest.
         exporter.finalize(extra_state_dict=extra_state_dict, carried_over_names=carried_names)
+        # Finalized, the exporter holds nothing a later call needs, but it does hold the model.
+        session.runtime.layerwise_exporter = None
         # Into the exporter's directory, which is where finalize() wrote: export_dir may differ
         # when the recipe's layerwise.export_dir chose it.
         if _writes_extra and checkpoint is not None:

@@ -52,6 +52,8 @@ from modelopt.torch.export.unified_export_hf import (
     export_hf_checkpoint,
     read_unplaced_weights,
 )
+from modelopt.torch.opt import ModelOptSession
+from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import SourceCheckpoint
@@ -867,38 +869,212 @@ def test_carryable_unplaced_keys_works_without_the_loader_dependencies(tmp_path,
     assert carryable_unplaced_keys(source) == ["model.mtp.eh_proj.weight"]
 
 
-def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
+@pytest.mark.parametrize("held_by", ["session", "model", "both"])
+def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch, held_by):
     """The layerwise fix depends on an ordering: work out the carried set, THEN call finalize().
 
     LayerwiseExporter.bind() snapshots its quant config during calibration, so finalize() is the
     only point where it can learn what the export carried. If export_hf_checkpoint ever hands the
     carried names over after dispatching to the exporter -- or stops handing them on that path --
     the sidecar exclusions silently go missing again, with nothing else to catch it.
+
+    The exporter finalized is the one the workflow's session holds, which then lets it go, else the
+    one announced on the model; two different ones are refused.
     """
     from modelopt.torch.export import unified_export_hf as uehf
     from modelopt.torch.export.layerwise_export import LAYERWISE_EXPORTER_ATTR
 
     seen = {}
+    model = torch.nn.Module()
 
     class _Exporter:
         export_dir = tmp_path
+        _model = model
 
         def finalize(self, extra_state_dict=None, carried_over_names=()):
             seen["keys"] = carried_over_names
             return {}
 
-    model = torch.nn.Module()
-    setattr(model, LAYERWISE_EXPORTER_ATTR, _Exporter())
+    session = ModelOptSession()
+    if held_by in ("session", "both"):
+        session.runtime.layerwise_exporter = _Exporter()
+    if held_by in ("model", "both"):
+        setattr(model, LAYERWISE_EXPORTER_ATTR, _Exporter())
     # Accepts **kwargs because the call site passes keys_only: non-writing ranks resolve
     # names without reading tensors, and a stub that ignores that would hide a signature drift.
     monkeypatch.setattr(uehf, "read_unplaced_weights", lambda m, **kw: {})
     monkeypatch.setattr(uehf, "off_index_tensor_names", lambda m: ["model.mtp.eh_proj.weight"])
 
-    uehf.export_hf_checkpoint(model, export_dir=tmp_path)
+    if held_by == "both":
+        with session, pytest.raises(ValueError, match="different layerwise exporters"):
+            uehf.export_hf_checkpoint(model, export_dir=tmp_path)
+        return
+    with session:
+        uehf.export_hf_checkpoint(model, export_dir=tmp_path)
+        # The export it finalized is over: the session lets go of its exporter.
+        assert session.runtime.layerwise_exporter is None
 
     assert seen["keys"] == ["model.mtp.eh_proj.weight"], (
         f"finalize() saw {seen['keys']!r}; the carried set must be handed to it"
     )
+
+
+class Qwen3MoeSparseMoeBlock(torch.nn.Module):  # the MoE spec's block, its experts unhandled
+    def __init__(self):
+        super().__init__()
+        self.experts = torch.nn.Linear(4, 4)
+
+    def forward(self, x):
+        return self.experts(x)
+
+
+def test_a_run_that_exports_refuses_what_the_export_cannot_write_before_calibrating():
+    """A run whose session says it exports ends in export_hf_checkpoint, so quantizing its model
+    refuses, before calibrating, a model the export could only refuse afterwards: here one whose
+    MoE experts no export handler takes. The export writes the whole model, so its blocks outside
+    the part quantized count, as a VLM's do when its language model is quantized. A run that does
+    not export quantizes it as before."""
+    calibrated = []
+
+    def forward_loop(model):
+        calibrated.append(model)
+        model(torch.randn(2, 4))
+
+    part, moe = torch.nn.Linear(4, 4), torch.nn.Sequential(Qwen3MoeSparseMoeBlock())
+    with ModelOptSession(export=True) as session, pytest.raises(NotImplementedError):
+        session.bind(torch.nn.Sequential(part, moe))
+        mtq.quantize(part, mtq.INT8_DEFAULT_CFG, forward_loop)
+    assert not calibrated
+
+    mtq.quantize(torch.nn.Sequential(Qwen3MoeSparseMoeBlock()), mtq.INT8_DEFAULT_CFG, forward_loop)
+    assert calibrated
+
+
+_KV_CANDIDATES = [
+    (
+        {
+            "quant_cfg": [{"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3)}}],
+            "algorithm": "max",
+            "effective_bits": 8.0,
+        },
+        "fp8",
+    ),
+    (
+        {
+            "quant_cfg": [
+                {
+                    "quantizer_name": "*[kv]_bmm_quantizer",
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                        "constant_amax": 1.0,
+                    },
+                }
+            ],
+            "algorithm": None,
+            "effective_bits": 4.5,
+        },
+        "nvfp4",
+    ),
+]
+
+
+@pytest.mark.parametrize("search", ["kv-cache", "resumed-weights"])
+def test_auto_quantize_refuses_what_the_export_cannot_write_before_searching(
+    tmp_path, monkeypatch, search
+):
+    """A search in a run that exports refuses up front, as quantize does, a model the export could
+    not write: the KV-cache search, whose candidates calibrate through no refusal, and a weight
+    search resumed from its saved scores, which calibrates none."""
+    pytest.importorskip("transformers")
+    # Local import: transformers and its test fixtures are optional dependencies.
+    from _test_utils.torch.transformers_models import get_tiny_llama
+
+    # A CPU stand-in for the CUDA-only NVFP4 fake-quant kernel a KV candidate runs.
+    monkeypatch.setattr(
+        tensor_quant,
+        "dynamic_block_quantize_op",
+        lambda inputs, *_a, **_k: torch.zeros_like(inputs),
+    )
+
+    def unexportable():
+        torch.manual_seed(0)
+        model = get_tiny_llama(num_hidden_layers=2)
+        model.model.unused_moe = Qwen3MoeSparseMoeBlock()  # exported with the model, never run
+        return model
+
+    data = [{"input_ids": torch.randint(0, 32, (1, 8))} for _ in range(2)]
+    forwards = []
+
+    def run_search(model):
+        if search == "kv-cache":
+
+            def logits(model, batch):
+                forwards.append(batch)
+                return model(**batch).logits
+
+            mtq.auto_quantize(
+                model,
+                {"effective_bits": 6.25, "cost_model": "kv_cache"},
+                _KV_CANDIDATES,
+                data,
+                logits,
+                num_calib_steps=2,
+                num_score_steps=2,
+            )
+            return
+
+        def loss(model, batch):
+            forwards.append(batch)
+            return model(**batch, labels=batch["input_ids"])
+
+        mtq.auto_quantize(
+            model,
+            {"effective_bits": 8.5},
+            ["FP8_DEFAULT_CFG", "INT8_DEFAULT_CFG"],
+            data,
+            loss,
+            loss_func=lambda output, _: output.loss,
+            num_calib_steps=2,
+            num_score_steps=2,
+            method="gradient",
+            checkpoint=str(tmp_path / "scores.pth"),
+            disabled_layers=["*unused_moe*"],
+        )
+
+    if search == "resumed-weights":
+        run_search(unexportable())  # its scores, saved by a run that does not export
+        forwards.clear()
+
+    model = unexportable()
+    with (
+        ModelOptSession(export=True) as session,
+        pytest.raises(NotImplementedError, match="not supported in export"),
+    ):
+        session.bind(model)
+        run_search(model)
+    assert not forwards
+
+
+def _only_rank_0_exports_job(rank, size):
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), Qwen3MoeSparseMoeBlock())
+    set_distribution_plan(model, DistributionPlan(size))
+    with bounded_collectives(), ModelOptSession() as session:
+        session.bind(model)
+        if rank == 0:  # only the rank that exports a replicated model says its workflow exports
+            session.export = True
+        try:
+            mtq.quantize(model[0], mtq.INT8_DEFAULT_CFG, lambda m: model(torch.randn(2, 4)))
+        except Exception as error:  # rank 0's refusal, as every rank receives it
+            raised = str(error)
+        else:
+            raised = "no error"
+    assert "not supported in export" in raised, (rank, raised)
+
+
+def test_a_refusal_of_the_model_on_one_rank_fails_every_rank(cpu_dist_workers):
+    """Its refusal fails every rank, rather than leave the others waiting for it in calibration."""
+    cpu_dist_workers.run(_only_rank_0_exports_job)
 
 
 def test_export_writes_the_off_index_safetensors(tmp_path, monkeypatch):

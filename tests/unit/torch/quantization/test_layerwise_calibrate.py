@@ -24,6 +24,8 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.layerwise_export import LAYERWISE_EXPORTER_ATTR
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import (
@@ -446,6 +448,41 @@ def test_layerwise_max_outside_calibration_uses_configured_forward_behavior(
     mtq.quantize(model, config, forward_loop=forward_loop)
 
     assert forward_calls == expected_forward_calls
+
+
+def test_layerwise_export_writes_through_the_exporter_the_session_holds(monkeypatch, tmp_path):
+    """A layerwise calibration with export_dir writes each layer through the exporter the active
+    session holds, for the export to finalize, and announces nothing on the model."""
+    _register_test_discoverer(monkeypatch)
+    written = []
+
+    class _Exporter:
+        export_dir = tmp_path
+
+        def bind(self, calibrated_layers):
+            # The workflow's session, where the export reads the model's facts, such as its type.
+            assert ModelOptSession.current() is session
+            written.append("bind")
+
+        def export_layer(self, layer_idx, layer, layer_inputs):
+            written.append(layer_idx)
+
+    exporter = _Exporter()
+    session = ModelOptSession()
+    session.runtime.layerwise_exporter = exporter
+    model = _TransformerWithLMHead(n_layers=2, dim=16)
+    config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
+    config["algorithm"] = {
+        "method": "max",
+        "layerwise": {"enable": True, "export_dir": str(tmp_path)},
+    }
+
+    with session:
+        mtq.quantize(model, config, forward_loop=lambda m: m(torch.randint(0, 32, (2, 8))))
+        assert session.runtime.layerwise_exporter is exporter
+
+    assert written == ["bind", 0, 1]
+    assert not hasattr(model, LAYERWISE_EXPORTER_ATTR)
 
 
 def test_layerwise_export_rejects_enabled_outside_quantizer(monkeypatch, tmp_path):

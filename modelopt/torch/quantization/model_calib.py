@@ -36,6 +36,7 @@ from tqdm import tqdm
 from modelopt.torch.models import list_all_possible
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.searcher import ForwardLoop
+from modelopt.torch.opt.session import ModelOptSession
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
@@ -2454,7 +2455,10 @@ def layerwise_calibrate(
     Every knob arrives through ``calib_kwargs`` from
     :class:`LayerwiseConfig <modelopt.torch.quantization.config.LayerwiseConfig>`, which
     documents them; ``export_dir`` additionally leaves the model in export form, so it
-    must not be used for inference afterwards.
+    must not be used for inference afterwards. With ``export_dir``, the layers are written through
+    the layerwise exporter the active ModelOpt session holds, else through the one set on the model,
+    else through a new one; once every layer is written, the session holds that exporter, for the
+    export to finalize.
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
     export_dir = calib_kwargs.pop("export_dir", None)
@@ -2497,12 +2501,17 @@ def layerwise_calibrate(
     exporter = None
     finalize_hint = ""
     if export_dir is not None:
-        exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
+        session = ModelOptSession.active()
+        # One announced on the model is how a calibration in a session of its own hands it on.
+        exporter = session.runtime.layerwise_exporter or getattr(
+            model, LAYERWISE_EXPORTER_ATTR, None
+        )
         if exporter is None:
+            # Announced on the model too, for an export in another session.
             exporter = LayerwiseExporter(model, export_dir)
             finalize_hint = (
-                f" Call finalize() on model.{LAYERWISE_EXPORTER_ATTR} to write the tail "
-                "shard, the index and the config artifacts; it does not load until then."
+                " Export the model with export_hf_checkpoint to write the tail shard, the index "
+                "and the config artifacts; it does not load until then."
             )
         # Before calibration, so unsupported models fail in seconds not hours.
         exporter.bind(calibrated_layers=list(transformer_layers))
@@ -2523,6 +2532,7 @@ def layerwise_calibrate(
             f"Layerwise export: every layer shard in {exporter.export_dir} is already "
             f"written.{finalize_hint}"
         )
+        ModelOptSession.active().runtime.layerwise_exporter = exporter
         return
 
     layer_pbar = tqdm(
@@ -2623,6 +2633,9 @@ def layerwise_calibrate(
     outside_calibrator.calibrate()
 
     if exporter is not None:
+        # Held once it wrote every layer: one that refused the model, or a calibration that failed,
+        # leaves the one set on the model, for a retry in the workflow to replace as it would there.
+        ModelOptSession.active().runtime.layerwise_exporter = exporter
         warn_rank_0(
             f"Layerwise export: wrote every layer shard to {exporter.export_dir}.{finalize_hint}"
         )
