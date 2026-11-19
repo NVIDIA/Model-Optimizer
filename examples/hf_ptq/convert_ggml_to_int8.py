@@ -94,7 +94,7 @@ def convert_ggml_export_to_int8(
     if compressed_tensors:
         quantization_config = _compressed_tensors_config(layer_formats)
     else:
-        hf_quant_config["quantization"] = _int8_quantization(quantization, layer_formats)
+        hf_quant_config["quantization"] = _int8_quantization(quantization)
         quantization_config = convert_hf_quant_config_format(hf_quant_config)
     if output_dir.exists() and any(output_dir.iterdir()):
         raise ValueError(f"{output_dir} is not empty.")
@@ -154,7 +154,6 @@ def _ggml_layer_formats(
                 }
             )
     layer_formats = {}
-    described = set()
     for layer, shape in payloads.items():
         if mixed:
             key = _config_key(layer, layer_algos)
@@ -169,16 +168,7 @@ def _ggml_layer_formats(
         if len(shape) != 3:
             raise ValueError(f"{layer} is not a 2-D weight; only 2-D weights convert to INT8.")
         layer_formats[layer] = GGML_FORMAT_REGISTRY[algo]
-        if mixed:
-            described.add(key)
-    if mixed:
-        unpacked = sorted(
-            layer
-            for layer, algo in layer_algos.items()
-            if algo in GGML_FORMAT_REGISTRY and layer not in described
-        )
-        if unpacked:
-            raise ValueError(f"{unpacked} are GGML layers without a packed uint8 weight.")
+    # A config entry without a payload is fine: export drops a tied alias's copy of its weight.
     if not layer_formats:
         raise ValueError(f"{ggml_dir} holds no GGML weights to convert.")
     return layer_formats
@@ -209,19 +199,24 @@ def _has_non_ggml_quantization(quantization: dict) -> bool:
     return any(str(algo).lower() not in GGML_FORMAT_REGISTRY for algo in algos)
 
 
-def _int8_quantization(quantization: dict, layer_formats: dict[str, GGMLFormat]) -> dict:
-    """``quantization`` with each GGML layer described as INT8_PB_WO at its INT8 group size."""
+def _int8_quantization(quantization: dict) -> dict:
+    """``quantization`` with each GGML entry described as INT8_PB_WO at its INT8 group size.
+
+    Every GGML entry is rewritten, including those of fused experts and of deduplicated tied
+    aliases, which hold no payload of their own.
+    """
     quantization = copy.deepcopy(quantization)
     if quantization.get("quant_algo") == "MIXED_PRECISION":
         quantized_layers = quantization["quantized_layers"]
-        for layer, ggml_format in layer_formats.items():
-            # Fused experts keep their single entry, now describing every expert as INT8_PB_WO.
-            quantized_layers[_config_key(layer, quantized_layers)] = {
-                "quant_algo": "INT8_PB_WO",
-                "group_size": ggml_format.int8_group_size,
-            }
+        for layer, cfg in quantized_layers.items():
+            algo = str(cfg.get("quant_algo")).lower()
+            if algo in GGML_FORMAT_REGISTRY:
+                quantized_layers[layer] = {
+                    "quant_algo": "INT8_PB_WO",
+                    "group_size": GGML_FORMAT_REGISTRY[algo].int8_group_size,
+                }
     else:
-        (ggml_format,) = set(layer_formats.values())
+        ggml_format = GGML_FORMAT_REGISTRY[str(quantization["quant_algo"]).lower()]
         for key in _GGML_PAYLOAD_KEYS:
             quantization.pop(key, None)
         quantization.update(quant_algo="INT8_PB_WO", group_size=ggml_format.int8_group_size)

@@ -16,7 +16,7 @@
 
 import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 import modelopt.torch.quantization as mtq
 
@@ -32,12 +32,15 @@ FP8_ATTENTION = (
 )
 
 
-def quantize_tiny_llama(tmp_path, layer_cfgs=(IQ1_S, IQ2_XS), extra_quant_cfg=()):
+def quantize_tiny_llama(
+    tmp_path, layer_cfgs=(IQ1_S, IQ2_XS), extra_quant_cfg=(), tied_weights=None
+):
     """Return a two-layer tiny LLaMA whose layer ``i`` MLP takes ``layer_cfgs[i]``, and its tokens.
 
     The default formats have 32- and 16-weight sub-blocks, so the INT8 checkpoint needs a config
-    group for each. ``extra_quant_cfg`` quantizes other layers. The shapes suit vLLM's kernels,
-    and fake quant runs on CPU.
+    group for each. ``extra_quant_cfg`` quantizes other layers. ``tied_weights`` ({alias: canonical}
+    weight names) ties weights and declares them as HF's ``all_tied_weights_keys`` does. The shapes
+    suit vLLM's kernels, and fake quant runs on CPU.
     """
     source = create_tiny_llama_dir(
         tmp_path,
@@ -51,6 +54,12 @@ def quantize_tiny_llama(tmp_path, layer_cfgs=(IQ1_S, IQ2_XS), extra_quant_cfg=()
         initializer_range=0.05,
     )
     model = AutoModelForCausalLM.from_pretrained(source, dtype=torch.bfloat16)
+    for alias, canonical in (tied_weights or {}).items():
+        alias_module, _, alias_name = alias.rpartition(".")
+        canonical_module, _, canonical_name = canonical.rpartition(".")
+        weight = getattr(model.get_submodule(canonical_module), canonical_name)
+        setattr(model.get_submodule(alias_module), alias_name, weight)
+        model.all_tied_weights_keys[alias] = canonical
     quant_cfg = {
         "quant_cfg": [
             {"quantizer_name": "*", "enable": False},
@@ -73,8 +82,6 @@ def quantize_tiny_moe(tmp_path, extra_quant_cfg=()):
     transformers fuses the experts, and the export writes them one weight per expert under a
     single ``quantized_layers`` entry per experts module.
     """
-    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
-
     config = Qwen3MoeConfig(
         vocab_size=128,
         hidden_size=256,

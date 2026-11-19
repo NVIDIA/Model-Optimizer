@@ -265,3 +265,32 @@ def test_fused_moe_experts_convert_per_expert(tmp_path, mixed):
         }
         for layer in experts[i]:
             assert after[f"{layer}.weight"].dtype == torch.int8
+
+
+@pytest.mark.parametrize("mixed", [False, True], ids=["compressed-tensors", "modelopt"])
+def test_a_deduplicated_tied_ggml_weight_converts(tmp_path, mixed):
+    # Export keeps a tied alias's config entry but drops its copy of the weight.
+    alias, canonical = "model.layers.0.mlp.up_proj", "model.layers.0.mlp.gate_proj"
+    model, _ = quantize_tiny_llama(
+        tmp_path,
+        extra_quant_cfg=FP8_ATTENTION if mixed else (),
+        tied_weights={f"{alias}.weight": f"{canonical}.weight"},
+    )
+    export_hf_checkpoint(model, export_dir=tmp_path / "ggml")
+    assert f"{alias}.weight" not in load_file(tmp_path / "ggml" / "model.safetensors")
+    exported = json.loads((tmp_path / "ggml" / "hf_quant_config.json").read_text())
+    assert alias in exported["quantization"]["quantized_layers"]
+
+    convert_ggml_to_int8.convert_ggml_export_to_int8(tmp_path / "ggml", tmp_path / "int8")
+
+    after = load_file(tmp_path / "int8" / "model-00001-of-00001.safetensors")
+    assert not [name for name, tensor in after.items() if tensor.dtype == torch.uint8]
+    config = json.loads((tmp_path / "int8" / "config.json").read_text())["quantization_config"]
+    if not mixed:
+        assert config["quant_method"] == "compressed-tensors"
+        assert after[f"{canonical}.weight_packed"].dtype == torch.int32
+        return
+    layers = json.loads((tmp_path / "int8" / "hf_quant_config.json").read_text())
+    layers = layers["quantization"]["quantized_layers"]
+    int8 = {"quant_algo": "INT8_PB_WO", "group_size": 32}
+    assert layers[alias] == layers[canonical] == int8
