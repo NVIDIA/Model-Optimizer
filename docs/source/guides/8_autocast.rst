@@ -37,6 +37,7 @@ AutoCast can also be used programmatically through its Python API:
       init_max=65504,                       # threshold for initializers
       keep_io_types=False,                  # whether to preserve input/output types
       calibration_data=None,                # optional path to input data file
+      calibrate_per_node=False,             # run calibration node by node to reduce peak memory
       init_conversion_max_bytes=None,       # maximum size in bytes for initializer conversion
       providers=["cpu"],                    # list of Execution Providers for ONNX-Runtime backend
       trt_plugins=[],                       # list of TensorRT plugin library paths in .so format
@@ -69,7 +70,8 @@ AutoCast follows these steps to convert a model:
    - Default classification rules. Nodes that meet any of these rules will be kept in high precision:
      - Node I/O magnitudes are higher than ``data_max`` (default: 512). Due to precision limitations, compute of high magnitude tensors in low precision might not be accurate. The unit in last place (ULP) for 512 is 0.5, for 1024 it is 1.0, etc.
      - Initializers magnitudes are higher than ``init_max`` (default: 65504). Initializers are often used for non-compute intensive operations and are more likely to be controlled by the user. However, values above ``init_max`` will cause overflow, therefore they are kept in high precision.
-   
+     - The variance of a decomposed RMSNorm, or of a decomposed LayerNorm that AutoCast does not fuse into ``LayerNormalization``: ``Pow(x, 2)`` or ``x * x`` followed by ``ReduceMean``, ``Add`` and ``Sqrt``. Squaring overflows FP16 once ``|x|`` exceeds about 256, which LLM activations often do even when random data does not show it. The rule also applies to BF16 and with calibration data, for precision, as ``torch.autocast`` keeps ``pow`` and ``rsqrt`` in FP32. To opt out, match these nodes by name with ``nodes_to_include``, for example ``r".*norm/(Pow|ReduceMean|Add|Sqrt)"`` for Hugging Face exports; ``op_types_to_include`` would also force every other node of those types to low precision. ``nodes_to_include`` also overrides the ``data_max`` and ``init_max`` checks for the matched nodes, so with calibration data it can put norms in low precision that AutoCast would otherwise keep in FP32.
+
    Additional classification rules (disabled by default):
      - ``max_depth_of_reduction``: Require nodes with a high depth of reduction (e.g., large matrix multiplications, convolutions with large kernels) to be kept in high precision.
      - ``nodes_to_exclude``: List of regex patterns for node names to keep in high precision.
@@ -134,6 +136,17 @@ Best Practices
    - Use ``--init_conversion_max_bytes`` to limit the size of initializers that will be converted at compile time.
    - Initializers larger than ``--init_conversion_max_bytes`` will be converted at runtime (using a cast operation).
 
+#. **Large Calibration Activations**
+
+   - Use ``--calibrate_per_node`` when retaining every intermediate activation during calibration exceeds available
+     memory.
+   - Per-node calibration executes and releases one node at a time while keeping only tensors still needed by
+     downstream nodes. It produces the same tensor range statistics for deterministic graphs but takes longer because
+     it creates a separate ONNX Runtime session for each node and calibration batch.
+   - For stochastic nodes, each fresh session restarts the random state. Seeded random operators therefore repeat
+     their first sample in every batch, so their aggregated range statistics and those of downstream consumers can
+     differ from default calibration.
+
 #. **TensorRT custom op support**
 
    - Refer to :ref:`TensorRT Execution Provider requirements <ort_ep_requirements>`.
@@ -193,6 +206,12 @@ Bypass data magnitude check and keep specific node names in FP32:
 .. code-block:: bash
 
    python -m modelopt.onnx.autocast --onnx_path model.onnx --data_max inf --nodes_to_exclude ".*attn.*"
+
+Reduce peak calibration memory for a large model:
+
+.. code-block:: bash
+
+   python -m modelopt.onnx.autocast --onnx_path model.onnx --calibrate_per_node
 
 Limit depth of reduction for precision-sensitive operations:
 

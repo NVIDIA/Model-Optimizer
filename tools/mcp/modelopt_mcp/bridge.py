@@ -532,16 +532,27 @@ def _source_checkout_failure(
     }
 
 
-def _ensure_source_checkout(
-    source_ref: str | None = None,
-    source_repo: str | None = None,
-) -> dict:
+def _ensure_source_checkout(source_repo: str | None = None) -> dict:
     """Return a managed source checkout, or None when explicitly disabled."""
     if _source_disabled():
         return {"ok": True, "checkout": None}
 
-    repo = source_repo or os.environ.get("MODELOPT_MCP_SOURCE_REPO") or _DEFAULT_SOURCE_REPO
-    ref = source_ref or os.environ.get("MODELOPT_MCP_SOURCE_REF") or _DEFAULT_SOURCE_REF
+    configured_repo = os.environ.get("MODELOPT_MCP_SOURCE_REPO") or _DEFAULT_SOURCE_REPO
+    # The checkout runs locally, so the agent may only pick repos the operator configured.
+    allowed_repos = sorted({configured_repo, _DEFAULT_SOURCE_REPO})
+    if source_repo and source_repo not in allowed_repos:
+        return {
+            "ok": False,
+            "reason": "source_repo_not_allowed",
+            "diagnostic": (
+                f"source_repo {source_repo!r} is not allowed. Allowed: {allowed_repos}; "
+                f"omit source_repo to use {configured_repo}."
+            ),
+            "source_repo": source_repo,
+        }
+    repo = source_repo or configured_repo
+    # Only the operator picks the ref: GitHub serves fork PR refs and commits from this repo too.
+    ref = os.environ.get("MODELOPT_MCP_SOURCE_REF") or _DEFAULT_SOURCE_REF
 
     resolved = _resolve_source_ref(repo, ref)
     if not resolved.get("ok"):
@@ -1529,7 +1540,6 @@ def submit_job_impl(
     mfa: bool = False,
     ssh_alias: str | None = None,
     dry_run: bool = False,
-    source_ref: str | None = None,
     source_repo: str | None = None,
     enable_mlflow: bool = False,
     mlflow_tracking_uri: str | None = None,
@@ -1587,7 +1597,6 @@ def submit_job_impl(
             ntasks_per_node=ntasks_per_node,
             control_socket=control_socket,
             reconnect_command=reconnect_command,
-            source_ref=source_ref,
             source_repo=source_repo,
         )
 
@@ -1639,7 +1648,7 @@ def submit_job_impl(
             }
 
     # ---- Resolve source + YAML path -------------------------------
-    source = _ensure_source_checkout(source_ref=source_ref, source_repo=source_repo)
+    source = _ensure_source_checkout(source_repo=source_repo)
     if not source.get("ok"):
         return source
     checkout: SourceCheckout | None = source["checkout"]
@@ -1962,7 +1971,6 @@ def _submit_job_dry_run(
     ntasks_per_node: int | None,
     control_socket: str | None,
     reconnect_command: str | None,
-    source_ref: str | None,
     source_repo: str | None,
 ) -> dict:
     """Validate a launcher YAML by running ``launch.py --dryrun``.
@@ -1981,7 +1989,7 @@ def _submit_job_dry_run(
     """
     # Same source + path resolution as the live submit, so dry-run and live
     # use exactly the same launcher checkout and YAML.
-    source = _ensure_source_checkout(source_ref=source_ref, source_repo=source_repo)
+    source = _ensure_source_checkout(source_repo=source_repo)
     if not source.get("ok"):
         return {**source, "dry_run": True}
     checkout: SourceCheckout | None = source["checkout"]

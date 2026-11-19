@@ -55,7 +55,7 @@ from ._auto_quantize_cost import (
 from .config import LayerwiseConfig, QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
 from .ggml import GGML_FORMAT_REGISTRY
-from .ggml.common import PIN_OVERRIDES_WEIGHT
+from .ggml.common import PIN_OVERRIDES_WEIGHT, drop_search_scales
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
 
@@ -593,6 +593,8 @@ class QuantRecipeHparam(Hparam):
         self.cost_weight = cost_weight
         self.allow_no_quant = allow_no_quant
         self.is_fixed = fixed_recipe is not None
+        # A format shard scores only its own formats; None scores every choice.
+        self._scored_recipes: set | None = None
 
         # Module hashes depend on object identity, so sets can produce different orders per rank.
         self.quant_modules = list(dict.fromkeys(quant_modules or []))
@@ -697,6 +699,16 @@ class QuantRecipeHparam(Hparam):
         active = self.active
         assert isinstance(active, QuantRecipe)
         self._apply_quantizer_choice(active)
+
+    @property
+    def scored_choices(self) -> list[QuantRecipe]:
+        """Choices whose sensitivity this process scores."""
+        recipes: list[QuantRecipe] = []
+        for recipe in self.choices:
+            assert isinstance(recipe, QuantRecipe)
+            if self._scored_recipes is None or recipe in self._scored_recipes:
+                recipes.append(recipe)
+        return recipes
 
     @property
     def solver_choices(self) -> list[QuantRecipe]:
@@ -856,6 +868,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     # Hands back the unconverted model for a failure before calibration; ``auto_quantize`` sets it
     # and ``before_search`` drops it once the checks before calibration pass.
     restore_unconverted: Callable[[], None] | None = None
+    # Method options that change what a stored score means; saved so a re-solve can honor them.
+    scoring_config_keys: frozenset[str] = frozenset()
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
@@ -894,6 +908,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_model": COST_MODEL_WEIGHT,
             "cost": {},
             "active_moe_expert_ratio": None,
+            "format_shard": None,
         }
 
     @property
@@ -913,8 +928,35 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "disabled_layers": None,
             "candidate_stats": defaultdict(dict),
             "quantizer_states": {},
+            "format_shard": None,
+            "num_calib_steps": None,
+            "num_score_steps": None,
+            "scoring_config": {},
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
+
+    def scoring_config_from(self, options: dict | None) -> dict:
+        """The scoring options in ``options``, with the defaults for those it does not set."""
+        defaults = self.default_search_config
+        options = options or {}
+        return {key: options.get(key, defaults[key]) for key in sorted(self.scoring_config_keys)}
+
+    def unknown_scoring_options(self, state: dict) -> list[str]:
+        """Scoring options ``state`` records that this searcher does not know, e.g. a renamed one."""
+        return sorted(set(state.get("scoring_config") or {}) - self.scoring_config_keys)
+
+    def scoring_mismatch(self, state: dict) -> str | None:
+        """How the scores in ``state`` were taken other than this search's config takes them.
+
+        Options a checkpoint does not record count as the defaults it was scored with.
+        """
+        if unknown := self.unknown_scoring_options(state):
+            return f"Checkpoint scoring options {unknown} are not known to this search."
+        restored = self.scoring_config_from(state.get("scoring_config"))
+        current = self.scoring_config_from(self.config)
+        if restored != current:
+            return f"Checkpoint scoring options {restored} do not match current {current}."
+        return None
 
     def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
         """Sanitize the search config dict."""
@@ -926,13 +968,48 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         assert config["forward_step"] is not None, (
             "`forward_step` must be provided for `auto_quantize`."
         )
+        if config["format_shard"] is not None:
+            index, count = config["format_shard"]
+            if not (isinstance(index, int) and isinstance(count, int) and 0 <= index < count):
+                raise ValueError("format_shard must be (index, count) with 0 <= index < count.")
+            if self.method_name not in ("gradient", "kl_div"):
+                raise ValueError("format_shard supports method='gradient' or 'kl_div'.")
+            if config["checkpoint"] is None:
+                raise ValueError("format_shard needs a checkpoint to save the shard's scores.")
+            config["format_shard"] = (index, count)
         return config
 
     def validate_search_input(self, constraints, config) -> None:
         """Validate method-specific inputs before quantizing the model."""
+        # Refuse scores of another method or scoring options before the model is converted, so the
+        # caller can retry the same model with another checkpoint. The search restores the state
+        # read here rather than reading the checkpoint again.
+        self.config = config
+        self._preloaded_state = None
+        self.reset_search()
+        loaded = self.load_search_checkpoint()
+        state = self.state_dict()
+        self._preloaded_state = state if loaded else {}
+        if not state["candidate_stats"]:
+            return
+        if state.get("method") not in (None, self.method_name):
+            raise ValueError(
+                f"Checkpoint method '{state['method']}' does not match current method "
+                f"'{self.method_name}'. Use a different checkpoint path."
+            )
+        if mismatch := self.scoring_mismatch(state):
+            raise ValueError(f"{mismatch} Use a different checkpoint path.")
 
     def load_search_checkpoint(self) -> bool:
-        return super().load_search_checkpoint(strict=False)
+        state, self._preloaded_state = getattr(self, "_preloaded_state", None), None
+        if state is not None:  # read by validate_search_input; search() reset the attributes
+            for key, value in state.items():
+                setattr(self, key, value)
+            return bool(state)
+        loaded = super().load_search_checkpoint(strict=False)
+        # safe_save stores the defaultdict as a dict, which scoring after a resume fills by name.
+        self.candidate_stats = defaultdict(dict, self.candidate_stats)
+        return loaded
 
     @staticmethod
     def _is_auto_quantize_module(module):
@@ -1032,6 +1109,48 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             }
             for search_space in module_search_spaces
         ]
+
+    def _candidate_signatures(self) -> dict:
+        """Checkpoint-stable signatures of this config's global, fixed and per-module candidates."""
+        fixed = self._get_search_recipes(
+            [self.config["fixed_quantization_config"]]
+            if self.config["fixed_quantization_config"] is not None
+            else []
+        )
+        return {
+            "quantization_formats_signature": _quantization_formats_signature(
+                self._get_search_recipes(self.config["quantization_formats"])
+            ),
+            "fixed_quantization_config_signature": fixed[0].checkpoint_signature if fixed else None,
+            "module_search_space_signature": _module_search_space_signature(
+                self._normalize_module_search_spaces(self.config["module_search_spaces"])
+            ),
+        }
+
+    def candidate_mismatch(self, state: dict) -> str | None:
+        """How the candidates of a checkpoint's calibration or scores differ from this config's."""
+        if not (state.get("quantizer_states") or state.get("candidate_stats")):
+            return None
+        current = self._candidate_signatures()
+        restored = state.get("quantization_formats_signature")
+        if restored is None:
+            return (
+                "Checkpoint does not record its quantization_formats signature and cannot be "
+                "safely reused."
+            )
+        if restored != current["quantization_formats_signature"]:
+            return "Checkpoint quantization_formats do not match the current search config."
+        if (
+            state.get("fixed_quantization_config_signature")
+            != current["fixed_quantization_config_signature"]
+        ):
+            return "Checkpoint fixed_quantization_config does not match the current search config."
+        restored = state.get("module_search_space_signature")
+        if (restored is None and current["module_search_space_signature"]) or (
+            restored is not None and restored != current["module_search_space_signature"]
+        ):
+            return "Checkpoint module_search_spaces do not match the current search config."
+        return None
 
     @staticmethod
     def _match_module_search_space(quant_module_names, module_search_spaces):
@@ -1279,18 +1398,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 continue
 
             formats, raw_scores, scores, costs = [], [], [], []
-            prev_score = float("inf")
             for recipe in hparam.solver_choices:
                 formats.append(recipe)
-
-                score = hparam.get_score(recipe)
-                cost = hparam.get_cost(recipe)
-
-                raw_scores.append(score)
-                score = min(score, prev_score)  # TODO: Should we get rid of this?
-                scores.append(score)
-                costs.append(cost)
-                prev_score = score
+                # A format shard leaves other shards' formats unscored; their merge fills them.
+                scored = self._scores_recipe(hparam, recipe)
+                raw_scores.append(hparam.get_score(recipe) if scored else None)
+                costs.append(hparam.get_cost(recipe))
+            scores = _monotone_scores(raw_scores)
 
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
@@ -1312,6 +1426,45 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             total=num_iters,
         ):
             func(self.model, data)
+
+    def _other_shards_recipes(self, quant_recipe_hparams, search_recipes) -> set:
+        """The searched formats this format shard leaves to the others; none without sharding.
+
+        Formats are dealt round-robin in canonical (compression, then config) order, each
+        calibrated and scored by its own shard. Every shard calibrates the formats groups hold
+        fixed, since those shape the reference the other groups are scored against.
+        """
+        if self.format_shard is None:
+            return set()
+        index, count = self.format_shard
+        configurable = [hparam for hparam in quant_recipe_hparams if hparam.is_configurable]
+        searched = [
+            recipe
+            for recipe in search_recipes
+            if not recipe.is_no_quant and any(recipe in hparam.choices for hparam in configurable)
+        ]
+        if count > len(searched):
+            raise ValueError(
+                f"format_shard count {count} exceeds {len(searched)} searched formats."
+            )
+        owned = set(searched[index::count])
+        for hparam in configurable:
+            hparam._scored_recipes = owned
+        held = {
+            recipe
+            for hparam in quant_recipe_hparams
+            if not hparam.is_configurable
+            for recipe in hparam.choices
+        }
+        return set(searched) - owned - held - self._shared_calibration_recipes(quant_recipe_hparams)
+
+    def _shared_calibration_recipes(self, quant_recipe_hparams) -> set:
+        """Recipes every format shard calibrates besides its own (e.g. a scoring context)."""
+        return set()
+
+    def _scores_recipe(self, hparam, recipe) -> bool:
+        """Whether this process scores ``recipe`` of ``hparam``; BF16 scores 0 by construction."""
+        return recipe.is_no_quant or recipe in hparam.scored_choices
 
     def _snapshot_source_weights(self, quant_recipe_hparams, search_recipes):
         """CPU copies of the weights candidates' calibrations will rewrite, or None if none will.
@@ -1381,6 +1534,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                                     quantizer, weight
                                 )
                             )
+                            # A decoding encodes to its codes at the pinned scales.
+                            drop_search_scales(quantizer)
                 # Including the candidates not selected, which would otherwise replay their codes
                 # over the selected weights if made active again.
                 for _, _, quantizer in hparam._iter_quantizer_choices():
@@ -1421,7 +1576,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 f"current=({self.config['cost_model']}, {self.config['active_moe_expert_ratio']}). "
                 "Use a different checkpoint path."
             )
+        mismatch = self.scoring_mismatch(self.state_dict()) if self.candidate_stats else None
+        if mismatch:
+            raise ValueError(f"{mismatch} Use a different checkpoint path.")
         self.method = self.method_name
+        self.scoring_config = self.scoring_config_from(self.config)
         self.cost_model = self.config["cost_model"]
         self.cost = self.config["cost"]
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]
@@ -1439,59 +1598,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         )
         assert len(fixed_search_recipes) <= 1
         fixed_recipe = fixed_search_recipes[0] if fixed_search_recipes else None
-        quantization_formats_signature = _quantization_formats_signature(default_search_recipes)
-        fixed_quantization_config_signature = (
-            fixed_recipe.checkpoint_signature if fixed_recipe is not None else None
-        )
-        module_search_space_signature = _module_search_space_signature(module_search_spaces)
-        restored_quantization_formats_signature = getattr(
-            self, "quantization_formats_signature", None
-        )
-        restored_fixed_quantization_config_signature = getattr(
-            self, "fixed_quantization_config_signature", None
-        )
-        restored_module_search_space_signature = getattr(
-            self, "module_search_space_signature", None
-        )
         has_restored_calibration_or_scores = bool(self.quantizer_states or self.candidate_stats)
-        if has_restored_calibration_or_scores and restored_quantization_formats_signature is None:
-            raise ValueError(
-                "Checkpoint does not record its quantization_formats signature and cannot be "
-                "safely reused. Use a different checkpoint path."
-            )
-        if (
-            has_restored_calibration_or_scores
-            and restored_quantization_formats_signature != quantization_formats_signature
-        ):
-            raise ValueError(
-                "Checkpoint quantization_formats do not match the current search config. "
-                "Use a different checkpoint path."
-            )
-        if (
-            has_restored_calibration_or_scores
-            and restored_fixed_quantization_config_signature != fixed_quantization_config_signature
-        ):
-            raise ValueError(
-                "Checkpoint fixed_quantization_config does not match the current search config. "
-                "Use a different checkpoint path."
-            )
-        if has_restored_calibration_or_scores and (
-            (restored_module_search_space_signature is None and module_search_space_signature)
-            or (
-                restored_module_search_space_signature is not None
-                and restored_module_search_space_signature != module_search_space_signature
-            )
-        ):
-            raise ValueError(
-                "Checkpoint module_search_spaces do not match the current search config. "
-                "Use a different checkpoint path."
-            )
-        self.quantization_formats_signature = quantization_formats_signature
-        self.fixed_quantization_config_signature = fixed_quantization_config_signature
+        mismatch = self.candidate_mismatch(self.state_dict())
+        if mismatch:
+            raise ValueError(f"{mismatch} Use a different checkpoint path.")
+        for key, signature in self._candidate_signatures().items():
+            setattr(self, key, signature)
         self.fixed_quantization_config = (
             fixed_recipe.config.model_dump() if fixed_recipe is not None else None
         )
-        self.module_search_space_signature = module_search_space_signature
 
         search_recipes = sorted(
             {
@@ -1542,7 +1657,35 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.resolved_search_setup_signature = resolved_search_setup_signature
         self._verify_resolved_constraint(quant_recipe_hparams)
 
-        source_weights = self._snapshot_source_weights(quant_recipe_hparams, search_recipes)
+        format_shard = self.config["format_shard"]
+        restored_format_shard = self.format_shard
+        if restored_format_shard is not None:
+            restored_format_shard = tuple(restored_format_shard)
+        if has_restored_calibration_or_scores and restored_format_shard != format_shard:
+            raise ValueError(
+                f"Checkpoint holds format shard {restored_format_shard}, not {format_shard}. "
+                "Combine shard checkpoints with merge_auto_quantize_checkpoints() first."
+            )
+        self.format_shard = format_shard
+        # Scores sum over the batches, so restored calibration and scores keep the step counts they
+        # were computed with, which a shard's merge compares; a shard refuses to reuse them under
+        # other counts. An unsharded search reuses them as before, e.g. to re-solve a budget.
+        reused = {
+            "num_calib_steps": bool(self.quantizer_states),
+            "num_score_steps": bool(self.candidate_stats),
+        }
+        for key, is_reused in reused.items():
+            if not is_reused:
+                setattr(self, key, self.config[key])
+            elif format_shard is not None and getattr(self, key) != self.config[key]:
+                raise ValueError(
+                    f"This shard's checkpoint was computed with {key}={getattr(self, key)}, not "
+                    f"{self.config[key]}; resume it with the same counts or a new checkpoint."
+                )
+        other_shards_recipes = self._other_shards_recipes(quant_recipe_hparams, search_recipes)
+        calibration_recipes = [r for r in search_recipes if r not in other_shards_recipes]
+
+        source_weights = self._snapshot_source_weights(quant_recipe_hparams, calibration_recipes)
         # Free the weights conversion replaced before calibration and scoring.
         self.restore_unconverted = None
         QuantRecipe.disable_folding_pqs_to_weights()
@@ -1550,7 +1693,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         # Iterate over the search recipes and calibrate the quantizers for each recipe
         calibrated_new = False
         try:
-            for recipe in search_recipes:
+            for recipe in calibration_recipes:
                 if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
                     continue
 
@@ -1721,6 +1864,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     def run_search(self):
         """Search for the best per-layer quantization configuration and return the best model and configuration."""
         verbose = self.config["verbose"]
+        if self.format_shard is not None:
+            if verbose:
+                print_rank_0(
+                    f"AutoQuantize: format shard {self.format_shard} scored; merge the shard "
+                    "checkpoints with merge_auto_quantize_checkpoints() to solve."
+                )
+            return
         assert "effective_bits" in self.constraints and (
             set(self.constraints) <= AUTO_QUANTIZE_CONSTRAINT_KEYS
         ), (
@@ -1784,6 +1934,81 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
         self._write_selected_codes_to_weights()
         QuantRecipe.fold_pqs_to_weights(self.model)
+
+
+def _monotone_scores(raw_scores):
+    """Scores never increasing with compression; formats left unscored (None) stay None."""
+    scores, prev_score = [], float("inf")
+    for score in raw_scores:
+        if score is not None:
+            score = min(score, prev_score)  # TODO: Should we get rid of this?
+            prev_score = score
+        scores.append(score)
+    return scores
+
+
+_SHARD_INVARIANT_STATE = (
+    "method",
+    "scoring_config",
+    "cost_model",
+    "cost",
+    "active_moe_expert_ratio",
+    "quantization_formats_signature",
+    "fixed_quantization_config_signature",
+    "module_search_space_signature",
+    "resolved_search_setup_signature",
+    "num_calib_steps",
+    "num_score_steps",
+)
+
+
+def merge_auto_quantize_shards(shard_states: Sequence[dict]) -> dict:
+    """Combine the states of every format shard of one search into an unsharded search state."""
+    ids = [tuple(state.get("format_shard") or ()) for state in shard_states]
+    if sorted(ids) != [(index, len(ids)) for index in range(len(ids))]:
+        raise ValueError(
+            f"Merge needs one checkpoint per format shard (0..count-1, count), got {ids}."
+        )
+    shards = [state for _, state in sorted(zip(ids, shard_states), key=lambda pair: pair[0])]
+    for key in ("num_calib_steps", "num_score_steps"):
+        # Unrecorded counts would compare equal across shards whose scores scale differently.
+        if any(state.get(key) is None for state in shards):
+            raise ValueError(
+                f"Every format shard must record {key}; rerun shards saved without it."
+            )
+    # Copy the containers the merge fills, not the calibrated tensors (GGML codes) they hold.
+    merged = {
+        **shards[0],
+        "quantizer_states": dict(shards[0]["quantizer_states"]),
+        "candidate_stats": copy.deepcopy(shards[0]["candidate_stats"]),
+    }
+    for state in shards[1:]:
+        for key in _SHARD_INVARIANT_STATE:
+            if state.get(key) != merged.get(key):
+                raise ValueError(f"Format shards were run with different search setups ({key}).")
+        if state["candidate_stats"].keys() != merged["candidate_stats"].keys():
+            raise ValueError("Format shards were run with different quantization groups.")
+        merged["quantizer_states"].update(state["quantizer_states"])
+        for name, stats in state["candidate_stats"].items():
+            target = merged["candidate_stats"][name]
+            if [str(f) for f in stats["formats"]] != [str(f) for f in target["formats"]]:
+                raise ValueError(f"Format shards list different formats for {name}.")
+            for i, score in enumerate(stats["raw_scores"]):
+                current = target["raw_scores"][i]
+                if score is None or current == score:
+                    continue
+                # Every shard scores fixed groups alike (0), and BF16 too unless a KL context has
+                # shard 0 alone measure it; a sharded format is scored only once.
+                if current is not None:
+                    raise ValueError(f"Two format shards scored {target['formats'][i]} for {name}.")
+                target["raw_scores"][i] = score
+    for name, stats in merged["candidate_stats"].items():
+        if any(score is None for score in stats["raw_scores"]):
+            raise ValueError(f"No format shard scored every format of {name}.")
+        stats["scores"] = _monotone_scores(stats["raw_scores"])
+    merged["format_shard"] = None
+    merged["best"] = {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False}
+    return merged
 
 
 def _get_auto_quantize_score(grad_output, output_diff):
@@ -1976,7 +2201,7 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeCandidateReplayScoringSes
             return output
 
         output_diffs = self._replay_candidates(
-            module, base, lambda hparam: hparam.choices, *args, **kwargs
+            module, base, lambda hparam: hparam.scored_choices, *args, **kwargs
         )
         self._register_candidate_score_hook(module, base, output_diffs)
         return output
@@ -2169,13 +2394,14 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBackwardScoringSearcher):
 
 @torch.compile(dynamic=True)
 def _get_log_softmax_dist(logits: torch.Tensor, tp_group) -> torch.Tensor:
-    dtype = logits.dtype
+    # In fp32 like the unsharded path: a KL context adds one large base to every score, and a bf16
+    # KL would round away the candidates' differences.
     max_logits = torch.amax(logits, dim=-1, keepdim=True)
     torch.distributed.all_reduce(max_logits, op=torch.distributed.ReduceOp.MAX, group=tp_group)
-    logits = (logits - max_logits).float()
+    logits = logits.float() - max_logits
     sum_exp_logits = torch.exp(torch.logsumexp(logits, dim=-1, keepdim=True))
     torch.distributed.all_reduce(sum_exp_logits, op=torch.distributed.ReduceOp.SUM, group=tp_group)
-    return (logits - torch.log(sum_exp_logits)).to(dtype)
+    return logits - torch.log(sum_exp_logits)
 
 
 def _get_log_prob(logits: torch.Tensor, lm_head: nn.Module = None) -> torch.Tensor:
@@ -2208,14 +2434,27 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
     """A searcher for AutoQuantize algorithm that uses KL-Divergence loss based score estimation."""
 
     method_name = "kl_div"
+    method_config_keys = frozenset({"context_quant_level"})
+    scoring_config_keys = frozenset({"context_quant_level"})
 
     @property
     def default_search_config(self):
-        """Get the default config for the searcher."""
+        """Get the default config for the searcher.
+
+        ``context_quant_level``: the format the other searched groups take while one group's
+        candidates are scored (the scoring context). ``None`` (default) leaves them unquantized.
+        ``"lowest"`` quantizes each to its lowest-bit quantized candidate, and an int ``k`` to the
+        ``k``-th from the lowest, counting from 0 (so ``0`` is ``"lowest"``) and capped at its
+        highest. A score is then the KL at that operating point and also counts how a group's
+        error compounds with the others'; every candidate, BF16 included, is measured.
+        ``"lowest"`` is a good default; in our sub-4-bit tests a context nearer the budget
+        measured the same.
+        """
         config = super().default_search_config
         config.update(
             {
                 "forward_step": None,
+                "context_quant_level": None,
             }
         )
         return config
@@ -2235,7 +2474,39 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
             "`forward_step` must be provided for KL-Divergence loss based `auto_quantize`. "
             "`forward_step(model, data)` should return model logits."
         )
+        level = config["context_quant_level"]
+        if not (level in (None, "lowest") or (type(level) is int and level >= 0)):
+            raise ValueError(
+                f"kl_div context_quant_level must be None, 'lowest' or an int >= 0, got {level!r}."
+            )
         return config
+
+    def scoring_config_from(self, options: dict | None) -> dict:
+        """``0`` scores as ``"lowest"``; record one spelling so each reuses the other's scores."""
+        config = super().scoring_config_from(options)
+        if type(config["context_quant_level"]) is int and config["context_quant_level"] == 0:
+            config["context_quant_level"] = "lowest"
+        return config
+
+    def _context_recipe(self, hparam):
+        """The recipe ``hparam`` holds while other groups are scored; no-quant without a context."""
+        level = self.config["context_quant_level"]
+        if level is None:
+            return QuantRecipe(quant_cfg=None)
+        # choices are sorted by compression, so they run from lowest bits up to no-quant.
+        quantized = [recipe for recipe in hparam.choices if not recipe.is_no_quant]
+        return quantized[min(0 if level == "lowest" else level, len(quantized) - 1)]
+
+    def _shared_calibration_recipes(self, quant_recipe_hparams) -> set:
+        if self.config["context_quant_level"] is None:
+            return set()
+        return {self._context_recipe(h) for h in quant_recipe_hparams if h.is_configurable}
+
+    def _scores_recipe(self, hparam, recipe) -> bool:
+        if recipe.is_no_quant and self.config["context_quant_level"] is not None:
+            # BF16 is measured in the quantized context; one shard measures it for the merge.
+            return self.format_shard is None or self.format_shard[0] == 0
+        return super()._scores_recipe(hparam, recipe)
 
     @torch.inference_mode()
     def estimate_sensitivity_scores(self):
@@ -2243,13 +2514,20 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
 
         Higher score means more sensitive to quantization.
         """
+        no_quant = QuantRecipe(quant_cfg=None)
+        context = self.config["context_quant_level"]
 
-        def set_to_unquantized():
+        context_recipe = self._context_recipe
+
+        def set_to(recipe_of):
             for name, hparam in named_hparams(self.model, unique=True):
                 if not isinstance(hparam, QuantRecipeHparam):
                     continue
                 if hparam.is_configurable:
-                    hparam.active = QuantRecipe(quant_cfg=None)
+                    hparam.active = recipe_of(hparam)
+
+        def set_to_unquantized():
+            set_to(lambda hparam: no_quant)
 
         self.model.eval()
         num_iters = self.config["num_score_steps"]
@@ -2262,30 +2540,52 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
             logits_unquant = self.config["forward_step"](self.model, data)
             log_prob_unquant = _get_log_prob(logits_unquant, lm_head=_get_lm_head(self.model))
 
-            for name, hparam in tqdm(
-                list(named_hparams(self.model, configurable=True)), desc="Evaluating hparams"
+            def kl_to_unquantized():
+                logits_quant = self.config["forward_step"](self.model, data)
+                return _get_kl_div_loss(log_prob_unquant, logits_quant, _get_lm_head(self.model))
+
+            set_to(context_recipe)
+            hparams = [
+                hparam
+                for _, hparam in named_hparams(self.model, configurable=True)
+                if isinstance(hparam, QuantRecipeHparam)
+            ]
+            # A group at its own context recipe leaves the model in the context, so one forward
+            # scores that recipe for every group.
+            context_score = None
+            if context is not None and any(
+                self._scores_recipe(hparam, context_recipe(hparam)) for hparam in hparams
             ):
-                if not isinstance(hparam, QuantRecipeHparam):
-                    continue
-                for recipe in hparam.choices:
-                    if recipe == QuantRecipe(quant_cfg=None):
+                context_score = kl_to_unquantized()
+
+            for hparam in tqdm(hparams, desc="Evaluating hparams"):
+                for recipe in hparam.solver_choices:
+                    if recipe == no_quant and context is None:
+                        continue  # scores 0 by construction
+                    if not self._scores_recipe(hparam, recipe):
                         continue
-                    hparam.active = recipe
-                    logits_quant = self.config["forward_step"](self.model, data)
-                    score = _get_kl_div_loss(
-                        log_prob_unquant, logits_quant, _get_lm_head(self.model)
-                    )
-                    if hparam._importance_dict[recipe][hparam.score_modules[0]] is None:
-                        hparam._importance_dict[recipe][hparam.score_modules[0]] = score
+                    if context_score is not None and recipe == context_recipe(hparam):
+                        score = context_score
                     else:
-                        hparam._importance_dict[recipe][hparam.score_modules[0]] += score
-                hparam.active = QuantRecipe(quant_cfg=None)
+                        hparam.active = recipe
+                        score = kl_to_unquantized()
+                    scores = hparam._importance_dict[recipe]
+                    previous = scores[hparam.score_modules[0]]
+                    scores[hparam.score_modules[0]] = (
+                        score if previous is None else previous + score
+                    )
+                hparam.active = context_recipe(hparam)
+            set_to_unquantized()
 
     def run_search_with_stats(self, max_weight_size, verbose=False):
         """Run threshold-based binary search for KLDivergence loss based auto_quantize.
 
         We use binary search to minimize the max(per-layer score) while meeting the constraint.
+        A scoring context adds the same base damage to every candidate of every group, so a
+        threshold on raw scores is meaningless; those scores are ranked by their sum instead.
         """
+        if self.config["context_quant_level"] is not None:
+            return self._run_linear_program_search(max_weight_size, verbose)
         # Collect all sensitivity scores to determine initial threshold bounds
         all_scores = [
             score for name in self.candidate_stats for score in self.candidate_stats[name]["scores"]
@@ -2403,7 +2703,7 @@ def _get_replay_quantizer_attrs(candidate_stat: dict, module_name: str) -> tuple
     return _STD_QUANTIZER_ATTRS
 
 
-def get_auto_quantize_config(search_state, constraints=None, verbose=False):
+def get_auto_quantize_config(search_state, constraints=None, verbose=False, algorithm=None):
     """Build a flat quant config dict from auto_quantize search_state.
 
     Re-solves for ``constraints`` if provided, otherwise uses the best recipe from the search.
@@ -2412,6 +2712,7 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         search_state: The state dict returned by :func:`auto_quantize`.
         constraints: Optional dict with ``effective_bits`` key to re-solve for a new target.
         verbose: If True, prints the per-layer recipe assignments.
+        algorithm: Calibration algorithm of the returned config; ``"max"`` (with a warning) if None.
 
     Returns:
         A config dict suitable for :func:`quantize`.
@@ -2490,12 +2791,14 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
     # modules override default disables such as ``*lm_head*``.
     quant_cfg.extend(global_entries.values())
     quant_cfg.extend(per_module_entries)
-    warnings.warn(
-        "get_auto_quantize_config: returned config uses algorithm='max'. "
-        "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "
-        "Update config['algorithm'] if a different calibration algorithm is needed (e.g. 'gptq')."
-    )
-    return {"quant_cfg": quant_cfg, "algorithm": "max"}
+    if algorithm is None:
+        warnings.warn(
+            "get_auto_quantize_config: returned config uses algorithm='max'. "
+            "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "
+            "Pass `algorithm` if a different calibration algorithm is needed (e.g. 'gptq')."
+        )
+        algorithm = "max"
+    return {"quant_cfg": quant_cfg, "algorithm": algorithm}
 
 
 def _resolve_best_recipe(search_state, constraints, verbose=False):
@@ -2514,6 +2817,8 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
             f"Expected one of {sorted(AUTO_QUANTIZE_SEARCHERS)}."
         )
     searcher = AUTO_QUANTIZE_SEARCHERS[method]()
+    if unknown := searcher.unknown_scoring_options(search_state):
+        raise ValueError(f"Search state scoring options {unknown} are not known to {method!r}.")
     searcher.candidate_stats = candidate_stats
     searcher.cost_model = search_state.get("cost_model", COST_MODEL_WEIGHT)
     searcher.cost = search_state.get("cost", {})
@@ -2529,6 +2834,7 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
         "cost_model": searcher.cost_model,
         "cost": searcher.cost,
         "active_moe_expert_ratio": searcher.active_moe_expert_ratio,
+        **search_state.get("scoring_config", {}),
     }
     for key in searcher.default_state_dict:
         if key in search_state and not hasattr(searcher, key):

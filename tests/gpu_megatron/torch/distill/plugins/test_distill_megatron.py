@@ -237,11 +237,11 @@ def _test_topk_logits_kl_loss(kd_kwargs, rank, size):
     loss["kd_loss"].backward()
 
 
-def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size):
+def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, skip_frozen_mtp, rank, size):
     """Test that skip_lm_loss only zeroes the main LM head, unless MTP is left out of quantization.
 
     An explicit ``freeze_mtp`` overrides that: ``True`` zeroes the MTP loss and freezes the MTP head,
-    ``False`` keeps both.
+    ``False`` keeps both. ``skip_frozen_mtp`` skips a frozen MTP head in training forwards only.
     """
     set_seed(SEED)
 
@@ -291,7 +291,9 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
     distill_cfg = setup_distillation_config(
         # kd_loss_alpha == 1.0 skips the LM loss; any alpha < 1 keeps it.
         config_or_path=DistillationConfig(
-            kd_loss_alpha=1.0 if skip_lm_loss else 0.5, freeze_mtp=freeze_mtp
+            kd_loss_alpha=1.0 if skip_lm_loss else 0.5,
+            freeze_mtp=freeze_mtp,
+            skip_frozen_mtp=skip_frozen_mtp,
         ),
         student_cfg=student_model.config,
         teacher_cfg=teacher_model.config,
@@ -302,10 +304,27 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
         "loss_balancer": distill_cfg.loss_balancer,
     }
     distillation_model = mtd.convert(student_model, mode=[("kd_loss", kd_config)])
-    adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
-
     # An untrained MTP head is frozen so DDP doesn't wait for its grads.
     mtp_skipped = (quantized and skip_lm_loss) if freeze_mtp is None else freeze_mtp
+    if skip_frozen_mtp and not mtp_skipped:
+        with pytest.raises(ValueError):
+            adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+        return
+    if skip_frozen_mtp:
+        # Also refused, leaving the model as it was: a micro-batch quantile-balancing router in the
+        # MTP head (its bias would be reset), and a KD loss on the MTP head (it never runs).
+        mtp_layer = distillation_model.mtp.layers[0]
+        mtp_layer.qb_beta_accum = torch.zeros(1)
+        with pytest.raises(ValueError):
+            adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+        del mtp_layer.qb_beta_accum
+        mtp_pair = ("mtp.layers.0", "mtp.layers.0")
+        distill_cfg.criterion[mtp_pair] = distill_cfg.criterion[tuple(distill_cfg.logit_layers)]
+        with pytest.raises(ValueError):
+            adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+        del distill_cfg.criterion[mtp_pair]
+    adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+
     with distillation_model.hide_teacher_model():
         mtp_params = [p for n, p in distillation_model.named_parameters() if "mtp" in n.split(".")]
     assert mtp_params
@@ -321,6 +340,11 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
         return loss
 
     distillation_model.compute_language_model_loss = _recording_loss
+    mtp_calls = []
+    distillation_model.mtp.register_forward_hook(lambda *_: mtp_calls.append("student"))
+    distillation_model.teacher_model.mtp.register_forward_hook(
+        lambda *_: mtp_calls.append("teacher")
+    )
 
     distillation_model.train()
     prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
@@ -337,17 +361,24 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
 
     distillation_model(prompt_tokens, position_ids, attention_mask, labels=labels)
 
-    # Expect mtp_num_layers + 1 total calls: first mtp_num_layers are MTP heads,
-    # the last one is the main LM head.
-    assert len(recorded_losses) == mtp_num_layers + 1, (
-        f"Expected {mtp_num_layers + 1} loss calls, got {len(recorded_losses)}"
+    # Expect one call per MTP head that runs, then one for the main LM head.
+    num_mtp_heads = 0 if skip_frozen_mtp else mtp_num_layers
+    assert mtp_calls == ([] if skip_frozen_mtp else ["teacher", "student"])
+    assert len(recorded_losses) == num_mtp_heads + 1, (
+        f"Expected {num_mtp_heads + 1} loss calls, got {len(recorded_losses)}"
     )
     for i, loss in enumerate(recorded_losses[:-1]):
         assert loss.any() != mtp_skipped, f"MTP head {i} loss should be zero iff MTP is skipped"
     assert recorded_losses[-1].any() != skip_lm_loss, "Main LM head loss is zero iff skip_lm_loss"
+    if skip_frozen_mtp:  # evaluation still runs both MTP heads
+        distillation_model.eval()
+        distillation_model(prompt_tokens, position_ids, attention_mask, labels=labels)
+        assert mtp_calls == ["teacher", "student"]
 
 
-def _test_freeze_mtp_training_step(mtp_quantized, freeze_mtp, kd_loss_alpha, rank, size):
+def _test_freeze_mtp_training_step(
+    mtp_quantized, freeze_mtp, kd_loss_alpha, skip_frozen_mtp, rank, size
+):
     """Through a training step, the MTP head is frozen exactly when ``freeze_mtp`` resolves to it."""
     set_seed(SEED)
 
@@ -377,7 +408,9 @@ def _test_freeze_mtp_training_step(mtp_quantized, freeze_mtp, kd_loss_alpha, ran
     frozen = (kd_loss_alpha == 1.0 and not mtp_quantized) if freeze_mtp is None else freeze_mtp
 
     distill_cfg = setup_distillation_config(
-        config_or_path=DistillationConfig(kd_loss_alpha=kd_loss_alpha, freeze_mtp=freeze_mtp),
+        config_or_path=DistillationConfig(
+            kd_loss_alpha=kd_loss_alpha, freeze_mtp=freeze_mtp, skip_frozen_mtp=skip_frozen_mtp
+        ),
         student_cfg=student_model.config,
         teacher_cfg=teacher_model.config,
     )
@@ -640,37 +673,51 @@ def test_distillation_config_top_p_validation():
 
 
 @pytest.mark.parametrize(
-    ("quantized", "skip_lm_loss", "freeze_mtp"),
+    ("quantized", "skip_lm_loss", "freeze_mtp", "skip_frozen_mtp"),
     [
-        (False, True, None),
-        (True, True, None),
-        (True, False, None),
-        (False, True, True),
-        (False, False, True),
-        (True, True, False),  # explicit False overrides the automatic freeze
+        (False, True, None, False),
+        (True, True, None, False),
+        (True, False, None, False),
+        (False, True, True, False),
+        (False, False, True, False),
+        (True, True, False, False),  # explicit False overrides the automatic freeze
+        (True, True, None, True),  # skip_frozen_mtp skips the automatically frozen MTP head
+        (False, False, True, True),  # its single LM-loss call is the main head's
+        (False, True, None, True),  # refused: the MTP head keeps training
     ],
 )
-def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss, freeze_mtp):
+def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss, freeze_mtp, skip_frozen_mtp):
     """Test that skip_lm_loss only zeroes the main LM head, unless MTP is left out of quantization."""
-    dist_workers.run(partial(_test_skip_lm_loss_with_mtp, quantized, skip_lm_loss, freeze_mtp))
+    dist_workers.run(
+        partial(_test_skip_lm_loss_with_mtp, quantized, skip_lm_loss, freeze_mtp, skip_frozen_mtp)
+    )
 
 
 @pytest.mark.parametrize(
-    ("mtp_quantized", "freeze_mtp", "kd_loss_alpha"),
+    ("mtp_quantized", "freeze_mtp", "kd_loss_alpha", "skip_frozen_mtp"),
     [
-        (True, None, 1.0),  # automatic: a quantized MTP head keeps training
-        (False, None, 1.0),  # automatic: an unquantized MTP head is frozen
-        (False, False, 1.0),  # explicit False overrides the automatic freeze
-        (True, True, 1.0),
-        (True, True, 0.5),
-        (False, True, 0.5),
-        (True, False, 1.0),
+        (True, None, 1.0, False),  # automatic: a quantized MTP head keeps training
+        (False, None, 1.0, False),  # automatic: an unquantized MTP head is frozen
+        (False, False, 1.0, False),  # explicit False overrides the automatic freeze
+        (True, True, 1.0, False),
+        (True, True, 0.5, False),
+        (False, True, 0.5, False),
+        (True, False, 1.0, False),
+        (False, None, 1.0, True),  # skipping the frozen MTP head still trains the rest
     ],
 )
-def test_freeze_mtp_training_step(dist_workers, mtp_quantized, freeze_mtp, kd_loss_alpha):
+def test_freeze_mtp_training_step(
+    dist_workers, mtp_quantized, freeze_mtp, kd_loss_alpha, skip_frozen_mtp
+):
     """Through a training step, the MTP head is frozen exactly when ``freeze_mtp`` resolves to it."""
     dist_workers.run(
-        partial(_test_freeze_mtp_training_step, mtp_quantized, freeze_mtp, kd_loss_alpha)
+        partial(
+            _test_freeze_mtp_training_step,
+            mtp_quantized,
+            freeze_mtp,
+            kd_loss_alpha,
+            skip_frozen_mtp,
+        )
     )
 
 

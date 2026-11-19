@@ -40,6 +40,7 @@ from .codebooks import iq1_s_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
+    ScaleFit,
     choice_blocks,
     chunk_importance,
     dequantize_blocks,
@@ -51,7 +52,9 @@ from .common import (
     validate_block_chunk_size,
     validate_packed_weights,
     validate_weight,
+    with_leading_fp16_scales,
 )
+from .scale_fields import NativeScaleSpec
 
 __all__ = [
     "IQ1_S_BLOCK_BYTES",
@@ -67,6 +70,11 @@ IQ1_S_BLOCK_SIZE = GGML_BLOCK_SIZE
 IQ1_S_BLOCK_BYTES = 50
 IQ1_S_EFFECTIVE_BITS = IQ1_S_BLOCK_BYTES * 8 / IQ1_S_BLOCK_SIZE
 _IQ1_S_DELTA = 0.125
+# The three IQ1 levels under each delta sign, as a sub-block's scale is fit to them.
+_IQ1_LEVELS = (
+    (-1 + _IQ1_S_DELTA, _IQ1_S_DELTA, 1 + _IQ1_S_DELTA),
+    (-1 - _IQ1_S_DELTA, -_IQ1_S_DELTA, 1 - _IQ1_S_DELTA),
+)
 _IQ1_S_INT8_GROUP_SIZE = 32
 _IQ1_S_NATIVE_MAX = 16.875
 _IQ1_S_SCALE_ANCHOR = 0.61
@@ -356,8 +364,24 @@ def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return levels.reshape(-1, IQ1_S_BLOCK_SIZE), steps
 
 
+def _read_local_scales(blocks: torch.Tensor) -> torch.Tensor:
+    return (blocks[:, 35:50:2].int() >> 4) & 7
+
+
+def _write_local_scales(blocks: torch.Tensor, local: torch.Tensor) -> None:
+    blocks[:, 35:50:2] = (blocks[:, 35:50:2] & 143) | (local.to(torch.uint8) << 4)
+
+
 IQ1_S_FORMAT = GGMLFormat(
     name="iq1_s",
+    scale_spec=NativeScaleSpec(
+        local_max=7,
+        local_multiplier=2,
+        local_bias=1,
+        divisor=8,
+        read_local=_read_local_scales,
+        write_local=_write_local_scales,
+    ),
     block_size=IQ1_S_BLOCK_SIZE,
     block_bytes=IQ1_S_BLOCK_BYTES,
     quantize=quantize_iq1_s,
@@ -372,6 +396,8 @@ IQ1_S_FORMAT = GGMLFormat(
     choice_groups=8,
     num_choices=16,
     payload_scales=leading_fp16_scales,
+    scale_fit=ScaleFit(top=15, levels=_IQ1_LEVELS),
+    replace_payload_scales=with_leading_fp16_scales,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq1_s and

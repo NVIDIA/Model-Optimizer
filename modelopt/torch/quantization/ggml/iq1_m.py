@@ -44,6 +44,7 @@ from ..extensions import get_cuda_ext_ggml
 from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
+    ScaleFit,
     choice_blocks,
     chunk_importance,
     dequantize_blocks,
@@ -55,7 +56,8 @@ from .common import (
     validate_packed_weights,
     validate_weight,
 )
-from .iq1_s import _search_shifted_grid, iq1_s_grid
+from .iq1_s import _IQ1_LEVELS, _search_shifted_grid, iq1_s_grid
+from .scale_fields import NativeScaleSpec
 
 __all__ = [
     "IQ1_M_BLOCK_BYTES",
@@ -265,11 +267,8 @@ def _unpack_fields(
     nibbles = torch.stack((high & 15, high >> 4), -1).reshape(count, 32)
     entries = packed[:, :32].long() | ((nibbles & 7) << 8)
     auxiliary = nibbles >> 3
-    words = _scale_words(packed)
     d = _payload_scales(packed).float()
-    local = ((words.unsqueeze(-1) >> (torch.arange(4, device=packed.device) * 3)) & 7).reshape(
-        count, 16
-    )
+    local = _read_local_scales(packed)
     return entries.reshape(count, 32), auxiliary, local, d
 
 
@@ -285,11 +284,27 @@ def _pack_fields(
     nibbles = (entries >> 8) | (auxiliary << 3)
     packed[:, 32:48] = (nibbles[:, ::2] | (nibbles[:, 1::2] << 4)).to(torch.uint8)
     words = (local.reshape(count, 4, 4) << (torch.arange(4, device=entries.device) * 3)).sum(-1)
-    d_bits = native_d.contiguous().view(torch.int16).long() & 65535
-    words |= ((d_bits.unsqueeze(-1) >> (torch.arange(4, device=entries.device) * 4)) & 15) << 12
-    packed[:, 48:56:2] = (words & 255).to(torch.uint8)
-    packed[:, 49:56:2] = (words >> 8).to(torch.uint8)
+    _write_scale_words(packed, words, native_d)
     return torch.where((native_d == 0).unsqueeze(-1), 0, packed)
+
+
+def _write_scale_words(blocks: torch.Tensor, local_bits: torch.Tensor, scales: torch.Tensor):
+    """Write each block's four scale words, ``local_bits`` below one nibble of its FP16 scale.
+
+    Bits 0..11 hold the local scales and bits 12..15 the scale's nibbles, low nibble first.
+    """
+    d_bits = scales.to(torch.float16).contiguous().view(torch.int16).to(torch.int64) & 0xFFFF
+    nibble_shifts = torch.tensor([0, 4, 8, 12], dtype=torch.int64, device=blocks.device)
+    words = local_bits | (((d_bits.unsqueeze(-1) >> nibble_shifts) & 0xF) << 12)
+    blocks[:, 48:56:2] = (words & 0xFF).to(torch.uint8)
+    blocks[:, 49:56:2] = ((words >> 8) & 0xFF).to(torch.uint8)
+
+
+def _replace_payload_scales(blocks: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """``blocks`` with each FP16 super-block scale written back into the scale words' top nibbles."""
+    replaced = blocks.clone()
+    _write_scale_words(replaced, _scale_words(blocks) & 0x0FFF, scales)
+    return replaced
 
 
 def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -301,8 +316,27 @@ def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return levels.reshape(-1, IQ1_M_BLOCK_SIZE), steps
 
 
+def _read_local_scales(blocks: torch.Tensor) -> torch.Tensor:
+    shifts = torch.tensor([0, 3, 6, 9], device=blocks.device)
+    return ((_scale_words(blocks).unsqueeze(-1) >> shifts) & 7).reshape(-1, 16)
+
+
+def _write_local_scales(blocks: torch.Tensor, local: torch.Tensor) -> None:
+    shifts = torch.tensor([0, 3, 6, 9], device=blocks.device)
+    words = (local.int().reshape(-1, 4, 4) << shifts).sum(-1)
+    _write_scale_words(blocks, words, _payload_scales(blocks))
+
+
 IQ1_M_FORMAT = GGMLFormat(
     name="iq1_m",
+    scale_spec=NativeScaleSpec(
+        local_max=7,
+        local_multiplier=2,
+        local_bias=1,
+        divisor=8,
+        read_local=_read_local_scales,
+        write_local=_write_local_scales,
+    ),
     block_size=IQ1_M_BLOCK_SIZE,
     block_bytes=IQ1_M_BLOCK_BYTES,
     quantize=quantize_iq1_m,
@@ -317,6 +351,8 @@ IQ1_M_FORMAT = GGMLFormat(
     choice_groups=16,
     num_choices=8,
     payload_scales=_payload_scales,
+    scale_fit=ScaleFit(top=15, levels=_IQ1_LEVELS),
+    replace_payload_scales=_replace_payload_scales,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq1_m and

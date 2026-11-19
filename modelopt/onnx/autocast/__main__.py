@@ -74,6 +74,14 @@ def get_parser() -> argparse.ArgumentParser:
         "precision conversion decisions. If not provided, random inputs will be used.",
     )
     parser.add_argument(
+        "--calibrate_per_node",
+        action="store_true",
+        help=(
+            "Run calibration node by node to reduce peak memory consumption, at the cost of "
+            "longer calibration time."
+        ),
+    )
+    parser.add_argument(
         "--nodes_to_exclude",
         "-ne",
         type=str,
@@ -227,6 +235,7 @@ def main(argv=None):
         init_max=args.init_max,
         keep_io_types=args.keep_io_types,
         calibration_data=args.calibration_data,
+        calibrate_per_node=args.calibrate_per_node,
         init_conversion_max_bytes=args.init_conversion_max_bytes,
         providers=args.providers,
         trt_plugins=args.trt_plugins,

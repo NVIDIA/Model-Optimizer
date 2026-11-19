@@ -1,0 +1,156 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Pre-commit hook: read ``MODELOPT_*`` environment variables only through ``modelopt/env.py``.
+
+``modelopt/env.py`` holds one documented accessor per ``MODELOPT_*`` variable ModelOpt reads. The hook
+fails on a read of a ``MODELOPT_*`` variable through ``os.environ`` or ``os.getenv``, under any
+name the file imports them as, in any other Python file under ``modelopt/``; setting or deleting
+one is not a read. Under ``examples/`` it fails only on a name ``modelopt/env.py`` reads: an example
+keeps its own variables, but reads the library's through their accessors. A name is recognized as a
+string literal, the leading text of an f-string, or a module-level string constant.
+"""
+
+import ast
+import re
+import sys
+from collections.abc import Iterator
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_ENV_MODULE = _REPO_ROOT / "modelopt" / "env.py"
+_PREFIX = "MODELOPT_"
+# os.environ methods and os functions that return a variable's value, given its name first.
+_ENVIRON_METHODS = {"get", "pop", "setdefault"}
+_OS_FUNCTIONS = {"getenv"}
+
+
+def _local_names(tree: ast.AST) -> dict[str, set[str]]:
+    """The names ``tree`` knows ``os``, ``environ`` and ``getenv`` by: their own and any aliases."""
+    names = {name: {name} for name in ("os", "environ", *_OS_FUNCTIONS)}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            aliases = [alias for alias in node.names if alias.name == "os"]
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            aliases = [alias for alias in node.names if alias.name in names]
+        else:
+            continue
+        for alias in aliases:
+            if alias.asname:
+                names[alias.name].add(alias.asname)
+    return names
+
+
+def _is_os(node: ast.expr, names: dict[str, set[str]]) -> bool:
+    return isinstance(node, ast.Name) and node.id in names["os"]
+
+
+def _is_environ(node: ast.expr, names: dict[str, set[str]]) -> bool:
+    """``os.environ``, or ``environ`` imported from ``os``."""
+    if isinstance(node, ast.Attribute):
+        return node.attr == "environ" and _is_os(node.value, names)
+    return isinstance(node, ast.Name) and node.id in names["environ"]
+
+
+def _is_env_function(func: ast.expr, names: dict[str, set[str]]) -> bool:
+    """``os.environ.get`` and the like, or ``os.getenv``, also imported from ``os``."""
+    if isinstance(func, ast.Attribute):
+        return (func.attr in _ENVIRON_METHODS and _is_environ(func.value, names)) or (
+            func.attr in _OS_FUNCTIONS and _is_os(func.value, names)
+        )
+    return isinstance(func, ast.Name) and any(func.id in names[f] for f in _OS_FUNCTIONS)
+
+
+def _accessed_names(tree: ast.AST) -> Iterator[ast.expr]:
+    """The name expression of every environment read in ``tree``."""
+    names = _local_names(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_env_function(node.func, names):
+            # The variable's name comes first, or as ``key=``.
+            yield from node.args[:1] or [kw.value for kw in node.keywords if kw.arg == "key"]
+        elif (
+            isinstance(node, ast.Subscript)
+            and _is_environ(node.value, names)
+            and isinstance(node.ctx, ast.Load)
+        ):
+            yield node.slice
+        elif (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.target, ast.Subscript)
+            and _is_environ(node.target.value, names)
+        ):
+            # ``os.environ[name] += ...`` reads the variable before setting it.
+            yield node.target.slice
+        elif (
+            isinstance(node, ast.Compare)
+            and isinstance(node.ops[0], (ast.In, ast.NotIn))
+            and _is_environ(node.comparators[0], names)
+        ):
+            yield node.left
+
+
+def _string_constants(tree: ast.Module) -> dict[str, str]:
+    """Module-level ``NAME = "text"`` assignments, to see through ``os.environ.get(NAME)``."""
+    constants = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign | ast.AnnAssign) and isinstance(node.value, ast.Constant):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and isinstance(node.value.value, str):
+                    constants[target.id] = node.value.value
+    return constants
+
+
+def _text(name: ast.expr, constants: dict[str, str]) -> str | None:
+    """The accessed name, or an f-string's leading text; ``None`` when it is not known statically."""
+    if isinstance(name, ast.Constant) and isinstance(name.value, str):
+        return name.value
+    if isinstance(name, ast.JoinedStr) and name.values and isinstance(name.values[0], ast.Constant):
+        return str(name.values[0].value)
+    if isinstance(name, ast.Name):
+        return constants.get(name.id)
+    return None
+
+
+def _violations(path: Path, library_knobs: set[str]) -> list[str]:
+    in_library = path.relative_to(_REPO_ROOT).parts[0] == "modelopt"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    constants = _string_constants(tree)
+    found = []
+    for name in _accessed_names(tree):
+        text = _text(name, constants)
+        if text and text.startswith(_PREFIX) and (in_library or text in library_knobs):
+            found.append(
+                f"{path.relative_to(_REPO_ROOT)}:{name.lineno}: reads {text} from the environment; "
+                "read it through its accessor in modelopt/env.py, adding one there if it is new."
+            )
+    return found
+
+
+def main() -> int:
+    """Check the Python files pre-commit passes in, exit 1 on a violation."""
+    library_knobs = set(re.findall(r"[\"'](MODELOPT_[A-Z0-9_]+)[\"']", _ENV_MODULE.read_text()))
+    errors: list[str] = []
+    for arg in sys.argv[1:]:
+        path = Path(arg).resolve()
+        if path.suffix == ".py" and path != _ENV_MODULE:
+            errors.extend(_violations(path, library_knobs))
+    for error in errors:
+        print(f"ERROR: {error}", file=sys.stderr)
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

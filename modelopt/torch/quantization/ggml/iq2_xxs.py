@@ -42,6 +42,7 @@ from .codebooks import iq2_xxs_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
+    ScaleFit,
     choice_blocks,
     chunk_importance,
     dequantize_blocks,
@@ -54,7 +55,9 @@ from .common import (
     validate_block_chunk_size,
     validate_packed_weights,
     validate_weight,
+    with_leading_fp16_scales,
 )
+from .scale_fields import NativeScaleSpec
 
 __all__ = [
     "IQ2_XXS_BLOCK_BYTES",
@@ -334,8 +337,24 @@ def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return levels.reshape(-1, IQ2_XXS_BLOCK_SIZE), steps
 
 
+def _read_local_scales(blocks: torch.Tensor) -> torch.Tensor:
+    return blocks[:, 9::8].int() >> 4
+
+
+def _write_local_scales(blocks: torch.Tensor, local: torch.Tensor) -> None:
+    blocks[:, 9::8] = (blocks[:, 9::8] & 15) | (local.to(torch.uint8) << 4)
+
+
 IQ2_XXS_FORMAT = GGMLFormat(
     name="iq2_xxs",
+    scale_spec=NativeScaleSpec(
+        local_max=15,
+        local_multiplier=2,
+        local_bias=1,
+        divisor=8,
+        read_local=_read_local_scales,
+        write_local=_write_local_scales,
+    ),
     block_size=IQ2_XXS_BLOCK_SIZE,
     block_bytes=IQ2_XXS_BLOCK_BYTES,
     quantize=quantize_iq2_xxs,
@@ -350,6 +369,9 @@ IQ2_XXS_FORMAT = GGMLFormat(
     choice_groups=_IQ2_XXS_SUBBLOCKS,
     num_choices=_IQ2_XXS_LOCAL_SCALES,
     payload_scales=leading_fp16_scales,
+    # Fit at llama.cpp's levels 1, 3, 5, the odd steps its grid's 8, 25, 43 (in eighths) round to.
+    scale_fit=ScaleFit(top=31, levels=((1.0, 3.0, 5.0),)),
+    replace_payload_scales=with_leading_fp16_scales,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq2_xxs and

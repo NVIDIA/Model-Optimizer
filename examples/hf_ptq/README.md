@@ -139,7 +139,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>10.</sup>GPT-OSS ships with native MXFP4 weights; NVFP4 export is produced via the closed-form `--cast_mxfp4_to_nvfp4` cast (see [MXFP4 → NVFP4 cast](#mxfp4--nvfp4-cast-for-gpt-oss)).* \
 > *<sup>11.</sup>Vision-language model (VLM): by default, only the language model is quantized while the vision encoder is kept in high precision. Pass `--vlm` to the shell script (see [VLM quantization](#vlm-quantization)).* \
 > *<sup>12.</sup>For VLMs, `int8_smoothquant` only supports TensorRT-LLM checkpoint export and is not compatible with the TensorRT-LLM torch backend.* \
-> *<sup>13.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).* \
+> *<sup>13.</sup>The Nemotron VL model types `NemotronH_Nano_VL_V2`, `NemotronH_Nano_Omni_Reasoning_V3`, `nemotron_h_omni`, `Llama_Nemotron_Nano_VL` and `nemotron_parse` calibrate with image-text pairs by default; other VLMs need `--calib_with_images`. The default does not apply with `--use_fsdp2`, where these types need the flag too, or with an AutoQuantize recipe, whose calibration is text-only. See [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).* \
 > *<sup>14.</sup>Qwen3-VL and dense Qwen3.5 VLM checkpoints support opt-in FP8 vision encoder quantization through model-specific recipes. Vision Linear layers, including primary and deepstack merger Linears where present, are quantized; patch embedding and vision-attention BMMs remain in high precision. MoE variants are not validated by these recipes.* \
 > *<sup>15.</sup>Kimi K3 uses the calibration-free [streaming converter](../kimi/README.md) because its routed experts are released as packed MXFP4 tensors; it does not use the in-memory `hf_ptq.py` flow.*
 
@@ -436,9 +436,10 @@ and keeps the more sensitive ones at higher precision (or unquantized), so the m
 `effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
 `constraints.effective_bits`, `auto_quantize_method` (`gradient`, `kl_div`, or `aumann_shapley`),
 `method_options`, `score_size`, `module_search_spaces` (optional per-module candidate overrides),
-`disabled_layers` (excluded from the search), and `cost_excluded_layers` (kept out of the bit-budget
-accounting — e.g. VL vision towers). Recipes can splice a shared base `disabled_layers` set via `$import` (see
-`modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
+`disabled_layers` (excluded from the search), `cost_excluded_layers` (kept out of the bit-budget
+accounting — e.g. VL vision towers), and `finalize_algorithm` (see
+[below](#scoring-and-finalizing-autoquantize-in-separate-runs)). Recipes can splice a shared base
+`disabled_layers` set via `$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
 
 An Aumann-Shapley recipe can target effective bits:
 
@@ -588,6 +589,67 @@ The example scripts above also have an additional flag `--tasks`, where the actu
 > *If GPU out-of-memory error is reported running the scripts, please try editing the scripts and reducing the max batch size to save GPU memory.*
 
 > *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` or `aumann_shapley` methods. Aumann-Shapley does not need labels, but it still backpropagates its comparison loss. The `kl_div` method does not require backpropagation.*
+
+### Scoring and finalizing AutoQuantize in separate runs
+
+Sequential (layerwise) GPTQ makes each layer's result depend on the formats chosen for the layers
+before it, which a per-layer search cannot score. Set `auto_quantize.finalize_algorithm` to run such
+an algorithm once the formats are chosen; the search still scores each candidate with its own
+algorithm:
+
+```yaml
+auto_quantize:
+  # candidate_formats, constraints.effective_bits, ... as above
+  finalize_algorithm:
+    method: gptq
+    layerwise:
+      enable: true
+```
+
+The first run then saves the scores to `--auto_quantize_checkpoint` and stops without exporting.
+Rerun the same command: it re-solves for `constraints.effective_bits`, quantizes the freshly loaded
+source weights with the selected formats, `finalize_algorithm` and the KV-cache config, and exports.
+When `finalize_algorithm` is layerwise, the rerun's default batch is sized for one decoder layer.
+Changing only `effective_bits` finalizes the same scores at another budget; the disabled layers and
+cost model come from the checkpoint, so change those with a new one. From Python,
+`mtq.get_auto_quantize_config(search_state, constraints, algorithm=...)` returns the finalized config.
+
+Gradient and `kl_div` searches can also score their formats in parallel processes, at most one
+*format shard* per searched format. Give every shard the same explicit `--batch_size` and its own
+checkpoint, then merge them into a new checkpoint. The merge run solves and exports like the
+unsharded search, or finalizes if the recipe sets `finalize_algorithm`:
+
+```bash
+RECIPE=general/auto_quantize/nvfp4_fp8_at_5p4bits  # searches two formats
+for i in 0 1; do  # one shard per GPU
+  CUDA_VISIBLE_DEVICES=$i python hf_ptq.py --pyt_ckpt_path $HF_PATH --recipe $RECIPE --batch_size 4 \
+    --auto_quantize_checkpoint /path/to/shard$i.pth --auto_quantize_format_shard $i/2 &
+done; wait
+python hf_ptq.py --pyt_ckpt_path $HF_PATH --recipe $RECIPE \
+  --auto_quantize_merge_shards /path/to/shard0.pth,/path/to/shard1.pth \
+  --auto_quantize_checkpoint /path/to/merged.pth --export_path /path/to/export
+```
+
+Both need `--auto_quantize_checkpoint` and a weight search for `constraints.effective_bits` without
+a KV-cache search, in a single `hf_ptq.py` process: not under `torchrun` or with `--use_fsdp2`.
+
+### Sub-4-bit AutoQuantize (GGML formats)
+
+Below 4 bits (IQ2 and similar GGML formats), the default search does no better than uniform
+quantization. The
+[Qwen3.6-35B-A3B](../../modelopt_recipes/models/Qwen/Qwen3.6-35B-A3B/auto_quantize/README.md)
+recipe uses this setup:
+
+- **Score KL in a low-bit context:** `auto_quantize_method: kl_div` with
+  `method_options: {context_quant_level: lowest}`. Default scoring prices each layer with every
+  other layer in BF16. At 2 bits, that rates early layers ~30× more sensitive than late ones and
+  starves the late layers. A context scores every candidate with the other searched layers at their
+  lowest-bit format, or at the `k`-th from the lowest with `context_quant_level: k`. At NVFP4/FP8
+  budgets, context scoring did not beat the default gradient scoring in our tests.
+- **Finalize with sequential GPTQ:** calibrate the IQ candidates with local GPTQ + imatrix and set
+  `finalize_algorithm` to sequential GPTQ + imatrix. That gives ~20% lower KL than imatrix alone.
+- **Search the MoE experts only**, and keep the other layers at fixed formats.
+- **Score the formats in parallel** with format shards, as above.
 
 ## Real Quant
 
@@ -767,7 +829,7 @@ print(llm_fp8.generate(["What's the age of the earth? "]))
 
 #### vLLM with GGML recipes (IQ, Q8_0)
 
-vLLM cannot load the GGML checkpoints ModelOpt exports, which are Hugging Face checkpoints holding packed GGML blocks. To serve one on vLLM's integer kernels, expand it into an INT8 weight-only compressed-tensors checkpoint with [convert_ggml_to_int8.py](./convert_ggml_to_int8.py):
+vLLM cannot load the GGML checkpoints ModelOpt exports, which are Hugging Face checkpoints holding packed GGML blocks. To serve one on vLLM's integer kernels, expand it into an INT8 weight-only checkpoint with [convert_ggml_to_int8.py](./convert_ggml_to_int8.py).
 
 ```bash
 python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --recipe general/ptq/iq1_s --export_path <ggml_ckpt_path>
@@ -775,7 +837,10 @@ python convert_ggml_to_int8.py <ggml_ckpt_path> <int8_ckpt_path>
 vllm serve <int8_ckpt_path>
 ```
 
-Each weight keeps its GGML integer level, and the step of its 16- or 32-weight sub-block becomes the INT8 group scale. The INT8 checkpoint therefore holds the same weights up to rounding the scales to the model dtype, at about half the BF16 weight memory. Its config names each converted layer explicitly, so every other layer loads unquantized. The GGML checkpoint is left unchanged.
+Each weight keeps its GGML integer level as int8, and the step of its 16- or 32-weight sub-block becomes its group scale. The INT8 checkpoint therefore holds the same weights up to rounding the scales to the model dtype, at about half the BF16 weight memory. The GGML checkpoint is left unchanged. The script picks the checkpoint format from the export:
+
+- **Only GGML layers** (IQ formats or `q8_0`, plus unquantized layers): a compressed-tensors checkpoint of pack-quantized INT8 group layers, which released vLLM serves.
+- **GGML layers beside other formats** (FP8, NVFP4, KV cache quantization), which compressed-tensors cannot hold: a ModelOpt checkpoint. Each GGML layer becomes `{"quant_algo": "INT8_PB_WO", "group_size": 16 or 32}`, and every other layer and its config entry are copied as they are. vLLM serves `INT8_PB_WO` in versions newer than 0.34.0: linear layers from [vllm-project/vllm#65272](https://github.com/vllm-project/vllm/pull/65272), and MoE experts, on NVIDIA GPUs, from [vllm-project/vllm#66717](https://github.com/vllm-project/vllm/pull/66717).
 
 vLLM serves group-32 layers (IQ1_S, IQ2_XXS, Q8_0) with Marlin and group-16 layers (IQ1_M, IQ2_XS, IQ2_S) with Humming. On Blackwell GPUs, Marlin is much slower at large batch sizes, so set `VLLM_DISABLED_KERNELS=MarlinLinearKernel` to use Humming for group 32 as well.
 

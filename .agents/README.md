@@ -7,7 +7,7 @@ and holds shared configuration.
 
 ```text
 .agents/
-├── skills → ../plugins/modelopt/skills
+├── skills → ../skills
 ├── plugins/
 │   └── marketplace.json   # Codex marketplace
 ├── scripts/                # shared helper scripts (sync-upstream-skills.sh, …)
@@ -16,40 +16,64 @@ and holds shared configuration.
 .codex/
 └── agents/                 # Codex project role definitions
 
-plugins/modelopt/
-├── .claude-plugin/
-├── .codex-plugin/
-├── agents/                 # Claude Code subagent definitions
-└── skills/                 # canonical SKILL.md files
-    ├── common/             # shared skill support files
-    └── <skill-name>/SKILL.md
+.claude-plugin/plugin.json  # root Claude plugin manifest
+.codex-plugin/plugin.json   # root Codex plugin manifest
+.claude-plugin/mcp.json     # Claude plugin MCP configuration
+.codex-plugin/mcp.json      # Codex plugin MCP configuration
+.claude/agents/             # canonical Claude subagent definitions
+
+skills/                     # workflows and compatibility entrypoints
+├── common/                 # shared support
+└── <skill-name>/SKILL.md    # canonical workflows use modelopt-<name>
 ```
 
 ## How each agent finds these
 
-Each agent points at `.agents/` through whatever mechanism it supports — never
-a copy:
+Repository discovery shares files through the supported agent paths:
 
 - **Claude Code** only auto-discovers skills under `.claude/skills/`, so
-  `.claude/skills/` holds relative symlinks into `.agents/skills/`.
-- **Repository agents** use `.agents/skills`, a relative symlink into the
-  plugin.
-- **Claude Code and Codex plugins** load `plugins/modelopt/skills` directly.
-- **Claude Code** loads subagents from `plugins/modelopt/agents/` through the
-  plugin, while `.claude/agents/*.md` symlinks expose them to repository users.
+  `.claude/skills/` holds relative symlinks directly into root `skills/`.
+- **Repository agents** use `.agents/skills`, a relative symlink to root `skills/`.
+- **Both marketplaces** select the repository root as the plugin source.
+  The root manifests load the real `skills/` directory, without installer symlinks.
+- **Claude Code** loads the individual `.claude/agents/*.md` paths listed in
+  the root plugin manifest. These canonical files also serve repository users.
+- **MCP servers** load through each plugin manifest. In a plain Claude checkout,
+  use `claude --mcp-config .claude-plugin/mcp.json` or load the plugin with
+  `claude --plugin-dir .`; nested MCP files are not auto-discovered.
 - **Codex** discovers project roles directly under `.codex/agents/`. Codex
   plugins cannot currently install custom roles.
 
+## Old-name compatibility
+
+Bare names are deprecated, retained temporarily for backward compatibility, and
+will be removed in ModelOpt 0.50.0. Use `modelopt-*` names now.
+
+All 15 workflows use `modelopt-<name>`. Each old name has a minimal `SKILL.md`
+that asks the agent to read its canonical sibling; these are agent-level
+forwarders, not native aliases. Supporting paths are symlinked to canonical files.
+`common` remains shared support, not a workflow.
+
+Checkout discovery and the root plugin expose both names. A stub installed alone
+cannot work: its sibling canonical directory must be included. Publish only
+canonical skills in the standalone catalog; do not publish stubs independently.
+Installers that skip symlinks (observed with Codex 0.162.1) omit old supporting
+paths; forwarding still works through the real canonical directories.
+
+Descriptions identify compatibility names but overlap with canonical descriptions,
+so automatic selection may choose either. Old names can collide with other skills;
+prefer `modelopt-*` (or `modelopt:modelopt-*` when the client adds the plugin namespace).
+Do not load both the checkout and plugin copy when avoiding duplicate discovery.
+
 ## Editing rules
 
-- **Always edit skills under `plugins/modelopt/skills/`**.
-- Claude Code subagents belong in `plugins/modelopt/agents/`, not
-  `.claude/agents/`.
+- **Always edit skills under root `skills/`**.
+- Claude Code subagents belong in `.claude/agents/` as real files.
 - Codex custom roles belong in `.codex/agents/`.
-- Vendored-verbatim skills (`launching-evals`, `accessing-mlflow`) are managed
+- Upstream-derived skills (`modelopt-launching-evals`, `modelopt-accessing-mlflow`) are managed
   by `.agents/scripts/sync-upstream-skills.sh` — do not modify by hand.
-- New skills go in `plugins/modelopt/skills/<skill-name>/SKILL.md`.
-- Shared support files go in `plugins/modelopt/skills/common/`.
+- New skills go in `skills/<skill-name>/SKILL.md`.
+- Shared support files go in `skills/common/`.
 
 ## Review baseline
 
