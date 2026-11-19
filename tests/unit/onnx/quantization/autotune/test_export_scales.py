@@ -284,6 +284,71 @@ def test_rearrange_shape_input_is_not_grouped(rearrange_model):
     assert groups["shape"] != groups["a"]
 
 
+def _graph(nodes, inputs, outputs, initializer=()):
+    """Return the graphsurgeon graph of float tensors ``inputs``/``outputs`` ({name: shape})."""
+    return gs.import_onnx(
+        helper.make_model(
+            helper.make_graph(
+                nodes,
+                "groups",
+                [helper.make_tensor_value_info(n, TensorProto.FLOAT, s) for n, s in inputs.items()],
+                [
+                    helper.make_tensor_value_info(n, TensorProto.FLOAT, s)
+                    for n, s in outputs.items()
+                ],
+                initializer=list(initializer),
+            ),
+            opset_imports=[helper.make_opsetid("", 13)],
+        )
+    )
+
+
+def test_concat_input_leaves_its_rearrange_chain():
+    """Concat elimination widens the range of a Concat input, not of its rearrange neighbors.
+
+    ``b`` is a Transpose of ``a``, a Reshape source of ``e`` and a Concat input. The quantized
+    model gives ``b`` the scale of its Concat group, while ``a`` and ``e`` keep the range they
+    share. ``f`` rearranges the output of the only Concat in the group, which holds every value
+    of the group, so ``f`` shares the group's scale.
+    """
+    shape = [1, 4, 4, 4]
+    nodes = [
+        helper.make_node("Transpose", ["a"], ["b"], name="transpose1", perm=[0, 1, 3, 2]),
+        helper.make_node("Reshape", ["b", "shape"], ["e"], name="reshape1"),
+        helper.make_node("Concat", ["b", "d"], ["cat"], name="concat1", axis=1),
+        helper.make_node("Transpose", ["cat"], ["f"], name="transpose2", perm=[0, 1, 3, 2]),
+    ]
+    graph = _graph(
+        nodes,
+        {"a": shape, "d": shape},
+        {"e": shape, "f": [1, 8, 4, 4]},
+        [numpy_helper.from_array(np.array(shape, dtype=np.int64), "shape")],
+    )
+    groups = build_scale_group_map(graph, {"a", "b", "d", "cat", "e", "f"})
+    assert groups["b"] == groups["d"] == groups["cat"] == groups["f"]
+    assert groups["a"] == groups["e"]
+    assert groups["a"] != groups["b"]
+
+
+def test_concats_sharing_an_input_leave_their_output_rearrange_chains():
+    """Concats sharing ``b`` form one group, whose range exceeds that of either output.
+
+    ``f`` rearranges ``cat1`` and keeps the range of ``cat1`` alone in the quantized model.
+    """
+    shape = [1, 4, 4, 4]
+    nodes = [
+        helper.make_node("Concat", ["b", "d"], ["cat1"], name="concat1", axis=1),
+        helper.make_node("Transpose", ["cat1"], ["f"], name="transpose1", perm=[0, 1, 3, 2]),
+        helper.make_node("Concat", ["b", "e"], ["cat2"], name="concat2", axis=1),
+    ]
+    graph = _graph(
+        nodes, {"b": shape, "d": shape, "e": shape}, {"f": [1, 8, 4, 4], "cat2": [1, 8, 4, 4]}
+    )
+    groups = build_scale_group_map(graph, {"b", "d", "e", "cat1", "cat2", "f"})
+    assert groups["b"] == groups["d"] == groups["e"] == groups["cat1"] == groups["cat2"]
+    assert groups["f"] != groups["cat1"]
+
+
 def test_flag_off_restores_the_uniform_scale(model):
     points = _points(model, [("pool1", 0, "r1"), ("conv2", 0, "p1"), ("conv3", 0, "cat")])
     config = Config(use_varied_activation_scales=False)

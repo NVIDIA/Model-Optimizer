@@ -31,7 +31,10 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
 )
 from modelopt.onnx.quantization.fp8 import _rescale_int8_scales_to_fp8, int8_to_fp8
 from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
-from modelopt.onnx.quantization.qdq_graph import remove_scalar_input_qdq
+from modelopt.onnx.quantization.qdq_graph import (
+    group_scale_sharing_tensors,
+    remove_scalar_input_qdq,
+)
 from modelopt.onnx.utils import export_onnx
 
 __all__ = [
@@ -214,22 +217,21 @@ def _hashed_scale(key: str) -> float:
     return float(np.exp(np.log(low) + (np.log(high) - np.log(low)) * digest / 0xFFFFFFFF))
 
 
-# Ops that only rearrange the values of their first input, so a calibrator derives the same
-# range on both sides. Ops that can introduce new values (MaxPool, Resize, ...) are left out
-# even where the ranges often coincide.
-_REARRANGE_OPS = frozenset({"Flatten", "Reshape", "Squeeze", "Transpose", "Unsqueeze"})
-
-
 def build_scale_group_map(graph: gs.Graph, quantized_tensors: set[str]) -> dict[str, str]:
     """Map each quantized tensor to the representative of its scale group.
 
     Tensors in one group get one scale, as they do in the quantized model:
 
-    * The data input and output of a rearranging op, including chains of such ops through
-      tensors this candidate leaves unquantized, since they hold the same values.
     * The quantized inputs and the output of a Concat whose output is quantized, which the
       ``concat_elimination`` pass unifies. Unquantized inputs stay out: merging a boundary
       the quantized model keeps would drop a requantization it performs.
+    * Tensors joined by rearranging ops, including chains of such ops through tensors this
+      candidate leaves unquantized, since they hold the same values. A member of a Concat group
+      stays out and takes the group's scale instead, except the output of a group formed by one
+      Concat, whose range is already the group's.
+
+    The groups come from :func:`~modelopt.onnx.quantization.qdq_graph.group_scale_sharing_tensors`,
+    which the quantizer also uses for concat elimination.
 
     Args:
         graph: Graph the candidate is built from.
@@ -239,36 +241,10 @@ def build_scale_group_map(graph: gs.Graph, quantized_tensors: set[str]) -> dict[
         Mapping from every name in ``quantized_tensors`` to its group representative, which
         is the tensor itself when it shares a scale with nothing.
     """
-    parent: dict[str, str] = {}
-
-    def find(x: str) -> str:
-        root = x
-        while parent.get(root, root) != root:
-            root = parent[root]
-        while parent.get(x, x) != x:
-            parent[x], x = root, parent[x]
-        return root
-
-    def union(a: str, b: str) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            # Keep the lexicographically smallest name as root for determinism.
-            if rb < ra:
-                ra, rb = rb, ra
-            parent[rb] = ra
-
-    for node in graph.nodes:
-        if not node.inputs or not node.outputs:
-            continue
-        output = node.outputs[0].name
-        if node.op in _REARRANGE_OPS:
-            union(node.inputs[0].name, output)
-        elif node.op == "Concat" and output in quantized_tensors:
-            for source in node.inputs:
-                if source.name in quantized_tensors:
-                    union(source.name, output)
-
-    return {name: find(name) for name in quantized_tensors}
+    representatives = group_scale_sharing_tensors(
+        graph, quantized_tensors.__contains__, through_rearrange_ops=True
+    )
+    return {name: representatives.get(name, name) for name in quantized_tensors}
 
 
 def _to_grid(value: float, bfloat16: bool) -> int:
