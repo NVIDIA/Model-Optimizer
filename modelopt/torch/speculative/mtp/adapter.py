@@ -122,6 +122,7 @@ def create_native_mtp_boost_model(
     mtp_loss_type: str = "lk_lambda",
     mtp_lk_eta: float = 3.0,
     mtp_loss_decay_factor: float = 1.0,
+    mtp_use_torch_compile: bool = True,
 ) -> nn.Module:
     """Load native MTP weights for offline training through a registered adapter."""
     config = MTPConfig(
@@ -132,6 +133,7 @@ def create_native_mtp_boost_model(
         mtp_loss_type=mtp_loss_type,
         mtp_lk_eta=mtp_lk_eta,
         mtp_loss_decay_factor=mtp_loss_decay_factor,
+        mtp_use_torch_compile=mtp_use_torch_compile,
     )
     selected = get_native_mtp_adapter(model_path, config.mtp_adapter)
     config.mtp_adapter = selected.name

@@ -156,6 +156,8 @@ def create_mtp_model(
         ),
         draft_module=mtp,
     )
+    if cfg.mtp_use_torch_compile:
+        model._eagle_loss = torch.compile(model._eagle_loss, dynamic=False, fullgraph=True)
     model.config.mtp_config = mtp.config.to_dict()
     model.config.mtp_boost = cfg.model_dump()
     model.mtp_config = cfg

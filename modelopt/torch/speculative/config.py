@@ -513,6 +513,11 @@ class MTPConfig(ModeloptBaseConfig):
         description=("The per-round loss decay factor for native MTP training."),
     )
 
+    mtp_use_torch_compile: bool = ModeloptField(
+        default=True,
+        description=("Whether to torch.compile the MTP loss. The native decoder stays eager."),
+    )
+
     mtp_ttt_steps: int = ModeloptField(
         default=1,
         strict=True,

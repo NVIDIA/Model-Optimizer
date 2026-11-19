@@ -289,6 +289,7 @@ def test_native_rounds_share_eagle_alignment_and_gradients(
         mtp_mix_hidden_states_mode="uniform_layer_sample",
         mtp_loss_type=loss_type,
         mtp_loss_decay_factor=0.7,
+        mtp_use_torch_compile=False,
     )
     reference = deepcopy(model)
     batch = _batch(streams, length)
@@ -336,7 +337,7 @@ def test_native_rounds_share_eagle_alignment_and_gradients(
 
 def test_offline_batch_and_empty_assistant_mask(tmp_path):
     model = create_native_mtp_boost_model(
-        _write_base(tmp_path, 3), dtype=torch.float32, mtp_ttt_steps=2
+        _write_base(tmp_path, 3), dtype=torch.float32, mtp_ttt_steps=2, mtp_use_torch_compile=False
     )
     batch = _batch(3)
     features = ("target_mtp_hidden_states", "target_lm_head_hidden_states")
