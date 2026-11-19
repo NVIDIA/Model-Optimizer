@@ -395,6 +395,46 @@ def test_ensure_source_checkout_defaults_to_main(monkeypatch, tmp_path):
     assert result["checkout"].resolved_sha == "a" * 40
 
 
+@pytest.mark.parametrize(
+    ("env_repo", "source_repo", "allowed"),
+    [
+        (None, "https://github.com/NVIDIA/Model-Optimizer.git", True),
+        (
+            "https://github.com/alice/Model-Optimizer.git",
+            "https://github.com/alice/Model-Optimizer.git",
+            True,
+        ),
+        (None, "https://github.com/attacker/Model-Optimizer.git", False),
+        ("https://github.com/alice/Model-Optimizer.git", "/tmp/evil-repo", False),
+    ],
+)
+def test_ensure_source_checkout_source_repo_allowlist(
+    monkeypatch, tmp_path, env_repo, source_repo, allowed
+):
+    """Only the default or operator-configured repo can be checked out."""
+    monkeypatch.delenv("MODELOPT_MCP_DISABLE_MANAGED_SOURCE", raising=False)
+    monkeypatch.setenv("MODELOPT_MCP_SOURCE_CACHE", str(tmp_path / "cache"))
+    if env_repo:
+        monkeypatch.setenv("MODELOPT_MCP_SOURCE_REPO", env_repo)
+    else:
+        monkeypatch.delenv("MODELOPT_MCP_SOURCE_REPO", raising=False)
+    seen = []
+
+    def fake_resolve(repo, ref):
+        seen.append(repo)
+        return {"ok": True, "resolved_sha": "a" * 40}
+
+    monkeypatch.setattr(bridge, "_resolve_source_ref", fake_resolve)
+    monkeypatch.setattr(bridge, "_checkout_ready", lambda path, sha: True)
+
+    result = bridge._ensure_source_checkout(source_repo=source_repo)
+
+    assert result["ok"] is allowed
+    assert seen == ([source_repo] if allowed else [])
+    if not allowed:
+        assert result["reason"] == "source_repo_not_allowed"
+
+
 def test_submit_job_dry_run_uses_managed_source_checkout(monkeypatch, tmp_path):
     """Managed source routes launcher execution through an editable checkout."""
     checkout_root = tmp_path / "checkout"

@@ -167,7 +167,7 @@ For local Docker execution, drop `cluster_host`/`cluster_user`/`identity` and pa
 | `NEMORUN_HOME` | submit + status + logs | Where the launcher writes experiment artifacts. Defaults to cwd if unset. `job_status` / `job_logs` search `$NEMORUN_HOME/experiments/<id>/`. |
 | `MODELOPT_MCP_LOG` | (optional) server | Log level. Defaults to `INFO`. Logs go to stderr — stdout is the MCP wire. |
 | `MODELOPT_MCP_SKIP_GPU_CHECK` | (optional) `verify_setup(executor='docker')` | Set to skip the `docker info --format` runtime-registry check. Useful for CI hosts where the daemon is up but the NVIDIA Container Toolkit isn't installed. |
-| `MODELOPT_MCP_SOURCE_REPO` | (optional) `submit_job` | Default git repository for managed source checkouts. Defaults to `https://github.com/NVIDIA/Model-Optimizer.git`. |
+| `MODELOPT_MCP_SOURCE_REPO` | (optional) `submit_job` | Default git repository for managed source checkouts. Defaults to `https://github.com/NVIDIA/Model-Optimizer.git`. `submit_job(source_repo=...)` accepts only this repo or the default. |
 | `MODELOPT_MCP_SOURCE_REF` | (optional) `submit_job` | Default branch, tag, or SHA when `source_ref` is omitted. Defaults to `main`. |
 | `MODELOPT_MCP_SOURCE_CACHE` | (optional) `submit_job` | Root for managed source checkouts. Defaults to `$XDG_CACHE_HOME/modelopt-mcp/sources` or `~/.cache/modelopt-mcp/sources`. |
 | `MODELOPT_MCP_DISABLE_MANAGED_SOURCE` | (optional) local dev | Set to `1` to skip managed checkout and invoke the installed `modelopt-launcher` entrypoint directly. |

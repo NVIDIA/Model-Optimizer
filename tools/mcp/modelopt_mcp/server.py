@@ -281,7 +281,7 @@ def _build_server() -> FastMCP:
                 description=(
                     "Git repository URL for the managed Model-Optimizer checkout. "
                     "None uses MODELOPT_MCP_SOURCE_REPO or the public NVIDIA/"
-                    "Model-Optimizer repository."
+                    "Model-Optimizer repository; any other URL is rejected."
                 )
             ),
         ] = None,
