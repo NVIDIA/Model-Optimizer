@@ -1,5 +1,8 @@
 # Configuration
 
+For named tasks, parameters, dependency graphs and output declarations, see
+[Workflow API v2](workflow_v2.md). Unversioned YAMLs retain the format below.
+
 ## Environment Variables
 
 | Variable | Description | Required |
@@ -266,6 +269,56 @@ for each distinct host/cache root. Missing providers or mismatched mounts fail
 before job submission. Additional mounts must not overlap declared asset destinations,
 and Slurm arguments cannot override the container mounts. Dry-run configuration
 inspection does not transfer assets.
+
+## Mount-keyed inputs
+
+Use `pipeline.inputs` to separate an artifact reference from its container path:
+
+```yaml
+pipeline:
+  inputs:
+    /inputs/model:
+      ref: Org/Model@revision
+      env: HF_MODEL_CKPT
+      role: base_model
+  asset_resolver: ["my-artifact-provider", "--profile", "my-team"]
+  # task_0, task_1, ... as usual
+```
+
+`ref` is opaque to the launcher: the resolver can accept a Hub repository,
+a complete catalog key or an artifact UUID. Provider selection and credentials
+belong to the resolver's environment/profile. No `provider` field is required.
+Every active task receives a read-only `/inputs/model` mount and, if declared,
+`HF_MODEL_CKPT=/inputs/model`. `role` is recorded as provenance; it does not create
+MLflow lineage by itself. Input paths must be normalized, non-overlapping paths
+below `/inputs/`. Conflicting task environment values and overlapping explicit
+mounts are rejected. Do not combine `inputs` with legacy `assets`.
+
+The built-in resolver downloads Hugging Face model or dataset snapshots at exact
+commits. Install the optional `artifacts` extra on the cache host. Set
+`kind: dataset` for datasets; model is the default. A custom `asset_resolver`
+implements schema version 2, with `inputs` replacing `assets`:
+
+```json
+{"schema_version":2,"host":"login.example.com","hf_local":"/shared/hf-local","inputs":{"/inputs/model":{"ref":"Org/Model@revision","env":"HF_MODEL_CKPT","role":"base_model"}}}
+```
+
+```json
+{"schema_version":2,"status":"ready","inputs":[{"mount":"/inputs/model","ref":"Org/Model@revision","path":"/shared/hf-local/.snapshots/immutable-id","version":"immutable-id","backend":"my-provider"}]}
+```
+
+Return one entry per declaration in order, echoing its exact `mount` and `ref`.
+Every entry must have a nonempty resolved `version` and a source `path` beneath
+the cache root. Optional `artifact_id` and `backend` fields are retained. All
+readiness, timeout and path restrictions from the asset protocol apply. The
+resolved manifest is written to `metadata.json` before experiment execution so
+it survives an execution error. A new launch resolves references again; reuse
+an explicit version or catalog UUID when retrying must select the same content.
+
+The launcher supplies a Hugging Face implementation, mounts and environment
+wiring. A custom resolver can select another storage service. V2 also supports
+[explicit output publication and MLflow model lineage](workflow_v2.md#artifact-publication-and-model-lineage). `examples/smoke/inputs.yaml` exercises two tasks through
+`--dryrun` without invoking a resolver or submitting jobs.
 
 ## MLflow environment context
 

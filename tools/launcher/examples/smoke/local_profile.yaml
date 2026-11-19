@@ -1,0 +1,2 @@
+# CPU-only development profile. Container targets use Slurm or Docker profiles.
+executor: local

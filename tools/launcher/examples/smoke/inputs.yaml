@@ -1,0 +1,25 @@
+# Configuration-only smoke test. --dryrun does not call the resolver or submit jobs.
+# Supply a schema-v2 asset_resolver before running this workflow live.
+job_name: workflow_inputs_smoke
+pipeline:
+  inputs:
+    /inputs/model:
+      ref: Qwen/Qwen3-8B
+      env: HF_MODEL_CKPT
+      role: base_model
+  task_0:
+    inline: test -d "$HF_MODEL_CKPT"
+    slurm_config:
+      _factory_: slurm_factory
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node:
+      time: "00:02:00"
+  task_1:
+    inline: test -f "$HF_MODEL_CKPT/config.json"
+    slurm_config:
+      _factory_: slurm_factory
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node:
+      time: "00:02:00"

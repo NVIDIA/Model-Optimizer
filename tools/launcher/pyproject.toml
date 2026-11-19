@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "modelopt-launcher"
-version = "0.1.0"
+version = "0.2.0"
 description = "ModelOpt Launcher — submit quantization, training, and evaluation jobs to Slurm clusters"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,6 +12,10 @@ dependencies = [
     "nemo-run>=0.8.0",
     "pyyaml",
 ]
+
+[project.optional-dependencies]
+artifacts = ["huggingface-hub>=0.23"]
+tracking = ["mlflow-skinny>=3.11,<4"]
 
 [project.scripts]
 modelopt-launcher = "modelopt_launcher.launch:main"
@@ -27,6 +31,9 @@ modelopt_launcher = [
     "common/**/*",
     "examples/**/*.yaml",
     "examples/**/*.jinja",
+    "examples/evaluation/*.py",
+    "examples/evaluation/requirements.txt",
+    "examples/evaluation/README.md",
 ]
 
 [tool.pytest.ini_options]

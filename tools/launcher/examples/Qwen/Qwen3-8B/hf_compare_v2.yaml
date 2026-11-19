@@ -1,0 +1,56 @@
+api_version: modelopt/v2
+name: qwen3_checkpoint_comparison
+parameters:
+  baseline: Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218
+  candidate: nvidia/Qwen3-8B-NVFP4@ccd10a893cbca613259517c3efe08e151ddf2b8e
+  dataset: openai/gsm8k@740312add88f781978c0658806c59bc2815b9866
+  samples: 64
+  candidate_linear_backend: auto
+  compilation_mode: default
+  flashinfer_autotune: auto
+  allocated_gpus: 1
+inputs:
+  /inputs/baseline:
+    ref: ${parameters.baseline}
+    env: BASELINE_MODEL
+    role: baseline
+  /inputs/candidate:
+    ref: ${parameters.candidate}
+    env: CANDIDATE_MODEL
+    role: candidate
+  /inputs/gsm8k:
+    ref: ${parameters.dataset}
+    kind: dataset
+    env: GSM8K_DATASET
+tasks:
+  validate:
+    inline: >-
+      python3 examples/evaluation/compare.py
+      --baseline "$BASELINE_MODEL" --candidate "$CANDIDATE_MODEL"
+      --dataset "$GSM8K_DATASET" --output "$EVALUATION_RESULTS"
+      --baseline-ref "$BASELINE_REF" --candidate-ref "$CANDIDATE_REF"
+      --samples "$ACCURACY_SAMPLES" --candidate-linear-backend "$CANDIDATE_LINEAR_BACKEND"
+      --compilation-mode "$COMPILATION_MODE"
+      --flashinfer-autotune "$FLASHINFER_AUTOTUNE"
+      --allocated-gpus "$ALLOCATED_GPUS"
+    environment:
+      BASELINE_REF: ${parameters.baseline}
+      CANDIDATE_REF: ${parameters.candidate}
+      ACCURACY_SAMPLES: ${parameters.samples}
+      CANDIDATE_LINEAR_BACKEND: ${parameters.candidate_linear_backend}
+      COMPILATION_MODE: ${parameters.compilation_mode}
+      FLASHINFER_AUTOTUNE: ${parameters.flashinfer_autotune}
+      ALLOCATED_GPUS: ${parameters.allocated_gpus}
+    resources:
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: ${parameters.allocated_gpus}
+    container: vllm/vllm-openai:v0.25.0@sha256:fc56161ee42a011aeee78b65d0a81b6683c7d04402fd40503d14d4d6c98f07cb
+    outputs:
+      results:
+        path: results
+        kind: metrics
+        env: EVALUATION_RESULTS
+outputs:
+  results:
+    from: validate.results
