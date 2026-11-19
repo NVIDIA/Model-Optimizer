@@ -319,6 +319,115 @@ def test_weight_access_writeback_failure_preserves_backing_maps(
     torch.testing.assert_close(model(inputs), expected)
 
 
+@pytest.mark.parametrize("offload_mode", ["cpu_offload", "disk_offload"])
+@pytest.mark.parametrize("failure_stage", ["local_writeback", "peer"])
+def test_iq_finalize_writeback_failure_restores_state_for_retry(
+    offload_mode, failure_stage, tmp_path
+):
+    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": "iq1_m", "backend": "ggml"},
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+    for owner in model:
+        quantizer = owner.weight_quantizer
+        quantizer.pre_quant_scale = torch.linspace(0.5, 1.5, 256)
+        source = owner.weight * quantizer.pre_quant_scale
+        pin_packed_weight(
+            quantizer, "iq1_m", GGML_FORMAT_REGISTRY["iq1_m"].pack(source, quantizer), source=source
+        )
+    original = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    if offload_mode == "cpu_offload":
+        # Native CPU onload casts these master weights back to FP32, preventing aliases from
+        # disguising a peer rollback that only restores the temporary onloaded tensors.
+        masters = {
+            name: value.double() if value.is_floating_point() else value.clone()
+            for name, value in original.items()
+        }
+        cpu_offload(model, execution_device="cpu", offload_buffers=True, state_dict=masters)
+    else:
+        disk_offload(model, tmp_path / "offload", execution_device="cpu", offload_buffers=True)
+    dataset = model[0]._hf_hook.weights_map.dataset
+    backing = getattr(dataset, "state_dict", dataset)
+    original_backing = dict(backing)
+    policy = IQRepairPolicy()
+    plan = plan_iq_repair([model])
+
+    def weight_access(writeback=True):
+        return enable_weight_access_and_writeback(model, model, writeback=writeback)
+
+    failure = RuntimeError("late IQ writeback failure")
+    armed = True
+
+    def fail_writeback(module, state_dict, prefix, local_metadata):
+        nonlocal armed
+        if armed and failure_stage == "local_writeback":
+            armed = False
+            raise failure
+
+    def synchronize_error(error):
+        nonlocal armed
+        if armed and failure_stage == "peer":
+            armed = False
+            raise failure
+
+    try:
+        with enable_weight_access_and_writeback(model, model, writeback=False):
+            fields = policy.prepare_plan(plan, 0)
+        with torch.no_grad():
+            for field in fields:
+                field.add_(0.25)
+        inputs = torch.randn(3, 256)
+        expected = [owner(inputs).detach() for owner in model]
+        native = [owner.weight_quantizer._local_repair_state.native_payload() for owner in model]
+        devices = {name: value.device for name, value in model.state_dict().items()}
+        handle = model[0].register_state_dict_post_hook(fail_writeback)
+        try:
+            with pytest.raises(RuntimeError) as error:
+                policy.finalize_(weight_access=weight_access, synchronize_error=synchronize_error)
+            assert error.value is failure
+        finally:
+            handle.remove()
+        assert {name: value.device for name, value in model.state_dict().items()} == devices
+        assert all(owner._hf_hook.offload for owner in model)
+        assert all(hasattr(owner.weight_quantizer, "_local_repair_state") for owner in model)
+        assert all(owner.weight_quantizer._enable_pre_quant_scale for owner in model)
+        assert backing.keys() == original_backing.keys()
+        for name, value in original_backing.items():
+            assert backing[name] is value
+        for name, value in original.items():
+            torch.testing.assert_close(dataset[name], value, check_dtype=False, rtol=0, atol=0)
+        with enable_weight_access_and_writeback(model, model, writeback=False):
+            state = model.state_dict()
+            assert state.keys() == original.keys()
+            for name, value in original.items():
+                torch.testing.assert_close(state[name], value, rtol=0, atol=0)
+        for owner, output in zip(model, expected, strict=True):
+            torch.testing.assert_close(owner(inputs), output, rtol=0, atol=0)
+        policy.finalize_(weight_access=weight_access)
+        with enable_weight_access_and_writeback(model, model, writeback=False):
+            for owner, payload in zip(model, native, strict=True):
+                torch.testing.assert_close(
+                    pinned_packed_weight(owner.weight_quantizer, "iq1_m"), payload, rtol=0, atol=0
+                )
+        for owner, output in zip(model, expected, strict=True):
+            torch.testing.assert_close(owner(inputs), output, rtol=0, atol=0)
+        assert all(not owner.weight_quantizer._enable_pre_quant_scale for owner in model)
+        assert all(not hasattr(owner.weight_quantizer, "_local_repair_state") for owner in model)
+        assert all(parameter.requires_grad for parameter in model.parameters())
+    finally:
+        policy.close()
+
+
 @pytest.mark.parametrize(
     "mapping_mode",
     [
@@ -498,112 +607,3 @@ def test_weight_access_keeps_buffer_persistence_local_to_its_owner(buffer_case, 
                 owner: owner._non_persistent_buffers_set for owner in model.modules()
             } == persistence
             torch.testing.assert_close(model(inputs), expected)
-
-
-@pytest.mark.parametrize("offload_mode", ["cpu_offload", "disk_offload"])
-@pytest.mark.parametrize("failure_stage", ["local_writeback", "peer"])
-def test_iq_finalize_writeback_failure_restores_state_for_retry(
-    offload_mode, failure_stage, tmp_path
-):
-    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
-    mtq.quantize(
-        model,
-        {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "*weight_quantizer",
-                    "cfg": {"num_bits": "iq1_m", "backend": "ggml"},
-                },
-            ],
-            "algorithm": None,
-        },
-    )
-    for owner in model:
-        quantizer = owner.weight_quantizer
-        quantizer.pre_quant_scale = torch.linspace(0.5, 1.5, 256)
-        source = owner.weight * quantizer.pre_quant_scale
-        pin_packed_weight(
-            quantizer, "iq1_m", GGML_FORMAT_REGISTRY["iq1_m"].pack(source, quantizer), source=source
-        )
-    original = {name: value.detach().clone() for name, value in model.state_dict().items()}
-    if offload_mode == "cpu_offload":
-        # Native CPU onload casts these master weights back to FP32, preventing aliases from
-        # disguising a peer rollback that only restores the temporary onloaded tensors.
-        masters = {
-            name: value.double() if value.is_floating_point() else value.clone()
-            for name, value in original.items()
-        }
-        cpu_offload(model, execution_device="cpu", offload_buffers=True, state_dict=masters)
-    else:
-        disk_offload(model, tmp_path / "offload", execution_device="cpu", offload_buffers=True)
-    dataset = model[0]._hf_hook.weights_map.dataset
-    backing = getattr(dataset, "state_dict", dataset)
-    original_backing = dict(backing)
-    policy = IQRepairPolicy()
-    plan = plan_iq_repair([model])
-
-    def weight_access(writeback=True):
-        return enable_weight_access_and_writeback(model, model, writeback=writeback)
-
-    failure = RuntimeError("late IQ writeback failure")
-    armed = True
-
-    def fail_writeback(module, state_dict, prefix, local_metadata):
-        nonlocal armed
-        if armed and failure_stage == "local_writeback":
-            armed = False
-            raise failure
-
-    def synchronize_error(error):
-        nonlocal armed
-        if armed and failure_stage == "peer":
-            armed = False
-            raise failure
-
-    try:
-        with enable_weight_access_and_writeback(model, model, writeback=False):
-            fields = policy.prepare_plan(plan, 0)
-        with torch.no_grad():
-            for field in fields:
-                field.add_(0.25)
-        inputs = torch.randn(3, 256)
-        expected = [owner(inputs).detach() for owner in model]
-        native = [owner.weight_quantizer._local_repair_state.native_payload() for owner in model]
-        devices = {name: value.device for name, value in model.state_dict().items()}
-        handle = model[0].register_state_dict_post_hook(fail_writeback)
-        try:
-            with pytest.raises(RuntimeError) as error:
-                policy.finalize_(weight_access=weight_access, synchronize_error=synchronize_error)
-            assert error.value is failure
-        finally:
-            handle.remove()
-        assert {name: value.device for name, value in model.state_dict().items()} == devices
-        assert all(owner._hf_hook.offload for owner in model)
-        assert all(hasattr(owner.weight_quantizer, "_local_repair_state") for owner in model)
-        assert all(owner.weight_quantizer._enable_pre_quant_scale for owner in model)
-        assert backing.keys() == original_backing.keys()
-        for name, value in original_backing.items():
-            assert backing[name] is value
-        for name, value in original.items():
-            torch.testing.assert_close(dataset[name], value, check_dtype=False, rtol=0, atol=0)
-        with enable_weight_access_and_writeback(model, model, writeback=False):
-            state = model.state_dict()
-            assert state.keys() == original.keys()
-            for name, value in original.items():
-                torch.testing.assert_close(state[name], value, rtol=0, atol=0)
-        for owner, output in zip(model, expected, strict=True):
-            torch.testing.assert_close(owner(inputs), output, rtol=0, atol=0)
-        policy.finalize_(weight_access=weight_access)
-        with enable_weight_access_and_writeback(model, model, writeback=False):
-            for owner, payload in zip(model, native, strict=True):
-                torch.testing.assert_close(
-                    pinned_packed_weight(owner.weight_quantizer, "iq1_m"), payload, rtol=0, atol=0
-                )
-        for owner, output in zip(model, expected, strict=True):
-            torch.testing.assert_close(owner(inputs), output, rtol=0, atol=0)
-        assert all(not owner.weight_quantizer._enable_pre_quant_scale for owner in model)
-        assert all(not hasattr(owner.weight_quantizer, "_local_repair_state") for owner in model)
-        assert all(parameter.requires_grad for parameter in model.parameters())
-    finally:
-        policy.close()
