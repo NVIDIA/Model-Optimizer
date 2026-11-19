@@ -1886,9 +1886,9 @@ def _layerwise_exporter(model: Any) -> Any:
     """The layerwise exporter this export finalizes, if the model was calibrated through one.
 
     That is the one the workflow's session holds, else the one announced on the model, as a
-    calibration made in a session of its own, outside the workflow's, leaves it. One the session
-    holds writes its own model, so it is refused for a model that is neither that one nor a part of
-    it, as a VLM is not of an exporter built on its language model.
+    calibration outside the workflow's session, in no session or in one of its own, leaves it. One
+    the session holds writes its own model, so it is refused for a model that is neither that one
+    nor a part of it, as a VLM is not of an exporter built on its language model.
     """
     # Local import breaks the cycle: layerwise_export imports this module.
     from .layerwise_export import LAYERWISE_EXPORTER_ATTR
@@ -2192,8 +2192,8 @@ def export_hf_checkpoint(
     The tensors of the source checkpoint that the model has no parameter for, such as an MTP head,
     are carried into the export unchanged, and the checkpoint's non-model files are copied: the
     checkpoint the model's load recorded on it, else its ``config._name_or_path``. The export
-    finalizes the layerwise exporter the session holds, the one the model's layerwise calibration
-    wrote its layers through.
+    finalizes the layerwise exporter the model's layerwise calibration wrote its layers through: the
+    one the workflow's session holds, else the one set on the model.
 
     Args:
         model: The model to export: a module, such as a transformers model (e.g.,
@@ -2216,8 +2216,6 @@ def export_hf_checkpoint(
             runtime compatibility; other diffusion components omit them.
             Transformers components always retain them for KV-cache scales.
     """
-    # The workflow, as its session holds it; an argument passed here wins over it.
-    session = ModelOptSession.active()
     exporter = _layerwise_exporter(model)
     # A layerwise export resolved its source before calibration packed the first layer.
     source = getattr(exporter, "_source", None) if exporter is not None else None
@@ -2327,7 +2325,7 @@ def export_hf_checkpoint(
         # Per-layer export wrote the shards during calibration; this writes the rest.
         exporter.finalize(extra_state_dict=extra_state_dict, carried_over_names=carried_names)
         # Finalized, the exporter holds nothing a later call needs, but it does hold the model.
-        session.runtime.layerwise_exporter = None
+        ModelOptSession.active().runtime.layerwise_exporter = None
         # Into the exporter's directory, which is where finalize() wrote: export_dir may differ
         # when the recipe's layerwise.export_dir chose it.
         if _writes_extra and checkpoint is not None:

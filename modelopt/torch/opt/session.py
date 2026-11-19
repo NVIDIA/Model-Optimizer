@@ -77,7 +77,8 @@ class RunState:
     """The live objects one call of a workflow, or one step of it, creates and a later one uses.
 
     ``layerwise_exporter`` is the :class:`~modelopt.torch.export.layerwise_export.LayerwiseExporter`
-    a layerwise calibration wrote every layer's shard through, for the export to finalize.
+    a layerwise calibration in a ``with ModelOptSession():`` block wrote every layer's shard
+    through, for the export to finalize.
 
     ``export_context`` is the :class:`~modelopt.torch.export.registry.ExportContext` of the export
     in progress. The export keeps it here from its setup until it ends, and each of its steps and
@@ -101,7 +102,8 @@ class ModelOptSession:
 
     ``runtime`` (:class:`RunState`) holds the live objects one call hands to a later one, such as
     the layerwise exporter calibration writes through and the export finalizes, and those one step
-    of a call hands to the next, such as the context of the export in progress.
+    of a call hands to the next, such as the context of the export in progress. The default
+    session keeps nothing from one call to the next.
 
     ``with ModelOptSession():`` makes it the process's active session for the block, and every
     ModelOpt call in the block runs in it. Opening another while one is active raises: a workflow

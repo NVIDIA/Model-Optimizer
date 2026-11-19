@@ -96,6 +96,8 @@ def test_a_layerwise_export_finishes_outside_any_workflow_session(tmp_path):
     model = get_tiny_llama(num_hidden_layers=2).eval()
     model.config.architectures = ["LlamaForCausalLM"]
     mtq.quantize(model, _layerwise_fp8_cfg(tmp_path), lambda m: m(torch.randint(0, 32, (1, 16))))
+    # The default session keeps nothing between calls: the model alone holds the exporter.
+    assert ModelOptSession.active().runtime.layerwise_exporter is None
 
     copy.deepcopy(model)
     getattr(model, LAYERWISE_EXPORTER_ATTR).finalize()
@@ -172,7 +174,7 @@ def test_a_layerwise_export_that_fails_is_not_the_workflows(tmp_path, fails_at):
         first, error = calibrate, NotImplementedError
     else:
         first, error = fail, RuntimeError
-    with ModelOptSession() as session:
+    with ModelOptSession().bind(model) as session:
         with pytest.raises(error):
             mtq.quantize(model, cfg, first)
         assert session.runtime.layerwise_exporter is None

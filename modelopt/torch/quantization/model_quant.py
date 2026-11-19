@@ -227,11 +227,10 @@ def calibrate(
     In order to calibrate using custom user defined calibration algorithm, refer to
     :ref:`custom calibration algorithm <custom_calibration_algorithm>`
 
-    Calibration runs in the active ModelOpt session
-    (:class:`~modelopt.torch.opt.session.ModelOptSession`): the workflow's, else the default one. A
-    layerwise calibration with ``layerwise.export_dir`` writes the layers through the exporter the
-    session holds, else through the one set on the model, else through a new one; once every layer
-    is written, the session holds that exporter, for ``export_hf_checkpoint`` to finalize.
+    A layerwise calibration with ``layerwise.export_dir`` writes the layers through the exporter the
+    workflow's ModelOpt session (:class:`~modelopt.torch.opt.session.ModelOptSession`) holds, else
+    through the one set on the model, else through a new one; once every layer is written, the
+    workflow's session holds that exporter, for ``export_hf_checkpoint`` to finalize.
 
     Args:
         model: A pytorch model with quantizer modules.

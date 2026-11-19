@@ -2456,9 +2456,9 @@ def layerwise_calibrate(
     :class:`LayerwiseConfig <modelopt.torch.quantization.config.LayerwiseConfig>`, which
     documents them; ``export_dir`` additionally leaves the model in export form, so it
     must not be used for inference afterwards. With ``export_dir``, the layers are written through
-    the layerwise exporter the active ModelOpt session holds, else through the one set on the model,
-    else through a new one; once every layer is written, the session holds that exporter, for the
-    export to finalize.
+    the layerwise exporter the workflow's ModelOpt session holds, else through the one set on the
+    model, else through a new one; once every layer is written, the session of a
+    ``with ModelOptSession():`` block holds that exporter, for the export to finalize.
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
     export_dir = calib_kwargs.pop("export_dir", None)
@@ -2501,9 +2501,9 @@ def layerwise_calibrate(
     exporter = None
     finalize_hint = ""
     if export_dir is not None:
-        session = ModelOptSession.active()
-        # One announced on the model is how a calibration in a session of its own hands it on.
-        exporter = session.runtime.layerwise_exporter or getattr(
+        # One announced on the model is how a calibration outside the workflow's session, in no
+        # session or in one of its own, hands it on.
+        exporter = ModelOptSession.active().runtime.layerwise_exporter or getattr(
             model, LAYERWISE_EXPORTER_ATTR, None
         )
         if exporter is None:
@@ -2532,7 +2532,8 @@ def layerwise_calibrate(
             f"Layerwise export: every layer shard in {exporter.export_dir} is already "
             f"written.{finalize_hint}"
         )
-        ModelOptSession.active().runtime.layerwise_exporter = exporter
+        if (workflow := ModelOptSession.current()) is not None:
+            workflow.runtime.layerwise_exporter = exporter
         return
 
     layer_pbar = tqdm(
@@ -2635,7 +2636,10 @@ def layerwise_calibrate(
     if exporter is not None:
         # Held once it wrote every layer: one that refused the model, or a calibration that failed,
         # leaves the one set on the model, for a retry in the workflow to replace as it would there.
-        ModelOptSession.active().runtime.layerwise_exporter = exporter
+        # The default session keeps nothing between calls, so outside any workflow the model holds
+        # it alone.
+        if (workflow := ModelOptSession.current()) is not None:
+            workflow.runtime.layerwise_exporter = exporter
         warn_rank_0(
             f"Layerwise export: wrote every layer shard to {exporter.export_dir}.{finalize_hint}"
         )

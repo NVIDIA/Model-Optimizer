@@ -20,7 +20,7 @@ Changelog
 
 *Quantization - Export & Deployment*
 
-- In a ``ModelOptSession``, a layerwise calibration hands its exporter to the export through the session once every layer is written.
+- In a ``with ModelOptSession():`` block, a layerwise calibration hands its exporter to the export through the session once every layer is written.
 
 *Quantization - Recipes*
 
