@@ -34,6 +34,7 @@ __all__ = [
     "dequantize_mxfp4",
     "mxfp4_to_nvfp4_global_amax",
     "mxfp4_to_nvfp4_per_block_amax",
+    "unpack_e2m1",
 ]
 
 E8M0_BIAS = 127  # E8M0 stores k_j as uint8 with bias 127
@@ -84,18 +85,23 @@ def dequantize_mxfp4(
             f"{tuple(e8m0_scales.shape)} {e8m0_scales.dtype}: expected one byte per two values "
             "and one per 32."
         )
-    packed = blocks.reshape(rows, 16).view(torch.uint8)
+    packed = blocks.reshape(rows, 16)
     scales = e8m0_scales.reshape(rows).view(torch.uint8)
-    # The E2M1 value of each nibble: its magnitude in the low three bits, its sign in the fourth.
-    magnitude = _e2m1_magnitude_table(blocks.device)
-    table = torch.cat((magnitude, -magnitude))
     out = torch.empty(rows, 32, dtype=dtype, device=blocks.device)
     for start in range(0, rows, _DEQUANT_ROWS):
-        chunk = packed[start : start + _DEQUANT_ROWS]
-        values = torch.stack((table[(chunk & 0x0F).int()], table[(chunk >> 4).int()]), dim=-1)
+        values = unpack_e2m1(packed[start : start + _DEQUANT_ROWS])
         exponent = scales[start : start + _DEQUANT_ROWS].int() - E8M0_BIAS
-        out[start : start + _DEQUANT_ROWS] = torch.ldexp(values.flatten(1), exponent.unsqueeze(-1))
+        out[start : start + _DEQUANT_ROWS] = torch.ldexp(values, exponent.unsqueeze(-1))
     return out.reshape(*e8m0_scales.shape[:-1], 32 * e8m0_scales.shape[-1])
+
+
+def unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
+    """The E2M1 values ``packed`` holds two a byte, low nibble first, as float32 ``(..., 2 * n)``."""
+    # The value of each nibble: its magnitude in the low three bits, its sign in the fourth.
+    magnitude = _e2m1_magnitude_table(packed.device)
+    table = torch.cat((magnitude, -magnitude))
+    packed = packed.view(torch.uint8)
+    return torch.stack((table[(packed & 0x0F).int()], table[(packed >> 4).int()]), -1).flatten(-2)
 
 
 def mxfp4_to_nvfp4_global_amax(e8m0_scales: torch.Tensor) -> tuple[float, dict]:
