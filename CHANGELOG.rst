@@ -29,7 +29,7 @@ Changelog
 *Misc*
 
 - Add ``modelopt.torch.opt.ModelOptSession``, the session a ModelOpt workflow runs in: run the workflow inside ``with ModelOptSession().bind(model):`` and the quantization, calibration and Hugging Face export calls it makes run in that session, which describes the models the workflow binds by name (``model``, and ``teacher`` for distillation). In the block, the Hugging Face export reads the model's type from its binding and refuses a model the session does not bind. Code that opens no session runs as before.
-- Inside a ``ModelOptSession``, ``load_pretrained`` loads by the session's ``distribution`` plan when none is passed, and records in the session the plan it loaded by and the source checkpoint, whose tensors the model has no parameter for, such as an MTP head, the Hugging Face exports carry over.
+- ``load_pretrained`` binds the model it loads in the active ``ModelOptSession`` under its new ``name`` argument (``"model"`` by default, ``"teacher"`` for a distillation's teacher), and records there the source checkpoint, whose tensors the model has no parameter for, such as an MTP head, the Hugging Face exports carry over. Inside a ``with ModelOptSession():`` block, it also loads by the session's ``distribution`` plan when none is passed, and records the plan it loaded by.
 
 **Backward Breaking Changes**
 
