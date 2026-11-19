@@ -81,6 +81,8 @@ def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
         mbs=1,
         gbs=4,
         train_iters=train_iters,
+        # Other GPU counts retain tensor-parallel coverage; chunked KL supports TP1.
+        logit_kl_chunk_size=128 if num_gpus == 1 else None,
         lr_warmup_iters=1,
         eval_interval=1,  # save_interval defaults to it, so every iteration is checkpointed
         eval_iters=1,

@@ -42,6 +42,7 @@ from torch.nn.modules.loss import _Loss
 
 import modelopt.torch.distill as mtd
 from modelopt.torch.distill.config import Criterion
+from modelopt.torch.distill.losses import _chunked_logits_kl
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils import warn_rank_0
 
@@ -68,6 +69,8 @@ class DistillationConfig:
             ``(1 - alpha) * lm_loss + alpha * kd_loss``. Must be in [0, 1]. Default: ``1.0``. When ``1.0``,
             the standard language model loss is skipped entirely (see :attr:`skip_lm_loss`).
         logit_kl_temperature: Temperature for the logit KL-divergence loss.
+        logit_kl_chunk_size: Optional sequence rows per full-vocabulary KL chunk.
+            Bounds FP32 temporaries in forward and backward; requires TP1 and no Top-K.
         logit_kl_topk: If not None, use TopLogitsKLLoss instead of LogitsKLLoss with this top-k value.
         logit_kl_top_p: Optional nucleus (top-P) threshold applied on top of the teacher's Top-K.
             Only the smallest prefix of the (sorted) Top-K whose cumulative teacher probability
@@ -88,6 +91,7 @@ class DistillationConfig:
     logit_layers: tuple[str, str] = ("output_layer", "output_layer")
     kd_loss_alpha: float = 1.0
     logit_kl_temperature: float = 1.0
+    logit_kl_chunk_size: int | None = None
     logit_kl_topk: int | None = None
     logit_kl_top_p: float | None = None
     logit_kl_top_p_min_k: int = 1
@@ -124,6 +128,11 @@ class DistillationConfig:
         )
         assert 0 <= self.kd_loss_alpha <= 1, f"{self.kd_loss_alpha=}"
         assert self.logit_kl_temperature > 0, f"{self.logit_kl_temperature=}"
+        if self.logit_kl_chunk_size is not None:
+            if self.logit_kl_chunk_size < 1 or self.logit_kl_topk is not None:
+                raise ValueError(
+                    "Chunked full-vocabulary KL needs a positive chunk size and no Top-K"
+                )
         if self.logit_kl_top_p is not None:
             assert self.logit_kl_topk is not None, "logit_kl_top_p requires logit_kl_topk"
             assert 0 < self.logit_kl_top_p <= 1, f"{self.logit_kl_top_p=}"
@@ -191,7 +200,9 @@ def setup_distillation_config(
                 )
             else:
                 criterion[tuple(cfg.logit_layers)] = LogitsKLLoss(
-                    student_cfg, temperature=cfg.logit_kl_temperature
+                    student_cfg,
+                    temperature=cfg.logit_kl_temperature,
+                    chunk_size=cfg.logit_kl_chunk_size,
                 )
             # NOTE: Projection layer shared among intermediate layer pairs.
             projection_layer = ProjectionLayer(student_cfg, teacher_cfg)
@@ -352,7 +363,12 @@ class LogitsKLLoss(BaseLoss):
     """Calculates KL-Divergence loss between two logits tensors without reducing the sequence dim."""
 
     def __init__(
-        self, model_config: "TransformerConfig", temperature: float = 1.0, reverse: bool = False
+        self,
+        model_config: "TransformerConfig",
+        temperature: float = 1.0,
+        reverse: bool = False,
+        *,
+        chunk_size: int | None = None,
     ):
         """Constructor.
 
@@ -360,10 +376,18 @@ class LogitsKLLoss(BaseLoss):
             model_config: MCore transformer config.
             temperature: Divide tensors by this value prior to calculating loss.
             reverse: Whether to reverse the loss as KLD(teacher, student) instead of KLD(student, teacher)
+            chunk_size: Optional sequence chunk size for bounded-memory TP1 forward KL.
         """
         super().__init__(model_config)
         self._temperature = temperature
         self._reverse = reverse
+        if chunk_size is not None and (
+            chunk_size < 1 or model_config.tensor_model_parallel_size != 1 or reverse
+        ):
+            raise ValueError(
+                "Chunked full-vocabulary KL requires positive chunks, TP1 and forward KL"
+            )
+        self._chunk_size = chunk_size
 
     def forward(self, predictions: Tensor, targets: Tensor) -> Tensor:
         """Forward function.
@@ -376,6 +400,10 @@ class LogitsKLLoss(BaseLoss):
             KLD loss of tensors (size [b, s])
         """
         predictions, targets = self.pre_forward(predictions, targets)
+
+        if self._chunk_size is not None:
+            loss = _chunked_logits_kl(predictions, targets, self._temperature, self._chunk_size)
+            return self.post_forward(loss, tp_reduce=True)
 
         # Division by temp should happen prior to finding max for both student and teacher.
         output_teacher = targets.float() / self._temperature
@@ -861,6 +889,9 @@ def adjust_distillation_model_for_mcore(
         is_mtp_call = self._lm_loss_call_count <= mtp_num_layers
         if self.training and (skip_mtp_loss if is_mtp_call else skip_lm_loss):
             return torch.zeros_like(labels, dtype=logits.dtype)
+        # Native Core cross-entropy also mutates FP32 inputs, which KD hooks retain.
+        if logits.dtype == torch.float32:
+            logits = logits.clone()
         return type(self).compute_language_model_loss(self, labels, logits)
 
     model.compute_language_model_loss = MethodType(_compute_student_lm_loss, model)

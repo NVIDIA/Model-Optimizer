@@ -350,6 +350,12 @@ def get_args():
         "CUDA context, which fails when the training process already fills the GPU.",
     )
     parser.add_argument(
+        "--logit_kl_chunk_size",
+        type=_positive_int,
+        default=None,
+        help="Bound full-vocabulary KL temporaries by this many tokens.",
+    )
+    parser.add_argument(
         "--logit_kl_top_k",
         type=int,
         default=None,
@@ -778,6 +784,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
 
     kd_config = ModelOptDistillConfig(
         kd_loss_alpha=args.kd_loss_alpha,
+        logit_kl_chunk_size=args.logit_kl_chunk_size,
         logit_kl_topk=args.logit_kl_top_k,
         logit_kl_top_p=args.logit_kl_top_p,
         logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,

@@ -20,6 +20,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd.function import once_differentiable
 from torch.nn.modules.loss import _Loss as Loss
 
 __all__ = ["LogitsDistillationLoss", "MFTLoss", "MGDLoss"]
@@ -276,3 +277,51 @@ class MGDLoss(Loss):
         loss = self._loss_fn(out_s, out_t) * self._alpha_mgd
 
         return loss
+
+
+class _ChunkedLogitsKL(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, predictions, targets, temperature, chunk_rows):
+        if predictions.shape != targets.shape or predictions.ndim != 3:
+            raise ValueError("Expected matching [sequence, batch, vocabulary] logits")
+        if targets.requires_grad:
+            raise ValueError("QAD teacher logits must be detached")
+        if temperature <= 0 or chunk_rows < 1:
+            raise ValueError("Invalid KL temperature or row chunk size")
+        ctx.save_for_backward(predictions, targets)
+        ctx.temperature = temperature
+        ctx.chunk_rows = chunk_rows
+        loss = torch.empty(predictions.shape[:2], dtype=torch.float32, device=predictions.device)
+        for start in range(0, predictions.shape[0], chunk_rows):
+            stop = min(start + chunk_rows, predictions.shape[0])
+            student = predictions[start:stop].float() / temperature
+            teacher = targets[start:stop].float() / temperature
+            p = student - student.logsumexp(dim=-1, keepdim=True)
+            q = teacher - teacher.logsumexp(dim=-1, keepdim=True)
+            loss[start:stop] = F.kl_div(p, q, reduction="none", log_target=True).sum(dim=-1)
+        return loss
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, loss_gradient):
+        predictions, targets = ctx.saved_tensors
+        gradient = torch.empty_like(predictions)
+        for start in range(0, predictions.shape[0], ctx.chunk_rows):
+            stop = min(start + ctx.chunk_rows, predictions.shape[0])
+            student = predictions[start:stop].float() / ctx.temperature
+            teacher = targets[start:stop].float() / ctx.temperature
+            p = student - student.logsumexp(dim=-1, keepdim=True)
+            q = teacher - teacher.logsumexp(dim=-1, keepdim=True)
+            teacher_probability = q.exp()
+            # Keep the computed probability mass, including FP32 rounding,
+            # exactly as autograd does for the existing logsumexp expression.
+            derivative = (
+                p.exp() * teacher_probability.sum(dim=-1, keepdim=True) - teacher_probability
+            )
+            derivative.mul_(loss_gradient[start:stop].unsqueeze(-1)).div_(ctx.temperature)
+            gradient[start:stop] = derivative
+        return gradient, None, None, None
+
+
+def _chunked_logits_kl(predictions, targets, temperature=1.0, chunk_rows=128):
+    return _ChunkedLogitsKL.apply(predictions, targets, temperature, chunk_rows)
