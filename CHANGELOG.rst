@@ -20,6 +20,8 @@ Changelog
 
 *Quantization - Export & Deployment*
 
+- ``examples/hf_ptq/convert_ggml_to_int8.py`` now also converts GGML exports that hold other formats (FP8, NVFP4, KV cache quantization): their GGML layers become ModelOpt ``INT8_PB_WO`` layers beside the rest of the export, which vLLM newer than 0.34.0 serves. Exports with only GGML layers still become compressed-tensors, and fused MoE experts now convert in both.
+
 *Quantization - Recipes*
 
 - Add a sub-4-bit AutoQuantize recipe for Qwen3.6-35B-A3B at 2.75 bits, which searches the routed experts over GGML IQ2 formats with GPTQ and imatrix, weight-only NVFP4 and FP8, and BF16. Select it under ``models/Qwen/Qwen3.6-35B-A3B/auto_quantize/``.
