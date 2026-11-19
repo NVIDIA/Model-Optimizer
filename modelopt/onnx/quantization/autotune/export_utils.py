@@ -16,6 +16,7 @@
 """Utilities for Q/DQ model export and insertion in ONNX autotune."""
 
 import dataclasses
+import hashlib
 from collections.abc import Callable
 
 import numpy as np
@@ -28,12 +29,17 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
     ResolvedInsertionPoint,
     merge_resolved_insertion_points,
 )
-from modelopt.onnx.quantization.fp8 import int8_to_fp8
+from modelopt.onnx.quantization.fp8 import _rescale_int8_scales_to_fp8, int8_to_fp8
 from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
-from modelopt.onnx.quantization.qdq_graph import remove_scalar_input_qdq
+from modelopt.onnx.quantization.qdq_graph import (
+    group_scale_sharing_tensors,
+    remove_scalar_input_qdq,
+)
 from modelopt.onnx.utils import export_onnx
 
 __all__ = [
+    "build_activation_scales",
+    "build_scale_group_map",
     "build_tensor_map",
     "create_qdq_nodes",
     "export_qdq_onnx",
@@ -200,12 +206,137 @@ def create_qdq_nodes(
     return q_node, dq_node
 
 
+# Activation scales are drawn log-uniformly from this range.
+_ACTIVATION_SCALE_RANGE = (1e-4, 1e0)
+
+
+def _hashed_scale(key: str) -> float:
+    """Return a scale for a key, log-uniform over _ACTIVATION_SCALE_RANGE."""
+    low, high = _ACTIVATION_SCALE_RANGE
+    digest = int(hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:8], 16)
+    return float(np.exp(np.log(low) + (np.log(high) - np.log(low)) * digest / 0xFFFFFFFF))
+
+
+def build_scale_group_map(graph: gs.Graph, quantized_tensors: set[str]) -> dict[str, str]:
+    """Map each quantized tensor to the representative of its scale group.
+
+    Tensors in one group get one scale, as they do in the quantized model:
+
+    * The quantized inputs and the output of a Concat whose output is quantized, which the
+      ``concat_elimination`` pass unifies. Unquantized inputs stay out: merging a boundary
+      the quantized model keeps would drop a requantization it performs.
+    * Tensors joined by rearranging ops, including chains of such ops through tensors this
+      candidate leaves unquantized, since they hold the same values. A member of a Concat group
+      stays out and takes the group's scale instead, except the output of a group formed by one
+      Concat, whose range is already the group's.
+
+    The groups come from :func:`~modelopt.onnx.quantization.qdq_graph.group_scale_sharing_tensors`,
+    which the quantizer also uses for concat elimination.
+
+    Args:
+        graph: Graph the candidate is built from.
+        quantized_tensors: Names of the (activation) tensors that receive Q/DQ.
+
+    Returns:
+        Mapping from every name in ``quantized_tensors`` to its group representative, which
+        is the tensor itself when it shares a scale with nothing.
+    """
+    representatives = group_scale_sharing_tensors(
+        graph, quantized_tensors.__contains__, through_rearrange_ops=True
+    )
+    return {name: representatives.get(name, name) for name in quantized_tensors}
+
+
+def _to_grid(value: float, bfloat16: bool) -> int:
+    """Return the 16-bit pattern of the float16 or bfloat16 value nearest to ``value``."""
+    if bfloat16:
+        bits = int(np.array(value, dtype=np.float32).view(np.uint32))
+        return (bits + 0x7FFF + ((bits >> 16) & 1)) >> 16
+    return int(np.array(value, dtype=np.float16).view(np.uint16))
+
+
+def _from_grid(bits: int, bfloat16: bool) -> float:
+    """Inverse of :func:`_to_grid`."""
+    if bfloat16:
+        return float(np.array(bits << 16, dtype=np.uint32).view(np.float32))
+    return float(np.array(bits, dtype=np.uint16).view(np.float16))
+
+
+def build_activation_scales(
+    quantized_tensors: set[str],
+    scale_group_map: dict[str, str],
+    *,
+    bfloat16: bool = False,
+    fp8: bool = False,
+) -> dict[str, float]:
+    """Give every scale group its own activation scale.
+
+    Two tensors carrying the same scale have nothing to requantize between them and the
+    compiler drops the rescale, so a candidate only represents the work a calibrated model
+    performs when scales repeat exactly where quantization would unify them. Each group's
+    scale is hashed from its representative, so it is reproducible across runs and resumed
+    processes.
+
+    Hashes of unrelated groups collide once rounded to 16 bits, so scales are placed on the
+    float16 grid (bfloat16 when the candidate runs in it; float32 holds either exactly), and
+    one that another group already took moves to the next free grid value, wrapping within
+    ``_ACTIVATION_SCALE_RANGE``. For FP8 candidates the check applies to the scale after
+    ``int8_to_fp8`` rescales it, which merges some adjacent grid values. Groups share a
+    scale by accident only when they outnumber the distinct values in the range (13,683
+    for float16 and 1,711 for bfloat16; 12,194 and 1,523 after the FP8 rescale).
+
+    Args:
+        quantized_tensors: Names of the (activation) tensors that receive Q/DQ.
+        scale_group_map: Tensor name to scale-group representative, from
+            :func:`build_scale_group_map`.
+        bfloat16: Place the scales on the bfloat16 grid instead of the float16 one.
+        fp8: The candidate is converted to FP8 after export, so keep the converted scales
+            distinct.
+
+    Returns:
+        Mapping from tensor name to the scale its Q/DQ should carry.
+    """
+    low = _to_grid(_ACTIVATION_SCALE_RANGE[0], bfloat16)
+    high = _to_grid(_ACTIVATION_SCALE_RANGE[1], bfloat16)
+    grid = np.arange(low, high + 1, dtype=np.uint16)
+    if fp8:
+        grid_dtype = onnx.helper.tensor_dtype_to_np_dtype(
+            onnx.TensorProto.BFLOAT16 if bfloat16 else onnx.TensorProto.FLOAT16
+        )
+        carried = _rescale_int8_scales_to_fp8(grid.view(grid_dtype), grid_dtype).view(np.uint16)
+    else:
+        carried = grid
+    # final[bits - low]: bits of the scale the candidate carries for grid value ``bits``.
+    final: list[int] = carried.tolist()
+    capacity = len(set(final))
+
+    roots = sorted({scale_group_map.get(t, t) for t in quantized_tensors})
+    if len(roots) > capacity:
+        logger.warning(
+            f"{len(roots)} activation scale groups exceed the {capacity} distinct scales "
+            "available; some unrelated groups will share a scale"
+        )
+
+    taken: set[int] = set()
+    group_scales: dict[str, float] = {}
+    for root in roots:
+        bits = _to_grid(_hashed_scale(root), bfloat16)
+        for _ in range(len(final)):
+            if final[bits - low] not in taken:
+                break
+            bits = low if bits >= high else bits + 1
+        taken.add(final[bits - low])
+        group_scales[root] = _from_grid(bits, bfloat16)
+    return {t: group_scales[scale_group_map.get(t, t)] for t in quantized_tensors}
+
+
 def insert_qdq_at_tensors(
     graph: gs.Graph,
     resolved_insertion_points: set[ResolvedInsertionPoint],
     config: Config,
     *,
     tensor_users_map: dict[str, list[int]] | None = None,
+    fp8_conversion: bool = False,
 ) -> None:
     """Insert Q/DQ (Quantize/Dequantize) node pairs at specified locations.
 
@@ -217,6 +348,8 @@ def insert_qdq_at_tensors(
         resolved_insertion_points: Set of ResolvedInsertionPoint specifying where to insert Q/DQ.
         config: Config with default_q_scale, default_q_zero_point, default_quant_type, default_dq_dtype.
         tensor_users_map: Optional precomputed tensor name -> list of node indices. If None, computed.
+        fp8_conversion: The INT8 Q/DQ inserted here are converted to FP8 afterwards, which
+            rescales them; keep the activation scales distinct after that conversion.
     """
     q_scale = config.default_q_scale
     q_zero_point = config.default_q_zero_point
@@ -228,6 +361,22 @@ def insert_qdq_at_tensors(
     resolved_insertion_points = merge_resolved_insertion_points(graph, resolved_insertion_points)
 
     tensor_map = build_tensor_map(graph)
+
+    activation_scales: dict[str, float] = {}
+    if config.use_varied_activation_scales:
+        quantized_activations = {
+            ip.tensor_name
+            for ip in resolved_insertion_points
+            if not isinstance(tensor_map.get(ip.tensor_name), gs.Constant)
+        }
+        scale_group_map = build_scale_group_map(graph, quantized_activations)
+        activation_scales = build_activation_scales(
+            quantized_activations,
+            scale_group_map,
+            bfloat16=config.default_dq_dtype == "bfloat16",
+            fp8=fp8_conversion,
+        )
+
     if tensor_users_map is None:
         tensor_users_map = get_tensor_consumer_node_indices(graph)
     logger.debug(
@@ -277,13 +426,15 @@ def insert_qdq_at_tensors(
             unique_suffix = f"n{node_index}_i{input_index}"
         unique_tensor_name = f"{tensor_name}_{unique_suffix}"
 
+        point_scale = q_scale if is_constant else activation_scales.get(tensor_name, q_scale)
+
         q_node, dq_node = create_qdq_nodes(
             unique_tensor_name,
             original_tensor,
             output_shape,
             output_dtype,
             quant_dtype,
-            q_scale,
+            point_scale,
             q_zero_point,
         )
 
@@ -348,7 +499,9 @@ def export_qdq_onnx(
         if needs_fp8_conversion:
             logger.debug("FP8 conversion: creating INT8 model first")
             config_int8 = dataclasses.replace(config, default_quant_type="int8")
-            insert_qdq_at_tensors(graph_copy, resolved_insertion_points, config_int8)
+            insert_qdq_at_tensors(
+                graph_copy, resolved_insertion_points, config_int8, fp8_conversion=True
+            )
         else:
             insert_qdq_at_tensors(graph_copy, resolved_insertion_points, config)
         # A per-tensor Q/DQ on a rank-0 constant breaks TensorRT's ONNX parser

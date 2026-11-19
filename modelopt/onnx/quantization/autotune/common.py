@@ -807,7 +807,12 @@ class Config:
     - verbose: Enable detailed logging of autotuning progress (default: False).
     - performance_threshold: Minimum speedup ratio to accept a scheme;
       1.0 = no improvement required, 1.02 = 2% improvement (default: 1.02).
-    - default_q_scale: Default scale for Q/DQ nodes; typical range 0.01-0.1 (default: 0.1).
+    - default_q_scale: Scale for Q/DQ nodes on weights; typical range 0.01-0.1 (default: 0.1).
+      Also used for activations when use_varied_activation_scales is False.
+    - use_varied_activation_scales: Give activations per-tensor scales that differ across
+      every requantization boundary (see export_utils.build_activation_scales) rather than
+      default_q_scale everywhere, which leaves no rescale for TensorRT to perform
+      (default: True).
     - default_q_zero_point: Zero-point for Q/DQ; 0 for int8, 128 for uint8 (default: 0).
     - default_quant_type: Quantization type; "int8" (default) or "fp8".
     - default_dq_dtype: Dtype for DequantizeLinear output; "float32" (default) or "float16".
@@ -846,3 +851,6 @@ class Config:
     # Pattern Cache Settings
     pattern_cache_minimum_distance: int = 4
     pattern_cache_max_entries_per_pattern: int = 32
+
+    # Candidate scale assignment (after the existing fields to keep positional order)
+    use_varied_activation_scales: bool = True

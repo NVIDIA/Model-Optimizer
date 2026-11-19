@@ -16,6 +16,8 @@
 """Q/DQ graph policy for ONNX quantization."""
 
 import re
+from collections import Counter, defaultdict
+from collections.abc import Callable
 from typing import Any, cast
 
 import numpy as np
@@ -50,6 +52,7 @@ __all__ = [
     "get_layer_info",
     "get_layer_precision_mapping",
     "get_resize_scales",
+    "group_scale_sharing_tensors",
     "print_stat",
     "remove_partial_input_qdq",
     "remove_scalar_input_qdq",
@@ -879,67 +882,122 @@ def get_concat_eliminated_tensors(
     """
     logger.info("Finding concat eliminated tensors")
     input_name_to_nodes = get_tensor_consumer_nodes(onnx_model.graph)
-    graph = gs.import_onnx(onnx_model)
 
-    # We'll use a Union-Find data structure to track tensor groups
-    parent = {}
+    def is_quantized(tensor_name: str) -> bool:
+        return any(
+            consumer.name in nodes_to_quantize for consumer in input_name_to_nodes[tensor_name]
+        )
 
-    def find(x):
-        if x not in parent:
-            parent[x] = x
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
-
-    def union(x, y):
-        parent[find(x)] = find(y)
-
-    # First, identify concat ops where output is quantized
-    for node in graph.nodes:
-        if node.op == "Concat":
-            # Check if concat output is quantized
-            concat_output_name = node.outputs[0].name
-            concat_consumers = input_name_to_nodes[concat_output_name]
-            concat_has_qdq = any(
-                consumer.name in nodes_to_quantize for consumer in concat_consumers
-            )
-
-            if concat_has_qdq:
-                # Find quantized inputs to concat
-                quantized_inputs = []
-                for input_tensor in node.inputs:
-                    # A constant (initializer) input is not an activation: the calibrator collects no range
-                    # for it, so it cannot share a scaling factor with the other tensors of the group.
-                    if isinstance(input_tensor, gs.Constant):
-                        continue
-                    input_name = input_tensor.name
-                    input_consumers = input_name_to_nodes[input_name]
-                    if any(consumer.name in nodes_to_quantize for consumer in input_consumers):
-                        quantized_inputs.append(input_name)
-
-                # If we have quantized inputs, merge them with the output
-                if quantized_inputs:
-                    # Add the concat output
-                    quantized_inputs.append(concat_output_name)
-
-                    # Use union-find to merge all related tensors
-                    for i in range(1, len(quantized_inputs)):
-                        union(quantized_inputs[i], quantized_inputs[0])
-
-    # Build the final result dictionary
-    result = {}
-    all_tensors = set(parent.keys())
-
-    # Group by the root parent
-    groups = {}
-    for tensor in all_tensors:
-        root = find(tensor)
-        if root not in groups:
-            groups[root] = set()
+    representatives = group_scale_sharing_tensors(gs.import_onnx(onnx_model), is_quantized)
+    groups: dict[str, set[str]] = defaultdict(set)
+    for tensor, root in representatives.items():
         groups[root].add(tensor)
+    return {tensor: groups[root] for tensor, root in representatives.items()}
 
-    # Build the final mapping
-    for tensor in all_tensors:
-        root = find(tensor)
-        result[tensor] = groups[root]
-    return result
+
+# Ops that only rearrange the values of their first input, so a calibrator derives the same
+# range on both sides. Ops that can introduce new values (MaxPool, Resize, ...) are left out
+# even where the ranges often coincide.
+_REARRANGE_OPS = frozenset({"Flatten", "Reshape", "Squeeze", "Transpose", "Unsqueeze"})
+
+
+def group_scale_sharing_tensors(
+    graph: gs.Graph,
+    is_quantized: Callable[[str], bool],
+    *,
+    through_rearrange_ops: bool = False,
+) -> dict[str, str]:
+    """Map the tensors that end up with one scaling factor to a common representative.
+
+    Concat elimination gives one scaling factor to the quantized activation inputs and the
+    output of each Concat whose output is quantized.
+
+    With ``through_rearrange_ops``, tensors joined by ops that only rearrange values (Reshape,
+    Transpose, ...), also through unquantized tensors, are grouped as well. They hold the same
+    values, so calibration gives them one scaling factor without being told; only a model built
+    without calibration needs them grouped explicitly. The members of a Concat group are the
+    exception: concat elimination widens their range to that of the group, so they stay out of
+    the groups the rearranging ops form, while the tensors on either side of them stay together.
+    Only the output of a group formed by one Concat keeps its rearranging neighbors: it holds
+    every value of the group, so its own range is already the group's. (Under histogram-based
+    calibration, that holds exactly when every input of the Concat is in the group.)
+
+    Args:
+        graph: Graph to search.
+        is_quantized: Whether a tensor, given by name, is quantized.
+        through_rearrange_ops: Whether to also group tensors joined by rearranging ops.
+
+    Returns:
+        Mapping from every grouped tensor to the lexicographically smallest name in its group.
+        Tensors that share a scaling factor with nothing are left out. With
+        ``through_rearrange_ops``, the mapping also covers the tensors that only link a
+        rearranging chain, quantized or not.
+    """
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a: str, b: str) -> None:
+        parent.setdefault(a, a)
+        parent.setdefault(b, b)
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            if rb < ra:
+                ra, rb = rb, ra
+            parent[rb] = ra
+
+    concat_inputs: set[str] = set()
+    concat_outputs: list[str] = []
+    for node in graph.nodes:
+        if node.op != "Concat" or not is_quantized(node.outputs[0].name):
+            continue
+        # A constant (initializer) input is not an activation: the calibrator collects no range
+        # for it, so it cannot share a scaling factor with the other tensors of the group.
+        quantized_inputs = [
+            tensor.name
+            for tensor in node.inputs
+            if not isinstance(tensor, gs.Constant) and is_quantized(tensor.name)
+        ]
+        for tensor_name in quantized_inputs:
+            union(tensor_name, node.outputs[0].name)
+        concat_inputs.update(quantized_inputs)
+        if quantized_inputs:
+            concat_outputs.append(node.outputs[0].name)
+
+    if through_rearrange_ops:
+        # Concats that share an input form one group whose range exceeds each of their outputs'.
+        concats_per_group = Counter(find(name) for name in concat_outputs)
+        widened = concat_inputs | {
+            name for name in concat_outputs if concats_per_group[find(name)] > 1
+        }
+        neighbors: dict[str, list[str]] = defaultdict(list)
+        for node in graph.nodes:
+            if node.op in _REARRANGE_OPS and node.inputs and node.outputs:
+                source, target = node.inputs[0].name, node.outputs[0].name
+                neighbors[source].append(target)
+                neighbors[target].append(source)
+        visited: set[str] = set()
+        for start in neighbors:
+            if start in visited:
+                continue
+            # Walk every tensor holding the same values as ``start``.
+            visited.add(start)
+            stack, same_values = [start], []
+            while stack:
+                tensor_name = stack.pop()
+                same_values.append(tensor_name)
+                for neighbor in neighbors[tensor_name]:
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        stack.append(neighbor)
+            kept = [name for name in same_values if name not in widened]
+            for tensor_name in kept[1:]:
+                union(kept[0], tensor_name)
+
+    return {tensor_name: find(tensor_name) for tensor_name in parent}
