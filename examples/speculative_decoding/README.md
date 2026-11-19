@@ -259,6 +259,32 @@ See more details on deployment of quantized model to TRTLLM [here](../hf_ptq/REA
 
 ## Advanced Usage
 
+### Pad Microbatches to Buckets
+
+Offline and streaming training can right-pad each microbatch to the smallest of one or two
+configured lengths that fits every sample:
+
+```bash
+./launch_train.sh \
+    --config ../../modelopt_recipes/general/speculative_decoding/eagle3.yaml \
+    data.offline_data_path=$HIDDEN_STATES_DIR \
+    'data.padding_buckets=[24576,32768]' \
+    training.training_seq_len=32768
+```
+
+Buckets must increase and end at `training.training_seq_len`. DFlash, DSpark and Domino
+also require every bucket to be divisible by `dflash.dflash_block_size`. This changes
+padding only: samples are neither sorted nor packed, and truncation at the training
+sequence length and streaming fetch retries remain unchanged. Misaligned feature lengths
+raise errors. Use `training.dataloader_in_order=true`
+when worker completion order must preserve the sampler's order.
+
+The two-bucket limit bounds the sequence lengths seen by compiled training and the
+attention-mask cache; arbitrary dynamic padding can introduce many compiled variants.
+EAGLE retains TTT FlexAttention block masks for at most two sequence lengths, evicting the
+oldest when a third is used. Device, dtype, or attention-method changes clear the cache.
+Dense attention retains masks for only one length because their storage grows quadratically.
+
 ### Other Datasets
 
 In addition to the default dataset, we support adding several other commonly used datasets in `../dataset/make_dataset.py`:

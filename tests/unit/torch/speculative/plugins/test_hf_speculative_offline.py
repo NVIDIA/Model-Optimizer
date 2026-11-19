@@ -17,6 +17,7 @@
 
 import argparse
 import importlib.util
+import json
 import os
 
 # ---------------------------------------------------------------------------
@@ -40,6 +41,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
+from modelopt.torch.speculative.plugins.hf_streaming_dataset import EagleVllmStreamingDataset
 from modelopt.torch.utils.plugins import transformers_dataset
 
 _mock_scripts = types.ModuleType("scripts")
@@ -828,3 +830,107 @@ def test_collator_batches_multiple(tmp_path):
         train_len,
         HIDDEN_SIZE,
     )
+
+
+@pytest.mark.parametrize(
+    ("lengths", "expected_length"), [([3, 4], 4), ([5, 3], 8), ([8, 4], 8), ([10, 4], 8)]
+)
+def test_collator_padding_buckets_preserves_samples_up_to_cap(tmp_path, lengths, expected_length):
+    """Buckets preserve feature alignment and sample order while retaining the truncation cap."""
+    paths = [tmp_path / f"{index}.pt" for index in range(len(lengths))]
+    for path, length in zip(paths, lengths, strict=True):
+        _make_offline_pt(path, seq_len=length)
+    dataset = OfflineSupervisedDataset(paths)
+    features = [dataset[index] for index in range(len(lengths))]
+    module = make_speculative_data_module(
+        None,
+        argparse.Namespace(
+            mode="offline",
+            offline_data_path=str(tmp_path),
+            vlm_processor=None,
+            padding_buckets=[4, 8],
+            sample_size=-1,
+        ),
+        train_len=8,
+    )
+    batch = module["data_collator"](features)
+    assert batch["input_ids"].shape == (len(lengths), expected_length)
+    for index, (feature, length) in enumerate(zip(features, lengths, strict=True)):
+        length = min(length, 8)
+        for key, expected in feature.items():
+            if key == "base_hidden_prenorm":
+                assert batch["base_model_outputs"][key] == expected
+                continue
+            output = batch.get(key, batch["base_model_outputs"].get(key))
+            torch.testing.assert_close(output[index, :length], expected[:length])
+            assert torch.count_nonzero(output[index, length:]) == 0
+
+
+def test_padding_buckets_rejects_effective_online_mode():
+    """Reject buckets only after data-source overrides have resolved the training mode."""
+    with pytest.raises(ValueError):
+        make_speculative_data_module(
+            None, argparse.Namespace(mode="online", padding_buckets=[4, 8]), train_len=8
+        )
+
+
+@pytest.mark.parametrize("content", ["a", "hello " * 12])
+def test_streaming_padding_buckets_preserves_truncation_and_fetch_retry(
+    tmp_path, monkeypatch, content
+):
+    """Selecting buckets keeps the normal token cap and tolerates a transient fetch failure."""
+    tokenizer = get_tiny_tokenizer()
+    tokenizer.chat_template = "{% for message in messages %}{{ message['content'] }} {% endfor %}"
+    entries = [
+        {"uuid": str(index), "messages": [{"role": "user", "content": content}]}
+        for index in range(2)
+    ]
+    corpus = tmp_path / "samples.jsonl"
+    corpus.write_text("\n".join(json.dumps(entry) for entry in entries))
+    fetched = []
+
+    def fetch(self, sample):
+        fetched.append(sample)
+        if len(fetched) == 1:
+            return None
+        return {
+            "token_ids": torch.tensor(sample["token_ids"]),
+            "loss_mask": sample["loss_mask"],
+            "hidden_states": torch.zeros(len(sample["token_ids"]), 2, 4),
+        }
+
+    monkeypatch.setattr(EagleVllmStreamingDataset, "_fetch", fetch)
+    module = make_speculative_data_module(
+        tokenizer,
+        argparse.Namespace(
+            mode="streaming",
+            data_path=str(corpus),
+            sample_size=-1,
+            streaming_server_url="http://localhost:8000",
+            streaming_model_name="tiny",
+            padding_buckets=[4, 8],
+        ),
+        train_len=8,
+    )
+    batch = module["data_collator"]([module["train_dataset"][0]])
+    expected_ids = tokenizer.apply_chat_template(
+        entries[1]["messages"], tokenize=True, return_dict=False
+    )[:8]
+    assert [sample["cid"] for sample in fetched] == ["0", "1"]
+    assert fetched[1]["token_ids"] == expected_ids
+    assert batch["input_ids"][0, : len(expected_ids)].tolist() == expected_ids
+    assert torch.count_nonzero(batch["input_ids"][0, len(expected_ids) :]) == 0
+
+
+@pytest.mark.parametrize("invalid", ["alignment", "empty"])
+def test_collator_padding_buckets_rejects_incomplete_samples(tmp_path, invalid):
+    """Buckets cannot repair misaligned teacher features or collate an empty microbatch."""
+    path = tmp_path / "sample.pt"
+    _make_offline_pt(path, seq_len=4)
+    features = [OfflineSupervisedDataset([path])[0]]
+    if invalid == "alignment":
+        features[0]["aux_hidden_states"] = features[0]["aux_hidden_states"][:-1]
+    if invalid == "empty":
+        features = []
+    with pytest.raises(ValueError):
+        EagleOfflineDataCollator(train_len=8, padding_buckets=[4, 8])(features)

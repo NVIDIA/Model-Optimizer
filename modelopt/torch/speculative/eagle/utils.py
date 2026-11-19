@@ -185,9 +185,19 @@ class OfflineSupervisedDataset(Dataset):
 class EagleOfflineDataCollator:
     """Data collator that truncates or pads data for offline training."""
 
-    def __init__(self, train_len):
-        """Initialize with the target sequence length for truncation/padding."""
+    def __init__(self, train_len, padding_buckets=None):
+        """Truncate to train_len and pad to it or to one of the configured buckets."""
         self.train_len = train_len
+        self.padding_buckets = tuple(padding_buckets) if padding_buckets is not None else None
+        if self.padding_buckets is not None and (
+            not 1 <= len(self.padding_buckets) <= 2
+            or any(type(length) is not int or length <= 0 for length in self.padding_buckets)
+            or self.padding_buckets != tuple(sorted(set(self.padding_buckets)))
+            or self.padding_buckets[-1] != train_len
+        ):
+            raise ValueError(
+                "padding_buckets must contain one or two increasing positive integers ending at train_len"
+            )
 
     def _pad_or_truncate(self, x: torch.Tensor, length: int, dim: int = 0):
         """Pad or truncate a tensor to length along a given dimension."""
@@ -208,13 +218,33 @@ class EagleOfflineDataCollator:
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
         """Collate a list of feature dicts into a single padded/truncated batch."""
+        train_len = self.train_len
+        if self.padding_buckets is not None:
+            if not features:
+                raise ValueError("padding_buckets requires a nonempty microbatch")
+            keys = (
+                "attention_mask",
+                "loss_mask",
+                "labels",
+                "base_model_hidden_states",
+                "aux_hidden_states",
+            )
+            lengths = [item["input_ids"].shape[0] for item in features]
+            if any(
+                length <= 0 or any(item[key].shape[0] != length for key in keys)
+                for item, length in zip(features, lengths, strict=True)
+            ):
+                raise ValueError("padding_buckets requires aligned nonempty features")
+            train_len = next(
+                length for length in self.padding_buckets if length >= min(max(lengths), train_len)
+            )
         base_batch = {
-            k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
+            k: torch.stack([self._pad_or_truncate(item[k], train_len) for item in features])
             for k in ["input_ids", "attention_mask", "loss_mask", "labels"]
         }
 
         base_model_outputs = {
-            k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
+            k: torch.stack([self._pad_or_truncate(item[k], train_len) for item in features])
             for k in ["base_model_hidden_states", "aux_hidden_states"]
         }
         # Propagate the producer's pre-norm declaration. DFlash honors it to decide whether to

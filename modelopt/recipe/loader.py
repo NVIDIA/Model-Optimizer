@@ -24,6 +24,8 @@ from omegaconf import OmegaConf
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT as BUILTIN_RECIPES_LIB
 from modelopt.torch.opt.config_loader import (
     _alias_builtin_recipe_prefix,
+    _load_raw_config,
+    _resolve_imports,
     load_config,
     peek_declared_schema,
 )
@@ -393,11 +395,12 @@ def _load_recipe_from_file(
     # :class:`QuantizerCfgEntry`).  The return value is already a validated schema
     # instance.
     if overrides:
-        # Overrides have to be applied before pydantic validation.  Round-trip through
-        # ``model_dump(exclude_unset=True)`` so $imports are resolved while preserving which
-        # defaulted fields the recipe omitted; then splice the dotlist values and re-validate.
-        recipe = load_config(recipe_file, schema_type=schema_class)
-        data = recipe.model_dump(exclude_unset=True)
+        # Resolve typed imports, then validate the effective recipe after overrides.
+        # Imported snippets still validate independently in _resolve_imports.
+        raw_data = _load_raw_config(recipe_file)
+        assert isinstance(raw_data, dict)
+        data = _resolve_imports(raw_data, schema_type=schema_class)
+        assert isinstance(data, dict)
         data = _apply_dotlist(data, overrides)
         return schema_class.model_validate(data)
 
