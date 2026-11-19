@@ -35,7 +35,6 @@ import modelopt.torch.utils.distributed as dist
 from modelopt import env
 from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
-from modelopt.torch.opt.session import ModelOptSession
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
@@ -217,37 +216,6 @@ def _refuse_a_malformed_variable() -> None:
         parse()
 
 
-def _refuse_a_model_the_export_cannot_write() -> None:
-    """Refuse now, not after calibrating it, a model the workflow's export could not write.
-
-    A workflow that exports says so in its session (``export`` set). The whole model the session
-    is bound to is checked, as the export will write it, even when calibration gets a part of it,
-    such as a VLM's language model. A diffusers model or pipeline is not: its export prepares no MoE
-    inputs, so it refuses no MoE block. In a distributed run every rank refuses if one does: a rank
-    refusing alone, such as the one that exports, would leave the others waiting for it in
-    calibration.
-    """
-    session = ModelOptSession.active()
-
-    def check() -> None:
-        if not session.export:
-            return
-        # Imported here: modelopt.torch.export imports this package.
-        from modelopt.torch.export.diffusers_utils import is_diffusers_object
-        from modelopt.torch.export.unified_export_hf import _refuse_unexportable_moe
-
-        root = session.model
-        if isinstance(root, nn.Module) and not is_diffusers_object(root):
-            _refuse_unexportable_moe(root, session.model_type)
-
-    # all_reduce refuses a distributed launch with no process group, where each rank quantizes on
-    # its own.
-    if dist.is_distributed_run():
-        dist.all_reduce("the export's refusal of the model", check, combine=lambda _: None)
-    else:
-        check()
-
-
 # TODO: Descriptors for the supported algorithms
 def calibrate(
     model: nn.Module,
@@ -260,9 +228,7 @@ def calibrate(
     :ref:`custom calibration algorithm <custom_calibration_algorithm>`
 
     Calibration runs in the active ModelOpt session
-    (:class:`~modelopt.torch.opt.session.ModelOptSession`): the workflow's, else the default one.
-    Before calibrating, it refuses a model the rest of the workflow could not finish, such as one
-    its export could not write when the session says the workflow exports (``export``). A
+    (:class:`~modelopt.torch.opt.session.ModelOptSession`): the workflow's, else the default one. A
     layerwise calibration with ``layerwise.export_dir`` writes the layers through the exporter the
     session holds, else through the one set on the model, else through a new one; once every layer
     is written, the session holds that exporter, for ``export_hf_checkpoint`` to finalize.
@@ -288,7 +254,6 @@ def calibrate(
     _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
     _refuse_unsupported_distributed_calibration(model, algorithm)
     _refuse_a_malformed_variable()
-    _refuse_a_model_the_export_cannot_write()
     if forward_loop is not None:
         # get the number of arguments of forward_loop
         num_args = len(inspect.signature(forward_loop).parameters)
@@ -891,8 +856,6 @@ def _auto_quantize_kv_cache(
     if converted_for_search:
         model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
         set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
-    # Once converted, as the export finds the experts: its candidates calibrate through no refusal.
-    _refuse_a_model_the_export_cannot_write()
     searcher = AutoQuantizeKVSearcher()
     searcher.search(
         model,
@@ -1380,9 +1343,6 @@ def auto_quantize(
             fixed_cfg, fixed_name = processed_fixed_quantization_config
             fixed_recipe = QuantRecipe(fixed_cfg, name=fixed_name)
             set_quantizer_by_cfg(model, fixed_recipe.config.quant_cfg)
-        # Once converted, as the export finds the experts, and before a search resumed from its
-        # scores, which calibrates no candidate.
-        _refuse_a_model_the_export_cannot_write()
         searcher.search(model, search_constraints, config=search_config)
     except BaseException:
         if searcher.restore_unconverted is not None:

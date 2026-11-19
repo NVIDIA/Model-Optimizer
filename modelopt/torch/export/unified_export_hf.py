@@ -25,7 +25,7 @@ import traceback
 import warnings
 from builtins import ValueError
 from collections import defaultdict
-from collections.abc import Callable, Generator, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -171,34 +171,9 @@ from .quant_utils import (
     sync_tied_input_amax,
     to_quantized_weight,
 )
-from .registry import ExportContext, ExportHandler, ExportModuleRegistry, PrepareMoEInputsRegistry
+from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
 __all__ = ["export_hf_checkpoint", "export_speculative_decoding"]
-
-
-def _refuse_unexportable_moe(model: nn.Module, model_type: str | None) -> None:
-    """Raise as the export would for an MoE block whose experts no input-preparing handler takes."""
-    for _ in _moe_blocks(model, model_type):
-        pass
-
-
-def _moe_blocks(
-    model: nn.Module, model_type: str | None
-) -> Iterator[tuple[str, nn.Module, ExportHandler]]:
-    """Each MoE block of ``model``, by name, with the handler preparing its experts' inputs.
-
-    An MoE block whose experts no handler takes is refused.
-    """
-    for name, sub_module in model.named_modules():
-        if is_moe(sub_module, model_type) and hasattr(sub_module, "experts"):
-            handler = PrepareMoEInputsRegistry.match(sub_module.experts)
-            if handler is None:
-                raise NotImplementedError(
-                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is not "
-                    "supported in export. Please file an issue or add support for this model "
-                    "architecture."
-                )
-            yield name, sub_module, handler
 
 
 def _is_enabled_quantizer(quantizer):
@@ -1015,8 +990,16 @@ def _prepare_moe_inputs(model: nn.Module) -> None:
     of the export in progress.
     """
     ctx = ExportContext.current()
-    for name, sub_module, handler in _moe_blocks(model, ctx.model_type):
-        handler(name, sub_module, ctx)
+    for name, sub_module in model.named_modules():
+        if is_moe(sub_module, ctx.model_type) and hasattr(sub_module, "experts"):
+            handler = PrepareMoEInputsRegistry.match(sub_module.experts)
+            if handler is None:
+                # Unsupported MoE model structure
+                raise NotImplementedError(
+                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is not supported in export."
+                    f"Please file an issue or add support for this model architecture."
+                )
+            handler(name, sub_module, ctx)
 
 
 def _warn_on_unsynced_moe_gate_up(model: nn.Module, model_type: str | None) -> None:

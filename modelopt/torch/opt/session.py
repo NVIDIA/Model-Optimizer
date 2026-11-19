@@ -95,9 +95,6 @@ class ModelOptSession:
     Each field belongs to the calls that read it, and a call works out a field left unset as it
     would without a session. A call's own argument for the same thing wins over the field.
 
-    * ``export``: whether the workflow exports the model with
-      :func:`~modelopt.torch.export.export_hf_checkpoint`. Set, ``mtq.quantize``, ``mtq.calibrate``
-      and ``mtq.auto_quantize`` refuse a model the export could not write before calibrating it.
     * ``distribution``: the :class:`~modelopt.torch.utils.distributed.DistributionPlan` to load the
       model by. ``load_pretrained`` loads by it where its ``distribution=`` is not passed, and
       records here the plan the load used, or, while none is held, the plan a load was given.
@@ -121,7 +118,6 @@ class ModelOptSession:
     there reads what it needs off the model it is given.
     """
 
-    export: bool = False
     distribution: "DistributionPlan | None" = None
     runtime: RunState = field(default_factory=RunState, init=False, repr=False)
     _bindings: dict[ModelName, ModelBinding] = field(default_factory=dict, init=False, repr=False)
