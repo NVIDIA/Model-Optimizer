@@ -169,7 +169,8 @@ abstention and non-correct counts to obtain these exact permutation p-values.
 **Repetition-level:** for each model and repetition, divide the number of cap hits by 294. Apply a
 `one-sided Welch t-test
 <https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ttest_ind.html>`__
-to the two lists of repetition rates, testing whether Candidate's mean is lower than Baseline's.
+to the models' per-repetition average scores (cap-hit rates), testing whether Candidate's mean
+is lower than Baseline's.
 The calculation uses each model's sample variance across repetitions and Welch's degrees of
 freedom. It treats runs as independent and allows different variances for the two models.
 At least two repetitions per model are needed to estimate those variances; with very few
