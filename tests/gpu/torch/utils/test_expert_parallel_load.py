@@ -52,8 +52,10 @@ from transformers import (
 )
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.models import _onfly_decompress
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.utils.packed_experts import is_packed, unpacked
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     distributed_forward_loop,
@@ -210,43 +212,127 @@ def _save_compressed_tiny_qwen3_moe(dense_dir, packed_dir, compression):
     (packed_dir / "config.json").write_text(json.dumps(config))
 
 
-def _compressed_experts_load_on_their_own_ranks(rank, size, dense_dir, packed_dir):
+def _checkpoint_tensors(directory):
+    tensors = {}
+    for file in sorted(Path(directory).glob("*.safetensors")):
+        tensors.update(load_file(str(file)))
+    return tensors
+
+
+def _compressed_experts_load_on_their_own_ranks(
+    rank, size, dense_dir, packed_dir, export_dir, dense
+):
     device = torch.device(f"cuda:{rank}")
+    plan = DistributionPlan(size, ep_size=size, dense=dense)
+    calibrates = Version(transformers.__version__) >= Version("5.16")
+    # Exported with the dense part replicated: packed experts unpack alike either way, and the
+    # export of a sharded dense part is no part of keeping them packed.
+    exports = calibrates and dense == "replicate"
+    amaxes = {}
     problems = []
     # The decompressor's hooks are process-wide, and the workers outlive the job.
     hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
     try:
         with bounded_collectives(seconds=120):
-            config = AutoConfig.from_pretrained(packed_dir)
-            _onfly_decompress.install_onfly_decompress(config)  # as a model spec's prepare does
-            model = load_and_prepare_ep(
-                packed_dir, DistributionPlan(size, ep_size=size), hf_config=config
-            ).eval()
             whole = AutoModelForCausalLM.from_pretrained(dense_dir, dtype=torch.bfloat16)
             whole = whole.to(device).eval()
-
-            # This rank's experts, decompressed as they loaded, are the dense model's, exactly.
-            per_rank = NUM_EXPERTS // size
-            owned = slice(rank * per_rank, (rank + 1) * per_rank)
-            for i, (layer, whole_layer) in enumerate(zip(model.model.layers, whole.model.layers)):
-                for name in ("gate_up_proj", "down_proj"):
-                    local = _local(getattr(layer.mlp.experts, name))
-                    if local.shape[0] != per_rank:
-                        problems.append(f"layer {i} {name}: {local.shape[0]} experts held")
-                    elif not torch.equal(local, getattr(whole_layer.mlp.experts, name)[owned]):
-                        problems.append(f"layer {i} {name}: rank {rank}'s experts differ")
-            # Every stored tensor of the experts it built went into them.
-            if model._modelopt_unplaced_source_keys:
-                problems.append(f"unplaced: {model._modelopt_unplaced_source_keys[:3]}")
-            set_distribution_plan(model, DistributionPlan(size, ep_size=size))
-
             generator = torch.Generator().manual_seed(rank)
             input_ids = torch.randint(0, 128, (2, 16), generator=generator).to(device)
             with torch.no_grad():
-                sharded = model(input_ids).logits.float()
                 reference = whole(input_ids).logits.float()
-            if not torch.allclose(sharded, reference, atol=2e-2, rtol=2e-2):
-                problems.append(f"logits differ by {(sharded - reference).abs().max().item():.3g}")
+            per_rank = NUM_EXPERTS // size
+            owned = slice(rank * per_rank, (rank + 1) * per_rank)
+            # Kept packed, then decompressed as they load: the same model either way.
+            for keep in (True, False):
+                config = AutoConfig.from_pretrained(packed_dir)
+                _onfly_decompress.install_onfly_decompress(config)  # as a model spec's prepare does
+                model = load_and_prepare_ep(
+                    packed_dir, plan, hf_config=config, keep_compressed=keep
+                ).eval()
+
+                # This rank's experts, decompressed, are the dense model's, exactly; kept packed,
+                # they hold the stored values and scales of this rank's experts alone.
+                for i, (layer, whole_layer) in enumerate(
+                    zip(model.model.layers, whole.model.layers)
+                ):
+                    experts = layer.mlp.experts
+                    if is_packed(experts) is not keep:
+                        problems.append(f"keep={keep}: layer {i}'s experts are not as asked")
+                        continue
+                    stored = [p for n, p in experts.named_parameters() if n.endswith("proj_scales")]
+                    if keep and [len(_local(p)) for p in stored] != [per_rank, per_rank]:
+                        problems.append(f"layer {i}: scales of {[len(_local(p)) for p in stored]}")
+                    with unpacked(experts):
+                        for name in ("gate_up_proj", "down_proj"):
+                            local = _local(getattr(experts, name))
+                            if local.shape[0] != per_rank:
+                                problems.append(f"layer {i} {name}: {local.shape[0]} experts held")
+                            elif not torch.equal(
+                                local, getattr(whole_layer.mlp.experts, name)[owned]
+                            ):
+                                problems.append(f"layer {i} {name}: rank {rank}'s experts differ")
+                # Every stored tensor of the experts it built went into them.
+                if model._modelopt_unplaced_source_keys:
+                    problems.append(f"unplaced: {model._modelopt_unplaced_source_keys[:3]}")
+                set_distribution_plan(model, plan)
+
+                with torch.no_grad():
+                    sharded = model(input_ids).logits.float()
+                if not torch.allclose(sharded, reference, atol=2e-2, rtol=2e-2):
+                    error = (sharded - reference).abs().max().item()
+                    problems.append(f"keep={keep}: logits differ by {error:.3g}")
+
+                if calibrates:
+                    # Calibrated through the re-planted torch_a2a forwards, as hf_ptq does.
+                    forward_loop = distributed_forward_loop(
+                        model,
+                        [{"input_ids": input_ids}],
+                        device=device,
+                        ep_mesh=expert_parallel_mesh(model),
+                    )
+                    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
+                    amaxes[keep] = {
+                        name: quantizer.amax.clone()
+                        for name, quantizer in _calibrated_quantizers(model).items()
+                    }
+                if exports:
+                    export_hf_checkpoint(
+                        model, dtype=torch.bfloat16, export_dir=f"{export_dir}/{keep}"
+                    )
+                    dist.barrier()
+                del model
+                torch.cuda.empty_cache()
+
+            if amaxes and (amaxes[True].keys() != amaxes[False].keys() or not amaxes[True]):
+                problems.append(f"calibrated {len(amaxes[True])} and {len(amaxes[False])} scales")
+            problems += [
+                f"{name}: its scale differs, packed or not"
+                for name, amax in amaxes.get(False, {}).items()
+                if name in amaxes[True] and not torch.equal(amax, amaxes[True][name])
+            ]
+            if rank == 0 and exports:
+                packed, decompressed = (
+                    _checkpoint_tensors(f"{export_dir}/{k}") for k in (True, False)
+                )
+                if not packed or packed.keys() != decompressed.keys():
+                    problems.append(
+                        f"the exports hold {len(packed)} and {len(decompressed)} tensors"
+                    )
+                problems += [
+                    f"{key} differs between the exports"
+                    for key, tensor in decompressed.items()
+                    if key in packed
+                    and not torch.equal(
+                        tensor.reshape(-1).view(torch.uint8),
+                        packed[key].reshape(-1).view(torch.uint8),
+                    )
+                ]
+                for name in ("config.json", "hf_quant_config.json"):
+                    if (
+                        Path(export_dir, "True", name).read_bytes()
+                        != Path(export_dir, "False", name).read_bytes()
+                    ):
+                        problems.append(f"{name} differs between the exports")
 
             gathered = [None] * size
             dist.all_gather_object(gathered, problems)
@@ -256,14 +342,20 @@ def _compressed_experts_load_on_their_own_ranks(rank, size, dense_dir, packed_di
     assert not found, "\n".join(found[:20])
 
 
+@pytest.mark.parametrize("dense", ["replicate", "fsdp"])
 @pytest.mark.parametrize("compression", sorted(_COMPRESSIONS))
 def test_compressed_experts_load_expert_parallel_each_rank_decompressing_its_own(
-    need_2_gpus, dist_workers, tmp_path, compression
+    need_2_gpus, dist_workers, tmp_path, compression, dense
 ):
     """A checkpoint whose experts are compressed (INT4, MXFP4) loads expert-parallel through the
-    on-the-fly decompressor: each rank holds exactly the dense model's weights for its own experts,
-    every stored tensor is placed, and the sharded model matches the dense one loaded whole. Each
-    rank's checks are gathered before any rank fails, so a regression fails instead of hanging."""
+    on-the-fly decompressor, decompressed as they load or kept packed: each rank holds exactly the
+    dense model's weights for its own experts, every stored tensor is placed, and the sharded model
+    matches the dense one loaded whole, with the dense part replicated or FSDP2-sharded. Kept
+    packed, each rank holds its experts' stored values and scales alone, and the model calibrates
+    to the decompressed one's scales exactly, and, its dense part replicated, exports the same
+    checkpoint byte for byte.
+    Each rank's checks are gathered before any rank fails, so a regression fails instead of
+    hanging."""
     pytest.importorskip(
         "compressed_tensors",
         minversion="0.16",
@@ -275,7 +367,13 @@ def test_compressed_experts_load_expert_parallel_each_rank_decompressing_its_own
         pytest.skip(f"{NUM_EXPERTS} experts do not shard over {dist_workers.world_size} GPUs")
     dense_dir, packed_dir = tmp_path / "dense", tmp_path / "packed"
     _save_compressed_tiny_qwen3_moe(dense_dir, packed_dir, compression)
-    dist_workers.run(_compressed_experts_load_on_their_own_ranks, str(dense_dir), str(packed_dir))
+    dist_workers.run(
+        _compressed_experts_load_on_their_own_ranks,
+        str(dense_dir),
+        str(packed_dir),
+        str(tmp_path / "export"),
+        dense,
+    )
 
 
 @pytest.mark.parametrize(("fsdp_dense", "ep_share"), _LAYOUTS)

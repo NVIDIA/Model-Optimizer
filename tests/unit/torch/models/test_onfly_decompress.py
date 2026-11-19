@@ -431,6 +431,7 @@ def test_installing_twice_wraps_the_loader_once(monkeypatch):
         "nothing-to-decompress",
         "compressed-differently",
         "zero-points-kept-packed",
+        "tensor-scales-kept-packed",
         None,
     ],
 )
@@ -449,6 +450,9 @@ def test_decompression_refusal_finds_what_the_install_refuses(monkeypatch, refus
             return None
         if refused == "zero-points-kept-packed":  # a zero point would not fuse with gate and up
             return (_ScaledCompressor, None, (*PACKED, "weight_zero_point"), "stub-format")
+        if refused == "tensor-scales-kept-packed":  # nor would gate's and up's own scales
+            per_tensor = SimpleNamespace(weights=SimpleNamespace(strategy="tensor"))
+            return (_ScaledCompressor, per_tensor, PACKED, "stub-format")
         return getattr(cfg, "compression", first)
 
     monkeypatch.setattr(onfly, "_read_compression", read)
@@ -465,7 +469,7 @@ def test_decompression_refusal_finds_what_the_install_refuses(monkeypatch, refus
     asked = {"text_config": {}} if refused == "raw-dict" else config
     hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
 
-    keep = refused == "zero-points-kept-packed"
+    keep = refused in ("zero-points-kept-packed", "tensor-scales-kept-packed")
     why = onfly.decompression_refusal(asked, keep_packed=keep)
 
     assert (mu.get_model_conversion_mapping, cml.spawn_materialize) == hooks
