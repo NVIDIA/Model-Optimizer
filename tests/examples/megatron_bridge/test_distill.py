@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import yaml
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
 from _test_utils.torch.transformers_models import (
@@ -86,12 +87,33 @@ def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
         eval_iters=1,
         log_interval=1,
         checkpoint_keep_last=-1,
+        attention_backend="auto",
+        num_workers=0,
+        checkpoint_storage_writers_per_rank=2,
+        distributed_timeout_minutes=45,
         hf_export_path=distilled_hf_path,
     )
+    distill_cmd_parts += [
+        "--no-pin_memory",
+        "--no-overlap_grad_reduce",
+        "--no-overlap_param_gather",
+        "--callbacks",
+        "megatron.bridge.training.callbacks.Callback",
+    ]
     run_example_command(distill_cmd_parts, example_path="megatron_bridge")
 
     checkpoint_root = distill_output_dir / "checkpoints"
     assert (checkpoint_root / f"iter_{train_iters:07d}").exists()
+    run_config = yaml.safe_load(
+        (checkpoint_root / f"iter_{train_iters:07d}" / "run_config.yaml").read_text()
+    )
+    assert run_config["dataset"]["num_workers"] == 0
+    assert run_config["dataset"]["pin_memory"] is False
+    assert run_config["dataset"]["persistent_workers"] is False
+    assert run_config["ddp"]["overlap_grad_reduce"] is False
+    assert run_config["ddp"]["overlap_param_gather"] is False
+    assert run_config["checkpoint"]["storage_writers_per_rank"] == 2
+    assert run_config["dist"]["distributed_timeout_minutes"] == 45
     assert (distilled_hf_path / "config.json").exists()
     if fake_hub_checkpoint.active:
         assert (distilled_hf_path / fake_hub_checkpoint.marker).exists()

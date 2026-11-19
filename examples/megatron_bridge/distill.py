@@ -22,6 +22,7 @@ See `README.md` in this directory for example usage and data preparation instruc
 
 import argparse
 import contextlib
+import importlib
 import inspect
 import os
 from pathlib import Path
@@ -66,6 +67,7 @@ from megatron.core.datasets.gpt_dataset import GPTDataset
 from megatron.core.datasets.indexed_dataset import IndexedDataset
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
+from megatron.core.transformer.enums import AttnBackend
 from megatron.core.utils import unwrap_model
 from mlflow_utils import (
     NON_PARAMS,
@@ -199,6 +201,30 @@ def get_args():
     parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
     parser.add_argument(
+        "--attention_backend",
+        choices=[backend.name for backend in AttnBackend],
+        default=None,
+        help="Override the attention backend for both student and teacher; auto permits fallback.",
+    )
+    parser.add_argument(
+        "--overlap_grad_reduce",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Overlap DDP gradient reduction with backward computation.",
+    )
+    parser.add_argument(
+        "--overlap_param_gather",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Overlap DDP parameter gathering with forward computation.",
+    )
+    parser.add_argument(
+        "--distributed_timeout_minutes",
+        type=_positive_int,
+        default=None,
+        help="Distributed operation timeout in minutes (default: Bridge's setting).",
+    )
+    parser.add_argument(
         "--num_layers_in_first_pipeline_stage",
         type=_positive_int,
         default=None,
@@ -221,6 +247,24 @@ def get_args():
     )
 
     # Dataset arguments
+    parser.add_argument(
+        "--num_workers",
+        type=_nonnegative_int,
+        default=None,
+        help="Data loader worker count (default: Bridge's setting).",
+    )
+    parser.add_argument(
+        "--pin_memory",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Pin data loader memory (default: Bridge's setting).",
+    )
+    parser.add_argument(
+        "--persistent_workers",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Keep data loader workers between epochs (default: Bridge's setting).",
+    )
     parser.add_argument(
         "--seed",
         type=int,
@@ -344,6 +388,13 @@ def get_args():
         "more GPU memory (one extra bf16 copy of the student's quantized weights per GPU).",
     )
     parser.add_argument(
+        "--callbacks",
+        nargs="+",
+        default=[],
+        help="Optional fully qualified callback factories, called without arguments. "
+        "Modules must already be importable; requires Bridge's native callbacks API.",
+    )
+    parser.add_argument(
         "--no_async_save",
         action="store_true",
         help="Save checkpoints synchronously. Async saving spawns a worker that needs its own "
@@ -451,6 +502,20 @@ def get_args():
             "export and downstream evaluation."
         ),
     )
+    parser.add_argument(
+        "--checkpoint_keep_iterations",
+        type=_nonnegative_int,
+        nargs="+",
+        default=None,
+        help="Keep these saved iterations in addition to --checkpoint_keep_last recovery checkpoints. "
+        "Requires a Bridge CheckpointConfig with keep_iterations support.",
+    )
+    parser.add_argument(
+        "--checkpoint_storage_writers_per_rank",
+        type=_positive_int,
+        default=None,
+        help="Checkpoint storage writers per rank (default: Bridge's setting).",
+    )
     # Logging arguments
     parser.add_argument("--log_interval", type=int, default=10, help="Write to log every <N> steps")
     parser.add_argument(
@@ -490,6 +555,15 @@ def get_args():
         args.student_hf_model = args.student_hf_path
     if args.checkpoint_keep_last < -1:
         raise ValueError("--checkpoint_keep_last must be >= -1.")
+    if args.checkpoint_keep_iterations:
+        if args.checkpoint_keep_last < 1:
+            raise ValueError("--checkpoint_keep_iterations requires --checkpoint_keep_last >= 1.")
+        if "keep_iterations" not in CheckpointConfig.__dataclass_fields__:
+            raise ValueError("--checkpoint_keep_iterations requires a newer Megatron-Bridge.")
+    if args.num_workers == 0:
+        if args.persistent_workers:
+            raise ValueError("--persistent_workers requires --num_workers > 0.")
+        args.persistent_workers = False
     if args.validate_only and args.eval_iters == 0:
         raise ValueError("--validate_only requires --eval_iters > 0.")
     if args.pp_size == 1 and (
@@ -678,6 +752,18 @@ class FakeQuantWeightCache(Callback):
 
 def main(args: argparse.Namespace, owns_the_run: bool = True):
     """Build the student and teacher providers, then run Megatron-Bridge distillation."""
+    if args.callbacks and "callbacks" not in inspect.signature(distill).parameters:
+        raise ValueError("--callbacks needs a newer Megatron-Bridge.")
+    callbacks = []
+    for target in args.callbacks:
+        module, separator, name = target.rpartition(".")
+        if not separator:
+            raise ValueError("--callbacks requires fully qualified factory names.")
+        callback = getattr(importlib.import_module(module), name)()
+        if not isinstance(callback, Callback):
+            raise ValueError(f"{target} must return a Bridge Callback.")
+        callbacks.append(callback)
+
     # --student_hf_path stays as given. The student is built and exported from the local copy of
     # the whole checkpoint in student_local_checkpoint_path, since the HF export reads the source's
     # files from local disk only; student_hub_model_id is the Hub ID, or None for a local path.
@@ -730,6 +816,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         provider.seq_length = args.seq_length
         if args.dsa_kernel_backend is not None:
             provider.dsa_kernel_backend = args.dsa_kernel_backend
+        if args.attention_backend is not None:
+            provider.attention_backend = AttnBackend[args.attention_backend]
         set_moe_expert_layout(provider, moe_grouped_gemm)
         if args.moe_aux_loss_coeff is not None:
             provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
@@ -741,6 +829,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             provider.recompute_num_layers = args.recompute_num_layers
             if args.recompute_modules is not None:
                 provider.recompute_modules = args.recompute_modules
+        if args.attention_backend is not None:
+            provider.finalize()
         return provider
 
     # The student structure is always built from --student_hf_path. When --student_megatron_path is
@@ -934,6 +1024,17 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         blend = get_blend_from_list(args.data_paths)
         dataset_config = GPTDatasetConfig(blend=blend, split="99,1,0", **dataset_kwargs)
 
+    for field in ("num_workers", "pin_memory", "persistent_workers"):
+        value = getattr(args, field)
+        if value is not None:
+            setattr(dataset_config, field, value)
+
+    checkpoint_kwargs = {}
+    if args.checkpoint_keep_iterations is not None:
+        checkpoint_kwargs["keep_iterations"] = sorted(set(args.checkpoint_keep_iterations))
+    if args.checkpoint_storage_writers_per_rank is not None:
+        checkpoint_kwargs["storage_writers_per_rank"] = args.checkpoint_storage_writers_per_rank
+
     # Assemble ConfigContainer and run distillation
     config = ConfigContainer(
         model=distill_provider,
@@ -956,8 +1057,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         ddp=DistributedDataParallelConfig(
             check_for_nan_in_grad=True,
             grad_reduce_in_fp32=True,
-            overlap_grad_reduce=True,
-            overlap_param_gather=True,
+            overlap_grad_reduce=args.overlap_grad_reduce,
+            overlap_param_gather=args.overlap_param_gather,
             average_in_collective=not per_token_loss,
             use_distributed_optimizer=True,
         ),
@@ -1005,17 +1106,22 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             ckpt_format="torch_dist",
             async_save=not args.no_async_save,
             fully_parallel_save=True,
+            **checkpoint_kwargs,
         ),
         rng=RNGConfig(seed=args.seed),
         mixed_precision="bf16_mixed",
     )
 
+    if args.distributed_timeout_minutes is not None:
+        config.dist.distributed_timeout_minutes = args.distributed_timeout_minutes
     print_rank_0("\nStarting distillation...")
     # Before training: a resumed run starts with the previous run's checkpoint in place, so
     # only a move in this marker shows that this run saved one of its own.
     saved_before = checkpoint_marker(args, DISTILL)
     # Only a newer Megatron-Bridge's distill() takes callbacks, so pass them only when needed.
-    distill_kwargs = {"callbacks": [FakeQuantWeightCache()]} if args.fake_quant_weight_cache else {}
+    if args.fake_quant_weight_cache:
+        callbacks.append(FakeQuantWeightCache())
+    distill_kwargs = {"callbacks": callbacks} if callbacks else {}
     try:
         distill(config, **distill_kwargs)
     finally:

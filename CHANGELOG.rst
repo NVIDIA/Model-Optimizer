@@ -18,6 +18,8 @@ Changelog
 
 *Quantization - QAT / QAD*
 
+- Megatron-Bridge distillation adds CLI controls for attention backends, data loading, communication overlap, checkpoint retention and callbacks.
+
 *Quantization - Export & Deployment*
 
 - ``examples/hf_ptq/convert_ggml_to_int8.py`` now also converts GGML exports that hold other formats (FP8, NVFP4, KV cache quantization): their GGML layers become ModelOpt ``INT8_PB_WO`` layers beside the rest of the export, which vLLM newer than 0.34.0 serves. Exports with only GGML layers still become compressed-tensors, and fused MoE experts now convert in both.

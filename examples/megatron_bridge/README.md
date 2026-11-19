@@ -398,6 +398,34 @@ It supports GPTModel-based models such as Qwen3.5 / Qwen3.6 with `--pp_size 1`.
 
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 
+#### QAD runtime options
+
+Configure distillation through CLI arguments. For example, alongside the model,
+dataset and training arguments:
+
+```bash
+python distill.py \
+  --attention_backend auto \
+  --recompute_granularity selective --recompute_modules core_attn mlp \
+  --num_workers 0 --no-pin_memory \
+  --no-overlap_grad_reduce --no-overlap_param_gather \
+  --save_interval 50 --checkpoint_keep_last 1 \
+  --checkpoint_keep_iterations 100 150 200 --no_async_save ...
+```
+
+The attention backend applies to both student and teacher. Omit it to retain
+their provider defaults. `--num_workers 0` also disables persistent workers.
+`--checkpoint_keep_iterations` retains saved milestone iterations in addition
+to the most recent recovery checkpoints and requires a compatible Bridge
+`CheckpointConfig`. `--checkpoint_storage_writers_per_rank` and
+`--distributed_timeout_minutes` expose checkpoint I/O and distributed timeout
+settings. Communication overlap remains enabled unless explicitly disabled.
+
+Optional `--callbacks package.module.CallbackFactory ...` entries are fully
+qualified factories called without arguments. Each must return a Bridge
+`Callback`, its module must already be importable, and Bridge's `distill()` must
+support native callbacks. No callbacks are loaded unless explicitly requested.
+
 #### Evaluating a QAD checkpoint in vLLM with fake quantization
 
 To evaluate a format vLLM has no kernels for (e.g. NVFP4 on Hopper, GGML IQ2, or a custom research format), export with `--vllm_fakequant_export`. The weight quantizers are folded into BF16 weights and Megatron-Bridge saves the model at any TP / EP / PP, VLMs included. The enabled activation and KV-cache quantizers go to `quantizer_state.pth` (ranges) and `quant_recipe.yaml` (settings), both under HF names:
