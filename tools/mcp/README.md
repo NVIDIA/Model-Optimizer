@@ -21,7 +21,7 @@ Mode is determined by which args you pass, not by which tool you call. One tool,
 |---|---|
 | `list_examples` | Enumerate bundled launcher YAMLs under `tools/launcher/examples/` with model + description metadata extracted from each YAML. Discovery primitive — call this first when you don't know which YAML to launch. |
 | `verify_setup(executor, ...)` | Fail-fast probe for the named executor. Docker: `docker info` (daemon up) + `docker info --format` runtime-registry check (looks for `"nvidia"` runtime registered by the NVIDIA Container Toolkit — no image pull, daemon-fast). Slurm: `ssh -o BatchMode=yes -o ConnectTimeout=5` to the cluster login node. Returns structured failure on auth / network / daemon issues — no exception. |
-| `submit_job(yaml_path, hf_local? \| cluster_host?, ..., dry_run?, source_ref?, source_repo?, enable_mlflow?)` | Submit a launcher YAML. Mode resolved from mutually-exclusive args. Before launching, materializes a managed Model-Optimizer checkout at `source_ref` (branch, tag, or SHA; default `main`) and initializes recursive submodules, then runs that checkout's launcher. Returns `experiment_id` (Slurm) or PID plus captured `experiment_id` when available (Docker) immediately; if Docker's short tail times out, it still returns PID with `experiment_id=None` and a persistent `stdout_log` under `$NEMORUN_HOME/.modelopt-mcp/docker-submit-logs/` for diagnostics. The actual job runs detached. Auto-runs `verify_setup` first by default (skippable). When `enable_mlflow=True`, creates an MLflow run before launch and passes standard `MLFLOW_RUN_ID` / `MLFLOW_TRACKING_URI` into the job. **Pass `dry_run=True`** to validate the YAML via `launch.py --dryrun --yes` without contacting the cluster / spawning a container / running sbatch — returns `{ok, dry_run: True, validated: bool, diagnostic?, exit_code, stdout_tail, stderr_tail, argv, source_sha, source_root}` instead of `experiment_id`. |
+| `submit_job(yaml_path, hf_local? \| cluster_host?, ..., dry_run?, source_repo?, enable_mlflow?)` | Submit a launcher YAML. Mode resolved from mutually-exclusive args. Before launching, materializes a managed Model-Optimizer checkout at `MODELOPT_MCP_SOURCE_REF` (branch, tag, or SHA; default `main`) and initializes recursive submodules, then runs that checkout's launcher. Returns `experiment_id` (Slurm) or PID plus captured `experiment_id` when available (Docker) immediately; if Docker's short tail times out, it still returns PID with `experiment_id=None` and a persistent `stdout_log` under `$NEMORUN_HOME/.modelopt-mcp/docker-submit-logs/` for diagnostics. The actual job runs detached. Auto-runs `verify_setup` first by default (skippable). When `enable_mlflow=True`, creates an MLflow run before launch and passes standard `MLFLOW_RUN_ID` / `MLFLOW_TRACKING_URI` into the job. **Pass `dry_run=True`** to validate the YAML via `launch.py --dryrun --yes` without contacting the cluster / spawning a container / running sbatch — returns `{ok, dry_run: True, validated: bool, diagnostic?, exit_code, stdout_tail, stderr_tail, argv, source_sha, source_root}` instead of `experiment_id`. |
 | `job_status(experiment_id)` | Filesystem-based status from nemo_run's experiment dir (`_DONE`, `status_*.out`). Returns `done` / `failed` / `running` plus per-task statuses. No in-memory registry; survives MCP server restarts. |
 | `job_logs(experiment_id, task?, tail?)` | Read `log_<task>.out` from the experiment dir. Per-task filtering + optional tail to truncate. |
 | `wait_for_experiment(experiment_id, timeout_sec?, poll_interval_sec?, finalize_mlflow?, mlflow_run_id?, mlflow_tracking_uri?)` | Block until `job_status` returns `done` / `failed`, or until `timeout_sec` elapses. Single tool call replaces the agent's `while True: status; sleep` loop — saves tool-call turns and avoids overshooting the poll interval. When `finalize_mlflow=True`, fetches terminal Nemo/Slurm logs with `nemo experiment logs`, then attaches final pass/fail status and launcher logs to the MLflow run created by `submit_job(enable_mlflow=True)`. |
@@ -86,9 +86,10 @@ finalize the externally owned lifecycle run.
 
 `submit_job` does not rely on the uvx install clone or on the caller being inside a Model-Optimizer checkout. For each launch it resolves:
 
-1. `source_ref` argument, if provided.
-2. `MODELOPT_MCP_SOURCE_REF`, if set.
-3. `main`.
+1. `MODELOPT_MCP_SOURCE_REF`, if set.
+2. `main`.
+
+The ref is not a tool argument, so only the operator chooses it. Callers can still pick `source_repo`, but only the default repo or `MODELOPT_MCP_SOURCE_REPO`, and the same ref can point to different code in each.
 
 It resolves that ref against `source_repo` / `MODELOPT_MCP_SOURCE_REPO` / `https://github.com/NVIDIA/Model-Optimizer.git`, creates a cached checkout under `MODELOPT_MCP_SOURCE_CACHE` (default `$XDG_CACHE_HOME/modelopt-mcp/sources` or `~/.cache/modelopt-mcp/sources`), and runs:
 
@@ -137,7 +138,6 @@ result = mcp__modelopt__submit_job(
     cluster_user="alice",
     identity="/home/alice/.ssh/id_ed25519",
     skip_verify=True,  # we just probed
-    source_ref="main",  # optional; omit to use main
     enable_mlflow=True,  # optional; passes MLFLOW_RUN_ID into the job
 )
 # {"ok": True, "experiment_id": "cicd_1781240000", "mlflow": {"mlflow_run_id": "..."}, ...}
@@ -167,8 +167,8 @@ For local Docker execution, drop `cluster_host`/`cluster_user`/`identity` and pa
 | `NEMORUN_HOME` | submit + status + logs | Where the launcher writes experiment artifacts. Defaults to cwd if unset. `job_status` / `job_logs` search `$NEMORUN_HOME/experiments/<id>/`. |
 | `MODELOPT_MCP_LOG` | (optional) server | Log level. Defaults to `INFO`. Logs go to stderr — stdout is the MCP wire. |
 | `MODELOPT_MCP_SKIP_GPU_CHECK` | (optional) `verify_setup(executor='docker')` | Set to skip the `docker info --format` runtime-registry check. Useful for CI hosts where the daemon is up but the NVIDIA Container Toolkit isn't installed. |
-| `MODELOPT_MCP_SOURCE_REPO` | (optional) `submit_job` | Default git repository for managed source checkouts. Defaults to `https://github.com/NVIDIA/Model-Optimizer.git`. |
-| `MODELOPT_MCP_SOURCE_REF` | (optional) `submit_job` | Default branch, tag, or SHA when `source_ref` is omitted. Defaults to `main`. |
+| `MODELOPT_MCP_SOURCE_REPO` | (optional) `submit_job` | Default git repository for managed source checkouts. Defaults to `https://github.com/NVIDIA/Model-Optimizer.git`. `submit_job(source_repo=...)` accepts only this repo or the default. |
+| `MODELOPT_MCP_SOURCE_REF` | (optional) `submit_job` | Branch, tag, or SHA for managed source checkouts. Defaults to `main`. |
 | `MODELOPT_MCP_SOURCE_CACHE` | (optional) `submit_job` | Root for managed source checkouts. Defaults to `$XDG_CACHE_HOME/modelopt-mcp/sources` or `~/.cache/modelopt-mcp/sources`. |
 | `MODELOPT_MCP_DISABLE_MANAGED_SOURCE` | (optional) local dev | Set to `1` to skip managed checkout and invoke the installed `modelopt-launcher` entrypoint directly. |
 | `MODELOPT_MCP_UV` | (optional) `submit_job` | Override the `uv` binary used for `uv run --project <source>/tools/launcher ...`. |
