@@ -18,6 +18,7 @@
 import contextlib
 import json
 import warnings
+from collections.abc import Generator
 from pathlib import Path
 
 import torch
@@ -47,13 +48,14 @@ from .quant_utils import (
     get_quantization_format,
     seed_carried_over_exclusions,
 )
-from .registry import ExportContext, PrepareMoEInputsRegistry
+from .registry import PrepareMoEInputsRegistry
 from .unified_export_hf import (
     _dispatch_export_handler,
     _fuse_shared_input_modules,
     _prepare_moe_inputs,
     _resolve_export_dtype,
     _source_checkpoint,
+    _start_export,
     _write_hf_export_config,
     collect_shared_input_modules,
     save_non_weight_artifacts,
@@ -184,6 +186,8 @@ class LayerwiseExporter:
         self._dtype = dtype
         self._bound = False
         self._finalized = False
+        # The export bind() starts, which finalize() ends.
+        self._export = contextlib.ExitStack()
         self._source_key_snapshot: tuple[str, list[str]] | None = None
         self._announced_on: list[nn.Module] = []
         # A VLM calibrates its language model but exports the whole thing, so announce on
@@ -212,26 +216,18 @@ class LayerwiseExporter:
         """Validate the model and snapshot what the tail pass needs.
 
         Called from calibration, after quantizer insertion and before any layer is converted
-        -- the only window where both hold.
+        -- the only window where both hold. The active ModelOpt session holds this export's context
+        from here until the export that finalizes it ends, and is bound to the exporter's model, the
+        root the checkpoint describes, as an export of that model binds it. A calibration resumed
+        after a failure binds it again: its session, maybe another, takes the root too.
         """
         if self._bound:
+            ModelOptSession.active().bind(self._model)
             return
         model = self._model
         assert_layerwise_export_supported(model)
         # Tensor transforms regroup state across keys; no per-layer pass reverses that.
         _assert_no_split_rules(model)
-
-        model_type = hf_model_type(model)
-        for _, sub_module in model.named_modules():
-            if (
-                is_moe(sub_module, model_type)
-                and hasattr(sub_module, "experts")
-                and PrepareMoEInputsRegistry.match(sub_module.experts) is None
-            ):
-                raise NotImplementedError(
-                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is "
-                    "not supported in export."
-                )
 
         layers = LayerActivationCollector.get_decoder_layers(model)
         if layers is None:
@@ -245,6 +241,18 @@ class LayerwiseExporter:
                 f"{len(calibrated_layers)}, so layer_idx would not agree. The exporter's "
                 "model must contain exactly the layers being calibrated."
             )
+
+        model_type = hf_model_type(model)
+        for _, sub_module in model.named_modules():
+            if (
+                is_moe(sub_module, model_type)
+                and hasattr(sub_module, "experts")
+                and PrepareMoEInputsRegistry.match(sub_module.experts) is None
+            ):
+                raise NotImplementedError(
+                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is "
+                    "not supported in export."
+                )
         self._layers = layers
         layer_ids = {id(m): i for i, m in enumerate(layers)}
         self._layer_names: dict[int, str] = {}
@@ -253,15 +261,10 @@ class LayerwiseExporter:
             if idx is not None:
                 self._layer_names[idx] = name
 
-        # model_type is threaded in so the per-model spec lookups resolve: this path hands
-        # single decoder layers to helpers that would otherwise try to read config.model_type
-        # off them.
-        self._ctx = ExportContext(
-            model=model, dtype=_resolve_export_dtype(model, self._dtype), model_type=model_type
-        )
         # get_quant_config reports on the quantizer modules, which export_layer replaces as
-        # it goes, so by finalize() the model would look unquantized.
-        self._quant_config = get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora)
+        # it goes, so by finalize() the model would look unquantized. No QLoRA model is exported
+        # layer by layer.
+        self._quant_config = get_quant_config(model)
         # Not get_kv_cache_dtype: it does not recurse, so on the root it answers None.
         self._kv_cache_format = _get_kv_cache_postprocess_config(self._quant_config["quantization"])
 
@@ -281,6 +284,15 @@ class LayerwiseExporter:
         if source and Path(source).is_dir():
             self._source_key_snapshot = (str(source), unplaced_keys_for(model, source))
 
+        # The export's one context, for every layer and the tail, started once nothing here can
+        # fail: the active ModelOpt session holds it from here until finalize() ends the export,
+        # where its steps and handlers find it. That session is bound first to the exporter's
+        # model, the root the checkpoint describes, whose type the export reads: calibration may
+        # have been handed a part of it, such as a VLM's language model.
+        ModelOptSession.active().bind(model)
+        self._ctx = self._export.enter_context(
+            _start_export(model, _resolve_export_dtype(model, self._dtype))
+        )
         self._bound = True
 
     def export_layer(
@@ -313,26 +325,27 @@ class LayerwiseExporter:
         layer_name = self._layer_names[layer_idx]
         tensors: dict[str, torch.Tensor] = {}
 
-        # Order matters at both seams: scales derive from amax, so they must be final
-        # before packing, and the restack consumes packed per-expert tensors.
-        _prepare_moe_inputs(
-            layer_module, self._ctx.dtype, self._ctx.is_modelopt_qlora, self._ctx.model_type
-        )
-        self._unify_shared_quantization_params(layer_module, layer_inputs)
+        # A calibration resumed after a failure, maybe in a session of its own, finds the export
+        # it goes on with there for the layer.
+        with self._resumed():
+            # Order matters at both seams: scales derive from amax, so they must be final
+            # before packing, and the restack consumes packed per-expert tensors.
+            _prepare_moe_inputs(layer_module)
+            self._unify_shared_quantization_params(layer_module, layer_inputs)
 
-        # The shard on disk is the artifact once this block closes; nothing reads the
-        # layer again.
-        with _release_exported_tensors(layer_module):
-            for sub_name, sub_mod in layer_module.named_modules():
-                full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
-                _dispatch_export_handler(full_name, sub_mod, self._ctx)
-            _reconstruct_fused_moe_linear(layer_module)
+            # The shard on disk is the artifact once this block closes; nothing reads the
+            # layer again.
+            with _release_exported_tensors(layer_module):
+                for sub_name, sub_mod in layer_module.named_modules():
+                    full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
+                    _dispatch_export_handler(full_name, sub_mod, self._ctx)
+                _reconstruct_fused_moe_linear(layer_module)
 
-            prefix = f"{layer_name}." if layer_name else ""
-            for key, tensor in layer_module.state_dict().items():
-                self._collect(tensors, prefix + key, tensor)
+                prefix = f"{layer_name}." if layer_name else ""
+                for key, tensor in layer_module.state_dict().items():
+                    self._collect(tensors, prefix + key, tensor)
 
-            save_file(tensors, str(self._export_dir / layer_shard_name(layer_idx)))
+                save_file(tensors, str(self._export_dir / layer_shard_name(layer_idx)))
 
     def _unify_shared_quantization_params(
         self, layer_module: nn.Module, layer_inputs: list | None
@@ -386,10 +399,30 @@ class LayerwiseExporter:
             raise RuntimeError("finalize() called twice; the checkpoint is already written.")
         with ModelOptSession.ensure(self._model):
             self._finalized = True
-            return self._finalize(extra_state_dict)
+            # The export ends here, however finalizing ends.
+            with self._export, self._resumed():
+                return self._finalize(extra_state_dict)
+
+    @contextlib.contextmanager
+    def _resumed(self) -> Generator[None, None, None]:
+        """This export, as the export in progress in the active ModelOpt session, for the block.
+
+        A calibration made in a session of its own started it in that session, so the export that
+        finalizes it, in another, finds it there only for the block.
+        """
+        runtime = ModelOptSession.active().runtime
+        if runtime.export_context is self._ctx:
+            yield
+            return
+        held = runtime.export_context
+        runtime.export_context = self._ctx
+        try:
+            yield
+        finally:
+            runtime.export_context = held
 
     def _finalize(self, extra_state_dict: dict[str, torch.Tensor] | None) -> dict:
-        """:meth:`finalize`, in the ModelOpt session it runs in."""
+        """:meth:`finalize`, while the export it ends still runs."""
         model = self._ctx.model
         quant_config = self._quant_config
         # No gate/up sync here: export_layer did every layer, and the tail has no experts.

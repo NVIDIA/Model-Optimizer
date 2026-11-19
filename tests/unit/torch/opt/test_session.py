@@ -31,7 +31,8 @@ from modelopt.torch.opt.session import ensure_modelopt_session
 def test_a_session_describes_one_model():
     """A session binds to the first model a call gives it, and holds it. That model's submodules and
     the model containing it are the same model, as a VLM's language model and the VLM are; any other
-    model is refused, also once the workflow drops that model. A copy of the session is unbound."""
+    model is refused, also once the workflow drops that model. A copy of the session is unbound and
+    holds no live objects."""
     vlm = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
     language_model = vlm[0]
 
@@ -40,8 +41,9 @@ def test_a_session_describes_one_model():
     assert session.bind(language_model).model is vlm
     with pytest.raises(ValueError, match="a session describes one model"):
         session.bind(torch.nn.Linear(2, 2))
+    session.runtime.export_context = object()
     for copied in (copy.deepcopy(session), pickle.loads(pickle.dumps(session))):
-        assert copied.model is None
+        assert copied.model is None and copied.runtime.export_context is None
         copied.bind(torch.nn.Linear(2, 2))
     held = weakref.ref(vlm)
     del vlm, language_model

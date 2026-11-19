@@ -30,7 +30,9 @@ from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 import modelopt.torch.export.hf_export_handlers as handlers
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import pack_int4_in_uint8
-from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
+from modelopt.torch.export.registry import ExportModuleRegistry
+from modelopt.torch.export.unified_export_hf import _start_export
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 from modelopt.torch.quantization.qtensor import INT4QTensor, MXFP4QTensor, NF4QTensor, NVFP4QTensor
@@ -152,38 +154,46 @@ def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
     mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(4, 32)))
     refs = copy.deepcopy(model)[0]
     for i, ref in enumerate(refs):
-        ExportModuleRegistry.match(ref)(
-            f"0.{i}", ref, ExportContext(model=ref, dtype=torch.bfloat16)
-        )
+        with ModelOptSession().bind(ref), _start_export(ref, torch.bfloat16) as ref_ctx:
+            ExportModuleRegistry.match(ref)(
+                f"0.{i}",
+                ref,
+                ref_ctx,
+            )
     units = list(layer) if layout == "linear-units" else [layer]
     for unit in units:
         fully_shard(unit, mesh=gloo_world_of_one)
     if layout == "fsdp2":
         fully_shard(model, mesh=gloo_world_of_one)
     set_distribution_plan(model, DistributionPlan(dense="fsdp"))
-    ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
-    unshards = []
-    unshard = FSDPModule.unshard
-    monkeypatch.setattr(
-        FSDPModule, "unshard", lambda unit, *a, **k: unshards.append(unit) or unshard(unit, *a, **k)
-    )
+    with (
+        ModelOptSession().bind(model),
+        _start_export(model, torch.bfloat16, keep_fused_experts=True) as ctx,
+    ):
+        unshards = []
+        unshard = FSDPModule.unshard
+        monkeypatch.setattr(
+            FSDPModule,
+            "unshard",
+            lambda unit, *a, **k: unshards.append(unit) or unshard(unit, *a, **k),
+        )
 
-    with handlers.held_fsdp2_weight_windows(ctx) if held else contextlib.nullcontext():
-        for i, linear in enumerate(layer):
-            ExportModuleRegistry.match(linear)(f"0.{i}", linear, ctx)
+        with handlers.held_fsdp2_weight_windows(ctx) if held else contextlib.nullcontext():
+            for i, linear in enumerate(layer):
+                ExportModuleRegistry.match(linear)(f"0.{i}", linear, ctx)
 
-    per_linear = [linear if layout == "linear-units" else layer for linear in layer]
-    assert unshards == (list(dict.fromkeys(per_linear)) if held else per_linear)
-    assert all(isinstance(linear.weight, DTensor) for linear in layer)
-    sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
-    for i, ref in enumerate(refs):
-        packed = sd[f"0.{i}.weight"]
-        assert isinstance(packed, DTensor)
-        assert packed.dtype == torch.uint8
-        assert torch.equal(packed.full_tensor(), ref.weight)
-        for name in ("weight_scale", "weight_scale_2", "input_scale"):
-            want = _raw_bytes(getattr(ref, name))
-            assert torch.equal(_raw_bytes(sd[f"0.{i}.{name}"]), want), name
+        per_linear = [linear if layout == "linear-units" else layer for linear in layer]
+        assert unshards == (list(dict.fromkeys(per_linear)) if held else per_linear)
+        assert all(isinstance(linear.weight, DTensor) for linear in layer)
+        sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
+        for i, ref in enumerate(refs):
+            packed = sd[f"0.{i}.weight"]
+            assert isinstance(packed, DTensor)
+            assert packed.dtype == torch.uint8
+            assert torch.equal(packed.full_tensor(), ref.weight)
+            for name in ("weight_scale", "weight_scale_2", "input_scale"):
+                want = _raw_bytes(getattr(ref, name))
+                assert torch.equal(_raw_bytes(sd[f"0.{i}.{name}"]), want), name
 
 
 def test_a_module_joins_its_units_held_window_once(gloo_world_of_one):
@@ -197,19 +207,22 @@ def test_a_module_joins_its_units_held_window_once(gloo_world_of_one):
     model = nn.Sequential(layer)
     mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(4, 32)))
     ref = copy.deepcopy(layer[0])
-    ExportModuleRegistry.match(ref)("0.0", ref, ExportContext(model=ref, dtype=torch.bfloat16))
+    with ModelOptSession().bind(ref), _start_export(ref, torch.bfloat16) as ref_ctx:
+        ExportModuleRegistry.match(ref)("0.0", ref, ref_ctx)
     fully_shard(layer, mesh=gloo_world_of_one)
     fully_shard(model, mesh=gloo_world_of_one)
     set_distribution_plan(model, DistributionPlan(dense="fsdp"))
-    ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
+    with (
+        ModelOptSession().bind(model),
+        _start_export(model, torch.bfloat16, keep_fused_experts=True) as ctx,
+    ):
+        with handlers.held_fsdp2_weight_windows(ctx):
+            ExportModuleRegistry.match(layer[0])("0.0", layer[0], ctx)
+            with handlers._fsdp2_weight_window(ctx, layer[0]):  # as for the module's next weight
+                pass
 
-    with handlers.held_fsdp2_weight_windows(ctx):
-        ExportModuleRegistry.match(layer[0])("0.0", layer[0], ctx)
-        with handlers._fsdp2_weight_window(ctx, layer[0]):  # as for the module's next weight
-            pass
-
-    sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
-    assert torch.equal(sd["0.0.weight"].full_tensor(), ref.weight)
+        sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
+        assert torch.equal(sd["0.0.weight"].full_tensor(), ref.weight)
 
 
 def test_a_module_the_window_cannot_name_never_takes_the_roots_own_weight(gloo_world_of_one):
@@ -279,24 +292,31 @@ def _two_rank_packing_job(rank, world_size):
     refs = copy.deepcopy(model)
     for name, _ in linears:
         ref = refs.get_submodule(name)
-        ExportModuleRegistry.match(ref)(name, ref, ExportContext(model=ref, dtype=torch.bfloat16))
+        with ModelOptSession().bind(ref), _start_export(ref, torch.bfloat16) as ref_ctx:
+            ExportModuleRegistry.match(ref)(
+                name,
+                ref,
+                ref_ctx,
+            )
     for unit in model.units:
         fully_shard(unit, mesh=mesh)
     fully_shard(model, mesh=mesh)
     set_distribution_plan(model, DistributionPlan(world_size, dense="fsdp"))
-    ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
+    with (
+        ModelOptSession().bind(model),
+        _start_export(model, torch.bfloat16, keep_fused_experts=True) as ctx,
+    ):
+        with bounded_collectives(), handlers.held_fsdp2_weight_windows(ctx):
+            for name, linear in linears:
+                ExportModuleRegistry.match(linear)(name, linear, ctx)
 
-    with bounded_collectives(), handlers.held_fsdp2_weight_windows(ctx):
-        for name, linear in linears:
-            ExportModuleRegistry.match(linear)(name, linear, ctx)
-
-    sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
-    for name, _ in linears:
-        ref = refs.get_submodule(name)
-        assert torch.equal(sd[f"{name}.weight"].full_tensor(), ref.weight), name
-        for leaf in ("weight_scale", "weight_scale_2", "input_scale"):
-            got = _raw_bytes(sd[f"{name}.{leaf}"])
-            assert torch.equal(got, _raw_bytes(getattr(ref, leaf))), (name, leaf)
+        sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
+        for name, _ in linears:
+            ref = refs.get_submodule(name)
+            assert torch.equal(sd[f"{name}.weight"].full_tensor(), ref.weight), name
+            for leaf in ("weight_scale", "weight_scale_2", "input_scale"):
+                got = _raw_bytes(sd[f"{name}.{leaf}"])
+                assert torch.equal(got, _raw_bytes(getattr(ref, leaf))), (name, leaf)
 
 
 def test_two_ranks_pack_their_shards_into_the_unsharded_bytes(cpu_dist_workers):

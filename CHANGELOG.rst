@@ -32,7 +32,7 @@ Changelog
 
 **Backward Breaking Changes**
 
-- ModelOpt supports one model optimization workflow at a time in a process: running different workflows at once from several threads, such as quantizing two models in two threads, is not supported. The threads of the one workflow share its ``ModelOptSession``.
+- ModelOpt supports one model optimization workflow at a time in a process: running different workflows at once from several threads, such as quantizing two models in two threads, is not supported. The threads of the one workflow share its ``ModelOptSession``, which runs one export at a time.
 
 **Deprecations**
 

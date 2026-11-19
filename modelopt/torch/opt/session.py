@@ -22,7 +22,8 @@ one set up for that call alone, so a call made without a session gets what the c
 
 ModelOpt supports one model optimization workflow at a time in a process: different workflows run
 at once from several threads, such as two models quantized in two threads, are not supported. The
-one workflow's session is shared by all the process's threads.
+one workflow's session is shared by all the process's threads, and holds one export in progress
+at a time, a layerwise calibration's included.
 """
 
 import contextlib
@@ -41,13 +42,28 @@ if TYPE_CHECKING:
     # defines for installs without torch.
     from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-__all__ = ["ModelOptSession"]
+    from modelopt.torch.export.registry import ExportContext
+
+__all__ = ["ModelOptSession", "RunState"]
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 # What a session is bound to: a model, or a diffusers pipeline, which its export binds whole.
 _Model: TypeAlias = "torch.nn.Module | DiffusionPipeline"
+
+
+@dataclass
+class RunState:
+    """The live objects one call of a workflow, or one step of it, creates and a later one uses.
+
+    ``export_context`` is the :class:`~modelopt.torch.export.registry.ExportContext` of the export
+    in progress. The export keeps it here from its setup until it ends, and each of its steps and
+    handlers gets it here. A layerwise export's is here from the exporter's binding, before
+    calibration, until the export that finalizes it ends.
+    """
+
+    export_context: "ExportContext | None" = None
 
 
 @dataclass(eq=False)
@@ -62,16 +78,20 @@ class ModelOptSession:
       the model's spec in :mod:`modelopt.torch.models` by it, also for the decoder layers and
       experts it hands its handlers, which carry no type of their own.
 
+    ``runtime`` (:class:`RunState`) holds the live objects one step of a call hands to the next,
+    such as the context of the export in progress.
+
     ``with ModelOptSession():`` makes it the process's active session for the block, and every
     ModelOpt call in the block runs in it. Opening another while one is active raises: a workflow
     has one session. A session describes one model, which it holds until its block ends. The first
     call binds it to that model (:meth:`bind`), and a call on another model raises; the model's
     submodules, and the model containing it, are the same model, since a VLM is calibrated through
-    its language model and exported whole. A copy of a session, pickled or deep-copied, is unbound,
-    as is a session whose block has ended.
+    its language model and exported whole. A copy of a session, pickled or deep-copied, is unbound
+    and holds no live objects, as is a session whose block has ended.
     """
 
     model_type: str | None = field(default=None, init=False)
+    runtime: RunState = field(default_factory=RunState, init=False, repr=False)
     _model: "_Model | None" = field(default=None, init=False, repr=False)
 
     @staticmethod
@@ -119,8 +139,9 @@ class ModelOptSession:
     def __exit__(self, *exc_info: object) -> None:
         global _active
         _active = None
-        # The workflow ends with its block: the session lets go of its model.
+        # The workflow ends with its block: the session lets go of its model and live objects.
         self._model = None
+        self.runtime = RunState()
 
     @property
     def model(self) -> "_Model | None":
@@ -150,9 +171,11 @@ class ModelOptSession:
         return self
 
     def __getstate__(self) -> dict[str, object]:
-        # The binding belongs to this process; a copy describes the same workflow without it.
+        # The binding and the live objects belong to this process; a copy describes the same
+        # workflow without them.
         state = self.__dict__.copy()
         state["_model"] = None
+        state["runtime"] = RunState()
         return state
 
 

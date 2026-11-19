@@ -37,6 +37,7 @@ from modelopt.torch.export.layerwise_export import (
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
+from modelopt.torch.opt import ModelOptSession
 
 NUM_LAYERS = 4
 CALIB_BATCHES = [torch.randint(0, 32, (1, 16)) for _ in range(2)]
@@ -172,7 +173,8 @@ def test_layerwise_export_resolves_mixed_kv_cache_formats(tmp_path):
         },
     )
     exporter = LayerwiseExporter(model, tmp_path)
-    exporter.bind(list(model.model.layers))
+    with ModelOptSession().bind(model):
+        exporter.bind(list(model.model.layers))
 
     assert exporter._kv_cache_format == {
         "model.layers.0.self_attn": {"quant_algo": "FP8"},

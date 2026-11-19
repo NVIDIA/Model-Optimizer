@@ -1123,9 +1123,12 @@ def test_export_weight_specific_rename_keeps_config_aligned(tmp_path, quantized_
     original_head = model.lm_head.weight.detach().clone()
     if export_mode == "layerwise":
         exporter = LayerwiseExporter(model, tmp_path)
-        exporter.bind(list(model.model.layers))
-        exporter.export_layer(0, model.model.layers[0])
-        config = exporter.finalize()
+        with ModelOptSession().bind(model) as session:
+            exporter.bind(list(model.model.layers))
+            exporter.export_layer(0, model.model.layers[0])
+            config = exporter.finalize()
+            # The export bind() started ends with finalize().
+            assert session.runtime.export_context is None
     elif export_mode == "streaming":
         with ModelOptSession().bind(model):
             state, config = _export_transformers_checkpoint(model)

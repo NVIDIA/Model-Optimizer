@@ -33,6 +33,8 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from modelopt.torch.opt.session import ModelOptSession
+
 if TYPE_CHECKING:
     from modelopt.torch.export.hf_export_handlers import _HeldWindow
     from modelopt.torch.quantization.utils.core_utils import ModuleNames
@@ -47,7 +49,12 @@ __all__ = [
 
 @dataclass
 class ExportContext:
-    """Shared state for a single export invocation, passed to every handler call.
+    """The state of one export of a model, which the export's steps and handlers share.
+
+    The workflow's :class:`~modelopt.torch.opt.session.ModelOptSession` holds it while the export
+    runs (``runtime.export_context``), and each step of the export gets it there with
+    :meth:`current`; the handlers are handed it. A layerwise export's is there from the exporter's
+    binding, before calibration, until the export that finalizes it ends.
 
     Tied-weight dedup is not a handler concern: the driver builds one name-based
     :class:`TiedWeightMap` and feeds it to ``sync_tied_input_amax`` and
@@ -82,6 +89,19 @@ class ExportContext:
 
     fsdp2_window: "_HeldWindow | None" = None
     """The FSDP2 unit's weight-update window the handlers hold open across its modules."""
+
+    @classmethod
+    def current(cls) -> "ExportContext":
+        """The context of the export in progress in the active ModelOpt session.
+
+        An export's steps and handlers run only inside it, so outside one this raises.
+        """
+        export = ModelOptSession.active().runtime.export_context
+        if export is None:
+            raise RuntimeError(
+                "No export is in progress: export steps and handlers run only inside one."
+            )
+        return export
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]

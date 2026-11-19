@@ -36,7 +36,10 @@ from torch.distributed.fsdp import fully_shard
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
-from modelopt.torch.export.unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
+from modelopt.torch.export.unified_export_hf_streaming import (
+    _export_fsdp2_checkpoint_streaming,
+    collect_export_tensors,
+)
 from modelopt.torch.opt import ModelOptSession
 
 transformers = pytest.importorskip("transformers")
@@ -183,6 +186,18 @@ def test_streaming_export_extra_state_dict_mtp(tmp_path):
     loaded = _load_all(d)
     assert "model.layers.99.mtp.weight" in loaded
     assert torch.equal(loaded["model.layers.99.mtp.weight"], extra["model.layers.99.mtp.weight"])
+
+
+def test_collect_export_tensors_runs_its_own_export_in_the_active_session():
+    """Outside an export, the collector's own export runs in the caller's session and ends there."""
+    model = _tiny_quantized_llama()
+
+    with ModelOptSession() as session:
+        owned = collect_export_tensors(model, torch.bfloat16, False, owner="rank0")
+        assert session.model is model
+        assert session.runtime.export_context is None
+
+    assert owned
 
 
 def _two_rank_streaming_export(rank, size, export_dir):
