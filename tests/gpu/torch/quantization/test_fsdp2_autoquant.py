@@ -34,6 +34,7 @@ from transformers import AutoConfig
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.kv_cache_auto_quant import AutoQuantizeKVSearcher
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 
@@ -141,11 +142,13 @@ def _run_kv_autoquant_example(rank, size, checkpoint_dir, search_dir, composed):
             {"input_ids": tokens, "labels": tokens, "attention_mask": torch.ones_like(tokens)}
         )
 
-    model, language_model, model_type, calibration_only, *_ = hf_ptq.load_model(args)
-    model.config.use_cache = False
-    hf_ptq._run_auto_quantize_recipe(
-        args, recipe, model, language_model, model_type, calibration_only, batches, False
-    )
+    # Each run in a session of its own, as hf_ptq's are.
+    with ModelOptSession():
+        model, language_model, model_type, calibration_only, *_ = hf_ptq.load_model(args)
+        model.config.use_cache = False
+        hf_ptq._run_auto_quantize_recipe(
+            args, recipe, model, language_model, model_type, calibration_only, batches, False
+        )
     state = torch.load(search_dir / "kv" / f"rank{rank}.pth", weights_only=True)
     assert state["num_scored_tokens"] == 32 * size
     assert state["best"]["is_satisfied"]
@@ -157,9 +160,9 @@ def _run_kv_autoquant_example(rank, size, checkpoint_dir, search_dir, composed):
         assert (search_dir / "weights" / f"rank{rank}.pth").is_file()
 
     del language_model, model
-    model, language_model, model_type, calibration_only, *_ = hf_ptq.load_model(args)
-    model.config.use_cache = False
-    with pytest.MonkeyPatch.context() as patch:
+    with ModelOptSession(), pytest.MonkeyPatch.context() as patch:
+        model, language_model, model_type, calibration_only, *_ = hf_ptq.load_model(args)
+        model.config.use_cache = False
         patch.setattr(model, "forward", lambda *_a, **_kw: pytest.fail("Resume ran a forward"))
         hf_ptq._run_auto_quantize_recipe(
             args, recipe, model, language_model, model_type, calibration_only, batches, False

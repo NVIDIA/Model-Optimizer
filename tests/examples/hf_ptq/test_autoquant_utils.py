@@ -27,6 +27,7 @@ from transformers import WhisperConfig, WhisperForConditionalGeneration
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils.dataset_utils import get_max_batch_size
 
@@ -442,9 +443,11 @@ def test_autoquant_label_free_recipe_calls_mtq(
             return SimpleNamespace(logits=input_ids + 1)
 
     captured = {}
+    searched_in = []
 
     def fake_auto_quantize(model, **kwargs):
         captured.update(kwargs)
+        searched_in.append(ModelOptSession.current())
         assert torch.equal(kwargs["forward_step"](model, batch), batch["input_ids"] + 1)
         # Layerwise calibration of a candidate stops the forward early and returns no output.
         assert kwargs["forward_step"](lambda **_: None, batch) is None
@@ -453,7 +456,9 @@ def test_autoquant_label_free_recipe_calls_mtq(
     monkeypatch.setattr(autoquant_utils.mtq, "auto_quantize", fake_auto_quantize)
     model = LogitsModel()
 
-    assert autoquant_utils.auto_quantize(args, model, [batch], aq) is model
+    with ModelOptSession() as session:
+        assert autoquant_utils.auto_quantize(args, model, [batch], aq) is model
+    assert searched_in == [session]  # the search runs in the run's session
     expected_method = {"method": method, **method_options} if method_options else method
     assert captured["method"] == expected_method
     assert "method_options" not in captured

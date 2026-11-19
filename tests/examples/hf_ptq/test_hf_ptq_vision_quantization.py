@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.utils.distributed import DistributionPlan
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
@@ -66,13 +67,17 @@ def test_image_calibration_model_target_follows_recipe(
         recipe=recipe,
     )
 
-    monkeypatch.setattr(hf_ptq, "get_model", lambda *args, **kwargs: full_model)
+    def get_model(*args, **kwargs):
+        ModelOptSession.active().bind(full_model)  # as load_pretrained binds the model it loads
+        return full_model
+
+    monkeypatch.setattr(hf_ptq, "get_model", get_model)
     # A single process's plan, decided without reading the "dummy" checkpoint.
     monkeypatch.setattr(hf_ptq, "resolve_distribution", lambda args: (DistributionPlan(), None))
-    # A VLM's extracted language model reports its own sub-config type; hf_ptq must keep the root's.
+    # A VLM's extracted language model reports its own sub-config type; hf_ptq must keep the root's,
+    # which the session read when the load bound it.
     monkeypatch.setattr(
-        hf_ptq,
-        "hf_model_type",
+        "modelopt.torch.opt.session.hf_model_type",
         lambda model: "qwen3_vl" if model is full_model else "qwen3_vl_text",
     )
     monkeypatch.setattr(
@@ -89,7 +94,8 @@ def test_image_calibration_model_target_follows_recipe(
         hf_ptq, "extract_and_prepare_language_model_from_vl", extract_language_model
     )
 
-    loaded = hf_ptq.load_model(args)
+    with ModelOptSession():
+        loaded = hf_ptq.load_model(args)
     quantization_target = loaded[1]
     assert loaded[2] == "qwen3_vl"  # root model_type, even when the language model is extracted
 
