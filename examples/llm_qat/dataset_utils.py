@@ -532,13 +532,22 @@ def _build_cache_path(
     tokenizer: PreTrainedTokenizerBase,
     max_length: int,
     cache_dir: str,
+    seed: int,
+    shuffle: bool,
+    shuffle_buffer: int,
 ) -> str:
-    """Build a deterministic cache path for the blend config."""
+    """Build a deterministic cache path for the blend config.
+
+    The path depends on everything that decides which rows the blend holds and in what order, but not
+    on the number of processes that build it: they give the same blend at any count.
+    """
     base = cache_dir or tempfile.gettempdir()
 
     tok_name, tok_fp = _tokenizer_fingerprint(tokenizer)
     splits_str = ",".join(f"{k}:{v}" for k, v in sorted(config.splits.items()))
-    sig = f"{tok_fp}|{max_length}|{config.blend_size}|{splits_str}"
+    sig = (
+        f"{tok_fp}|{max_length}|{config.blend_size}|{splits_str}|{seed}|{shuffle}|{shuffle_buffer}"
+    )
     for s in config.sources:
         sig += (
             f"|{s.hf_path}|{s.ratio}|{s.split}|{s.dataset_kwargs}"
@@ -688,35 +697,39 @@ def _tokenize_source_split(
 
 def _merge_distributed_shards(
     cache_path: str,
-    local_flat: datasets.Dataset,
+    local_parts: list[datasets.Dataset],
     parallel: ParallelConfig,
     splits: dict[str, float],
     seed: int = 42,
 ) -> datasets.DatasetDict:
-    """Save per-rank flat data, merge on rank 0, shuffle, and split by ratios.
+    """Save per-rank data, merge on rank 0, shuffle, and split by ratios.
 
-    Each rank saves its local tokenized data as a flat Dataset. Rank 0 loads
-    all shards, concatenates, shuffles deterministically, then splits by the
-    configured ratios.
+    Each rank saves its tokenized data, one Dataset per source. Rank 0 loads all shards and
+    concatenates them source by source, and rank by rank within a source: each rank holds a
+    consecutive slice of every source, so that is the source's own order, and the blend is the same
+    at any number of ranks. It then shuffles deterministically and splits by the configured ratios.
     """
     print_rank_0(f"\tSaving rank {parallel.rank} data to disk...")
     temp_dir = os.path.join(cache_path, "temp")
     rank_path = os.path.join(temp_dir, f"rank_{parallel.rank}")
     os.makedirs(rank_path, exist_ok=True)
-    local_flat.save_to_disk(rank_path)
+    for i, part in enumerate(local_parts):
+        if len(part) > 0:  # an empty Dataset cannot be saved: a rank may load nothing of a source
+            part.save_to_disk(os.path.join(rank_path, str(i)))
 
     dist_barrier()
 
     if parallel.rank == 0:
-
-        def load_rank(r: int) -> datasets.Dataset:
-            return datasets.load_from_disk(os.path.join(temp_dir, f"rank_{r}"))
-
         print_rank_0(f"\tMerging {parallel.world_size} shards...")
+        paths = [
+            os.path.join(temp_dir, f"rank_{r}", str(i))
+            for i in range(len(local_parts))
+            for r in range(parallel.world_size)
+        ]
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, parallel.world_size)) as pool:
-            all_shards = list(pool.map(load_rank, range(parallel.world_size)))
+            all_parts = list(pool.map(datasets.load_from_disk, filter(os.path.isdir, paths)))
 
-        merged = _concat_parts(all_shards)
+        merged = _concat_parts(all_parts)
         merged = merged.shuffle(seed=seed)
 
         total = len(merged)
@@ -758,7 +771,9 @@ def build_blend_dataset(
     Returns a ``DatasetDict`` with keys matching ``config.splits``
     (e.g. ``"train"``, ``"eval"``, ``"test"``).
     """
-    cache_path = _build_cache_path(config, tokenizer, max_length, cache_dir)
+    cache_path = _build_cache_path(
+        config, tokenizer, max_length, cache_dir, seed, shuffle, shuffle_buffer
+    )
 
     cached = _load_cached_dataset(cache_path)
     if cached is not None:
@@ -777,17 +792,15 @@ def build_blend_dataset(
     )
 
     print_rank_0(f"Tokenizing {len(config.sources)} sources...")
-    tokenized_parts: list[datasets.Dataset] = []
-    for source, samples in zip(config.sources, per_source_samples):
-        if samples:
-            tokenized_parts.append(
-                _tokenize_source_split(source, samples, tokenizer, max_length, parallel)
-            )
-
-    local_flat = _concat_parts(tokenized_parts)
+    tokenized_parts = [
+        _tokenize_source_split(source, samples, tokenizer, max_length, parallel)
+        if samples
+        else datasets.Dataset.from_dict(_EMPTY_TOKENIZED)
+        for source, samples in zip(config.sources, per_source_samples)
+    ]
 
     print_rank_0("Merging distributed shards...")
-    result = _merge_distributed_shards(cache_path, local_flat, parallel, config.splits, seed)
+    result = _merge_distributed_shards(cache_path, tokenized_parts, parallel, config.splits, seed)
     _dataset_cache[cache_path] = result
     return result
 
