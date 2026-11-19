@@ -794,6 +794,65 @@ def pin_energy_matched(
 _FIT_BLOCKS_PER_CHUNK = 1024
 
 
+def derive_scales(
+    ggml_format: GGMLFormat, weight: torch.Tensor, second_moments: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Each 256-value block's FP16 super-block scale, derived from ``weight`` (:class:`ScaleFit`).
+
+    The fit is weighted by the root of the per-input-column ``second_moments``, uniform when
+    ``None``, as in :func:`quantize_energy_matched`.
+    """
+    blocks = weight.detach().reshape(-1, GGML_BLOCK_SIZE)
+    columns = importance_blocks(second_moments, weight, ggml_format.name.upper())
+    return _derived_scales(ggml_format, blocks, columns)
+
+
+def match_hessian_energy(
+    ggml_format: GGMLFormat,
+    weight: torch.Tensor,
+    packed: torch.Tensor,
+    scales: torch.Tensor,
+    hessian: torch.Tensor,
+) -> torch.Tensor:
+    """``packed``, its codes searched at ``scales``, with each block's output energy matched under ``hessian``.
+
+    ``hessian`` holds one ``[256, 256]`` Hessian per block of columns. Each block's stored scale is
+    ``scales`` rescaled so it decodes ``q`` with ``q H q = w H w`` under its block of ``hessian``:
+    :func:`quantize_energy_matched`'s rule under the block's full Hessian instead of its diagonal.
+    """
+    replace = ggml_format.replace_payload_scales
+    if replace is None:
+        raise ValueError(f"{ggml_format.name.upper()} has no super-block scale to rescale")
+    rows = weight.detach().reshape(-1, weight.shape[-1])
+    blocks = rows.shape[-1] // GGML_BLOCK_SIZE
+    payload = packed.reshape(len(rows), blocks, ggml_format.block_bytes)
+    hessian = hessian.to(device=rows.device, dtype=torch.float32)
+    # Each block's Hessian scaled by a power of two, as its values are below, so a statistic near
+    # the float32 maximum cannot overflow the energies; neither scaling changes their ratio.
+    hessian = hessian * _unit_powers_of_two(hessian.reshape(blocks, -1))[0].reshape(blocks, 1, 1)
+    step = max(1, ggml_format.decode_chunk_size // blocks)
+    factors = []
+    for start in range(0, len(rows), step):
+        x = narrow_to_float32(rows[start : start + step].reshape(-1, GGML_BLOCK_SIZE))
+        decoded = ggml_format.dequantize(
+            payload[start : start + step].reshape(-1, ggml_format.block_bytes),
+            torch.tensor(x.shape),
+            dtype=torch.float32,
+            block_chunk_size=ggml_format.decode_chunk_size,
+        ).reshape(x.shape)
+        to_unit, _ = _unit_powers_of_two(x)
+        x = (x * to_unit).reshape(-1, blocks, GGML_BLOCK_SIZE)
+        decoded = (decoded * to_unit).reshape(x.shape)
+        # Clamped: an undamped, near-singular Hessian can round w H w below zero.
+        target = (torch.einsum("rbi,bij->rbj", x, hessian) * x).sum(dim=-1).clamp_min(0)
+        energy = (torch.einsum("rbi,bij->rbj", decoded, hessian) * decoded).sum(dim=-1)
+        factors.append(torch.where(energy > 0, (target / energy.clamp_min(1e-30)).sqrt(), 1.0))
+    stored = (scales.float() * torch.cat(factors).reshape(-1)).clamp(max=65504.0)
+    return replace(payload.reshape(-1, ggml_format.block_bytes), stored.to(torch.float16)).reshape(
+        packed.shape
+    )
+
+
 def _derived_scales(
     ggml_format: GGMLFormat, blocks: torch.Tensor, columns: torch.Tensor | None
 ) -> torch.Tensor:

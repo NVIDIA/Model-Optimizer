@@ -9,10 +9,11 @@ Changelog
 *Quantization - ONNX*
 
 - The Windows ONNX LLM quantization example supports text calibration for hybrid decoder inputs, including embedding-only exports and linear-attention states, and keeps small constants inline when exporting external weights. Install the example requirements with Transformers ``>=5.5,<5.19`` (previously ``<5.0.0``).
+- Add opt-in ``awqlite_reuse_activations`` (default: False) to share calibration activations across adjacent weights with the same input in per-node ONNX AWQ Lite/Full. For stochastic graphs, enabling reuse shares captured samples across those weights.
 
 *Quantization - Algorithms*
 
-- ``max`` and ``imatrix`` calibration of ``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` now derive each block's super-block scale from the weights and match each block's output energy, in place of fixed per-format scale anchors, which lowered KL divergence in all our tests (by up to half at IQ1) and matches or beats llama.cpp's own imatrix quantizer in most of them.
+- ``max``, ``imatrix`` and ``local_hessian`` calibration of ``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` now derive each block's super-block scale from the weights and match each block's output energy (``local_hessian`` under each block's Hessian), in place of fixed per-format scale anchors, which lowered KL divergence in all our tests (by up to half at IQ1) and matches or beats llama.cpp's own imatrix quantizer in most of them.
 - Add ``context_quant_level`` to KL-divergence AutoQuantize (``method={"method": "kl_div", "context_quant_level": "lowest"}``, or ``method_options: {context_quant_level: lowest}`` in a recipe): each candidate is scored with every other searched layer at its lowest-bit format (an int picks the format by its 0-based index from the lowest), so low-bit budgets go to the layers whose error compounds most once the whole model is quantized. ``"lowest"`` is a good default; a context nearer the target budget measured the same in our tests.
 
 *Quantization - QAT / QAD*
@@ -59,6 +60,8 @@ Changelog
 
 - ONNX AutoTune can now upload its remote safety engine to a chosen path with ``autotune_remote_model_path`` / ``--autotune_remote_model_path`` (``--remote_model_path`` in the AutoTune CLI); its unique temporary filename remains the default.
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
+- ONNX AutoCast can now calibrate node by node with ``--calibrate_per_node`` or
+  ``calibrate_per_node=True``, reducing peak memory at the cost of longer calibration time.
 
 *Quantization - Algorithms*
 
@@ -215,6 +218,7 @@ Changelog
 
 *ONNX*
 
+- Fix ONNX AutoCast inference shape mismatches caused by incorrectly shared symbolic dimensions, and preserve intermediate shapes when using standalone type inference. Reconvert affected models.
 - Fix ONNX loading and quantization graph exports failing on individual initializers larger than 2 GiB, while preserving nested scopes and sequence/optional value types.
 - Saving ONNX external weights to another directory no longer removes a same-named weight file from the working directory. Existing external weights remain intact when saving a model loaded without weight data.
 - ONNX autotuner file exports now save external weight data without serializing the full model to bytes first.
@@ -241,6 +245,9 @@ Changelog
 - Fix streaming speculative-decoding training capturing another request's hidden states when the vLLM serve ran requests concurrently, and failing on vLLM 0.29 and later. Retrain drafters trained in streaming mode against a serve that ran requests concurrently.
 - Fix DFlash-family drafters (DFlash, DFlash2, DSpark, Domino, LiLiCorr) trained from scratch with ``examples/speculative_decoding/main.py`` having their RoPE frequencies rounded to BF16, so they trained under different rotary phases than vLLM serves them with.
 - Fix DFlash2's candidate-selector loss weighing every block position equally and dividing by its own count of positions, unlike the backbone loss and the SGLang/SpecForge DFlash2 reference. Logged DFlash2 losses change.
+- Fix the Hugging Face export of a quantized Wan VAE (``AutoencoderKLWan``), which declared NVFP4 or FP8 in its ``quantization_config`` but saved its ``Conv3d`` weights unquantized: NVFP4 weights are now packed with their scales, other formats raise an error, and ``examples/diffusers`` quantizes only the decoder convolutions that text-to-video calibration runs. Re-quantize affected VAEs with the updated example: a VAE restored with ``--restore-from`` from an older example checkpoint keeps its uncalibrated encoder quantizers, and exporting it now raises.
+- The Hugging Face export of a diffusers model now raises an error, instead of writing a checkpoint without ``input_scale``, when a component's static input quantizers (e.g. NVFP4 or FP8) were never calibrated, as with Wan 2.2's ``transformer_2`` calibrated with ``--n-steps 1``. Calibrate with enough denoising steps to run every quantized component and re-export.
+- Fix ``examples/megatron_bridge/distill.py`` crashing on the first step when distilling a model that uses mRoPE (e.g. Qwen-VL, Qwen3.5) with ``--pp_size`` greater than 1.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
@@ -253,6 +260,9 @@ Changelog
 - Fix the Puzzletron memory objective pricing the KV cache with ``hidden_size // num_attention_heads`` instead of the model's ``head_dim``, which misestimated it for models such as Mistral-Small, GPT-OSS and Gemma-3 and for every candidate with a pruned hidden size. Recompute subblock statistics produced with earlier versions.
 - The ``evaluation`` agent skill's NeMo Gym MRCR recipe no longer passes ``HF_TOKEN`` on the command line, where other users on the node could read it, and keeps its rollout script in a private temporary directory instead of a fixed ``/tmp`` path.
 - Fix ``ModuleNotFoundError: No module named 'huggingface_hub'`` when importing ``modelopt.torch`` without the optional ``hf`` extra. Install the ``hf`` extra to use Hugging Face checkpointing. Affects 0.44 through 0.48.
+- Require Pydantic 2.5.0 or newer to prevent configuration-schema errors when importing ``modelopt.torch`` with older releases.
+- Require Wonderwords 2.2.0 or newer in the ``hf`` extra to prevent RULER calibration failures during random-word generation with older releases.
+- A legacy dict-format ``quant_cfg`` now applies its ``"default"`` key before the other keys wherever it appears, as before 0.44.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^

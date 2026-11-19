@@ -15,7 +15,9 @@
 
 import numpy as np
 import onnx
+import onnxruntime as ort
 import pytest
+from _test_utils.onnx.lib_test_models import build_if_outer_scope_model
 from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.onnx.autocast.utils as utils
@@ -210,6 +212,11 @@ def test_simple_convert(
     converted_model = converter.convert(
         high_precision_nodes=["gemm", "add"], low_precision_nodes=["relu"]
     )
+
+    converted_value_info = {value.name: value for value in converted_model.graph.value_info}
+    for name in ("gemm_output", "add_output"):
+        shape = converted_value_info[name].type.tensor_type.shape
+        assert [dim.dim_value for dim in shape.dim] == [1, 3]
 
     # Verify input type changed to fp16
     expected_io_type = (
@@ -1916,39 +1923,8 @@ def test_if_subgraph_mixed_precision_boundary(
 
 @pytest.fixture
 def model_with_if_outer_scope_reference():
-    """Create a minimal model where If subgraphs reference outer scope variables.
-
-    This tests that subgraph value_info for outer scope variables is preserved during type clearing.
-    """
-    # Main graph inputs/outputs
-    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])
-    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
-    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 4])
-
-    # Create "then" branch: Identity on X from outer scope
-    then_y = helper.make_tensor_value_info("then_y", TensorProto.FLOAT, [2, 4])
-    then_identity = helper.make_node("Identity", ["X"], ["then_y"], name="then_identity")
-    then_graph = helper.make_graph([then_identity], "then_branch", [], [then_y])
-    # Add X to value_info - this is what needs to be preserved
-    then_graph.value_info.extend([helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])])
-
-    # Create "else" branch: Identity on X from outer scope
-    else_y = helper.make_tensor_value_info("else_y", TensorProto.FLOAT, [2, 4])
-    else_identity = helper.make_node("Identity", ["X"], ["else_y"], name="else_identity")
-    else_graph = helper.make_graph([else_identity], "else_branch", [], [else_y])
-    else_graph.value_info.extend([helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])])
-
-    # Create If node and main graph
-    if_node = helper.make_node(
-        "If", ["condition"], ["Y"], name="if_node", then_branch=then_graph, else_branch=else_graph
-    )
-    main_graph = helper.make_graph([if_node], "model_with_outer_scope", [x, condition], [y])
-
-    model = helper.make_model(main_graph, producer_name="model_with_outer_scope")
-    model.opset_import[0].version = 20
-    onnx.checker.check_model(model)
-
-    model = onnx_utils.infer_shapes(model)
+    """Create mappings for a model whose If branches reference an outer-scope value."""
+    model = build_if_outer_scope_model()
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
     return model, value_info_map, initializer_map, node_to_init_map
 
@@ -2805,6 +2781,126 @@ def test_loop_subgraph_high_precision_capture(
     )
     onnx.checker.check_model(converted_model)
     onnx.shape_inference.infer_shapes(converted_model, strict_mode=True, check_type=True)
+
+
+def test_dynamic_rope_shapes_do_not_alias():
+    """AutoCast must not alias unrelated unknown dimensions with one symbolic name."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", 2, "sequence", 64])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["batch", 2, "sequence", 64])
+
+    def int64_initializer(name, values):
+        return numpy_helper.from_array(np.array(values, dtype=np.int64), name=name)
+
+    initializers = [
+        int64_initializer("width_index", 3),
+        int64_initializer("two", 2),
+        int64_initializer("unsqueeze_axis", [0]),
+        int64_initializer("zero", [0]),
+        int64_initializer("slice_axis", [3]),
+        numpy_helper.from_array(np.ones((1, 1, 1, 64), dtype=np.float32), name="scale"),
+    ]
+    nodes = [
+        helper.make_node("Shape", ["X"], ["shape"], name="shape"),
+        helper.make_node("Gather", ["shape", "width_index"], ["width"], name="gather_width"),
+        helper.make_node("Div", ["width", "two"], ["half_width"], name="half_width"),
+        helper.make_node("Unsqueeze", ["width", "unsqueeze_axis"], ["width_1d"], name="width_1d"),
+        helper.make_node(
+            "Unsqueeze",
+            ["half_width", "unsqueeze_axis"],
+            ["half_width_1d"],
+            name="half_width_1d",
+        ),
+        helper.make_node(
+            "Slice",
+            ["X", "half_width_1d", "width_1d", "slice_axis"],
+            ["upper_half"],
+            name="slice_upper_half",
+        ),
+        helper.make_node(
+            "Slice",
+            ["X", "zero", "half_width_1d", "slice_axis"],
+            ["lower_half"],
+            name="slice_lower_half",
+        ),
+        helper.make_node("Neg", ["upper_half"], ["negated_half"], name="negate"),
+        helper.make_node(
+            "Concat",
+            ["negated_half", "lower_half"],
+            ["rotated"],
+            name="rotate_half",
+            axis=3,
+        ),
+        helper.make_node("Mul", ["rotated", "scale"], ["Y"], name="rope_mul"),
+    ]
+    value_info = [
+        helper.make_tensor_value_info(name, TensorProto.FLOAT, ["batch", 2, "sequence", width])
+        for name, width in [
+            ("upper_half", 32),
+            ("lower_half", 32),
+            ("negated_half", 32),
+            ("rotated", 64),
+        ]
+    ]
+    graph = helper.make_graph(nodes, "dynamic_rope", [x], [y], initializers, value_info=value_info)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
+    model.ir_version = LATEST_IR_VERSION_SUPPORTED_BY_ORT
+
+    converted_model = convert_to_f16(model, keep_io_types=True)
+
+    onnx.checker.check_model(converted_model)
+    assert all(
+        dim.dim_param != "unk"
+        for value in [*converted_model.graph.value_info, *converted_model.graph.output]
+        for dim in value.type.tensor_type.shape.dim
+    )
+    value_info_map = {value.name: value for value in converted_model.graph.value_info}
+    half_width = value_info_map["upper_half"].type.tensor_type.shape.dim[3]
+    full_width = value_info_map["rotated"].type.tensor_type.shape.dim[3]
+    for width, expected in [(half_width, 32), (full_width, 64)]:
+        if width.HasField("dim_value"):
+            assert width.dim_value == expected
+        else:
+            assert width.dim_param
+    assert half_width != full_width
+
+    session = ort.InferenceSession(
+        converted_model.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    output = session.run(None, {"X": np.ones((1, 2, 5, 64), dtype=np.float32)})[0]
+
+    assert output.shape == (1, 2, 5, 64)
+    np.testing.assert_array_equal(output[..., :32], -1)
+    np.testing.assert_array_equal(output[..., 32:], 1)
+
+
+@pytest.mark.parametrize("nodes_to_exclude", [None, ["matmul"]])
+@pytest.mark.parametrize("keep_io_types", [False, True])
+def test_output_dims_survive_shape_inference_fallback(monkeypatch, keep_io_types, nodes_to_exclude):
+    """Output dims that type-only inference cannot re-derive must keep their original value."""
+    weight = numpy_helper.from_array(np.ones((3, 4), dtype=np.float32), name="weight")
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["X", "weight"], ["Y"], name="matmul")],
+        "matmul",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", 3])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["batch", 4])],
+        [weight],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
+    model.ir_version = LATEST_IR_VERSION_SUPPORTED_BY_ORT
+
+    def failing_infer_shapes(*args, **kwargs):
+        raise RuntimeError("forced ONNX shape inference failure")
+
+    # Force infer_types onto its type-only fallback, which cannot re-derive cleared dims. Keeping
+    # the output's producer in FP32 adds a cast that cleanup later renames to the graph output.
+    monkeypatch.setattr(onnx_utils, "infer_shapes", failing_infer_shapes)
+    converted_model = convert_to_f16(
+        model, keep_io_types=keep_io_types, nodes_to_exclude=nodes_to_exclude
+    )
+
+    output_dims = converted_model.graph.output[0].type.tensor_type.shape.dim
+    assert [dim.dim_param or dim.dim_value for dim in output_dims] == ["batch", 4]
+    assert onnx_utils.get_output_shapes(converted_model) == {"Y": [1, 4]}
 
 
 @pytest.mark.parametrize("kind", ["sanitizer", "converter"])
