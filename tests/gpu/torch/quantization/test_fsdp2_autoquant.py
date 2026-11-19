@@ -143,8 +143,9 @@ def _run_kv_autoquant_example(rank, size, checkpoint_dir, search_dir, composed):
         )
 
     # Each run in a session of its own, as hf_ptq's are.
-    with ModelOptSession():
+    with ModelOptSession() as session:
         model, language_model, model_type, calibration_only, *_ = hf_ptq.load_model(args)
+        session.bind(model)
         model.config.use_cache = False
         hf_ptq._run_auto_quantize_recipe(
             args, recipe, model, language_model, model_type, calibration_only, batches, False
@@ -160,8 +161,9 @@ def _run_kv_autoquant_example(rank, size, checkpoint_dir, search_dir, composed):
         assert (search_dir / "weights" / f"rank{rank}.pth").is_file()
 
     del language_model, model
-    with ModelOptSession(), pytest.MonkeyPatch.context() as patch:
+    with ModelOptSession() as session, pytest.MonkeyPatch.context() as patch:
         model, language_model, model_type, calibration_only, *_ = hf_ptq.load_model(args)
+        session.bind(model)
         model.config.use_cache = False
         patch.setattr(model, "forward", lambda *_a, **_kw: pytest.fail("Resume ran a forward"))
         hf_ptq._run_auto_quantize_recipe(

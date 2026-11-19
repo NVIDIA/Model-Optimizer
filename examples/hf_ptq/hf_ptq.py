@@ -86,7 +86,7 @@ from modelopt.torch.export import (
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
-from modelopt.torch.models import get_ptq_spec
+from modelopt.torch.models import get_ptq_spec, hf_model_type
 from modelopt.torch.models.hf import (
     calibration_sample_input,
     load_calibration_processor,
@@ -433,10 +433,9 @@ def load_model(args: argparse.Namespace):
     # Include auxiliary modules whose activation quantizers require calibration data.
     prepare_model_for_calibration(full_model)
 
-    # The checkpoint's Hugging Face model_type, which the load's binding read off the root model: a
-    # VLM's language model reports its own sub-config's type, which varies across transformers
-    # versions.
-    model_type = mto.ModelOptSession.active().model_type
+    # The checkpoint's Hugging Face model_type. Always taken from the root model: a VLM's language
+    # model reports its own sub-config's type, which varies across transformers versions.
+    model_type = hf_model_type(full_model)
 
     if plan.is_fsdp_dense:
         device = args.dist_state.device
@@ -686,7 +685,7 @@ def _run_auto_quantize_recipe(
         # The search's scores are saved: calibrate the source weights with the frozen formats.
         mono_quantize(
             args,
-            _prepare_quant_cfg(args, finalized_quant_cfg, full_model, model_type),
+            _prepare_quant_cfg(args, finalized_quant_cfg, full_model),
             full_model,
             language_model,
             model_type,
@@ -704,9 +703,7 @@ def _run_auto_quantize_recipe(
             )
 
     if primary_is_kv and fixed_quantize_config is not None:
-        quant_cfg = _prepare_quant_cfg(
-            args, fixed_quantize_config.model_dump(), full_model, model_type
-        )
+        quant_cfg = _prepare_quant_cfg(args, fixed_quantize_config.model_dump(), full_model)
         mono_quantize(
             args,
             quant_cfg,
@@ -1015,7 +1012,7 @@ def post_quantize(
         if hasattr(generated_ids, "sequences"):
             generated_ids = generated_ids.sequences
 
-        if generate_excludes_prompt(full_model, model_type):
+        if generate_excludes_prompt(full_model):
             if tokenizer is None and processor is not None:
                 return processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
             elif tokenizer is not None:
@@ -1236,7 +1233,7 @@ def quantize_main(
                     KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"],
                 )
 
-        quant_cfg = _prepare_quant_cfg(args, quant_cfg, full_model, model_type)
+        quant_cfg = _prepare_quant_cfg(args, quant_cfg, full_model)
 
         if quant_cfg:
             mono_quantize(
@@ -1674,7 +1671,7 @@ def main(args: argparse.Namespace):
 
 def _main_inner(args: argparse.Namespace):
     # The workflow's one session, which every ModelOpt call of the run runs in.
-    with mto.ModelOptSession(), mlflow_run(args):
+    with mto.ModelOptSession() as session, mlflow_run(args):
         # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
         # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
         # path.
@@ -1697,6 +1694,9 @@ def _main_inner(args: argparse.Namespace):
             tokenizer,
             device,
         ) = load_model(args)
+        # The model the run works on and exports, whole: its parts, such as a VLM's language model,
+        # run under its binding.
+        session.bind(full_model)
 
         if args.sparsity_fmt != "dense":
             # Sparse

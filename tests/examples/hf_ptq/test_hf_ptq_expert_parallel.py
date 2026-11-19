@@ -45,11 +45,9 @@ from transformers import AutoConfig, DeepseekV3Config, LlamaConfig
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.models import get_spec
-from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
 from modelopt.torch.utils.moe import _EP_MIN_TRANSFORMERS, register_torch_a2a
 from modelopt.torch.utils.plugins import model_load_utils
-from modelopt.torch.utils.plugins.hf_checkpoint_utils import SourceCheckpoint
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
@@ -977,18 +975,14 @@ def test_only_rank_0_writes_a_replicated_model(hf_ptq, monkeypatch, plan, rank, 
     """A replicated model is whole on every rank, whose exports would write one checkpoint into the
     same directory over each other; a sharded one needs every rank for its part. The source config
     is rank 0's either way: another rank's, written after rank 0's export, would drop the
-    quantization config. The export runs in the run's session, which holds the source its load
-    recorded."""
+    quantization config."""
     written = []
     monkeypatch.setattr(hf_ptq, "has_spec_opt", lambda model: False)
     monkeypatch.setattr(hf_ptq, "is_multimodal_model", lambda model: True)
     monkeypatch.setattr(hf_ptq, "save_source_config", lambda args, path: written.append("config"))
     monkeypatch.setattr(
-        hf_ptq,
-        "export_hf_checkpoint",
-        lambda model, export_dir: written.append(("checkpoint", ModelOptSession.active().source)),
+        hf_ptq, "export_hf_checkpoint", lambda model, export_dir: written.append("checkpoint")
     )
-    source = SourceCheckpoint("/source", ("mtp.fc.weight",))
     args = SimpleNamespace(
         dist_state=_dist_state(plan.world_size, rank),
         export_path="/export",
@@ -1001,11 +995,9 @@ def test_only_rank_0_writes_a_replicated_model(hf_ptq, monkeypatch, plan, rank, 
     )
 
     model = _planned(plan)
-    with ModelOptSession().bind(model) as session:
-        session.binding(model).source = source
-        hf_ptq.export_quantized(args, model, model, "qwen3_moe")
+    hf_ptq.export_quantized(args, model, model, "qwen3_moe")
 
-    assert written == ["config"] * (rank == 0) + [("checkpoint", source)] * exports
+    assert written == ["config"] * (rank == 0) + ["checkpoint"] * exports
 
 
 @pytest.mark.parametrize(

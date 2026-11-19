@@ -99,10 +99,7 @@ def _config(model_type: str, is_encoder_decoder: bool) -> SimpleNamespace:
     ],
 )
 def test_generate_excludes_prompt(hf_ptq, config: SimpleNamespace, expected: bool):
-    assert (
-        hf_ptq.generate_excludes_prompt(SimpleNamespace(config=config), config.model_type)
-        is expected
-    )
+    assert hf_ptq.generate_excludes_prompt(SimpleNamespace(config=config)) is expected
 
 
 @pytest.mark.parametrize(
