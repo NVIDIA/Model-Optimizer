@@ -193,8 +193,9 @@ def _fuse_layers(rank, size, quant_config, bias):
         model.apply_embed = True
         non_fsdp_model.apply_embed = True
 
-        requantize_resmooth_fused_llm_layers(model)
-        requantize_resmooth_fused_llm_layers(non_fsdp_model)
+        # The toy model has no Hugging Face model type.
+        requantize_resmooth_fused_llm_layers(model, None)
+        requantize_resmooth_fused_llm_layers(non_fsdp_model, None)
 
         torch.distributed.barrier()
 
@@ -236,8 +237,9 @@ def _export_quantized_weight_test(rank, size, quant_config, bias):
         model.apply_embed = True
         non_fsdp_model.apply_embed = True
 
-        requantize_resmooth_fused_llm_layers(model)
-        requantize_resmooth_fused_llm_layers(non_fsdp_model)
+        # The toy model has no Hugging Face model type.
+        requantize_resmooth_fused_llm_layers(model, None)
+        requantize_resmooth_fused_llm_layers(non_fsdp_model, None)
 
         torch.distributed.barrier()
 
@@ -460,7 +462,8 @@ def _streaming_export_matches_reference_test(rank, size, export_dir, quant_confi
         mtq.quantize(reference, quant_config, calib_fn)
         torch.distributed.barrier()
 
-        _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=export_dir)
+        with mto.ModelOptSession().bind(model):
+            _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=export_dir)
         # Rank 0 writes the index only after gathering the other ranks' manifests, so everyone
         # must arrive before the checks below read the directory.
         torch.distributed.barrier()
@@ -480,7 +483,8 @@ def _streaming_export_matches_reference_test(rank, size, export_dir, quant_confi
             merged.update(load_file(str(export_dir / fname)))
         assert set(merged) == set(weight_map), "the index and the shard contents disagree"
 
-        ref, _ = _export_transformers_checkpoint(reference, torch.bfloat16)
+        with mto.ModelOptSession().bind(reference):
+            ref, _ = _export_transformers_checkpoint(reference, torch.bfloat16)
         assert set(merged) == set(ref), (
             f"only merged {sorted(set(merged) - set(ref))}, "
             f"only reference {sorted(set(ref) - set(merged))}"

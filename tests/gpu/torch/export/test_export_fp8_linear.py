@@ -28,6 +28,7 @@ from transformers.integrations.finegrained_fp8 import FP8Linear
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _process_quantized_modules
+from modelopt.torch.opt import ModelOptSession
 
 BLOCK = 128
 DIM = 2 * BLOCK
@@ -86,7 +87,8 @@ def test_unquantized_fp8_linear_exported_in_export_dtype(dtype):
 
     x = torch.randn(4, DIM, dtype=dtype, device="cuda")
     model = mtq.quantize(model, _mlp_only_nvfp4_cfg(), lambda m: m(x))
-    _process_quantized_modules(model, dtype=dtype)
+    with ModelOptSession().bind(model):
+        _process_quantized_modules(model, dtype=dtype)
 
     assert model.mlp.weight.dtype == torch.uint8  # packed NVFP4
     assert model.attn.weight.dtype == dtype

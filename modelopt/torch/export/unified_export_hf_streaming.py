@@ -33,7 +33,7 @@ from safetensors.torch import save_file
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
-from modelopt.torch.models import hf_model_type
+from modelopt.torch.opt.session import ModelOptSession, ensure_modelopt_session
 from modelopt.torch.quantization.utils.core_utils import (
     _get_fsdp2_mesh,
     enable_weight_access_and_writeback,
@@ -357,13 +357,14 @@ def _export_transformers_checkpoint_streaming(
 
     # --- Same model-level setup as _export_transformers_checkpoint ---
     dtype = _resolve_export_dtype(model, dtype)
-    _prepare_moe_inputs(model, dtype, is_modelopt_qlora)
+    model_type = ModelOptSession.active().model_type
+    _prepare_moe_inputs(model, dtype, is_modelopt_qlora, model_type)
 
-    requantize_resmooth_fused_llm_layers(model)
+    requantize_resmooth_fused_llm_layers(model, model_type)
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
 
-    _warn_on_unsynced_moe_gate_up(model)
+    _warn_on_unsynced_moe_gate_up(model, model_type)
 
     # --- Per-tensor constants ---
     kv_cache_max_bound = 448
@@ -428,7 +429,7 @@ def _export_transformers_checkpoint_streaming(
         model=model,
         dtype=dtype,
         is_modelopt_qlora=is_modelopt_qlora,
-        model_type=hf_model_type(model),
+        model_type=model_type,
     )
     seen_keys: set[str] = set()
 
@@ -532,6 +533,7 @@ def _assert_fsdp2_owns_every_mesh_dim(model: nn.Module) -> None:
             )
 
 
+@ensure_modelopt_session
 def collect_export_tensors(
     model: nn.Module, dtype: torch.dtype, is_modelopt_qlora: bool, *, owner: str
 ) -> list[tuple[str, torch.Tensor]]:
@@ -565,7 +567,7 @@ def collect_export_tensors(
         model=model,
         dtype=dtype,
         is_modelopt_qlora=is_modelopt_qlora,
-        model_type=hf_model_type(model),
+        model_type=ModelOptSession.active().model_type,
     )
     owned: list[tuple[str, torch.Tensor]] = []
     seen_keys: set[str] = set()

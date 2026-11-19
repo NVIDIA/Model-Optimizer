@@ -21,6 +21,7 @@ the three head variants, the three-term training forward (CE + TVD + confidence
 BCE), vLLM vanilla exports, and native gated/recurrent exports.
 """
 
+import contextlib
 import json
 import shutil
 from copy import deepcopy
@@ -349,10 +350,14 @@ class TestDSparkExporter:
         else:
             assert "enable_confidence_head" not in cfg
 
+    @pytest.mark.parametrize("in_session", [False, True])
     @pytest.mark.parametrize("head_type", HEAD_TYPES)
     @pytest.mark.parametrize("quantize_draft", [False, True])
-    def test_quantized_export_metadata_matches_weights(self, tmp_path, head_type, quantize_draft):
-        """Packed exports keep mixed-precision keys and wildcard exclusions aligned."""
+    def test_quantized_export_metadata_matches_weights(
+        self, tmp_path, head_type, quantize_draft, in_session
+    ):
+        """Packed exports keep mixed-precision keys and wildcard exclusions aligned, in a workflow's
+        ModelOptSession or outside any."""
         model = get_tiny_llama(num_hidden_layers=4)
         mtsp.convert(
             model,
@@ -375,12 +380,16 @@ class TestDSparkExporter:
                     "enable": True,
                 }
             )
-        mtq.quantize(
-            model,
-            {"quant_cfg": quantizers, "algorithm": "max"},
-            forward_loop=lambda m: m(torch.ones((1, 2), dtype=torch.long)),
-        )
-        model.get_exporter().export(tmp_path, dtype=torch.bfloat16)
+        with mto.ModelOptSession() if in_session else contextlib.nullcontext() as ctx:
+            mtq.quantize(
+                model,
+                {"quant_cfg": quantizers, "algorithm": "max"},
+                forward_loop=lambda m: m(torch.ones((1, 2), dtype=torch.long)),
+            )
+            model.get_exporter().export(tmp_path, dtype=torch.bfloat16)
+            if in_session:
+                # The export ran in the active session.
+                assert ctx.model is model
         cfg = json.loads((tmp_path / "config.json").read_text())
         quant_cfg = json.loads((tmp_path / "hf_quant_config.json").read_text())
         assert cfg["quantization_config"] == quant_cfg

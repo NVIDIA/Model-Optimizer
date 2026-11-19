@@ -27,6 +27,7 @@ from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _process_quantized_modules,
 )
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight
@@ -236,7 +237,8 @@ def test_process_quantized_modules_fills_step3p5_moe_input_scale_for_unrouted_ex
     assert model.moe.experts[0].input_quantizer.amax is not None
     assert model.moe.experts[1].input_quantizer.amax is None
 
-    _process_quantized_modules(model, torch.float32)
+    with ModelOptSession().bind(model):
+        _process_quantized_modules(model, torch.float32)
 
     assert hasattr(model.moe.experts[0], "input_scale")
     assert hasattr(model.moe.experts[1], "input_scale")

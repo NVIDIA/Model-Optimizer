@@ -60,7 +60,7 @@ def _vlm(class_name: str, architectures: list[str] | None) -> nn.Module:
 def test_nemotron_vl_runs_language_model_only(class_name: str, architectures: list[str] | None):
     model = _vlm(class_name, architectures)
 
-    _llm_dummy_forward(model)
+    _llm_dummy_forward(model, model.config.model_type)
 
     ((args, kwargs),) = model.language_model.calls
     assert args[0].shape == (1, 2)
@@ -71,7 +71,7 @@ def test_non_nemotron_vl_runs_root_forward():
     model = _vlm("OtherVLM", ["OtherVLMForConditionalGeneration"])
 
     with pytest.raises(AssertionError, match="needs pixel_values"):
-        _llm_dummy_forward(model)
+        _llm_dummy_forward(model, model.config.model_type)
     assert model.language_model.calls == []
 
 
@@ -89,7 +89,7 @@ def test_whisper_uses_mel_spectrogram_input(monkeypatch: pytest.MonkeyPatch):
         model_type="whisper", architectures=None, is_encoder_decoder=True, num_mel_bins=80
     )
 
-    _llm_dummy_forward(model)
+    _llm_dummy_forward(model, model.config.model_type)
 
     ((args, kwargs),) = model.calls
     assert args[0].shape == (1, 80, 3000)

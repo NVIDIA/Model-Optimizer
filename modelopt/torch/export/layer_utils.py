@@ -26,7 +26,6 @@ import torch.nn as nn
 
 from modelopt.torch.models import (
     get_spec,
-    hf_model_type,
     is_moe,
     list_all_possible,
     match_moe_block,
@@ -342,7 +341,7 @@ def set_expert_quantizer_amax(
     return uncalibrated_modules
 
 
-def sync_moe_gate_up_amax(model: nn.Module, model_type: str | None = None) -> int:
+def sync_moe_gate_up_amax(model: nn.Module, model_type: str | None) -> int:
     """Take element-wise max of gate and up weight quantizer amaxes per expert.
 
     Serving engines fuse gate_proj and up_proj into a single gate_up_proj and
@@ -355,15 +354,12 @@ def sync_moe_gate_up_amax(model: nn.Module, model_type: str | None = None) -> in
     (e.g. Qwen MoE, DeepSeek). Models with already-fused gate_up_proj
     (e.g. Llama4, GptOss) are unaffected.
 
-    ``model_type`` is the root model's HF model type; callers passing a sub-tree
-    (layerwise export passes one decoder layer) must supply it, since it cannot be
-    resolved from a decoder layer.
+    ``model_type`` is the root model's HF model type: the layerwise export passes one decoder
+    layer, which has none.
 
     Returns:
         Number of expert gate/up pairs whose amaxes were synced.
     """
-    if model_type is None:
-        model_type = hf_model_type(model)
     synced = 0
     for _, sub_module in model.named_modules():
         if not (is_moe(sub_module, model_type) and hasattr(sub_module, "experts")):

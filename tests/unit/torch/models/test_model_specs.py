@@ -319,7 +319,7 @@ def test_sync_moe_gate_up_amax_uses_own_spec():
     model.moe = _make_gated_block(
         Qwen3MoeSparseMoeBlock, "gate_proj", "up_proj", [1.0, 3.0], [2.0, 2.0]
     )
-    assert sync_moe_gate_up_amax(model) == 1
+    assert sync_moe_gate_up_amax(model, None) == 1
     expert = model.moe.experts[0]
     assert torch.equal(expert.gate_proj.weight_quantizer.amax, torch.tensor([2.0, 3.0]))
     assert torch.equal(expert.up_proj.weight_quantizer.amax, torch.tensor([2.0, 3.0]))
@@ -338,7 +338,7 @@ def test_sync_moe_gate_up_amax_falls_back_for_unmatched_block():
     model.moe = _make_gated_block(
         UnknownSparseMoeBlock, "gate_proj", "up_proj", [1.0, 3.0], [2.0, 2.0]
     )
-    assert sync_moe_gate_up_amax(model) == 1
+    assert sync_moe_gate_up_amax(model, None) == 1
     expert = model.moe.experts[0]
     assert torch.equal(expert.gate_proj.weight_quantizer.amax, torch.tensor([2.0, 3.0]))
     assert torch.equal(expert.up_proj.weight_quantizer.amax, torch.tensor([2.0, 3.0]))
@@ -351,7 +351,7 @@ def test_sync_moe_gate_up_amax_fallback_covers_w1_w3_naming():
     # The fallback vocabulary is every declared pair, not just gate_proj/up_proj.
     model = nn.Module()
     model.moe = _make_gated_block(UnknownSparseMoeBlock, "w1", "w3", [1.0, 3.0], [2.0, 2.0])
-    assert sync_moe_gate_up_amax(model) == 1
+    assert sync_moe_gate_up_amax(model, None) == 1
     assert torch.equal(model.moe.experts[0].w1.weight_quantizer.amax, torch.tensor([2.0, 3.0]))
 
 
@@ -363,8 +363,7 @@ def test_sync_moe_gate_up_amax_skips_layout_without_gate_up_pair():
 
     model = nn.Module()
     model.moe = _make_gated_block(NemotronHMOE, "gate_proj", "up_proj", [1.0, 3.0], [2.0, 2.0])
-    model.config = SimpleNamespace(model_type="nemotron_h")
-    assert sync_moe_gate_up_amax(model) == 0
+    assert sync_moe_gate_up_amax(model, "nemotron_h") == 0
 
 
 def test_match_moe_block_scope_prefers_own_model_type():

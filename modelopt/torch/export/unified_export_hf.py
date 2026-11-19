@@ -36,7 +36,8 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt import env
-from modelopt.torch.models import hf_model_type, is_moe
+from modelopt.torch.models import is_moe
+from modelopt.torch.opt.session import ModelOptSession, ensure_modelopt_session
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     copy_off_index_safetensors,
@@ -501,16 +502,15 @@ def _fusion_update_context(model: nn.Module, modules: list[nn.Module], names=Non
     return fsdp2_aware_weight_update(model, modules, names=names)
 
 
-def _llm_dummy_forward(model: torch.nn.Module) -> None:
+def _llm_dummy_forward(model: torch.nn.Module, model_type: str | None) -> None:
     """Run a dummy forward that reaches every fusable linear of an LLM or VLM language model."""
-    model_hf_type = hf_model_type(model)
     fake_input = torch.ones([1, 2], dtype=torch.long).to(model.device)
     decoder_fake_input = fake_input
 
     # Check if this is a VL model that needs special input handling
     is_vl_model = is_multimodal_model(model)
 
-    if model_hf_type == "whisper":
+    if model_type == "whisper":
         # For Whisper models, we need to pass a fake input with the specific sequence length
         from transformers import AutoFeatureExtractor
 
@@ -554,10 +554,12 @@ def _llm_dummy_forward(model: torch.nn.Module) -> None:
         model(fake_input)
 
 
-def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
-    """Group modules that take the same input and register shared parameters in module."""
+def requantize_resmooth_fused_llm_layers(model: torch.nn.Module, model_type: str | None):
+    """Group modules that take the same input and register shared parameters in module.
+
+    ``model_type`` is the model's, as the workflow's ModelOpt session read it when binding it.
+    """
     quantization_format = get_quantization_format(model)
-    model_hf_type = hf_model_type(model)
     module_names = set()
     # Built once: every fusion below resolves module names through it.
     names = module_name_maps(model)
@@ -568,25 +570,25 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     #    the later gate up fusion.
     # Fuse pre_quant_scale to the linear weights if possible
     if quantization_format is not None and "nvfp4_awq" in quantization_format.lower():
-        fuse_prequant_to_linear(model, model_type=model_hf_type)
+        fuse_prequant_to_linear(model, model_type=model_type)
 
     # Pre-process MoE experts
     for name, module in model.named_modules():
         module_names.add(name)
 
         # For MoE models update pre_quant_scale to average pre_quant_scale amongst experts
-        if is_moe(module, model_hf_type) and (
+        if is_moe(module, model_type) and (
             quantization_format is not QUANTIZATION_NONE
             and ("awq" in quantization_format or quantization_format == QUANTIZATION_NVFP4_SVDQUANT)
         ):
             # update_experts_avg_prequant_scale(module)
-            grouped_experts = get_experts_list(module, model_hf_type)
+            grouped_experts = get_experts_list(module, model_type)
             for modules in grouped_experts:
                 with _fusion_update_context(model, modules, names):
                     preprocess_linear_fusion(modules, resmooth_only=True)
 
     input_to_linear, output_to_layernorm = collect_shared_input_modules(
-        model, lambda: _llm_dummy_forward(model), collect_layernorms=True
+        model, lambda: _llm_dummy_forward(model, model_type), collect_layernorms=True
     )
 
     fused_linears = _fuse_shared_input_modules(
@@ -941,23 +943,21 @@ def _prepare_moe_inputs(
     model: nn.Module,
     dtype: torch.dtype,
     is_modelopt_qlora: bool,
-    model_type: str | None = None,
+    model_type: str | None,
 ) -> None:
     """Handle input quantizers of experts that are not calibrated.
 
     Each MoE block is dispatched by its experts container to the matching preparation
     handler.
 
-    ``model_type`` is the root model's HF model type. Callers that pass a sub-tree
-    rather than the root model (layerwise export passes one decoder layer) must supply
-    it, since a decoder layer carries no reliable ``config.model_type`` of its own and
-    the expert-naming lookup would otherwise fail to resolve.
+    ``model_type`` is the root model's HF model type: the layerwise export passes one decoder
+    layer, which has none.
     """
     prepare_ctx = ExportContext(
         model=model,
         dtype=dtype,
         is_modelopt_qlora=is_modelopt_qlora,
-        model_type=model_type if model_type is not None else hf_model_type(model),
+        model_type=model_type,
     )
     for name, sub_module in model.named_modules():
         if is_moe(sub_module, prepare_ctx.model_type) and hasattr(sub_module, "experts"):
@@ -971,13 +971,13 @@ def _prepare_moe_inputs(
             handler(name, sub_module, prepare_ctx)
 
 
-def _warn_on_unsynced_moe_gate_up(model: nn.Module) -> None:
+def _warn_on_unsynced_moe_gate_up(model: nn.Module, model_type: str | None) -> None:
     """Safety net for gate/up weight quantizer amaxes that resmoothing did not reach.
 
     ``requantize_resmooth_fused_llm_layers`` can miss experts that the dummy forward
     never activated, or that use non-standard expert naming.
     """
-    synced = sync_moe_gate_up_amax(model)
+    synced = sync_moe_gate_up_amax(model, model_type)
     if synced:
         warnings.warn(
             f"Found {synced} MoE expert gate/up projection pair(s) with mismatched "
@@ -1019,7 +1019,7 @@ def _process_quantized_modules(
         model=model,
         dtype=dtype,
         is_modelopt_qlora=is_modelopt_qlora,
-        model_type=hf_model_type(model),
+        model_type=ModelOptSession.active().model_type,
         keep_fused_experts=keep_fused_experts,
     )
 
@@ -1034,18 +1034,20 @@ def _process_quantized_modules(
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
     """Run the shared export setup. Packing the weights is a separate step.
 
-    Both export paths call this so they cannot drift. Returns the dtype, the tied-weight map and
+    Both export paths call this so they cannot drift. It prepares the model by the model type the
+    workflow's ModelOpt session read when binding it. Returns the dtype, the tied-weight map and
     the quant config.
     """
     dtype = _resolve_export_dtype(model, dtype)
+    model_type = ModelOptSession.active().model_type
     # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
     # Sourced from HF's name-based all_tied_weights_keys, so it is correct even under FSDP/offload.
     tied_map = TiedWeightMap(model)
-    _prepare_moe_inputs(model, dtype, is_modelopt_qlora)
+    _prepare_moe_inputs(model, dtype, is_modelopt_qlora, model_type)
 
     # Resmooth and requantize fused layers
     # TODO: Handle mixed precision
-    requantize_resmooth_fused_llm_layers(model)
+    requantize_resmooth_fused_llm_layers(model, model_type)
 
     # Offloaded models need their weights materialized layer-by-layer, which this
     # whole-state-dict path cannot do; export_hf_checkpoint() streams them instead.
@@ -1065,7 +1067,7 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
 
-    _warn_on_unsynced_moe_gate_up(model)
+    _warn_on_unsynced_moe_gate_up(model, model_type)
 
     # Merge per-side input_quantizer amaxes BEFORE export, so the retained tied weight's single
     # input_scale covers every side's activation range (else the dropped side clips at inference).
@@ -1741,6 +1743,7 @@ def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
     _copy_non_model_files_from_source(model, export_dir)
 
 
+@ensure_modelopt_session
 def export_speculative_decoding(
     model: torch.nn.Module,
     dtype: torch.dtype | None = None,
@@ -2089,6 +2092,7 @@ def _no_gather_export_asked() -> bool:
     return env.fsdp2_export() == "nogather"
 
 
+@ensure_modelopt_session
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -2106,7 +2110,8 @@ def export_hf_checkpoint(
 
     Under ``torch.distributed`` (e.g. FSDP2), all ranks participate in the
     collective state-dict gather inside ``_export_transformers_checkpoint``;
-    only rank 0 writes files. A final barrier syncs the other ranks.
+    only rank 0 writes files. A final barrier syncs the other ranks. The export runs in the active
+    ModelOpt session (:class:`~modelopt.torch.opt.session.ModelOptSession`), else in one of its own.
 
     Args:
         model: The full torch model to export. The actual quantized model may be a submodule.

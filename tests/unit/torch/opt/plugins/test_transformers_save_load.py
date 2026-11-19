@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -48,25 +49,28 @@ def test_causal_lm_save_restore(tmp_path, model_cls):
     tf_modelopt_state_and_output_tester(model_ref, model_test)
 
 
+@pytest.mark.parametrize("one_session", [False, True], ids=["call_by_call", "one_session"])
 @pytest.mark.parametrize(
     "quant_config", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG], ids=["fp8", "nvfp4"]
 )
 @torch.no_grad()
-def test_vlm_export_without_modelopt_state(tmp_path, quant_config):
-    """Export separately converted VLM components without requiring a single ModelOpt state."""
+def test_vlm_export_without_modelopt_state(tmp_path, quant_config, one_session):
+    """Export separately converted VLM components without requiring a single ModelOpt state, each
+    call in a session of its own, or all in the one session of the workflow on the whole model."""
     model = get_tiny_qwen3vl().eval()
     disabled_config = {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": "max"}
-    mtq.quantize(model.model.visual, disabled_config)
-    mtq.quantize(model.lm_head, disabled_config)
-    mtq.quantize(
-        model.model.language_model,
-        quant_config,
-        lambda _: model(input_ids=torch.ones(1, 4, dtype=torch.long)),
-    )
     state_path = tmp_path / "modelopt_state.pth"
-    torch.save(mto.modelopt_state(model.model.language_model), state_path)
+    with mto.ModelOptSession().bind(model) if one_session else contextlib.nullcontext():
+        mtq.quantize(model.model.visual, disabled_config)
+        mtq.quantize(model.lm_head, disabled_config)
+        mtq.quantize(
+            model.model.language_model,
+            quant_config,
+            lambda _: model(input_ids=torch.ones(1, 4, dtype=torch.long)),
+        )
+        torch.save(mto.modelopt_state(model.model.language_model), state_path)
 
-    export_hf_checkpoint(model, export_dir=tmp_path, save_modelopt_state=False)
+        export_hf_checkpoint(model, export_dir=tmp_path, save_modelopt_state=False)
 
     assert not state_path.exists()
     saved = load_file(tmp_path / "model.safetensors")

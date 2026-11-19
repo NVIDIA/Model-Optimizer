@@ -58,6 +58,7 @@ from modelopt.torch.export.diffusers_utils import (
     hide_quantizers_from_state_dict,
 )
 from modelopt.torch.export.unified_export_hf import _postprocess_safetensors, export_hf_checkpoint
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -505,9 +506,10 @@ def test_export_diffusion_component_kv_metadata(
     assert kv_amax
     # LTX-2 exposes its native transformer through the stage-1 ledger.
     pipe = SimpleNamespace(stage_1_model_ledger=SimpleNamespace(transformer=lambda: model))
-    unified_export_hf._export_diffusers_checkpoint(
-        pipe, None, tmp_path, None, export_attention_quantizers=export_attention_quantizers
-    )
+    with ModelOptSession().bind(pipe):
+        unified_export_hf._export_diffusers_checkpoint(
+            pipe, None, tmp_path, None, export_attention_quantizers=export_attention_quantizers
+        )
 
     config = _load_config(tmp_path / "config.json")["quantization_config"]
     assert ("kv_cache_scheme" in config) == is_transformers_component

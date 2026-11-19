@@ -30,7 +30,11 @@ Changelog
 
 *Misc*
 
+- Add ``modelopt.torch.opt.ModelOptSession``, the session a ModelOpt workflow runs in: run the workflow inside ``with ModelOptSession():`` and the quantization, calibration and Hugging Face export calls it makes run in that session, which describes the workflow and its one model. A call made outside any session runs in one of its own, as before.
+
 **Backward Breaking Changes**
+
+- ModelOpt supports one model optimization workflow at a time in a process: running different workflows at once from several threads, such as quantizing two models in two threads, is not supported. The threads of the one workflow share its ``ModelOptSession``.
 
 **Deprecations**
 

@@ -68,6 +68,7 @@ from modelopt.torch.export.unified_export_hf import (
     _process_quantized_modules,
     export_hf_checkpoint,
 )
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
 
 _WRITER = "modelopt.torch.export.distributed_writer"
@@ -401,7 +402,8 @@ def _quantize_with_reference(model, quant_cfg):
     batch = torch.randint(0, model.config.vocab_size, (2, 8))
     mtq.quantize(model, quant_cfg, lambda m: m(batch))
     ref = copy.deepcopy(model)
-    want, _ = _export_transformers_checkpoint(ref, torch.bfloat16)
+    with ModelOptSession().bind(ref):
+        want, _ = _export_transformers_checkpoint(ref, torch.bfloat16)
     want = revert_weight_conversion_quant_aware(ref, dict(want))
     assert any(v.dtype in (torch.float8_e4m3fn, torch.uint8) for v in want.values())
     return want

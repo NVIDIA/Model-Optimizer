@@ -28,6 +28,15 @@ from _test_utils.torch.distributed.utils import init_process
 from _test_utils.transient_errors import TRANSIENT_MARKERS, TransientError
 
 import modelopt.torch.opt as mto
+from modelopt.torch.opt import session as _modelopt_session
+
+
+@pytest.fixture(autouse=True)
+def _no_modelopt_session_left_active():
+    """Fail a test that leaves a ModelOptSession active, and clear it for the next test."""
+    yield
+    leaked, _modelopt_session._active = _modelopt_session._active, None
+    assert leaked is None, "The test left a ModelOptSession active."
 
 
 @pytest.fixture(scope="session")

@@ -456,7 +456,7 @@ def test_nemotron_vl_dummy_forward_gathers_the_root(tmp_path, gloo_group):
     _tiny_llava_checkpoint(tmp_path)
     model = _fsdp2_load(tmp_path)
     model.config.architectures = ["NemotronTestVL"]  # takes the Nemotron-VL branch
-    _llm_dummy_forward(model)
+    _llm_dummy_forward(model, model.config.model_type)
     assert all(isinstance(p, DTensor) for p in model.model.language_model.embed_tokens.parameters())
 
 
