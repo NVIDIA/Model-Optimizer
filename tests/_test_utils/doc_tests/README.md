@@ -188,8 +188,10 @@ A copied FSDP2 config test checks the copy, not the subsequent human edit.
 Name README test modules `test_<example>_readme.py` so different examples can be
 collected together without module-name collisions.
 
-Run inside the appropriate example environment: PyTorch 26.07 with the QAT
-requirements, or NeMo 26.08 for Megatron Bridge, as in the example CI workflow.
+Run inside the example CI environment: `nvcr.io/nvidia/pytorch:26.09-py3`
+with the QAT requirements, or `nvcr.io/nvidia/nemo:26.10.00` for Megatron
+Bridge. Apply the NeMo setup actions in `.github/workflows/_example_tests_runner.yml`
+before installing dependencies, as the CI lane does.
 Keep the container's matching Torch/FlashAttention binaries when installing test
 dependencies. Install the checkout and its `dev-test` dependencies first.
 
