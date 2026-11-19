@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     # defines for installs without torch.
     from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
+    from modelopt.torch.export.layerwise_export import LayerwiseExporter
     from modelopt.torch.export.registry import ExportContext
     from modelopt.torch.utils.distributed import DistributionPlan
     from modelopt.torch.utils.plugins.hf_checkpoint_utils import SourceCheckpoint
@@ -59,12 +60,16 @@ _Model: TypeAlias = "torch.nn.Module | DiffusionPipeline"
 class RunState:
     """The live objects one call of a workflow, or one step of it, creates and a later one uses.
 
+    ``layerwise_exporter`` is the :class:`~modelopt.torch.export.layerwise_export.LayerwiseExporter`
+    a layerwise calibration wrote every layer's shard through, for the export to finalize.
+
     ``export_context`` is the :class:`~modelopt.torch.export.registry.ExportContext` of the export
     in progress. The export keeps it here from its setup until it ends, and each of its steps and
     handlers gets it here. A layerwise export's is here from the exporter's binding, before
     calibration, until the export that finalizes it ends.
     """
 
+    layerwise_exporter: "LayerwiseExporter | None" = None
     export_context: "ExportContext | None" = None
 
 
@@ -79,6 +84,9 @@ class ModelOptSession:
       (:class:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.SourceCheckpoint`), as
       :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` records it. The Hugging
       Face exports carry its tensors the model has no parameter for into the export.
+    * ``export``: whether the workflow exports the model with
+      :func:`~modelopt.torch.export.export_hf_checkpoint`. Set, ``mtq.quantize``, ``mtq.calibrate``
+      and ``mtq.auto_quantize`` refuse a model the export could not write before calibrating it.
     * ``distribution``: the :class:`~modelopt.torch.utils.distributed.DistributionPlan` to load the
       model by. ``load_pretrained`` loads by it where its ``distribution=`` is not passed, and
       records here the plan it loaded by.
@@ -87,8 +95,9 @@ class ModelOptSession:
       the model's spec in :mod:`modelopt.torch.models` by it, also for the decoder layers and
       experts it hands its handlers, which carry no type of their own.
 
-    ``runtime`` (:class:`RunState`) holds the live objects one step of a call hands to the next,
-    such as the context of the export in progress.
+    ``runtime`` (:class:`RunState`) holds the live objects one call hands to a later one, such as
+    the layerwise exporter calibration writes through and the export finalizes, and those one step
+    of a call hands to the next, such as the context of the export in progress.
 
     ``with ModelOptSession():`` makes it the process's active session for the block, and every
     ModelOpt call in the block runs in it. Opening another while one is active raises: a workflow
@@ -100,6 +109,7 @@ class ModelOptSession:
     """
 
     source: "SourceCheckpoint | None" = None
+    export: bool = False
     distribution: "DistributionPlan | None" = None
     model_type: str | None = field(default=None, init=False)
     runtime: RunState = field(default_factory=RunState, init=False, repr=False)
@@ -185,6 +195,11 @@ class ModelOptSession:
                 "session describes one model."
             )
         return self
+
+    def _unbind(self) -> None:
+        # For a load that bound it and then failed: the workflow never got that model.
+        self._model = None
+        self.model_type = None
 
     def __getstate__(self) -> dict[str, object]:
         # The binding and the live objects belong to this process; a copy describes the same

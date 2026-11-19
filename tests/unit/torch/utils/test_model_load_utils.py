@@ -2276,17 +2276,20 @@ def test_a_bound_session_is_refused_before_anything_loads(tmp_path):
             load_pretrained(str(tmp_path / "absent"))
 
 
-def test_a_load_that_fails_leaves_its_session_free_to_load_again(tmp_path, monkeypatch):
-    """A load whose read of the source fails binds nothing, so the workflow can load again."""
+@pytest.mark.parametrize("low_memory", [False, True])
+def test_a_load_that_fails_leaves_its_session_free_to_load_again(tmp_path, monkeypatch, low_memory):
+    """A load whose read of the source fails leaves its session unbound, so the workflow can load
+    again: also one through init_quantized_weights, whose quantization binds the session first."""
     LlamaForCausalLM(LlamaConfig(**_TINY)).save_pretrained(tmp_path)
 
     def unreadable(*args, **kwargs):
         raise OSError("unreadable index")
 
+    loader = init_quantized_weights(mtq.INT8_DEFAULT_CFG) if low_memory else nullcontext()
     with ModelOptSession() as session:
         monkeypatch.setattr(model_load_utils, "unplaced_source_keys", unreadable)
-        with pytest.raises(OSError, match="unreadable"):
-            load_pretrained(str(tmp_path), device_map="cpu")
+        with pytest.raises(OSError, match="unreadable"), loader:
+            load_pretrained(str(tmp_path), **({} if low_memory else {"device_map": "cpu"}))
         assert not session.is_bound
         monkeypatch.undo()
         model = load_pretrained(str(tmp_path), device_map="cpu")
