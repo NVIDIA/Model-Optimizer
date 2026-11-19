@@ -49,8 +49,6 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
-- Add optional ``logit_kl_chunk_size`` for TP1 full-vocabulary distillation, bounding FP32 temporary memory in both the forward and backward pass.
-
 - Add the opt-in ``--qdq_student_weight`` flag to the Megatron-Bridge QAD example and ``initialize_qdq_weights`` to initialize floating latent weights through their configured fake quantizers. Native resumes preserve trained weights and optimizer state.
 - Add ``--trainable_params`` (alias ``--trainable_parameter_patterns``) to ``examples/megatron_bridge/distill.py`` to train selected student weights, including full-rank routed-expert QAD. Reuse the selection on native resume.
 - Add ``--sft_in_batch_packing``, ``--moe_aux_loss_coeff`` and ``--dsa_kernel_backend`` to ``examples/megatron_bridge/distill.py`` (``--dsa_kernel_backend`` also to ``quantize.py``): pack ``--sft_hf_dataset`` conversations per micro-batch instead of padding each to ``--seq_length``, override the MoE load-balancing loss weight (e.g. 0 for padded SFT data), and select fused DeepSeek sparse-attention kernels for long sequences.
@@ -63,6 +61,8 @@ Changelog
 - The Megatron unified HF export (``export_mcore_gpt_to_hf``) now copies the source checkpoint's non-model files (tokenizer, processor, remote code, chat templates, ...) into the export unchanged, from local disk only. The ``examples/megatron_bridge`` scripts make a Hugging Face Hub model local first with ``modelopt.torch.export.ensure_local_checkpoint``.
 - Add an end-to-end W4A4 NVFP4 PTQ and QAD tutorial for NVIDIA Nemotron 3.5 Super VL, covering chat-data blend preparation, assistant-only distillation, Hugging Face export and vLLM serving. See `examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/>`_ for details.
 - Add GLM-5.3-Flash (``glm5_next``) support to ``examples/megatron_bridge`` PTQ and unified HF export with the ``models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`` recipe, matching ``nvidia/GLM-5.3-Flash-NVFP4``, and two GGML IQ2_S recipes for its routed experts: ``models/zai-org/GLM-5.3-Flash-BF16/ptq/iq2_s_experts-q8_0_shared_dense-gptq`` and, with weight-only NVFP4 on the experts' down projections, ``iq2_s_experts-nvfp4_down-q8_0_shared_dense-gptq``. Requires a Megatron-Bridge newer than the ``nemo:26.10`` container; see ``examples/megatron_bridge/README.md``.
+
+- Add optional ``logit_kl_chunk_size`` for TP1 full-vocabulary distillation, bounding FP32 temporary memory in both the forward and backward pass. Enable it in the Megatron-Bridge example with ``--logit_kl_chunk_size``; it is disabled by default.
 
 *Sparsity*
 

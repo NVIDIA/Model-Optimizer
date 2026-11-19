@@ -366,6 +366,12 @@ torchrun --nproc_per_node 8 distill.py \
     --output_dir /output/qwen3_8b_nvfp4_qad
 ```
 
+For full-vocabulary KL with tensor parallel size 1, optionally add
+`--logit_kl_chunk_size 128` to bound FP32 temporary memory in both forward and backward.
+This chunks token rows while retaining the full vocabulary and the same loss objective.
+Omitting the flag leaves chunking disabled (`None`). It cannot be combined with
+`--logit_kl_top_k`.
+
 With pipeline parallelism, the last stage also runs the teacher and student output layers and the KD loss, and
 stage `k` holds `pp_size - k` micro-batches of activations in flight. An even layer split with uniform full
 recompute therefore leaves the other stages idle while they wait for the last one. Balance the pipeline by giving the
