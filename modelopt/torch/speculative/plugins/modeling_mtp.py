@@ -25,7 +25,7 @@ from transformers import Cache, PretrainedConfig, PreTrainedModel
 
 from ..config import EagleConfig, MTPConfig
 from ..eagle.conversion import EagleDMRegistry
-from ..eagle.eagle_model import EagleModel
+from .modeling_fakebase import FakeBaseModel
 
 __all__ = ["MTPModule", "MTPModuleOutput", "create_mtp_model"]
 
@@ -114,29 +114,27 @@ class MTPModule(nn.Module, ABC):
 
 def create_mtp_model(
     mtp: MTPModule,
-    embedding: nn.Embedding,
-    lm_head: nn.Linear,
+    base_model: FakeBaseModel,
     training_config: MTPConfig | None = None,
 ) -> PreTrainedModel:
     """Attach loaded native modules to EAGLE's existing offline training implementation.
 
     Offline batches use ``base_model_outputs`` with ``draft_hidden_states`` (native
-    state) and ``base_model_hidden_states`` (teacher LM-head input). Only the native
-    module trains; adapters reconstruct frozen endpoints before HF Trainer resume.
+    state) and ``base_model_hidden_states`` (teacher LM-head input). Set
+    ``base_hidden_prenorm=True`` for captures before the target's final norm.
+    Resume by reconstructing through the adapter before loading the Trainer checkpoint.
     """
     cfg = MTPConfig() if training_config is None else training_config.model_copy(deep=True)
-    model = PreTrainedModel(
-        PretrainedConfig(
-            mtp_config=mtp.config.to_dict(),
-            mtp_boost=cfg.model_dump(),
-            num_hidden_layers=0,
-        )
-    )
-    model = EagleDMRegistry.convert(model)
-    # Native MTP supplies its decoder and frozen endpoints, so use only base config assignment.
-    # Keep the shared forward state initialized below consistent with HFEagleModel.modify.
-    EagleModel.modify(
-        model,
+    if (
+        mtp.config.hidden_size != base_model.config.hidden_size
+        or mtp.config.vocab_size != base_model.config.vocab_size
+    ):
+        raise ValueError("Native MTP and target must have matching hidden and vocabulary sizes")
+    frozen_keys = list(base_model.state_dict())
+    # Use shared initialization without recording an EAGLE conversion that cannot restore MTP.
+    EagleDMRegistry.register_subclass(type(base_model), "base_model_class")
+    model = EagleDMRegistry.convert(base_model)
+    model.modify(
         EagleConfig(
             eagle_offline=True,
             eagle_ttt_steps=cfg.mtp_ttt_steps,
@@ -147,27 +145,14 @@ def create_mtp_model(
             eagle_loss_decay_factor=cfg.mtp_loss_decay_factor,
             eagle_use_torch_compile=False,
             eagle_export_rope_scaling={},
+            eagle_architecture_config={"use_aux_hidden_state": False},
         ),
+        draft_module=mtp,
     )
-    model.eagle_module = mtp
-    model.eagle_config = PretrainedConfig(
-        use_aux_hidden_state=False,
-        vocab_size=lm_head.out_features,
-        draft_vocab_size=lm_head.out_features,
-    )
-    model.eagle_config._attn_implementation = "sdpa"
-    model.embedding = embedding.requires_grad_(False)
-    model.lm_head = lm_head.requires_grad_(False)
-    model.base_model_embeddings_path = "embedding"
-    model.base_model_lm_head_path = "lm_head"
-    model._cached_attn_blk_masks = {}
-    model._cached_attn_blk_mask_context = None
+    model.config.mtp_config = mtp.config.to_dict()
+    model.config.mtp_boost = cfg.model_dump()
     model.mtp_config = cfg
     model.is_native_mtp_boost = True
-    # HF owns serialization; the adapter reconstructs the frozen endpoints.
-    model._keys_to_ignore_on_save = [
-        f"{name}.{key}"
-        for name, module in (("embedding", embedding), ("lm_head", lm_head))
-        for key in module.state_dict()
-    ]
+    # HF owns serialization; the adapter reconstructs the frozen target, including its norm.
+    model._keys_to_ignore_on_save = frozen_keys
     return model

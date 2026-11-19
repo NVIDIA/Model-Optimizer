@@ -37,7 +37,7 @@ class NativeMTPCheckpointError(ValueError):
 
 
 class NativeMTPAdapter(ABC):
-    """Identify a native checkpoint and construct its module and frozen endpoints."""
+    """Identify and load native MTP; FakeBase supplies the frozen target components."""
 
     name: str
 
@@ -49,6 +49,17 @@ class NativeMTPAdapter(ABC):
 
     @classmethod
     @abstractmethod
+    def load_mtp(
+        cls,
+        model_path: str | Path,
+        *,
+        dtype: torch.dtype,
+        device: torch.device | str | None,
+    ) -> nn.Module:
+        """Load an MTPModule with native config, state layout and placement, without the backbone."""
+        raise NotImplementedError
+
+    @classmethod
     def create(
         cls,
         model_path: str | Path,
@@ -57,12 +68,18 @@ class NativeMTPAdapter(ABC):
         device: torch.device | str | None,
         config: MTPConfig,
     ) -> nn.Module:
-        """Return ``create_mtp_model(native_module, embedding, lm_head, config)``.
+        """Load the partial target and attach native MTP to shared EAGLE training.
 
-        Adapters handle native state layouts and placement. They must not load the
-        target backbone for offline training.
+        Override for checkpoint layouts or distributed loading that need a specialized
+        FakeBase construction. Never load the target backbone for offline training.
         """
-        raise NotImplementedError
+        # Transformers is optional; dispatch and checkpoint detection do not require it.
+        from ..plugins.modeling_fakebase import FakeBaseModel
+        from ..plugins.modeling_mtp import create_mtp_model
+
+        base_model = FakeBaseModel.from_source(str(model_path)).to(device=device, dtype=dtype)
+        mtp = cls.load_mtp(model_path, dtype=dtype, device=device)
+        return create_mtp_model(mtp, base_model, config)
 
 
 _ADAPTERS: dict[str, type[NativeMTPAdapter]] = {}

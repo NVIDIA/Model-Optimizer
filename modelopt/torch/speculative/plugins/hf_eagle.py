@@ -341,11 +341,13 @@ class HFEagleModel(EagleModel):
     def modify(
         self,
         config,
+        draft_module: torch.nn.Module | None = None,
     ):
         """Constructor.
 
         Args:
             config: The config for eagle decoder layers.
+            draft_module: Optional loaded draft; its config, dtype and placement are preserved.
         """
         super().modify(config)
 
@@ -390,14 +392,14 @@ class HFEagleModel(EagleModel):
             for _, param in self.named_parameters():
                 param.requires_grad = False
 
-        self.eagle_module = EagleModule(
-            self.eagle_config,
-            decoder_cls,
+        self.eagle_module = (
+            EagleModule(self.eagle_config, decoder_cls) if draft_module is None else draft_module
         )
 
         # find base model, lm head, and embeddings paths
         self._find_base_model_parts()
-        self.eagle_module.to(self._base_model.dtype).to(self._get_eagle_device())
+        if draft_module is None:
+            self.eagle_module.to(self._base_model.dtype).to(self._get_eagle_device())
 
         # EAGLE-3 auxiliary hidden_states
         if (not self.eagle_offline) and self.eagle_config.use_aux_hidden_state:

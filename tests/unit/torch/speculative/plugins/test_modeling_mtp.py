@@ -22,12 +22,12 @@ from pathlib import Path
 import pytest
 import torch
 from pydantic import ValidationError
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from torch import nn
 from torch.nn import functional as F
 
 pytest.importorskip("transformers")
-from transformers import DynamicCache, PretrainedConfig, Trainer, TrainingArguments
+from transformers import DynamicCache, LlamaConfig, Trainer, TrainingArguments
 
 from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
@@ -45,6 +45,7 @@ from modelopt.torch.speculative.mtp import (
     register_native_mtp_adapter,
 )
 from modelopt.torch.speculative.mtp import adapter as adapter_registry
+from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseConfig, FakeBaseModel
 from modelopt.torch.speculative.plugins.modeling_mtp import (
     MTPModule,
     MTPModuleOutput,
@@ -97,20 +98,14 @@ class TinyMTPAdapter(NativeMTPAdapter):
         return path.is_file() and json.loads(path.read_text()).get("native_mtp") is True
 
     @classmethod
-    def create(cls, model_path, *, dtype, device, config):
-        architecture = PretrainedConfig(
-            **json.loads((Path(model_path) / "config.json").read_text())
+    def load_mtp(cls, model_path, *, dtype, device):
+        architecture = LlamaConfig(**json.loads((Path(model_path) / "config.json").read_text()))
+        mtp = TinyMTPModule(architecture).to(device=device, dtype=dtype)
+        weights = load_file(Path(model_path) / "model.safetensors")
+        mtp.load_state_dict(
+            {k.removeprefix("mtp."): v for k, v in weights.items() if k.startswith("mtp.")}
         )
-        model = _make_model(architecture, config)
-        model.load_state_dict(torch.load(Path(model_path) / "base.pt", weights_only=True))
-        return model.to(device=device, dtype=dtype)
-
-
-def _make_model(architecture, config=None):
-    embedding = nn.Embedding(architecture.vocab_size, architecture.hidden_size)
-    head = nn.Linear(architecture.hidden_size, architecture.vocab_size, bias=False)
-    head.weight = embedding.weight
-    return create_mtp_model(TinyMTPModule(architecture), embedding, head, config)
+        return mtp
 
 
 @pytest.fixture(autouse=True)
@@ -119,13 +114,31 @@ def _register_tiny_adapter(monkeypatch):
     register_native_mtp_adapter(TinyMTPAdapter)
 
 
-def _write_base(path, streams=1):
+def _write_base(path, streams=1, tied=True):
     torch.manual_seed(7)
-    architecture = PretrainedConfig(
-        vocab_size=11, hidden_size=4, streams=streams, native_mtp=True, num_hidden_layers=1
+    architecture = LlamaConfig(
+        vocab_size=11,
+        hidden_size=4,
+        streams=streams,
+        native_mtp=True,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        intermediate_size=8,
+        max_position_embeddings=512,
+        tie_word_embeddings=tied,
+        dtype="float32",
     )
     (path / "config.json").write_text(architecture.to_json_string())
-    torch.save(_make_model(architecture).state_dict(), path / "base.pt")
+    mtp = TinyMTPModule(architecture)
+    weights = {
+        "model.embed_tokens.weight": torch.randn(11, 4),
+        "model.norm.weight": torch.linspace(0.7, 1.3, 4),
+        **{f"mtp.{key}": value for key, value in mtp.state_dict().items()},
+    }
+    if not tied:
+        weights["lm_head.weight"] = torch.randn(11, 4)
+    save_file(weights, path / "model.safetensors")
     return path
 
 
@@ -141,11 +154,50 @@ def _batch(streams, length=7):
     }
 
 
+@pytest.mark.parametrize("device", ["cpu", "meta"])
+def test_construction_preserves_native_module_and_validates_before_mutation(device):
+    architecture = LlamaConfig(
+        vocab_size=11,
+        hidden_size=4,
+        streams=3,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+    )
+    with torch.device(device):
+        mtp = TinyMTPModule(architecture).to(torch.bfloat16)
+    base = FakeBaseModel(
+        FakeBaseConfig(num_hidden_layers=1, hidden_size=4, vocab_size=12, dtype=torch.float32)
+    )
+    parameters = dict(base.named_parameters())
+    with pytest.raises(ValueError):
+        create_mtp_model(mtp, base)
+    assert type(base) is FakeBaseModel
+    assert all(p is parameters[name] and p.requires_grad for name, p in base.named_parameters())
+
+    mtp.config.vocab_size = 12
+    rng = torch.get_rng_state()
+    model = create_mtp_model(mtp, base)
+    assert torch.equal(torch.get_rng_state(), rng)
+    assert model.eagle_module is mtp and mtp.config is architecture
+    assert all(
+        p.device.type == device and p.dtype == torch.bfloat16 and p.requires_grad
+        for p in mtp.parameters()
+    )
+    assert not model.embed_tokens.weight.requires_grad
+
+
 def _reference(model, batch):
     """Compute EAGLE-aligned losses with explicit history sampling and native attention."""
     cfg = model.mtp_config
     tokens = batch["input_ids"]
-    teacher = model.lm_head(batch["base_model_outputs"]["base_model_hidden_states"]).detach()
+    hidden = batch["base_model_outputs"]["base_model_hidden_states"]
+    if batch["base_model_outputs"].get("base_hidden_prenorm", False):
+        normalized = hidden.float() * torch.rsqrt(
+            hidden.float().square().mean(-1, keepdim=True) + model.config.rms_norm_eps
+        )
+        hidden = normalized.to(hidden.dtype) * model.norm.weight
+    teacher = model.lm_head(hidden).detach()
     state = batch["base_model_outputs"]["draft_hidden_states"].detach()
     shifted = tokens.roll(-1, 1)
     positions = torch.arange(tokens.shape[1]).unsqueeze(0)
@@ -169,7 +221,7 @@ def _reference(model, batch):
         )
         # Bypass activation checkpointing to compare its gradients as well.
         hidden, state, cache = model.eagle_module._forward(
-            state, model.embedding(shifted), attn, positions, cache, True, shifted
+            state, model.embed_tokens(shifted), attn, positions, cache, True, shifted
         )
         logits = model.lm_head(hidden)
         student = logits[:, depth:-1]
@@ -195,21 +247,21 @@ def _reference(model, batch):
 
 @pytest.mark.parametrize("streams", [1, 3])
 @pytest.mark.parametrize(
-    ("loss_type", "steps", "mix_hidden_states", "length", "dtype"),
+    ("loss_type", "steps", "mix_hidden_states", "length", "dtype", "prenorm"),
     [
-        ("lk_lambda", 1, False, 7, torch.float32),
-        ("lk_lambda", 3, False, 7, torch.float32),
-        ("lk_lambda", 3, True, 7, torch.float32),
-        ("soft_target_ce", 3, True, 7, torch.float32),
-        ("lk_lambda", 3, True, 257, torch.float32),
-        ("lk_lambda", 3, True, 7, torch.bfloat16),
+        ("lk_lambda", 1, False, 7, torch.float32, False),
+        ("lk_lambda", 3, False, 7, torch.float32, True),
+        ("lk_lambda", 3, True, 7, torch.float32, False),
+        ("soft_target_ce", 3, True, 7, torch.float32, True),
+        ("lk_lambda", 3, True, 257, torch.float32, False),
+        ("lk_lambda", 3, True, 7, torch.bfloat16, True),
     ],
 )
 def test_native_rounds_share_eagle_alignment_and_gradients(
-    tmp_path, streams, loss_type, steps, mix_hidden_states, length, dtype
+    tmp_path, streams, loss_type, steps, mix_hidden_states, length, dtype, prenorm
 ):
     model = create_native_mtp_boost_model(
-        _write_base(tmp_path, streams),
+        _write_base(tmp_path, streams, tied=streams == 1),
         dtype=dtype,
         mtp_ttt_steps=steps,
         mtp_mix_hidden_states=mix_hidden_states,
@@ -227,6 +279,7 @@ def test_native_rounds_share_eagle_alignment_and_gradients(
     batch["base_model_outputs"] = {
         "draft_hidden_states": batch.pop("target_mtp_hidden_states"),
         "base_model_hidden_states": batch.pop("target_lm_head_hidden_states"),
+        "base_hidden_prenorm": prenorm,
     }
     rng = torch.get_rng_state()
     expected_loss, expected_logits = _reference(reference, batch)
@@ -244,9 +297,12 @@ def test_native_rounds_share_eagle_alignment_and_gradients(
         torch.testing.assert_close(actual.grad, expected.grad)
     assert batch["base_model_outputs"]["draft_hidden_states"].grad is None
     assert batch["base_model_outputs"]["base_model_hidden_states"].grad is None
-    assert model.embedding.weight is model.lm_head.weight
-    assert model.embedding.weight.grad is None
-    assert not model.embedding.weight.requires_grad
+    if model.config.tie_word_embeddings:
+        torch.testing.assert_close(model.embed_tokens.weight, model.lm_head.weight, rtol=0, atol=0)
+    for name, parameter in model.named_parameters():
+        assert parameter.dtype == dtype
+        if not name.startswith("eagle_module."):
+            assert parameter.grad is None and not parameter.requires_grad
     assert len(outputs.train_acc) == 1 and len(outputs.train_acc[0]) == steps
     model.eval()
     reference.eval()
@@ -296,7 +352,7 @@ def test_offline_batch_and_empty_assistant_mask(tmp_path):
         model(**collated)
 
     draft_before = model.eagle_module.proj.weight.detach().clone()
-    frozen_before = model.embedding.weight.detach().clone()
+    frozen_before = model.embed_tokens.weight.detach().clone()
     trainer = Trainer(
         model=model,
         args=TrainingArguments(
@@ -318,7 +374,7 @@ def test_offline_batch_and_empty_assistant_mask(tmp_path):
     assert torch.isfinite(torch.tensor(result.training_loss))
     assert torch.isfinite(model.eagle_module.proj.weight).all()
     assert not torch.equal(model.eagle_module.proj.weight, draft_before)
-    torch.testing.assert_close(model.embedding.weight, frozen_before, rtol=0, atol=0)
+    torch.testing.assert_close(model.embed_tokens.weight, frozen_before, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -343,18 +399,27 @@ def test_trainer_checkpoint_roundtrip_preserves_dtype_and_frozen_endpoints(
         for shard in destination.glob("*.safetensors")
         for key, value in load_file(shard).items()
     }
-    assert all(k.startswith("eagle_module.") and v.dtype == dtype for k, v in state.items())
+    assert state and all(
+        k.startswith("eagle_module.") and v.dtype == dtype for k, v in state.items()
+    )
+    assert not (destination / "modelopt_state.pth").exists()
     metadata = json.loads((destination / "config.json").read_text())["mtp_boost"]
     assert metadata["mtp_adapter"] == TinyMTPAdapter.name
     assert metadata["mtp_loss_type"] == "lk_lambda"
     restored = create_native_mtp_boost_model(base, dtype=dtype, **metadata)
-    frozen = restored.embedding.weight.detach().clone()
+    frozen = {
+        k: v.clone() for k, v in restored.state_dict().items() if not k.startswith("eagle_module.")
+    }
     Trainer(model=restored, args=args)._load_from_checkpoint(str(destination))
     torch.testing.assert_close(
         restored.eagle_module.state_dict(), model.eagle_module.state_dict(), rtol=0, atol=0
     )
-    torch.testing.assert_close(restored.embedding.weight, frozen, rtol=0, atol=0)
-    assert restored.embedding.weight is restored.lm_head.weight
+    torch.testing.assert_close(
+        {k: restored.state_dict()[k] for k in frozen}, frozen, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        restored.embed_tokens.weight, restored.lm_head.weight, rtol=0, atol=0
+    )
 
 
 @pytest.mark.parametrize(
