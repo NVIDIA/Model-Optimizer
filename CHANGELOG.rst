@@ -257,6 +257,7 @@ Changelog
 - Fix ``ModuleNotFoundError: No module named 'huggingface_hub'`` when importing ``modelopt.torch`` without the optional ``hf`` extra. Install the ``hf`` extra to use Hugging Face checkpointing. Affects 0.44 through 0.48.
 - Require Pydantic 2.5.0 or newer to prevent configuration-schema errors when importing ``modelopt.torch`` with older releases.
 - Require Wonderwords 2.2.0 or newer in the ``hf`` extra to prevent RULER calibration failures during random-word generation with older releases.
+- A legacy dict-format ``quant_cfg`` now applies its ``"default"`` key before the other keys wherever it appears, as before 0.44.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^
