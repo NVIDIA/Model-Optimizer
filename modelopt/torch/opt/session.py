@@ -45,6 +45,8 @@ if TYPE_CHECKING:
     from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
     from modelopt.torch.export.registry import ExportContext
+    from modelopt.torch.utils.distributed import DistributionPlan
+    from modelopt.torch.utils.plugins.hf_checkpoint_utils import SourceCheckpoint
 
 __all__ = ["ModelBinding", "ModelName", "ModelOptSession", "RunState"]
 
@@ -63,11 +65,17 @@ class ModelBinding:
     ``model_type`` is the model's Hugging Face model type (``config.model_type``), ``None`` for a
     model without one. The export resolves the model's spec in :mod:`modelopt.torch.models` by it,
     also for the decoder layers and experts it hands its handlers, which carry no type of their own.
+
+    ``source`` is the checkpoint the model was loaded from
+    (:class:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.SourceCheckpoint`), as
+    :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` records it. The Hugging
+    Face exports carry its tensors the model has no parameter for into the export.
     """
 
     name: ModelName
     model_type: str | None
     model: "_Model" = field(repr=False)
+    source: "SourceCheckpoint | None" = None
 
 
 @dataclass
@@ -89,6 +97,10 @@ class ModelOptSession:
     Each field belongs to the calls that read it, and a call works out a field left unset as it
     would without a session. A call's own argument for the same thing wins over the field.
 
+    * ``distribution``: the :class:`~modelopt.torch.utils.distributed.DistributionPlan` to load the
+      model by. ``load_pretrained`` loads by it where its ``distribution=`` is not passed, and
+      records here the plan it loaded by.
+
     ``runtime`` (:class:`RunState`) holds the live objects one step of a call hands to the next,
     such as the context of the export in progress.
 
@@ -107,6 +119,7 @@ class ModelOptSession:
     there reads what it needs off the model it is given.
     """
 
+    distribution: "DistributionPlan | None" = None
     runtime: RunState = field(default_factory=RunState, init=False, repr=False)
     _bindings: dict[ModelName, ModelBinding] = field(default_factory=dict, init=False, repr=False)
     _is_default: bool = field(default=False, init=False, repr=False)
@@ -154,6 +167,17 @@ class ModelOptSession:
         """The type of the model bound as ``"model"`` (:attr:`ModelBinding.model_type`)."""
         binding = self._bindings.get("model")
         return binding.model_type if binding is not None else None
+
+    @property
+    def source(self) -> "SourceCheckpoint | None":
+        """The checkpoint the model bound as ``"model"`` was loaded from (:attr:`ModelBinding.source`)."""
+        binding = self._bindings.get("model")
+        return binding.source if binding is not None and binding.model is not None else None
+
+    @property
+    def is_bound(self) -> bool:
+        """Whether a call has bound a model as ``"model"``, which this session then describes."""
+        return self.model is not None
 
     def bind(self, model: _Model, name: ModelName | None = None) -> "ModelOptSession":
         """Bind ``model`` under ``name`` in this session, and return the session.

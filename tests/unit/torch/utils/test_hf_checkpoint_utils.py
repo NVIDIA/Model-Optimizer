@@ -27,6 +27,7 @@ import torch
 from safetensors.torch import save_file
 
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    SourceCheckpoint,
     copy_off_index_safetensors,
     indexed_weight_map,
     off_index_safetensors_files,
@@ -267,10 +268,9 @@ def test_export_config_reloads_nemotron_h_with_source_auto_map(tmp_path, native,
     )
     model = torch.nn.Module()
     model.config = config
-    model._modelopt_source_checkpoint = str(source)
     quant_config = {"quantization": {"quant_algo": "FP8", "kv_cache_quant_algo": "FP8"}}
 
-    save_non_weight_artifacts(model, export)
+    save_non_weight_artifacts(model, export, SourceCheckpoint(str(source)))
     _write_hf_export_config(model, quant_config, export)
     reloaded = transformers.AutoConfig.from_pretrained(
         export, trust_remote_code=True, local_files_only=True

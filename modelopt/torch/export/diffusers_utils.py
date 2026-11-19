@@ -21,27 +21,23 @@ import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
 from importlib import import_module
-from typing import Any
+from typing import Any, TypeAlias, TypeGuard
 
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file, safe_open
 
-DiffusionPipeline: type[Any] | None
-ModelMixin: type[Any] | None
 try:  # diffusers is optional for LTX-2 export paths
-    from diffusers import DiffusionPipeline as _DiffusionPipeline
-    from diffusers import ModelMixin as _ModelMixin
+    # From their defining modules: mypy reads diffusers' top-level names as the placeholder
+    # classes it defines for installs without torch.
+    from diffusers.models.modeling_utils import ModelMixin
+    from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-    DiffusionPipeline = _DiffusionPipeline
-    ModelMixin = _ModelMixin
     _HAS_DIFFUSERS = True
 except Exception:  # pragma: no cover
-    DiffusionPipeline = None
-    ModelMixin = None
     _HAS_DIFFUSERS = False
 
-TI2VidTwoStagesPipeline: type[Any] | None
+TI2VidTwoStagesPipeline: "type[_TI2VidTwoStagesPipeline] | None"
 try:  # optional for LTX-2 export paths
     from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline as _TI2VidTwoStagesPipeline
 
@@ -60,24 +56,32 @@ try:  # optional for LTX-2 export paths
 except Exception:  # pragma: no cover
     TI2VidTwoStagesPipeline = None
 
+# What the diffusers export takes: a module, a diffusers pipeline or LTX-2's two-stage pipeline.
+# Where ltx_pipelines is not installed, mypy reads LTX-2's class as Any, and with it this whole
+# type, so the export checks what it is given when it runs. For that reason export_hf_checkpoint
+# leaves LTX-2's pipeline out of its own type, which its callers' code is checked against.
+DiffusionExportInput: TypeAlias = "nn.Module | DiffusionPipeline | _TI2VidTwoStagesPipeline"
 
-def is_diffusers_object(model: Any) -> bool:
+
+def is_diffusers_object(model: object) -> bool:
     """Return True if model is a diffusers pipeline/component or LTX-2 pipeline."""
     if not _HAS_DIFFUSERS:
         return False
 
-    diffusers_types: tuple[type, ...] = ()
-    if DiffusionPipeline is not None:
-        diffusers_types = (*diffusers_types, DiffusionPipeline)
-    if ModelMixin is not None:
-        diffusers_types = (*diffusers_types, ModelMixin)
+    diffusers_types: tuple[type, ...] = (DiffusionPipeline, ModelMixin)
     if TI2VidTwoStagesPipeline is not None:
         diffusers_types = (*diffusers_types, TI2VidTwoStagesPipeline)
 
-    if not diffusers_types:
-        return False
-
     return isinstance(model, diffusers_types)
+
+
+def is_diffusion_pipeline(model: object) -> TypeGuard["DiffusionPipeline"]:
+    """Return True if model is a diffusers pipeline.
+
+    False, rather than an error, where diffusers' pipelines cannot be imported, such as without
+    transformers: no pipeline can exist there.
+    """
+    return _HAS_DIFFUSERS and isinstance(model, DiffusionPipeline)
 
 
 def generate_diffusion_dummy_inputs(
@@ -484,7 +488,7 @@ def generate_diffusion_dummy_forward_fn(model: nn.Module) -> Callable[[], None]:
             device = next(model.parameters()).device
             default_dtype = next(model.parameters()).dtype
 
-            def _param_dtype(module: Any, fallback: torch.dtype) -> torch.dtype:
+            def _param_dtype(module: nn.Module, fallback: torch.dtype) -> torch.dtype:
                 w = getattr(getattr(module, "weight", None), "dtype", None)
                 return w if isinstance(w, torch.dtype) else fallback
 
@@ -664,7 +668,7 @@ def get_qkv_group_key(module_name: str) -> str:
 
 
 def get_diffusion_components(
-    model: Any,
+    model: DiffusionExportInput,
     components: list[str] | None = None,
 ) -> dict[str, Any]:
     """Get all exportable components from a diffusion(-like) pipeline.
@@ -697,7 +701,7 @@ def get_diffusion_components(
         return all_components
 
     # diffusers pipeline
-    if _HAS_DIFFUSERS and DiffusionPipeline is not None and isinstance(model, DiffusionPipeline):
+    if _HAS_DIFFUSERS and isinstance(model, DiffusionPipeline):
         # Get all components from the pipeline
         all_components = {name: comp for name, comp in model.components.items() if comp is not None}
 
@@ -1055,7 +1059,7 @@ def swizzle_nvfp4_scales(
     return state_dict
 
 
-def get_diffusion_model_type(pipe: Any) -> str:
+def get_diffusion_model_type(pipe: DiffusionExportInput) -> str:
     """Detect the diffusion model type for merge function dispatch.
 
     To add a new model type, add a detection clause here and a corresponding
@@ -1068,8 +1072,14 @@ def get_diffusion_model_type(pipe: Any) -> str:
         A string key into ``DIFFUSION_MERGE_FUNCTIONS``.
 
     Raises:
+        TypeError: If ``pipe`` is neither a module nor a diffusion pipeline.
         ValueError: If the model type is not supported.
     """
+    if not (isinstance(pipe, nn.Module) or is_diffusers_object(pipe)):
+        raise TypeError(
+            "get_diffusion_model_type takes a module or a diffusion pipeline, not a "
+            f"{type(pipe).__name__}."
+        )
     if TI2VidTwoStagesPipeline is not None and isinstance(pipe, TI2VidTwoStagesPipeline):
         return "ltx2"
 

@@ -41,7 +41,7 @@ from modelopt.torch.export.quant_format import (
     QUANTIZATION_W4A16_MXFP4,
 )
 from modelopt.torch.export.quant_utils import (
-    _get_carried_over_module_names,
+    _carried_over_module_names,
     _has_large_fp8_scale,
     get_kv_cache_scaling_factor,
     get_quant_config,
@@ -876,26 +876,37 @@ def test_moe_router_names_handle_root_module():
     assert _get_unquantized_moe_router_names(block) == ["gate"]
 
 
-def test_carried_over_weights_are_excluded_from_quantization():
+@pytest.mark.parametrize("given", ["passed", "recorded"])
+def test_carried_over_weights_are_excluded_from_quantization(given):
     """A carried MTP head has no module, so nothing in the quantizer walk can see it.
 
     Its original-precision weight is copied into the export verbatim, so it must still reach
     ``exclude_modules`` -- otherwise a deployment framework reads the top-level ``quant_algo``
     and tries to load ``eh_proj`` as an NVFP4 weight. Same failure as the MoE router above,
-    different cause: no quantizer there, no module at all here.
+    different cause: no quantizer there, no module at all here. A caller that passes no carried
+    weights gets those the deprecated ``record_unplaced_source_keys`` recorded on the model.
     """
     hidden = 16
     model = _FakeMoEModel(hidden=hidden)
     mtq.quantize(model, _nvfp4_all_linears_config, lambda m: m(torch.randn(2, hidden)))
 
     # The loader could not place these; the exporter copies them straight from the checkpoint.
-    model._modelopt_unplaced_source_keys = [
+    carried = [
         "model.mtp.eh_proj.weight",
         "model.mtp.eh_proj.bias",
         "model.mtp.embed_tokens.weight",
     ]
 
-    quant_config = get_quant_config(model)
+    if given == "passed":
+        quant_config = get_quant_config(model, carried_over_names=carried)
+    else:
+        pytest.importorskip("transformers")
+        # Local import: model_load_utils imports transformers and accelerate, optional dependencies.
+        from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
+
+        with pytest.deprecated_call():
+            record_unplaced_source_keys(model, "/source", carried)
+        quant_config = get_quant_config(model)
     assert quant_config["quantization"]["quant_algo"] == "NVFP4"
 
     exclude_modules = quant_config["quantization"]["exclude_modules"]
@@ -911,61 +922,16 @@ def test_carried_over_weights_are_excluded_from_quantization():
 
 def test_carried_over_module_names_strip_parameter_and_dedup():
     """Keys are ``<module>.<param>``; two params of one module yield one module name."""
-    model = torch.nn.Module()
-    # No attribute at all -- the common case, and every non-carry-over caller.
-    assert _get_carried_over_module_names(model) == []
-
-    model._modelopt_unplaced_source_keys = [
-        "a.b.weight",
-        "a.b.bias",  # same module as above
-        "c.weight",
-        "toplevel",  # no dot: no owning module, skipped
-    ]
-    assert _get_carried_over_module_names(model) == ["a.b", "c"]
-
-
-def test_carried_over_names_prefer_what_the_export_actually_wrote():
-    """Off-index sidecars never appear in unexpected_keys, so the unplaced list alone misses them.
-
-    GLM-4.7 ships its MTP head in a standalone ``mtp.safetensors`` that the loader never opens.
-    The export copies it verbatim, so its tensors are in the checkpoint in original precision and
-    must reach ``exclude_modules`` -- the same requirement as a carried weight, via the other
-    mechanism. The export records both under ``_modelopt_carried_over_names``.
-    """
-    model = torch.nn.Module()
-    model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
-    # What the export actually wrote: the carried weight plus the copied sidecar's tensors.
-    model._modelopt_carried_over_names = [
-        "model.mtp.eh_proj.weight",
-        "model.mtp.embed_tokens.weight",  # only in the sidecar
-    ]
-    assert _get_carried_over_module_names(model) == [
-        "model.mtp.eh_proj",
-        "model.mtp.embed_tokens",
-    ]
-
-
-def test_carried_over_names_fall_back_before_the_export_records():
-    """Callers that never ran the export still get the wider unplaced answer."""
-    model = torch.nn.Module()
-    model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
-    assert _get_carried_over_module_names(model) == ["model.mtp.eh_proj"]
-
-    # An export that wrote nothing is an answer, not a missing one -- do not fall back to the
-    # wider list and claim exclusions for weights the checkpoint does not contain.
-    model._modelopt_carried_over_names = []
-    assert _get_carried_over_module_names(model) == []
+    assert _carried_over_module_names([]) == []
+    names = ["a.b.weight", "a.b.bias", "c.weight", "toplevel"]  # no dot: no owning module
+    assert _carried_over_module_names(names) == ["a.b", "c"]
 
 
 def test_seed_carried_over_exclusions_adds_missing_names():
     """The layerwise exporter snapshots its config before the carried set exists, so it re-seeds."""
-    model = torch.nn.Module()
-    model._modelopt_carried_over_names = [
-        "model.mtp.eh_proj.weight",
-        "model.mtp.embed_tokens.weight",
-    ]
+    carried = ["model.mtp.eh_proj.weight", "model.mtp.embed_tokens.weight"]
     cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": ["lm_head"]}}
-    added = seed_carried_over_exclusions(model, cfg)
+    added = seed_carried_over_exclusions(carried, cfg)
 
     assert added == ["model.mtp.eh_proj", "model.mtp.embed_tokens"]
     assert cfg["quantization"]["exclude_modules"] == [
@@ -977,21 +943,17 @@ def test_seed_carried_over_exclusions_adds_missing_names():
 
 def test_seed_carried_over_exclusions_respects_existing_wildcards():
     """A recipe that already excluded mtp* must not gain redundant per-module entries."""
-    model = torch.nn.Module()
-    model._modelopt_carried_over_names = ["model.mtp.eh_proj.weight"]
     cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": ["model.mtp*"]}}
 
-    assert seed_carried_over_exclusions(model, cfg) == []
+    assert seed_carried_over_exclusions(["model.mtp.eh_proj.weight"], cfg) == []
     assert cfg["quantization"]["exclude_modules"] == ["model.mtp*"]
 
 
 def test_seed_carried_over_exclusions_noop_without_a_uniform_format():
     """No single quant_algo means nothing for a deployment framework to misapply."""
-    model = torch.nn.Module()
-    model._modelopt_carried_over_names = ["model.mtp.eh_proj.weight"]
     for algo in (None, "MIXED_PRECISION"):
         cfg = {"quantization": {"quant_algo": algo}}
-        assert seed_carried_over_exclusions(model, cfg) == []
+        assert seed_carried_over_exclusions(["model.mtp.eh_proj.weight"], cfg) == []
         assert "exclude_modules" not in cfg["quantization"]
 
 
@@ -1007,13 +969,10 @@ def test_both_export_paths_exclude_carried_weights_identically():
     hidden = 16
     model = _FakeMoEModel(hidden=hidden)
     mtq.quantize(model, _nvfp4_all_linears_config, lambda m: m(torch.randn(2, hidden)))
-    model._modelopt_carried_over_names = [
-        "model.mtp.eh_proj.weight",
-        "model.mtp.embed_tokens.weight",
-    ]
+    carried = ["model.mtp.eh_proj.weight", "model.mtp.embed_tokens.weight"]
 
     # Unified: seeded inside get_quant_config.
-    unified = get_quant_config(model)["quantization"]["exclude_modules"]
+    unified = get_quant_config(model, carried_over_names=carried)["quantization"]["exclude_modules"]
 
     # Layerwise: the same config minus the carried names, re-seeded at finalize() time.
     layerwise_cfg = {
@@ -1022,17 +981,15 @@ def test_both_export_paths_exclude_carried_weights_identically():
             "exclude_modules": [e for e in unified if not e.startswith("model.mtp")],
         }
     }
-    seed_carried_over_exclusions(model, layerwise_cfg)
+    seed_carried_over_exclusions(carried, layerwise_cfg)
 
     assert sorted(layerwise_cfg["quantization"]["exclude_modules"]) == sorted(unified)
 
 
 def test_seeded_exclusions_are_literal_module_names():
     """Exact names, not prefix wildcards: a literal cannot over-match a quantized module."""
-    model = torch.nn.Module()
-    model._modelopt_carried_over_names = ["model.mtp.eh_proj.weight"]
     cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": []}}
 
-    assert seed_carried_over_exclusions(model, cfg) == ["model.mtp.eh_proj"]
+    assert seed_carried_over_exclusions(["model.mtp.eh_proj.weight"], cfg) == ["model.mtp.eh_proj"]
     assert cfg["quantization"]["exclude_modules"] == ["model.mtp.eh_proj"]
     assert not any("*" in e for e in cfg["quantization"]["exclude_modules"])

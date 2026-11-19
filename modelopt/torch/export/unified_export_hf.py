@@ -28,7 +28,7 @@ from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -37,8 +37,8 @@ from safetensors.torch import save_file
 
 from modelopt import env
 from modelopt.torch.models import is_moe
-from modelopt.torch.opt.session import ModelOptSession
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    SourceCheckpoint,
     copy_non_model_files,
     copy_off_index_safetensors,
     locate_source_keys,
@@ -46,7 +46,12 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     sanitize_hf_config_for_deployment,
 )
 
-from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
+from .diffusers_utils import (
+    DiffusionExportInput,
+    build_layerwise_quant_metadata,
+    pad_nvfp4_weights,
+    swizzle_nvfp4_scales,
+)
 
 try:
     import diffusers
@@ -59,6 +64,7 @@ try:
         hide_quantizers_from_state_dict,
         infer_dtype_from_model,
         is_diffusers_object,
+        is_diffusion_pipeline,
         is_qkv_projection,
         merge_diffusion_checkpoint,
     )
@@ -66,6 +72,12 @@ try:
     HAS_DIFFUSERS = True
 except ImportError:
     HAS_DIFFUSERS = False
+
+if TYPE_CHECKING:
+    # From its defining module: mypy reads diffusers' top-level name as the placeholder class it
+    # defines for installs without torch. Not imported at run time: diffusers' pipelines need
+    # transformers, without which this module still imports.
+    from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 try:
     from transformers import PretrainedConfig, PreTrainedModel
@@ -79,6 +91,7 @@ except ImportError:
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
+from modelopt.torch.opt.session import ModelOptSession
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.algorithms import (
     _linear_attn_ba_group_key,
@@ -201,7 +214,7 @@ def _save_component_state_dict_safetensors(
 
 def _postprocess_safetensors(
     export_dir: Path,
-    pipe: Any | None = None,
+    pipe: "DiffusionExportInput | None" = None,
     hf_quant_config: dict | None = None,
     **kwargs,
 ) -> None:
@@ -1036,14 +1049,16 @@ def _process_quantized_modules() -> None:
 
 @contextlib.contextmanager
 def _prepare_model_for_export(
-    model, dtype, is_modelopt_qlora, **fields
+    model, dtype, is_modelopt_qlora, carried_over_names=(), **fields
 ) -> Generator[tuple[torch.dtype, TiedWeightMap, dict[str, Any]], None, None]:
     """Run the shared export setup, for an export that lasts as long as the ``with`` block.
 
     Both export paths call this so they cannot drift. It starts the export (:func:`_start_export`),
     with ``fields`` set on its context, in the active ModelOpt session, where each later step of the
-    export seeks it, and yields the export dtype, the tied-weight map and the quant config. Packing
-    the weights is a separate step.
+    export seeks it, and yields the export dtype, the tied-weight map and the quant config, which excludes
+    the modules of ``carried_over_names``
+    (:func:`~modelopt.torch.export.quant_utils.seed_carried_over_exclusions`). Packing the weights is
+    a separate step.
     """
     dtype = _resolve_export_dtype(model, dtype)
     model_type = ModelOptSession.active().binding(model).model_type
@@ -1073,7 +1088,9 @@ def _prepare_model_for_export(
         except ImportError:
             pass  # no accelerate installed → no offload hooks exist to remove
 
-        quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
+        quant_config = get_quant_config(
+            model, is_modelopt_qlora=is_modelopt_qlora, carried_over_names=carried_over_names
+        )
 
         _warn_on_unsynced_moe_gate_up(model, model_type)
 
@@ -1120,7 +1137,10 @@ def _hf_shard_flags(model: nn.Module) -> tuple[bool, bool]:
 
 
 def _process_hf_model_for_export(
-    model: nn.Module, dtype: torch.dtype | None = None, is_modelopt_qlora: bool = False
+    model: nn.Module,
+    dtype: torch.dtype | None = None,
+    is_modelopt_qlora: bool = False,
+    carried_over_names: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Fold a quantized HF model's quantizers into its weights in place; return its quant config.
 
@@ -1132,11 +1152,13 @@ def _process_hf_model_for_export(
     """
     # Only the no-gather writer calls this, and only for a sharded model, so the experts stay fused
     # without reading the plan a second time.
-    with _prepare_model_for_export(model, dtype, is_modelopt_qlora, keep_fused_experts=True) as (
-        _,
-        _,
-        quant_config,
-    ):
+    with _prepare_model_for_export(
+        model,
+        dtype,
+        is_modelopt_qlora,
+        carried_over_names,
+        keep_fused_experts=True,
+    ) as (_, _, quant_config):
         pack_quantized_weights()
         return quant_config
 
@@ -1158,6 +1180,7 @@ def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
     is_modelopt_qlora: bool = False,
+    carried_over_names: Iterable[str] = (),
     **kwargs,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Exports the torch model to the packed checkpoint with original HF naming.
@@ -1187,7 +1210,7 @@ def _export_transformers_checkpoint(
     Raises:
         NotImplementedError: if the model has accelerate offload hooks.
     """
-    with _prepare_model_for_export(model, dtype, is_modelopt_qlora) as prepared:
+    with _prepare_model_for_export(model, dtype, is_modelopt_qlora, carried_over_names) as prepared:
         dtype, tied_map, quant_config = prepared
         if is_fsdp2_model(model):
             # Imported here rather than at module scope: the streaming exporter imports the
@@ -1356,7 +1379,7 @@ def _remove_promoted_quantizer_tensors(component: nn.Module) -> None:
 
 
 def _export_diffusers_checkpoint(
-    pipe: Any,
+    pipe: DiffusionExportInput,
     dtype: torch.dtype | None,
     export_dir: Path,
     components: list[str] | None,
@@ -1420,15 +1443,8 @@ def _export_diffusers_checkpoint(
             "input quantizers."
         )
 
-    # Best-effort diffusers pipeline check (kept for folder layout + model_index.json behavior)
-    is_diffusers_pipe = False
-    if HAS_DIFFUSERS:
-        try:
-            from diffusers import DiffusionPipeline as _DiffusionPipeline
-
-            is_diffusers_pipe = isinstance(pipe, _DiffusionPipeline)
-        except Exception:
-            is_diffusers_pipe = False
+    # A diffusers pipeline's components go in its subfolders, next to its model_index.json.
+    diffusers_pipe = pipe if is_diffusion_pipeline(pipe) else None
 
     # Export each nn.Module component with quantization handling
     for component_name, component in module_components.items():
@@ -1438,7 +1454,7 @@ def _export_diffusers_checkpoint(
 
         # Determine component export directory
         # For pipelines, each component goes in a subfolder
-        if is_diffusers_pipe:
+        if diffusers_pipe is not None:
             component_export_dir = export_dir / component_name
         else:
             component_export_dir = export_dir
@@ -1578,7 +1594,7 @@ def _export_diffusers_checkpoint(
         print(f"  Saved to: {component_export_dir}")
 
     # Export non-nn.Module components (tokenizers, schedulers, feature extractors, etc.)
-    if is_diffusers_pipe:
+    if diffusers_pipe is not None:
         for component_name, component in all_components.items():
             # Skip nn.Module components (already handled above)
             if isinstance(component, nn.Module):
@@ -1606,15 +1622,15 @@ def _export_diffusers_checkpoint(
             print(f"  Saved to: {component_export_dir}")
 
     # For pipelines, also save model_index.json
-    if is_diffusers_pipe:
+    if diffusers_pipe is not None:
         model_index_path = export_dir / "model_index.json"
         is_partial_export = components is not None
 
         # For full export, preserve original model_index.json when possible.
         # For partial export, skip this to avoid listing non-exported components.
         if not is_partial_export:
-            source_path = getattr(pipe, "name_or_path", None) or getattr(
-                getattr(pipe, "config", None), "_name_or_path", None
+            source_path = getattr(diffusers_pipe, "name_or_path", None) or getattr(
+                getattr(diffusers_pipe, "config", None), "_name_or_path", None
             )
             if source_path:
                 candidate_model_index = Path(source_path) / "model_index.json"
@@ -1626,20 +1642,28 @@ def _export_diffusers_checkpoint(
 
         # Full-export fallback to Diffusers-native config serialization.
         # Partial export skips this for the same reason as above.
-        if not is_partial_export and not model_index_path.exists() and hasattr(pipe, "save_config"):
-            pipe.save_config(export_dir)
+        if (
+            not is_partial_export
+            and not model_index_path.exists()
+            and hasattr(diffusers_pipe, "save_config")
+        ):
+            diffusers_pipe.save_config(export_dir)
 
         # Preserve pipeline settings while listing only the exported components.
-        if not model_index_path.exists() and hasattr(pipe, "config") and pipe.config is not None:
-            pipeline_components = pipe.components
+        if (
+            not model_index_path.exists()
+            and hasattr(diffusers_pipe, "config")
+            and diffusers_pipe.config is not None
+        ):
+            pipeline_components = diffusers_pipe.components
             model_index = {
                 key: value
-                for key, value in json.loads(pipe.to_json_string()).items()
+                for key, value in json.loads(diffusers_pipe.to_json_string()).items()
                 if key not in pipeline_components and not key.startswith("_")
             }
             model_index.update(
                 {
-                    "_class_name": type(pipe).__name__,
+                    "_class_name": type(diffusers_pipe).__name__,
                     "_diffusers_version": diffusers.__version__,
                 }
             )
@@ -1709,34 +1733,37 @@ def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
         gc.do_sample = True
 
 
-def _copy_non_model_files_from_source(model: nn.Module, export_dir: "str | Path") -> None:
+def _copy_non_model_files_from_source(
+    source: SourceCheckpoint | None, export_dir: "str | Path"
+) -> None:
     """Copy the source checkpoint's non-model files into the export, from local disk only.
 
     See ``copy_non_model_files``. Exporters never fetch from the Hub: a model loaded by Hub ID
     gets a warning instead, since its cache holds only the files loading needed.
     """
-    source = _source_checkpoint(model)
     if source is None:
         return
-    if not Path(source).is_dir():
+    if not Path(source.path).is_dir():
         warnings.warn(
-            f"The source checkpoint {source!r} is not a local directory, so its non-model files "
-            "(tokenizer, processor, remote code, chat templates, ...) were not copied into the "
-            "export. Get a local copy first with modelopt.torch.export.ensure_local_checkpoint "
+            f"The source checkpoint {source.path!r} is not a local directory, so its non-model "
+            "files (tokenizer, processor, remote code, chat templates, ...) were not copied into "
+            "the export. Get a local copy first with modelopt.torch.export.ensure_local_checkpoint "
             "and load the model from that directory."
         )
         return
-    copy_non_model_files(source, export_dir)
+    copy_non_model_files(source.path, export_dir)
 
 
-def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
+def save_non_weight_artifacts(
+    model: nn.Module, export_dir: Path, source: SourceCheckpoint | None = None
+) -> None:
     """Write config.json and generation_config.json, then copy the source's non-model files.
 
     For exporters that stream weights out themselves and never hand a state dict to
     ``save_pretrained``, which is not an option here: MoE models (e.g. DSR1) share expert
     storage across layers, so safetensors' shared-tensor check fires even on an empty dict.
     The non-model files include the ``*.py`` modules ``trust_remote_code`` checkpoints (e.g.
-    NemotronH) need.
+    NemotronH) need. They come from ``source``, else from the checkpoint the model names.
     """
     _sanitize_generation_config_for_save(model)
     # transformers' own revert_weight_conversion cannot handle quantized state dicts.
@@ -1750,7 +1777,7 @@ def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
         with contextlib.suppress(Exception):
             model.generation_config.save_pretrained(str(export_dir))
 
-    _copy_non_model_files_from_source(model, export_dir)
+    _copy_non_model_files_from_source(source or _named_source(model), export_dir)
 
 
 def export_speculative_decoding(
@@ -1835,52 +1862,108 @@ def _revert_quant_config_names_best_effort(
     return hf_quant_config
 
 
-def _source_checkpoint(model: nn.Module) -> str | None:
-    """Where the model's original checkpoint lives, or ``None`` if nothing is known.
+def _named_source(model: nn.Module) -> SourceCheckpoint | None:
+    """The checkpoint ``model`` names as its provenance; keys not read.
 
-    Prefers ``_modelopt_source_checkpoint`` (recorded at load time by
-    ``record_unplaced_source_keys``). A model that reached export without going through that path
-    still knows its own provenance via ``config._name_or_path``, and the several places this is
-    asked must agree on the answer -- otherwise, for instance, a weight is carried but its off-index
-    tensors never reach ``exclude_modules`` because the two halves disagreed about where the
-    checkpoint was.
+    That is the checkpoint its load recorded on it
+    (:func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained`), else its
+    ``config._name_or_path``. The several places that ask where a model's
+    checkpoint is must agree on the answer -- otherwise, for instance, a weight is carried but its
+    off-index tensors never reach ``exclude_modules`` because the two halves disagreed about where
+    the checkpoint was -- so an export resolves it once (:func:`_resolve_source`) and hands it on.
     """
     # ``or None``: a model built with ``from_config`` has ``_name_or_path == ""``, which would
     # otherwise name the current directory.
-    return (
+    path = (
         getattr(model, "_modelopt_source_checkpoint", None)
         or getattr(getattr(model, "config", None), "_name_or_path", None)
         or None
     )
+    return None if path is None else SourceCheckpoint(str(path))
 
 
-def carryable_unplaced_keys(model: nn.Module) -> list[str]:
+def _layerwise_exporter(model: Any) -> Any:
+    """The layerwise exporter this export finalizes, if the model was calibrated through one."""
+    # Local import breaks the cycle: layerwise_export imports this module.
+    from .layerwise_export import LAYERWISE_EXPORTER_ATTR
+
+    return getattr(model, LAYERWISE_EXPORTER_ATTR, None)
+
+
+def _resolve_source(model: nn.Module, source: SourceCheckpoint | None) -> SourceCheckpoint | None:
+    """The source facts an export of ``model`` carries weights over by: ``source``, else derived.
+
+    ``source`` is what the load recorded in the workflow's ModelOpt session (``load_pretrained``
+    inside ``with ModelOptSession():``). Without it the export takes the keys the model's load
+    recorded on it, else works the facts out from the checkpoint the model names
+    (:func:`_named_source`), by the derivation the loads run, which gives the same keys while the
+    model holds the parameters it was loaded with. A layerwise export packs them as it goes, so it
+    resolves its source before the first layer, and that is the one read back here.
+
+    The derivation needs ``model_load_utils``, which imports transformers and accelerate at module
+    scope. Where those are absent the export carries nothing, with a warning; a ``source`` passed in
+    needs neither.
+    """
+    if source is not None:
+        return source
+    named = _named_source(model)
+    if named is None:
+        return None
+    if (recorded := getattr(model, "_modelopt_unplaced_source_keys", None)) is not None:
+        # record_unplaced_source_keys (deprecated) recorded them with the checkpoint named above.
+        return SourceCheckpoint(named.path, tuple(recorded))
+    # Local import breaks the cycle: layerwise_export imports this module.
+    from .layerwise_export import LAYERWISE_EXPORTER_ATTR
+
+    resolved = getattr(getattr(model, LAYERWISE_EXPORTER_ATTR, None), "_source", None)
+    if resolved is not None and resolved.path == named.path:
+        return resolved
+    if not Path(named.path).is_dir():
+        return named  # a Hub ID: nothing on disk to derive the keys from
+    # A checkpoint with no safetensors at all (pytorch_model.bin) has nothing to carry, and finding
+    # that out must not depend on the derivation's optional imports.
+    if not any(
+        Path(named.path, name).exists()
+        for name in ("model.safetensors.index.json", "model.safetensors")
+    ):
+        return named
+    try:
+        from modelopt.torch.utils.plugins.model_load_utils import unplaced_source_keys
+
+        keys = unplaced_source_keys(model, named.path)
+    except Exception as exc:
+        warnings.warn(
+            f"Could not derive unplaced source keys ({exc}), so the export carries none. Load and "
+            "export the model inside one `with ModelOptSession():`, whose load records them, to "
+            "carry them."
+        )
+        return named
+    return SourceCheckpoint(named.path, tuple(sorted(keys)))
+
+
+def carryable_unplaced_keys(source: SourceCheckpoint | None) -> list[str]:
     """Unplaced checkpoint keys a shard actually provides.
 
-    ``_modelopt_unplaced_source_keys`` answers "does the model have a parameter for this key",
-    which is a wider question than "is there a tensor to carry". Checkpoints routinely list keys
-    no shard backs -- a stale ``rotary_emb.inv_freq`` buffer, leftovers after a
-    ``conversion_mapping`` rename -- and those carry nothing. Callers that want to know whether
-    real weights would be dropped must ask this, not the raw recorded list.
+    ``source.unplaced_keys`` answers "does the model have a parameter for this key", which is a
+    wider question than "is there a tensor to carry". Checkpoints routinely list keys no shard backs
+    -- a stale ``rotary_emb.inv_freq`` buffer, leftovers after a ``conversion_mapping`` rename --
+    and those carry nothing. Callers that want to know whether real weights would be dropped must
+    ask this, not the raw list.
 
     Best-effort by design: it is used to decide how loudly to complain, so an unreadable index
     answers "nothing to carry" rather than raising from inside a diagnostic.
     """
-    ckpt = _source_checkpoint(model)
-    if not ckpt or not Path(ckpt).is_dir():
-        return []
-    keys = unplaced_keys_for(model, ckpt)
-    if not keys:
+    if source is None or not source.unplaced_keys or not Path(source.path).is_dir():
         return []
     try:
-        located = locate_source_keys(ckpt, keys)
+        located = locate_source_keys(source.path, list(source.unplaced_keys))
     except Exception:
         return []
     return sorted(located)
 
 
-def off_index_tensor_names(model: nn.Module) -> list[str]:
-    """Tensor names in the checkpoint's off-index weight files.
+def off_index_tensor_names(source: SourceCheckpoint | None) -> list[str]:
+    """Tensor names in the source checkpoint's off-index weight files.
 
     Those files (GLM-4.7's ``mtp.safetensors``) are copied into the export verbatim by
     :func:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.copy_off_index_safetensors` rather
@@ -1894,52 +1977,15 @@ def off_index_tensor_names(model: nn.Module) -> list[str]:
     library cannot be read: an absent exclusion is a deployment problem, but so is an export that
     dies while computing one.
     """
-    ckpt = _source_checkpoint(model)
-    if not ckpt or not Path(ckpt).is_dir():
+    if source is None or not Path(source.path).is_dir():
         return []
     try:
         names: list[str] = []
-        for file_name in off_index_safetensors_files(ckpt):
-            with safe_open(str(Path(ckpt) / file_name), framework="pt") as f:
+        for file_name in off_index_safetensors_files(source.path):
+            with safe_open(str(Path(source.path) / file_name), framework="pt") as f:
                 names.extend(f.keys())
         return sorted(set(names))
     except Exception:
-        return []
-
-
-def unplaced_keys_for(model: nn.Module, ckpt: "str | Path") -> list[str]:
-    """The source keys the model has no parameter for, as recorded when it was loaded.
-
-    The loaders that build a model for export --
-    :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` and
-    ``parallel_load_and_prepare_fsdp2`` -- work this out once, at load time
-    (``record_unplaced_source_keys``), and the export only reads it back. A model loaded some other
-    way, by a caller's own ``from_pretrained`` say, has no record: the same derivation then runs
-    once, here, and is recorded so nothing derives it again.
-
-    That derivation needs ``model_load_utils``, which imports transformers and accelerate at module
-    scope. Where those are absent an unrecorded model carries nothing, with a warning; a recorded
-    one needs neither.
-    """
-    # Local import breaks the cycle: layerwise_export imports this module.
-    from .layerwise_export import LAYERWISE_EXPORTER_ATTR
-
-    exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
-    snapshot = getattr(exporter, "_source_key_snapshot", None)
-    if snapshot is not None and snapshot[0] == str(ckpt):
-        return list(snapshot[1])
-
-    if hasattr(model, "_modelopt_unplaced_source_keys"):
-        return list(model._modelopt_unplaced_source_keys)
-    try:
-        from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
-
-        return record_unplaced_source_keys(model, str(ckpt))
-    except Exception as exc:
-        warnings.warn(
-            f"Could not derive unplaced source keys ({exc}), so the export carries none. Loading "
-            "with modelopt.torch.utils.plugins.model_load_utils.load_pretrained records them."
-        )
         return []
 
 
@@ -1947,14 +1993,16 @@ def unplaced_keys_for(model: nn.Module, ckpt: "str | Path") -> list[str]:
 _NO_TENSOR: Any = None
 
 
-def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[str, torch.Tensor]:
+def read_unplaced_weights(
+    source: SourceCheckpoint | None, *, keys_only: bool = False
+) -> dict[str, torch.Tensor]:
     """Read back checkpoint weights the model never loaded, so the export stays complete.
 
     A checkpoint can hold parameters the built model has no home for -- an MTP head, an auxiliary
     tower -- which means quantization never sees them and they would be missing from the exported
-    checkpoint unless they are copied across verbatim. The loader records which keys those were
-    (:attr:`_modelopt_unplaced_source_keys`) and where they came from (see :func:`unplaced_keys_for`);
-    this reads them on demand rather than holding them in memory from load to export.
+    checkpoint unless they are copied across verbatim. ``source`` names those keys and where they
+    came from (see :func:`_resolve_source`); this reads them on demand rather than holding them in
+    memory from load to export.
 
     Deliberately architecture-agnostic: the question asked at load time was "does the model have a
     parameter for this checkpoint key", not "is this an MTP head", so anything the model did not
@@ -1968,18 +2016,17 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     state use this: the FSDP2 writer only emits ``extra_state_dict`` from rank 0, so having every
     rank materialize an MTP head (10 GB+ in bf16 on a large MoE) is host memory read and dropped.
     """
-    # These are pure filesystem checks and deliberately sit ABOVE the try below: deciding that
-    # there is nothing to carry must not depend on an optional import succeeding.
-    ckpt = _source_checkpoint(model)
-    if not ckpt or not Path(ckpt).is_dir():
-        # A hub id rather than a local path, or no provenance at all -- nothing to read. Quiet
-        # when nothing was recorded, because there is no reason to think anything is missing. But
-        # if the loader DID record unplaced keys, they are about to be dropped, and dropping them
-        # silently is the failure this whole path exists to prevent.
-        recorded = getattr(model, "_modelopt_unplaced_source_keys", None) or []
-        if recorded:
+    if source is None:
+        return {}
+    ckpt, keys = source.path, list(source.unplaced_keys)
+    if not Path(ckpt).is_dir():
+        # A hub id rather than a local path -- nothing to read. Quiet when no key is unplaced,
+        # because there is no reason to think anything is missing. But if the load DID find
+        # unplaced keys, they are about to be dropped, and dropping them silently is the failure
+        # this whole path exists to prevent.
+        if keys:
             warnings.warn(
-                f"Could not copy {len(recorded)} unplaced source weight(s) into the export: "
+                f"Could not copy {len(keys)} unplaced source weight(s) into the export: "
                 f"the source checkpoint is not a readable directory ({ckpt}); "
                 "the checkpoint will be missing them."
             )
@@ -1987,20 +2034,15 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     # A checkpoint with no safetensors at all (pytorch_model.bin) has nothing this path can read.
     # Returning quietly is right: there is nothing to carry, so warning about weights "missing"
     # from the export would be alarming and wrong.
-    if (
+    if not keys or (
         not (Path(ckpt) / "model.safetensors.index.json").exists()
         and not (Path(ckpt) / "model.safetensors").exists()
     ):
         return {}
 
-    keys: list[str] | None = None
     try:
-        keys = unplaced_keys_for(model, ckpt)
-        if not keys:
-            return {}
-
         by_file: dict[str, list[str]] = {}
-        for k, shard in locate_source_keys(ckpt, list(keys)).items():
+        for k, shard in locate_source_keys(ckpt, keys).items():
             by_file.setdefault(shard, []).append(k)
 
         if keys_only:
@@ -2016,12 +2058,8 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
                 for k in shard_keys:
                     out[k] = f.get_tensor(k)
     except Exception as exc:
-        # ``keys`` can still be None here -- the failure may land before it is resolved (a failed
-        # import, or unplaced_source_keys itself raising). Counting it unconditionally would throw
-        # from inside the handler whose whole job is to leave the export standing.
-        count = f"{len(keys)} " if keys is not None else ""
         warnings.warn(
-            f"Could not copy {count}unplaced source weight(s) into the export ({exc}); "
+            f"Could not copy {len(keys)} unplaced source weight(s) into the export ({exc}); "
             "the checkpoint will be missing them."
         )
         return {}
@@ -2041,7 +2079,7 @@ _DISTRIBUTED_RUN_CONFIG_ATTRS = ("distributed_config", "base_model_ep_plan")
 
 
 @contextlib.contextmanager
-def _source_distributed_config_attrs(model: nn.Module):
+def _source_distributed_config_attrs(model: nn.Module, checkpoint: SourceCheckpoint | None):
     """Within the block, every config holds the run attributes its source ``config.json`` declared.
 
     transformers drops ``base_model_tp_plan`` and ``base_model_pp_plan`` when it serializes a config,
@@ -2053,10 +2091,9 @@ def _source_distributed_config_attrs(model: nn.Module):
     sharded model still reads them (transformers' ``tp_plan`` checks ``distributed_config``).
     """
     source: Any = {}
-    ckpt = _source_checkpoint(model)
-    if ckpt and Path(ckpt, "config.json").is_file():
+    if checkpoint is not None and Path(checkpoint.path, "config.json").is_file():
         with contextlib.suppress(OSError, ValueError):
-            source = json.loads(Path(ckpt, "config.json").read_text())
+            source = json.loads(Path(checkpoint.path, "config.json").read_text())
 
     _missing = object()
     saved: list[tuple[Any, str, Any]] = []
@@ -2086,14 +2123,14 @@ def _source_distributed_config_attrs(model: nn.Module):
                 setattr(config, attr, value)
 
 
-def _write_base_config(model: nn.Module, export_dir: Path) -> None:
+def _write_base_config(model: nn.Module, export_dir: Path, source: SourceCheckpoint | None) -> None:
     """Write the no-gather export's non-weight files, once every rank has written its shards.
 
     ``save_non_weight_artifacts`` writes them, as it does for the FSDP2 streaming writer; this
     keeps the config attributes an expert-parallel run sets out of config.json.
     """
-    with _source_distributed_config_attrs(model):
-        save_non_weight_artifacts(model, export_dir)
+    with _source_distributed_config_attrs(model, source):
+        save_non_weight_artifacts(model, export_dir, source)
 
 
 def _no_gather_export_asked() -> bool:
@@ -2102,7 +2139,7 @@ def _no_gather_export_asked() -> bool:
 
 
 def export_hf_checkpoint(
-    model: Any,
+    model: "nn.Module | DiffusionPipeline",
     dtype: torch.dtype | None = None,
     export_dir: Path | str = tempfile.gettempdir(),
     save_modelopt_state: bool = False,
@@ -2123,10 +2160,15 @@ def export_hf_checkpoint(
     the session's binding of the model, so the workflow binds the model first; outside any session
     it reads it off the model.
 
+    The tensors of the source checkpoint the session holds that the model has no parameter for,
+    such as an MTP head, are carried into the export unchanged, and the checkpoint's non-model
+    files are copied; without one, both come from the checkpoint the model names: the one its load
+    recorded on it, else its ``config._name_or_path``.
+
     Args:
-        model: The full torch model to export. The actual quantized model may be a submodule.
-            Supports both transformers models (e.g., LlamaForCausalLM) and diffusers
-            models/pipelines (e.g., StableDiffusionPipeline, UNet2DConditionModel).
+        model: The model to export: a module, such as a transformers model (e.g.,
+            LlamaForCausalLM) or a diffusers model (e.g., UNet2DConditionModel), or a diffusion
+            pipeline (e.g., StableDiffusionPipeline). The actual quantized model may be a submodule.
         dtype: The weights data type to export the unquantized layers or the default
             model data type if None.
         export_dir: The target export path.
@@ -2144,6 +2186,33 @@ def export_hf_checkpoint(
             runtime compatibility; other diffusion components omit them.
             Transformers components always retain them for KV-cache scales.
     """
+    # The workflow, as its session holds it.
+    session = ModelOptSession.active()
+    exporter = _layerwise_exporter(model)
+    source = session.source
+    if source is None and exporter is not None:
+        # A layerwise export resolved its source before calibration packed the first layer.
+        source = getattr(exporter, "_source", None)
+    if not isinstance(model, nn.Module):
+        # A diffusion pipeline is not a module: it is never sharded or calibrated layerwise, and
+        # nothing below is carried into the diffusers export, so it goes there now.
+        if not (HAS_DIFFUSERS and is_diffusers_object(model)):
+            raise TypeError(
+                "export_hf_checkpoint exports an nn.Module or a diffusion pipeline, not a "
+                f"{type(model).__name__}."
+            )
+        export_dir = Path(export_dir)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        _export_diffusers_checkpoint(
+            model,
+            dtype,
+            export_dir,
+            components,
+            max_shard_size,
+            save_modelopt_state=save_modelopt_state,
+            **kwargs,
+        )
+        return
     # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
     # source so the exported checkpoint is the complete model. Merged here, ahead of the path
     # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict
@@ -2196,32 +2265,31 @@ def export_hf_checkpoint(
     # A sharded export reads and hands over the carried weights on rank 0 alone, since both sharded
     # writers take extra_state_dict from that one sender: on any other rank, reading them (889
     # tensors on GLM-5.3-Flash, its MTP layer) would be host memory spent for nothing. This gates
-    # the tensors only. Every rank still resolves their names, which _modelopt_carried_over_names
-    # below records alike on every rank for the quant config.
+    # the tensors only. Every rank still gets their names, for the quant config.
     _writes_extra = not _sharded_export or torch.distributed.get_rank() == 0
     _carried: dict = {}
+    _resolved: list[SourceCheckpoint | None] = []
 
     def carried_over_names() -> list[str]:
         # Everything the export writes in original precision straight from the source, by either
         # mechanism: tensors carried here, and the off-index weight files copied verbatim alongside.
-        # get_quant_config reads this to seed exclude_modules; recorded here because it runs before
-        # that, and because only this point knows what was actually written rather than what was
-        # merely unplaced.
-        _carried.update(read_unplaced_weights(model, keys_only=not _writes_extra))
-        return sorted({*_carried, *off_index_tensor_names(model)})
+        # get_quant_config takes this to seed exclude_modules; worked out here because only this
+        # point knows what was actually written rather than what was merely unplaced.
+        _resolved.append(_resolve_source(model, source))
+        _carried.update(read_unplaced_weights(_resolved[0], keys_only=not _writes_extra))
+        return sorted({*_carried, *off_index_tensor_names(_resolved[0])})
 
     if _sharded_export:
         # Rank 0 reads the source here and sends every rank its names, so a failure of that read
         # fails every rank rather than leave the others waiting in the export's first collective.
-        model._modelopt_carried_over_names = broadcast_from("carried weights", carried_over_names)
+        carried_names = broadcast_from("carried weights", carried_over_names)
     else:
-        model._modelopt_carried_over_names = carried_over_names()
+        carried_names = carried_over_names()
+    # The other ranks of a sharded export write no source file, so they need only its path.
+    checkpoint = _resolved[0] if _resolved else source or _named_source(model)
     if _writes_extra and _carried:
         extra_state_dict = {**_carried, **(extra_state_dict or {})}
 
-    from .layerwise_export import LAYERWISE_EXPORTER_ATTR
-
-    exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
     if exporter is not None:
         if save_modelopt_state:
             warnings.warn(
@@ -2229,11 +2297,11 @@ def export_hf_checkpoint(
                 "path and will be ignored."
             )
         # Per-layer export wrote the shards during calibration; this writes the rest.
-        exporter.finalize(extra_state_dict=extra_state_dict)
+        exporter.finalize(extra_state_dict=extra_state_dict, carried_over_names=carried_names)
         # Into the exporter's directory, which is where finalize() wrote: export_dir may differ
         # when the recipe's layerwise.export_dir chose it.
-        if _writes_extra:
-            copy_off_index_safetensors(_source_checkpoint(model), exporter.export_dir)
+        if _writes_extra and checkpoint is not None:
+            copy_off_index_safetensors(checkpoint.path, exporter.export_dir)
         return
 
     export_dir = Path(export_dir)
@@ -2299,6 +2367,8 @@ def export_hf_checkpoint(
                     export_dir=export_dir,
                     max_shard_size=max_shard_size,
                     extra_state_dict=extra_state_dict,
+                    source=checkpoint,
+                    carried_over_names=carried_names,
                     **kwargs,
                 )
             if getattr(model, "hf_quantizer", None) is not None:
@@ -2320,7 +2390,7 @@ def export_hf_checkpoint(
             # Folds in place; the model is sharded here, so the MoE experts stay fused and each rank
             # folds only its local experts. The writer then splits each rank's experts into
             # per-expert tensors.
-            hf_quant_config = _process_together(model, dtype, _qlora)
+            hf_quant_config = _process_together(model, dtype, _qlora, carried_names)
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
             reverted = distributed_save_hf_checkpoint(
@@ -2335,7 +2405,7 @@ def export_hf_checkpoint(
                 extra_state_dict=extra_state_dict,
             )
             if rank == 0:
-                _write_base_config(model, export_dir)
+                _write_base_config(model, export_dir, checkpoint)
                 # As the streaming path below: every FSDP2 rank holds the same ModelOpt state.
                 if save_modelopt_state and ModeloptStateManager.is_converted(model):
                     torch.save(modelopt_state(model), export_dir / _MODELOPT_STATE_SAVE_NAME)
@@ -2355,6 +2425,8 @@ def export_hf_checkpoint(
                 export_dir=export_dir,
                 max_shard_size=max_shard_size,
                 extra_state_dict=extra_state_dict,
+                source=checkpoint,
+                carried_over_names=carried_names,
                 **kwargs,
             )
             if getattr(model, "hf_quantizer", None) is not None:
@@ -2365,7 +2437,10 @@ def export_hf_checkpoint(
                 hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
         else:
             post_state_dict, hf_quant_config = _export_transformers_checkpoint(
-                model, dtype, **kwargs
+                model,
+                dtype,
+                carried_over_names=carried_names,
+                **kwargs,
             )
 
             # Remove hf_quantizer from model so post_state_dict can be exported.
@@ -2431,11 +2506,12 @@ def export_hf_checkpoint(
 
         if rank == 0:
             _write_hf_export_config(model, hf_quant_config, export_dir)
-            copy_off_index_safetensors(_source_checkpoint(model), export_dir)
+            if checkpoint is not None:
+                copy_off_index_safetensors(checkpoint.path, export_dir)
             if not (_offloaded or is_fsdp2_sharded or use_no_gather_writer):
                 # The streaming paths and the no-gather writer already did, from
                 # save_non_weight_artifacts.
-                _copy_non_model_files_from_source(model, export_dir)
+                _copy_non_model_files_from_source(checkpoint, export_dir)
 
     except Exception as e:
         error = e
@@ -2515,7 +2591,10 @@ def _agree_on_fused_expert_quantization(model: nn.Module) -> None:
 
 
 def _process_together(
-    model: nn.Module, dtype: torch.dtype | None, is_modelopt_qlora: bool
+    model: nn.Module,
+    dtype: torch.dtype | None,
+    is_modelopt_qlora: bool,
+    carried_over_names: Iterable[str] = (),
 ) -> dict[str, Any]:
     """:func:`_process_hf_model_for_export` on every rank, raising on all of them if any failed.
 
@@ -2526,7 +2605,14 @@ def _process_together(
     quant_config: list[dict[str, Any]] = []
 
     def processed() -> bool:
-        quant_config.append(_process_hf_model_for_export(model, dtype, is_modelopt_qlora))
+        quant_config.append(
+            _process_hf_model_for_export(
+                model,
+                dtype,
+                is_modelopt_qlora,
+                carried_over_names,
+            )
+        )
         return True
 
     all_reduce("export processed", processed, all)

@@ -22,9 +22,12 @@ dropped from it.
 """
 
 import json
+from contextlib import contextmanager, nullcontext
+from unittest import mock
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from packaging.version import Version
 from safetensors.torch import load_file, save_file
 
@@ -42,10 +45,15 @@ from transformers import (
     LlamaConfig,
     LlamaForCausalLM,
     Mxfp4Config,
+    PretrainedConfig,
+    PreTrainedModel,
 )
 from transformers import __version__ as transformers_version
 
+import modelopt.torch.quantization as mtq
+from modelopt.torch.export.unified_export_hf import _resolve_source, export_hf_checkpoint
 from modelopt.torch.models import _onfly_decompress
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
@@ -55,8 +63,9 @@ from modelopt.torch.utils.plugins.model_load_utils import (
 
 
 def test_a_two_argument_unplaced_source_keys_still_records_the_keys(monkeypatch, tmp_path):
-    """The map a load already read reaches ``unplaced_source_keys`` by keyword, and only when there is
-    one, so a caller that replaced the function with its two-argument form still records keys."""
+    """The deprecated record still works: the map a load already read reaches
+    ``unplaced_source_keys`` by keyword, and only when there is one, so a caller that replaced the
+    function with its two-argument form still records keys."""
     seen = []
 
     def two_arguments(model, ckpt_path):
@@ -66,7 +75,9 @@ def test_a_two_argument_unplaced_source_keys_still_records_the_keys(monkeypatch,
     monkeypatch.setattr(model_load_utils, "unplaced_source_keys", two_arguments)
     model = LlamaForCausalLM(_tiny_llama_config())
 
-    assert model_load_utils.record_unplaced_source_keys(model, str(tmp_path)) == ["mtp.fc.weight"]
+    with pytest.deprecated_call():
+        keys = model_load_utils.record_unplaced_source_keys(model, str(tmp_path))
+    assert keys == ["mtp.fc.weight"]
     assert seen == [str(tmp_path)]
     read = {"mtp.fc.weight": "model.safetensors"}
     monkeypatch.setattr(
@@ -74,9 +85,9 @@ def test_a_two_argument_unplaced_source_keys_still_records_the_keys(monkeypatch,
         "unplaced_source_keys",
         lambda model, ckpt_path, tensor_files=None: sorted(tensor_files),
     )
-    assert model_load_utils.record_unplaced_source_keys(
-        model, str(tmp_path), tensor_files=read
-    ) == ["mtp.fc.weight"]
+    with pytest.deprecated_call():
+        keys = model_load_utils.record_unplaced_source_keys(model, str(tmp_path), tensor_files=read)
+    assert keys == ["mtp.fc.weight"]
 
 
 # A layer past ``num_hidden_layers``: genuinely stray, so it must always be recorded.
@@ -107,10 +118,13 @@ def _save(path, config, state, quantization_config=None):
 
 
 def _load(path, auto_class=None, **kwargs):
-    model = load_pretrained(str(path), auto_class, **kwargs)
+    """The model and the source its load records in the active session."""
+    with ModelOptSession() as session:
+        model = load_pretrained(str(path), auto_class, **kwargs)
+    source = session.source
     if getattr(model, "_weight_conversions", None) is None:
         pytest.skip("this transformers does not record the conversions from_pretrained ran")
-    return model
+    return model, source
 
 
 _MTP_AND_AUX = {"mtp.fc.weight": torch.ones(2), "aux_tower.blocks.0.weight": torch.ones(2)}
@@ -122,9 +136,9 @@ _MTP_AND_AUX = {"mtp.fc.weight": torch.ones(2), "aux_tower.blocks.0.weight": tor
     ids=["nothing-stray", "mtp-and-aux-tower", "in-a-subfolder"],
 )
 def test_records_the_stray_tensors_and_the_checkpoint(tmp_path, extra, subfolder):
-    """Nothing keys off a name such as 'mtp': an auxiliary tower is recorded by the same rule. An
-    empty record is an answer too, so the export does not derive the list again. A subfolder is
-    where the checkpoint is: the config and the record come from it, as the weights do."""
+    """Nothing keys off a name such as 'mtp': an auxiliary tower is found by the same rule. A
+    subfolder is where the checkpoint is: the config and the source come from it, as the weights
+    do. The model carries the source too, for an export outside the workflow's session."""
     config = _tiny_llama_config()
     state = LlamaForCausalLM(config).to(torch.bfloat16).state_dict()
     checkpoint = tmp_path / subfolder if subfolder else tmp_path
@@ -132,9 +146,11 @@ def test_records_the_stray_tensors_and_the_checkpoint(tmp_path, extra, subfolder
     _save(checkpoint, config, {**state, **extra})
 
     options = {"subfolder": subfolder} if subfolder else {}
-    model = _load(tmp_path, dtype=torch.bfloat16, **options)
+    model, source = _load(tmp_path, dtype=torch.bfloat16, **options)
 
-    assert model._modelopt_unplaced_source_keys == sorted(extra), "sorted, for a stable export"
+    assert list(source.unplaced_keys) == sorted(extra), "sorted, for a stable export"
+    assert source.path == str(checkpoint)
+    assert model._modelopt_unplaced_source_keys == sorted(extra)
     assert model._modelopt_source_checkpoint == str(checkpoint)
     assert model.dtype == torch.bfloat16, "from_pretrained kwargs must pass through"
     assert distribution_plan(model) == DistributionPlan(), "a single process holds it whole"
@@ -173,7 +189,9 @@ def test_the_hub_options_pick_the_snapshot_and_reach_the_loads_from_it(tmp_path,
         "local_files_only": True,
     }
 
-    model = load_pretrained("org/model", models, **hub_kwargs)
+    with ModelOptSession() as session:
+        load_pretrained("org/model", models, **hub_kwargs)
+    source = session.source
 
     assert resolved[0] == ("org/model", hub_kwargs)
     # Anything resolved after that is the local snapshot.
@@ -182,32 +200,92 @@ def test_the_hub_options_pick_the_snapshot_and_reach_the_loads_from_it(tmp_path,
     loads = configs.options + models.options
     assert len(loads) == 2
     assert all({k: load[k] for k in hub_kwargs if k in load} == code_options for load in loads)
-    assert model._modelopt_source_checkpoint == str(tmp_path)
+    assert source.path == str(tmp_path)
 
 
 def test_a_tied_name_the_checkpoint_stores_is_placed(tmp_path):
     """Qwen3-0.6B stores lm_head.weight beside the embedding it is tied to. named_parameters()
     lists a tied parameter under its first name only, but the other name is the model's own
-    parameter too: neither the whole-model nor the FSDP2 load may record it for the export to carry
-    over beside the weight it is."""
+    parameter too: neither the whole-model nor the FSDP2 load may call it unplaced, for the export to
+    carry over beside the weight it is."""
     config = _tiny_llama_config(tie_word_embeddings=True)
     _save(
         tmp_path, config, {k: v.clone() for k, v in LlamaForCausalLM(config).state_dict().items()}
     )
     assert "lm_head.weight" in load_file(str(tmp_path / "model.safetensors"))
 
-    assert _load(tmp_path)._modelopt_unplaced_source_keys == []
+    assert _load(tmp_path)[1].unplaced_keys == ()
+    with _a_process_group_of_one(tmp_path):
+        sharded = parallel_load_and_prepare_fsdp2(str(tmp_path), torch.device("cpu"), 0, 1)
+    assert model_load_utils.unplaced_source_keys(sharded, str(tmp_path)) == []
+
+
+def test_an_fsdp2_load_names_the_checkpoint_it_read(tmp_path):
+    """The FSDP2 load builds the model from the config it is passed, which the caller may have read
+    elsewhere, by a Hub ID say. It names the checkpoint it read on the model's config, as
+    from_pretrained does, so an export passed no source still finds the tensors to carry over."""
+    config = _tiny_llama_config()
+    _save(tmp_path, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
+    hf_config = AutoConfig.from_pretrained(str(tmp_path))
+    hf_config._name_or_path = "org/model"
+
+    with _a_process_group_of_one(tmp_path):
+        model = parallel_load_and_prepare_fsdp2(
+            str(tmp_path), torch.device("cpu"), 0, 1, hf_config=hf_config
+        )
+
+    # Without the load's record, as on a model that lost it, the config names the checkpoint.
+    for recorded in ("_modelopt_unplaced_source_keys", "_modelopt_source_checkpoint"):
+        delattr(model, recorded)
+    assert _resolve_source(model, None).unplaced_keys == (STRAY,)
+
+
+def _rank_0_cannot_read_the_source_job(rank, size, ckpt):
+    read = model_load_utils.unplaced_source_keys
+
+    def unreadable_on_rank_0(*args, **kwargs):
+        if rank == 0:
+            raise OSError("a shard of the source is unreadable")
+        return read(*args, **kwargs)
+
+    raised = None
+    with (
+        bounded_collectives(),
+        mock.patch.object(model_load_utils, "unplaced_source_keys", unreadable_on_rank_0),
+    ):
+        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
+        # the shared worker down instead of failing this test alone.
+        try:
+            with ModelOptSession() as session:
+                load_pretrained(ckpt, distribution=DistributionPlan(size))
+        except (OSError, RuntimeError) as e:
+            raised = e
+    # Rank 0 raises its own error, and rank 1 one that names it; each leaves its session unbound.
+    assert raised is not None and "a shard of the source is unreadable" in str(raised), raised
+    assert not session.is_bound
+
+
+def test_every_rank_fails_a_load_whose_source_rank_0_cannot_read(cpu_dist_workers, tmp_path):
+    """Rank 0 reads the checkpoint for the source every rank's load records, so its failure there
+    must fail every rank, not leave the others waiting in their next collective."""
+    config = _tiny_llama_config()
+    _save(tmp_path, config, LlamaForCausalLM(config).state_dict())
+    cpu_dist_workers.run(_rank_0_cannot_read_the_source_job, ckpt=str(tmp_path))
+
+
+@contextmanager
+def _a_process_group_of_one(tmp_path):
+    """The process group the FSDP2 load shards over, of this one rank, unless one is set up."""
     owns_group = not torch.distributed.is_initialized()
     if owns_group:
         torch.distributed.init_process_group(
             "gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'group'}"
         )
     try:
-        sharded = parallel_load_and_prepare_fsdp2(str(tmp_path), torch.device("cpu"), 0, 1)
+        yield
     finally:
         if owns_group:
             torch.distributed.destroy_process_group()
-    assert sharded._modelopt_unplaced_source_keys == []
 
 
 @pytest.mark.parametrize(
@@ -267,9 +345,9 @@ def test_a_config_passed_for_the_load_needs_none_on_disk(
         passed = {"config": config}
     (weights / "generation_config.json").write_text("{}")  # from_pretrained reads it instead
 
-    model = _load(weights, model_type=model_type, **passed)
+    model, source = _load(weights, model_type=model_type, **passed)
 
-    assert model._modelopt_unplaced_source_keys == [STRAY]
+    assert list(source.unplaced_keys) == [STRAY]
 
 
 @pytest.mark.parametrize("model_type", [_OwnConfig.model_type, None], ids=["given", "read"])
@@ -280,9 +358,9 @@ def test_a_model_class_of_the_callers_own_reads_its_config_itself(tmp_path, mode
     config = _OwnConfig(**_tiny_llama_config().to_diff_dict())
     _save(tmp_path, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
 
-    model = _load(tmp_path, _OwnModel, model_type=model_type)
+    model, source = _load(tmp_path, _OwnModel, model_type=model_type)
 
-    assert model._modelopt_unplaced_source_keys == [STRAY]
+    assert list(source.unplaced_keys) == [STRAY]
     assert distribution_plan(model) == DistributionPlan()
 
 
@@ -301,9 +379,9 @@ def test_an_ignore_rule_does_not_hide_an_unplaced_tensor(tmp_path):
         tmp_path, config, {**LlamaForCausalLM(config).state_dict(), "mtp.fc.weight": torch.ones(2)}
     )
 
-    model = _load(tmp_path, IgnoresMtp)
+    model, source = _load(tmp_path, IgnoresMtp)
 
-    assert model._modelopt_unplaced_source_keys == ["mtp.fc.weight"]
+    assert list(source.unplaced_keys) == ["mtp.fc.weight"]
 
 
 def test_a_tensor_the_index_omits_is_recorded(tmp_path):
@@ -317,9 +395,9 @@ def test_a_tensor_the_index_omits_is_recorded(tmp_path):
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
     (tmp_path / "config.json").write_text(json.dumps(config.to_dict()))
 
-    model = _load(tmp_path)
+    model, source = _load(tmp_path)
 
-    assert model._modelopt_unplaced_source_keys == ["mtp.fc.weight"]
+    assert list(source.unplaced_keys) == ["mtp.fc.weight"]
 
 
 def test_experts_of_a_missing_layer_are_recorded_by_their_source_names(tmp_path):
@@ -353,9 +431,9 @@ def test_experts_of_a_missing_layer_are_recorded_by_their_source_names(tmp_path)
     weights = tmp_path / "model.safetensors"
     save_file({**load_file(str(weights)), **stray}, str(weights), metadata={"format": "pt"})
 
-    model = _load(tmp_path)
+    model, source = _load(tmp_path)
 
-    assert model._modelopt_unplaced_source_keys == sorted(stray)
+    assert list(source.unplaced_keys) == sorted(stray)
 
 
 def test_fp8_block_scales_folded_in_at_load_are_placed(tmp_path):
@@ -375,11 +453,11 @@ def test_fp8_block_scales_folded_in_at_load_are_placed(tmp_path):
     fp8 = {"quant_method": "fp8", "fmt": "e4m3", "activation_scheme": "dynamic"}
     _save(tmp_path, config, state, {**fp8, "weight_block_size": [128, 128]})
 
-    model = _load(
+    model, source = _load(
         tmp_path, quantization_config=FineGrainedFP8Config(dequantize=True), dtype=torch.bfloat16
     )
 
-    assert model._modelopt_unplaced_source_keys == [STRAY]
+    assert list(source.unplaced_keys) == [STRAY]
 
 
 def test_mxfp4_expert_blocks_folded_in_at_load_are_placed(tmp_path):
@@ -419,9 +497,11 @@ def test_mxfp4_expert_blocks_folded_in_at_load_are_placed(tmp_path):
     ]
     _save(tmp_path, config, state, {"quant_method": "mxfp4", "modules_to_not_convert": bf16})
 
-    model = _load(tmp_path, quantization_config=Mxfp4Config(dequantize=True), dtype=torch.bfloat16)
+    model, source = _load(
+        tmp_path, quantization_config=Mxfp4Config(dequantize=True), dtype=torch.bfloat16
+    )
 
-    assert model._modelopt_unplaced_source_keys == [STRAY]
+    assert list(source.unplaced_keys) == [STRAY]
 
 
 def test_compressed_experts_decompressed_at_load_are_placed(tmp_path, monkeypatch):
@@ -495,3 +575,66 @@ def test_compressed_experts_decompressed_at_load_are_placed(tmp_path, monkeypatc
 
     assert sorted(stored_as) == ["weight_packed", "weight_scale", "weight_shape"]
     assert model_load_utils.unplaced_source_keys(model, str(tmp_path)) == sorted(mtp)
+
+
+class _StepLikeConfig(PretrainedConfig):
+    # A later Step revision, which ModelOpt quantizes by its Step-family plugin.
+    model_type = "step9"
+
+    def __init__(self, hidden_size=16, num_experts=2, vocab_size=32, **kwargs):
+        self.hidden_size, self.num_experts, self.vocab_size = hidden_size, num_experts, vocab_size
+        super().__init__(**kwargs)
+
+
+class _ExpertIndexedLinear(torch.nn.Module):
+    """Step's MoELinear: one projection's experts in an expert-indexed 3-D weight."""
+
+    def __init__(self, num_experts, features):
+        super().__init__()
+        self.num_experts, self.in_features, self.out_features = num_experts, features, features
+        self.weight = torch.nn.Parameter(torch.randn(num_experts, features, features))
+
+    def forward(self, x, expert_id):
+        return torch.nn.functional.linear(x, self.weight[expert_id])
+
+
+class _StepLike(PreTrainedModel):
+    config_class = _StepLikeConfig
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.embed = torch.nn.Embedding(config.vocab_size, config.hidden_size)
+        self.up_proj = _ExpertIndexedLinear(config.num_experts, config.hidden_size)
+        self.lm_head = torch.nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.post_init()
+
+    def _init_weights(self, module):
+        pass
+
+    def forward(self, input_ids, **kwargs):
+        hidden = self.embed(input_ids)
+        return self.lm_head(sum(self.up_proj(hidden, i) for i in range(self.up_proj.num_experts)))
+
+
+@pytest.mark.parametrize(
+    "where", ["outside any session", "in the session", "after the session's block"]
+)
+def test_a_parameter_its_quantization_renames_is_not_carried_over_raw(tmp_path, where):
+    """The tensors the model has no parameter for are found at load time, from the model as loaded,
+    whether the workflow loads and exports in a session, outside any, or loads in one and exports
+    after it: found at export time instead, they would also name a parameter the quantization
+    renamed, as it splits Step's experts, and the export would write the raw tensor over the
+    quantized one."""
+    _StepLike(_StepLikeConfig(architectures=["_StepLike"])).save_pretrained(tmp_path / "source")
+    with nullcontext() if where == "outside any session" else ModelOptSession():
+        model = load_pretrained(str(tmp_path / "source"), _StepLike, device_map="cpu")
+        mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 32, (1, 4))))
+        if where != "after the session's block":
+            export_hf_checkpoint(model, export_dir=tmp_path / "export")
+    if where == "after the session's block":
+        export_hf_checkpoint(model, export_dir=tmp_path / "export")
+
+    weight = load_file(str(tmp_path / "export" / "model.safetensors"))["up_proj.weight"]
+    assert weight.dtype == torch.float8_e4m3fn
+    quantization = json.loads((tmp_path / "export" / "hf_quant_config.json").read_text())
+    assert "up_proj" not in quantization["quantization"].get("exclude_modules", [])

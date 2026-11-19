@@ -55,6 +55,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.diffusers_utils import (
     generate_diffusion_dummy_inputs,
+    get_diffusion_model_type,
     hide_quantizers_from_state_dict,
 )
 from modelopt.torch.export.unified_export_hf import _postprocess_safetensors, export_hf_checkpoint
@@ -734,3 +735,19 @@ def test_postprocess_default_is_noop(tmp_path):
         metadata = _read_safetensors_metadata(shard)
         assert "quantization_config" not in metadata
         assert "_quantization_metadata" not in metadata
+
+
+def test_diffusion_model_type_refuses_what_the_export_does_not_take(monkeypatch):
+    """LTX-2's pipeline, the one with a merge function, is typed and taken; a module has none."""
+
+    class FakeLTX2Pipeline:
+        pass
+
+    monkeypatch.setattr(
+        "modelopt.torch.export.diffusers_utils.TI2VidTwoStagesPipeline", FakeLTX2Pipeline
+    )
+    assert get_diffusion_model_type(FakeLTX2Pipeline()) == "ltx2"
+    with pytest.raises(ValueError):
+        get_diffusion_model_type(nn.Linear(1, 1))
+    with pytest.raises(TypeError):
+        get_diffusion_model_type("pipe")

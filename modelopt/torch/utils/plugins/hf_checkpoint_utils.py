@@ -31,6 +31,7 @@ import re
 import shutil
 import warnings
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -403,9 +404,9 @@ def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
 # both how we find them and how we move them, so it is worth keeping straight:
 #
 #   1. UNPLACED weights. The loader opened the file and read the tensor, but the model had no
-#      parameter for it -- an MTP head the recipe did not quantize is the common case. Recorded
-#      once at load time by ``record_unplaced_source_keys``. Moved as TENSORS: located in whichever
-#      shard holds them and merged into the exporter's ``extra_state_dict``.
+#      parameter for it -- an MTP head the recipe did not quantize is the common case. Worked out
+#      once at load time and returned in a ``SourceCheckpoint``. Moved as TENSORS: located in
+#      whichever shard holds them and merged into the exporter's ``extra_state_dict``.
 #      Found by: ``read_unplaced_weights`` / ``carryable_unplaced_keys`` / ``locate_source_keys``.
 #
 #   2. OFF-INDEX weight files. The index never names the file, so the loader never opened it --
@@ -420,8 +421,22 @@ def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
 #
 # Both sets must reach ``quantization_config.ignore``, or a deployment framework reads the
 # top-level ``quant_algo`` and tries to load an original-precision weight as a quantized one
-# (NVBug 5718750). ``_modelopt_carried_over_names`` is their union, recorded by the export once it
-# knows what it actually wrote.
+# (NVBug 5718750). The export works out their union once it knows what it actually wrote.
+
+
+@dataclass(frozen=True)
+class SourceCheckpoint:
+    """Where a loaded model came from, as its export needs to know.
+
+    ``path`` is the local checkpoint directory the weights were read from; ``unplaced_keys`` are its
+    tensors the model has no parameter for, such as an MTP head, which the export copies over
+    unchanged. A load works them out once, while it places the weights: ``load_pretrained`` records
+    it in the active ModelOpt session, and ``export_hf_checkpoint`` takes it from there.
+    """
+
+    path: str
+    unplaced_keys: tuple[str, ...] = ()
+
 
 # --- HF checkpoint layout: what counts as a file inside a checkpoint -------------------
 # A hub snapshot stores every entry as a symlink into a sibling ``blobs/`` directory, so
@@ -651,7 +666,7 @@ def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
     ``model.safetensors.index.json`` is not a complete inventory of the checkpoint. The loader sees
     the CONTENTS of each shard it opens, including a tensor the index omits -- an MTP head stored
     inside a main shard is exactly that case, and :func:`checkpoint_tensor_files` lists it among the
-    ``_modelopt_unplaced_source_keys`` like any other unplaced key. Resolving purely through
+    unplaced keys like any other (:class:`SourceCheckpoint`). Resolving purely through
     ``weight_map`` then finds no shard for it and drops it silently, which is the failure the
     carry-over exists to prevent.
 

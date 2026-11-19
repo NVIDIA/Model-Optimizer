@@ -15,6 +15,7 @@
 
 """Tests for tied-weight helpers in unified_export_hf."""
 
+import contextlib
 import importlib.util
 import json
 from copy import deepcopy
@@ -28,7 +29,7 @@ from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
 )
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import distributed_writer, unified_export_hf
@@ -46,14 +47,16 @@ from modelopt.torch.export.unified_export_hf import (
     _copy_non_model_files_from_source,
     _fuse_shared_input_modules,
     _resolve_export_dtype,
-    _source_checkpoint,
+    _resolve_source,
     _write_base_config,
     collect_shared_input_modules,
     export_hf_checkpoint,
     read_unplaced_weights,
 )
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import SourceCheckpoint
 
 
 def test_multimodal_detection_accepts_null_architectures():
@@ -670,10 +673,10 @@ def test_fuse_prequant_layernorm_fuses_and_removes_pre_quant_scale():
 # --- carrying over weights the loader could not place --------------------------------------------
 
 
-# ``read_unplaced_weights`` imports model_load_utils inside its try block, before it
-# looks at the recorded keys, and model_load_utils imports accelerate at module scope. With
-# accelerate absent every call raises ImportError, gets caught, warns and returns {} -- so these
-# tests would still "pass" while exercising none of the logic they name.
+# ``_resolve_source`` imports model_load_utils inside its try block to derive a model's keys, and
+# model_load_utils imports accelerate at module scope. With accelerate absent every derivation
+# raises ImportError, gets caught, warns and carries nothing -- so these tests would still "pass"
+# while exercising none of the logic they name.
 requires_accelerate = pytest.mark.skipif(
     importlib.util.find_spec("accelerate") is None,
     reason="carry-over goes through model_load_utils, which requires accelerate",
@@ -681,9 +684,9 @@ requires_accelerate = pytest.mark.skipif(
 
 
 class _ProvenanceModel(torch.nn.Module):
-    """A model carrying only what the carry-over reads: recorded keys and a source path."""
+    """A model carrying only what the carry-over reads off a model: the checkpoint it names."""
 
-    def __init__(self, keys=None, ckpt=None, name_or_path=None):
+    def __init__(self, name_or_path=None):
         super().__init__()
         self.lin = torch.nn.Linear(2, 2)
         # Sentinel already-placed weights this file's checkpoints use to stand in for "the
@@ -692,34 +695,49 @@ class _ProvenanceModel(torch.nn.Module):
         # whether the model has a matching parameter, not by which test wrote it).
         self.a = torch.nn.Linear(1, 1)
         self.other = torch.nn.Linear(1, 1)
-        if keys is not None:
-            self._modelopt_unplaced_source_keys = keys
-        if ckpt is not None:
-            self._modelopt_source_checkpoint = str(ckpt)
         if name_or_path is not None:
             self.config = SimpleNamespace(_name_or_path=str(name_or_path))
 
 
 @requires_accelerate
 def test_carry_over_returns_nothing_when_the_loader_placed_everything(tmp_path):
-    """A recorded empty list means the question was asked and answered -- do not re-derive.
+    """A source with no unplaced key means the question was asked and answered -- do not derive.
 
-    Deriving again would find the stray tensor, which the model has no parameter for, and carry it.
+    Deriving would find the stray tensor, which the model has no parameter for, and carry it.
     """
     save_file({"stray.weight": torch.zeros(2)}, str(tmp_path / "model.safetensors"))
-    model = _ProvenanceModel(keys=[], ckpt=tmp_path)
-    assert read_unplaced_weights(model) == {}
+    model = _ProvenanceModel(name_or_path=tmp_path)
+    assert read_unplaced_weights(_resolve_source(model, SourceCheckpoint(str(tmp_path)))) == {}
 
 
 @requires_accelerate
 def test_carry_over_returns_nothing_without_provenance():
-    assert read_unplaced_weights(_ProvenanceModel()) == {}
+    assert _resolve_source(_ProvenanceModel(), None) is None
+    assert read_unplaced_weights(None) == {}
 
 
 @requires_accelerate
 def test_carry_over_returns_nothing_for_a_hub_id_rather_than_a_local_path():
     """``_name_or_path`` is often a hub id; there is nothing on disk to re-read."""
-    assert read_unplaced_weights(_ProvenanceModel(name_or_path="org/Some-Model")) == {}
+    model = _ProvenanceModel(name_or_path="org/Some-Model")
+    assert read_unplaced_weights(_resolve_source(model, None)) == {}
+
+
+@requires_accelerate
+@pytest.mark.parametrize("recorded", [["model.mtp.weight"], []], ids=["a-key", "none"])
+def test_carry_over_reads_what_the_deprecated_recorder_recorded(tmp_path, recorded):
+    """The keys ``record_unplaced_source_keys`` recorded on a model, deprecated, and only those, are
+    carried from the checkpoint it recorded with them, though the model's ``_name_or_path`` is a
+    Hub ID: a record of none carries none, as a loader that placed everything records."""
+    # Local import: model_load_utils imports transformers and accelerate, optional dependencies.
+    from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
+
+    save_file({"model.mtp.weight": torch.full((2,), 7.0)}, str(tmp_path / "model.safetensors"))
+    model = _ProvenanceModel(name_or_path="org/Some-Model")
+    with pytest.deprecated_call():
+        record_unplaced_source_keys(model, str(tmp_path), keys=recorded)
+
+    assert list(read_unplaced_weights(_resolve_source(model, None))) == recorded
 
 
 @requires_accelerate
@@ -728,9 +746,7 @@ def test_carry_over_reads_the_recorded_keys_off_disk(tmp_path):
         {"kept.weight": torch.arange(4, dtype=torch.float32), "other.weight": torch.zeros(2)},
         str(tmp_path / "model.safetensors"),
     )
-    model = _ProvenanceModel(keys=["kept.weight"], ckpt=tmp_path)
-
-    carried = read_unplaced_weights(model)
+    carried = read_unplaced_weights(SourceCheckpoint(str(tmp_path), ("kept.weight",)))
 
     assert list(carried) == ["kept.weight"]
     assert torch.equal(carried["kept.weight"], torch.arange(4, dtype=torch.float32))
@@ -739,18 +755,16 @@ def test_carry_over_reads_the_recorded_keys_off_disk(tmp_path):
 @requires_accelerate
 def test_carry_over_warns_and_keeps_the_export_alive_when_the_checkpoint_is_unreadable(tmp_path):
     """Best-effort: the rest of the weights are already correct, so this must not abort the export."""
-    model = _ProvenanceModel(keys=["kept.weight"], ckpt=tmp_path / "does-not-exist")
+    source = SourceCheckpoint(str(tmp_path / "does-not-exist"), ("kept.weight",))
     with pytest.warns(UserWarning, match="Could not copy"):
-        assert read_unplaced_weights(model) == {}
+        assert read_unplaced_weights(source) == {}
 
 
 @requires_accelerate
 def test_carry_over_handler_survives_failing_before_the_keys_are_known(tmp_path, monkeypatch):
-    """The failure can land while ``keys`` is still None, and the handler must not throw itself.
+    """A model exported without its source has its keys derived, and the derivation can fail.
 
-    Nothing was recorded here, so the keys are derived from provenance -- and that derivation is
-    what fails. Counting the keys unconditionally in the warning would raise TypeError from inside
-    the very handler that exists to keep the export standing.
+    The export must still stand, carrying nothing, with a warning that says why.
     """
     from modelopt.torch.utils.plugins import model_load_utils
 
@@ -763,11 +777,10 @@ def test_carry_over_handler_survives_failing_before_the_keys_are_known(tmp_path,
     (tmp_path / "model.safetensors.index.json").write_text('{"weight_map": {}}')
     model = _ProvenanceModel(name_or_path=tmp_path)
 
-    # Deliberately not "could not copy N weights": with nothing recorded we do not know that
-    # anything is missing, only that we could not check. What must hold is that the handler does
-    # not throw from inside itself.
+    # Deliberately not "could not copy N weights": with no source passed we do not know that
+    # anything is missing, only that we could not check.
     with pytest.warns(UserWarning, match="Could not derive unplaced source keys"):
-        assert read_unplaced_weights(model) == {}
+        assert read_unplaced_weights(_resolve_source(model, None)) == {}
 
 
 def test_carry_over_is_quiet_for_a_checkpoint_with_no_safetensors(tmp_path, recwarn):
@@ -779,7 +792,7 @@ def test_carry_over_is_quiet_for_a_checkpoint_with_no_safetensors(tmp_path, recw
     (tmp_path / "pytorch_model.bin").write_bytes(b"not safetensors")
     model = _ProvenanceModel(name_or_path=tmp_path)
 
-    assert read_unplaced_weights(model) == {}
+    assert read_unplaced_weights(_resolve_source(model, None)) == {}
     assert [w for w in recwarn if "Could not copy" in str(w.message)] == []
 
 
@@ -801,8 +814,8 @@ def test_carry_over_is_quiet_without_the_loader_dependencies(tmp_path, monkeypat
     (tmp_path / "pytorch_model.bin").write_bytes(b"not safetensors")
     model = _ProvenanceModel(name_or_path=tmp_path)
 
-    assert read_unplaced_weights(model) == {}
-    assert [w for w in recwarn if "Could not copy" in str(w.message)] == []
+    assert read_unplaced_weights(_resolve_source(model, None)) == {}
+    assert [w for w in recwarn if "Could not" in str(w.message)] == []
 
 
 def test_carryable_unplaced_keys_skips_keys_no_shard_backs(tmp_path):
@@ -816,20 +829,21 @@ def test_carryable_unplaced_keys_skips_keys_no_shard_backs(tmp_path):
     (tmp_path / "model.safetensors.index.json").write_text(
         '{"weight_map": {"model.mtp.eh_proj.weight": "mtp-0001.safetensors"}}'
     )
-    model = _ProvenanceModel(name_or_path=tmp_path)
-    model._modelopt_source_checkpoint = str(tmp_path)
-    model._modelopt_unplaced_source_keys = [
-        "model.mtp.eh_proj.weight",  # a shard has it -- losing it matters
-        "model.layers.0.self_attn.rotary_emb.inv_freq",  # nothing backs it
-    ]
-    assert carryable_unplaced_keys(model) == ["model.mtp.eh_proj.weight"]
+    source = SourceCheckpoint(
+        str(tmp_path),
+        (
+            "model.mtp.eh_proj.weight",  # a shard has it -- losing it matters
+            "model.layers.0.self_attn.rotary_emb.inv_freq",  # nothing backs it
+        ),
+    )
+    assert carryable_unplaced_keys(source) == ["model.mtp.eh_proj.weight"]
 
 
 def test_carryable_unplaced_keys_is_quiet_when_nothing_was_recorded():
     """No provenance, no answer -- and no exception from a diagnostic helper."""
     from modelopt.torch.export.unified_export_hf import carryable_unplaced_keys
 
-    assert carryable_unplaced_keys(torch.nn.Module()) == []
+    assert carryable_unplaced_keys(None) == []
 
 
 def test_carryable_unplaced_keys_works_without_the_loader_dependencies(tmp_path, monkeypatch):
@@ -850,22 +864,19 @@ def test_carryable_unplaced_keys_works_without_the_loader_dependencies(tmp_path,
     (tmp_path / "model.safetensors.index.json").write_text(
         '{"weight_map": {"model.mtp.eh_proj.weight": "mtp-0001.safetensors"}}'
     )
-    model = _ProvenanceModel(name_or_path=tmp_path)
-    model._modelopt_source_checkpoint = str(tmp_path)
-    model._modelopt_unplaced_source_keys = [
-        "model.mtp.eh_proj.weight",
-        "model.layers.0.self_attn.rotary_emb.inv_freq",
-    ]
-    assert carryable_unplaced_keys(model) == ["model.mtp.eh_proj.weight"]
+    source = SourceCheckpoint(
+        str(tmp_path), ("model.mtp.eh_proj.weight", "model.layers.0.self_attn.rotary_emb.inv_freq")
+    )
+    assert carryable_unplaced_keys(source) == ["model.mtp.eh_proj.weight"]
 
 
 def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
-    """The layerwise fix depends on an ordering: record the carried set, THEN call finalize().
+    """The layerwise fix depends on an ordering: work out the carried set, THEN call finalize().
 
     LayerwiseExporter.bind() snapshots its quant config during calibration, so finalize() is the
-    only point where it can learn what the export carried. If export_hf_checkpoint ever records
-    _modelopt_carried_over_names after dispatching to the exporter -- or stops recording it on
-    that path -- the sidecar exclusions silently go missing again, with nothing else to catch it.
+    only point where it can learn what the export carried. If export_hf_checkpoint ever hands the
+    carried names over after dispatching to the exporter -- or stops handing them on that path --
+    the sidecar exclusions silently go missing again, with nothing else to catch it.
     """
     from modelopt.torch.export import unified_export_hf as uehf
     from modelopt.torch.export.layerwise_export import LAYERWISE_EXPORTER_ATTR
@@ -875,8 +886,8 @@ def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
     class _Exporter:
         export_dir = tmp_path
 
-        def finalize(self, extra_state_dict=None):
-            seen["keys"] = getattr(model, "_modelopt_carried_over_names", "<unset>")
+        def finalize(self, extra_state_dict=None, carried_over_names=()):
+            seen["keys"] = carried_over_names
             return {}
 
     model = torch.nn.Module()
@@ -889,7 +900,7 @@ def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
     uehf.export_hf_checkpoint(model, export_dir=tmp_path)
 
     assert seen["keys"] == ["model.mtp.eh_proj.weight"], (
-        f"finalize() saw {seen['keys']!r}; the carried set must be recorded before dispatch"
+        f"finalize() saw {seen['keys']!r}; the carried set must be handed to it"
     )
 
 
@@ -913,21 +924,23 @@ def test_export_writes_the_off_index_safetensors(tmp_path, monkeypatch):
     )
     save_file({"model.mtp.eh_proj.weight": torch.ones(2)}, str(ckpt / "mtp.safetensors"))
 
+    carried = {}
+
     class _Exporter:
         export_dir = export
 
-        def finalize(self, extra_state_dict=None):
+        def finalize(self, extra_state_dict=None, carried_over_names=()):
+            carried["names"] = carried_over_names
             return {}
 
     model = _ProvenanceModel(name_or_path=ckpt)
-    model._modelopt_source_checkpoint = str(ckpt)
     setattr(model, LAYERWISE_EXPORTER_ATTR, _Exporter())
     monkeypatch.setattr(uehf, "read_unplaced_weights", lambda m, **kw: {})
 
     uehf.export_hf_checkpoint(model, export_dir=tmp_path / "elsewhere")
 
     assert sorted(p.name for p in export.iterdir()) == ["mtp.safetensors"]
-    assert model._modelopt_carried_over_names == ["model.mtp.eh_proj.weight"]
+    assert carried["names"] == ["model.mtp.eh_proj.weight"]
 
 
 def test_exporters_copy_non_model_files_from_a_local_source(tmp_path):
@@ -939,31 +952,62 @@ def test_exporters_copy_non_model_files_from_a_local_source(tmp_path):
     (ckpt / "tokenizer.json").write_text("{}")
     (ckpt / "model.safetensors").write_text("weights")
 
-    uehf._copy_non_model_files_from_source(_ProvenanceModel(name_or_path=ckpt), export)
+    uehf._copy_non_model_files_from_source(SourceCheckpoint(str(ckpt)), export)
 
     assert sorted(p.name for p in export.iterdir()) == ["tokenizer.json"]
 
 
-def test_export_hf_checkpoint_copies_the_source_non_model_files(tmp_path):
-    """The regular (non-streaming, non-layerwise) path copies them after save_pretrained."""
+@pytest.mark.parametrize("given", ["named", "session"])
+def test_export_hf_checkpoint_copies_the_source_non_model_files(tmp_path, given):
+    """The regular (non-streaming, non-layerwise) path copies them after save_pretrained, from the
+    source the workflow's session holds, else from the checkpoint the model names, and carries
+    from it, unchanged, its tensors the model has no parameter for, such as an MTP head."""
+    # Local import: transformers and its test fixtures are optional dependencies.
     from _test_utils.torch.transformers_models import create_tiny_llama_dir
     from transformers import AutoModelForCausalLM
 
-    from modelopt.torch.export import export_hf_checkpoint
-
     source = create_tiny_llama_dir(tmp_path)
+    mtp = "model.mtp.eh_proj.weight"
+    tensors = load_file(str(source / "model.safetensors"))
+    save_file({**tensors, mtp: torch.full((2, 2), 7.0)}, str(source / "model.safetensors"))
     (source / "README.md").write_text("# source\n")
     (source / "assets").mkdir()
     (source / "assets" / "notes.txt").write_text("asset\n")
     model = AutoModelForCausalLM.from_pretrained(source)
     export = tmp_path / "export"
+    # A checkpoint with nothing to copy, which the session's source must win over.
+    (tmp_path / "decoy").mkdir()
+    if given == "session":
+        model.config._name_or_path = str(tmp_path / "decoy")
+    session = (
+        ModelOptSession(source=SourceCheckpoint(str(source), (mtp,)))
+        if given == "session"
+        else None
+    )
 
-    export_hf_checkpoint(model, export_dir=export)
+    with session or contextlib.nullcontext():
+        export_hf_checkpoint(model, export_dir=export)
+        if session is not None:
+            # The export's steps found its context in the workflow's ModelOpt session, which lets it
+            # go with the export: it holds the model, which the ModelOpt session must not keep alive.
+            assert session.runtime.export_context is None
+            # The export bound the session to the model, which read the model's type there, where
+            # its steps and handlers read it.
+            assert session.model_type == "llama"
 
+    exported = {}
+    for shard in export.glob("*.safetensors"):
+        exported.update(load_file(str(shard)))
+    assert torch.equal(exported[mtp], torch.full((2, 2), 7.0))
     assert (export / "README.md").read_text() == "# source\n"
     assert (export / "assets" / "notes.txt").read_text() == "asset\n"
     # The export's own config, not the source's.
     assert (export / "config.json").read_text() != (source / "config.json").read_text()
+
+
+def test_export_hf_checkpoint_refuses_what_is_neither_a_module_nor_a_pipeline(tmp_path):
+    with pytest.raises(TypeError, match="diffusion pipeline"):
+        export_hf_checkpoint(object(), export_dir=tmp_path)
 
 
 def test_exporters_warn_rather_than_fetch_for_a_hub_source(tmp_path, monkeypatch):
@@ -977,7 +1021,7 @@ def test_exporters_warn_rather_than_fetch_for_a_hub_source(tmp_path, monkeypatch
     monkeypatch.setattr(hf_checkpoint_utils, "snapshot_download", fail)
 
     with pytest.warns(UserWarning, match="ensure_local_checkpoint"):
-        uehf._copy_non_model_files_from_source(_ProvenanceModel(name_or_path="org/model"), tmp_path)
+        uehf._copy_non_model_files_from_source(SourceCheckpoint("org/model"), tmp_path)
     assert list(tmp_path.iterdir()) == []
 
 
@@ -985,7 +1029,7 @@ def test_carries_a_key_the_index_does_not_list(tmp_path):
     """A tensor inside a main shard but absent from weight_map must still be carried.
 
     model.safetensors.index.json is not a complete inventory. The loader sees the contents of each
-    shard it opens, so such a tensor is recorded in _modelopt_unplaced_source_keys like any other
+    shard it opens, so such a tensor is among the source's unplaced keys like any other
     -- but resolving the file purely through weight_map finds
     nothing and used to drop it silently, with the --vllm_fakequant_export guard staying quiet
     too because it shared that lookup. An MTP head stored in a main shard is exactly this shape:
@@ -1006,16 +1050,14 @@ def test_carries_a_key_the_index_does_not_list(tmp_path):
         '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
     )
 
-    model = _ProvenanceModel(name_or_path=tmp_path)
-    model._modelopt_source_checkpoint = str(tmp_path)
-    model._modelopt_unplaced_source_keys = [extra]
+    source = SourceCheckpoint(str(tmp_path), (extra,))
 
-    carried = read_unplaced_weights(model)
+    carried = read_unplaced_weights(source)
     assert extra in carried, f"un-indexed key dropped from the export: {sorted(carried)}"
     assert torch.equal(carried[extra], torch.full((2,), 7.0))
 
     # The guard must see it too, or it stays silent on the very weights that would be lost.
-    assert carryable_unplaced_keys(model) == [extra]
+    assert carryable_unplaced_keys(source) == [extra]
 
 
 def test_warns_when_a_recorded_key_is_in_no_shard(tmp_path):
@@ -1029,20 +1071,18 @@ def test_warns_when_a_recorded_key_is_in_no_shard(tmp_path):
     (tmp_path / "model.safetensors.index.json").write_text(
         '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
     )
-    model = _ProvenanceModel(name_or_path=tmp_path)
-    model._modelopt_source_checkpoint = str(tmp_path)
-    model._modelopt_unplaced_source_keys = ["ghost.weight"]
+    source = SourceCheckpoint(str(tmp_path), ("ghost.weight",))
 
     with pytest.warns(UserWarning, match="in no safetensors file"):
-        assert read_unplaced_weights(model) == {}
+        assert read_unplaced_weights(source) == {}
 
 
 def test_carry_over_works_without_the_loader_dependencies(tmp_path, monkeypatch):
-    """Recorded keys must carry where transformers/accelerate are absent.
+    """A source's keys must carry where transformers/accelerate are absent.
 
-    Only deriving the keys of an unrecorded model needs model_load_utils. Importing it
-    unconditionally made the recorded-keys path -- which needs nothing from it -- fail in the
-    partial-install environments,
+    Only deriving the keys of a model exported without its source needs model_load_utils.
+    Importing it unconditionally made the explicit path -- which needs nothing from it -- fail in
+    the partial-install environments,
     where the handler reported "could not copy" and dropped every carried weight. The sibling test
     pins this for carryable_unplaced_keys; this pins the carry itself, which is what actually writes.
     """
@@ -1062,19 +1102,16 @@ def test_carry_over_works_without_the_loader_dependencies(tmp_path, monkeypatch)
         '{"weight_map": {"model.mtp.eh_proj.weight": "model-00001-of-00001.safetensors"}}'
     )
 
-    model = _ProvenanceModel(name_or_path=tmp_path)
-    model._modelopt_source_checkpoint = str(tmp_path)
-    model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
-
-    carried = read_unplaced_weights(model)
-    assert "model.mtp.eh_proj.weight" in carried, "recorded keys must not need the loader imports"
+    carried = read_unplaced_weights(SourceCheckpoint(str(tmp_path), ("model.mtp.eh_proj.weight",)))
+    assert "model.mtp.eh_proj.weight" in carried, "a source's keys must not need the loader imports"
 
 
-def test_an_unrecorded_model_derives_its_unplaced_keys_once(tmp_path, monkeypatch):
-    """A model loaded without ModelOpt's loaders has no record: the export derives it, once.
+def test_a_model_exported_without_its_source_derives_its_unplaced_keys_once(tmp_path, monkeypatch):
+    """Exported without the source its load returned, a model's keys are derived, once.
 
     Its MTP head must not drop out of the export silently, but nothing should work the list out
-    twice either: the derivation is recorded, and every later reader reads the record.
+    twice either: the export resolves the source once and hands it on, recording nothing on the
+    model.
     """
     pytest.importorskip("transformers")
     from modelopt.torch.export.unified_export_hf import read_unplaced_weights
@@ -1093,11 +1130,13 @@ def test_an_unrecorded_model_derives_its_unplaced_keys_once(tmp_path, monkeypatc
     )
     model = _ProvenanceModel(name_or_path=tmp_path)
 
+    source = _resolve_source(model, None)
     for _ in range(2):
-        carried = read_unplaced_weights(model)
+        carried = read_unplaced_weights(source)
         assert torch.equal(carried[mtp], torch.full((2,), 5.0))
-    assert derived_from == [str(tmp_path)], "derived once, then read back"
-    assert model._modelopt_unplaced_source_keys == [mtp]
+    assert derived_from == [str(tmp_path)], "derived once, then handed on"
+    assert source.unplaced_keys == (mtp,)
+    assert not hasattr(model, "_modelopt_unplaced_source_keys")
 
 
 def test_source_checkpoint_is_none_for_a_model_built_from_config(tmp_path, monkeypatch):
@@ -1111,9 +1150,9 @@ def test_source_checkpoint_is_none_for_a_model_built_from_config(tmp_path, monke
     export_dir = tmp_path / "export"
     export_dir.mkdir()
 
-    _copy_non_model_files_from_source(model, export_dir)
+    _copy_non_model_files_from_source(_resolve_source(model, None), export_dir)
 
-    assert _source_checkpoint(model) is None
+    assert _resolve_source(model, None) is None
     assert not any(export_dir.iterdir())
 
 
@@ -1140,9 +1179,9 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
     swapped_plan = {"layers.*.feed_forward.experts": "torch_a2a_experts"}
     config.distributed_config = distributed_config
     config.text_config.base_model_ep_plan = swapped_plan
-    model = SimpleNamespace(config=config, _modelopt_source_checkpoint=str(source))
+    model = SimpleNamespace(config=config)
 
-    _write_base_config(model, tmp_path / "export")
+    _write_base_config(model, tmp_path / "export", SourceCheckpoint(str(source)))
 
     written = json.loads((tmp_path / "export" / "config.json").read_text())
     assert written == json.loads((tmp_path / "single_gpu" / "config.json").read_text())
@@ -1227,7 +1266,7 @@ def _one_rank_fails_processing_job(rank, size, tmp_dir):
     set_distribution_plan(model, DistributionPlan(size, ep_size=size))
     failure = NotImplementedError("rank 1's experts mix quantized and unquantized ones")
 
-    def process(*args):
+    def process(*args, **kwargs):
         if rank == 1:
             raise failure
         return {}
