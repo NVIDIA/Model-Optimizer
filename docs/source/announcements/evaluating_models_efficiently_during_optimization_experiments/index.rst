@@ -337,8 +337,10 @@ p < 0.01 at 3,000 responses and p < 0.001 at 12,000 per model among the tested s
 Test known weaknesses on a focused subset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Freeze a subset from earlier baseline failures to screen for targeted improvements. We report the 11
-held-out subtasks, with ten matched repetitions—110 responses per model.
+Freeze a subset from earlier baseline failures to screen for targeted improvements. Our focused
+subset uses 11 held-out subtasks × 10 repetitions (110 responses per model). For comparison, the
+SciCode row shows the broader evaluation: 294 subtasks × 20 repetitions (5,880 responses per model).
+
 “Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05); “no evidence” means a lower
 rate was not established.
 
