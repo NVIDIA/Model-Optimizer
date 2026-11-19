@@ -125,15 +125,15 @@ examples = mcp__modelopt__list_examples()
 # 2. Pre-flight check before submission
 mcp__modelopt__verify_setup(
     executor="slurm",
-    cluster_host="cw-dfw-cs-001-login-01.nvidia.com",
+    cluster_host="login.cluster.example.com",
     cluster_user="alice",
 )
-# {"ok": True, "ssh_ok": True, "whoami": "alice", "remote_hostname": "cw-dfw-cs-001-login-01"}
+# {"ok": True, "ssh_ok": True, "whoami": "alice", "remote_hostname": "login"}
 
 # 3. Submit
 result = mcp__modelopt__submit_job(
     yaml_path="launcher/examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml",
-    cluster_host="cw-dfw-cs-001-login-01.nvidia.com",
+    cluster_host="login.cluster.example.com",
     cluster_user="alice",
     identity="/home/alice/.ssh/id_ed25519",
     skip_verify=True,  # we just probed
