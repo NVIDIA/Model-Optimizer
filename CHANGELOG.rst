@@ -28,6 +28,7 @@ Changelog
 
 - Add a sub-4-bit AutoQuantize recipe for Qwen3.6-35B-A3B at 2.75 bits, which searches the routed experts over GGML IQ2 formats with GPTQ and imatrix, weight-only NVFP4 and FP8, and BF16. Select it under ``models/Qwen/Qwen3.6-35B-A3B/auto_quantize/``.
 - The streaming Kimi-K3 converter (``examples/kimi/kimi_k3/quantize_to_nvfp4.py``) now resolves each module's format from the recipe's ``quant_cfg`` and rejects layouts it cannot write. Add the checkpoint-mirror recipe for ``nvidia/Kimi-K3.1-Pro-NVFP4`` under ``models/moonshotai/Kimi-K3.1-Pro/ptq/``.
+- ``general/ptq/nvfp4_default-kv_none-gptq`` now collects GPTQ's Hessians from bfloat16 inputs, with the same or lower per-weight error, and the fused NVFP4 GPTQ update (``fused: true``) runs its kernel 2-3x faster. With the fused update, GPTQ on Qwen3.8-27B took 4.3 instead of 11.2 minutes and on Qwen3-8B 20% less time; MoEs with narrow experts change little. Set ``hessian_input_dtype: float32`` for the previous Hessians.
 
 *Speculative Decoding*
 
@@ -50,6 +51,7 @@ Changelog
 - NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 - Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
+- Calibration of a model spread over several GPUs no longer fails with an illegal memory access under ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``: clearing the CUDA cache now waits for every GPU's queued work first.
 
 *ONNX*
 
