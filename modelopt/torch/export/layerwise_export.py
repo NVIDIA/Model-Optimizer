@@ -186,8 +186,6 @@ class LayerwiseExporter:
         self._dtype = dtype
         self._bound = False
         self._finalized = False
-        # The export bind() starts, which finalize() ends.
-        self._export = contextlib.ExitStack()
         self._source_key_snapshot: tuple[str, list[str]] | None = None
         self._announced_on: list[nn.Module] = []
         # A VLM calibrates its language model but exports the whole thing, so announce on
@@ -216,8 +214,8 @@ class LayerwiseExporter:
         """Validate the model and snapshot what the tail pass needs.
 
         Called from calibration, after quantizer insertion and before any layer is converted
-        -- the only window where both hold. The active ModelOpt session holds this export's context
-        from here until the export that finalizes it ends.
+        -- the only window where both hold. It makes the export's context here, which the active
+        ModelOpt session holds as the export in progress while a layer, or the tail, is exported.
         """
         if self._bound:
             return
@@ -281,12 +279,11 @@ class LayerwiseExporter:
         if source and Path(source).is_dir():
             self._source_key_snapshot = (str(source), unplaced_keys_for(model, source))
 
-        # The export's one context, for every layer and the tail, started once nothing here can
-        # fail: the active ModelOpt session holds it from here until finalize() ends the export,
-        # where its steps and handlers find it.
-        self._ctx = self._export.enter_context(
-            _start_export(model, _resolve_export_dtype(model, self._dtype))
-        )
+        # The export's one context, for every layer and the tail, made once nothing here can fail.
+        # The exporter keeps it, and a session holds it only while the exporter writes
+        # (_resumed), so none is left holding an export a calibration never finishes.
+        with _start_export(model, _resolve_export_dtype(model, self._dtype)) as ctx:
+            self._ctx = ctx
         self._bound = True
 
     def export_layer(
@@ -389,17 +386,12 @@ class LayerwiseExporter:
         if self._finalized:
             raise RuntimeError("finalize() called twice; the checkpoint is already written.")
         self._finalized = True
-        # The export ends here, however finalizing ends.
-        with self._export, self._resumed():
+        with self._resumed():
             return self._finalize(extra_state_dict)
 
     @contextlib.contextmanager
     def _resumed(self) -> Generator[None, None, None]:
-        """This export, as the export in progress in the active ModelOpt session, for the block.
-
-        A calibration made in a session of its own started it in that session, so the export that
-        finalizes it, in another, finds it there only for the block.
-        """
+        """This export, as the export in progress in the active ModelOpt session, for the block."""
         runtime = ModelOptSession.active().runtime
         if runtime.export_context is self._ctx:
             yield

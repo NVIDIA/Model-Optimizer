@@ -940,48 +940,33 @@ def _resolve_export_dtype(model: nn.Module, dtype: torch.dtype | None) -> torch.
     return dtype
 
 
+@contextlib.contextmanager
 def _start_export(
     model: nn.Module,
     dtype: torch.dtype,
     is_modelopt_qlora: bool = False,
     **fields: Any,
-) -> "_Export":
+) -> Generator[ExportContext, None, None]:
     """One export of ``model`` in the active ModelOpt session, for a ``with`` block.
 
-    The block gets the export's context (:class:`ExportContext`), which the workflow's session holds
-    while the block runs, so the export's steps and handlers share what it holds, such as
-    ``model``'s name maps, and the model's type, which the workflow's session read when binding it.
-    The export ends with the block, which gives the workflow back what it held before.
+    The block gets the export's context (:class:`ExportContext`), which the session holds while the
+    block runs, so the export's steps and handlers share what it holds, such as ``model``'s name
+    maps, and the model's type, read from the model's binding. The export ends with the block, which
+    gives the session back what it held before.
     """
-    return _Export(
-        ExportContext(
-            model=model,
-            dtype=dtype,
-            is_modelopt_qlora=is_modelopt_qlora,
-            model_type=ModelOptSession.active().binding(model).model_type,
-            **fields,
-        )
+    export_context = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=ModelOptSession.active().binding(model).model_type,
+        **fields,
     )
-
-
-class _Export:
-    """An export :func:`_start_export` started, which runs for a ``with`` block.
-
-    An object rather than a generator: a layerwise exporter holds its export from calibration to the
-    export, and the model holding the exporter can still be copied or pickled.
-    """
-
-    def __init__(self, export_context: ExportContext) -> None:
-        self._export_context = export_context
-
-    def __enter__(self) -> ExportContext:
-        self._runtime = ModelOptSession.active().runtime
-        self._held = self._runtime.export_context
-        self._runtime.export_context = self._export_context
-        return self._export_context
-
-    def __exit__(self, *exc_info: object) -> None:
-        self._runtime.export_context = self._held
+    runtime = ModelOptSession.active().runtime
+    held, runtime.export_context = runtime.export_context, export_context
+    try:
+        yield export_context
+    finally:
+        runtime.export_context = held
 
 
 def _prepare_moe_inputs(model: nn.Module) -> None:

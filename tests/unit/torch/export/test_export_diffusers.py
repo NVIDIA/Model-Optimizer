@@ -250,7 +250,7 @@ def test_export_diffusers_refuses_uncalibrated_static_inputs(
             export_hf_checkpoint(pipe, export_dir=export_dir)
         assert not any(export_dir.glob("*"))
     else:
-        with ModelOptSession() as session:
+        with ModelOptSession().bind(pipe) as session:
             export_hf_checkpoint(pipe, export_dir=export_dir)
             # Each component's export ran in the workflow's session and ended with the component.
             assert session.runtime.export_context is None

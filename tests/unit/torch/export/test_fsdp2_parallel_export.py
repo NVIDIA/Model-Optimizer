@@ -192,9 +192,8 @@ def test_collect_export_tensors_runs_its_own_export_in_the_active_session():
     """Outside an export, the collector's own export runs in the caller's session and ends there."""
     model = _tiny_quantized_llama()
 
-    with ModelOptSession() as session:
+    with ModelOptSession().bind(model) as session:
         owned = collect_export_tensors(model, torch.bfloat16, False, owner="rank0")
-        assert session.model is model
         assert session.runtime.export_context is None
 
     assert owned

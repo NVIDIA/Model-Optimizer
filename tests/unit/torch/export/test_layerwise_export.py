@@ -29,29 +29,28 @@ from _test_utils.torch.transformers_models import get_tiny_llama
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import layerwise_export
 from modelopt.torch.export.layerwise_export import LAYERWISE_EXPORTER_ATTR, LayerwiseExporter
-from modelopt.torch.export.registry import ExportContext
 from modelopt.torch.opt import ModelOptSession
 
 
 def test_a_layerwise_export_runs_in_the_workflows_modelopt_session(tmp_path):
-    """The exporter's binding starts its export in the workflow's session, with the type of the
-    model the checkpoint describes, read from that model's binding: a workflow's session bound only
-    to the calibrated part refuses the export, while code that opens no session reads the whole
-    model's type off it."""
+    """The exporter's binding makes its export's context with the type of the model the checkpoint
+    describes, read from that model's binding: a workflow's session bound only to the calibrated part
+    refuses the export, while code that opens no session reads the whole model's type off it. No
+    session holds the export once the binding returns."""
     model = get_tiny_llama(num_hidden_layers=1)
     # A part with a type of its own, as a VLM's language model has.
     model.model.config = copy.deepcopy(model.config)
     model.model.config.model_type = "llama_text"
-    with ModelOptSession().bind(model):
-        LayerwiseExporter(model, tmp_path).bind(list(model.model.layers))
+    with ModelOptSession().bind(model) as session:
+        exporter = LayerwiseExporter(model, tmp_path)
+        exporter.bind(list(model.model.layers))
+        assert exporter._ctx.model is model and exporter._ctx.model_type == "llama"
+        assert session.runtime.export_context is None
 
-        # From the binding, the workflow's session holds the layerwise export's context, with the
-        # whole model's type.
-        assert ExportContext.current().model is model
-        assert ExportContext.current().model_type == "llama"
-
-    LayerwiseExporter(model, tmp_path / "default").bind(list(model.model.layers))
-    assert ExportContext.current().model_type == "llama"
+    exporter = LayerwiseExporter(model, tmp_path / "default")
+    exporter.bind(list(model.model.layers))
+    assert exporter._ctx.model_type == "llama"
+    assert ModelOptSession.active().runtime.export_context is None
 
     with (
         ModelOptSession().bind(model.model),

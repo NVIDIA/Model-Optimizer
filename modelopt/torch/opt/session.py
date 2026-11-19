@@ -76,8 +76,7 @@ class RunState:
 
     ``export_context`` is the :class:`~modelopt.torch.export.registry.ExportContext` of the export
     in progress. The export keeps it here from its setup until it ends, and each of its steps and
-    handlers gets it here. A layerwise export's is here from the exporter's binding, before
-    calibration, until the export that finalizes it ends.
+    handlers gets it here. A layerwise export's is here while it writes a layer, or the tail.
     """
 
     export_context: "ExportContext | None" = None
