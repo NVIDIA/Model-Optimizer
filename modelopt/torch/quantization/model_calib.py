@@ -42,7 +42,7 @@ from modelopt.torch.quantization.utils.layerwise_calib import (
     _OutsideQuantizerCalibrator,
     _reconcile_export_with_resume,
 )
-from modelopt.torch.utils import print_rank_0, warn_rank_0
+from modelopt.torch.utils import clear_cuda_cache, print_rank_0, warn_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
 from modelopt.torch.utils.distributed import is_initialized as dist_is_initialized
 from modelopt.torch.utils.distributed import size as dist_size
@@ -1491,8 +1491,7 @@ def local_hessian_calibrate(
         model._local_hessian_accumulators = accumulators
     else:
         accumulators.clear()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    clear_cuda_cache()
 
     print_rank_0("local_hessian: Calibration complete.")
 
@@ -2611,7 +2610,7 @@ def layerwise_calibrate(
 
             layer_pbar.update(1)
             del layer_inputs
-            torch.cuda.empty_cache()
+            clear_cuda_cache()
             layer_inputs = next_inputs  # noqa: F841 (used in next iteration's closure)
     finally:
         input_getter._unpatch_all_layers()
@@ -2872,8 +2871,7 @@ def gptq(
             )
     del gptq_handles, expert_handles
 
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    clear_cuda_cache()
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
 
 

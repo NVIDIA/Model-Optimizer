@@ -35,13 +35,14 @@ import torch
 import torch.nn as nn
 
 from modelopt.torch.opt.searcher import ForwardLoop
-from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import (
+    clear_cuda_cache,
     get_available_gpu_memory,
     get_process_gpus,
     print_rank_0,
     warn_rank_0,
 )
+from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.network import (
     bind_forward_method,
@@ -678,7 +679,7 @@ def _layer_batch_fit(
         args = kwargs = None
     if two is None:
         # One sample fits but two do not: release what the failed forward left cached.
-        torch.cuda.empty_cache()
+        clear_cuda_cache()
         return 1
 
     costs = {}
