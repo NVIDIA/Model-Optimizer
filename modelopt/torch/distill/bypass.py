@@ -53,8 +53,12 @@ def bypass(
         fields, hooks, modes and gradient flags are restored on every exit.
     """
     config = config if isinstance(config, BypassConfig) else BypassConfig(**(config or {}))
-    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
-        raise ValueError("Distributed Bypass requires its native placement integration")
+    if (
+        torch.distributed.is_initialized()
+        and torch.distributed.get_world_size() > 1
+        and device_mesh is None
+    ):
+        raise ValueError("Distributed Bypass requires the caller's actual device_mesh")
     adapter: ModuleBypassAdapter
     if getattr(getattr(student, "config", None), "model_type", None):
         from .plugins.transformers import TransformersBypassAdapter
@@ -62,16 +66,40 @@ def bypass(
         adapter = TransformersBypassAdapter(device_mesh)
         adapter.adopt(student)
     else:
-        if device_mesh is not None:
-            raise ValueError("Generic Torch mesh adoption requires the distributed Bypass runtime")
         adapter = ModuleBypassAdapter()
-    units = adapter.resolve_units(student, teacher, config)
-    plan = plan_iq_repair(
-        [student.get_submodule(u.student_path) for u in units], root_model=student
-    )
+        if device_mesh is not None:
+            from ._bypass_parallel import torch_mesh_context
+
+            adapter.context = torch_mesh_context(device_mesh)
+    context = getattr(adapter, "context", None)
+    runtime = None
+    if context is not None:
+        from ._bypass_runtime import DistributedBypassRuntime
+
+        runtime = DistributedBypassRuntime(context, config)
+    error = None
+    try:
+        units = adapter.resolve_units(student, teacher, config)
+        plan = plan_iq_repair(
+            [student.get_submodule(u.student_path) for u in units], root_model=student
+        )
+    except Exception as exc:
+        if runtime is None:
+            raise
+        error = f"{type(exc).__name__}: {exc}"
+    if runtime is not None:
+        runtime.synchronize_error(error)
+        schedules = runtime.gather_values(
+            (config.model_dump(), [u.name for u in units], validation_dataloader is not None)
+        )
+        runtime.synchronize_error(
+            "Bypass recipes, boundaries and validation presence must agree across model ranks"
+            if any(value != schedules[0] for value in schedules)
+            else None
+        )
     logging.getLogger(__name__).info("Bypass selected boundaries: %s", [u.name for u in units])
     if config.num_steps == 0:
         return student
-    return _BypassRunner(student, teacher, units, plan, config, adapter).run(
+    return _BypassRunner(student, teacher, units, plan, config, adapter, runtime).run(
         train_dataloader, validation_dataloader
     )

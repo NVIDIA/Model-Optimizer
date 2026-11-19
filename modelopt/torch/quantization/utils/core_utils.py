@@ -552,7 +552,7 @@ def _fsdp2_unshard_context(fsdp_module: FSDPModule):
     if was_sharded:
         fsdp_module.unshard()
     try:
-        with _disable_fsdp_unshard_reshard(fsdp_module):
+        with _disable_fsdp_unshard_reshard(fsdp_module, groups=[fsdp_param_group]):
             yield
     finally:
         if was_sharded:
@@ -581,14 +581,22 @@ def _fsdp2_persistent_parameters(module: nn.Module) -> dict[tuple[nn.Module, str
     return parameters
 
 
+class _FSDP2ParameterInfo(NamedTuple):
+    reference: weakref.ref
+    mesh: Any
+    unsharded: bool
+
+
 # Per FSDP2 unit, the parameters _fsdp2_owned_params found: the weight-access window opens once per
 # quantized module, and a scan walks the unit's whole parameter group.
-_FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
+_FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, _FSDP2ParameterInfo]]" = (
     weakref.WeakKeyDictionary()
 )
 
 
-def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[int, weakref.ref]:
+def _fsdp2_owned_params(
+    fsdp_module: FSDPModule, refresh: bool = False
+) -> dict[int, _FSDP2ParameterInfo]:
     """The parameters FSDP2 manages in ``fsdp_module``'s unit and in the units inside it, by id.
 
     FSDP2 registers a different parameter object in each shard state -- sharded, resharded after the
@@ -604,21 +612,27 @@ def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[
         for group in _fsdp2_param_groups(fsdp_module):
             for fsdp_param in group.fsdp_params:
                 # The last two exist once their state is first entered.
-                for state_param in (
-                    fsdp_param.sharded_param,
-                    getattr(fsdp_param, "_sharded_post_forward_param", None),
-                    getattr(fsdp_param, "_unsharded_param", None),
+                for state_param, mesh_info, unsharded in (
+                    (fsdp_param.sharded_param, group.mesh_info, False),
+                    (
+                        getattr(fsdp_param, "_sharded_post_forward_param", None),
+                        group.post_forward_mesh_info,
+                        False,
+                    ),
+                    (getattr(fsdp_param, "_unsharded_param", None), group.mesh_info, True),
                 ):
                     if state_param is not None:
-                        owned[id(state_param)] = weakref.ref(state_param)
+                        owned[id(state_param)] = _FSDP2ParameterInfo(
+                            weakref.ref(state_param), mesh_info.mesh, unsharded
+                        )
         _FSDP2_OWNED_PARAMS[fsdp_module] = owned
     return owned
 
 
-def _fsdp2_owns(owned: dict[int, weakref.ref], param: nn.Parameter) -> bool:
+def _fsdp2_owns(owned: dict[int, _FSDP2ParameterInfo], param: nn.Parameter) -> bool:
     """Whether ``param`` itself, not just an object at its address, is among ``owned``."""
     ref = owned.get(id(param))
-    return ref is not None and ref() is param
+    return ref is not None and ref.reference() is param
 
 
 @contextmanager
@@ -643,12 +657,19 @@ def fsdp2_weight_access_and_writeback_context(
     fsdp_module = _get_enclosing_fsdp_module(module, root_model, names)
     assert fsdp_module is not None, "Module is not wrapped by FSDP"
     if not writeback:
-        with _fsdp2_unshard_context(fsdp_module):
+        with ExitStack() as stack:
+            seen = set()
+            # A composite MoE may contain expert FSDP units on another mesh.
+            for owner in (
+                fsdp_module,
+                *(child for child in module.modules() if isinstance(child, FSDPModule)),
+            ):
+                group = fully_shard.state(owner)._fsdp_param_group
+                if group is not None and id(group) not in seen:
+                    seen.add(id(group))
+                    stack.enter_context(_fsdp2_unshard_context(owner))
             yield
         return
-
-    fsdp_device_mesh = _get_fsdp2_mesh(fsdp_module)
-    fsdp_dim = fsdp_device_mesh.ndim
 
     # Collect all DTensor parameters, replacing them with local replicated copies.
     originals: dict[str, tuple] = {}
@@ -675,13 +696,27 @@ def fsdp2_weight_access_and_writeback_context(
                 continue
             original_placements = param.placements
             original_device_mesh = param.device_mesh
-            if fsdp_dim != original_device_mesh.ndim:
-                assert (
-                    fsdp_device_mesh.mesh_dim_names
-                    == original_device_mesh.mesh_dim_names[:fsdp_dim]
-                ), "FSDP2 mesh should be a slice of DTensor's device mesh."
+            info = owned[id(param)]
+            fsdp_device_mesh = info.mesh
+            mesh_names, fsdp_names = (
+                original_device_mesh.mesh_dim_names,
+                fsdp_device_mesh.mesh_dim_names,
+            )
+            if mesh_names is not None and fsdp_names is not None:
+                dimensions = [index for index, axis in enumerate(mesh_names) if axis in fsdp_names]
+                if not dimensions and not info.unsharded and fsdp_device_mesh.size() > 1:
+                    raise ValueError("The parameter's FSDP axes are absent from its realized mesh")
+            elif info.unsharded:
+                dimensions = []
+            elif fsdp_device_mesh.ndim == original_device_mesh.ndim:
+                dimensions = list(range(original_device_mesh.ndim))
+            else:
+                raise ValueError("Combined FSDP/TP parameters require explicit mesh axis names")
+            placements = list(original_placements)
+            for dimension in dimensions:
+                placements[dimension] = Replicate()
             unsharded_dtensor = param.redistribute(
-                placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
+                placements=placements,
                 device_mesh=original_device_mesh,
             )
             unsharded_tensor = unsharded_dtensor.to_local()
@@ -957,7 +992,7 @@ def patch_fsdp_mp_dtypes():
 
 
 @contextmanager
-def _disable_fsdp_unshard_reshard(layer):
+def _disable_fsdp_unshard_reshard(layer, *, groups=None):
     """Make the FSDP2 param groups inside *layer* skip unshard/reshard (already gathered).
 
     Patched per group instance, not on ``FSDPParamGroup``: the rest of the model still runs forward
@@ -966,7 +1001,7 @@ def _disable_fsdp_unshard_reshard(layer):
     if not isinstance(layer, FSDPModule):  # nothing was gathered for its FSDP submodules
         yield
         return
-    groups = _fsdp2_param_groups(layer)
+    groups = list(_fsdp2_param_groups(layer) if groups is None else groups)
     # Contexts nest (``persistent_materialization(writeback=False)`` enters this twice), so restore
     # whatever instance attributes were there before instead of deleting them.
     saved = [
