@@ -33,6 +33,7 @@ from modelopt.torch.opt.utils import named_hparams
 from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.algorithms import QuantRecipeHparam, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml import gptq as ggml_gptq
 from modelopt.torch.quantization.ggml.common import (
     PIN_OVERRIDES_WEIGHT,
     _pinned_search_scales,
@@ -371,9 +372,10 @@ def test_gptq_drops_each_fused_experts_weights_before_the_next_window(monkeypatc
 
 
 @pytest.mark.parametrize("num_bits", ["iq1_s", "iq2_xs"])
-def test_gptq_gives_each_row_a_gain_of_one_under_its_hessian(num_bits):
+def test_gptq_gives_each_row_a_gain_of_one_under_its_hessian(monkeypatch, num_bits):
     # As a least-squares fit GPTQ shrinks each row's output; one factor per row on its stored
     # scales undoes that under the damped Hessian GPTQ minimized.
+    monkeypatch.setattr(ggml_gptq, "_GAIN_ROWS", 4)  # the gains come from several row chunks
     torch.manual_seed(0)
     model = torch.nn.Linear(512, 16, bias=False)
     original = model.weight.detach().double()

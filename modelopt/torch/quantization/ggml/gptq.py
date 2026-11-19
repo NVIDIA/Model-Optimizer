@@ -102,9 +102,9 @@ def row_gains(h_inv: torch.Tensor, original: torch.Tensor, quantized: torch.Tens
     factors = []
     for start in range(0, len(original), _GAIN_ROWS):
         rows = slice(start, start + _GAIN_ROWS)
-        a = torch.linalg.solve_triangular(h_inv, original[rows], upper=True, left=False)
+        a = torch.linalg.solve_triangular(h_inv, original[rows].float(), upper=True, left=False)
         b = torch.linalg.solve_triangular(h_inv, quantized[rows], upper=True, left=False)
-        num, den = (a * a).sum(dim=-1), (b * a).sum(dim=-1)
+        num, den = torch.einsum("rc,rc->r", a, a), torch.einsum("rc,rc->r", b, a)
         ratio = num / den
         factors.append(torch.where((den > 0) & ratio.isfinite(), ratio, 1.0))
     return torch.cat(factors)
@@ -149,8 +149,10 @@ class GGMLGPTQHelper(GPTQHelper):
         rows, columns = weight.numel() // weight.shape[-1], weight.shape[-1]
         scratch = 0
         if ggml_format.scale_fit is not None:
-            # The float32 weight before GPTQ, and two triangular solves of a chunk of its rows.
-            scratch += 4 * rows * columns + 2 * 4 * min(rows, _GAIN_ROWS) * columns
+            # The weight before GPTQ in its own dtype, and two float32 solves of a chunk of its rows.
+            scratch += (
+                weight.element_size() * rows * columns + 2 * 4 * min(rows, _GAIN_ROWS) * columns
+            )
         if self._searches(ggml_format):
             scratch += search_scratch(ggml_format, rows)
         return scratch
@@ -217,11 +219,12 @@ class GGMLGPTQHelper(GPTQHelper):
         self._search_scales = None
         derive = ggml_format.scale_fit is not None
         if derive and self.n_samples == 0:
-            self._encode_plain(ggml_format, block_chunk_size, decode_chunk_size)
+            self._encode_plain(ggml_format, self.weight, block_chunk_size, decode_chunk_size)
             return
 
         search = self._searched = self._searches(ggml_format)
-        original = self.weight.clone() if derive else None
+        # The float32 working copy holds the weight's own dtype exactly, so this copy is lossless.
+        original = self.weight.to(self._weight_dtype, copy=True) if derive else None
 
         def quantize_group(group, columns):
             kwargs = {} if importance is None else {"importance": importance[columns]}
@@ -259,26 +262,28 @@ class GGMLGPTQHelper(GPTQHelper):
             gains = row_gains(self.h_inv, original, self.weight)
             del original
             rows = self._packed.reshape(-1, ggml_format.block_bytes)
-            searched = ggml_format.payload_scales(rows)
+            payload_scales = ggml_format.payload_scales
+            replace_payload_scales = ggml_format.replace_payload_scales
+            # GGMLFormat requires both of a format with a scale fit.
+            assert payload_scales is not None and replace_payload_scales is not None
+            searched = payload_scales(rows)
             stored = searched.float().reshape(len(gains), -1) * gains[:, None]
             stored = stored.clamp(max=65504.0).to(torch.float16).reshape(-1)
-            self._packed = ggml_format.replace_payload_scales(rows, stored).reshape(
-                self._packed.shape
-            )
+            self._packed = replace_payload_scales(rows, stored).reshape(self._packed.shape)
             self._search_scales = searched
             # The decoding at the raised scales, up to rounding them to FP16; only logged.
             self.weight.mul_(gains[:, None])
 
-    def _encode_plain(self, ggml_format, block_chunk_size, decode_chunk_size):
+    def _encode_plain(self, ggml_format, weight, block_chunk_size, decode_chunk_size):
         """Encode a weight no calibration input reached as its forwards would, with no GPTQ update."""
         self._searched = False
         if self._unrounded is not None:
-            self._unrounded.copy_(self.weight)
+            self._unrounded.copy_(weight)
         packed, shape, self._search_scales = quantize_energy_matched(
-            ggml_format, self.weight, block_chunk_size=block_chunk_size
+            ggml_format, weight, block_chunk_size=block_chunk_size
         )
         self._packed = packed
-        self.weight.copy_(
+        weight.copy_(
             ggml_format.dequantize(
                 packed, shape, dtype=torch.float32, block_chunk_size=decode_chunk_size
             )
