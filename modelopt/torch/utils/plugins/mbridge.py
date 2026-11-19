@@ -32,6 +32,11 @@ from megatron.bridge.training.post_training.checkpointing import (
     has_modelopt_state,
     load_modelopt_state,
 )
+from megatron.bridge.training.utils.checkpoint_utils import (
+    file_exists,
+    get_checkpoint_run_config_filename,
+    read_run_config,
+)
 from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.hybrid.hybrid_model import HybridModel
@@ -51,6 +56,8 @@ from modelopt.torch.utils.plugins.megatron_layer_specs import te_hybrid_stack_sp
 # covers all of ``modelopt`` rather than one module, which assumes a ``run_config.yaml`` is trusted
 # input -- it comes from a checkpoint the caller is already choosing to load.
 register_allowed_target_prefix("modelopt.")
+
+_GROUPED_EXPERT_WEIGHT = re.compile(r"experts\.linear_fc[12]\.weight\d")
 
 __all__ = [
     "get_language_model",
@@ -94,20 +101,27 @@ def use_moe_grouped_gemm(
     hf_model_name_or_path: str,
     trust_remote_code: bool = False,
     force_sequential: bool = False,
-    force_grouped: bool = False,
-) -> bool:
-    """Pick the MoE expert layout: grouped GEMM unless that would not be HF-exportable.
+    *,
+    megatron_path: str | None = None,
+    export_backend: str = "modelopt",
+) -> bool | None:
+    """Choose the saved expert layout, or an export-compatible default for a new model.
 
-    Grouped GEMM calibrates faster, but only architectures with an ``experts.linear_fc1`` export
-    rule can be converted to HuggingFace from it. Every script that builds the model must agree,
-    since the layout is baked into the Megatron checkpoint -- hence a pure function of the config.
+    ``None`` preserves the Bridge provider's native layout. Existing ModelOpt export mappings
+    retain their grouped/sequential defaults; they do not describe Bridge-only architectures.
     """
-    if force_sequential and force_grouped:
-        raise ValueError("Grouped and sequential expert layouts are mutually exclusive.")
-    if force_grouped:
-        return True
+    if megatron_path is not None:
+        layout = _checkpoint_moe_expert_layout(megatron_path)
+        if layout is not None:
+            if force_sequential and layout:
+                raise ValueError(
+                    "--no_moe_grouped_gemm conflicts with the grouped checkpoint layout."
+                )
+            return layout
     if force_sequential:
         return False
+    if export_backend == "bridge":
+        return None
     config = _hf_config(hf_model_name_or_path, trust_remote_code)
     text_config = getattr(config, "text_config", config)
     is_moe = any(
@@ -117,7 +131,10 @@ def use_moe_grouped_gemm(
     if not is_moe:
         return True  # ignored for dense models
     architectures = getattr(config, "architectures", None) or [""]
-    exportable = "experts.linear_fc1" in all_mcore_hf_export_mapping.get(architectures[0], {})
+    mapping = all_mcore_hf_export_mapping.get(architectures[0])
+    if mapping is None:
+        return None
+    exportable = "experts.linear_fc1" in mapping
     if not exportable:
         warn_rank_0(
             f"{architectures[0]} has no export rule for fused (grouped GEMM) MoE experts; "
@@ -126,10 +143,11 @@ def use_moe_grouped_gemm(
     return exportable
 
 
-def set_moe_expert_layout(provider, moe_grouped_gemm: bool) -> None:
+def set_moe_expert_layout(provider, moe_grouped_gemm: bool | None) -> None:
     """Apply the MoE expert layout to a provider, hybrid stack spec included.
 
-    Set ``moe_grouped_gemm`` on the provider (the bridge's native, possibly custom/hybrid spec
+    ``None`` preserves the provider and its stack spec. Otherwise, set ``moe_grouped_gemm``
+    on the provider (the bridge's native, possibly custom/hybrid spec
     reads it at build time) rather than replacing the whole layer spec -- overwriting it would
     drop custom layers (e.g. Qwen3.5's GatedDeltaNet or Gemma3's custom spec). A hybrid provider
     additionally has its stack spec set, since the native one pins ``TEGroupedMLP``: the bridge's
@@ -141,6 +159,8 @@ def set_moe_expert_layout(provider, moe_grouped_gemm: bool) -> None:
     ``MLPSubmodules`` / ``MoESubmodules``. Such a checkpoint cannot be reloaded or exported. The
     provider calls the factory at build time, so behavior is unchanged.
     """
+    if moe_grouped_gemm is None:
+        return
     if isinstance(provider, HybridModelProvider):
         # The grouped-GEMM factory is Megatron-Bridge's, and returns Megatron-Core's
         # ``hybrid_stack_spec`` unchanged -- the layer composition is identical either way. It is
@@ -161,7 +181,7 @@ def load_mbridge_model_from_hf(
     trust_remote_code: bool = False,
     provider_overrides: dict[str, Any] | None = None,
     init_model_parallel: bool = True,
-    moe_grouped_gemm: bool = True,
+    moe_grouped_gemm: bool | None = True,
     load_weights: bool = True,
 ) -> tuple[
     AutoBridge,
@@ -177,7 +197,7 @@ def load_mbridge_model_from_hf(
         trust_remote_code: Whether to trust remote code.
         provider_overrides: Overrides for the provider.
         init_model_parallel: Whether to initialize model parallel.
-        moe_grouped_gemm: Whether to use grouped GEMM for MoE.
+        moe_grouped_gemm: Whether to use grouped GEMM for MoE; ``None`` keeps provider defaults.
         load_weights: Whether to load the HF weights into the model. Set to ``False`` when the
             weights will be loaded from a Megatron checkpoint instead (e.g. for export), in which
             case only the model structure (with the correct layer spec) is built.
@@ -232,6 +252,24 @@ def _checkpoint_keys(checkpoint_path: str) -> list[str]:
     return list(FileSystemReader(checkpoint_path).read_metadata().state_dict_metadata)
 
 
+def _checkpoint_moe_expert_layout(megatron_path: str) -> bool | None:
+    checkpoint_path = _get_modelopt_checkpoint_path(megatron_path)
+    run_config = get_checkpoint_run_config_filename(checkpoint_path)
+    if file_exists(run_config):
+        layout = read_run_config(run_config).get("model", {}).get("moe_grouped_gemm")
+        if layout is not None:
+            if not isinstance(layout, bool):
+                raise ValueError("Checkpoint model.moe_grouped_gemm must be a boolean.")
+            return layout
+    # Older checkpoints may omit run_config.yaml; their tensor keys still identify the layout.
+    keys = _checkpoint_keys(checkpoint_path)
+    grouped = any(_GROUPED_EXPERT_WEIGHT.search(key) for key in keys)
+    sequential = any(".local_experts." in key for key in keys)
+    if grouped and sequential:
+        raise ValueError("Checkpoint mixes grouped and sequential expert layouts.")
+    return True if grouped else False if sequential else None
+
+
 def is_language_model_only_checkpoint(megatron_path: str) -> bool:
     """Whether a checkpoint omits the full VLM wrapper's language_model prefix."""
     return not any(
@@ -281,12 +319,11 @@ def load_modelopt_megatron_checkpoint(
     # The expert layout is baked into the checkpoint and the two layouts use different key names,
     # so a model built with the other one would load its experts as random init: the load is
     # non-strict. Fires only when the layout is positively identified, so unknown naming is silent.
-    grouped_re = re.compile(r"experts\.linear_fc[12]\.weight\d")
-    ckpt_grouped = any(grouped_re.search(key) for key in checkpoint_keys)
+    ckpt_grouped = any(_GROUPED_EXPERT_WEIGHT.search(key) for key in checkpoint_keys)
     ckpt_sequential = any(".local_experts." in key for key in checkpoint_keys)
     param_names = [name for m in unwrap_model(model) for name, _ in m.named_parameters()]
     model_has_experts = any(".experts." in name for name in param_names)
-    model_grouped = any(grouped_re.search(name) for name in param_names)
+    model_grouped = any(_GROUPED_EXPERT_WEIGHT.search(name) for name in param_names)
     if torch.distributed.is_initialized():
         # checkpoint_keys is global but named_parameters() is this PP stage only, so a stage
         # holding no MoE layer would otherwise raise on its own and hang the ranks that do not.

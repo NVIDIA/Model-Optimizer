@@ -120,11 +120,6 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument(
-        "--moe_grouped_gemm",
-        action="store_true",
-        help="Use GroupedMLP; must match the layout used to save the Megatron checkpoint.",
-    )
-    parser.add_argument(
         "--export_backend",
         choices=("modelopt", "bridge"),
         default="modelopt",
@@ -135,8 +130,7 @@ def get_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
-            "By default grouped GEMM is used unless the architecture cannot export it to "
-            "HuggingFace, in which case SequentialMLP is selected automatically."
+            "The saved checkpoint layout is used by default; conflicting overrides are rejected."
         ),
     )
     parser.add_argument(
@@ -282,7 +276,8 @@ def main(args: argparse.Namespace):
             args.local_checkpoint_path,
             trust_remote_code=trust_remote_code,
             force_sequential=args.no_moe_grouped_gemm,
-            force_grouped=args.moe_grouped_gemm,
+            megatron_path=args.megatron_path,
+            export_backend="bridge" if args.vllm_fakequant_export else args.export_backend,
         ),
         provider_overrides={
             "tensor_model_parallel_size": args.tp_size,

@@ -133,17 +133,12 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--hf_model_name_or_path", type=str, required=True)
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument(
-        "--moe_grouped_gemm",
-        action="store_true",
-        help="Use GroupedMLP explicitly, including models exported through the Bridge backend.",
-    )
-    parser.add_argument(
         "--no_moe_grouped_gemm",
         action="store_true",
         help=(
             "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
-            "By default grouped GEMM is used unless the architecture cannot export it to "
-            "HuggingFace, in which case SequentialMLP is selected automatically."
+            "Known ModelOpt export architectures use an export-compatible default; "
+            "other architectures keep their Bridge provider's native expert layout."
         ),
     )
     parser.add_argument(
@@ -374,7 +369,6 @@ def main(args: argparse.Namespace):
         args.local_checkpoint_path,
         trust_remote_code=trust_remote_code,
         force_sequential=args.no_moe_grouped_gemm,
-        force_grouped=args.moe_grouped_gemm,
     )
 
     bridge, _provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(

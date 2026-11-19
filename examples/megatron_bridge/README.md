@@ -143,8 +143,9 @@ For ordinary text calibration, `--no_calib_packing` keeps documents separate.
 requires a Bridge version that implements that API and the selected model's
 deployment layout. The existing `modelopt` backend remains the default; unsupported
 Bridge exports fail explicitly. This option is separate from `--vllm_fakequant_export`.
-When using GroupedMLP for a model absent from the default export mapping table,
-pass `--moe_grouped_gemm` to both quantization and export so their layouts agree.
+Models absent from ModelOpt's export mapping table keep their native Bridge expert
+layout during quantization. Export restores the layout recorded in the Megatron
+checkpoint; `--no_moe_grouped_gemm` rejects a conflicting grouped checkpoint.
 
 ### Vision-Language Models (VLMs)
 
