@@ -23,7 +23,10 @@ from hashlib import sha256
 import pulp
 import pytest
 
-from modelopt.torch.sparsity.attention_sparsity.calibration import mask_reuse_compact
+from modelopt.torch.sparsity.attention_sparsity.calibration import (
+    assess_mask_reuse_benchmark_gates,
+    mask_reuse_compact,
+)
 from modelopt.torch.sparsity.attention_sparsity.calibration.checkpoint_manifest import (
     create_checkpoint_manifest,
 )
@@ -443,3 +446,64 @@ def test_unresolvable_donor_risks_do_not_export_a_more_expensive_risk(tmp_path, 
             reuse_dropped_mass_report_threshold=0.02,
             target_bmm1_skip_ratio=0.1,
         )
+
+
+def test_benchmark_replays_sub_ulp_winner_and_gates_quality(tmp_path):
+    checkpoint = _checkpoint(tmp_path)
+    path = tmp_path / "capture.jsonl"
+    captures, _ = _write_captures(path, checkpoint.sha256)
+    # The two targets tie after adding these masses in binary64. The more
+    # expensive target wins by the exact captured amount, including anchor risk.
+    for row in captures:
+        target = float.fromhex(row["invocation"]["target_sparsity_hex"])
+        row["anchor_stats_by_layer"]["0"]["dropped_mass"] = [0.5, 0.5]
+        diff = 2**-60 if target == 0.5 else 2**-59
+        row["consumer_layers"]["1"]["dropped_mass"] = [[diff, diff], [diff, diff]]
+    kwargs = {
+        "vanilla_calibration": _FIT,
+        "topology": _TOPOLOGY,
+        "checkpoint_manifest": checkpoint,
+        "evidence": _evidence(_write_payload(path, captures)),
+        "benchmark_candidate": True,
+        "target_bmm1_skip_ratio": 0.05,
+        "reuse_dropped_mass_report_threshold": 0.02,
+        "source_provenance": {"capture_scope": "whole_prefill"},
+    }
+    candidate = calibrate_compact_mask_reuse_policy(path, **kwargs)
+    assert candidate["context_policies"][0]["target_sparsity"] == 0.5
+    assert candidate["context_policies"][0]["fallback_heads"] == {"1": [0]}
+    proof = candidate["calibration_report"]["by_bucket"][0]["benchmark_proof"]
+    assert proof["status"] == "proved_optimal"
+    assert proof["worst_prompt_risk_exact"] == f"{2**60 + 1}/{2**62}"
+    candidate_bytes = json.dumps(candidate).encode()
+    digest = sha256(candidate_bytes).hexdigest()
+    common = {"evaluation_sha256": "a" * 64, "checkpoint_manifest_sha256": checkpoint.sha256}
+    pair = {
+        "candidate": dict(common, accuracy_percent=79.1, policy_sha256=digest),
+        "dense": dict(common, accuracy_percent=80.1, attention_mode="dense"),
+    }
+    gate = {
+        "expected_policy_sha256": digest,
+        "search_scope": proof["scope"],
+        "required_benchmarks": ["AA-LCR"],
+        "matched_scores": {"AA-LCR": pair},
+    }
+    assert assess_mask_reuse_benchmark_gates(candidate_bytes, **gate)["selection_and_accuracy_pass"]
+    assert not assess_mask_reuse_benchmark_gates(
+        candidate_bytes, **(gate | {"search_scope": "joint_topology_and_donors"})
+    )["selection_and_accuracy_pass"]
+    assert not assess_mask_reuse_benchmark_gates(
+        candidate_bytes, **(gate | {"required_benchmarks": ["AA-LCR", "HLE"]})
+    )["selection_and_accuracy_pass"]
+    pair["candidate"]["accuracy_percent"] = 79.099
+    assert not assess_mask_reuse_benchmark_gates(candidate_bytes, **gate)[
+        "selection_and_accuracy_pass"
+    ]
+    pair["candidate"]["policy_sha256"] = "b" * 64
+    with pytest.raises(ValueError, match="unmatched"):
+        assess_mask_reuse_benchmark_gates(candidate_bytes, **gate)
+    bad_prior = {**candidate, "checkpoint_manifest_sha256": "c" * 64}
+    with pytest.raises(MaskReuseCalibrationError, match="prior candidate"):
+        calibrate_compact_mask_reuse_policy(path, previous_candidate=bad_prior, **kwargs)
+    with pytest.raises(MaskReuseSolverError, match="no verified"):
+        calibrate_compact_mask_reuse_policy(path, **(kwargs | {"target_bmm1_skip_ratio": 1}))

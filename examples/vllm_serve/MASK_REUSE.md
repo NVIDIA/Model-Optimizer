@@ -113,7 +113,7 @@ refitting. Discovery never selects using held-out data.
 ```bash
 python calibrate_mask_reuse.py --checkpoint <CHECKPOINT> \
   --checkpoint-manifest checkpoint-manifest.json \
-  --compact-captures captures.jsonl --capture-manifest captures.jsonl.manifest.json \
+  --compact-captures discovery.jsonl --capture-manifest discovery.jsonl.manifest.json \
   --vanilla-config sparse_attention_config.json --topology topology.json \
   --anchor-dropped-mass-report-threshold 0.02 \
   --reuse-dropped-mass-report-threshold 0.02 --target-bmm1-skip-ratio 0.50 \
@@ -154,6 +154,37 @@ Unresolved solves return exit code 3 and a report. An infeasible BMM1 target
 returns code 2 and a report without a policy. `--allow-unmet-target` explicitly
 requests a diagnostic maximum-saving candidate. A zero target is valid and may
 produce a dense policy.
+
+### Exporting a benchmark candidate before the proof finishes
+
+Add `--benchmark-candidate` to the refit command. Discovery also accepts this
+flag and returns its best replayed joint assignment when one is available.
+Passing its artifact and captures to benchmark refit includes that assignment
+as a starting candidate. The selector starts with a
+work-feasible assignment when one exists for the frozen topology. It compares
+assignments from native solver stages and retries using exact sums of the
+captured binary64 masses. Use `--previous-candidate previous.json` to include a
+saved assignment from the same checkpoint, capture and topology. Each target
+competes on the same work constraint. Held-out prompts never select a winner.
+
+The final pass rereads the capture and checks the selected assignments' risk
+and integer tile counts in every range. A missing feasible assignment yields
+exit 3 and a report. An exported report includes the policy file SHA-256 and
+a per-range proof status. `feasible_unproved` permits benchmarking.
+`proved_optimal` covers the frozen topology, all permitted donors, targets,
+and tie-breaks when exact enumeration completes. Native gap values alone
+cannot establish that status.
+
+For qualification, pin the exact policy SHA-256 before collecting scores.
+`assess_mask_reuse_benchmark_gates` takes the policy bytes, the pinned digest,
+the declared search scope, the preregistered benchmark names, and their paired
+score receipts. Each pair supplies `candidate` and `dense` records with
+`accuracy_percent`, `checkpoint_manifest_sha256`, and the same
+`evaluation_sha256` identifying the evaluation setup. The candidate also
+supplies `policy_sha256`, and the control supplies `attention_mode="dense"`.
+Every key benchmark must be within one percentage point of dense. A missing
+score or proof blocks qualification. The fixed-topology proof cannot qualify
+a claim of optimal joint topology discovery. Deployment checks still apply.
 
 Held-out observations evaluate the frozen choices without retuning them.
 Outputs retain `promotion_status="candidate_only"` and

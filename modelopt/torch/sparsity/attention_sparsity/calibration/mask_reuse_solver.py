@@ -540,6 +540,9 @@ class _SolverSession:
                 raise MaskReuseSolverFailure(
                     f"solver error in {phase}: {error}", self.records
                 ) from error
+            observer = getattr(problem, "_mask_reuse_observe_assignment", None)
+            if observer is not None:
+                observer()
             solution_status = problem.sol_status
             self.records.append(
                 {

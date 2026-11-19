@@ -37,19 +37,16 @@ from array import array
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 from functools import cache
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING
 from weakref import ref
 
 import numpy as np
 import pulp
 
 import modelopt
-
-if TYPE_CHECKING:
-    from fractions import Fraction
 
 from .analytical_dense import validate_analytical_dense
 from .checkpoint_manifest import VerifiedCheckpointManifest
@@ -72,6 +69,7 @@ from .mask_reuse import (
     _validate_shared_prefix_provenance,
     canonical_prefill_threshold_scale_factor,
 )
+from .mask_reuse_benchmark import _selected_binary_keys
 from .mask_reuse_compact import (
     _ANCHOR_FIELDS,
     _INVOCATION_FIELDS,
@@ -91,7 +89,13 @@ from .mask_reuse_contracts import (
     threshold_pair_matches,
     validate_context_buckets,
 )
-from .mask_reuse_solver import MaskReuseSolverConfig, MaskReuseSolverFailure, _SolverSession
+from .mask_reuse_solver import (
+    MaskReuseAllocationPause,
+    MaskReuseSolverConfig,
+    MaskReuseSolverError,
+    MaskReuseSolverFailure,
+    _SolverSession,
+)
 
 __all__ = [
     "TopologyDiscoveryCapture",
@@ -784,6 +788,7 @@ def _selection_pass(
     solver_session: _SolverSession | None = None,
     donor_head_mode: str = "calibrated",
     stride_paths: Mapping[int, tuple[tuple[int, int], ...]] | None = None,
+    benchmark_candidate: bool = False,
 ) -> tuple[_FrozenSelection, list[Mapping[str, object]]]:
     session = solver_session or _SolverSession()
     layers = dataset.attention_layers
@@ -802,6 +807,7 @@ def _selection_pass(
                 anchor_prompt_values={},
                 prompt_mass={},
             )
+    peak_risk = 0.0
     for capture in source:
         session._remaining_seconds()
         if capture.split != "calibration":
@@ -821,11 +827,20 @@ def _selection_pass(
             )
         accumulator.anchor_prompt_means[capture.prompt_id] = prompt_means
         accumulator.anchor_prompt_values[capture.prompt_id] = prompt_values
+        if max_anchor_dropped_mass is None:
+            peak_risk = max(peak_risk, float(prompt_values.max()))
         prompt_mass: dict[tuple[int, int], np.ndarray] = {}
         for consumer, by_anchor in capture.consumer_candidates_by_layer.items():
             for anchor, matrix in by_anchor.items():
                 prompt_mass[(anchor, consumer)] = np.asarray(matrix, dtype=np.float64)
+                peak_risk = max(peak_risk, float(prompt_mass[(anchor, consumer)].max()))
         accumulator.prompt_mass[capture.prompt_id] = prompt_mass
+
+    # Keep uniformly tiny risk coefficients within the native solver's working
+    # range. A binary exponent change leaves the captured binary64 values exact.
+    risk_scale = 1.0
+    if 0 < peak_risk < 2**-12:
+        risk_scale = math.ldexp(1.0, min(1023, -math.frexp(peak_risk)[1]))
 
     def edge(
         start: int,
@@ -876,7 +891,7 @@ def _selection_pass(
                 )
             )
 
-        return _pareto_donor_options(options)
+        return _pareto_donor_options(options, check_native_precision=not benchmark_candidate)
 
     def eligible_bmm1_tiles(targets: Mapping[Bucket, float]) -> int:
         return sum(
@@ -887,16 +902,20 @@ def _selection_pass(
         )
 
     def freeze_selection(
-        targets, anchors, nearest, choices, combined_tile_cost, minimum, target_met, risk_objective
+        targets, anchors, nearest, choices, combined_tile_cost, minimum, target_met
     ):
-        prompt_risks: list[float] = []
+        prompt_risks: list[Fraction] = []
         worst_individual_risk = 0.0
         for bucket in dataset.buckets:
             accumulator = accumulators[(bucket, targets[bucket])]
             for prompt in dataset.prompts[(bucket, "calibration")]:
                 anchor_indices = [layer_index[anchor] for anchor in anchors]
                 anchor_values = accumulator.anchor_prompt_values[prompt][anchor_indices]
-                total = float(anchor_values.sum()) if max_anchor_dropped_mass is None else 0.0
+                total = (
+                    sum(map(Fraction, anchor_values.flat), Fraction(0))
+                    if max_anchor_dropped_mass is None
+                    else Fraction(0)
+                )
                 worst_individual_risk = max(
                     worst_individual_risk,
                     float(anchor_values.max()) if max_anchor_dropped_mass is None else 0.0,
@@ -910,7 +929,7 @@ def _selection_pass(
                         if choice.fallback:
                             continue
                         risk = float(matrix[head, choice.donor_head])
-                        total += risk
+                        total += Fraction(risk)
                         worst_individual_risk = max(worst_individual_risk, risk)
                 prompt_risks.append(total / (len(layers) * dataset.global_num_heads))
         skipped = sum(
@@ -942,13 +961,16 @@ def _selection_pass(
             bmm1_skipped_tiles=skipped,
             bmm1_eligible_tiles=eligible_bmm1_tiles(targets),
             target_bmm1_skip_ratio_met=target_met,
-            worst_prompt_total_dropped_mass=max(prompt_risks, default=0.0),
+            worst_prompt_total_dropped_mass=float(max(prompt_risks, default=0.0)),
             mean_prompt_total_dropped_mass=(
-                sum(prompt_risks) / len(prompt_risks) if prompt_risks else 0.0
+                float(sum(prompt_risks) / len(prompt_risks)) if prompt_risks else 0.0
             ),
             worst_individual_dropped_mass=worst_individual_risk,
-            risk_objective=risk_objective,
+            risk_objective=max(prompt_risks) * len(layers) * dataset.global_num_heads,
         )
+
+    observed: _FrozenSelection | None = None
+    observed_rank: tuple | None = None
 
     def solve_path(
         targets: Mapping[Bucket, float],
@@ -1061,7 +1083,7 @@ def _selection_pass(
                 coefficient = dataset.global_num_heads * float(prompt_means[start])
                 if coefficient != 0:
                     for variable, weight in outgoing[start].items():
-                        expression.addterm(variable, coefficient * weight)
+                        expression.addterm(variable, risk_scale * coefficient * weight)
 
         for bucket in dataset.buckets:
             accumulator = accumulators[(bucket, targets[bucket])]
@@ -1136,7 +1158,7 @@ def _selection_pass(
                                 risk = option.risk_by_prompt[prompt_index]
                                 expression = prompt_risk_terms[(bucket, prompt)]
                                 if risk != 0:
-                                    expression.addterm(variable, risk)
+                                    expression.addterm(variable, risk_scale * risk)
                         problem += (
                             pulp.lpSum(variables_for_choice) == pair_active,
                             f"choose_{start}_{bucket_index}_{consumer}_{head}",
@@ -1198,7 +1220,7 @@ def _selection_pass(
                 risk = option.risk_by_prompt[index]
                 if risk != 0:
                     value += assignment * risk
-            return value
+            return value * risk_scale
 
         if generated_risk:
             problem_ref = ref(problem)
@@ -1267,7 +1289,7 @@ def _selection_pass(
                     for variable, option in choices_by_bucket[bucket]:
                         risk = option.risk_by_prompt[index]
                         if risk != 0:
-                            expression.addterm(variable, risk)
+                            expression.addterm(variable, risk_scale * risk)
                     append_risk_constraint(current_problem, prompt_key, expression)
                     active_prompts.add(prompt_key)
                 if violated:
@@ -1305,7 +1327,7 @@ def _selection_pass(
                     for variable, option in choices_by_bucket[bucket]:
                         risk = option.risk_by_prompt[index]
                         if risk != 0:
-                            expression.addterm(variable, risk)
+                            expression.addterm(variable, risk_scale * risk)
                     expression.addterm(worst_prompt_risk, -1)
                     yield pulp.LpConstraint(e=expression, sense=pulp.LpConstraintLE, rhs=0)
 
@@ -1326,6 +1348,88 @@ def _selection_pass(
                     bucket_skipped >= required_skipped_tiles(target_bmm1_skip_ratio, eligible),
                     f"minimum_bmm1_skipped_tiles_bucket_{bucket_index}",
                 )
+
+        def replay_assignment():
+            edges = _selected_binary_keys(edge_variables)
+            if not edges:
+                return
+            edges.sort()
+            if (
+                edges[0][0] != 0
+                or edges[-1][1] != len(layers)
+                or any(a[1] != b[0] for a, b in itertools.pairwise(edges))
+            ):
+                return
+            if stride_paths is not None and tuple(edges) not in stride_paths.values():
+                return
+            anchors = tuple(layers[start] for start, _ in edges)
+            nearest = {
+                layer: layers[start] for start, stop in edges for layer in layers[start:stop]
+            }
+            chosen = _selected_binary_keys(choice_variables)
+            if chosen is None:
+                return
+            choices = {}
+            cost = sum(edge_rows[edge].anchor_tile_cost for edge in edges)
+            skips = dict.fromkeys(dataset.buckets, 0)
+            for key in chosen:
+                start, bucket, consumer, head, _ = key
+                head_key = bucket, consumer, head
+                if nearest[consumer] != layers[start] or consumer in anchors or head_key in choices:
+                    return
+                option = choice_options[key]
+                choices[head_key] = option.choice
+                cost += 2 * option.choice.retained_tiles
+                skips[bucket] += option.bmm1_skipped_tiles
+            if len(choices) != (len(layers) - len(anchors)) * dataset.global_num_heads * len(
+                dataset.buckets
+            ):
+                return
+            for bucket in dataset.buckets:
+                acc = accumulators[bucket, targets[bucket]]
+                eligible = acc.eligible_sum * len(layers) * dataset.global_num_heads
+                if target_met and skips[bucket] < required_skipped_tiles(
+                    target_bmm1_skip_ratio, eligible
+                ):
+                    return
+                if benchmark_candidate and max_anchor_dropped_mass is not None:
+                    indices = [layer_index[a] for a in anchors]
+                    for values in acc.anchor_prompt_values.values():
+                        mass = values[indices]
+                        if (
+                            sum(map(Fraction, mass.flat))
+                            > Fraction(max_anchor_dropped_mass) * mass.size
+                        ):
+                            return
+            return freeze_selection(
+                targets, anchors, nearest, choices, cost, minimum_bmm1_skipped_tiles, target_met
+            )
+
+        if benchmark_candidate:
+
+            def observe_assignment():
+                nonlocal observed, observed_rank
+                result = replay_assignment()
+                if result is None:
+                    return
+                choices = result.choices
+                digits = tuple(
+                    0 if choices[key].fallback else choices[key].donor_head + 1
+                    for key in sorted(choices)
+                )
+                rank = (
+                    result.risk_objective,
+                    result.combined_tile_cost,
+                    len(choices) - result.fallback_count,
+                    len(result.anchors),
+                    tuple(targets[b] for b in dataset.buckets),
+                    result.anchors,
+                    digits,
+                )
+                if observed_rank is None or rank < observed_rank:
+                    observed, observed_rank = result, rank
+
+            problem._mask_reuse_observe_assignment = observe_assignment
 
         if seed_enabled:
             # With no anchor-risk cap, each edge's maximum saving is separable
@@ -1381,6 +1485,8 @@ def _selection_pass(
                     for variable in variables:
                         variable.varValue = initial_values.get(variable, 0.0)
                     seed_feasible = problem.valid(1e-5)
+                    if benchmark_candidate:
+                        observe_assignment()
                 finally:
                     for variable, previous in zip(variables, previous_values, strict=True):
                         variable.varValue = previous
@@ -1392,7 +1498,7 @@ def _selection_pass(
                     problem._mask_reuse_initial_values = initial_values
                 problem._mask_reuse_initial_diagnostics.update(
                     supplied=seed_feasible,
-                    worst_prompt_total_dropped_mass=supplied_risk,
+                    worst_prompt_total_dropped_mass=supplied_risk / risk_scale,
                     calibration_prompt_rows_checked=len(totals),
                     all_prompt_risks_valid=True,
                 )
@@ -1469,41 +1575,10 @@ def _selection_pass(
             phase="fix_donor_map",
         )
 
-        selected = sorted(
-            edge_key for edge_key, variable in edge_variables.items() if variable.value() > 0.5
-        )
-        if not selected or selected[0][0] != 0 or selected[-1][1] != len(layers):
-            raise MaskReuseSolverFailure(
-                "topology solver returned a non-covering path", session.records
-            )
-        anchors = tuple(layers[start] for start, _ in selected)
-        nearest: dict[int, int] = {}
-        choices: dict[tuple[Bucket, int, int], _Choice] = {}
-        combined_tile_cost = 0
-        for edge_key in selected:
-            start, stop = edge_key
-            anchor = layers[start]
-            combined_tile_cost += edge_rows[edge_key].anchor_tile_cost
-            for layer in layers[start:stop]:
-                nearest[layer] = anchor
-        for key, variable in choice_variables.items():
-            _, bucket, consumer, head, _ = key
-            if variable.value() <= 0.5:
-                continue
-            option = choice_options[key]
-            choices[(bucket, consumer, head)] = option.choice
-            combined_tile_cost += 2 * option.choice.retained_tiles
-
-        return freeze_selection(
-            targets,
-            anchors,
-            nearest,
-            choices,
-            combined_tile_cost,
-            minimum_bmm1_skipped_tiles,
-            target_met,
-            risk_objective,
-        )
+        result = replay_assignment()
+        if result is None:
+            raise MaskReuseSolverFailure("invalid discrete topology assignment", session.records)
+        return result
 
     frontier: list[Mapping[str, object]] = []
     candidates: list[tuple[tuple[object, ...], _FrozenSelection]] = []
@@ -1524,11 +1599,19 @@ def _selection_pass(
             )
             for bucket in dataset.buckets
         )
-        solved = solve_path(
-            targets,
-            minimum_bmm1_skipped_tiles=required_tiles,
-            target_met=True,
-        )
+        observed = None
+        observed_rank = None
+        try:
+            solved = solve_path(targets, minimum_bmm1_skipped_tiles=required_tiles, target_met=True)
+        except MaskReuseAllocationPause:
+            raise
+        except MaskReuseSolverError as error:
+            if not benchmark_candidate:
+                raise
+            session.records.append({"phase": "benchmark_discovery", "error": str(error)})
+            solved = None
+        if benchmark_candidate:
+            solved = observed
         row: dict[str, object] = {
             "target_sparsity_by_bucket": [
                 {
@@ -1546,7 +1629,7 @@ def _selection_pass(
         }
         if solved is not None:
             rank = (
-                # Rank with the solved objective, not its rounded reporting sum.
+                # Compare the original binary64 observations exactly across target menus.
                 solved.risk_objective,
                 solved.combined_tile_cost,
                 len(solved.choices) - solved.fallback_count,
@@ -1569,9 +1652,21 @@ def _selection_pass(
                     ),
                 }
             )
+        elif benchmark_candidate:
+            row.update(
+                feasible=None,
+                target_bmm1_skip_ratio_feasible=None,
+                selection_status="no_verified_assignment",
+            )
         else:
             infeasible_targets.append((targets, target_values, row))
         frontier.append(row)
+        if benchmark_candidate and session.elapsed_seconds >= session.config.time_limit_seconds:
+            break
+    if benchmark_candidate and not candidates:
+        raise MaskReuseSolverError(
+            "no replayed joint topology meets every range work target", session.records
+        )
     if candidates:
         selection = min(candidates, key=lambda item: item[0])[1]
         return selection, frontier
@@ -1636,6 +1731,8 @@ def _evaluation_pass(
     *,
     anchor_dropped_mass_report_threshold: float,
     reuse_dropped_mass_report_threshold: float,
+    replay_risks=None,
+    include_anchor=True,
 ) -> tuple[
     Mapping[tuple[Bucket, str], _ReuseEvaluation],
     Mapping[tuple[Bucket, str], _AnchorEvaluation],
@@ -1655,6 +1752,8 @@ def _evaluation_pass(
         if capture.target_sparsity != target:
             continue
         reuse_result = reuse[(capture.bucket, capture.split)]
+        exact_mass = Fraction(0)
+        check_risk = replay_risks is not None and capture.split == "calibration"
         previous_mass = reuse_result.dropped_mass_sum
         head_count = len(dataset.attention_layers) * dataset.global_num_heads
         reuse_result.model_wide_eligible_tiles += capture.eligible_tiles * head_count
@@ -1680,6 +1779,8 @@ def _evaluation_pass(
                     capture.eligible_tiles - anchor_stats.retained_tiles[choice.donor_head]
                 )
                 dropped = matrix[head][choice.donor_head]
+                if check_risk:
+                    exact_mass += Fraction(dropped)
                 reuse_result.retained_tiles += anchor_stats.retained_tiles[choice.donor_head]
                 reuse_result.sparse_observations += 1
                 reuse_result.dropped_mass_sum += dropped
@@ -1697,6 +1798,10 @@ def _evaluation_pass(
             else:
                 anchor_result.retained_tiles += sum(stats.retained_tiles)
                 dropped_values.extend(stats.dropped_mass)
+        if check_risk:
+            if include_anchor:
+                exact_mass += sum(map(Fraction, dropped_values))
+            replay_risks[capture.bucket] = max(replay_risks.get(capture.bucket, 0), exact_mass)
         prompt_mean = sum(dropped_values) / len(dropped_values)
         total_risk = (
             reuse_result.dropped_mass_sum - previous_mass + sum(dropped_values)
@@ -1748,6 +1853,7 @@ def calibrate_mask_reuse_topology(
     anchor_stride_choices: Sequence[int] | None = None,
     allow_same_group_prefixes: bool = False,
     source_provenance: Mapping[str, object] | None = None,
+    benchmark_candidate: bool = False,
 ) -> dict[str, object]:
     """Select a global candidate topology and evaluate it without held-out tuning.
 
@@ -1836,13 +1942,17 @@ def calibrate_mask_reuse_topology(
         solver_session=solver_session,
         donor_head_mode=donor_head_mode,
         stride_paths=stride_paths,
+        benchmark_candidate=benchmark_candidate,
     )
+    replay_risks = {} if benchmark_candidate else None
     reuse_evaluations, anchor_evaluations, bmm1_evaluations = _evaluation_pass(
         source,
         dataset,
         selection,
         anchor_dropped_mass_report_threshold=anchor_report_threshold,
         reuse_dropped_mass_report_threshold=reuse_report_threshold,
+        replay_risks=replay_risks,
+        include_anchor=report_only,
     )
     if source.sha256() != input_sha256:
         raise MaskReuseCalibrationError(
@@ -2050,6 +2160,7 @@ def calibrate_mask_reuse_topology(
         "selection_split": "calibration",
         "evaluation_split": "heldout",
         "selection_scope": "one_global_topology_across_context_buckets",
+        "exact_joint_optimum_proved": False,
         "max_reuse_span": dataset.max_reuse_span,
         "vanilla_fit_bounds_available": fit_bounds_available,
         "selection_cost": {
@@ -2085,10 +2196,26 @@ def calibrate_mask_reuse_topology(
             "lexicographically smallest donor-head map",
         ],
         "downstream_contract": (
-            "freeze anchors and nearest, then recollect with the ordinary "
-            "fixed-topology compact calibrator"
+            "freeze anchors and nearest, then project the discovery captures in the fixed-topology refit"
         ),
     }
+    if benchmark_candidate:
+        assert replay_risks is not None
+        if max(replay_risks.values()) != selection.risk_objective:
+            raise MaskReuseCalibrationError(
+                "frozen topology replay disagrees with the selected risk"
+            )
+        provenance["selection_mode"] = "verified_benchmark_candidate"
+        provenance["worst_prompt_risk_exact"] = str(
+            Fraction(selection.risk_objective)
+            / (len(dataset.attention_layers) * dataset.global_num_heads)
+        )
+        for bucket in dataset.buckets:
+            work = bmm1_evaluations[bucket, "calibration"]
+            if work.skipped_tiles < required_skipped_tiles(bmm1_target, work.eligible_tiles):
+                raise MaskReuseCalibrationError(
+                    "frozen topology replay failed the per-range work target"
+                )
     restrictions: dict[str, object] = {}
     if donor_head_mode != "calibrated":
         restrictions["donor_head_mode"] = donor_head_mode

@@ -409,7 +409,7 @@ def _risk_variant(max_anchor_dropped_mass, anchor_dropped_mass_report_threshold)
     return None, threshold, "anchor_inclusive_v1"
 
 
-def _pareto_donor_options(options):
+def _pareto_donor_options(options, *, check_native_precision=True):
     """Prune only dominance that also preserves the canonical donor-map tie-break."""
     skipped = np.asarray([option.bmm1_skipped_tiles for option in options])
     ranks = np.asarray(
@@ -421,6 +421,9 @@ def _pareto_donor_options(options):
         dominates &= prompt[:, None] <= prompt[None, :]
     dominates &= (skipped[:, None] > skipped[None, :]) | (ranks[:, None] < ranks[None, :])
     keep = ~dominates.any(axis=0)
+    survivors = tuple(option for option, retained in zip(options, keep, strict=True) if retained)
+    if not check_native_precision:
+        return survivors
     retained_risks = risks[keep]
     # A zero MIP gap does not resolve distinct coefficients below the native
     # feasibility precision. Refuse these alternatives rather than treating
@@ -434,7 +437,7 @@ def _pareto_donor_options(options):
         raise MaskReuseSolverError(
             "distinct donor risks are below native solver precision; selection is unresolved", []
         )
-    return tuple(option for option, retained in zip(options, keep, strict=True) if retained)
+    return survivors
 
 
 def _validate_donor_head_mode(mode: str) -> None:

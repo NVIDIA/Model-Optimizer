@@ -952,59 +952,89 @@ def test_whole_prefill_collector_output_runs_through_refit(
     topology = tmp_path / "topology.json"
     if discovery:
         discover = runpy.run_path(str(_SCRIPT_PATH.with_name("calibrate_mask_reuse_topology.py")))
+        discovery_args = [
+            "--checkpoint",
+            args.model,
+            "--captures",
+            str(capture),
+            "--capture-manifest",
+            str(manifest),
+            "--vanilla-config",
+            args.vanilla_config,
+            "--prompt-plan",
+            args.prompts_jsonl,
+            "--target-bmm1-skip-ratio",
+            "1e-8",
+            "--reuse-dropped-mass-report-threshold",
+            "0.02",
+            "--output",
+            str(topology),
+        ]
+        assert discover["main"]([*discovery_args, "--benchmark-candidate"]) == 0
         assert (
-            discover["main"](
-                [
-                    "--checkpoint",
-                    args.model,
-                    "--captures",
-                    str(capture),
-                    "--capture-manifest",
-                    str(manifest),
-                    "--vanilla-config",
-                    args.vanilla_config,
-                    "--prompt-plan",
-                    args.prompts_jsonl,
-                    "--target-bmm1-skip-ratio",
-                    "0",
-                    "--reuse-dropped-mass-report-threshold",
-                    "0.02",
-                    "--output",
-                    str(topology),
-                ]
-            )
-            == 0
+            json.loads(topology.read_bytes())["provenance"]["exact_joint_optimum_proved"] is False
         )
+        for name, target, budget, expected in (
+            ("unmet", "1", "60", 2),
+            ("unresolved", "1e-8", "1e-9", 3),
+        ):
+            attempt = list(discovery_args)
+            attempt[attempt.index("--target-bmm1-skip-ratio") + 1] = target
+            output = tmp_path / (name + ".json")
+            attempt[attempt.index("--output") + 1] = str(output)
+            attempt += ["--solver-time-limit-seconds", budget]
+            if expected == 2:
+                with pytest.raises(SystemExit) as exc:
+                    discover["main"](attempt)
+                assert exc.value.code == 2
+            else:
+                assert discover["main"](attempt) == expected
+            assert not output.exists()
+            diagnostic = json.loads(Path(str(output) + ".report.json").read_bytes())
+            if expected == 3:
+                assert diagnostic["selection_status"] == "unresolved"
     else:
         topology.write_text('{"anchors":[0],"nearest":{"0":0,"1":0}}')
     policy, report = tmp_path / "policy.json", tmp_path / "report.json"
     cli = runpy.run_path(str(_SCRIPT_PATH.with_name("calibrate_mask_reuse.py")))
+    refit_args = [
+        "--checkpoint",
+        args.model,
+        "--compact-captures",
+        str(capture),
+        "--capture-manifest",
+        str(manifest),
+        "--vanilla-config",
+        args.vanilla_config,
+        "--topology",
+        str(topology),
+        "--target-bmm1-skip-ratio",
+        "1e-8",
+        "--reuse-dropped-mass-report-threshold",
+        "0.02",
+        "--output-policy",
+        str(policy),
+        "--output-report",
+        str(report),
+    ]
+    assert cli["main"]([*refit_args, "--benchmark-candidate"]) == 0
+    result = json.loads(policy.read_bytes())
+    assert result["provenance"]["input_capture_count"] == 54
+    for row in result["calibration_report"]["by_bucket"]:
+        assert row["benchmark_proof"]["status"] == "proved_optimal"
+        assert row["bmm1_skip_objective"]["skipped_tiles"] > 0
     assert (
-        cli["main"](
-            [
-                "--checkpoint",
-                args.model,
-                "--compact-captures",
-                str(capture),
-                "--capture-manifest",
-                str(manifest),
-                "--vanilla-config",
-                args.vanilla_config,
-                "--topology",
-                str(topology),
-                "--target-bmm1-skip-ratio",
-                "0",
-                "--reuse-dropped-mass-report-threshold",
-                "0.02",
-                "--output-policy",
-                str(policy),
-                "--output-report",
-                str(report),
-            ]
-        )
+        json.loads(report.read_bytes())["candidate_policy_sha256"]
+        == sha256(policy.read_bytes()).hexdigest()
+    )
+    next_policy = tmp_path / "retried.json"
+    refit_args[refit_args.index("--output-policy") + 1] = str(next_policy)
+    refit_args[refit_args.index("--output-report") + 1] = str(tmp_path / "retried-report.json")
+    assert (
+        cli["main"]([*refit_args, "--benchmark-candidate", "--previous-candidate", str(policy)])
         == 0
     )
-    assert json.loads(policy.read_text())["provenance"]["input_capture_count"] == 54
+    assert json.loads(next_policy.read_bytes())["context_policies"] == result["context_policies"]
 
 
 @pytest.mark.parametrize("hard_kill", [False, True])

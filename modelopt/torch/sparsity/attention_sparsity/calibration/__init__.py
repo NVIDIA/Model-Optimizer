@@ -32,6 +32,7 @@ from .mask_reuse import (
     MaskReuseCalibrationError,
     canonical_prefill_threshold_scale_factor,
 )
+from .mask_reuse_benchmark import assess_mask_reuse_benchmark_gates
 from .mask_reuse_compact import (
     CompactMaskReuseCapture,
     CompactMaskReuseCaptureSource,
@@ -69,6 +70,7 @@ __all__ = [
     "TopologyDiscoveryCapture",
     "TopologyDiscoveryCaptureSource",
     "VerifiedCheckpointManifest",
+    "assess_mask_reuse_benchmark_gates",
     "calibrate_compact_mask_reuse_policy",
     "calibrate_mask_reuse_topology",
     "calibrate_sparse_attention",

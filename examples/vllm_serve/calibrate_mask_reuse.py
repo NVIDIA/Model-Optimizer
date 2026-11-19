@@ -400,6 +400,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Export a diagnostic maximum-skip candidate when the target is infeasible",
     )
+    parser.add_argument(
+        "--benchmark-candidate",
+        action="store_true",
+        help="Export the best replayed work-feasible fixed-topology assignment even if optimality is unproved",
+    )
+    parser.add_argument(
+        "--previous-candidate",
+        type=Path,
+        help="Replay this prior policy alongside new benchmark assignments",
+    )
     parser.add_argument("--topology-sha256", help="Expected SHA-256 of the topology file")
     parser.add_argument("--solver-time-limit-seconds", type=float, default=600.0)
     parser.add_argument(
@@ -432,6 +442,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.previous_candidate and not args.benchmark_candidate:
+        parser.error("--previous-candidate requires --benchmark-candidate")
+    if args.benchmark_candidate and (args.allow_unmet_target or args.diagnostic_final_chunk):
+        parser.error("--benchmark-candidate requires whole-prefill captures and a met work target")
     if args.output_policy.resolve() == args.output_report.resolve():
         parser.error("--output-policy and --output-report must be different paths")
     for path in (args.output_policy, args.output_report):
@@ -456,6 +470,9 @@ def main(argv: list[str] | None = None) -> int:
         topology_sha256 = topology_snapshot.sha256
         if args.topology_sha256 is not None and args.topology_sha256 != topology_sha256:
             raise ValueError("topology file SHA-256 does not match --topology-sha256")
+        previous = None
+        prior_provenance = {}
+        donor_mode = "calibrated"
         if "topology_selection_schema_version" in topology:
             if (
                 type(topology["topology_selection_schema_version"]) is not int
@@ -472,6 +489,27 @@ def main(argv: list[str] | None = None) -> int:
             )
             if sorted(int(layer) for layer in topology["nearest"]) != topology["attention_layers"]:
                 raise ValueError("topology nearest mapping does not cover attention_layers")
+            donor_mode = (
+                topology["provenance"]
+                .get("candidate_restrictions", {})
+                .get("donor_head_mode", "calibrated")
+                if args.benchmark_candidate
+                else "calibrated"
+            )
+            discovery_evidence = topology.get("evidence")
+            if (
+                args.benchmark_candidate
+                and not args.previous_candidate
+                and isinstance(discovery_evidence, Mapping)
+                and discovery_evidence.get("topology_discovery_capture_sha256")
+                == evidence["reuse_bundle_sha256"]
+            ):
+                previous = {
+                    **topology,
+                    "context_policies": topology["discovery_context_policies"],
+                    "evidence": {"reuse_bundle_sha256": evidence["reuse_bundle_sha256"]},
+                }
+                prior_provenance["previous_candidate_sha256"] = topology_sha256
             topology = {key: topology[key] for key in ("anchors", "nearest")}
         validate_capture_scope(capture_manifest, diagnostic=args.diagnostic_final_chunk)
         _validate_capture_manifest(
@@ -499,6 +537,11 @@ def main(argv: list[str] | None = None) -> int:
         validate_model_geometry(
             checkpoint, [int(layer) for layer in topology["nearest"]], first.global_num_heads
         )
+        if args.previous_candidate:
+            previous, snapshot = _load_json_snapshot(
+                args.previous_candidate, label="prior candidate"
+            )
+            prior_provenance["previous_candidate_sha256"] = snapshot.sha256
         artifact = calibrate_compact_mask_reuse_policy(
             source,
             vanilla_calibration=vanilla_config,
@@ -516,7 +559,11 @@ def main(argv: list[str] | None = None) -> int:
             reuse_dropped_mass_report_threshold=(args.reuse_dropped_mass_report_threshold),
             target_bmm1_skip_ratio=args.target_bmm1_skip_ratio,
             allow_same_group_prefixes=whole_prefill,
+            benchmark_candidate=args.benchmark_candidate,
+            previous_candidate=previous,
+            donor_head_mode=donor_mode,
             source_provenance={
+                **prior_provenance,
                 "capture_manifest_sha256": capture_manifest_sha256,
                 "topology_file_sha256": topology_sha256,
                 "capture_provider": capture_source_provenance(capture_manifest),
@@ -598,7 +645,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not selection_target_met(artifact) and not args.allow_unmet_target:
         payload = _canonical_json_bytes(report)
-        _publish_no_clobber(_temporary_payload(args.output_report, payload), args.output_report)
+        try:
+            _publish_no_clobber(_temporary_payload(args.output_report, payload), args.output_report)
+        except OSError as error:
+            parser.error(f"could not publish infeasibility report: {error}")
         print(
             f"[ModelOpt] BMM1 target infeasible; no policy exported. Report: {args.output_report.resolve()}"
         )
@@ -606,7 +656,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         policy_payload = _canonical_json_bytes(artifact)
-        report_payload = _canonical_json_bytes(report)
+        report_payload = _canonical_json_bytes(
+            {**report, "candidate_policy_sha256": sha256(policy_payload).hexdigest()}
+            if args.benchmark_candidate
+            else report
+        )
         _publish_candidate_outputs(
             args.output_policy, policy_payload, args.output_report, report_payload
         )
