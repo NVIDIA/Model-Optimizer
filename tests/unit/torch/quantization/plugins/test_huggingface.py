@@ -286,6 +286,26 @@ def test_fp8_linear_per_tensor_dequant(monkeypatch):
     )
 
 
+def test_fp8_linear_weight_only_calibration_uses_dequantized_weight():
+    module = FP8Linear(2, 2, block_size=(128, 128))
+    module.weight_scale_inv = nn.Parameter(torch.tensor(2.0))
+    with torch.no_grad():
+        module.weight.copy_(torch.tensor([[-2.0, 1.0], [0.5, 4.0]], dtype=torch.float8_e4m3fn))
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+
+    model = mtq.quantize(nn.Sequential(module), config, forward_loop=None)
+
+    # The forward quantizes the dequantized weight (abs max 4.0 * 2.0), not the FP8 codes (4.0).
+    assert model[0].weight.dtype == torch.float8_e4m3fn
+    assert model[0].weight_quantizer.amax.item() == 8.0
+
+
 @pytest.mark.skipif(
     not hasattr(transformers, "NemotronHConfig"),
     reason="NemotronH is not supported by this Transformers version",
