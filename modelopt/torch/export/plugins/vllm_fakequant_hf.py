@@ -655,9 +655,8 @@ def export_hf_vllm_fq_checkpoint(
     (:class:`~modelopt.torch.opt.session.ModelOptSession`), the export reads the model's type from
     the session's binding of the model, so the workflow binds the model first; outside any session
     it reads it off the model.
-    The tensors of the source checkpoint the session holds that the model has no parameter for are
-    carried over; without one, those of the checkpoint the model names: the one its load recorded
-    on it, else its ``config._name_or_path``.
+    The tensors of the source checkpoint that the model has no parameter for are carried over: the
+    checkpoint the model's load recorded on it, else its ``config._name_or_path``.
 
     Args:
         model: In-memory quantized model.
@@ -668,7 +667,7 @@ def export_hf_vllm_fq_checkpoint(
             modified and weight quantizers are not re-enabled after export.
     """
     session = mto.ModelOptSession.active()
-    source = _resolve_source(model, session.binding(model).source)
+    source = _resolve_source(model)
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 

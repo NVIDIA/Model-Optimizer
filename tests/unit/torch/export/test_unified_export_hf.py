@@ -15,7 +15,6 @@
 
 """Tests for tied-weight helpers in unified_export_hf."""
 
-import contextlib
 import importlib.util
 import json
 from copy import deepcopy
@@ -53,7 +52,6 @@ from modelopt.torch.export.unified_export_hf import (
     export_hf_checkpoint,
     read_unplaced_weights,
 )
-from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import SourceCheckpoint
@@ -725,17 +723,16 @@ def test_carry_over_returns_nothing_for_a_hub_id_rather_than_a_local_path():
 
 @requires_accelerate
 @pytest.mark.parametrize("recorded", [["model.mtp.weight"], []], ids=["a-key", "none"])
-def test_carry_over_reads_what_the_deprecated_recorder_recorded(tmp_path, recorded):
-    """The keys ``record_unplaced_source_keys`` recorded on a model, deprecated, and only those, are
-    carried from the checkpoint it recorded with them, though the model's ``_name_or_path`` is a
-    Hub ID: a record of none carries none, as a loader that placed everything records."""
+def test_carry_over_reads_what_the_recorder_recorded(tmp_path, recorded):
+    """The keys ``record_unplaced_source_keys`` recorded on a model, and only those, are carried
+    from the checkpoint it recorded with them, though the model's ``_name_or_path`` is a Hub ID: a
+    record of none carries none, as a loader that placed everything records."""
     # Local import: model_load_utils imports transformers and accelerate, optional dependencies.
     from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
 
     save_file({"model.mtp.weight": torch.full((2,), 7.0)}, str(tmp_path / "model.safetensors"))
     model = _ProvenanceModel(name_or_path="org/Some-Model")
-    with pytest.deprecated_call():
-        record_unplaced_source_keys(model, str(tmp_path), keys=recorded)
+    record_unplaced_source_keys(model, str(tmp_path), keys=recorded)
 
     assert list(read_unplaced_weights(_resolve_source(model, None))) == recorded
 
@@ -957,14 +954,16 @@ def test_exporters_copy_non_model_files_from_a_local_source(tmp_path):
     assert sorted(p.name for p in export.iterdir()) == ["tokenizer.json"]
 
 
-@pytest.mark.parametrize("given", ["named", "session"])
+@pytest.mark.parametrize("given", ["named", "recorded"])
 def test_export_hf_checkpoint_copies_the_source_non_model_files(tmp_path, given):
     """The regular (non-streaming, non-layerwise) path copies them after save_pretrained, from the
-    source the workflow's session holds, else from the checkpoint the model names, and carries
+    source the model's load recorded on it, else from the checkpoint its config names, and carries
     from it, unchanged, its tensors the model has no parameter for, such as an MTP head."""
     # Local import: transformers and its test fixtures are optional dependencies.
     from _test_utils.torch.transformers_models import create_tiny_llama_dir
     from transformers import AutoModelForCausalLM
+
+    from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
 
     source = create_tiny_llama_dir(tmp_path)
     mtp = "model.mtp.eh_proj.weight"
@@ -975,23 +974,13 @@ def test_export_hf_checkpoint_copies_the_source_non_model_files(tmp_path, given)
     (source / "assets" / "notes.txt").write_text("asset\n")
     model = AutoModelForCausalLM.from_pretrained(source)
     export = tmp_path / "export"
-    # A checkpoint with nothing to copy, which the session's source must win over.
+    # A checkpoint with nothing to copy, which the recorded source must win over.
     (tmp_path / "decoy").mkdir()
-    if given == "session":
+    if given == "recorded":
         model.config._name_or_path = str(tmp_path / "decoy")
-    session = ModelOptSession().bind(model) if given == "session" else None
-    if session is not None:
-        session.binding(model).source = SourceCheckpoint(str(source), (mtp,))
+        record_unplaced_source_keys(model, str(source), keys=[mtp])
 
-    with session or contextlib.nullcontext():
-        export_hf_checkpoint(model, export_dir=export)
-        if session is not None:
-            # The export's steps found its context in the workflow's ModelOpt session, which lets it
-            # go with the export: it holds the model, which the ModelOpt session must not keep alive.
-            assert session.runtime.export_context is None
-            # The export bound the session to the model, which read the model's type there, where
-            # its steps and handlers read it.
-            assert session.model_type == "llama"
+    export_hf_checkpoint(model, export_dir=export)
 
     exported = {}
     for shard in export.glob("*.safetensors"):

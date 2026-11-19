@@ -1890,15 +1890,17 @@ def _layerwise_exporter(model: Any) -> Any:
     return getattr(model, LAYERWISE_EXPORTER_ATTR, None)
 
 
-def _resolve_source(model: nn.Module, source: SourceCheckpoint | None) -> SourceCheckpoint | None:
+def _resolve_source(
+    model: nn.Module, source: SourceCheckpoint | None = None
+) -> SourceCheckpoint | None:
     """The source facts an export of ``model`` carries weights over by: ``source``, else derived.
 
-    ``source`` is what the load recorded in the workflow's ModelOpt session (``load_pretrained``
-    inside ``with ModelOptSession():``). Without it the export takes the keys the model's load
-    recorded on it, else works the facts out from the checkpoint the model names
-    (:func:`_named_source`), by the derivation the loads run, which gives the same keys while the
-    model holds the parameters it was loaded with. A layerwise export packs them as it goes, so it
-    resolves its source before the first layer, and that is the one read back here.
+    ``source`` is one the export already holds, such as the one a layerwise export resolved before
+    its first layer. Without it the export takes the keys the model's load recorded on it, else
+    works the facts out from the checkpoint the model names (:func:`_named_source`), by the
+    derivation the loads run, which gives the same keys while the model holds the parameters it
+    was loaded with. A layerwise export packs them as it goes, so it resolves its source before the
+    first layer, and that is the one read back here.
 
     The derivation needs ``model_load_utils``, which imports transformers and accelerate at module
     scope. Where those are absent the export carries nothing, with a warning; a ``source`` passed in
@@ -1933,9 +1935,8 @@ def _resolve_source(model: nn.Module, source: SourceCheckpoint | None) -> Source
         keys = unplaced_source_keys(model, named.path)
     except Exception as exc:
         warnings.warn(
-            f"Could not derive unplaced source keys ({exc}), so the export carries none. Load and "
-            "export the model inside one `with ModelOptSession():`, whose load records them, to "
-            "carry them."
+            f"Could not derive unplaced source keys ({exc}), so the export carries none. Loading "
+            "with modelopt.torch.utils.plugins.model_load_utils.load_pretrained records them."
         )
         return named
     return SourceCheckpoint(named.path, tuple(sorted(keys)))
@@ -2160,10 +2161,9 @@ def export_hf_checkpoint(
     the session's binding of the model, so the workflow binds the model first; outside any session
     it reads it off the model.
 
-    The tensors of the source checkpoint the session holds that the model has no parameter for,
-    such as an MTP head, are carried into the export unchanged, and the checkpoint's non-model
-    files are copied; without one, both come from the checkpoint the model names: the one its load
-    recorded on it, else its ``config._name_or_path``.
+    The tensors of the source checkpoint that the model has no parameter for, such as an MTP head,
+    are carried into the export unchanged, and the checkpoint's non-model files are copied: the
+    checkpoint the model's load recorded on it, else its ``config._name_or_path``.
 
     Args:
         model: The model to export: a module, such as a transformers model (e.g.,
@@ -2186,14 +2186,9 @@ def export_hf_checkpoint(
             runtime compatibility; other diffusion components omit them.
             Transformers components always retain them for KV-cache scales.
     """
-    ensure_modelopt_session_binding(model)
-    # The workflow, as its session holds it.
-    session = ModelOptSession.active()
     exporter = _layerwise_exporter(model)
-    source = session.binding(model).source
-    if source is None and exporter is not None:
-        # A layerwise export resolved its source before calibration packed the first layer.
-        source = getattr(exporter, "_source", None)
+    # A layerwise export resolved its source before calibration packed the first layer.
+    source = getattr(exporter, "_source", None) if exporter is not None else None
     if not isinstance(model, nn.Module):
         # A diffusion pipeline is not a module: it is never sharded or calibrated layerwise, and
         # nothing below is carried into the diffusers export, so it goes there now.

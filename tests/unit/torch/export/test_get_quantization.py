@@ -884,7 +884,7 @@ def test_carried_over_weights_are_excluded_from_quantization(given):
     ``exclude_modules`` -- otherwise a deployment framework reads the top-level ``quant_algo``
     and tries to load ``eh_proj`` as an NVFP4 weight. Same failure as the MoE router above,
     different cause: no quantizer there, no module at all here. A caller that passes no carried
-    weights gets those the deprecated ``record_unplaced_source_keys`` recorded on the model.
+    weights gets those ``record_unplaced_source_keys`` recorded on the model.
     """
     hidden = 16
     model = _FakeMoEModel(hidden=hidden)
@@ -904,8 +904,7 @@ def test_carried_over_weights_are_excluded_from_quantization(given):
         # Local import: model_load_utils imports transformers and accelerate, optional dependencies.
         from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
 
-        with pytest.deprecated_call():
-            record_unplaced_source_keys(model, "/source", carried)
+        record_unplaced_source_keys(model, "/source", carried)
         quant_config = get_quant_config(model)
     assert quant_config["quantization"]["quant_algo"] == "NVFP4"
 

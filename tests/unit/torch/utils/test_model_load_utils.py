@@ -24,7 +24,6 @@ tests of each part use a process group, two gloo ranks.
 
 import copy
 import dataclasses
-import gc
 import importlib
 import importlib.util
 import inspect
@@ -245,14 +244,18 @@ def test_unplaced_keys_preserve_registered_qwen_vlm_parameters(tmp_path, factory
 # --- recording what the load could not place -----------------------------------------------------
 
 
-def test_the_deprecated_record_still_stores_sorted_keys_and_provenance():
-    """Kept for its callers for a release, deprecated, so it warns."""
+def test_record_unplaced_source_keys_stores_sorted_keys_and_provenance():
     model = torch.nn.Linear(2, 2)
-    with pytest.deprecated_call():
-        keys = record_unplaced_source_keys(model, "/ckpt/path", iter(["z.weight", "a.weight"]))
+    keys = record_unplaced_source_keys(model, "/ckpt/path", ["z.weight", "a.weight"])
 
-    assert keys == model._modelopt_unplaced_source_keys == ["a.weight", "z.weight"]
+    assert keys == ["a.weight", "z.weight"]
+    assert model._modelopt_unplaced_source_keys == ["a.weight", "z.weight"]
     assert model._modelopt_source_checkpoint == "/ckpt/path"
+
+
+def test_record_unplaced_source_keys_accepts_any_iterable():
+    model = torch.nn.Linear(2, 2)
+    assert record_unplaced_source_keys(model, "/c", iter(["b", "a"])) == ["a", "b"]
 
 
 @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
@@ -2262,78 +2265,8 @@ def test_a_model_its_spec_refuses_is_refused_with_its_config_handed_in(
     assert loaders == {}
 
 
-def test_a_bound_session_is_refused_before_anything_loads(tmp_path):
-    """A load builds a new model, which an active session already bound to one cannot describe,
-    also once that model is freed: it is refused before the checkpoint is even read, not once the
-    model is built."""
-    previous = nn.Linear(2, 2)
-    with ModelOptSession().bind(previous):
-        with pytest.raises(RuntimeError, match="a session describes one model"):
-            load_pretrained(str(tmp_path / "absent"))
-        del previous
-        gc.collect()
-        with pytest.raises(RuntimeError, match="a session describes one model"):
-            load_pretrained(str(tmp_path / "absent"))
-
-
-def test_a_load_that_fails_leaves_its_session_free_to_load_again(tmp_path, monkeypatch):
-    """A load whose read of the source fails binds nothing, so the workflow can load again."""
-    LlamaForCausalLM(LlamaConfig(**_TINY)).save_pretrained(tmp_path)
-
-    def unreadable(*args, **kwargs):
-        raise OSError("unreadable index")
-
-    with ModelOptSession() as session:
-        monkeypatch.setattr(model_load_utils, "unplaced_source_keys", unreadable)
-        with pytest.raises(OSError, match="unreadable"):
-            load_pretrained(str(tmp_path), device_map="cpu")
-        assert not session.is_bound
-        monkeypatch.undo()
-        model = load_pretrained(str(tmp_path), device_map="cpu")
-        assert session.model is model
-
-
-def test_a_load_binds_the_model_it_builds_by_name(tmp_path):
-    """A load binds the model it builds as the name it is given, with that model's own source: a
-    distillation loads its teacher into the session bound to its student, where a second "model"
-    is refused before anything loads. The default session follows code that loads another model."""
-    LlamaForCausalLM(LlamaConfig(**_TINY)).save_pretrained(tmp_path)
-    ckpt = str(tmp_path)
-    with ModelOptSession() as session:
-        student = load_pretrained(ckpt, device_map="cpu")
-        teacher = load_pretrained(ckpt, device_map="cpu", name="teacher")
-        assert session.model is student and session.binding(teacher).name == "teacher"
-        assert session.binding(teacher).source == hf_checkpoint_utils.SourceCheckpoint(ckpt)
-        with pytest.raises(RuntimeError, match="a session describes one model"):
-            load_pretrained(ckpt, device_map="cpu")
-    load_pretrained(ckpt, device_map="cpu")
-    second = load_pretrained(ckpt, device_map="cpu")
-    assert ModelOptSession.current() is None and ModelOptSession.active().model is second
-
-
-def _one_rank_bound_job(rank, size, ckpt):
-    session = ModelOptSession()
-    if rank == 0:
-        session.bind(nn.Linear(2, 2))
-    with bounded_collectives(), session:
-        try:
-            load_pretrained(ckpt, distribution=DistributionPlan(size), device_map="cpu")
-        except Exception as error:  # rank 0's own RuntimeError, as the others receive it
-            raised = str(error)
-        else:
-            raised = "no error"
-    # Rank 0's refusal, on every rank, rather than rank 1 left waiting in the load's next collective.
-    assert "a session describes one model" in raised, (rank, raised)
-
-
-def test_a_session_one_rank_refuses_fails_every_rank(cpu_dist_workers, tmp_path):
-    """A refusal on any rank raises on every rank before the load, the active session's too."""
-    LlamaConfig(**_TINY).save_pretrained(tmp_path)
-    cpu_dist_workers.run(_one_rank_bound_job, ckpt=str(tmp_path))
-
-
 def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed, placed, through):
-    model, refused, other, recorded = None, None, None, None
+    model, refused = None, None
     session = ModelOptSession(distribution=handed[rank]) if through == "session" else None
     plan = {} if session else {"distribution": handed[rank]}
     # Ranks without GPUs, whatever the host has: the pooled workers keep no CUDA context.
@@ -2346,20 +2279,11 @@ def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed, placed, through)
             model = load_pretrained(ckpt, **plan, **placed)
         except Exception as error:
             refused = str(error)
-        if session is not None and refused is None:
-            # While its block runs, the session is bound to the model the load returned.
-            recorded = session.source
-            try:
-                session.bind(nn.Linear(1, 1))
-            except RuntimeError as error:
-                other = str(error)
     if isinstance(handed[0], DistributionPlan):
         assert refused is None and distribution_plan(model) == handed[0], (rank, refused)
         if session is not None:
-            # The session records the plan every rank loaded by, and the source, for this model.
+            # The session records the plan every rank loaded by.
             assert session.distribution == handed[0], rank
-            assert recorded == hf_checkpoint_utils.SourceCheckpoint(ckpt), rank
-            assert "describes one model" in str(other), rank
     else:
         # Rank 0's refusal, on every rank, rather than a rank left waiting in the broadcast.
         assert "expected a DistributionPlan" in str(refused), (rank, refused)

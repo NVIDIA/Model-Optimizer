@@ -30,7 +30,6 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM, DeepseekV3Config, LlamaConfig, Qwen3MoeConfig
 
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
-from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     broadcast_state_dict,
@@ -224,9 +223,7 @@ def _load_and_check(rank, size, ckpt_dir, knobs, expected):
     device = torch.device(f"cuda:{rank}")
     os.environ.update(knobs)
     try:
-        with ModelOptSession() as session:
-            model = load_pretrained(ckpt_dir)
-            source = session.source
+        model = load_pretrained(ckpt_dir)
         whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16)
 
         params = dict(model.named_parameters())
@@ -251,8 +248,8 @@ def _load_and_check(rank, size, ckpt_dir, knobs, expected):
                 torch.testing.assert_close(local.cpu(), owned)
         for name, param in params.items():  # the same order on every rank: full_tensor gathers
             torch.testing.assert_close(_full(param).cpu(), whole_params[name])
-        assert source.unplaced_keys == ()
-        assert source.path == ckpt_dir
+        assert model._modelopt_unplaced_source_keys == []
+        assert model._modelopt_source_checkpoint == ckpt_dir
         assert (
             distribution_plan(model)
             == {

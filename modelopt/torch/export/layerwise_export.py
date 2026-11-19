@@ -279,7 +279,7 @@ class LayerwiseExporter:
 
         # Packing removes fused source parameters; account for them while the tree is intact. The
         # source the workflow's load recorded wins, as it does for the whole-model export.
-        self._source = _resolve_source(model, ModelOptSession.active().binding(model).source)
+        self._source = _resolve_source(model)
 
         # The export's one context, for every layer and the tail, made once nothing here can fail.
         # The exporter keeps it, and a session holds it only while the exporter writes

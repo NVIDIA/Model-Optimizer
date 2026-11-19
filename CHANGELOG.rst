@@ -29,15 +29,13 @@ Changelog
 *Misc*
 
 - Add ``modelopt.torch.opt.ModelOptSession``, the session a ModelOpt workflow runs in: run the workflow inside ``with ModelOptSession().bind(model):`` and the quantization, calibration and Hugging Face export calls it makes run in that session, which describes the models the workflow binds by name (``model``, and ``teacher`` for distillation). In the block, the Hugging Face export reads the model's type from its binding and refuses a model the session does not bind. Code that opens no session runs as before.
-- ``load_pretrained`` binds the model it loads in the active ``ModelOptSession`` under its new ``name`` argument (``"model"`` by default, ``"teacher"`` for a distillation's teacher), and records there the source checkpoint, whose tensors the model has no parameter for, such as an MTP head, the Hugging Face exports carry over. Inside a ``with ModelOptSession():`` block, it also loads by the session's ``distribution`` plan when none is passed, and records the plan it loaded by.
+- Inside a ``with ModelOptSession():`` block, ``load_pretrained`` loads by the session's ``distribution`` plan when none is passed, and records in the session the plan it loaded by.
 
 **Backward Breaking Changes**
 
 - ModelOpt supports one model optimization workflow at a time in a process: running different workflows at once from several threads, such as quantizing two models in two threads, is not supported. The threads of the one workflow share its ``ModelOptSession``, which runs one export at a time.
 
 **Deprecations**
-
-- ``modelopt.torch.utils.plugins.model_load_utils.record_unplaced_source_keys`` is deprecated and will be removed in 0.51.0: ``load_pretrained`` records the source checkpoint itself, on the model and in the workflow's ``ModelOptSession``.
 
 **Bug Fixes**
 

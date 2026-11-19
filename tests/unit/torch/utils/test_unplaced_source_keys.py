@@ -63,9 +63,8 @@ from modelopt.torch.utils.plugins.model_load_utils import (
 
 
 def test_a_two_argument_unplaced_source_keys_still_records_the_keys(monkeypatch, tmp_path):
-    """The deprecated record still works: the map a load already read reaches
-    ``unplaced_source_keys`` by keyword, and only when there is one, so a caller that replaced the
-    function with its two-argument form still records keys."""
+    """The map a load already read reaches ``unplaced_source_keys`` by keyword, and only when there is
+    one, so a caller that replaced the function with its two-argument form still records keys."""
     seen = []
 
     def two_arguments(model, ckpt_path):
@@ -75,9 +74,7 @@ def test_a_two_argument_unplaced_source_keys_still_records_the_keys(monkeypatch,
     monkeypatch.setattr(model_load_utils, "unplaced_source_keys", two_arguments)
     model = LlamaForCausalLM(_tiny_llama_config())
 
-    with pytest.deprecated_call():
-        keys = model_load_utils.record_unplaced_source_keys(model, str(tmp_path))
-    assert keys == ["mtp.fc.weight"]
+    assert model_load_utils.record_unplaced_source_keys(model, str(tmp_path)) == ["mtp.fc.weight"]
     assert seen == [str(tmp_path)]
     read = {"mtp.fc.weight": "model.safetensors"}
     monkeypatch.setattr(
@@ -85,9 +82,9 @@ def test_a_two_argument_unplaced_source_keys_still_records_the_keys(monkeypatch,
         "unplaced_source_keys",
         lambda model, ckpt_path, tensor_files=None: sorted(tensor_files),
     )
-    with pytest.deprecated_call():
-        keys = model_load_utils.record_unplaced_source_keys(model, str(tmp_path), tensor_files=read)
-    assert keys == ["mtp.fc.weight"]
+    assert model_load_utils.record_unplaced_source_keys(
+        model, str(tmp_path), tensor_files=read
+    ) == ["mtp.fc.weight"]
 
 
 # A layer past ``num_hidden_layers``: genuinely stray, so it must always be recorded.
@@ -118,10 +115,9 @@ def _save(path, config, state, quantization_config=None):
 
 
 def _load(path, auto_class=None, **kwargs):
-    """The model and the source its load records in the active session."""
-    with ModelOptSession() as session:
-        model = load_pretrained(str(path), auto_class, **kwargs)
-        source = session.source
+    """The model and the source its load records on it, as the export reads it back."""
+    model = load_pretrained(str(path), auto_class, **kwargs)
+    source = _resolve_source(model)
     if getattr(model, "_weight_conversions", None) is None:
         pytest.skip("this transformers does not record the conversions from_pretrained ran")
     return model, source
@@ -189,9 +185,7 @@ def test_the_hub_options_pick_the_snapshot_and_reach_the_loads_from_it(tmp_path,
         "local_files_only": True,
     }
 
-    with ModelOptSession() as session:
-        load_pretrained("org/model", models, **hub_kwargs)
-        source = session.source
+    source = _resolve_source(load_pretrained("org/model", models, **hub_kwargs))
 
     assert resolved[0] == ("org/model", hub_kwargs)
     # Anything resolved after that is the local snapshot.
@@ -256,13 +250,11 @@ def _rank_0_cannot_read_the_source_job(rank, size, ckpt):
         # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
         # the shared worker down instead of failing this test alone.
         try:
-            with ModelOptSession() as session:
-                load_pretrained(ckpt, distribution=DistributionPlan(size))
+            load_pretrained(ckpt, distribution=DistributionPlan(size))
         except (OSError, RuntimeError) as e:
             raised = e
-    # Rank 0 raises its own error, and rank 1 one that names it; each leaves its session unbound.
+    # Rank 0 raises its own error, and rank 1 one that names it.
     assert raised is not None and "a shard of the source is unreadable" in str(raised), raised
-    assert not session.is_bound
 
 
 def test_every_rank_fails_a_load_whose_source_rank_0_cannot_read(cpu_dist_workers, tmp_path):
@@ -626,8 +618,10 @@ def test_a_parameter_its_quantization_renames_is_not_carried_over_raw(tmp_path, 
     renamed, as it splits Step's experts, and the export would write the raw tensor over the
     quantized one."""
     _StepLike(_StepLikeConfig(architectures=["_StepLike"])).save_pretrained(tmp_path / "source")
-    with nullcontext() if where == "outside any session" else ModelOptSession():
+    with nullcontext() if where == "outside any session" else ModelOptSession() as session:
         model = load_pretrained(str(tmp_path / "source"), _StepLike, device_map="cpu")
+        if session is not None:
+            session.bind(model)
         mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 32, (1, 4))))
         if where != "after the session's block":
             export_hf_checkpoint(model, export_dir=tmp_path / "export")

@@ -24,8 +24,6 @@ from safetensors.torch import load_file, save_file
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.plugins import vllm_fakequant_hf as vfq
-from modelopt.torch.opt import ModelOptSession
-from modelopt.torch.utils.plugins.hf_checkpoint_utils import SourceCheckpoint
 
 
 def test_carry_over_unplaced_weights_writes_extra_shard_and_reindexes(tmp_path, monkeypatch):
@@ -110,12 +108,14 @@ def test_carry_over_unplaced_weights_is_a_true_noop_when_nothing_to_carry(tmp_pa
     assert not (tmp_path / "model.safetensors.index.json").exists()
 
 
-def test_the_fakequant_export_carries_the_tensors_of_the_source_its_session_holds(tmp_path):
-    """The vLLM fake-quant export carries the source tensors the workflow's session names, such as
-    an MTP head, though the model names another checkpoint."""
+def test_the_fakequant_export_carries_the_tensors_of_the_source_its_load_recorded(tmp_path):
+    """The vLLM fake-quant export carries the source tensors the model's load recorded on it, such
+    as an MTP head, though its config names another checkpoint."""
     pytest.importorskip("transformers")
     # Local import: transformers and its test fixtures are optional dependencies.
     from _test_utils.torch.transformers_models import get_tiny_llama
+
+    from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
 
     mtp = "model.mtp.fc.weight"
     source = tmp_path / "source"
@@ -125,10 +125,9 @@ def test_the_fakequant_export_carries_the_tensors_of_the_source_its_session_hold
     model.config.architectures = ["LlamaForCausalLM"]
     model.config._name_or_path = "org/some-model"
 
-    with ModelOptSession().bind(model) as session:
-        session.binding(model).source = SourceCheckpoint(str(source), (mtp,))
-        mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 32, (1, 8))))
-        vfq.export_hf_vllm_fq_checkpoint(model, export_dir=tmp_path / "export")
+    record_unplaced_source_keys(model, str(source), keys=[mtp])
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 32, (1, 8))))
+    vfq.export_hf_vllm_fq_checkpoint(model, export_dir=tmp_path / "export")
 
     exported = {}
     for shard in (tmp_path / "export").glob("*.safetensors"):

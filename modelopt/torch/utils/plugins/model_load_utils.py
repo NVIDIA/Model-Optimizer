@@ -71,7 +71,7 @@ from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_
 
 from modelopt import env
 from modelopt.torch.export.model_utils import get_language_model_from_vl
-from modelopt.torch.opt.session import ModelName, ModelOptSession
+from modelopt.torch.opt.session import ModelOptSession
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import moe
@@ -558,21 +558,18 @@ def record_unplaced_source_keys(
     keys: "Iterable[str] | None" = None,
     tensor_files: "dict[str, str] | None" = None,
 ) -> list[str]:
-    """Deprecated: record on ``model`` the checkpoint tensors it has no parameter for.
+    """Record on ``model`` the checkpoint tensors it has no parameter for, for the export to carry.
 
-    :func:`load_pretrained` records the facts in the active ModelOpt session instead, and
-    :func:`~modelopt.torch.export.export_hf_checkpoint` takes them from it. Outside any session the
-    loads record them on the model, as this does, and an export without them reads that record,
-    else works them out from the checkpoint the model's own ``config._name_or_path`` names.
+    The load is what knows how the checkpoint maps onto the model, so the list is worked out once,
+    at load time, and the export reads it back (``_modelopt_unplaced_source_keys``, beside the
+    checkpoint in ``_modelopt_source_checkpoint``) rather than deriving it again. Pass ``keys`` when
+    the loader already found them while placing the weights; otherwise :func:`unplaced_source_keys`
+    derives them from the loaded model, from ``tensor_files`` when the load already read them. Every
+    loader of a model that may be exported calls this: :func:`load_pretrained` and
+    :func:`parallel_load_and_prepare_fsdp2` do.
     """
-    warnings.warn(
-        "record_unplaced_source_keys is deprecated and will be removed in 0.51.0: load and "
-        "export the model inside one `with ModelOptSession():`, whose load records the source.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
     if keys is None:
-        # The map by keyword, and only when there is one: a caller that replaced
+        # The map by keyword, and only when the load read it: a caller that replaced
         # unplaced_source_keys with its two-argument form gets its keys as before.
         keys = (
             unplaced_source_keys(model, ckpt_path)
@@ -580,12 +577,13 @@ def record_unplaced_source_keys(
             else unplaced_source_keys(model, ckpt_path, tensor_files=tensor_files)
         )
     keys = sorted(keys)
-    _record_source(model, SourceCheckpoint(str(ckpt_path), tuple(keys)))
+    model._modelopt_unplaced_source_keys = keys
+    model._modelopt_source_checkpoint = str(ckpt_path)
     return keys
 
 
 def _record_source(model: nn.Module, source: SourceCheckpoint) -> None:
-    """Leave ``source`` on ``model``, for an export outside the session of the load to read back.
+    """Leave ``source`` on ``model``, for the export to read back.
 
     Found at load time, from the model as loaded: worked out at export time instead, the keys would
     also name a parameter the model's quantization renamed, such as Step's experts, and the export
@@ -899,23 +897,12 @@ def _load_sharded(route, ckpt_path, load_kwargs) -> nn.Module:
     )
 
 
-def _refuse_a_bound_session(session: ModelOptSession, name: "ModelName | None") -> None:
-    """Refuse, before anything loads, a session holding another model as ``name``."""
-    if session._refuses_another(name):
-        raise RuntimeError(
-            f"The active ModelOptSession describes a workflow on another model as "
-            f"{name or 'model'!r}, so it cannot describe the model this load builds: a session "
-            "describes one model under each name."
-        )
-
-
 def load_pretrained(
     ckpt_path: str,
     auto_class: Any = None,
     *,
     model_type: str | None = None,
     distribution: DistributionPlan | None = None,
-    name: "ModelName | None" = None,
     **kwargs,
 ) -> nn.Module:
     """Load a Hugging Face model for ModelOpt to optimize and export, whole or distributed.
@@ -955,26 +942,25 @@ def load_pretrained(
       Nemotron-H checkpoint carries. ``model_type`` selects it; when omitted, the type of the
       ``config`` passed for the load, else of the checkpoint's config. A sharded load cannot run
       it, so it refuses a checkpoint the hook would build modules for.
-    * The active ModelOpt session (:class:`~modelopt.torch.opt.session.ModelOptSession`) binds the
-      model as ``name`` (``"model"`` by default; ``"teacher"`` for a distillation's teacher), and
-      the binding records the source: the
+    * The load records the source on the model: the
       :class:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.SourceCheckpoint` that names the
       local checkpoint and its tensors the model has no parameter for, which
-      ``export_hf_checkpoint`` carries over unchanged. A session already holding another model as
-      that name is refused before anything loads, except the default session, which follows code
-      that opens no session to the model it loads. A session a ``with`` block opened also supplies
-      the plan to load ``"model"`` by where ``distribution`` is not passed, and records the plan it
-      loaded by. The source is recorded on the model too, as before, for an export outside the
-      session to read back.
+      ``export_hf_checkpoint`` carries over unchanged.
+    * A session a ``with ModelOptSession():`` block opened
+      (:class:`~modelopt.torch.opt.session.ModelOptSession`) supplies the plan to load by where
+      ``distribution`` is not passed, and records the plan the load used, except that a load given
+      its own while the session holds one, such as a distillation teacher's, leaves the session's.
+      The load binds nothing: the workflow binds the model it loads
+      (:meth:`~modelopt.torch.opt.session.ModelOptSession.bind`).
       ``output_loading_info=True`` is refused, and so is a ``variant``: the source and the export
       read the checkpoint's default weight files.
     """
     # Importing modelopt.torch.models registers every model spec; only callers of this need them.
     from modelopt.torch.models.hf import prepare_model_for_loading
 
-    session, workflow = ModelOptSession.active(), ModelOptSession.current()
-    if distribution is None and workflow is not None and name in (None, "model"):
-        distribution = workflow.distribution
+    workflow, supplied = ModelOptSession.current(), False
+    if workflow is not None and distribution is None:
+        distribution, supplied = workflow.distribution, True
     # A launch whose processes set no group up (hf_ptq without --use_fsdp2): each loads alone.
     alone = dist.is_distributed_launch() and not dist.is_initialized()
     if alone and isinstance(distribution, DistributionPlan) and distribution.world_size > 1:
@@ -1028,15 +1014,14 @@ def load_pretrained(
     decided = plan is None and dist.size() > 1
     # Each rank checks its own arguments; a refusal on one fails every rank before the fetch.
     with _refused_together("load arguments", alone):
-        _refuse_a_bound_session(session, name)
         if decided:
             # Parsed in this check, a knob one rank cannot parse fails every rank.
             _ep_degree(None)
         if kwargs.pop("output_loading_info", False):
             raise ValueError(
-                "load_pretrained does not take output_loading_info=True; for the checkpoint "
-                "tensors the model has no parameter for, load inside `with ModelOptSession():`, "
-                "whose load records them."
+                "load_pretrained returns the model alone and does not take "
+                "output_loading_info=True; the checkpoint tensors the model has no parameter for "
+                "are recorded on it instead (see record_unplaced_source_keys)."
             )
         if kwargs.get("variant") is not None:
             raise ValueError(
@@ -1200,13 +1185,9 @@ def load_pretrained(
             f"{len(source.unplaced_keys)} checkpoint tensor(s) the model has no parameter for "
             f"(e.g. {source.unplaced_keys[0]}); the export will carry them over unchanged."
         )
-    # On the model too, as before: an export the workflow's session does not reach, such as one
-    # after its block ends, reads it back there.
+    # On the model, where the export reads it back.
     _record_source(model, source)
-    # Bound once nothing more can fail, so a load that failed leaves the workflow free to load again.
-    binding = session.bind(model, name).binding(model)
-    binding.source = source
-    if workflow is not None and binding.name == "model":
+    if workflow is not None and (supplied or workflow.distribution is None):
         workflow.distribution = plan
     return model
 
