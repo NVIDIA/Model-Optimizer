@@ -94,7 +94,7 @@ python calibrate_mask_reuse_topology.py --checkpoint <CHECKPOINT> \
 
 Discovery enforces the BMM1 target in **every context range**, rather than only
 over pooled prompts. It rejects duplicate full prompt sources and inconsistent
-layer sets or spans. It uses the same risk objective and solver optimality checks
+layer sets or spans. It uses the same risk objective and two-pass selection rule
 as refitting. A pooled maximum-saving diagnostic is not a per-range guarantee.
 Both calibrators verify each whole-prefill observation against its parent plan.
 Different-length prompts may share prefixes within one source group; all planned
@@ -127,64 +127,34 @@ topology identities are mandatory. The four additional provenance JSON flags
 are optional; supplying them records their hashes without certifying their
 contents or benchmark quality.
 
-For each context range, the selector meets the model-wide BMM1 skip target,
-then minimizes worst-prompt anchor-plus-consumer dropped mass. It subsequently
-minimizes tile cost and uses deterministic lexicographic tie-breaks. The two
-reported mass thresholds are diagnostics, not hard acceptance caps. The
-optional `--max-anchor-dropped-mass` selects the older capped formulation.
+The refit searches each context range independently. Every exported candidate must
+meet the requested model-wide BMM1 skip ratio in each range. For each target
+sparsity it first minimizes the largest calibration-prompt dropped mass, summed
+over anchor and consumer heads and normalized by the number of attention heads
+across all full-attention layers. The second pass minimizes combined tile cost
+under one ceiling shared by the targets: the smallest observed risk plus
+`1e-7` in normalized units. Equal tile cost favors the smaller target.
+Discovery applies the same rule to target tuples sharing one anchor layout.
+The optional legacy anchor cap keeps its consumer-only risk definition.
 
-HiGHS is the default; `--solver cbc` selects the hardened fallback. Every
-stage requires optimal status with zero native MIP gap. The returned assignment
-must reproduce the reported objective. HiGHS starts with presolve disabled;
-an inconsistent assignment or nonzero gap triggers a fresh, unseeded solve with
-presolve enabled. A second failure remains unresolved rather than accepting a
-feasible incumbent or a positive gap.
+HiGHS uses one thread. The solver checks the objective against its returned
+assignment, and the calibrator replays the exported policy against the capture.
+The default refit budget is 1,600 seconds per range. Discovery shares a
+600-second budget across all target tuples. `--solver-time-limit-seconds`
+overrides the corresponding budget. `--previous-candidate` can supply an initial
+assignment for a matching compact capture. Omit it to measure a fresh refit.
 
-Fixed risk is rechecked using exact arithmetic on the captured coefficients,
-with an eight-ULP allowance for expression accumulation. Distinct donor risk
-vectors separated by at most native feasibility precision (`1e-9` in raw
-per-head mass) remain unresolved; they are not rounded into ties. Native
-optimal status is not a rational-arithmetic proof of arbitrary sub-tolerance
-ordering.
+The report records available primal and dual bounds, completed stages, and
+the policy's recounted risk and work. A feasible policy can be exported on a
+timeout. A within-tolerance result requires bounds supporting both the risk
+ceiling and the cost comparison across qualifying targets. An unresolved run
+without a verified candidate returns exit 3. An established unmet work target
+returns exit 2 with a report. `--allow-unmet-target` permits diagnostic output.
 
-`--solver-time-limit-seconds` is a shared cooperative selection budget checked
-during model construction. Native operations may overrun it; use a
-process or scheduler deadline when a hard wall-time limit is required.
-Unresolved solves return exit code 3 and a report. An infeasible BMM1 target
-returns code 2 and a report without a policy. `--allow-unmet-target` explicitly
-requests a diagnostic maximum-saving candidate. A zero target is valid and may
-produce a dense policy.
-
-### Exporting a benchmark candidate before the proof finishes
-
-Add `--benchmark-candidate` to the refit command. Discovery also accepts this
-flag and returns its best replayed joint assignment when one is available.
-Passing its artifact and captures to benchmark refit includes that assignment
-as a starting candidate. The selector starts with a
-work-feasible assignment when one exists for the frozen topology. It compares
-assignments from native solver stages and retries using exact sums of the
-captured binary64 masses. Use `--previous-candidate previous.json` to include a
-saved assignment from the same checkpoint, capture and topology. Each target
-competes on the same work constraint. Held-out prompts never select a winner.
-
-The final pass rereads the capture and checks the selected assignments' risk
-and integer tile counts in every range. A missing feasible assignment yields
-exit 3 and a report. An exported report includes the policy file SHA-256 and
-a per-range proof status. `feasible_unproved` permits benchmarking.
-`proved_optimal` covers the frozen topology, all permitted donors, targets,
-and tie-breaks when exact enumeration completes. Native gap values alone
-cannot establish that status.
-
-For qualification, pin the exact policy SHA-256 before collecting scores.
-`assess_mask_reuse_benchmark_gates` takes the policy bytes, the pinned digest,
-the declared search scope, the preregistered benchmark names, and their paired
-score receipts. Each pair supplies `candidate` and `dense` records with
-`accuracy_percent`, `checkpoint_manifest_sha256`, and the same
-`evaluation_sha256` identifying the evaluation setup. The candidate also
-supplies `policy_sha256`, and the control supplies `attention_mode="dense"`.
-Every key benchmark must be within one percentage point of dense. A missing
-score or proof blocks qualification. The fixed-topology proof cannot qualify
-a claim of optimal joint topology discovery. Deployment checks still apply.
+For qualification, evaluate the pinned policy against dense attention on the
+same checkpoint with the same benchmark configuration. The accuracy gate
+requires every designated benchmark to regress by at most one percentage point,
+as well as whole-prefill replay and the requested work saving in every range.
 
 Held-out observations evaluate the frozen choices without retuning them.
 Outputs retain `promotion_status="candidate_only"` and

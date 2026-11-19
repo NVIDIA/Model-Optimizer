@@ -993,10 +993,11 @@ def test_whole_prefill_collector_output_runs_through_refit(
             "--output",
             str(topology),
         ]
-        assert discover["main"]([*discovery_args, "--benchmark-candidate"]) == 0
-        assert (
-            json.loads(topology.read_bytes())["provenance"]["exact_joint_optimum_proved"] is False
-        )
+        assert discover["main"](discovery_args) == 0
+        assert json.loads(topology.read_bytes())["provenance"]["selection_result"]["status"] in {
+            "within_tolerance",
+            "feasible",
+        }
         for name, target, budget, expected in (
             ("unmet", "1", "60", 2),
             ("unresolved", "1e-8", "1e-9", 3),
@@ -1040,11 +1041,11 @@ def test_whole_prefill_collector_output_runs_through_refit(
         "--output-report",
         str(report),
     ]
-    assert cli["main"]([*refit_args, "--benchmark-candidate"]) == 0
+    assert cli["main"](refit_args) == 0
     result = json.loads(policy.read_bytes())
     assert result["provenance"]["input_capture_count"] == 54
     for row in result["calibration_report"]["by_bucket"]:
-        assert row["benchmark_proof"]["status"] == "proved_optimal"
+        assert row["selection_result"]["status"] in {"within_tolerance", "feasible"}
         assert row["bmm1_skip_objective"]["skipped_tiles"] > 0
     assert (
         json.loads(report.read_bytes())["candidate_policy_sha256"]
@@ -1053,10 +1054,7 @@ def test_whole_prefill_collector_output_runs_through_refit(
     next_policy = tmp_path / "retried.json"
     refit_args[refit_args.index("--output-policy") + 1] = str(next_policy)
     refit_args[refit_args.index("--output-report") + 1] = str(tmp_path / "retried-report.json")
-    assert (
-        cli["main"]([*refit_args, "--benchmark-candidate", "--previous-candidate", str(policy)])
-        == 0
-    )
+    assert cli["main"]([*refit_args, "--previous-candidate", str(policy)]) == 0
     assert json.loads(next_policy.read_bytes())["context_policies"] == result["context_policies"]
 
 

@@ -130,7 +130,7 @@ def checkpoint(tmp_path, layers=3, heads=2):
     return create_checkpoint_manifest(root, model="test-model")
 
 
-def solve(tmp_path, cp, rows, rho, backend):
+def solve(tmp_path, cp, rows, rho, backend, *, fit=FIT):
     path = tmp_path / "captures.jsonl"
     ordered = sorted(
         rows,
@@ -144,7 +144,7 @@ def solve(tmp_path, cp, rows, rho, backend):
     path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in ordered))
     return calibrate_mask_reuse_topology(
         path,
-        vanilla_calibration=FIT,
+        vanilla_calibration=fit,
         checkpoint_manifest=cp,
         evidence={
             "topology_discovery_capture_sha256": sha256(path.read_bytes()).hexdigest(),
@@ -157,7 +157,7 @@ def solve(tmp_path, cp, rows, rho, backend):
     )
 
 
-def brute(observations, rho):
+def brute(observations, rho, *, policy=None):
     """Enumerate every topology/map, using all supplied calibration prompts."""
     rows = observations if isinstance(observations, list) else [observations]
     layers, heads = len(rows[0]["attention_layers"]), rows[0]["global_num_heads"]
@@ -170,7 +170,21 @@ def brute(observations, rho):
             (layer, h) for layer in range(layers) if layer not in anchors for h in range(heads)
         ]
         nearest = {layer: max(a for a in anchors if a <= layer) for layer in range(layers)}
-        for donors in itertools.product(range(-1, heads), repeat=len(consumers)):
+        if policy is None:
+            assignments = itertools.product(range(-1, heads), repeat=len(consumers))
+        else:
+            actual_anchors, frozen = policy
+            if list(anchors) != actual_anchors:
+                continue
+            assignments = [
+                tuple(
+                    -1
+                    if h in frozen["fallback_heads"][str(layer)]
+                    else frozen["headmaps"][str(layer)][h]
+                    for layer, h in consumers
+                )
+            ]
+        for donors in assignments:
             skipped, cost = 0, 0
             prompt_risks = []
             for row in rows:

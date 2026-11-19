@@ -409,8 +409,8 @@ def _risk_variant(max_anchor_dropped_mass, anchor_dropped_mass_report_threshold)
     return None, threshold, "anchor_inclusive_v1"
 
 
-def _pareto_donor_options(options, *, check_native_precision=True):
-    """Prune only dominance that also preserves the canonical donor-map tie-break."""
+def _pareto_donor_options(options):
+    """Drop dominated choices and preserve one representative of equal alternatives."""
     skipped = np.asarray([option.bmm1_skipped_tiles for option in options])
     ranks = np.asarray(
         [0 if option.choice.fallback else option.choice.donor_head + 1 for option in options]
@@ -422,21 +422,6 @@ def _pareto_donor_options(options, *, check_native_precision=True):
     dominates &= (skipped[:, None] > skipped[None, :]) | (ranks[:, None] < ranks[None, :])
     keep = ~dominates.any(axis=0)
     survivors = tuple(option for option, retained in zip(options, keep, strict=True) if retained)
-    if not check_native_precision:
-        return survivors
-    retained_risks = risks[keep]
-    # A zero MIP gap does not resolve distinct coefficients below the native
-    # feasibility precision. Refuse these alternatives rather than treating
-    # them as exact ties and preferring cheaper work over lower risk.
-    separations = np.zeros((len(retained_risks), len(retained_risks)))
-    for prompt in retained_risks.T:
-        np.maximum(separations, np.abs(prompt[:, None] - prompt[None, :]), out=separations)
-    if np.any((separations > 0) & (separations <= 1e-9)):
-        from .mask_reuse_solver import MaskReuseSolverError
-
-        raise MaskReuseSolverError(
-            "distinct donor risks are below native solver precision; selection is unresolved", []
-        )
     return survivors
 
 

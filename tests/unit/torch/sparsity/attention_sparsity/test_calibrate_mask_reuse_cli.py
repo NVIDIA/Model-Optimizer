@@ -192,7 +192,12 @@ def test_main_verifies_artifacts_and_atomically_writes_candidate(
 
     expected_policy = _canonical(artifact)
     assert policy_path.read_bytes() == expected_policy
-    assert report_path.read_bytes() == _canonical(artifact["calibration_report"])
+    assert report_path.read_bytes() == _canonical(
+        {
+            **artifact["calibration_report"],
+            "candidate_policy_sha256": sha256(expected_policy).hexdigest(),
+        }
+    )
     assert captured["source"] is source
     assert captured["evidence"] == {
         "calibration_plan_sha256": sha256(artifacts["calibration_plan"].read_bytes()).hexdigest(),

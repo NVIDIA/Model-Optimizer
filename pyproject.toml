@@ -52,7 +52,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mask-reuse = [
-    "highspy>=1.15.1,<2", # MIT; exact offline mask-reuse selection
+    "highspy>=1.15.1,<2", # MIT; offline mask-reuse selection
 ]
 onnx = [
     "cppimport",

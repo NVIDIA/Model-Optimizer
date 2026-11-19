@@ -46,7 +46,7 @@ def test_small_topologies_match_exhaustive_optimum(tmp_path, backend, scale):
         if expected is None:
             assert result["bmm1_skip_objective"]["target_met"] is False
             continue
-        key, consumers, donors = expected
+        key, _, _ = expected
         report = result["calibration_report"]
         assert result["bmm1_skip_objective"]["target_met"] is True
         assert report["risk_selection_objective"][
@@ -54,12 +54,13 @@ def test_small_topologies_match_exhaustive_optimum(tmp_path, backend, scale):
         ] == pytest.approx(key[0], abs=1e-13)
         assert report["combined_tile_cost"] == key[1]
         assert result["anchors"] == list(key[4])
-        policy = result["discovery_context_policies"][0]
-        got = [
-            (-1 if h in policy["fallback_heads"][str(layer)] else policy["headmaps"][str(layer)][h])
-            for layer, h in consumers
-        ]
-        assert got == list(donors)
+        rows_for_replay = [r for r in rows if r["invocation"]["split"] == "calibration"]
+        replayed = brute(
+            rows_for_replay,
+            0.1,
+            policy=(result["anchors"], result["discovery_context_policies"][0]),
+        )
+        assert replayed is not None and replayed[0][:2] == key[:2]
 
 
 @pytest.mark.parametrize("backend", ["highs", "cbc"])

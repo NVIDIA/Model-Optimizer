@@ -6,6 +6,10 @@ Changelog
 
 **New Features**
 
+*Sparsity*
+
+- Added two-pass mask-reuse calibration with per-range work targets and replay-verified candidate export.
+
 *Quantization - ONNX*
 
 *Quantization - Algorithms*

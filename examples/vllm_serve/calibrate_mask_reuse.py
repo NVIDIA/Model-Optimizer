@@ -71,6 +71,7 @@ from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_contracts
     validate_model_geometry,
 )
 from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_solver import (
+    DEFAULT_REFIT_TIME_LIMIT_SECONDS,
     MaskReuseSolverConfig,
     MaskReuseSolverError,
 )
@@ -401,17 +402,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Export a diagnostic maximum-skip candidate when the target is infeasible",
     )
     parser.add_argument(
-        "--benchmark-candidate",
-        action="store_true",
-        help="Export the best replayed work-feasible fixed-topology assignment even if optimality is unproved",
-    )
-    parser.add_argument(
         "--previous-candidate",
         type=Path,
-        help="Replay this prior policy alongside new benchmark assignments",
+        help="Use a capture-matched prior policy as the initial head assignment",
     )
     parser.add_argument("--topology-sha256", help="Expected SHA-256 of the topology file")
-    parser.add_argument("--solver-time-limit-seconds", type=float, default=600.0)
+    parser.add_argument(
+        "--solver-time-limit-seconds", type=float, default=DEFAULT_REFIT_TIME_LIMIT_SECONDS
+    )
     parser.add_argument(
         "--reuse-dropped-mass-report-threshold",
         type=float,
@@ -442,10 +440,6 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.previous_candidate and not args.benchmark_candidate:
-        parser.error("--previous-candidate requires --benchmark-candidate")
-    if args.benchmark_candidate and (args.allow_unmet_target or args.diagnostic_final_chunk):
-        parser.error("--benchmark-candidate requires whole-prefill captures and a met work target")
     if args.output_policy.resolve() == args.output_report.resolve():
         parser.error("--output-policy and --output-report must be different paths")
     for path in (args.output_policy, args.output_report):
@@ -493,23 +487,7 @@ def main(argv: list[str] | None = None) -> int:
                 topology["provenance"]
                 .get("candidate_restrictions", {})
                 .get("donor_head_mode", "calibrated")
-                if args.benchmark_candidate
-                else "calibrated"
             )
-            discovery_evidence = topology.get("evidence")
-            if (
-                args.benchmark_candidate
-                and not args.previous_candidate
-                and isinstance(discovery_evidence, Mapping)
-                and discovery_evidence.get("topology_discovery_capture_sha256")
-                == evidence["reuse_bundle_sha256"]
-            ):
-                previous = {
-                    **topology,
-                    "context_policies": topology["discovery_context_policies"],
-                    "evidence": {"reuse_bundle_sha256": evidence["reuse_bundle_sha256"]},
-                }
-                prior_provenance["previous_candidate_sha256"] = topology_sha256
             topology = {key: topology[key] for key in ("anchors", "nearest")}
         validate_capture_scope(capture_manifest, diagnostic=args.diagnostic_final_chunk)
         _validate_capture_manifest(
@@ -554,12 +532,13 @@ def main(argv: list[str] | None = None) -> int:
             ),
             solver_config=MaskReuseSolverConfig(
                 backend=getattr(args, "solver", "highs"),
-                time_limit_seconds=getattr(args, "solver_time_limit_seconds", 600.0),
+                time_limit_seconds=getattr(
+                    args, "solver_time_limit_seconds", DEFAULT_REFIT_TIME_LIMIT_SECONDS
+                ),
             ),
             reuse_dropped_mass_report_threshold=(args.reuse_dropped_mass_report_threshold),
             target_bmm1_skip_ratio=args.target_bmm1_skip_ratio,
             allow_same_group_prefixes=whole_prefill,
-            benchmark_candidate=args.benchmark_candidate,
             previous_candidate=previous,
             donor_head_mode=donor_mode,
             source_provenance={
@@ -658,8 +637,6 @@ def main(argv: list[str] | None = None) -> int:
         policy_payload = _canonical_json_bytes(artifact)
         report_payload = _canonical_json_bytes(
             {**report, "candidate_policy_sha256": sha256(policy_payload).hexdigest()}
-            if args.benchmark_candidate
-            else report
         )
         _publish_candidate_outputs(
             args.output_policy, policy_payload, args.output_report, report_payload

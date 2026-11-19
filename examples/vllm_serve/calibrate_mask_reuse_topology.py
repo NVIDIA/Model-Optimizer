@@ -124,11 +124,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--solver", choices=("cbc", "highs"), default="highs")
     parser.add_argument("--output-report", type=Path, help="Defaults to OUTPUT.report.json")
-    parser.add_argument(
-        "--benchmark-candidate",
-        action="store_true",
-        help="Export the best verified work-feasible joint topology found during discovery",
-    )
     parser.add_argument("--diagnostic-final-chunk", action="store_true")
     parser.add_argument(
         "--allow-unmet-target",
@@ -266,11 +261,6 @@ def _publish_no_clobber(path: Path, payload: bytes) -> None:
 
 
 def run(args: argparse.Namespace) -> Path:
-    benchmark_candidate = getattr(args, "benchmark_candidate", False)
-    if benchmark_candidate and (args.allow_unmet_target or args.diagnostic_final_chunk):
-        raise ValueError(
-            "--benchmark-candidate requires whole-prefill captures and a met work target"
-        )
     captures_path = Path(args.captures)
     manifest_path = Path(args.capture_manifest)
     vanilla_path = Path(args.vanilla_config)
@@ -339,7 +329,6 @@ def run(args: argparse.Namespace) -> Path:
         reuse_dropped_mass_report_threshold=args.reuse_dropped_mass_report_threshold,
         target_bmm1_skip_ratio=args.target_bmm1_skip_ratio,
         allow_same_group_prefixes=whole_prefill,
-        benchmark_candidate=benchmark_candidate,
         source_provenance=source_provenance,
     )
     provenance = result["provenance"]

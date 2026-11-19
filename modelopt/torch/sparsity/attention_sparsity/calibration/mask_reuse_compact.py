@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import json
 import math
+import time
 import unicodedata
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from hashlib import sha256
 from pathlib import Path
@@ -70,13 +71,15 @@ from .mask_reuse import (
     _validate_shared_prefix_provenance,
     canonical_prefill_threshold_scale_factor,
 )
-from .mask_reuse_benchmark import _BenchmarkIncumbent, _selected_binary_keys
+from .mask_reuse_benchmark import _RefitIncumbent, _selected_binary_keys
 from .mask_reuse_contracts import (
     required_skipped_tiles,
     threshold_pair_matches,
     validate_context_buckets,
 )
 from .mask_reuse_solver import (
+    DEFAULT_REFIT_TIME_LIMIT_SECONDS,
+    NATIVE_FEASIBILITY_TOLERANCE,
     MaskReuseAllocationPause,
     MaskReuseSolverConfig,
     MaskReuseSolverError,
@@ -841,7 +844,6 @@ def _selection_pass(
     anchor_report_threshold: float = 0.02,
     solver_session: _SolverSession | None = None,
     donor_head_mode: str = "calibrated",
-    benchmark_candidate: bool = False,
     previous_ranges=None,
 ) -> dict[Bucket, _Selection]:
     session = solver_session or _SolverSession()
@@ -939,7 +941,7 @@ def _selection_pass(
                     ),
                 )
             )
-        kept = _pareto_donor_options(options, check_native_precision=not benchmark_candidate)
+        kept = _pareto_donor_options(options)
         if preserve_donor is not None:
             match = next(
                 (
@@ -975,25 +977,14 @@ def _selection_pass(
                     ),
                 )
 
-    def solve_target(
-        bucket: Bucket,
-        target: float,
-        *,
-        minimum_bmm1_skipped_tiles: int | None,
-        maximize_bmm1_skipped_tiles: bool,
-        target_met: bool,
-        incumbent: _BenchmarkIncumbent | None = None,
-    ) -> _Selection | None:
+    def solve_target(bucket, target, incumbent, stage_session, phase):
         accumulator = accumulators[bucket]
         prompts = dataset.prompts[(bucket, "calibration")]
         problem = pulp.LpProblem("compact_mask_reuse", pulp.LpMinimize)
-        variables: dict[tuple[int, int, int], pulp.LpVariable] = {}
-        options: dict[tuple[int, int, int], _DonorOption] = {}
-        prompt_risk_terms: dict[str, list[object]] = defaultdict(list)
-        if incumbent is None:
-            menus = make_menus(accumulator, target, prompts)
-        else:
-            menus = zip(incumbent.keys, incumbent.menus, strict=True)
+        variables = {}
+        options = {}
+        prompt_risk_terms = defaultdict(list)
+        menus = zip(incumbent.keys, incumbent.menus, strict=True)
         for (layer, head), menu in menus:
             choice_variables = []
             for option_index, option in enumerate(menu):
@@ -1011,19 +1002,15 @@ def _selection_pass(
                     prompt_risk_terms[prompt].append(risk * variable)
             problem += pulp.lpSum(choice_variables) == 1, f"choose_{layer}_{head}"
 
-        if incumbent is not None:
+        def observe_assignment():
+            keys = _selected_binary_keys(variables)
+            if keys is None or len(keys) != len(incumbent.keys):
+                return
+            if any(key[:2] != expected for key, expected in zip(keys, incumbent.keys, strict=True)):
+                return
+            incumbent.consider([options[key] for key in keys])
 
-            def observe_assignment():
-                keys = _selected_binary_keys(variables)
-                if keys is None or len(keys) != len(incumbent.keys):
-                    return
-                if any(
-                    key[:2] != expected for key, expected in zip(keys, incumbent.keys, strict=True)
-                ):
-                    return
-                incumbent.consider([options[key] for key in keys])
-
-            problem._mask_reuse_observe_assignment = observe_assignment
+        problem._mask_reuse_observe_assignment = observe_assignment
 
         bmm1_skipped = pulp.lpSum(
             options[key].bmm1_skipped_tiles * variable for key, variable in variables.items()
@@ -1031,10 +1018,6 @@ def _selection_pass(
         retained_reuse = pulp.lpSum(
             options[key].choice.retained_tiles * variable for key, variable in variables.items()
         )
-        reuse_count = pulp.lpSum(
-            int(not options[key].choice.fallback) * variable for key, variable in variables.items()
-        )
-        normalizer = len(dataset.nearest) * dataset.global_num_heads
         worst_prompt_risk = pulp.LpVariable("worst_prompt_selection_risk", lowBound=0.0)
         for prompt_index, prompt in enumerate(prompts):
             anchor_risk = (
@@ -1046,320 +1029,179 @@ def _selection_pass(
                 anchor_risk + pulp.lpSum(prompt_risk_terms[prompt]) <= worst_prompt_risk,
                 f"reuse_risk_{prompt_index}",
             )
-        if minimum_bmm1_skipped_tiles is not None:
-            problem += bmm1_skipped >= minimum_bmm1_skipped_tiles, "minimum_bmm1_skips"
+        problem += bmm1_skipped >= incumbent.required, "minimum_bmm1_skips"
+        expression = worst_prompt_risk
+        if phase == "cost":
+            problem += worst_prompt_risk <= float(incumbent.ceiling), "global_risk_ceiling"
+            expression = retained_reuse
+        seed = incumbent.best
+        if seed is not None:
+            initial = {
+                var: 1.0
+                for key, var in variables.items()
+                if seed.choices[key[:2]] == options[key].choice
+            }
+            initial[worst_prompt_risk] = float(seed.risk_objective)
+            problem._mask_reuse_initial_values = initial
+        return stage_session.minimize(problem, expression, phase)
 
-        def minimize_and_fix(expression: object, name: str, *, integral: bool) -> bool:
-            if donor_head_mode != "calibrated" and not len(pulp.lpSum([expression])):
-                return True
-            return (
-                session.minimize_and_fix(problem, expression, name, integral=integral) is not None
-            )
-
-        if maximize_bmm1_skipped_tiles and not minimize_and_fix(
-            -bmm1_skipped, "fix_maximum_bmm1_skips", integral=True
-        ):
-            return None
-        risk_objective = session.minimize_and_fix(
-            problem, worst_prompt_risk, "fix_worst_prompt_risk", integral=False
-        )
-        if risk_objective is None:
-            return None
-        if not minimize_and_fix(retained_reuse, "fix_retained_reuse", integral=True):
-            raise MaskReuseSolverFailure(
-                "compact selector lost feasibility after fixing worst-prompt reuse risk",
-                session.records,
-            )
-        if not minimize_and_fix(reuse_count, "fix_reuse_count", integral=True):
-            raise MaskReuseSolverFailure(
-                "compact selector lost deterministic tie-break feasibility", session.records
-            )
-        donor_groups = defaultdict(list)
-        for key, variable in variables.items():
-            layer, head, _ = key
-            choice = options[key].choice
-            donor_groups[(layer, head)].append(
-                (0 if choice.fallback else choice.donor_head + 1) * variable
-            )
-        donor_terms = (pulp.lpSum(donor_groups[key]) for key in sorted(donor_groups))
-        if donor_head_mode != "calibrated":
-            donor_terms = (term for term in donor_terms if len(term))
-        session.lexicographic(
-            problem,
-            donor_terms,
-            base=dataset.global_num_heads + 1,
-            phase="fix_donor_map",
-        )
-
-        choices: dict[ConsumerHead, _Choice] = {}
-        prompt_totals = dict.fromkeys(prompts, 0.0)
-        worst_individual = 0.0
-        skipped_tiles = 0
-        retained_tiles = 0
-        for key, variable in variables.items():
-            if variable.value() <= 0.5:
-                continue
-            layer, head, _ = key
-            option = options[key]
-            choices[(layer, head)] = option.choice
-            skipped_tiles += option.bmm1_skipped_tiles
-            retained_tiles += option.choice.retained_tiles
-            if not option.choice.fallback:
-                for prompt, risk in zip(prompts, option.risk_by_prompt, strict=True):
-                    prompt_totals[prompt] += risk
-                    worst_individual = max(worst_individual, risk)
-        session.require_work_target(
-            skipped_tiles, minimum_bmm1_skipped_tiles, phase="compact_policy_extraction"
-        )
-        prompt_risks = [prompt_totals[prompt] / normalizer for prompt in prompts]
-        total_risks = [
-            (prompt_totals[prompt] + sum(accumulator.anchor_risks[target][prompt])) / normalizer
-            for prompt in prompts
-        ]
-        worst_total = max(
-            worst_individual,
-            max(v for prompt in prompts for v in accumulator.anchor_risks[target][prompt]),
-        )
-        eligible_tiles = (
-            accumulator.eligible_sum[target] * dataset.global_num_heads * len(dataset.nearest)
-        )
-        return _Selection(
-            target,
-            choices,
-            (),
-            bmm1_eligible_tiles=eligible_tiles,
-            bmm1_skipped_tiles=skipped_tiles,
-            target_bmm1_skip_ratio_met=target_met,
-            worst_prompt_reuse_dropped_mass=max(prompt_risks, default=0.0),
-            mean_prompt_reuse_dropped_mass=(
-                sum(prompt_risks) / len(prompt_risks) if prompt_risks else 0.0
-            ),
-            worst_individual_reuse_dropped_mass=worst_individual,
-            worst_prompt_total_dropped_mass=max(total_risks, default=0.0),
-            mean_prompt_total_dropped_mass=sum(total_risks) / len(total_risks)
-            if total_risks
-            else 0.0,
-            worst_individual_dropped_mass=worst_total,
-            risk_objective=risk_objective,
-        )
-
-    selections: dict[Bucket, _Selection] = {}
+    selections = {}
+    heads = len(dataset.nearest) * dataset.global_num_heads
+    epsilon = Fraction(str(session.config.risk_absolute_tolerance)) * heads
     for bucket in dataset.buckets:
+        started = time.monotonic()
         accumulator = accumulators[bucket]
-        frontier: list[dict[str, object]] = []
-        candidates: list[tuple[tuple[object, ...], _Selection]] = []
-        maximum_candidates: list[tuple[tuple[object, ...], _Selection]] = []
+        prompts = dataset.prompts[(bucket, "calibration")]
+        frontier = {}
+        search = {}
         for target in dataset.menus[bucket]:
-            anchor_evaluation = accumulator.anchor_evaluation[target]
-            eligible_tiles = (
-                accumulator.eligible_sum[target] * dataset.global_num_heads * len(dataset.nearest)
+            anchors = [accumulator.anchor_risks[target][prompt] for prompt in prompts]
+            safe = max_anchor_dropped_mass is None or all(
+                sum(map(Fraction, values)) <= Fraction(max_anchor_dropped_mass) * len(values)
+                for values in anchors
             )
-            required_tiles = required_skipped_tiles(target_bmm1_skip_ratio, eligible_tiles)
-            selected = None
-            anchor_safe = max_anchor_dropped_mass is None or anchor_evaluation.violations == 0
-            if benchmark_candidate and max_anchor_dropped_mass is not None:
-                anchor_safe = all(
-                    sum(map(Fraction, values)) <= Fraction(max_anchor_dropped_mass) * len(values)
-                    for values in accumulator.anchor_risks[target].values()
-                )
-            incumbent = None
-            if anchor_safe and benchmark_candidate:
-                prompts = dataset.prompts[(bucket, "calibration")]
-                prior = (previous_ranges or {}).get((bucket, target))
-                incumbent = _BenchmarkIncumbent(
-                    dict(make_menus(accumulator, target, prompts, prior)),
-                    [accumulator.anchor_risks[target][prompt] for prompt in prompts],
-                    target,
-                    eligible_tiles,
-                    required_tiles,
-                    len(dataset.nearest) * dataset.global_num_heads,
-                    max_anchor_dropped_mass is None,
-                )
-                if prior is not None:
-                    incumbent.consider(
-                        [
-                            next(
-                                o
-                                for o in menu
-                                if (-1 if o.choice.fallback else o.choice.donor_head) == prior[key]
-                            )
-                            for key, menu in zip(incumbent.keys, incumbent.menus, strict=True)
-                        ]
-                    )
-                incumbent.initialize()
-                if (
-                    incumbent.best is not None
-                    and not incumbent.proved
-                    and session.elapsed_seconds < session.config.time_limit_seconds
-                ):
-                    try:
-                        solve_target(
-                            bucket,
-                            target,
-                            minimum_bmm1_skipped_tiles=required_tiles,
-                            maximize_bmm1_skipped_tiles=False,
-                            target_met=True,
-                            incumbent=incumbent,
+            eligible = accumulator.eligible_sum[target] * heads
+            frontier[target] = {
+                "target_sparsity": target,
+                "anchor_safe": safe,
+                "target_bmm1_skip_ratio": target_bmm1_skip_ratio,
+                "target_bmm1_skip_ratio_feasible": False,
+                "anchor_calibration": accumulator.anchor_evaluation[target].to_mapping(),
+                "retained_anchor_tiles": accumulator.anchor_evaluation[target].retained_tiles,
+            }
+            if not safe:
+                continue
+            prior = (previous_ranges or {}).get((bucket, target))
+            incumbent = _RefitIncumbent(
+                dict(make_menus(accumulator, target, prompts, prior)),
+                anchors,
+                target,
+                eligible,
+                required_skipped_tiles(target_bmm1_skip_ratio, eligible),
+                heads,
+                max_anchor_dropped_mass is None,
+            )
+            incumbent.initialize()
+            if prior is not None:
+                incumbent.consider(
+                    [
+                        next(
+                            o
+                            for o in menu
+                            if (-1 if o.choice.fallback else o.choice.donor_head) == prior[key]
                         )
-                    except MaskReuseAllocationPause:
-                        raise
-                    except MaskReuseSolverError as error:
-                        # Replay determines feasibility even when a native solve cannot finish.
-                        session.records.append({"phase": "benchmark_refit", "error": str(error)})
-                selected = incumbent.best
-            elif anchor_safe:
-                selected = solve_target(
-                    bucket,
-                    target,
-                    minimum_bmm1_skipped_tiles=required_tiles,
-                    maximize_bmm1_skipped_tiles=False,
-                    target_met=True,
+                        for key, menu in zip(incumbent.keys, incumbent.menus, strict=True)
+                    ]
                 )
-            fallback_count = (
-                None
-                if selected is None
-                else sum(choice.fallback for choice in selected.choices.values())
-            )
-            retained_reuse = (
-                None
-                if selected is None
-                else sum(choice.retained_tiles for choice in selected.choices.values())
-            )
-            combined_tile_cost = (
-                None
-                if retained_reuse is None
-                else 2 * retained_reuse + anchor_evaluation.retained_tiles
-            )
-            frontier.append(
-                {
-                    "target_sparsity": target,
-                    "anchor_safe": anchor_safe,
-                    "target_bmm1_skip_ratio": target_bmm1_skip_ratio,
-                    "target_bmm1_skip_ratio_feasible": selected is not None,
-                    "retained_reuse_tiles": retained_reuse,
-                    "retained_anchor_tiles": anchor_evaluation.retained_tiles,
-                    "combined_tile_cost": combined_tile_cost,
-                    "fallback_head_count": fallback_count,
-                    "anchor_calibration": anchor_evaluation.to_mapping(),
-                }
-            )
-            if benchmark_candidate:
-                frontier[-1]["exact_search_complete"] = bool(
-                    not anchor_safe or (incumbent is not None and incumbent.proved)
+            search[target] = incumbent
+            if incumbent.best is None:
+                maximum = incumbent.maximum
+                frontier[target].update(
+                    maximum_feasible_bmm1_skipped_tiles=maximum.bmm1_skipped_tiles,
+                    maximum_feasible_bmm1_skip_ratio=maximum.bmm1_skipped_tiles / eligible,
                 )
-                if selected is not None:
-                    frontier[-1]["replayed_risk_sum"] = str(selected.risk_objective)
-            if selected is not None:
-                rank = (
-                    selected.risk_objective,
-                    combined_tile_cost,
-                    len(selected.choices)
-                    - sum(choice.fallback for choice in selected.choices.values()),
-                    target,
+        active = [t for t, i in search.items() if i.best is not None]
+
+        def run(target, phase, remaining_stages):
+            row = frontier[target]
+            seconds = (
+                session.config.time_limit_seconds - (time.monotonic() - started)
+            ) / remaining_stages
+            if seconds <= 0:
+                row[phase] = {"status": "budget_exhausted"}
+                return
+            stage = session.stage(seconds)
+            try:
+                complete = solve_target(bucket, target, search[target], stage, phase)
+            except (MaskReuseSolverFailure, MaskReuseAllocationPause):
+                raise
+            except MaskReuseSolverError:
+                complete = False
+            row[phase] = session.record_stage(stage, complete, bucket=bucket, target=target)
+
+        for index, target in enumerate(active):
+            run(target, "risk", len(active) - index + 1)
+
+        if active:
+            best_risk = min(search[t].best.risk_objective for t in active)
+            ceiling = best_risk + epsilon
+            eligible_targets = [
+                t
+                for t in active
+                if frontier[t]["risk"].get("dual_bound") is None
+                or frontier[t]["risk"]["dual_bound"]
+                <= float(ceiling) + NATIVE_FEASIBILITY_TOLERANCE
+            ]
+            for index, target in enumerate(eligible_targets):
+                incumbent = search[target]
+                incumbent.ceiling = ceiling
+                incumbent.rank = None
+                if incumbent.best.risk_objective > ceiling:
+                    incumbent.best = None
+                elif incumbent.best is not None:
+                    retained = sum(c.retained_tiles for c in incumbent.best.choices.values())
+                    incumbent.rank = (retained, incumbent.best.risk_objective, ())
+                run(target, "cost", len(eligible_targets) - index)
+            candidates = []
+            for target in active:
+                selected = search[target].best
+                row = frontier[target]
+                row["target_bmm1_skip_ratio_feasible"] = True
+                if selected is None:
+                    continue
+                retained = sum(c.retained_tiles for c in selected.choices.values())
+                cost = 2 * retained + row["retained_anchor_tiles"]
+                row.update(
+                    combined_tile_cost=cost,
+                    retained_reuse_tiles=retained,
+                    bmm1_skipped_tiles=selected.bmm1_skipped_tiles,
+                    achieved_bmm1_skip_ratio=selected.bmm1_skipped_tiles
+                    / selected.bmm1_eligible_tiles,
+                    fallback_head_count=sum(c.fallback for c in selected.choices.values()),
+                    worst_prompt_model_wide_reuse_dropped_mass=selected.worst_prompt_reuse_dropped_mass,
                 )
-                candidates.append((rank, selected))
-                frontier[-1].update(
-                    {
-                        "bmm1_skipped_tiles": selected.bmm1_skipped_tiles,
-                        "achieved_bmm1_skip_ratio": (
-                            selected.bmm1_skipped_tiles / selected.bmm1_eligible_tiles
-                        ),
-                        "worst_prompt_model_wide_reuse_dropped_mass": (
-                            selected.worst_prompt_reuse_dropped_mass
-                        ),
-                    }
-                )
-            elif anchor_safe and not benchmark_candidate:
-                maximum = solve_target(
-                    bucket,
-                    target,
-                    minimum_bmm1_skipped_tiles=None,
-                    maximize_bmm1_skipped_tiles=True,
-                    target_met=False,
-                )
-                if maximum is not None:
-                    maximum_candidates.append(
-                        (
-                            (
-                                -maximum.bmm1_skipped_tiles,
-                                maximum.risk_objective,
-                                2
-                                * sum(choice.retained_tiles for choice in maximum.choices.values())
-                                + anchor_evaluation.retained_tiles,
-                                len(maximum.choices)
-                                - sum(choice.fallback for choice in maximum.choices.values()),
-                                target,
-                            ),
-                            maximum,
-                        )
-                    )
-                    frontier[-1].update(
-                        {
-                            "maximum_feasible_bmm1_skipped_tiles": (maximum.bmm1_skipped_tiles),
-                            "maximum_feasible_bmm1_skip_ratio": (
-                                maximum.bmm1_skipped_tiles / maximum.bmm1_eligible_tiles
-                            ),
-                        }
-                    )
-        if candidates:
-            _, selected = min(candidates, key=lambda item: item[0])
-            selections[bucket] = _Selection(
-                selected.target_sparsity,
-                selected.choices,
-                tuple(frontier),
-                bmm1_eligible_tiles=selected.bmm1_eligible_tiles,
-                bmm1_skipped_tiles=selected.bmm1_skipped_tiles,
-                target_bmm1_skip_ratio_met=True,
-                worst_prompt_reuse_dropped_mass=selected.worst_prompt_reuse_dropped_mass,
-                mean_prompt_reuse_dropped_mass=selected.mean_prompt_reuse_dropped_mass,
-                worst_individual_reuse_dropped_mass=(selected.worst_individual_reuse_dropped_mass),
-                worst_prompt_total_dropped_mass=selected.worst_prompt_total_dropped_mass,
-                mean_prompt_total_dropped_mass=selected.mean_prompt_total_dropped_mass,
-                worst_individual_dropped_mass=selected.worst_individual_dropped_mass,
-                risk_objective=selected.risk_objective,
+                if selected.risk_objective <= ceiling:
+                    candidates.append(((cost, target), selected))
+            (cost, target), selected = min(candidates, key=lambda item: item[0])
+            bounds = [frontier[t]["risk"].get("dual_bound") for t in active]
+            lower = (
+                min(min(bounds), float(best_risk)) if all(v is not None for v in bounds) else None
             )
-        elif benchmark_candidate and (
-            target_bmm1_skip_ratio > 0 or any(row["anchor_safe"] for row in frontier)
-        ):
-            raise MaskReuseSolverError(
-                f"no verified benchmark assignment meets the requested work in range {bucket}",
-                frontier,
+            complete = (
+                lower is not None
+                and all(frontier[t]["risk"].get("finished") for t in eligible_targets)
+                and selected.risk_objective
+                <= Fraction(float(lower)) + epsilon + Fraction(str(NATIVE_FEASIBILITY_TOLERANCE))
+                and frontier[target].get("cost", {}).get("finished", False)
             )
-        elif maximum_candidates:
-            _, selected = min(maximum_candidates, key=lambda item: item[0])
-            selections[bucket] = _Selection(
-                selected.target_sparsity,
-                selected.choices,
-                tuple(frontier),
-                bmm1_eligible_tiles=selected.bmm1_eligible_tiles,
-                bmm1_skipped_tiles=selected.bmm1_skipped_tiles,
-                target_bmm1_skip_ratio_met=False,
-                worst_prompt_reuse_dropped_mass=selected.worst_prompt_reuse_dropped_mass,
-                mean_prompt_reuse_dropped_mass=selected.mean_prompt_reuse_dropped_mass,
-                worst_individual_reuse_dropped_mass=(selected.worst_individual_reuse_dropped_mass),
-                worst_prompt_total_dropped_mass=selected.worst_prompt_total_dropped_mass,
-                mean_prompt_total_dropped_mass=selected.mean_prompt_total_dropped_mass,
-                worst_individual_dropped_mass=selected.worst_individual_dropped_mass,
-                risk_objective=selected.risk_objective,
-            )
+            for t in eligible_targets:
+                stage = frontier[t].get("cost", {})
+                lb = stage.get("dual_bound")
+                if lb is None or (
+                    2 * math.ceil(lb - 1e-6) + frontier[t]["retained_anchor_tiles"],
+                    t,
+                ) < (cost, target):
+                    complete = False
+            frontier[target]["selection_outcome"] = {
+                "status": "within_tolerance" if complete else "feasible",
+                "risk_lower_bound": None if lower is None else lower / heads,
+                "risk_upper_bound": float(best_risk / heads),
+                "risk_ceiling": float(ceiling / heads),
+            }
+        elif search:
+            selected = max((i.maximum for i in search.values()), key=lambda s: s.bmm1_skipped_tiles)
+            selected = replace(selected, target_bmm1_skip_ratio_met=False)
         else:
             target = dataset.menus[bucket][0]
-            dense_choices = {
-                item: _Choice(0, True, accumulators[bucket].eligible_sum[target])
-                for item in dataset.targets
-            }
-            selections[bucket] = _Selection(
+            selected = _Selection(
                 None,
-                dense_choices,
-                tuple(frontier),
+                {k: _Choice(0, True, accumulator.eligible_sum[target]) for k in dataset.targets},
+                (),
                 "no_target_sparsity_satisfied_anchor_calibration_constraint",
+                bmm1_eligible_tiles=accumulator.eligible_sum[target] * heads,
                 target_bmm1_skip_ratio_met=target_bmm1_skip_ratio == 0,
-                bmm1_eligible_tiles=(
-                    accumulator.eligible_sum[target]
-                    * dataset.global_num_heads
-                    * len(dataset.nearest)
-                ),
             )
+        selections[bucket] = replace(selected, frontier=tuple(frontier.values()))
     return selections
 
 
@@ -1469,7 +1311,6 @@ def calibrate_compact_mask_reuse_policy(
     solver_config: MaskReuseSolverConfig | None = None,
     donor_head_mode: str = "calibrated",
     allow_same_group_prefixes: bool = False,
-    benchmark_candidate: bool = False,
     previous_candidate: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Refit a fixed topology, preserving same-index restriction when requested.
@@ -1541,8 +1382,6 @@ def calibrate_compact_mask_reuse_policy(
     )
     previous_ranges = {}
     if previous_candidate is not None:
-        if not benchmark_candidate:
-            raise MaskReuseCalibrationError("a previous candidate requires benchmark mode")
         prior_evidence = previous_candidate.get("evidence")
         if (
             previous_candidate.get("checkpoint_manifest_sha256") != checkpoint_identity
@@ -1559,7 +1398,9 @@ def calibrate_compact_mask_reuse_policy(
             previous_ranges = _prior_assignments(previous_candidate, dataset)
         except (KeyError, TypeError, AttributeError) as error:
             raise MaskReuseCalibrationError("invalid prior candidate context policy") from error
-    solver_session = _SolverSession(solver_config)
+    solver_session = _SolverSession(
+        solver_config or MaskReuseSolverConfig(time_limit_seconds=DEFAULT_REFIT_TIME_LIMIT_SECONDS)
+    )
     selections = _selection_pass(
         source,
         dataset,
@@ -1568,10 +1409,9 @@ def calibrate_compact_mask_reuse_policy(
         anchor_report_threshold=anchor_report_threshold,
         solver_session=solver_session,
         donor_head_mode=donor_head_mode,
-        benchmark_candidate=benchmark_candidate,
         previous_ranges=previous_ranges,
     )
-    replay_risks = {} if benchmark_candidate else None
+    replay_risks = {}
     reuse_evaluations, anchor_evaluations = _evaluation_pass(
         source,
         dataset,
@@ -1699,13 +1539,11 @@ def calibrate_compact_mask_reuse_policy(
                 ),
             }
         )
-        if benchmark_candidate:
+        if selection.target_sparsity is not None:
             if (
                 reuse_calibration.eligible_tiles - reuse_calibration.retained_tiles
                 != selection.bmm1_skipped_tiles
                 or reuse_calibration.model_wide_eligible_tiles != selection.bmm1_eligible_tiles
-                or selection.bmm1_skipped_tiles
-                < required_skipped_tiles(bmm1_target, selection.bmm1_eligible_tiles)
             ):
                 raise MaskReuseCalibrationError(
                     "frozen-policy replay disagrees with calibration tile counts"
@@ -1718,13 +1556,15 @@ def calibrate_compact_mask_reuse_policy(
                 raise MaskReuseCalibrationError(
                     "frozen-policy replay disagrees with the assignment risk"
                 )
-            proved = all(row["exact_search_complete"] for row in selection.frontier)
-            bucket_reports[-1]["benchmark_proof"] = {
+            chosen = next(
+                row
+                for row in selection.frontier
+                if row["target_sparsity"] == selection.target_sparsity
+            )
+            bucket_reports[-1]["selection_result"] = {
                 "scope": "fixed_topology_all_targets_and_permitted_donors",
-                "status": "proved_optimal" if proved else "feasible_unproved",
+                **chosen.get("selection_outcome", {"status": "target_unmet"}),
                 "worst_prompt_risk_exact": str(exact_risk),
-                "lower_bound_exact": str(exact_risk) if proved else None,
-                "absolute_gap_exact": "0" if proved else None,
             }
         if report_only:
             bucket_reports[-1]["risk_selection_objective"] = {
@@ -1809,10 +1649,8 @@ def calibrate_compact_mask_reuse_policy(
             "minimum worst-prompt model-wide anchor-plus-reuse dropped mass"
             if report_only
             else "minimum worst-prompt model-wide reuse dropped mass",
-            "minimum equal-BMM combined tile cost 2*A_R + A_A",
-            "fewest reused consumer heads",
+            "within the shared risk ceiling, minimum equal-BMM combined tile cost 2*A_R + A_A",
             "smallest target sparsity",
-            "lexicographically smallest donor-head map",
         ],
         "selection_cost": {
             "formula": "2 * retained_reuse_tiles + retained_anchor_tiles",
@@ -1871,19 +1709,11 @@ def calibrate_compact_mask_reuse_policy(
                 "grouped inner-fold modal and safety stability not evaluated",
                 "preregistered outer gate with at least 99 independent groups per family cell not evaluated",
                 "deployment rectangular-geometry promotion gate not evaluated",
-                *(
-                    [
-                        "optimality must be proved for the declared topology and donor search space",
-                        "matched dense quality must be within one percentage point on each key benchmark",
-                    ]
-                    if benchmark_candidate
-                    else []
-                ),
+                "matched dense quality must be within one percentage point on each key benchmark",
             ],
         },
     }
-    if benchmark_candidate:
-        provenance["selection_mode"] = "verified_benchmark_candidate"
+    provenance["selection_mode"] = "risk_band"
     return {
         "version": 3,
         "promotion_status": "candidate_only",

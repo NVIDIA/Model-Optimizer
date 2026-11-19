@@ -15,7 +15,6 @@
 
 """Replay discrete fixed-topology assignments against the original calibration measurements."""
 
-import itertools
 import json
 import math
 from fractions import Fraction
@@ -38,7 +37,7 @@ def _selected_binary_keys(variables):
     return keys
 
 
-class _BenchmarkIncumbent:
+class _RefitIncumbent:
     """Keep the best work-feasible assignment seen for one range and target."""
 
     def __init__(self, menus, anchors, target, eligible, required, heads, include_anchor):
@@ -53,7 +52,8 @@ class _BenchmarkIncumbent:
         self.include_anchor = include_anchor
         self.best = None
         self.rank = None
-        self.proved = False
+        self.ceiling = None
+        self.maximum = None
 
     def consider(self, assignment):
         skipped = sum(option.bmm1_skipped_tiles for option in assignment)
@@ -61,15 +61,15 @@ class _BenchmarkIncumbent:
             return
         retained = sum(option.choice.retained_tiles for option in assignment)
         donors = tuple(0 if o.choice.fallback else o.choice.donor_head + 1 for o in assignment)
-        if self.rank is not None and donors == self.rank[-1]:
-            return
         reuse = tuple(
             sum(Fraction(option.risk_by_prompt[i]) for option in assignment)
             for i in range(len(self.anchor_mass))
         )
         total = tuple(x + y for x, y in zip(self.anchor_mass, reuse))
         risk = max(total if self.include_anchor else reuse)
-        rank = (risk, retained, sum(bool(donor) for donor in donors), donors)
+        if self.ceiling is not None and risk > self.ceiling:
+            return
+        rank = (risk, retained, donors) if self.ceiling is None else (retained, risk, donors)
         if self.rank is not None and rank >= self.rank:
             return
         self.rank = rank
@@ -91,12 +91,6 @@ class _BenchmarkIncumbent:
         )
 
     def initialize(self):
-        # Small menus can be certified directly, including every canonical tie.
-        if math.prod(len(menu) for menu in self.menus) <= 2048:
-            for combination in itertools.product(*self.menus):
-                self.consider(combination)
-            self.proved = True
-            return
         # Head choices are independent at fixed topology. This assignment attains
         # the largest possible integer work saving and witnesses feasibility.
         assignment = [
@@ -112,7 +106,11 @@ class _BenchmarkIncumbent:
         ]
         spare = sum(o.bmm1_skipped_tiles for o in assignment) - self.required
         if spare < 0:
-            self.proved = True  # Maximum possible work still misses the target.
+            self.required += spare
+            self.consider(assignment)
+            self.maximum = self.best
+            self.best = self.rank = None
+            self.required -= spare
             return
         self.consider(assignment)
         for i in sorted(range(len(assignment)), key=lambda i: -max(assignment[i].risk_by_prompt)):
@@ -143,7 +141,7 @@ def assess_mask_reuse_benchmark_gates(
     required_benchmarks,
     matched_scores,
 ):
-    """Check the selection proof and paired accuracy evidence of one pinned candidate.
+    """Check whole-prefill replay and paired accuracy evidence of one pinned candidate.
 
     Scores are percentages. The caller supplies the preregistered benchmark names and
     trusted paired evaluation receipts. Other deployment gates remain independent.
@@ -155,7 +153,7 @@ def assess_mask_reuse_benchmark_gates(
         "joint_topology_and_donors",
         "fixed_topology_all_targets_and_permitted_donors",
     }:
-        raise ValueError("unknown proof scope")
+        raise ValueError("unknown selection scope")
     if isinstance(required_benchmarks, str):
         raise ValueError("required_benchmarks must contain individual benchmark names")
     benchmarks = tuple(required_benchmarks)
@@ -169,10 +167,7 @@ def assess_mask_reuse_benchmark_gates(
     report = policy["calibration_report"]
     reasons = []
     source = policy["provenance"]
-    if (
-        source.get("selection_mode") != "verified_benchmark_candidate"
-        or source.get("source", {}).get("capture_scope") != "whole_prefill"
-    ):
+    if source.get("source", {}).get("capture_scope") != "whole_prefill":
         reasons.append("whole-prefill benchmark replay is missing")
     policies = [(p["min_kv_tokens"], p["max_kv_tokens"]) for p in policy["context_policies"]]
     reports = [(p["min_kv_tokens"], p["max_kv_tokens"]) for p in report["by_bucket"]]
@@ -181,6 +176,9 @@ def assess_mask_reuse_benchmark_gates(
     if not report["overall"]["bmm1_skip_objective"]["all_context_buckets_met"]:
         reasons.append("work target is unmet")
     for row in report["by_bucket"]:
+        replay = row.get("selection_result", {})
+        if replay.get("scope") != search_scope or not replay.get("worst_prompt_risk_exact"):
+            reasons.append("missing frozen assignment replay for the declared search space")
         work = row["bmm1_skip_objective"]
         eligible, skipped = work["eligible_tiles"], work["skipped_tiles"]
         if (
@@ -190,16 +188,6 @@ def assess_mask_reuse_benchmark_gates(
             or skipped < required_skipped_tiles(policy["target_bmm1_skip_ratio"], eligible)
         ):
             reasons.append("work target is unmet in a calibrated range")
-        proof = row.get("benchmark_proof", {})
-        if (
-            proof.get("scope") != search_scope
-            or proof.get("status") != "proved_optimal"
-            or proof.get("absolute_gap_exact") != "0"
-            or not proof.get("worst_prompt_risk_exact")
-            or proof.get("lower_bound_exact") != proof["worst_prompt_risk_exact"]
-        ):
-            reasons.append("missing exact selection proof for the declared search space")
-            break
     regressions = {}
     for name in benchmarks:
         if name not in matched_scores:

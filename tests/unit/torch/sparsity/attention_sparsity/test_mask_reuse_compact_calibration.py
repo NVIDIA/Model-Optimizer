@@ -38,7 +38,6 @@ from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_compact i
 )
 from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_solver import (
     MaskReuseSolverConfig,
-    MaskReuseSolverError,
 )
 
 _FIT = {
@@ -425,7 +424,7 @@ def test_compact_validation_rejects_impossible_geometry_or_sparsity_trend(tmp_pa
 
 
 @pytest.mark.parametrize("delta", [1e-17, 1e-13, 1e-10])
-def test_unresolvable_donor_risks_do_not_export_a_more_expensive_risk(tmp_path, delta):
+def test_refit_accepts_close_donor_risks(tmp_path, delta):
     checkpoint = _checkpoint(tmp_path)
     path = tmp_path / "near.jsonl"
     captures = [
@@ -436,24 +435,52 @@ def test_unresolvable_donor_risks_do_not_export_a_more_expensive_risk(tmp_path, 
         capture["anchor_stats_by_layer"]["0"]["retained_tiles"] = [2, 1]
         capture["consumer_layers"]["1"]["dropped_mass"] = [[0.01, 0.01 + delta]] * 2
     digest = _write_payload(path, captures)
-    with pytest.raises(MaskReuseSolverError):
-        calibrate_compact_mask_reuse_policy(
-            path,
-            vanilla_calibration=_FIT,
-            topology=_TOPOLOGY,
-            checkpoint_manifest=checkpoint,
-            evidence=_evidence(digest),
-            reuse_dropped_mass_report_threshold=0.02,
-            target_bmm1_skip_ratio=0.1,
-        )
+    candidate = calibrate_compact_mask_reuse_policy(
+        path,
+        vanilla_calibration=_FIT,
+        topology=_TOPOLOGY,
+        checkpoint_manifest=checkpoint,
+        evidence=_evidence(digest),
+        reuse_dropped_mass_report_threshold=0.02,
+        target_bmm1_skip_ratio=0.1,
+    )
+    assert candidate["calibration_report"]["by_bucket"][0]["bmm1_skip_objective"]["target_met"]
+
+
+def test_cost_pass_spends_one_shared_risk_band_across_targets(tmp_path):
+    checkpoint = _checkpoint(tmp_path)
+    path = tmp_path / "capture.jsonl"
+    captures, _ = _write_captures(path, checkpoint.sha256)
+    for row in captures:
+        expensive = float.fromhex(row["invocation"]["target_sparsity_hex"]) == 0.5
+        row["anchor_stats_by_layer"]["0"]["dropped_mass"] = [0.0 if expensive else 8e-8] * 2
+        row["consumer_layers"]["1"]["dropped_mass"] = [[0.0 if expensive else 1.6e-7] * 2] * 2
+    result = calibrate_compact_mask_reuse_policy(
+        path,
+        vanilla_calibration=_FIT,
+        topology=_TOPOLOGY,
+        checkpoint_manifest=checkpoint,
+        evidence=_evidence(_write_payload(path, captures)),
+        reuse_dropped_mass_report_threshold=0.02,
+        target_bmm1_skip_ratio=0.05,
+    )
+    row = result["calibration_report"]["by_bucket"][0]
+    chosen = next(
+        t
+        for t in row["target_sparsity_frontier"]
+        if t["target_sparsity"] == row["selected_target_sparsity"]
+    )
+    # The 0.5 target costs 13. At 0.7 one reused head costs 11;
+    # reusing both costs 7 but exceeds the single shared ceiling.
+    assert (chosen["target_sparsity"], chosen["combined_tile_cost"]) == (0.7, 11)
+    assert row["fallback_head_count"] == 1
 
 
 def test_benchmark_replays_sub_ulp_winner_and_gates_quality(tmp_path):
     checkpoint = _checkpoint(tmp_path)
     path = tmp_path / "capture.jsonl"
     captures, _ = _write_captures(path, checkpoint.sha256)
-    # The two targets tie after adding these masses in binary64. The more
-    # expensive target wins by the exact captured amount, including anchor risk.
+    # Both targets qualify under the same risk ceiling. The cheaper target wins.
     for row in captures:
         target = float.fromhex(row["invocation"]["target_sparsity_hex"])
         row["anchor_stats_by_layer"]["0"]["dropped_mass"] = [0.5, 0.5]
@@ -464,17 +491,16 @@ def test_benchmark_replays_sub_ulp_winner_and_gates_quality(tmp_path):
         "topology": _TOPOLOGY,
         "checkpoint_manifest": checkpoint,
         "evidence": _evidence(_write_payload(path, captures)),
-        "benchmark_candidate": True,
         "target_bmm1_skip_ratio": 0.05,
         "reuse_dropped_mass_report_threshold": 0.02,
         "source_provenance": {"capture_scope": "whole_prefill"},
     }
     candidate = calibrate_compact_mask_reuse_policy(path, **kwargs)
-    assert candidate["context_policies"][0]["target_sparsity"] == 0.5
-    assert candidate["context_policies"][0]["fallback_heads"] == {"1": [0]}
-    proof = candidate["calibration_report"]["by_bucket"][0]["benchmark_proof"]
-    assert proof["status"] == "proved_optimal"
-    assert proof["worst_prompt_risk_exact"] == f"{2**60 + 1}/{2**62}"
+    assert candidate["context_policies"][0]["target_sparsity"] == 0.7
+    assert candidate["context_policies"][0]["fallback_heads"] == {"1": []}
+    proof = candidate["calibration_report"]["by_bucket"][0]["selection_result"]
+    assert proof["status"] == "within_tolerance"
+    assert proof["worst_prompt_risk_exact"] == f"{2**58 + 1}/{2**60}"
     candidate_bytes = json.dumps(candidate).encode()
     digest = sha256(candidate_bytes).hexdigest()
     common = {"evaluation_sha256": "a" * 64, "checkpoint_manifest_sha256": checkpoint.sha256}
@@ -505,5 +531,7 @@ def test_benchmark_replays_sub_ulp_winner_and_gates_quality(tmp_path):
     bad_prior = {**candidate, "checkpoint_manifest_sha256": "c" * 64}
     with pytest.raises(MaskReuseCalibrationError, match="prior candidate"):
         calibrate_compact_mask_reuse_policy(path, previous_candidate=bad_prior, **kwargs)
-    with pytest.raises(MaskReuseSolverError, match="no verified"):
-        calibrate_compact_mask_reuse_policy(path, **(kwargs | {"target_bmm1_skip_ratio": 1}))
+    unmet = calibrate_compact_mask_reuse_policy(path, **(kwargs | {"target_bmm1_skip_ratio": 1}))
+    assert not unmet["calibration_report"]["overall"]["bmm1_skip_objective"][
+        "all_context_buckets_met"
+    ]
