@@ -74,6 +74,15 @@ def test_native_roundoff_records_risk_and_cost_bounds(tmp_path, seed):
     assert selected["risk_lower_bound"] <= selected["risk_upper_bound"] + 1e-12
 
 
+@pytest.mark.parametrize("seed", [14, 37])
+def test_native_cbc_proof_reports_infeasible_per_range_target(tmp_path, seed):
+    cp = checkpoint(tmp_path)
+    ranges = ((129, 512, 256), (513, 1024, 768), (1025, 4096, 2048), (4097, 8192, 8192))
+    result = solve(tmp_path, cp, captures(cp, seed=seed, buckets=ranges), 0.1, "cbc")
+    assert result["bmm1_skip_objective"]["target_met"] is False
+    assert result["calibration_report"]["joint_frontier"][0]["risk"]["native_infeasibility_proven"]
+
+
 def test_lazy_prompt_rows_preserve_the_eager_optimum(tmp_path, monkeypatch):
     pytest.importorskip("highspy")
     cp = checkpoint(tmp_path)

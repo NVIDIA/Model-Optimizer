@@ -551,10 +551,14 @@ class _SolverSession:
                     for line in log:
                         if self.config.log:
                             print(line, end="")
+                        if line.strip() == "Result - Problem proven infeasible":
+                            fields["proven_infeasible"] = True
                         name, _, value = line.partition(":")
                         if name in {"Objective value", "Lower bound", "Version"}:
                             fields[name] = value.strip()
-        receipt = {}
+        # CBC's MPS solution can say "Integer infeasible" while PuLP assigns
+        # NoSolutionFound. Only its explicit proof qualifies as infeasibility.
+        receipt = {"native_infeasibility_proven": True} if fields.get("proven_infeasible") else {}
         if status == pulp.LpStatusOptimal and problem.sol_status == pulp.LpSolutionOptimal:
             # CBC prints its optimal objective to eight decimal places.
             reported = fields.get("Objective value")
@@ -639,8 +643,9 @@ class _SolverSession:
                 raise MaskReuseSolverFailure(
                     f"native solver failure in {phase}: {native_status}", self.records
                 )
-            infeasible = (
-                status == pulp.LpStatusInfeasible and solution_status == pulp.LpSolutionInfeasible
+            infeasible = status == pulp.LpStatusInfeasible and (
+                solution_status == pulp.LpSolutionInfeasible
+                or receipt.get("native_infeasibility_proven") is True
             )
             optimal = status == pulp.LpStatusOptimal and solution_status == pulp.LpSolutionOptimal
             if native_status is not None and problem.isMIP():
