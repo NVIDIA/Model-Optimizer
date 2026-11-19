@@ -43,6 +43,7 @@ Changelog
 
 *Quantization*
 
+- ``capture_quantized_weight_export_state`` now works on FSDP2-sharded (DTensor) weights; it raised on them, and could pick another weight's quantizer when local shards were empty.
 - NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
 
 *ONNX*
