@@ -150,12 +150,6 @@ def _hf_source(spec: str) -> "HFDatasetSourceConfig":
 def get_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Distillation for Megatron-Bridge.")
-    parser.add_argument(
-        "--logit_kl_chunk_size",
-        type=_positive_int,
-        default=None,
-        help="Bound full-vocabulary KL temporaries by this many tokens.",
-    )
     # Model arguments (HF teacher, HF or Megatron student)
     parser.add_argument(
         "--student_hf_path",
@@ -872,11 +866,6 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             f"sizes differ ({padded['student']} vs {padded['teacher']})."
         )
 
-    kd_options = {}
-    if args.logit_kl_chunk_size is not None:
-        if "logit_kl_chunk_size" not in ModelOptDistillConfig.__dataclass_fields__:
-            raise ValueError("Chunked KL requires a compatible ModelOpt distillation config.")
-        kd_options["logit_kl_chunk_size"] = args.logit_kl_chunk_size
     kd_config = ModelOptDistillConfig(
         kd_loss_alpha=args.kd_loss_alpha,
         logit_kl_topk=args.logit_kl_top_k,
@@ -884,7 +873,6 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,
         freeze_mtp=args.freeze_mtp,
         skip_frozen_mtp=args.skip_frozen_mtp,
-        **kd_options,
     )
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under

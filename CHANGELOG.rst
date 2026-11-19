@@ -18,7 +18,7 @@ Changelog
 
 *Quantization - QAT / QAD*
 
-- Megatron-Bridge distillation adds CLI controls for attention backends, data loading, communication overlap, checkpoint retention, callbacks and optional chunked KL.
+- Megatron-Bridge distillation adds CLI controls for attention backends, data loading, communication overlap, checkpoint retention and callbacks.
 
 *Quantization - Export & Deployment*
 

@@ -410,8 +410,7 @@ python distill.py \
   --num_workers 0 --no-pin_memory \
   --no-overlap_grad_reduce --no-overlap_param_gather \
   --save_interval 50 --checkpoint_keep_last 1 \
-  --checkpoint_keep_iterations 100 150 200 --no_async_save \
-  --logit_kl_chunk_size 128 ...
+  --checkpoint_keep_iterations 100 150 200 --no_async_save ...
 ```
 
 The attention backend applies to both student and teacher. Omit it to retain
@@ -421,8 +420,6 @@ to the most recent recovery checkpoints and requires a compatible Bridge
 `CheckpointConfig`. `--checkpoint_storage_writers_per_rank` and
 `--distributed_timeout_minutes` expose checkpoint I/O and distributed timeout
 settings. Communication overlap remains enabled unless explicitly disabled.
-
-`--logit_kl_chunk_size` requires a ModelOpt distillation config exposing that field.
 
 Optional `--callbacks package.module.CallbackFactory ...` entries are fully
 qualified factories called without arguments. Each must return a Bridge
