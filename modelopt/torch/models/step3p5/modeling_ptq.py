@@ -21,6 +21,7 @@ The package is named for the first Step release; later revisions share its exper
 
 import inspect
 import re
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -29,6 +30,9 @@ from torch import Tensor
 from modelopt.torch.models import hf_model_type
 from modelopt.torch.quantization.nn import QuantModule, QuantModuleRegistry
 from modelopt.torch.quantization.plugins.custom import CUSTOM_MODEL_PLUGINS
+
+if TYPE_CHECKING:
+    from modelopt.torch.export.registry import ExportContext
 
 __all__: list[str] = []
 
@@ -217,12 +221,45 @@ def register_moe_linear_on_the_fly(model):
                 f"{mod_type.__name__}, registering with _QuantMoELinear.\033[0m"
             )
             QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantMoELinear)
+            _register_export_handlers()
+
+
+def _register_export_handlers() -> None:
+    """Register how the export handles the wrapper, once a model has one to export.
+
+    Its ``on_pack`` fills the experts' missing input amax before they are packed, and its
+    ``on_post_pack`` stacks them back into the wrapper's 3-D layout once they are. It matches the
+    wrapper type rather than the dynamically generated class name (``Quant`` + the model's own class
+    name), which a compatible remote-code class can make anything. Defined here, not at module
+    scope: ``modelopt.torch.quantization`` imports this module and ``modelopt.torch.export`` imports
+    quantization, a cycle that resolves at module scope only through ``modelopt.torch``'s import
+    order.
+    """
+    from modelopt.torch.export.registry import ExportModuleRegistry, ModuleExportHandler
+
+    @ExportModuleRegistry.register(_QuantMoELinear, prepend=True)
+    class _QuantMoELinearExport(ModuleExportHandler):
+        on_pack = staticmethod(_export_moe_linear)
+        on_post_pack = staticmethod(_restack_moe_linear)
+
+
+def _export_moe_linear(name: str, module: nn.Module, ctx: "ExportContext") -> None:
+    """Fill missing input amax before the wrapper's expert linears are exported."""
+    # Not at module scope, for the import cycle _register_export_handlers names.
+    from modelopt.torch.export.layer_utils import set_expert_quantizer_amax
+
+    set_expert_quantizer_amax(list(module.experts), quantizer_attrs="input_quantizer")
+
+
+def _restack_moe_linear(name: str, module: nn.Module, ctx: "ExportContext") -> None:
+    """Stack the wrapper's exported experts back into its 3-D weight and scales."""
+    _reconstruct_fused_moe_linear(module)
 
 
 def _reconstruct_fused_moe_linear(model: nn.Module) -> None:
     """Reconstruct :class:`_QuantMoELinear` per-expert weights back to the 3-D MoELinear format.
 
-    After _process_quantized_modules, each expert's nn.Linear inside the wrapper has:
+    Once the export has packed the wrapper's experts, each expert's nn.Linear has:
       - weight: fp4-quantized tensor [out_features, in_features]
       - weight_scale, weight_scale_2: per-block / global scales
       - input_scale: activation scale (if calibrated)

@@ -17,6 +17,7 @@
 
 import collections.abc
 import contextlib
+import operator
 import warnings
 from dataclasses import dataclass
 
@@ -24,6 +25,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.fsdp import FSDPModule
 
+from modelopt.torch.models import get_specs, list_all_possible, match_class_names
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.quantization.utils import (
@@ -43,7 +45,7 @@ from .quant_utils import (
     get_weight_block_size,
     to_quantized_weight,
 )
-from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
+from .registry import ExportContext, ExportModuleRegistry, ModuleExportHandler
 
 __all__: list[str] = []
 
@@ -151,18 +153,38 @@ def _export_weight(
     _export_quantized_weight(module, ctx.dtype, weight_name)
 
 
-# Preparation handlers are registered in the same precedence as the legacy MoE prepass.
-
-
-@PrepareMoEInputsRegistry.register(predicate=_has_fused_experts_quantizers)
 def _prepare_fused_experts(name: str, moe_module: nn.Module, ctx: ExportContext) -> None:
     """Mark fused experts handled; their missing amax fallback occurs during export."""
 
 
-@PrepareMoEInputsRegistry.register("Llama4TextExperts", "GptOssExperts")
+def _is_bmm_experts(module: nn.Module) -> bool:
+    """Whether ``module`` is fused BMM-style experts, whose weights are stored transposed.
+
+    That is, of a class the registered models name as such (``ExportSpec.bmm_experts_names``),
+    including a model registered after this module was imported.
+    """
+    return match_class_names(module, _bmm_experts_names())
+
+
+# The specs the names were last read from, which it holds so that none is freed and its address
+# taken by a new one while they are compared, and the names.
+_bmm_experts_read: tuple[tuple[object, ...], tuple[str, ...]] = ((), ())
+
+
+def _bmm_experts_names() -> tuple[str, ...]:
+    """The classes the registered specs name, read again whenever the specs are others."""
+    global _bmm_experts_read
+    specs = get_specs()
+    read, names = _bmm_experts_read
+    if len(read) != len(specs) or not all(map(operator.is_, read, specs)):
+        names = list_all_possible("bmm_experts_names")
+        _bmm_experts_read = (tuple(specs), names)
+    return names
+
+
 def _prepare_bmm_experts(name: str, moe_module: nn.Module, ctx: ExportContext) -> None:
     """Fill missing input amax values for fused BMM-style experts."""
-    # Both use gate_up_proj and down_proj with singular input quantizers
+    # They hold gate_up_proj and down_proj with singular input quantizers
     # (gate_up_proj_input_quantizer/down_proj_input_quantizer); the weight-side
     # amax fallback and weight export happen in _export_bmm_experts.
     for linear_name in ["gate_up_proj", "down_proj"]:
@@ -175,9 +197,6 @@ def _prepare_bmm_experts(name: str, moe_module: nn.Module, ctx: ExportContext) -
                 )
 
 
-@PrepareMoEInputsRegistry.register(
-    predicate=lambda module: isinstance(module, collections.abc.Iterable)
-)
 def _prepare_iterable_experts(name: str, moe_module: nn.Module, ctx: ExportContext) -> None:
     """Fill missing input amax values for iterable per-expert submodules."""
     expert_linear_names = get_expert_linear_names(moe_module, ctx.model_type)
@@ -201,40 +220,6 @@ def _prepare_iterable_experts(name: str, moe_module: nn.Module, ctx: ExportConte
         ) from e
 
 
-# Export handlers are registered in the same precedence as the legacy model walk.
-
-
-def _is_quant_moe_linear(module: nn.Module) -> bool:
-    """Whether ``module`` is an expert-indexed ``MoELinear`` expanded by ``_QuantMoELinear``.
-
-    Matched by wrapper type first, not only by the dynamically generated class name
-    (``Quant`` + the model's own class name): the wrapper is registered structurally, so a
-    compatible remote-code class under any other name — or a second one, whose generated
-    name gets uniquified — would bypass this handler and export without the input-amax
-    fallback. The name check is kept as a fallback so stand-in modules match too.
-
-    The wrapper lives in the Step PTQ modeling module, imported lazily like other export
-    modules do to avoid an import cycle with ``modelopt.torch.quantization``.
-    """
-    if not hasattr(module, "experts"):
-        return False
-    try:
-        from modelopt.torch.models.step3p5.modeling_ptq import _QuantMoELinear
-
-        if isinstance(module, _QuantMoELinear):
-            return True
-    except ImportError:
-        pass
-    return any(cls.__name__ == "QuantMoELinear" for cls in type(module).__mro__)
-
-
-@ExportModuleRegistry.register(predicate=_is_quant_moe_linear)
-def _export_moe_linear(name: str, module: nn.Module, ctx: ExportContext) -> None:
-    """Fill missing input amax before child expert QuantLinears are exported."""
-    set_expert_quantizer_amax(list(module.experts), quantizer_attrs="input_quantizer")
-
-
-@ExportModuleRegistry.register(predicate=_has_fused_experts_quantizers)
 def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Split and quantize a fused-experts module with plural weight quantizers.
 
@@ -271,7 +256,6 @@ def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContex
         _export_fused_experts(module, ctx.dtype)
 
 
-@ExportModuleRegistry.register(predicate=is_quantlinear)
 def _export_quant_linear(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Export a standard quantized linear layer.
 
@@ -408,9 +392,6 @@ def _export_quantized_conv3d_weight(
     torch.cuda.empty_cache()
 
 
-@ExportModuleRegistry.register(
-    "WanCausalConv3d", predicate=lambda module: hasattr(module, "weight_quantizer")
-)
 def _export_quant_conv3d(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Export a supported quantized Wan Conv3d through its MRO registry match."""
     quantizers = [
@@ -427,9 +408,6 @@ def _export_quant_conv3d(name: str, module: nn.Module, ctx: ExportContext) -> No
         raise type(e)(message) from e
 
 
-@ExportModuleRegistry.register(
-    nn.Embedding, predicate=lambda module: hasattr(module, "weight_quantizer")
-)
 def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Export a quantized embedding table unless its weight is tied."""
     if get_quantization_format(module) == QUANTIZATION_NONE:
@@ -457,9 +435,8 @@ def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) ->
         ) from e
 
 
-@ExportModuleRegistry.register("Llama4TextExperts", "GptOssExperts")
 def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> None:
-    """Export fused BMM-style expert weights (Llama4 / GPT-OSS).
+    """Export fused BMM-style expert weights, of the classes models name as such.
 
     Their weight quantizer has one amax covering all experts. The keep-fused export refuses them,
     since they store their experts transposed.
@@ -467,7 +444,7 @@ def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> Non
     if ctx.keep_fused_experts:
         # The keep-fused export leaves fused experts for the writer to split by their
         # ``experts.<proj>`` key, as ``(num_experts, out_dim, in_dim)`` weights. These store theirs
-        # transposed (GPT-OSS also interleaves gate and up, and keeps biases), so the split would cut
+        # transposed (some also interleave gate and up, and keep biases), so the split would cut
         # every expert wrong, quantized or not.
         raise NotImplementedError(
             f"{name}: the keep-fused export splits fused experts stored (num_experts, out_dim, "
@@ -487,3 +464,53 @@ def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> Non
     )
     for weight_name in ["gate_up_proj", "down_proj"]:
         _export_weight(module, ctx, weight_name)
+
+
+# The built-in handlers, in precedence order: in each phase, the first that matches a module and
+# takes part in the phase handles it. A model's own handlers register from its package, ahead of
+# these. The quantized linears, which most modules the export walks are, come before the experts,
+# whose BMM-style ones are told by a lookup in the models' specs.
+
+
+def _has_weight_quantizer(module: nn.Module) -> bool:
+    return hasattr(module, "weight_quantizer")
+
+
+@ExportModuleRegistry.register(predicate=_has_fused_experts_quantizers)
+class _FusedExperts(ModuleExportHandler):
+    """Fused experts with a weight quantizer per expert (``<proj>_weight_quantizers``)."""
+
+    on_prepare_moe_inputs = staticmethod(_prepare_fused_experts)
+    on_pack = staticmethod(_export_fused_experts_module)
+
+
+@ExportModuleRegistry.register(predicate=is_quantlinear)
+class _QuantLinear(ModuleExportHandler):
+    on_pack = staticmethod(_export_quant_linear)
+
+
+@ExportModuleRegistry.register("WanCausalConv3d", predicate=_has_weight_quantizer)
+class _QuantConv3d(ModuleExportHandler):
+    on_pack = staticmethod(_export_quant_conv3d)
+
+
+@ExportModuleRegistry.register(nn.Embedding, predicate=_has_weight_quantizer)
+class _QuantEmbedding(ModuleExportHandler):
+    on_pack = staticmethod(_export_quant_embedding)
+
+
+@ExportModuleRegistry.register(predicate=_is_bmm_experts)
+class _BmmExperts(ModuleExportHandler):
+    """Fused BMM-style experts, of the classes models name as such."""
+
+    on_prepare_moe_inputs = staticmethod(_prepare_bmm_experts)
+    on_pack = staticmethod(_export_bmm_experts)
+
+
+@ExportModuleRegistry.register(
+    predicate=lambda module: isinstance(module, collections.abc.Iterable)
+)
+class _IterableExperts(ModuleExportHandler):
+    """Experts held one module each, whose linears the export packs one by one."""
+
+    on_prepare_moe_inputs = staticmethod(_prepare_iterable_experts)

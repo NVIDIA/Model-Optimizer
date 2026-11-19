@@ -15,7 +15,7 @@
 
 """Llama4 specs (HF model type ``llama4``)."""
 
-from ..specs import EPSpec, ModelSpec, MoESpec, PTQSpec, register
+from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
 
@@ -45,5 +45,8 @@ register(
             expert_linear_names=("gate_up_proj", "down_proj"),
             fused_expert_names=True,
         ),
+        # The text-only llama4_text checkpoints hold the same class; the export matches every
+        # model's names, so they are covered without a section of their own.
+        export_spec=ExportSpec(bmm_experts_names=("Llama4TextExperts",)),
     )
 )

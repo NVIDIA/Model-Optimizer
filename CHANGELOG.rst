@@ -21,6 +21,7 @@ Changelog
 *Quantization - Export & Deployment*
 
 - In a ``with ModelOptSession():`` block, a layerwise calibration hands its exporter to the export through the session once every layer is written.
+- An export handler, ``modelopt.torch.export.ModuleExportHandler``, now defines what the Hugging Face export does to a kind of module in each phase it takes part in (``on_prepare_moe_inputs``, ``on_pack``, ``on_post_pack``), and all handlers register with ``ExportModuleRegistry``; a plain function still registers as ``on_pack``.
 
 *Quantization - Recipes*
 
@@ -38,6 +39,8 @@ Changelog
 - ModelOpt supports one model optimization workflow at a time in a process: running different workflows at once from several threads, such as quantizing two models in two threads, is not supported. The threads of the one workflow share its ``ModelOptSession``, which runs one export at a time.
 
 **Deprecations**
+
+- ``modelopt.torch.export.PrepareMoEInputsRegistry`` is deprecated and will be removed in 0.51.0: register a ``ModuleExportHandler`` that defines ``on_prepare_moe_inputs`` with ``ExportModuleRegistry`` instead.
 
 **Bug Fixes**
 

@@ -35,6 +35,8 @@ from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.layer_utils import is_quantlinear
+from modelopt.torch.export.registry import ExportModuleRegistry, ModuleExportHandler
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
 from modelopt.torch.export.unified_export_hf_streaming import (
     _export_fsdp2_checkpoint_streaming,
@@ -82,8 +84,17 @@ def _load_all(export_dir: Path) -> dict:
 # --------------------------------------------------------------------------- #
 # End-to-end streaming export (world=1)
 # --------------------------------------------------------------------------- #
-def test_streaming_export_matches_resident_path(tmp_path):
-    """Streaming export produces the same tensors as the whole-state-dict path."""
+def test_streaming_export_matches_resident_path(tmp_path, monkeypatch):
+    """Streaming export produces the same tensors as the whole-state-dict path, and finishes the
+    same modules once packed (``on_post_pack``)."""
+    monkeypatch.setattr(ExportModuleRegistry, "_entries", list(ExportModuleRegistry._entries))
+    finished = []
+
+    @ExportModuleRegistry.register(predicate=is_quantlinear, prepend=True)
+    class _Finished(ModuleExportHandler):
+        def on_post_pack(self, name, module, ctx):
+            finished.append(name)
+
     model = _tiny_quantized_llama()
     ref_model = copy.deepcopy(model)  # export packs weights in place -> need two copies
 
@@ -91,6 +102,8 @@ def test_streaming_export_matches_resident_path(tmp_path):
     with ModelOptSession().bind(model):
         _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d)
     streamed = _load_all(d)
+    streamed_finished = sorted(finished)
+    finished.clear()
 
     with ModelOptSession().bind(ref_model):
         ref, _ = _export_transformers_checkpoint(ref_model, torch.bfloat16)
@@ -98,6 +111,8 @@ def test_streaming_export_matches_resident_path(tmp_path):
     assert set(streamed) == set(ref)
     for key in ref:
         assert torch.equal(streamed[key].float(), ref[key].cpu().float()), key
+    assert "model.layers.1.self_attn.q_proj" in streamed_finished
+    assert streamed_finished == sorted(finished)
 
 
 def test_streaming_export_of_a_sharded_w4a8_model(tmp_path, gloo_world_of_one):

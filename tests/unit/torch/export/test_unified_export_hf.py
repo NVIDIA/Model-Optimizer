@@ -1439,3 +1439,27 @@ def test_an_expert_parallel_export_it_cannot_write_is_refused_before_folding(
     assert after.keys() == before.keys()
     assert all(torch.equal(after[k], v) for k, v in before.items())
     assert not (tmp_path / "export").exists()
+
+
+def test_bmm_experts_are_packed_in_their_transposed_layout(tmp_path):
+    """Experts a model's spec names as stored for ``torch.bmm``, as GPT-OSS's are, hold each
+    weight as (in, out): the export quantizes them in blocks along their inputs, the second
+    dimension, so the packed weights and their scales keep that layout."""
+    pytest.importorskip("transformers")
+    # Local import: transformers and its test fixtures are optional dependencies.
+    from _test_utils.torch.transformers_models import get_tiny_gpt_oss
+
+    model = get_tiny_gpt_oss(num_hidden_layers=1, hidden_size=64, intermediate_size=96).float()
+    model.config.architectures = ["GptOssForCausalLM"]
+    mtq.quantize(model.eval(), mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randint(0, 32, (1, 16))))
+    export_hf_checkpoint(model, export_dir=tmp_path)
+
+    exported = {}
+    for shard in tmp_path.glob("*.safetensors"):
+        exported.update(load_file(str(shard)))
+    experts = "model.layers.0.mlp.experts."
+    # 8 experts; NVFP4 packs two inputs per byte and keeps one scale per 16 inputs.
+    assert exported[experts + "gate_up_proj"].shape == (8, 64 // 2, 2 * 96)
+    assert exported[experts + "gate_up_proj_weight_scale"].shape == (8, 64 // 16, 2 * 96)
+    assert exported[experts + "down_proj"].shape == (8, 96 // 2, 64)
+    assert exported[experts + "down_proj_weight_scale"].shape == (8, 96 // 16, 64)
