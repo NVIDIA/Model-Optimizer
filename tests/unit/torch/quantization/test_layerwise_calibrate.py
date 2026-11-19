@@ -455,7 +455,7 @@ def test_layerwise_calibration_refuses_another_models_session():
     other = _TransformerWithLMHead(n_layers=2, dim=16)
     with (
         ModelOptSession().bind(other),
-        pytest.raises(ValueError, match="describes one model"),
+        pytest.raises(RuntimeError, match="describes one model"),
     ):
         layerwise_calibrate(
             _TransformerWithLMHead(n_layers=2, dim=16),

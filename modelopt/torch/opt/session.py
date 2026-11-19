@@ -64,11 +64,11 @@ class ModelOptSession:
 
     ``with ModelOptSession():`` makes it the process's active session for the block, and every
     ModelOpt call in the block runs in it. Opening another while one is active raises: a workflow
-    has one session. A session describes one model, which it holds until its block ends. The first
-    call binds it to that model (:meth:`bind`), and a call on another model raises; the model's
-    submodules, and the model containing it, are the same model, since a VLM is calibrated through
-    its language model and exported whole. A copy of a session, pickled or deep-copied, is unbound,
-    as is a session whose block has ended.
+    has one session. A session describes one model, its workflow's root, which it holds until its
+    block ends. The first call binds it to that model (:meth:`bind`), and the binding never changes:
+    a call on a part of the root, such as the language model a VLM is calibrated through, runs in
+    the session, and a call on any other model raises, one that contains the root included. A copy
+    of a session, pickled or deep-copied, is unbound, as is a session whose block has ended.
     """
 
     model_type: str | None = field(default=None, init=False)
@@ -128,24 +128,26 @@ class ModelOptSession:
         return self._model
 
     def bind(self, model: _Model) -> "ModelOptSession":
-        """Bind this session to ``model``, the model its workflow works on, and return it.
+        """Bind this session to ``model``, the root model its workflow works on, and return it.
 
-        Binding it again to that model or to one of its submodules changes nothing; binding it to
-        the model that contains it, such as a compiled or PEFT wrapper, moves the binding there.
-        Any other model raises. The session holds the model it is bound to, so one the workflow
-        drops stays bound until the session's block ends, and no garbage collection, which each
-        rank runs at its own time, changes what a call binds to. Binding reads the model's type off
-        the model it binds to.
+        The first binding fixes the root. Binding the session again to the root, or to one of its
+        parts, changes nothing. Any other model raises, one that contains the root included, such
+        as a compiled or PEFT wrapper of it: a workflow that calls on a part of a model binds the
+        session to the whole model first. The session holds the model it is bound to, so one the
+        workflow drops stays bound until the session's block ends, and no garbage collection, which
+        each rank runs at its own time, changes what a call binds to. Binding reads the model's type
+        off the root.
         """
         bound = self._model
-        if bound is None or (model is not bound and _contains(model, bound)):
+        if bound is None:
             self._model = model
             self.model_type = hf_model_type(model)
         elif not _contains(bound, model):
-            raise ValueError(
+            raise RuntimeError(
                 f"This ModelOptSession describes a workflow on another model, a "
                 f"{type(bound).__name__}, so it cannot be used for this {type(model).__name__}: a "
-                "session describes one model."
+                "session describes one model, its workflow's root, and a call takes that model or "
+                "a part of it. Bind the session to the whole model before any call on a part of it."
             )
         return self
 
