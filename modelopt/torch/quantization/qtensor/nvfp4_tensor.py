@@ -159,7 +159,13 @@ class NVFP4QTensor(BaseQuantizedTensor):
         if cls._is_static_quantizer(weight_quantizer):
             # Static path: use pre-computed per-block amax values from quantizer
             global_amax = cls._get_static_global_amax(weight_quantizer).float()
-            per_block_amax = weight_quantizer._amax.float()
+            # LSQ moves the per-block amax out of ``_amax``: ``amax`` resolves tied LSQ to the
+            # learned ``_amax_post`` and refuses untied LSQ, whose two amaxes one scale cannot
+            # hold. Plain quantizers, and the functional export's stand-ins, keep ``_amax``.
+            if getattr(weight_quantizer, "_lsq", False):
+                per_block_amax = weight_quantizer.amax.detach().float()
+            else:
+                per_block_amax = weight_quantizer._amax.float()
 
             # Compute scales in float
             per_block_scale_max = global_amax / E2M1_MAX
