@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import json
 import os
 import tempfile
+import weakref
 from collections import OrderedDict
 from unittest.mock import Mock
 
@@ -48,6 +50,24 @@ def create_multi_io_model():
 
     graph = helper.make_graph([add_node, mul_node], "model_multi_io", [x1, x2], [y1, y2])
     model = helper.make_model(graph, producer_name="model_multi_io")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    model = onnx_utils.infer_shapes(model)
+    return model
+
+
+def create_string_cast_model():
+    # A plain numeric input Cast to a STRING output, so the non-numeric tensor
+    # that reaches the running statistics is produced by ONNX Runtime itself
+    # rather than passed in, sidestepping unrelated numpy/polygraphy input-dtype
+    # plumbing for STRING inputs while still exercising the same code path: a
+    # non-numeric entry anywhere in a batch's tensor mapping.
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3])
+    y = helper.make_tensor_value_info("Y", TensorProto.STRING, [1, 3])
+    cast_node = helper.make_node("Cast", ["X"], ["Y"], to=TensorProto.STRING, name="cast")
+    graph = helper.make_graph([cast_node], "model_string_cast", [x], [y])
+    model = helper.make_model(graph, producer_name="model_string_cast")
     model.opset_import[0].version = 20
     model.ir_version = 10
     onnx.checker.check_model(model)
@@ -698,6 +718,28 @@ def test_single_batch_backward_compatibility(reference_runner):
         os.remove(input_path)
 
 
+def test_single_batch_with_string_input_is_not_reduced(reference_runner):
+    """A single batch of non-numeric data must not require numeric reduction.
+
+    Regression test: streaming now folds every batch into the running
+    statistics immediately, even when there turns out to be only one, so a
+    valid string input feeding a Cast node reached np.abs on a STRING array
+    and raised TypeError before the raw-array return path -- something the
+    old, non-streaming aggregation never hit, since it checked the batch
+    count before doing any numeric reduction at all.
+    """
+    model = create_string_cast_model()
+    runner = ReferenceRunner(model)
+    inputs = {"X": np.array([[1.0, 2.0, 3.0]], dtype=np.float32)}
+
+    results = runner.run(inputs)
+
+    assert isinstance(results, OrderedDict)
+    assert isinstance(results["Y"], np.ndarray)
+    assert not isinstance(results["Y"], TensorStats)
+    assert list(results["Y"].flatten()) == ["1", "2", "3"]
+
+
 def test_multi_batch_aggregation_statistics(reference_runner):
     """Test that multi-batch aggregation correctly computes statistics across batches."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -742,3 +784,91 @@ def test_multi_batch_aggregation_statistics(reference_runner):
         assert results["Y2"].absmax == 70.0
         assert results["Y2"].min_val == -50.0
         assert results["Y2"].max_val == 70.0
+
+
+def test_multi_batch_does_not_accumulate_batches(reference_runner, monkeypatch):
+    """Batches are folded as they stream in, so peak memory is independent of batch count."""
+    batch_refs, array_refs = [], []
+    concurrent, array_concurrent = [], []
+
+    def spy(method):
+        def wrapped(self, *args):
+            batch_data = args[-1]
+            # Track an output activation alongside the mapping: marking every tensor as an
+            # output is what makes a batch big, and the arrays could outlive the mapping
+            # that carried them. batch_data holds the input feed first, so index by name.
+            batch_refs.append(weakref.ref(batch_data))
+            array_refs.append(weakref.ref(batch_data["Y1"]))
+            gc.collect()
+            concurrent.append(sum(ref() is not None for ref in batch_refs))
+            array_concurrent.append(sum(ref() is not None for ref in array_refs))
+            return method(self, *args)
+
+        return wrapped
+
+    # Spy only on _fold_tensor_stats: it now runs once per batch, including the
+    # first, so wrapping _init_tensor_stats too would double-count the first
+    # batch's mapping and array (it is reachable from both spies at once) and
+    # inflate every concurrency count that follows.
+    monkeypatch.setattr(
+        ReferenceRunner, "_fold_tensor_stats", spy(ReferenceRunner._fold_tensor_stats)
+    )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for i in range(5):
+            np.savez(
+                os.path.join(temp_dir, f"batch_{i:03d}.npz"),
+                X1=np.full((1, 3), i, dtype=np.float32),
+                X2=np.full((1, 3), i + 1, dtype=np.float32),
+            )
+        results = reference_runner.run(temp_dir)
+
+    assert len(concurrent) == 5, "every batch should reach the aggregator"
+    assert max(concurrent) == 1, f"batches were retained instead of streamed: {concurrent}"
+    assert max(array_concurrent) == 1, (
+        f"batch activations were retained instead of streamed: {array_concurrent}"
+    )
+    # The streaming machinery is only worth testing if it still produces the right
+    # numbers: X1=0..4, X2=1..5, Y1=X1+X2, Y2=X1*X2.
+    assert results["X1"].absmax == 4.0
+    assert results["X1"].min_val == 0.0
+    assert results["X1"].max_val == 4.0
+    assert results["X2"].absmax == 5.0
+    assert results["X2"].min_val == 1.0
+    assert results["X2"].max_val == 5.0
+    assert results["Y1"].absmax == 9.0
+    assert results["Y1"].min_val == 1.0
+    assert results["Y1"].max_val == 9.0
+    assert results["Y2"].absmax == 20.0
+    assert results["Y2"].min_val == 0.0
+    assert results["Y2"].max_val == 20.0
+
+
+def test_multi_batch_nan_first_batch_does_not_poison_stats(reference_runner):
+    """A NaN in the first batch must not lock a tensor's running stats at NaN.
+
+    Seeding directly from the first batch (instead of sentinels folded through
+    _fold_tensor_stats) breaks this: max(nan, 10.0) is nan because Python's max
+    never replaces its first argument with a comparand that loses a NaN
+    comparison, so a later finite batch could never clear the contamination.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Batch 1: Y1 = X1 + X2 contains a NaN.
+        np.savez(
+            os.path.join(temp_dir, "batch_001.npz"),
+            X1=np.array([[np.nan, 0.0, 0.0]], dtype=np.float32),
+            X2=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+        )
+        # Batch 2: all finite, with a clear absmax/min/max to assert on.
+        np.savez(
+            os.path.join(temp_dir, "batch_002.npz"),
+            X1=np.array([[10.0, -3.0, 0.0]], dtype=np.float32),
+            X2=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+        )
+
+        results = reference_runner.run(temp_dir)
+
+        assert not np.isnan(results["Y1"].absmax)
+        assert results["Y1"].absmax == 10.0
+        assert results["Y1"].min_val == -3.0
+        assert results["Y1"].max_val == 10.0
