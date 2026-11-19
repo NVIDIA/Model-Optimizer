@@ -14,6 +14,7 @@
 # limitations under the License.
 """Tests for quantize.py and export_quantized_megatron_to_hf.py scripts."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ from _test_utils.torch.export.unified_checkpoint import (
 from _test_utils.torch.megatron.modelopt_state import assert_has_modelopt_state
 from _test_utils.torch.transformers_models import (
     create_tiny_nemotron_h_dir,
+    create_tiny_qwen3_dir,
     create_tiny_qwen3_moe_dir,
     create_tiny_qwen3vl_dir,
 )
@@ -43,6 +45,43 @@ _DENSE_KWARGS = {
     "intermediate_size": 256,
     "max_position_embeddings": 512,
 }
+
+
+def test_ptq_and_bridge_checkpoint_export(tmp_path, num_gpus):
+    source = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, **_DENSE_KWARGS)
+    calibration = tmp_path / "calibration.jsonl"
+    calibration.write_text("\n".join(json.dumps({"text": "Hello world! " * 16}) for _ in range(4)))
+    checkpoint, output = tmp_path / "megatron", tmp_path / "hf"
+    quantize = extend_cmd_parts(
+        [
+            "torchrun",
+            "--nproc_per_node=1",
+            "quantize.py",
+            "--skip_generate",
+        ],
+        hf_model_name_or_path=source,
+        recipe="general/ptq/nvfp4_default-kv_fp8",
+        calib_dataset_name=calibration,
+        calib_num_samples=4,
+        seq_length=16,
+        export_megatron_path=checkpoint,
+    )
+    run_example_command(quantize, example_path="megatron_bridge", setup_free_port=True)
+    assert_has_modelopt_state(checkpoint)
+    export = extend_cmd_parts(
+        ["torchrun", "--nproc_per_node=1", "export_quantized_megatron_to_hf.py"],
+        hf_model_name_or_path=source,
+        megatron_path=checkpoint,
+        export_backend="bridge",
+        export_unified_hf_path=output,
+    )
+    run_example_command(export, example_path="megatron_bridge", setup_free_port=True)
+    assert_exported_checkpoint_matches(output, source)
+    assert any(tensor.dtype == torch.uint8 for tensor in load_safetensors_dir(output).values())
+    assert (
+        json.loads((output / "config.json").read_text())["quantization_config"]["quant_algo"]
+        == "NVFP4"
+    )
 
 
 @pytest.mark.parametrize(

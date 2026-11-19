@@ -255,7 +255,11 @@ def megatron_prefill(
             forward_kwargs["image_sizes"] = image_sizes
         output = model(**forward_kwargs)
     else:
-        output = model(tokens, position_ids, attention_mask, runtime_gather_output=True)
+        forward_kwargs = {"runtime_gather_output": True}
+        # Calibration is a prefill without an inference context; skip auxiliary training heads.
+        if "compute_mtp_loss" in inspect.signature(model.forward).parameters:
+            forward_kwargs["compute_mtp_loss"] = False
+        output = model(tokens, position_ids, attention_mask, **forward_kwargs)
 
     # Some VLM wrappers (e.g. Gemma3VLModel) return ``(logits, loss_mask)`` rather than a bare tensor.
     if isinstance(output, (tuple, list)):
@@ -273,16 +277,23 @@ def megatron_prefill(
         )
         send_to_next_pipeline_rank(output.to(dtype=pp_dtype))
 
+    if skip_return_logits:
+        return None
+
     # .contiguous() is required because the slice is a view with the padded stride; the broadcast
     # below asserts contiguity when SP pads seq_length up to a multiple of TP.
     logits = output[:, :seq_length, :].detach().contiguous() if pp_last else None
 
-    if model.config.bf16:
-        logits_dtype = torch.bfloat16
-    elif model.config.fp16:
-        logits_dtype = torch.float16
-    else:
-        logits_dtype = torch.float32
+    if not is_pp:
+        return logits
+    logits_dtype = getattr(model.config, "logit_dtype", None)
+    if logits_dtype is None:
+        if model.config.bf16:
+            logits_dtype = torch.bfloat16
+        elif model.config.fp16:
+            logits_dtype = torch.float16
+        else:
+            logits_dtype = torch.float32
 
     # All PP ranks must participate in the broadcast to stay in sync.
     # VLM wrappers (e.g. Qwen3VLModel) hold the output layer on the inner language_model, so the
@@ -293,7 +304,7 @@ def megatron_prefill(
     result = broadcast_from_last_pipeline_stage(
         [batch_size, seq_length, vocab_size], logits_dtype, logits
     )
-    return None if skip_return_logits else result
+    return result
 
 
 def megatron_generate(

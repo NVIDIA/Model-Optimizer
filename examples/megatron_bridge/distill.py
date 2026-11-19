@@ -167,8 +167,7 @@ def get_args():
         action="store_true",
         help=(
             "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
-            "By default grouped GEMM is used unless the architecture cannot export it to "
-            "HuggingFace, in which case SequentialMLP is selected automatically."
+            "Student checkpoints restore their saved layout; new models keep provider defaults."
         ),
     )
     parser.add_argument(
@@ -181,6 +180,11 @@ def get_args():
             "If the checkpoint carries ModelOpt state (i.e. it is quantized), the quantizers are "
             "restored automatically, turning distillation into Quantization Aware Distillation (QAD)."
         ),
+    )
+    parser.add_argument(
+        "--preserve_checkpoint_dtype",
+        action="store_true",
+        help="Restore floating checkpoint storage dtypes before loading student tensors.",
     )
     parser.add_argument(
         "--trainable_params",
@@ -693,17 +697,12 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         raise ValueError("--fake_quant_weight_cache needs a quantized --student_megatron_path.")
     if args.fake_quant_weight_cache and "callbacks" not in inspect.signature(distill).parameters:
         raise ValueError("--fake_quant_weight_cache needs a newer Megatron-Bridge; see the README.")
-    # A quantized student pins the layout: it must match what quantize.py wrote, so reuse the same
-    # data-driven choice. An unquantized (e.g. pruned) student exports via Megatron-Bridge, which
-    # reads either layout, so it keeps the faster grouped GEMM.
-    moe_grouped_gemm = (
-        use_moe_grouped_gemm(
-            args.student_local_checkpoint_path,
-            trust_remote_code=args.trust_remote_code,
-            force_sequential=args.no_moe_grouped_gemm,
-        )
-        if student_has_modelopt_state
-        else not args.no_moe_grouped_gemm
+    moe_grouped_gemm = use_moe_grouped_gemm(
+        args.student_local_checkpoint_path,
+        trust_remote_code=args.trust_remote_code,
+        force_sequential=args.no_moe_grouped_gemm,
+        megatron_path=args.student_megatron_path,
+        export_backend="bridge",
     )
     checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
@@ -713,7 +712,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     # which must not then be pre-averaged in the DDP collective below.
     per_token_loss = args.sft or args.cp_size > 1
 
-    def _build_model_provider(hf_path, load_weights=True, moe_grouped_gemm=True):
+    def _build_model_provider(hf_path, load_weights=True, moe_grouped_gemm=None):
         bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
         provider = bridge.to_megatron_provider(load_weights=load_weights)
 
@@ -756,10 +755,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         # Gradient accumulation fusion is not supported with ModelOpt quantized models. Disable it
         # before the model is built so the student's linear layers are constructed accordingly.
         student_provider.gradient_accumulation_fusion = False
-    # The teacher only runs forward, is loaded from HF, and is hidden from the checkpoint
-    # (``expose_minimal_state_dict``), so it keeps the faster grouped GEMM regardless.
+    # The teacher loads from HF and is hidden from the checkpoint, so its expert layout
+    # follows its own provider rather than the student checkpoint.
     teacher_provider = _build_model_provider(
-        args.teacher_hf_path, moe_grouped_gemm=not args.no_moe_grouped_gemm
+        args.teacher_hf_path, moe_grouped_gemm=False if args.no_moe_grouped_gemm else None
     )
 
     # The KD losses compare logits elementwise over the vocab dim, so both output layers must have
@@ -832,7 +831,11 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                 f"Loading student weights from Megatron checkpoint {args.student_megatron_path}"
             )
             student = unwrap_model(model_chunks[0])
-            loaded = load_modelopt_megatron_checkpoint([student], args.student_megatron_path)
+            loaded = load_modelopt_megatron_checkpoint(
+                [student],
+                args.student_megatron_path,
+                preserve_checkpoint_dtype=args.preserve_checkpoint_dtype,
+            )
             if is_vlm and student_has_modelopt_state and loaded[0] is student:
                 # PTQ stores the state on the VLM root (it quantizes and saves the whole VLM), but
                 # only ``language_model`` is distilled and checkpointed here, so move it there to

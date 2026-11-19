@@ -133,6 +133,15 @@ torchrun --nproc_per_node 2 export_quantized_megatron_to_hf.py \
 
 To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export_quantized_megatron_to_hf.py --help`).
 
+`export_quantized_megatron_to_hf.py --export_backend bridge` uses Bridge's
+`save_hf_pretrained_modelopt` API to write real-quant weights and metadata. It
+requires a Bridge version that implements that API and the selected model's
+deployment layout. The existing `modelopt` backend remains the default; unsupported
+Bridge exports fail explicitly. This option is separate from `--vllm_fakequant_export`.
+Models absent from ModelOpt's export mapping table keep their native Bridge expert
+layout during quantization. Export restores the layout recorded in the Megatron
+checkpoint; `--no_moe_grouped_gemm` rejects a conflicting grouped checkpoint.
+
 ### Vision-Language Models (VLMs)
 
 For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automatically quantizes only the **language model** and leaves the vision tower and vision-language projector in full precision, then saves the full VLM back as a Megatron checkpoint. The calibration modality is inferred from `--calib_dataset_name`:
@@ -174,6 +183,12 @@ This can be used stand-alone or after [Pruning](#pruning) / [Post-Training Quant
 The [distill.py](distill.py) script supports both standard HuggingFace checkpoints and [Puzzletron AnyModel](../puzzletron/README.md) checkpoints as student/teacher inputs. Just pass the checkpoint path via `--student_hf_path` / `--teacher_hf_path`. The distilled model is saved to `<output_dir>/checkpoints` in Megatron distributed checkpoint format.
 
 To distill a student whose weights live in a **Megatron checkpoint** (e.g. a quantized checkpoint from [quantize.py](quantize.py) for [Quantization Aware Distillation](#quantization-aware-distillation-qad), or a pruned checkpoint), additionally pass `--student_megatron_path` — `--student_hf_path` is still required to build the student architecture.
+
+The student restores the expert layout saved in that checkpoint. Add
+`--preserve_checkpoint_dtype` to restore its floating-point storage dtypes before
+loading weights, retaining stored FP32 exceptions through mixed-precision wrapping.
+The teacher and students initialized from HF retain their provider's expert layout
+unless `--no_moe_grouped_gemm` is given.
 
 ### Data Preparation
 

@@ -20,10 +20,10 @@ The process is as follows:
   2. Load the quantized Megatron checkpoint (ModelOpt state + weights are restored automatically).
   3. Export the model to a HuggingFace (unified) checkpoint via ModelOpt.
 
-The HuggingFace unified exporter does not gather tensor-parallel-sharded weights, so this script
-always loads the checkpoint at tensor_model_parallel_size=1 (re-sharding from whatever TP was used
-during quantization). Use --pp_size and/or --ep_size to shard a large model across GPUs for
-export.
+The default ModelOpt exporter requires tensor_model_parallel_size=1 (re-sharding from whatever TP
+was used during quantization). Use --pp_size and/or --ep_size to shard a large model across GPUs.
+The explicit --export_backend bridge route uses Bridge's real-quant checkpoint API and supports
+its model-specific tensor-parallel layouts.
 
 Example usage to export an FP8 checkpoint produced by quantize.py:
 
@@ -54,6 +54,7 @@ import json
 from pathlib import Path
 
 import torch
+from megatron.bridge import AutoBridge
 from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
 from megatron.core.utils import unwrap_model
@@ -75,6 +76,7 @@ from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
 from modelopt.torch.utils import print_args, print_rank_0
 from modelopt.torch.utils.mlflow import Tool, masked_args
 from modelopt.torch.utils.plugins.mbridge import (
+    is_language_model_only_checkpoint,
     is_vlm_config,
     load_mbridge_model_from_hf,
     load_modelopt_megatron_checkpoint,
@@ -118,12 +120,17 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument(
+        "--export_backend",
+        choices=("modelopt", "bridge"),
+        default="modelopt",
+        help="Real-quant HF exporter. The bridge backend requires save_hf_pretrained_modelopt.",
+    )
+    parser.add_argument(
         "--no_moe_grouped_gemm",
         action="store_true",
         help=(
             "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
-            "By default grouped GEMM is used unless the architecture cannot export it to "
-            "HuggingFace, in which case SequentialMLP is selected automatically."
+            "The saved checkpoint layout is used by default; conflicting overrides are rejected."
         ),
     )
     parser.add_argument(
@@ -146,7 +153,7 @@ def get_args() -> argparse.Namespace:
         "--tp_size",
         type=int,
         default=1,
-        help="Tensor parallel size (--vllm_fakequant_export only; the unified exporter needs 1)",
+        help="Tensor parallel size (bridge or fake-quant export; the modelopt backend requires 1)",
     )
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument(
@@ -238,6 +245,11 @@ def export_unified_hf(unwrapped_model, args: argparse.Namespace, trust_remote_co
 
 
 def main(args: argparse.Namespace):
+    if args.export_backend == "bridge" and not hasattr(AutoBridge, "save_hf_pretrained_modelopt"):
+        raise RuntimeError(
+            "--export_backend bridge requires a Megatron-Bridge version with "
+            "save_hf_pretrained_modelopt; update Bridge or select --export_backend modelopt."
+        )
     # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
     # checkpoint in local_checkpoint_path, since exporters read the source's files from local disk
     # only; hub_model_id is the Hub ID, or None for a local path.
@@ -247,8 +259,12 @@ def main(args: argparse.Namespace):
     trust_remote_code = is_safe_repo(
         trust_remote_code=args.trust_remote_code, hf_path=args.local_checkpoint_path
     )
-    if not args.vllm_fakequant_export and args.tp_size != 1:
-        raise ValueError("--tp_size > 1 needs --vllm_fakequant_export.")
+    if not args.vllm_fakequant_export and args.export_backend == "modelopt" and args.tp_size != 1:
+        raise ValueError("--tp_size > 1 needs --export_backend bridge or --vllm_fakequant_export.")
+    if args.export_backend == "bridge" and (
+        args.vllm_fakequant_export or args.export_extra_modules
+    ):
+        raise ValueError("--export_backend bridge exports the full real-quant checkpoint.")
     if args.vllm_fakequant_export and args.export_extra_modules:
         raise ValueError("--export_extra_modules is not supported with --vllm_fakequant_export.")
 
@@ -260,6 +276,8 @@ def main(args: argparse.Namespace):
             args.local_checkpoint_path,
             trust_remote_code=trust_remote_code,
             force_sequential=args.no_moe_grouped_gemm,
+            megatron_path=args.megatron_path,
+            export_backend="bridge" if args.vllm_fakequant_export else args.export_backend,
         ),
         provider_overrides={
             "tensor_model_parallel_size": args.tp_size,
@@ -274,20 +292,32 @@ def main(args: argparse.Namespace):
         # The weights come from the Megatron checkpoint. Megatron-Bridge saves the whole in-memory
         # model, and a VLM's QAD checkpoint holds only the language model, so load the HF vision
         # tower first.
-        load_weights=args.vllm_fakequant_export
+        load_weights=(
+            args.vllm_fakequant_export
+            or (
+                args.export_backend == "bridge"
+                and is_language_model_only_checkpoint(args.megatron_path)
+            )
+        )
         and is_vlm_config(args.local_checkpoint_path, trust_remote_code=trust_remote_code),
     )
 
     # Load the quantized checkpoint (with the correct layer spec) rather than reconstructing it from the checkpoint
     # config, which avoids the non-serializable layer-spec issue for MoE / Mamba models.
     print_rank_0(f"Loading quantized Megatron checkpoint from {args.megatron_path}...")
-    load_modelopt_megatron_checkpoint(model, args.megatron_path)
+    load_modelopt_megatron_checkpoint(
+        model, args.megatron_path, preserve_checkpoint_dtype=args.export_backend == "bridge"
+    )
     unwrapped_model = unwrap_model(model[0])
     mtq.merge_quant_lora(unwrapped_model)
 
     if args.vllm_fakequant_export:
         print_rank_0(f"Exporting vLLM fake-quant checkpoint to {args.export_unified_hf_path}...")
         export_vllm_fakequant(bridge, model, args.export_unified_hf_path)
+    elif args.export_backend == "bridge":
+        bridge.save_hf_pretrained_modelopt(
+            model, args.export_unified_hf_path, source_path=args.local_checkpoint_path
+        )
     else:
         export_unified_hf(unwrapped_model, args, trust_remote_code)
     args.checkpoint_exported = True

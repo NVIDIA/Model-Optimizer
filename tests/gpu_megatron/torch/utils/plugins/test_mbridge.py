@@ -13,13 +13,125 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
 import pytest
+import torch
 import yaml
 from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
 from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.bridge.utils.yaml_utils import dump_dataclass_to_yaml
+from megatron.core.transformer.module import Float16Module
+from torch.distributed.checkpoint import save
+from transformers import Qwen3MoeConfig
 
-from modelopt.torch.utils.plugins.mbridge import set_moe_expert_layout
+from modelopt.torch.utils.plugins.mbridge import (
+    _restore_checkpoint_dtypes,
+    set_moe_expert_layout,
+    use_moe_grouped_gemm,
+)
+
+
+@pytest.mark.parametrize(
+    ("architecture", "backend", "expected"),
+    [
+        ("Qwen3MoeForCausalLM", "modelopt", False),
+        ("NemotronHForCausalLM", "modelopt", True),
+        ("UnregisteredMoeForCausalLM", "modelopt", None),
+        ("Qwen3MoeForCausalLM", "bridge", None),
+    ],
+)
+def test_expert_layout_selection_preserves_native_defaults(
+    tmp_path, architecture, backend, expected
+):
+    Qwen3MoeConfig(architectures=[architecture], num_experts=2).save_pretrained(tmp_path)
+    kwargs = {} if backend == "modelopt" else {"export_backend": backend}
+    layout = use_moe_grouped_gemm(str(tmp_path), **kwargs)
+    assert layout is expected
+    provider = HybridModelProvider(
+        num_layers=2, hidden_size=64, num_attention_heads=4, moe_grouped_gemm=True
+    )
+    original_spec = provider.hybrid_stack_spec
+    set_moe_expert_layout(provider, layout)
+    if expected is None:
+        assert provider.moe_grouped_gemm is True
+        assert provider.hybrid_stack_spec is original_spec
+    else:
+        assert provider.moe_grouped_gemm is expected
+    assert use_moe_grouped_gemm(str(tmp_path), force_sequential=True, **kwargs) is False
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("config_layout", [None, False, True])
+def test_saved_expert_layout_wins_over_hf_defaults(tmp_path, grouped, config_layout):
+    source, checkpoint = tmp_path / "source", tmp_path / "checkpoint"
+    architecture = "Qwen3MoeForCausalLM" if grouped else "NemotronHForCausalLM"
+    Qwen3MoeConfig(architectures=[architecture], num_experts=2).save_pretrained(source)
+    key = (
+        "decoder.layers.0.mlp.experts.linear_fc1.weight0"
+        if grouped
+        else "decoder.layers.0.mlp.experts.local_experts.0.linear_fc1.weight"
+    )
+    save({key: torch.ones(2)}, checkpoint_id=checkpoint)
+    if config_layout is not None:
+        (checkpoint / "run_config.yaml").write_text(
+            yaml.safe_dump({"model": {"moe_grouped_gemm": config_layout}})
+        )
+    for backend in ("modelopt", "bridge"):
+        assert (
+            use_moe_grouped_gemm(str(source), megatron_path=str(checkpoint), export_backend=backend)
+            is grouped
+        )
+    if grouped:
+        with pytest.raises(ValueError):
+            use_moe_grouped_gemm(str(source), megatron_path=str(checkpoint), force_sequential=True)
+    else:
+        assert (
+            use_moe_grouped_gemm(str(source), megatron_path=str(checkpoint), force_sequential=True)
+            is False
+        )
+
+
+def test_checkpoint_storage_precision_is_restored_before_copy():
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
+            self.register_buffer("state", torch.ones(2, dtype=torch.float32))
+            self.register_buffer("indices", torch.ones(2, dtype=torch.int32))
+
+        def sharded_state_dict(self):
+            return {
+                "nested": [
+                    SimpleNamespace(key="weights", data=self.weight),
+                    SimpleNamespace(key="state", data=self.state),
+                    SimpleNamespace(key="indices", data=self.indices),
+                ]
+            }
+
+    model = Model()
+    metadata = {
+        name: SimpleNamespace(dtype=dtype)
+        for name, dtype in {
+            "weights": torch.float32,
+            "state": torch.bfloat16,
+            "indices": torch.int64,
+        }.items()
+    }
+    _restore_checkpoint_dtypes([model], metadata)
+    source = torch.tensor([1 + 2**-14, 1 + 2**-13])
+    model.weight.data.copy_(source)
+    assert torch.equal(model.weight, source)
+    assert model.state.dtype == torch.bfloat16
+    assert model.indices.dtype == torch.int32
+    # Later mixed-precision wrapping must honor checkpoint storage, including when
+    # the destination was already FP32 and no dtype conversion was needed above.
+    _restore_checkpoint_dtypes([model], metadata)
+    Float16Module(
+        SimpleNamespace(fp16=False, bf16=True, virtual_pipeline_model_parallel_size=None), model
+    )
+    assert torch.equal(model.weight, source)
+    assert model.state.dtype == torch.bfloat16
 
 
 def _round_trip(value):

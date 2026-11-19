@@ -28,6 +28,12 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
+- The Megatron-Bridge examples accept an explicit ``--export_backend bridge`` for real-quant HF checkpoints. The existing ModelOpt export backend remains the default.
+- Distillation restores checkpoint expert layouts and can preserve saved floating-point storage dtypes with ``--preserve_checkpoint_dtype``.
+
+- Add an explicit Megatron-Bridge PTQ ``--attention_backend`` override so calibration can allow fallback when a provider pins a fused backend.
+- Unregistered MoE architectures keep their native Bridge expert layout.
+
 *Misc*
 
 **Backward Breaking Changes**
@@ -35,6 +41,8 @@ Changelog
 **Deprecations**
 
 **Bug Fixes**
+
+- Preserve explicit FP32 logits in Megatron prefill and skip the unused output broadcast during calibration.
 
 *Quantization*
 
