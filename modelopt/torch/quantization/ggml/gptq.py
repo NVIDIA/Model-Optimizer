@@ -98,6 +98,9 @@ def row_gains(h_inv: torch.Tensor, original: torch.Tensor, quantized: torch.Tens
     the damped Hessian ``inv(U^T U)``, or the identity where its Cholesky failed. As a least-squares
     fit, ``q`` comes out shrunk along ``w``; ``<w, w> / <q, w>`` in that metric scales it back so its
     projection on ``w`` is ``w`` itself. Rows ``q`` has no component of ``w`` along keep a factor of 1.
+
+    A gain of one rather than :func:`quantize_energy_matched`'s energy match: under a Hessian it
+    measured better on dense MLPs and at IQ1, the energy match only on MoE experts at IQ2.
     """
     factors = []
     for start in range(0, len(original), _GAIN_ROWS):
@@ -105,6 +108,7 @@ def row_gains(h_inv: torch.Tensor, original: torch.Tensor, quantized: torch.Tens
         a = torch.linalg.solve_triangular(h_inv, original[rows].float(), upper=True, left=False)
         b = torch.linalg.solve_triangular(h_inv, quantized[rows], upper=True, left=False)
         num, den = torch.einsum("rc,rc->r", a, a), torch.einsum("rc,rc->r", b, a)
+        del a, b  # free before the next chunk's solves
         ratio = num / den
         factors.append(torch.where((den > 0) & ratio.isfinite(), ratio, 1.0))
     return torch.cat(factors)
@@ -264,7 +268,7 @@ class GGMLGPTQHelper(GPTQHelper):
             rows = self._packed.reshape(-1, ggml_format.block_bytes)
             payload_scales = ggml_format.payload_scales
             replace_payload_scales = ggml_format.replace_payload_scales
-            # GGMLFormat requires both of a format with a scale fit.
+            # Every format with a scale fit keeps its scales in the payload, so has both.
             assert payload_scales is not None and replace_payload_scales is not None
             searched = payload_scales(rows)
             stored = searched.float().reshape(len(gains), -1) * gains[:, None]
