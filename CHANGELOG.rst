@@ -15,6 +15,7 @@ Changelog
 
 - ``max``, ``imatrix`` and ``local_hessian`` calibration of ``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` now derive each block's super-block scale from the weights and match each block's output energy (``local_hessian`` under each block's Hessian), in place of fixed per-format scale anchors, which lowered KL divergence in all our tests (by up to half at IQ1) and matches or beats llama.cpp's own imatrix quantizer in most of them.
 - Add ``context_quant_level`` to KL-divergence AutoQuantize (``method={"method": "kl_div", "context_quant_level": "lowest"}``, or ``method_options: {context_quant_level: lowest}`` in a recipe): each candidate is scored with every other searched layer at its lowest-bit format (an int picks the format by its 0-based index from the lowest), so low-bit budgets go to the layers whose error compounds most once the whole model is quantized. ``"lowest"`` is a good default; a context nearer the target budget measured the same in our tests.
+- AutoQuantize now searches the routed experts of Llama 4 and GPT-OSS, which it previously left unquantized. Other quantized modules that quantize several named weights, such as grouped MoE experts with ``w1_weight_quantizer``, opt in with ``_auto_quantize_per_weight_quantizers = True``.
 
 *Quantization - QAT / QAD*
 
@@ -44,6 +45,7 @@ Changelog
 *Quantization*
 
 - NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
+- AutoQuantize now counts the ``up_proj`` weights of non-gated fused MoE experts (for example Nemotron-H) in the effective-bits budget; they were previously costed as zero.
 
 *ONNX*
 

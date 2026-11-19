@@ -41,10 +41,17 @@ from modelopt.torch.quantization.algorithms import (
     _AutoQuantizeGradientScoringSession,
     _get_kl_div_loss,
     _get_log_prob,
+    _get_quantizer_attrs,
     _module_search_space_signature,
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
+from modelopt.torch.quantization.nn import (
+    QuantModule,
+    QuantModuleRegistry,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.utils import safe_load, safe_save
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 
@@ -289,10 +296,15 @@ def test_auto_quantize_cost_model_excludes_module_name_patterns():
     )
 
 
-def test_active_moe_cost_model_counts_fused_experts_without_weight():
+@pytest.mark.parametrize("first_proj", ["gate_up_proj", "up_proj"])
+def test_active_moe_cost_model_counts_fused_experts_without_weight(first_proj):
     fused_experts = torch.nn.Module()
-    fused_experts.gate_up_proj = torch.nn.Parameter(torch.empty(2, 3, 5))
+    fused_experts._first_proj_attr = first_proj
+    setattr(fused_experts, first_proj, torch.nn.Parameter(torch.empty(2, 3, 5)))
     fused_experts.down_proj = torch.nn.Parameter(torch.empty(2, 5, 3))
+    for name in (first_proj, "down_proj"):
+        quantizers = torch.nn.ModuleList([TensorQuantizer(), TensorQuantizer()])
+        setattr(fused_experts, f"{name}_weight_quantizers", quantizers)
     cost_model = get_auto_quantize_cost_model("active_moe")
     cost_constraints = {
         "active_moe_expert_ratio": 0.25,
@@ -300,8 +312,9 @@ def test_active_moe_cost_model_counts_fused_experts_without_weight():
     }
 
     # Fused experts expose no `.weight`; their size is summed across all parameters.
+    # Non-gated experts (e.g. Nemotron-H) project through up_proj, which counts too.
     assert _get_module_weight_numel(fused_experts) == (
-        fused_experts.gate_up_proj.numel() + fused_experts.down_proj.numel()
+        getattr(fused_experts, first_proj).numel() + fused_experts.down_proj.numel()
     )
     # Routed MoE experts are scaled by the active-expert ratio; excluded modules drop to zero.
     assert cost_model.module_cost_weight(["layers.0.mlp.experts"], cost_constraints) == 0.25
@@ -1043,6 +1056,74 @@ def test_auto_quantize_disable_layers():
     )
 
     assert not best_model.mlp.input_quantizer.is_enabled
+
+
+class _BmmExperts(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.w1 = torch.nn.Parameter(torch.randn(2, 16, 32) * 0.1)
+        self.w2 = torch.nn.Parameter(torch.randn(2, 32, 16) * 0.1)
+
+    def forward(self, x):
+        return torch.bmm(torch.relu(torch.bmm(x, self.w1)), self.w2)
+
+
+class _QuantBmmExperts(QuantModule):
+    _auto_quantize_per_weight_quantizers = True
+
+    def _setup(self):
+        for name in ("w1", "w2"):
+            setattr(self, f"{name}_input_quantizer", TensorQuantizer())
+            setattr(self, f"{name}_weight_quantizer", TensorQuantizer())
+
+    def forward(self, x):
+        hidden = torch.bmm(self.w1_input_quantizer(x), self.w1_weight_quantizer(self.w1))
+        hidden = self.w2_input_quantizer(torch.relu(hidden))
+        return torch.bmm(hidden, self.w2_weight_quantizer(self.w2))
+
+
+class _BmmExpertsModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = torch.nn.Linear(16, 16)
+        self.experts = _BmmExperts()
+
+    def forward(self, x):
+        return self.experts(self.proj(x))
+
+
+def test_auto_quantize_searches_per_weight_quantizers():
+    QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)
+    try:
+        model = _BmmExpertsModel()
+        # Only an all-INT8 model meets 8 effective bits, so the experts must be searched and costed.
+        best_model, search_state = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=[torch.randn(2, 4, 16) for _ in range(2)],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+        )
+    finally:
+        QuantModuleRegistry.unregister(_BmmExperts)
+
+    experts = best_model.experts
+    assert all(
+        getattr(experts, f"{name}_{kind}_quantizer").is_enabled
+        for name in ("w1", "w2")
+        for kind in ("input", "weight")
+    )
+    quantizer_names = {
+        entry["quantizer_name"] for entry in mtq.get_auto_quantize_config(search_state)["quant_cfg"]
+    }
+    assert {"experts.w1_weight_quantizer", "experts.w2_input_quantizer"} <= quantizer_names
+
+    # A list-config candidate turns a weight quantizer sequential; later candidates swap it still.
+    experts.w1_weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+    assert "w1_weight_quantizer" in _get_quantizer_attrs(experts)
 
 
 def test_auto_quantize_disabled_layers_no_poison():

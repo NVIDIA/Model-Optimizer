@@ -41,10 +41,14 @@ class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
     computes `down_proj` outputs).
     """
 
+    # The quantizers are looked up by name on every access, so AutoQuantize may swap them.
+    _auto_quantize_per_weight_quantizers = True
+
     @staticmethod
-    def _get_quantized_weight(quantizer, module, weight):
+    def _get_quantized_weight(quantizer_name, module, weight):
         # MoE weight is accessed for each expert in one forward pass. so lets cache it
         if module._enable_weight_quantization:
+            quantizer = getattr(module, quantizer_name)
             if hasattr(quantizer, "_cached_quant_val"):
                 return getattr(quantizer, "_cached_quant_val")
             quantizer._cached_quant_val = _transposed_quantize(weight, quantizer)
@@ -53,10 +57,10 @@ class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
 
     def _setup_for_weight_quantization(self):
         self._register_dynamic_attribute(
-            "gate_up_proj", partial(self._get_quantized_weight, self.gate_up_proj_weight_quantizer)
+            "gate_up_proj", partial(self._get_quantized_weight, "gate_up_proj_weight_quantizer")
         )
         self._register_dynamic_attribute(
-            "down_proj", partial(self._get_quantized_weight, self.down_proj_weight_quantizer)
+            "down_proj", partial(self._get_quantized_weight, "down_proj_weight_quantizer")
         )
 
     def _setup(self):

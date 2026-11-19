@@ -57,7 +57,7 @@ from .conversion import set_quantizer_by_cfg
 from .ggml import GGML_FORMAT_REGISTRY
 from .ggml.common import PIN_OVERRIDES_WEIGHT, drop_search_scales
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
-from .utils import is_quantized_linear
+from .utils import is_quantized_linear, quantizer_attr_names, weight_attr_names
 
 
 def _is_hf_quant_fused_experts_module(module: nn.Module) -> bool:
@@ -113,7 +113,32 @@ def _get_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
         except ImportError:
             return _FUSED_EXPERTS_QUANTIZER_ATTRS
         return _get_fused_experts_quantizer_attr_names(module)
+    if per_weight_attrs := _per_weight_quantizer_attrs(module):
+        return per_weight_attrs
     return _STD_QUANTIZER_ATTRS
+
+
+def _per_weight_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
+    """Return the quantizers of weights named other than ``weight``, e.g. ``w1_weight_quantizer``.
+
+    Such modules (BMM-style or grouped MoE experts) quantize several named weights, each with its
+    own ``<name>_input_quantizer`` and ``<name>_weight_quantizer``; one search choice sets them all.
+    A module opts in with ``_auto_quantize_per_weight_quantizers = True``: the search swaps these
+    quantizers by attribute, so the module must look them up by attribute whenever it runs.
+    """
+    if not getattr(module, "_auto_quantize_per_weight_quantizers", False):
+        return ()
+    attrs = []
+    for name in weight_attr_names(module):
+        if name == "weight":
+            continue
+        names = quantizer_attr_names(name)
+        attrs.extend(
+            attr
+            for attr in (names.input_quantizer, names.weight_quantizer, names.output_quantizer)
+            if isinstance(getattr(module, attr, None), TensorQuantizer | SequentialQuantizer)
+        )
+    return tuple(attrs)
 
 
 def _make_fresh_quantizer_for_attr(module: nn.Module, attr_name: str) -> nn.Module:
@@ -1017,11 +1042,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             module, QuantModule
         ):
             return True
-        # Fused MoE experts: a single ``QuantModule`` that owns N per-expert
-        # weight quantizers in an ``nn.ModuleList`` plus shared input quantizers.
-        # All N experts in a layer share one search dimension (one recipe per
-        # fused module).
-        return _is_hf_quant_fused_experts_module(module) and isinstance(module, QuantModule)
+        # Fused MoE experts (N per-expert weight quantizers in an ``nn.ModuleList``) and modules
+        # with per-weight quantizers (e.g. BMM experts): one search dimension per module.
+        if not isinstance(module, QuantModule):
+            return False
+        return _is_hf_quant_fused_experts_module(module) or bool(
+            _per_weight_quantizer_attrs(module)
+        )
 
     @staticmethod
     def _get_search_recipes(quantization_formats):
