@@ -69,22 +69,22 @@ python3 cli.py -a two
 
 
 @pytest.mark.parametrize(
-    ("body", "message"),
+    ("body", "message", "timeout"),
     [
-        (None, "does not exist"),
-        ("raise SystemExit('help unavailable')", "help unavailable"),
-        ("import time; time.sleep(10)", "timed out"),
-        ("print('No option definitions')", "did not list any options"),
+        (None, "does not exist", 30),
+        ("raise SystemExit('help unavailable')", "help unavailable", 30),
+        ("import time; time.sleep(10)", "timed out", 0.2),
+        ("print('No option definitions')", "did not list any options", 30),
     ],
 )
-def test_unusable_script_help_reports_readme_location(tmp_path, body, message):
+def test_unusable_script_help_reports_readme_location(tmp_path, body, message, timeout):
     if body is not None:
         (tmp_path / "cli.py").write_text(body)
     readme = tmp_path / "README.md"
     readme.write_text("<!-- modelopt-snippet: cli -->\n```sh\npython cli.py --alpha=one\n```\n")
     command = python_commands(readme, cwd=tmp_path)[0]
     with pytest.raises(DocTestError, match=rf"(?s)README.md:3: cli:.*{message}"):
-        check_cli_options(readme, command, timeout=0.2)
+        check_cli_options(readme, command, timeout=timeout)
 
 
 def test_readme_command_preserves_flags_and_substitutes_inputs(tmp_path):
