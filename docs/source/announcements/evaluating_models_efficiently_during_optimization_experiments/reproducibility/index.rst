@@ -55,16 +55,6 @@ Evaluation setup
 For benchmark evaluation, both models generated responses with temperature ``0.6``, top-p ``0.95``,
 a ``131072``-token completion cap, and a ``262144``-token context window.
 
-.. _evaluation-aa-grading:
-
-AA-Omniscience grading
-~~~~~~~~~~~~~~~~~~~~~~
-
-For AA-Omniscience, the Codex assistant graded each response using the reference answer, without
-being told whether Baseline or Candidate produced it. The reported grading model was GPT-6.1 Sol
-with xhigh reasoning effort. Deliberate abstention means choosing not to answer; empty answers and
-uncertain guesses do not count.
-
 Saved metrics
 -------------
 
@@ -89,9 +79,10 @@ guide’s five plots as CSV summaries:
 Statistical methods
 -------------------
 
-For accuracy, cap-hit and missing-final-answer rates, and mean completion length, we calculate the
-difference by subtracting Baseline's value from Candidate's. Accuracy and rate changes are in
-percentage points; length differences are in tokens, including reasoning tokens.
+For accuracy, cap-hit and missing-final-answer rates, abstention ratio, and mean
+completion length, we calculate the difference by subtracting Baseline's value from Candidate's.
+Accuracy, rate, and ratio changes are in percentage points; length differences are in tokens,
+including reasoning tokens.
 
 - **Accuracy and mean completion length:** average each model's repetitions within each question,
   then subtract Baseline's average from Candidate's for that question. Across these paired question
@@ -102,12 +93,17 @@ percentage points; length differences are in tokens, including reasoning tokens.
   For differences in pp, the t statistic is ``(mean_difference + margin) / standard_error``, using
   the upper tail and the same degrees of freedom. The guide examines margins of 2, 1, 0.5, and 0.1
   pp.
-- **Failure, abstention, and incorrect-answer rates:** calculate paired-bootstrap 95% confidence
-  intervals by sampling questions with replacement, keeping each question's repetitions and both
-  models together. MMLU-Pro and SciCode use 100,000 resamples; AA uses 50,000, preserving 100
+- **Cap-hit and missing-final-answer rates:** calculate paired-bootstrap 95%
+  confidence intervals by sampling questions with replacement, keeping each question's repetitions
+  and both models together. MMLU-Pro and SciCode use 100,000 resamples; AA uses 50,000, preserving 100
   questions per domain. The interval endpoints are the 2.5th and 97.5th percentiles.
   If neither model has an observed failure, bootstrapping gives a [0, 0] interval. This does not
   establish that failures cannot occur or that the models have equal failure rates.
+- **Abstention ratio:** divide total abstentions by total responses not graded
+  correct, pooling all repetitions. The denominator includes incorrect and partial answers,
+  abstentions, and missing answers. Use the same domain-stratified paired question
+  bootstrap, with 50,000 resamples and seed ``2026111801``, recomputing both models’ ratios and their
+  difference in every resample.
 
 The question-level tests treat questions and SciCode subtasks as independent. Related subtasks from
 the same parent problem may need to be analyzed together.
@@ -161,8 +157,14 @@ pairing and repetitions within each question. With one response per model and qu
 <https://www.statsmodels.org/stable/generated/statsmodels.stats.contingency_tables.mcnemar.html>`__
 is another paired option.
 
-We use the same paired permutation method for the guide's cap-hit, missing-final-answer, abstention,
-and incorrect-answer p-values, taking the tail in the stated direction.
+We use the same paired permutation method for the guide's cap-hit and missing-final-answer
+p-values, taking the tail in the stated direction.
+
+For abstention ratio, swap the models’ complete outcomes within each question, keeping
+all repetitions together. Recompute both ratios from the swapped total counts and calculate
+Candidate − Baseline. Use the upper tail for the “Candidate higher” p-value and the lower tail for
+the context p-value, including ties. We enumerate the joint distribution of differences in
+abstention and non-correct counts to obtain these exact permutation p-values.
 
 **Repetition-level:** for each model and repetition, divide the number of cap hits by 294. Apply a
 `one-sided Welch t-test

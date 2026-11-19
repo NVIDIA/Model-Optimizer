@@ -139,8 +139,11 @@ loops, missing answers, and whether it abstains when appropriate.
 +------------------------+----------------------------------------------------------------------------+
 | Missing final answers  | Report how often responses contain no final answer.                        |
 +------------------------+----------------------------------------------------------------------------+
-| Abstention             | Report intentional abstentions separately from incorrect or missing        |
-|                        | answers;                                                                   |
+| Abstention ratio       | Count an abstention when the final response is non-empty and the judge     |
+|                        | grades it ``NOT_ATTEMPTED`` using AA-Omniscience’s rubric.                 |
+|                        | Report **abstentions / (all responses − correct responses)** alongside     |
+|                        | accuracy. The denominator includes abstentions, incorrect and partial      |
+|                        | answers, and missing answers.                                              |
 |                        | `AA-Omniscience <https://artificialanalysis.ai/evaluations/omniscience>`__ |
 |                        | is an example benchmark.                                                   |
 +------------------------+----------------------------------------------------------------------------+
@@ -194,15 +197,16 @@ reduction was not established.
 |                | (106/6,000)   | (51/6,000)    | −0.48]        |               |               |
 +----------------+---------------+---------------+---------------+---------------+---------------+
 
-Abstention
-^^^^^^^^^^
+Abstention ratio
+^^^^^^^^^^^^^^^^
 
 `AA-Omniscience public
 v1 <https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public>`__ distinguishes
-abstention from incorrect guessing. Deliberate abstentions exclude empty answers and uncertain guesses.
+abstention from incorrect guessing. Its ``NOT_ATTEMPTED`` category includes some uncertain guesses.
+We exclude empty final responses.
 
-“Yes” means evidence of a higher Candidate abstention rate (p < 0.05); “no evidence” means an
-increase was not established.
+“Yes” means evidence of a higher Candidate abstention rate among non-correct responses
+(p < 0.05); “no evidence” means an increase was not established.
 
 +---------------+---------------+---------------+---------------+---------------+---------------+
 | Measure       | Baseline      | Candidate     | Difference    | Candidate     | Candidate     |
@@ -210,25 +214,11 @@ increase was not established.
 |               |               |               |               | p-value       | p-value       |
 |               |               |               |               |               | (context)     |
 +===============+===============+===============+===============+===============+===============+
-| Deliberate    | 13.30%        | 14.55%        | +1.25 [+0.23, | 0.009 — yes   | 0.993         |
-| abstention    | (798/6,000)   | (873/6,000)   | +2.27]        |               |               |
+| Abstention    | 17.39%        | 19.00%        | +1.61 [+0.31, | 0.008 — yes   | 0.992         |
+| ratio         | (816/4,692)   | (890/4,685)   | +2.91]        |               |               |
 +---------------+---------------+---------------+---------------+---------------+---------------+
 
-“Yes” means evidence of a lower Candidate incorrect-answer rate (p < 0.05); “no evidence” means a
-reduction was not established.
-
-+---------------+---------------+---------------+---------------+---------------+---------------+
-| Measure       | Baseline      | Candidate     | Difference    | Candidate     | Candidate     |
-|               |               |               | [95% CI], pp  | lower,        | higher,       |
-|               |               |               |               | p-value       | p-value       |
-|               |               |               |               |               | (context)     |
-+===============+===============+===============+===============+===============+===============+
-| Incorrect     | 62.03%        | 61.72%        | −0.32 [−1.57, | 0.322 — no    | 0.696         |
-| answers       | (3,722/6,000) | (3,703/6,000) | +0.97]        | evidence      |               |
-+---------------+---------------+---------------+---------------+---------------+---------------+
-
-The candidate abstained more often (p = 0.009), with no evidence of fewer incorrect answers (p =
-0.322).
+Candidate has a higher abstention ratio (p = 0.008).
 
 Compare outcomes on the same questions to check whether Candidate abstains where Baseline answers
 correctly or incorrectly.
