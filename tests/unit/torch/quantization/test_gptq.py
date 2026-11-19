@@ -24,7 +24,11 @@ import torch
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.utils import calib_utils
-from modelopt.torch.quantization.utils.calib_utils import GPTQHelper, update_hessian
+from modelopt.torch.quantization.utils.calib_utils import (
+    GPTQHelper,
+    compute_hessian_inverse,
+    update_hessian,
+)
 from modelopt.torch.utils.distributed import ParallelState
 
 
@@ -125,6 +129,22 @@ def test_update_hessian_zero_token_input_noops():
     assert updated_hessian is hessian
     assert new_n_samples == n_samples
     torch.testing.assert_close(hessian, expected_hessian)
+
+
+def test_hessian_inverse_is_the_upper_cholesky_factor_of_the_damped_inverse():
+    inputs = torch.randn(64, 16, dtype=torch.float64, generator=torch.Generator().manual_seed(0))
+    hessian = inputs.T @ inputs
+    weight = torch.randn(4, 16, dtype=torch.float64)
+    weight[:, 3] = 0  # a dead column decouples from the others
+    damped = hessian.clone()
+    damped[3, :] = damped[:, 3] = 0
+    damped[3, 3] = 1
+    damped += 0.1 * damped.diagonal().mean() * torch.eye(16, dtype=torch.float64)
+
+    upper = compute_hessian_inverse(hessian, weight, perc_damp=0.1)
+
+    assert torch.equal(upper, upper.triu())
+    torch.testing.assert_close(upper.T @ upper, torch.linalg.inv(damped))
 
 
 @pytest.mark.parametrize(("input_quantized", "forwards"), [(False, 1), (True, 2)])

@@ -23,6 +23,7 @@ from ..extensions import get_cuda_ext_ggml
 from ..utils.calib_utils import GPTQHelper, register_gptq_helper
 from .choice_search import search_choices, search_scratch
 from .common import (
+    checked_encode_inputs,
     derive_scales,
     floored_second_moments,
     pin_packed_weight,
@@ -258,9 +259,12 @@ class GGMLGPTQHelper(GPTQHelper):
                 packed, shape, dtype=dtype, block_chunk_size=decode_chunk_size
             )
 
-        gptq_group_update(
-            self.weight, self.h_inv, block_size, ggml_format.block_size, quantize_group
-        )
+        # Each group's derived scale and encode read slices of one importance vector (the root of
+        # the diagonal they read), checked here once.
+        with checked_encode_inputs(importance):
+            gptq_group_update(
+                self.weight, self.h_inv, block_size, ggml_format.block_size, quantize_group
+            )
         self._packed = torch.cat(payloads, dim=-2)
         if derive:
             gains = row_gains(self.h_inv, original, self.weight)
