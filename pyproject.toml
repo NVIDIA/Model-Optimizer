@@ -128,6 +128,7 @@ dev-test = [
     "pytest-rerunfailures~=16.7", # transient-failure reruns (tests/conftest.py); 16.7 matches the exception chain
     "pytest-timeout~=2.4.0",
     "pytest-xdist~=3.8.0",
+    "sybil~=10.1.0",
     "uv",
     # test-specific dependencies
     "psutil", # tools/resource_monitor.py sidecar (tests/unit/tools)
