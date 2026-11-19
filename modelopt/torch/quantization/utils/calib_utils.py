@@ -323,22 +323,27 @@ def compute_hessian_inverse(hessian, weight, perc_damp):
         when the Hessian is not positive definite.
     """
     h = hessian.clone()
-    zero_cols = torch.nonzero(weight.eq(0).all(dim=0)).unsqueeze(-1)
-
-    h[zero_cols, :] = 0
-    h[:, zero_cols] = 0
-    h[zero_cols, zero_cols] = 1
-
-    damp = perc_damp * torch.mean(torch.diag(h))
-    diag_indices = torch.arange(h.shape[0], device=h.device)
-    h[diag_indices, diag_indices] += damp
+    # Masks rather than indices, and factorizations that report failure rather than raise: neither
+    # stalls the host on the GPU, so the solve syncs once, to check both factorizations together.
+    dead = weight.eq(0).all(dim=0)
+    h.masked_fill_(dead[:, None], 0)
+    h.masked_fill_(dead[None, :], 0)
+    diagonal = h.diagonal()
+    diagonal.masked_fill_(dead, 1)
+    # The mean of a contiguous copy: the strided view's sums in another order.
+    diagonal.add_(perc_damp * torch.diag(h).mean())
 
     try:
-        h = torch.cholesky_inverse(torch.linalg.cholesky(h))
-        return torch.linalg.cholesky(h, upper=True)
+        lower, info = torch.linalg.cholesky_ex(h)
+        # On the CPU, inverting a failed factor raises.
+        upper, info_upper = torch.linalg.cholesky_ex(torch.cholesky_inverse(lower), upper=True)
+        failed = bool((info != 0) | (info_upper != 0))
     except (RuntimeError, torch.linalg.LinAlgError):
+        failed = True
+    if failed:
         print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
         return torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+    return upper
 
 
 class GPTQHelper:

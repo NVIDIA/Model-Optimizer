@@ -15,6 +15,7 @@
 """GGML GPTQ with the CUDA encoders, through ``mtq.quantize`` and ``mtq.auto_quantize``."""
 
 import copy
+import warnings
 
 import pytest
 import torch
@@ -90,6 +91,38 @@ def test_gptq_on_a_ggml_format_rejects_blocks_smaller_than_a_ggml_block():
             _iq1_s_config({"method": "gptq", "block_size": 128}),
             forward_loop=lambda m: m(inputs),
         )
+
+
+def _host_syncs_in_gptq(width, local_hessian_scales):
+    model = torch.nn.Linear(width, 64, bias=False).cuda()
+    inputs = _correlated_inputs(width)
+    algorithm = {
+        "method": "gptq",
+        "block_size": 256,
+        "importance_weighted": True,
+        "local_hessian_scales": local_hessian_scales,
+    }
+    config = _iq1_s_config(algorithm)
+    config["quant_cfg"][1]["cfg"]["num_bits"] = "iq2_s"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        torch.cuda.set_sync_debug_mode("warn")
+        try:
+            mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+    return sum("synchroniz" in str(warning.message) for warning in caught)
+
+
+@pytest.mark.parametrize("local_hessian_scales", [False, True])
+def test_gptq_on_a_ggml_format_syncs_with_the_host_as_often_at_any_width(local_hessian_scales):
+    # Each sync stalls the host until the GPU drains; one per 256-column group added up on MoE
+    # experts.
+    get_cuda_ext_ggml(raise_if_failed=True)
+    _host_syncs_in_gptq(512, local_hessian_scales)  # IQ2_S builds its grid once
+    assert _host_syncs_in_gptq(2048, local_hessian_scales) == _host_syncs_in_gptq(
+        512, local_hessian_scales
+    )
 
 
 def test_auto_quantize_refuses_gptq_on_native_fp8_weights_and_hands_back_the_model():
