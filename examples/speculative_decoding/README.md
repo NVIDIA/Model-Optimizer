@@ -101,9 +101,10 @@ The saved modelopt checkpoint is similar in architecture to HF models. It can be
 
 For large models, you can export intermediate hidden states to disk and train only the draft model. This significantly reduces GPU memory requirements, but requires several to tens of terabytes of disk storage depending on dataset size.
 
-Offline `.pt` files are discovered recursively in lexical path order before applying
-`data.sample_size`. Keep the file set unchanged when resuming. Unreadable or incomplete
-dumps raise an error identifying the file; they are not replaced with another sample.
+Offline samples are shuffled reproducibly before applying `data.sample_size`, using
+`training.data_seed` if set, otherwise `training.seed`. Keep the file set, seed, and
+`data.sample_size` unchanged when resuming. Unreadable or incomplete dumps raise an error
+identifying the file; they are not replaced with another sample.
 
 ### Dumping Hidden States to Disk
 

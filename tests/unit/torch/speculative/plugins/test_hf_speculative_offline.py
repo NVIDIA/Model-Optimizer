@@ -19,6 +19,7 @@ import argparse
 import importlib.util
 import os
 import pickle
+import random
 
 # ---------------------------------------------------------------------------
 # Load eagle_utils from examples/ via importlib (not a package, so no import).
@@ -27,6 +28,7 @@ import pickle
 # ---------------------------------------------------------------------------
 import sys
 import types
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -547,15 +549,42 @@ def _make_data_args(sample_size, tmp_path, n_files=5):
     )
 
 
-def test_sample_size_positive_truncates(tmp_path):
-    """Sample selection uses stable lexical order before applying the limit."""
-    data_args = _make_data_args(sample_size=3, tmp_path=tmp_path, n_files=12)
-    tokenizer = MagicMock()
-    module = make_speculative_data_module(tokenizer, data_args, train_len=8)
-    assert len(module["train_dataset"]) == 3
-    assert module["train_dataset"].dumped_files == [
-        str(tmp_path / f"sample_{i}.pt") for i in (0, 1, 10)
-    ]
+def test_sample_size_selects_reproducible_mixed_subset(tmp_path, monkeypatch):
+    """Every limit selects a prefix of the same reproducible shuffled file order."""
+    data_args = _make_data_args(sample_size=9, tmp_path=tmp_path, n_files=0)
+    for source in ("daring-anteater", "magpie", "sharegpt"):
+        for i in range(12):
+            (tmp_path / f"{source}-{i}.pt").touch()
+    files = list(tmp_path.rglob("*.pt"))
+    selections = []
+    rng_state = random.getstate()
+    try:
+        for listing in (files, files[::-1]):
+            # Filesystem enumeration and training RNG state may differ between ranks.
+            monkeypatch.setattr(Path, "rglob", lambda self, pattern, files=listing: iter(files))
+            random.random()
+            before = random.getstate()
+            selected = {}
+            for seed in (0, 42):
+                selected[seed] = {}
+                for sample_size in (-1, 9, 18):
+                    data_args.sample_size = sample_size
+                    module = make_speculative_data_module(
+                        MagicMock(), data_args, train_len=8, seed=seed
+                    )
+                    selected[seed][sample_size] = module["train_dataset"].dumped_files
+            assert random.getstate() == before
+            selections.append(selected)
+    finally:
+        random.setstate(rng_state)
+    assert selections[0] == selections[1]
+    assert selections[0][0][9] != selections[0][42][9]
+    for selected in selections[0].values():
+        assert len(selected[-1]) == len(set(selected[-1])) == len(files)
+        assert set(selected[-1]) == {str(path) for path in files}
+        for sample_size in (9, 18):
+            assert selected[sample_size] == selected[-1][:sample_size]
+        assert len({Path(path).stem.rsplit("-", 1)[0] for path in selected[9]}) > 1
 
 
 def test_sample_size_minus_one_uses_all(tmp_path):
@@ -564,6 +593,9 @@ def test_sample_size_minus_one_uses_all(tmp_path):
     tokenizer = MagicMock()
     module = make_speculative_data_module(tokenizer, data_args, train_len=8)
     assert len(module["train_dataset"]) == 5
+    assert sorted(module["train_dataset"].dumped_files) == sorted(
+        str(p) for p in tmp_path.glob("*.pt")
+    )
 
 
 def test_sample_size_zero_raises(tmp_path):
@@ -574,12 +606,16 @@ def test_sample_size_zero_raises(tmp_path):
         make_speculative_data_module(tokenizer, data_args, train_len=8)
 
 
-def test_sample_size_larger_than_dataset_uses_all(tmp_path):
-    """sample_size > number of files should use all samples without error."""
-    data_args = _make_data_args(sample_size=100, tmp_path=tmp_path, n_files=5)
+@pytest.mark.parametrize("sample_size", [5, 100])
+def test_sample_size_at_least_dataset_size_uses_all(tmp_path, sample_size):
+    """A limit covering every file preserves the full dataset's order."""
+    data_args = _make_data_args(sample_size=sample_size, tmp_path=tmp_path, n_files=5)
     tokenizer = MagicMock()
     module = make_speculative_data_module(tokenizer, data_args, train_len=8)
     assert len(module["train_dataset"]) == 5
+    assert sorted(module["train_dataset"].dumped_files) == sorted(
+        str(p) for p in tmp_path.glob("*.pt")
+    )
 
 
 def test_sample_size_no_pt_files_raises(tmp_path):

@@ -513,6 +513,9 @@ def train():
         # written with --no-aux-hidden-states. Every other mode must still fail
         # loudly on a dump that omits them.
         aux_hidden_states_optional=isinstance(recipe, ModelOptExternalDraftRecipe),
+        seed=(
+            training_args.data_seed if training_args.data_seed is not None else training_args.seed
+        ),
     )
     if recipe.data.mode == "sparse" and recipe.external.external_loss == "tvd_deploy":
         # tvd_deploy filters the draft side by external_top_k, while the teacher side is

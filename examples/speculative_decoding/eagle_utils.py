@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import inspect
+import random
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -61,6 +62,7 @@ def make_speculative_data_module(
     shift_labels=True,
     final_aux_is_base_hidden=False,
     aux_hidden_states_optional=False,
+    seed: int = 42,
 ) -> dict:
     """Create data module for speculative decoding training.
 
@@ -72,6 +74,7 @@ def make_speculative_data_module(
             the base (KD-target) hidden instead of an extra dedicated plane.
         aux_hidden_states_optional: accept dumps written with ``--no-aux-hidden-states``.
             Only modes that never read the aux planes may set this.
+        seed: Seed for shuffling offline files before applying ``sample_size``.
     """
 
     # Validated once for every mode: each branch consumes sample_size differently
@@ -204,12 +207,13 @@ def make_speculative_data_module(
         offline_data_path = Path(data_args.offline_data_path)
         # All ranks and resumed runs must assign the same file to each dataset index.
         dumped_files = sorted(str(p) for p in offline_data_path.rglob("*.pt"))
+        # Avoid source-prefix bias without changing the training RNG state.
+        random.Random(seed).shuffle(dumped_files)
         if not dumped_files:
             raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
 
-        # sample_size=-1 means use all samples; positive integer selects that many
-        if data_args.sample_size > 0:
-            dumped_files = dumped_files[: data_args.sample_size]
+        if sample_size > 0:
+            dumped_files = dumped_files[:sample_size]
         train_dataset = OfflineSupervisedDataset(
             dumped_files,
             answer_only_loss=answer_only_loss,
