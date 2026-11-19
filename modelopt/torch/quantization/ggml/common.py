@@ -27,6 +27,7 @@ import torch
 from torch.optim.optimizer import register_optimizer_step_post_hook
 
 from ..extensions import get_cuda_ext_ggml
+from .scale_fields import NativeScaleSpec
 
 GGML_BLOCK_SIZE = 256
 _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
@@ -450,6 +451,18 @@ class GGMLFormat:
     # back into ``[blocks, block_bytes]`` payload rows.
     scale_fit: ScaleFit | None = None
     replace_payload_scales: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
+
+    scale_spec: NativeScaleSpec | None = None
+
+    # Native IQ fields: 32 grid entries and auxiliary values per block (format-native axes),
+    # [blocks, choice_groups] local scales, and [blocks] shared scales. Optional without GSQ.
+    pack_fields: (
+        Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None
+    ) = None
+    unpack_fields: (
+        Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]
+        | None
+    ) = None
 
     def __post_init__(self):
         if (self.scale_fit is None) != (self.replace_payload_scales is None):
@@ -996,13 +1009,20 @@ def _energy_factors(
 
 def leading_fp16_scales(blocks: torch.Tensor) -> torch.Tensor:
     """The FP16 super-block scale in the first two bytes of each ``[blocks, block_bytes]`` row."""
-    return blocks[:, :2].contiguous().view(torch.float16).reshape(-1)
+    # contiguous() can retain an odd storage offset for a single block.
+    return (
+        blocks[:, :2].clone(memory_format=torch.contiguous_format).view(torch.float16).reshape(-1)
+    )
 
 
 def with_leading_fp16_scales(blocks: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     """``[blocks, block_bytes]`` rows with their leading FP16 super-block scales replaced."""
+    scales = scales.to(torch.float16).contiguous()
+    # contiguous() can preserve a singleton's non-unit stride.
+    if scales.stride(-1) != 1:
+        scales = scales.clone(memory_format=torch.contiguous_format)
     replaced = blocks.clone()
-    replaced[:, :2] = scales.to(torch.float16).contiguous().view(torch.uint8).reshape(-1, 2)
+    replaced[:, :2] = scales.view(torch.uint8).reshape(-1, 2)
     return replaced
 
 

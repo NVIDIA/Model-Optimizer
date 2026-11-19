@@ -13,12 +13,14 @@ Changelog
 
 *Quantization - Algorithms*
 
-- ``max``, ``imatrix`` and ``local_hessian`` calibration of ``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` now derive each block's super-block scale from the weights and match each block's output energy (``local_hessian`` under each block's Hessian), in place of fixed per-format scale anchors, which lowered KL divergence in all our tests (by up to half at IQ1) and matches or beats llama.cpp's own imatrix quantizer in most of them.
+- ``max``, ``imatrix`` and ``local_hessian`` calibration of ``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` now derive each block's super-block scale from the weights and match each block's output energy (``local_hessian`` under each block's Hessian), in place of fixed per-format scale anchors, which lowered KL divergence in all our tests (by up to half at IQ1) and matches or beats llama.cpp's own imatrix quantizer in most of them. ``gptq`` derives the scale too and gives each output row a gain of one under its Hessian: KL fell on dense MLPs (by up to 40% at IQ1) and ranged from 19% lower to 3% higher on routed MoE experts alone.
 - Add ``context_quant_level`` to KL-divergence AutoQuantize (``method={"method": "kl_div", "context_quant_level": "lowest"}``, or ``method_options: {context_quant_level: lowest}`` in a recipe): each candidate is scored with every other searched layer at its lowest-bit format (an int picks the format by its 0-based index from the lowest), so low-bit budgets go to the layers whose error compounds most once the whole model is quantized. ``"lowest"`` is a good default; a context nearer the target budget measured the same in our tests.
 
 *Quantization - QAT / QAD*
 
 *Quantization - Export & Deployment*
+
+- ``examples/hf_ptq/convert_ggml_to_int8.py`` now also converts GGML exports that hold other formats (FP8, NVFP4, KV cache quantization): their GGML layers become ModelOpt ``INT8_PB_WO`` layers beside the rest of the export, which vLLM newer than 0.34.0 serves. Exports with only GGML layers still become compressed-tensors, and fused MoE experts now convert in both.
 
 *Quantization - Recipes*
 
@@ -31,6 +33,9 @@ Changelog
 
 *Misc*
 
+- Move agent skills to the repository-root ``skills/`` directory, with symlinks for agent discovery.
+- Prefix agent skill names with ``modelopt-``; existing names remain available as forwarding stubs.
+
 **Backward Breaking Changes**
 
 **Deprecations**
@@ -40,14 +45,19 @@ Changelog
 *Quantization*
 
 - Applying a finalized AutoQuantize config to a large MoE with one module per expert no longer takes hours: ``mtq.set_quantizer_by_cfg`` now finds a quantizer that an entry names exactly without walking the model.
+- NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
+- Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 
 *ONNX*
 
 - ONNX AutoCast now keeps the variance of decomposed RMSNorm and unfused LayerNorm in FP32 for both FP16 and BF16 conversion, so FP16 models converted without calibration data no longer give wrong outputs on execution providers such as TensorRT-RTX. Reconvert affected models.
+- Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
 
 *Speculative Decoding*
 
 *Megatron Framework (M-LM / M-Bridge)*
+
+- Preserve model-specific hybrid stacks when selecting MoE expert layouts in Megatron-Bridge, and reject grouped GEMM when a custom factory returns sequential experts. Custom built stack ``ModuleSpec`` values are now rejected; assign a named factory function instead.
 
 *Misc*
 

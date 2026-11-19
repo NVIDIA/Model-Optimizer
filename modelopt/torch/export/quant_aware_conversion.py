@@ -189,8 +189,10 @@ def _apply_split_rule(state_dict: dict[str, torch.Tensor], rule: SplitRule) -> N
 
     for module, leaf, key in fused_keys:
         tensor = state_dict.pop(key)
-        # A 3-D expert tensor here means stacked experts (MergeModulelist) — out of scope.
-        if leaf == ".weight" and tensor.dim() >= 3:
+        # A 3-D expert tensor here means stacked experts (MergeModulelist) — out of scope. Other
+        # weights split along their output dim whatever their rank, as a short convolution's
+        # [channels, 1, kernel] or a GGML payload's [rows, blocks, bytes] do.
+        if leaf == ".weight" and tensor.dim() >= 3 and _is_stacked_expert_key(key):
             raise QuantConversionUnsupportedError(
                 f"stacked 3-D expert tensor '{key}' (ndim={tensor.dim()}) is not supported; "
                 "un-stacking experts + their scales is a follow-up"
@@ -509,6 +511,16 @@ def revert_quant_config_names(
         }
 
 
+def _is_stacked_expert_key(key: str) -> bool:
+    """Whether ``key`` holds the experts stacked: an expert key with no per-expert index.
+
+    An expanded expert's tensors may be 3-D too, as a GGML payload's ``[rows, blocks, bytes]`` is.
+    Like the expert leaf renames, this relies on transformers naming fused expert modules
+    ``experts``. Split rules come only from dense ``Chunk`` converters, which never target experts.
+    """
+    return ".experts." in key and re.search(r"\.experts\.\d+\.", key) is None
+
+
 def _assert_experts_pre_expanded(
     state_dict: dict[str, torch.Tensor], expert_fused_leaves: list[str]
 ) -> None:
@@ -527,7 +539,8 @@ def _assert_experts_pre_expanded(
         r"\.experts\.(?:" + "|".join(re.escape(leaf) for leaf in expert_fused_leaves) + r")(?:\.|$)"
     )
     for key, tensor in state_dict.items():
-        if fused.search(key) or (".experts." in key and getattr(tensor, "ndim", 0) >= 3):
+        stacked = _is_stacked_expert_key(key) and getattr(tensor, "ndim", 0) >= 3
+        if fused.search(key) or stacked:
             raise QuantConversionUnsupportedError(
                 f"experts not pre-expanded (stacked/fused expert tensor '{key}'); "
                 "quant-aware reverse conversion cannot rename it"
