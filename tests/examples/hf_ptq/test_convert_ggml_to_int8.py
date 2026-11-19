@@ -19,7 +19,12 @@ from pathlib import Path
 
 import pytest
 import torch
-from _test_utils.examples.ggml_export import FP8_ATTENTION, IQ1_S, quantize_tiny_llama
+from _test_utils.examples.ggml_export import (
+    FP8_ATTENTION,
+    IQ1_S,
+    quantize_tiny_llama,
+    quantize_tiny_moe,
+)
 from _test_utils.examples.hf_ptq_example_utils import convert_ggml_to_int8
 from _test_utils.examples.run_command import run_example_command
 from safetensors.torch import load_file, save_file
@@ -221,3 +226,42 @@ def test_an_all_ggml_export_converts_to_compressed_tensors(tmp_path):
             assert torch.equal(unpacked - 128, levels.long())
             assert torch.equal(after.pop(f"{layer}.weight_scale"), steps.to(torch.bfloat16))
     assert after.keys() == before.keys()
+
+
+@pytest.mark.parametrize("mixed", [False, True], ids=["compressed-tensors", "modelopt"])
+def test_fused_moe_experts_convert_per_expert(tmp_path, mixed):
+    # The export writes each expert's weights but describes the experts module once.
+    model, _ = quantize_tiny_moe(tmp_path, FP8_ATTENTION if mixed else ())
+    export_hf_checkpoint(model, export_dir=tmp_path / "ggml")
+
+    convert_ggml_to_int8.convert_ggml_export_to_int8(tmp_path / "ggml", tmp_path / "int8")
+
+    after = load_file(tmp_path / "int8" / "model-00001-of-00001.safetensors")
+    experts = {
+        i: [
+            f"model.layers.{i}.mlp.experts.{e}.{proj}"
+            for e in range(4)
+            for proj in ("down_proj", "gate_proj", "up_proj")
+        ]
+        for i in LAYER_FORMATS
+    }
+    assert not [name for name, tensor in after.items() if tensor.dtype == torch.uint8]
+    config = json.loads((tmp_path / "int8" / "config.json").read_text())["quantization_config"]
+    if not mixed:
+        assert config["quant_method"] == "compressed-tensors"
+        assert {
+            group["weights"]["group_size"]: sorted(group["targets"])
+            for group in config["config_groups"].values()
+        } == {32: sorted(experts[0]), 16: sorted(experts[1])}
+        return
+    assert config["quant_method"] == "modelopt"
+    layers = json.loads((tmp_path / "int8" / "hf_quant_config.json").read_text())
+    layers = layers["quantization"]["quantized_layers"]
+    for i, name in LAYER_FORMATS.items():
+        group_size = GGML_FORMAT_REGISTRY[name].int8_group_size
+        assert layers[f"model.layers.{i}.mlp.experts"] == {
+            "quant_algo": "INT8_PB_WO",
+            "group_size": group_size,
+        }
+        for layer in experts[i]:
+            assert after[f"{layer}.weight"].dtype == torch.int8

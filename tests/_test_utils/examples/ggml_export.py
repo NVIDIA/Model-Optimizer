@@ -65,3 +65,41 @@ def quantize_tiny_llama(tmp_path, layer_cfgs=(IQ1_S, IQ2_XS), extra_quant_cfg=()
     token_ids = torch.randint(0, 128, (1, 48), generator=torch.Generator().manual_seed(0))
     mtq.quantize(model, quant_cfg, lambda m: m(token_ids))
     return model, token_ids
+
+
+def quantize_tiny_moe(tmp_path, extra_quant_cfg=()):
+    """Return a two-layer tiny Qwen3-MoE whose layer ``i`` routed experts take IQ1_S then IQ2_XS.
+
+    transformers fuses the experts, and the export writes them one weight per expert under a
+    single ``quantized_layers`` entry per experts module.
+    """
+    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+    config = Qwen3MoeConfig(
+        vocab_size=128,
+        hidden_size=256,
+        intermediate_size=512,
+        moe_intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        num_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+        initializer_range=0.05,
+    )
+    torch.manual_seed(0)
+    model = Qwen3MoeForCausalLM(config).to(torch.bfloat16)
+    quant_cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*layers.0.mlp.experts*weight_quantizer*", "cfg": IQ1_S},
+            {"quantizer_name": "*layers.1.mlp.experts*weight_quantizer*", "cfg": IQ2_XS},
+            *extra_quant_cfg,
+        ],
+        "algorithm": "max",
+    }
+    token_ids = torch.randint(0, 128, (1, 48), generator=torch.Generator().manual_seed(0))
+    mtq.quantize(model, quant_cfg, lambda m: m(token_ids))
+    return model, token_ids

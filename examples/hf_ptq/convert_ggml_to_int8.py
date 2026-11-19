@@ -154,27 +154,48 @@ def _ggml_layer_formats(
                 }
             )
     layer_formats = {}
+    described = set()
     for layer, shape in payloads.items():
-        if mixed and layer not in layer_algos:
-            raise ValueError(f"{layer} holds a uint8 weight but is not in quantized_layers.")
-        algo = layer_algos[layer] if mixed else str(quantization.get("quant_algo")).lower()
+        if mixed:
+            key = _config_key(layer, layer_algos)
+            if key is None:
+                raise ValueError(f"{layer} holds a uint8 weight but is not in quantized_layers.")
+            algo = layer_algos[key]
+        else:
+            algo = str(quantization.get("quant_algo")).lower()
         if algo not in GGML_FORMAT_REGISTRY:
             continue
         # A 2-D weight's payload is [rows, blocks, block bytes], the layout INT8 rows come from.
         if len(shape) != 3:
             raise ValueError(f"{layer} is not a 2-D weight; only 2-D weights convert to INT8.")
         layer_formats[layer] = GGML_FORMAT_REGISTRY[algo]
+        if mixed:
+            described.add(key)
     if mixed:
         unpacked = sorted(
             layer
             for layer, algo in layer_algos.items()
-            if algo in GGML_FORMAT_REGISTRY and layer not in layer_formats
+            if algo in GGML_FORMAT_REGISTRY and layer not in described
         )
         if unpacked:
             raise ValueError(f"{unpacked} are GGML layers without a packed uint8 weight.")
     if not layer_formats:
         raise ValueError(f"{ggml_dir} holds no GGML weights to convert.")
     return layer_formats
+
+
+def _config_key(layer: str, quantized_layers: dict) -> str | None:
+    """The ``quantized_layers`` entry describing ``layer``: its own, or its experts module's.
+
+    An export writes fused MoE experts one weight per expert, ``<experts>.<index>.<projection>``,
+    but describes them with a single entry for ``<experts>``.
+    """
+    if layer in quantized_layers:
+        return layer
+    parts = layer.rsplit(".", 2)
+    if len(parts) == 3 and parts[1].isdigit() and parts[0] in quantized_layers:
+        return parts[0]
+    return None
 
 
 def _has_non_ggml_quantization(quantization: dict) -> bool:
@@ -192,8 +213,10 @@ def _int8_quantization(quantization: dict, layer_formats: dict[str, GGMLFormat])
     """``quantization`` with each GGML layer described as INT8_PB_WO at its INT8 group size."""
     quantization = copy.deepcopy(quantization)
     if quantization.get("quant_algo") == "MIXED_PRECISION":
+        quantized_layers = quantization["quantized_layers"]
         for layer, ggml_format in layer_formats.items():
-            quantization["quantized_layers"][layer] = {
+            # Fused experts keep their single entry, now describing every expert as INT8_PB_WO.
+            quantized_layers[_config_key(layer, quantized_layers)] = {
                 "quant_algo": "INT8_PB_WO",
                 "group_size": ggml_format.int8_group_size,
             }
