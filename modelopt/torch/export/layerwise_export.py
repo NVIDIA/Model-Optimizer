@@ -18,8 +18,9 @@
 import contextlib
 import json
 import warnings
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -54,14 +55,16 @@ from .unified_export_hf import (
     _fuse_shared_input_modules,
     _prepare_moe_inputs,
     _resolve_export_dtype,
-    _source_checkpoint,
+    _resolve_source,
     _start_export,
     _write_hf_export_config,
     collect_shared_input_modules,
     save_non_weight_artifacts,
-    unplaced_keys_for,
 )
 from .unified_export_hf_streaming import _assert_no_split_rules
+
+if TYPE_CHECKING:
+    from modelopt.torch.utils.plugins.hf_checkpoint_utils import SourceCheckpoint
 
 # Fusable per layer because the groups (q/k/v, gate/up) never cross a decoder boundary.
 # AWQ and SVDQuant also need pre-quant-scale steps, which are still whole-model.
@@ -188,7 +191,7 @@ class LayerwiseExporter:
         self._finalized = False
         # The export bind() starts, which finalize() ends.
         self._export = contextlib.ExitStack()
-        self._source_key_snapshot: tuple[str, list[str]] | None = None
+        self._source: SourceCheckpoint | None = None
         self._announced_on: list[nn.Module] = []
         # A VLM calibrates its language model but exports the whole thing, so announce on
         # both: whichever of the two mtq.quantize is handed will find this exporter.
@@ -279,10 +282,9 @@ class LayerwiseExporter:
                 "match the original HF hub checkpoint."
             )
 
-        # Packing removes fused source parameters; account for them while the tree is intact.
-        source = _source_checkpoint(model)
-        if source and Path(source).is_dir():
-            self._source_key_snapshot = (str(source), unplaced_keys_for(model, source))
+        # Packing removes fused source parameters; account for them while the tree is intact. The
+        # source the workflow's load recorded wins, as it does for the whole-model export.
+        self._source = _resolve_source(model, ModelOptSession.active().source)
 
         # The export's one context, for every layer and the tail, started once nothing here can
         # fail: the active ModelOpt session holds it from here until finalize() ends the export,
@@ -379,13 +381,18 @@ class LayerwiseExporter:
             self._ctx.model, input_to_linear, quantization_format=layer_format
         )
 
-    def finalize(self, extra_state_dict: dict[str, torch.Tensor] | None = None) -> dict:
+    def finalize(
+        self,
+        extra_state_dict: dict[str, torch.Tensor] | None = None,
+        carried_over_names: Iterable[str] = (),
+    ) -> dict:
         """Export the tail, write the config artifacts, and index all shards.
 
         ``extra_state_dict`` carries tensors with no slot in ``model.state_dict()`` -- MTP
         weights, whichever convention the checkpoint uses. They are already in export form,
         so only the hub-name reversal applies, and they win on a name clash exactly as they
-        do in ``export_hf_checkpoint``.
+        do in ``export_hf_checkpoint``. ``carried_over_names`` are the source tensors the export
+        writes unchanged, which the quant config excludes.
 
         It runs in the active ModelOpt session, else in one of its own, as a public ModelOpt call
         does: a pipeline that establishes no session calls it outside any.
@@ -401,7 +408,7 @@ class LayerwiseExporter:
             self._finalized = True
             # The export ends here, however finalizing ends.
             with self._export, self._resumed():
-                return self._finalize(extra_state_dict)
+                return self._finalize(extra_state_dict, carried_over_names)
 
     @contextlib.contextmanager
     def _resumed(self) -> Generator[None, None, None]:
@@ -421,7 +428,9 @@ class LayerwiseExporter:
         finally:
             runtime.export_context = held
 
-    def _finalize(self, extra_state_dict: dict[str, torch.Tensor] | None) -> dict:
+    def _finalize(
+        self, extra_state_dict: dict[str, torch.Tensor] | None, carried_over_names: Iterable[str]
+    ) -> dict:
         """:meth:`finalize`, while the export it ends still runs."""
         model = self._ctx.model
         quant_config = self._quant_config
@@ -439,9 +448,9 @@ class LayerwiseExporter:
         # After the reversal, not before: carried names are source-checkpoint names already, so
         # passing them through the mapper would rewrite names that are correct as they stand.
         # bind() snapshotted this config during calibration, so the carried set -- which
-        # export_hf_checkpoint records immediately before calling us -- is only visible now.
+        # export_hf_checkpoint works out immediately before calling us -- is only known now.
         if quant_config:
-            seeded = seed_carried_over_exclusions(model, quant_config)
+            seeded = seed_carried_over_exclusions(carried_over_names, quant_config)
             if seeded:
                 print(
                     f"Excluding {len(seeded)} carried-over module(s) from the layerwise "
@@ -499,7 +508,7 @@ class LayerwiseExporter:
 
         save_file(tail, str(self._export_dir / _TAIL_SHARD))
         self._write_index()
-        save_non_weight_artifacts(model, self._export_dir)
+        save_non_weight_artifacts(model, self._export_dir, self._source)
         _write_hf_export_config(model, quant_config, self._export_dir)
         for module in self._announced_on:
             if getattr(module, LAYERWISE_EXPORTER_ATTR, None) is self:

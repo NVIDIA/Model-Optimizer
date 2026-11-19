@@ -43,6 +43,8 @@ if TYPE_CHECKING:
     from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
     from modelopt.torch.export.registry import ExportContext
+    from modelopt.torch.utils.distributed import DistributionPlan
+    from modelopt.torch.utils.plugins.hf_checkpoint_utils import SourceCheckpoint
 
 __all__ = ["ModelOptSession", "RunState"]
 
@@ -73,6 +75,13 @@ class ModelOptSession:
     Each field belongs to the calls that read it, and a call works out a field left unset as it
     would without a session. A call's own argument for the same thing wins over the field.
 
+    * ``source``: the checkpoint the model was loaded from
+      (:class:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.SourceCheckpoint`), as
+      :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` records it. The Hugging
+      Face exports carry its tensors the model has no parameter for into the export.
+    * ``distribution``: the :class:`~modelopt.torch.utils.distributed.DistributionPlan` to load the
+      model by. ``load_pretrained`` loads by it where its ``distribution=`` is not passed, and
+      records here the plan it loaded by.
     * ``model_type``: the model's Hugging Face model type (``config.model_type``), which binding
       reads off the model (:meth:`bind`), ``None`` for a model without one. The export resolves
       the model's spec in :mod:`modelopt.torch.models` by it, also for the decoder layers and
@@ -90,6 +99,8 @@ class ModelOptSession:
     and holds no live objects, as is a session whose block has ended.
     """
 
+    source: "SourceCheckpoint | None" = None
+    distribution: "DistributionPlan | None" = None
     model_type: str | None = field(default=None, init=False)
     runtime: RunState = field(default_factory=RunState, init=False, repr=False)
     _model: "_Model | None" = field(default=None, init=False, repr=False)
@@ -147,6 +158,11 @@ class ModelOptSession:
     def model(self) -> "_Model | None":
         """The model this session is bound to, or ``None`` until a call binds it."""
         return self._model
+
+    @property
+    def is_bound(self) -> bool:
+        """Whether a call has bound this session to a model, which it then describes."""
+        return self._model is not None
 
     def bind(self, model: _Model) -> "ModelOptSession":
         """Bind this session to ``model``, the model its workflow works on, and return it.

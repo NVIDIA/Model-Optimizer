@@ -71,6 +71,7 @@ from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_
 
 from modelopt import env
 from modelopt.torch.export.model_utils import get_language_model_from_vl
+from modelopt.torch.opt.session import ModelOptSession
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import moe
@@ -105,6 +106,7 @@ from modelopt.torch.utils.moe import (
     register_torch_a2a,
 )
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    SourceCheckpoint,
     checkpoint_tensor_files,
     ensure_local_checkpoint,
     indexed_weight_map,
@@ -556,18 +558,21 @@ def record_unplaced_source_keys(
     keys: "Iterable[str] | None" = None,
     tensor_files: "dict[str, str] | None" = None,
 ) -> list[str]:
-    """Record on ``model`` the checkpoint tensors it has no parameter for, for the export to carry.
+    """Deprecated: record on ``model`` the checkpoint tensors it has no parameter for.
 
-    The load is what knows how the checkpoint maps onto the model, so the list is worked out once,
-    at load time, and the export reads it back (``_modelopt_unplaced_source_keys``, beside the
-    checkpoint in ``_modelopt_source_checkpoint``) rather than deriving it again. Pass ``keys`` when
-    the loader already found them while placing the weights; otherwise :func:`unplaced_source_keys`
-    derives them from the loaded model, from ``tensor_files`` when the load already read them. Every
-    loader of a model that may be exported calls this: :func:`load_pretrained` and
-    :func:`parallel_load_and_prepare_fsdp2` do.
+    :func:`load_pretrained` records the facts in the active ModelOpt session instead, and
+    :func:`~modelopt.torch.export.export_hf_checkpoint` takes them from it. Outside any session the
+    loads record them on the model, as this does, and an export without them reads that record,
+    else works them out from the checkpoint the model's own ``config._name_or_path`` names.
     """
+    warnings.warn(
+        "record_unplaced_source_keys is deprecated and will be removed in 0.51.0: load and "
+        "export the model inside one `with ModelOptSession():`, whose load records the source.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if keys is None:
-        # The map by keyword, and only when the load read it: a caller that replaced
+        # The map by keyword, and only when there is one: a caller that replaced
         # unplaced_source_keys with its two-argument form gets its keys as before.
         keys = (
             unplaced_source_keys(model, ckpt_path)
@@ -575,9 +580,19 @@ def record_unplaced_source_keys(
             else unplaced_source_keys(model, ckpt_path, tensor_files=tensor_files)
         )
     keys = sorted(keys)
-    model._modelopt_unplaced_source_keys = keys
-    model._modelopt_source_checkpoint = str(ckpt_path)
+    _record_source(model, SourceCheckpoint(str(ckpt_path), tuple(keys)))
     return keys
+
+
+def _record_source(model: nn.Module, source: SourceCheckpoint) -> None:
+    """Leave ``source`` on ``model``, for an export outside the session of the load to read back.
+
+    Found at load time, from the model as loaded: worked out at export time instead, the keys would
+    also name a parameter the model's quantization renamed, such as Step's experts, and the export
+    would write the raw tensor over the quantized one.
+    """
+    model._modelopt_unplaced_source_keys = list(source.unplaced_keys)
+    model._modelopt_source_checkpoint = source.path
 
 
 _EXPERT_PARALLEL = "expert-parallel"
@@ -884,6 +899,15 @@ def _load_sharded(route, ckpt_path, load_kwargs) -> nn.Module:
     )
 
 
+def _refuse_a_bound_session(session: "ModelOptSession | None") -> None:
+    """Refuse, before anything loads, a session bound to a model: the load builds another."""
+    if session is not None and session.is_bound:
+        raise ValueError(
+            "The active ModelOptSession describes a workflow on another model, so it cannot "
+            "describe the model this load builds: a session describes one model."
+        )
+
+
 def load_pretrained(
     ckpt_path: str,
     auto_class: Any = None,
@@ -923,20 +947,29 @@ def load_pretrained(
       ``revision``: an ``auto_map`` entry can name custom code in another Hub repo, which
       Transformers fetches with them. The FSDP2 load builds the model with ``from_config``, which
       takes none. A ``subfolder`` is part of where the checkpoint is: the config, the loading hook
-      and the record below read it, as the load does.
+      and the source below read it, as the load does.
     * The model type's loading hook runs
       (:func:`~modelopt.torch.models.hf.prepare_model_for_loading`), e.g. to keep the MTP head a
       Nemotron-H checkpoint carries. ``model_type`` selects it; when omitted, the type of the
       ``config`` passed for the load, else of the checkpoint's config. A sharded load cannot run
       it, so it refuses a checkpoint the hook would build modules for.
-    * The checkpoint tensors the model has no parameter for are recorded
-      (:func:`record_unplaced_source_keys`), so the export carries them over unchanged. The model
-      is returned alone: ``output_loading_info=True`` is refused. So is a ``variant``: the record
-      and the export read the checkpoint's default weight files.
+    * Inside an active ModelOpt session (:class:`~modelopt.torch.opt.session.ModelOptSession`), it
+      loads by the session's plan where ``distribution`` is not passed, and records in the session
+      the plan it loaded by and the source: the
+      :class:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.SourceCheckpoint` that names the
+      local checkpoint and its tensors the model has no parameter for, which
+      ``export_hf_checkpoint`` carries over unchanged. It binds the session to the model. An active
+      session already bound to a model is refused before anything loads. The source is recorded
+      on the model too, as before, for an export outside the session to read back.
+      ``output_loading_info=True`` is refused, and so is a ``variant``: the source and the export
+      read the checkpoint's default weight files.
     """
     # Importing modelopt.torch.models registers every model spec; only callers of this need them.
     from modelopt.torch.models.hf import prepare_model_for_loading
 
+    session = ModelOptSession.current()
+    if distribution is None and session is not None:
+        distribution = session.distribution
     # A launch whose processes set no group up (hf_ptq without --use_fsdp2): each loads alone.
     alone = dist.is_distributed_launch() and not dist.is_initialized()
     if alone and isinstance(distribution, DistributionPlan) and distribution.world_size > 1:
@@ -990,20 +1023,21 @@ def load_pretrained(
     decided = plan is None and dist.size() > 1
     # Each rank checks its own arguments; a refusal on one fails every rank before the fetch.
     with _refused_together("load arguments", alone):
+        _refuse_a_bound_session(session)
         if decided:
             # Parsed in this check, a knob one rank cannot parse fails every rank.
             _ep_degree(None)
         if kwargs.pop("output_loading_info", False):
             raise ValueError(
-                "load_pretrained returns the model alone and does not take "
-                "output_loading_info=True; the checkpoint tensors the model has no parameter for "
-                "are recorded on it instead (see record_unplaced_source_keys)."
+                "load_pretrained does not take output_loading_info=True; for the checkpoint "
+                "tensors the model has no parameter for, load inside `with ModelOptSession():`, "
+                "whose load records them."
             )
         if kwargs.get("variant") is not None:
             raise ValueError(
                 f"load_pretrained does not take variant={kwargs['variant']!r}: the checkpoint "
-                "tensors the model has no parameter for are recorded from, and carried into the "
-                "export from, the checkpoint's default weight files."
+                "tensors the model has no parameter for are found in, and carried into the export "
+                "from, the checkpoint's default weight files."
             )
         if config is not None and "hf_config" in kwargs:
             raise TypeError("config and hf_config both name the config to load with; pass one.")
@@ -1120,8 +1154,6 @@ def load_pretrained(
         )
     if route is not None:
         model = _load_sharded(route, ckpt_path, load_kwargs)
-        # A sharded load finds the unplaced keys while it places the weights.
-        keys = model._modelopt_unplaced_source_keys
     else:
         auto_class = auto_class or AutoModelForCausalLM
         # No collective runs here, so a rank failing alone, placing or loading the model, would
@@ -1147,14 +1179,31 @@ def load_pretrained(
                 model_type, ckpt_path, trust_remote_code, model_class=whole
             ):
                 model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
-        keys = None
     set_distribution_plan(model, plan)
-    unplaced = record_unplaced_source_keys(model, ckpt_path, keys)
-    if unplaced:
+    # A sharded load found them as it placed the weights, and left them on the model.
+    found = getattr(model, "_modelopt_unplaced_source_keys", None) if route is not None else None
+
+    def unplaced() -> list[str]:
+        return sorted(found if found is not None else unplaced_source_keys(model, ckpt_path))
+
+    # Rank 0 reads the checkpoint for every rank: a failed read then fails them all instead of
+    # leaving the others waiting in their next collective, and they skip a read of the same keys.
+    keys = unplaced() if alone else dist.broadcast_from("the load's source checkpoint", unplaced)
+    source = SourceCheckpoint(ckpt_path, tuple(keys))
+    if source.unplaced_keys:
         print_rank_0(
-            f"{len(unplaced)} checkpoint tensor(s) the model has no parameter for "
-            f"(e.g. {unplaced[0]}); the export will carry them over unchanged."
+            f"{len(source.unplaced_keys)} checkpoint tensor(s) the model has no parameter for "
+            f"(e.g. {source.unplaced_keys[0]}); the export will carry them over unchanged."
         )
+    # On the model too, as before: an export the workflow's session does not reach, such as one
+    # after its block ends, reads it back there.
+    _record_source(model, source)
+    if session is None:
+        return model
+    # Bound once nothing more can fail, so a load that failed leaves the workflow free to load again.
+    session.bind(model)
+    session.distribution = plan
+    session.source = source
     return model
 
 
@@ -1297,6 +1346,7 @@ def _meta_dcp_load(
     device,
     *,
     load_names: set,
+    unplaced: "Iterable[str]" = (),
 ) -> None:
     """Materialize a meta-built model's ``load_names`` params and fill them through torch DCP.
 
@@ -1319,13 +1369,16 @@ def _meta_dcp_load(
     Every target param ends up filled -- from the checkpoint, by ``tie_weights`` with a param the
     checkpoint filled, or with the value it already had -- or the load fails: nothing is left as the
     uninitialized memory ``to_empty`` hands out. A rank failing before ``dcp.load`` fails every rank.
+    ``unplaced`` are the checkpoint tensors the load that built the model found no param for, which
+    the export carries over raw: one that maps onto a param here is refused, as it would be written
+    twice.
     """
     prepared: list[_MetaDcpPrepared] = []
     # Each rank reads the checkpoint, checks it and materializes its params itself: one failing must
     # fail every rank here, before the others enter dcp.load's collectives and wait there for it.
     dist.all_reduce(
         "the meta-DCP load's preparation",
-        lambda: prepared.append(_meta_dcp_prepare(model, local_dir, device, load_names)),
+        lambda: prepared.append(_meta_dcp_prepare(model, local_dir, device, load_names, unplaced)),
         lambda _: None,
     )
     _meta_dcp_fill(model, prepared[0])
@@ -1344,7 +1397,7 @@ class _MetaDcpPrepared(NamedTuple):
 
 
 def _meta_dcp_prepare(
-    model: "torch.nn.Module", local_dir: str, device, load_names: set
+    model: "torch.nn.Module", local_dir: str, device, load_names: set, unplaced: "Iterable[str]"
 ) -> _MetaDcpPrepared:
     """:func:`_meta_dcp_load`'s checks and materialization, up to the state dict DCP fills."""
     # Read what the checkpoint holds before changing the model, so a refusal leaves it as it was.
@@ -1391,15 +1444,12 @@ def _meta_dcp_prepare(
         if mk in target_names
     }
     # The export carries the checkpoint tensors the model has no parameter for over raw, as the load
-    # that built the model recorded them (record_unplaced_source_keys): filling one here too would
-    # write it twice, once quantized.
-    carried = sorted(
-        set(key_map) & set(getattr(model, "_modelopt_unplaced_source_keys", None) or ())
-    )
+    # that built the model found them: filling one here too would write it twice, once quantized.
+    carried = sorted(set(key_map) & set(unplaced))
     if carried:
         raise RuntimeError(
             f"meta+DCP load: {len(carried)} checkpoint tensor(s) map onto this model's params by name, "
-            f"but its load recorded them as having no param, for the export to carry over raw: "
+            f"but its load found no param for them, so the export carries them over raw: "
             f"{carried[:3]}. The two would write them twice."
         )
     # dcp.load refuses a checkpoint tensor whose shape is not its model tensor's only once to_empty has
@@ -1575,6 +1625,10 @@ def parallel_load_and_prepare_fsdp2(
         )
 
     model = build_meta_causal_lm(resolved_path, trust_remote_code, attn_implementation, hf_config)
+    # Named as from_pretrained names the checkpoint it reads: an export passed no source finds the
+    # tensors to carry over by it, and a config the caller read elsewhere (by a Hub ID, say) names
+    # somewhere else.
+    model.config.name_or_path = resolved_path
 
     # transformers fuses/renames checkpoint keys so they no longer match param names 1:1
     # (None => nothing to convert). Taken before the wrap: fully_shard swaps in an ``FSDP<cls>``
@@ -1602,14 +1656,11 @@ def parallel_load_and_prepare_fsdp2(
     )
     if unplaced:
         logger.debug(
-            "%d checkpoint keys have no parameter in the built model (e.g. an MTP head); "
-            "recorded for the export to copy through verbatim",
+            "%d checkpoint keys have no parameter in the built model (e.g. an MTP head), which "
+            "the export copies through verbatim",
             len(unplaced),
         )
-    # Recorded on the model so export can read them back from the source without being told where
-    # it came from. Not a state dict: holding these tensors from load to export would waste the
-    # memory this loader exists to save.
-    record_unplaced_source_keys(model, resolved_path, unplaced)
+    _record_source(model, SourceCheckpoint(resolved_path, tuple(sorted(unplaced))))
     # What from_pretrained records: the conversions some checkpoint key used, or all of them on a
     # Transformers without ``was_used``. The export reverts these and would otherwise query the
     # wrapped class, which has lost them.
@@ -2936,11 +2987,14 @@ def _ep_dense_meta_load(is_expert):
             m.get_device = orig
 
 
-def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_modules):
+def _load_ep_dense_distributed(
+    model, fsdp_mesh, local_dir, is_expert, expert_modules, unplaced: "Iterable[str]" = ()
+):
     """FSDP2-shard the meta dense part over ``fsdp_mesh`` and DCP-load each rank's shard of it.
 
     The dense ``.weight``/``.bias`` params arrive on meta (:func:`_ep_dense_meta_load`); the experts,
-    already loaded and EP-sharded, are left as they are. Returns the number of layers sharded.
+    already loaded and EP-sharded, are left as they are. ``unplaced`` are the checkpoint tensors the
+    load found no param for (:func:`_meta_dcp_load`). Returns the number of layers sharded.
     """
     # The GPU the rank is bound to, as the experts and FSDP2's compute are: not the one its local
     # rank numbers, which a launch showing each process one GPU does not bind.
@@ -2959,7 +3013,7 @@ def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_mo
         f"[ep] dense-distributed load: FSDP2-sharded {n_dense} dense module(s); "
         f"meta+DCP-loading {len(dense_names)} dense param(s) (experts left EP-sharded)"
     )
-    _meta_dcp_load(model, local_dir, device, load_names=dense_names)
+    _meta_dcp_load(model, local_dir, device, load_names=dense_names, unplaced=unplaced)
     return n_dense
 
 
@@ -3326,9 +3380,9 @@ def load_and_prepare_ep(
             if _cfg is not None and hasattr(_cfg, "_experts_implementation"):
                 _cfg._experts_implementation = "torch_a2a"
 
-        # The checkpoint tensors the model has no parameter for (an MTP head), worked out once, at load,
-        # for the export to carry.
-        unplaced = record_unplaced_source_keys(model, ckpt_path, tensor_files=tensor_files)
+        # The checkpoint tensors the model has no parameter for (an MTP head), which the export
+        # carries over as stored.
+        unplaced = unplaced_source_keys(model, ckpt_path, tensor_files=tensor_files)
         # The export would copy them as stored, and this load dropped the quantization_config that
         # reads a compressed one, such as an MTP layer's experts. A suffix is enough to tell them:
         # check_compressed_keys refused any compressed tensor outside the experts.
@@ -3338,6 +3392,7 @@ def load_and_prepare_ep(
                 f"for, such as {carried[0]}: the export would copy them as stored, with no "
                 "quantization_config to read them. Decompress the checkpoint first."
             )
+        _record_source(model, SourceCheckpoint(str(ckpt_path), tuple(sorted(unplaced))))
 
         # The model carries the ep submesh, for calibration to re-install the all-to-all forwards
         # over (expert_parallel_mesh); transformers sets it differently by release.
@@ -3426,7 +3481,7 @@ def load_and_prepare_ep(
     if plan.is_fsdp_dense:
         dense_fsdp_mesh = dense_mesh["dp"]
         n_dense = _load_ep_dense_distributed(
-            model, dense_fsdp_mesh, ckpt_path, is_expert_fn, expert_modules.values()
+            model, dense_fsdp_mesh, ckpt_path, is_expert_fn, expert_modules.values(), unplaced
         )
         print_rank_0(
             f"[ep] dense sharded: FSDP2-sharded {n_dense} dense module(s) over the whole world, "

@@ -24,6 +24,7 @@ lazily to keep the dependency acyclic.
 import itertools
 import json
 import warnings
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,7 @@ from modelopt.torch.quantization.utils.core_utils import (
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as _dist
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import SourceCheckpoint
 
 from .model_utils import _release_exported_tensors, get_export_units
 from .quant_aware_conversion import _build_reverse_rules, build_reverse_name_mapper
@@ -307,6 +309,8 @@ def _export_transformers_checkpoint_streaming(
     export_dir: Path | str = ".",
     max_shard_size: int | str = "10GB",
     extra_state_dict: dict[str, torch.Tensor] | None = None,
+    source: SourceCheckpoint | None = None,
+    carried_over_names: Iterable[str] = (),
     **kwargs,
 ) -> tuple[None, dict[str, Any]]:
     """Export a disk/CPU-offloaded model by streaming tensors layer-by-layer to shard files.
@@ -334,6 +338,9 @@ def _export_transformers_checkpoint_streaming(
         max_shard_size: shard size limit, as bytes or a string such as ``"10GB"``.
         extra_state_dict: tensors the model itself never holds (e.g. MTP weights, which HF
             leaves orphaned) and which would otherwise be missing from the export.
+        source: the checkpoint the model was loaded from, whose non-model files are copied.
+        carried_over_names: the source tensors the export writes unchanged, which the quant
+            config excludes.
 
     Returns:
         ``(None, quant_config)``. No state dict is returned because none is ever
@@ -362,7 +369,9 @@ def _export_transformers_checkpoint_streaming(
 
     requantize_resmooth_fused_llm_layers(model, model_type)
 
-    quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
+    quant_config = get_quant_config(
+        model, is_modelopt_qlora=is_modelopt_qlora, carried_over_names=carried_over_names
+    )
 
     _warn_on_unsynced_moe_gate_up(model, model_type)
 
@@ -499,7 +508,7 @@ def _export_transformers_checkpoint_streaming(
 
     writer.finalize()
 
-    save_non_weight_artifacts(model, export_dir)
+    save_non_weight_artifacts(model, export_dir, source)
 
     return None, quant_config
 
@@ -615,6 +624,8 @@ def _export_fsdp2_checkpoint_streaming(
     export_dir: Path | str = ".",
     max_shard_size: int | str = "10GB",
     extra_state_dict: dict[str, torch.Tensor] | None = None,
+    source: SourceCheckpoint | None = None,
+    carried_over_names: Iterable[str] = (),
     **kwargs: Any,
 ) -> tuple[None, dict[str, Any]]:
     """Export an FSDP2 model by writing each rank's own layers straight to its own files.
@@ -631,7 +642,7 @@ def _export_fsdp2_checkpoint_streaming(
 
     # Setup only -- no global packing pass. Each layer is packed below once it has been gathered,
     # so the packer always sees a whole weight exactly as a single-process export would.
-    with _prepare_model_for_export(model, dtype, is_modelopt_qlora) as prepared:
+    with _prepare_model_for_export(model, dtype, is_modelopt_qlora, carried_over_names) as prepared:
         dtype, tied_map, quant_config = prepared
         kv_cache_max_bound = 448
         kv_cache_format = _get_kv_cache_postprocess_config(quant_config["quantization"])
@@ -695,6 +706,6 @@ def _export_fsdp2_checkpoint_streaming(
             gathered = [closed]
         if my_rank == 0:
             name_shards_and_write_index(export_dir, gathered)
-            save_non_weight_artifacts(model, export_dir)
+            save_non_weight_artifacts(model, export_dir, source)
 
         return None, quant_config
