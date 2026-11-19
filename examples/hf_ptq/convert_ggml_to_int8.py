@@ -25,7 +25,6 @@ becomes a ModelOpt checkpoint with INT8_PB_WO layers, which needs vLLM newer tha
 """
 
 import argparse
-import copy
 import json
 import os
 import shutil
@@ -136,12 +135,6 @@ def _ggml_layer_formats(
     ggml_dir: Path, weight_map: dict[str, str], quantization: dict
 ) -> dict[str, GGMLFormat]:
     """The GGML format of every layer the export quantized to one."""
-    mixed = quantization.get("quant_algo") == "MIXED_PRECISION"
-    if mixed:
-        layer_algos = {
-            layer: str(cfg.get("quant_algo")).lower()
-            for layer, cfg in quantization.get("quantized_layers", {}).items()
-        }
     payloads = {}
     for shard in sorted(set(weight_map.values())):
         with safe_open(ggml_dir / shard, framework="pt") as f:
@@ -153,15 +146,19 @@ def _ggml_layer_formats(
                     if name.endswith(".weight") and f.get_slice(name).get_dtype() == "U8"
                 }
             )
+    if quantization.get("quant_algo") == "MIXED_PRECISION":
+        layer_algos = {
+            layer: str(cfg.get("quant_algo")).lower()
+            for layer, cfg in quantization.get("quantized_layers", {}).items()
+        }
+    else:
+        layer_algos = dict.fromkeys(payloads, str(quantization.get("quant_algo")).lower())
     layer_formats = {}
     for layer, shape in payloads.items():
-        if mixed:
-            key = _config_key(layer, layer_algos)
-            if key is None:
-                raise ValueError(f"{layer} holds a uint8 weight but is not in quantized_layers.")
-            algo = layer_algos[key]
-        else:
-            algo = str(quantization.get("quant_algo")).lower()
+        key = _config_key(layer, layer_algos)
+        if key is None:
+            raise ValueError(f"{layer} holds a uint8 weight but is not in quantized_layers.")
+        algo = layer_algos[key]
         if algo not in GGML_FORMAT_REGISTRY:
             continue
         # A 2-D weight's payload is [rows, blocks, block bytes], the layout INT8 rows come from.
@@ -205,7 +202,6 @@ def _int8_quantization(quantization: dict) -> dict:
     Every GGML entry is rewritten, including those of fused experts and of deduplicated tied
     aliases, which hold no payload of their own.
     """
-    quantization = copy.deepcopy(quantization)
     if quantization.get("quant_algo") == "MIXED_PRECISION":
         quantized_layers = quantization["quantized_layers"]
         for layer, cfg in quantized_layers.items():
@@ -349,9 +345,7 @@ def main():
     )
     args = parser.parse_args()
     convert_ggml_export_to_int8(
-        args.ggml_dir,
-        args.output_dir,
-        max_shard_size=int(args.max_shard_size_gb * 2**30),
+        args.ggml_dir, args.output_dir, max_shard_size=int(args.max_shard_size_gb * 2**30)
     )
     print(f"INT8 checkpoint written to {args.output_dir}")
 

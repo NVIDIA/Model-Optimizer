@@ -23,11 +23,13 @@ from _test_utils.examples.run_command import run_example_command
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.inputs import TokensPrompt
-from vllm.model_executor.layers.quantization import modelopt as vllm_modelopt
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 from modelopt.torch.export import export_hf_checkpoint
 
-_SERVES_INT8_PB_WO = "INT8_PB_WO" in getattr(vllm_modelopt, "QUANT_ALGOS", ())
+# vLLM serves ModelOpt INT8_PB_WO as the modelopt_int8 method from vllm-project/vllm#65272 on. The
+# ModelOpt case below skips without it, so a vLLM that renamed the method would skip it too.
+_SERVES_INT8_PB_WO = "modelopt_int8" in QUANTIZATION_METHODS
 
 
 @pytest.fixture(
