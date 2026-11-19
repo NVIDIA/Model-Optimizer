@@ -25,7 +25,7 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
-- The Megatron-Bridge examples accept frozen token JSONL calibration and an explicit ``--export_backend bridge`` for real-quant HF checkpoints. The existing ModelOpt export backend remains the default.
+- The Megatron-Bridge examples accept an explicit ``--export_backend bridge`` for real-quant HF checkpoints. The existing ModelOpt export backend remains the default.
 
 *Misc*
 

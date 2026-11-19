@@ -259,16 +259,6 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument("--calib_batch_size", type=int, default=1, help="Calibration batch size")
     parser.add_argument(
-        "--calib_pretokenized",
-        action="store_true",
-        help="Read input_ids and optional attention_mask from a local calibration JSONL file.",
-    )
-    parser.add_argument(
-        "--no_calib_packing",
-        action="store_true",
-        help="Keep calibration documents separate instead of packing a global token stream.",
-    )
-    parser.add_argument(
         "--seq_length",
         type=int,
         default=4096,
@@ -420,8 +410,6 @@ def main(args: argparse.Namespace):
     # Infer the calibration modality from the dataset: the known image-text datasets require a VLM, everything
     # else is text. Passing a text dataset for a VLM estimates importance from text only (vision tower idle).
     use_image_calib = args.calib_dataset_name in get_supported_vlm_datasets()
-    if args.calib_pretokenized and use_image_calib:
-        raise ValueError("--calib_pretokenized requires a local text-token JSONL dataset.")
     if use_image_calib and not is_vlm:
         raise ValueError(
             f"Calibration dataset '{args.calib_dataset_name}' is image-text and requires a VLM; "
@@ -479,8 +467,7 @@ def main(args: argparse.Namespace):
             num_samples=args.calib_num_samples,
             seq_length=args.seq_length,
             batch_size=args.calib_batch_size,
-            pack=not args.no_calib_packing and not args.calib_pretokenized,
-            pretokenized=args.calib_pretokenized,
+            pack=True,  # Megatron pretraining-style global-stream document packing
         )
 
         # Run text prefill on the language model: we quantize the root (a VLM root forward expects
