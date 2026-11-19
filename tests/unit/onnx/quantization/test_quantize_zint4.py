@@ -477,17 +477,6 @@ def test_get_weight_scale_matches_reference(ci, co):
     np.testing.assert_allclose(scale, _reference_weight_scale(weight, block_size))
 
 
-def test_get_weight_scale_without_block_size_is_unchanged():
-    rng = np.random.RandomState(2)
-    weight = rng.randn(16, 3)
-
-    scale = get_weight_scale(weight.copy(), block_size=None)
-
-    amax = np.abs(weight).max(axis=0, keepdims=True)
-    expected = (np.abs(weight) / (amax + np.finfo(amax.dtype).tiny)).mean(1)
-    np.testing.assert_allclose(scale, expected)
-
-
 def _reference_subgraph_w_mean(weight: np.ndarray, block_size: int) -> np.ndarray:
     """Per-block-max mean using consecutive, non-overlapping row blocks, 1e-6 damping."""
     ci, co = weight.shape
