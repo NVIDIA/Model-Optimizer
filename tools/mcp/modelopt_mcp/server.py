@@ -265,16 +265,6 @@ def _build_server() -> FastMCP:
                 )
             ),
         ] = None,
-        source_ref: Annotated[
-            str | None,
-            Field(
-                description=(
-                    "Model-Optimizer branch, tag, or commit SHA to materialize "
-                    "before launching. None resolves the repository default "
-                    "configured by MODELOPT_MCP_SOURCE_REF, falling back to main."
-                )
-            ),
-        ] = None,
         source_repo: Annotated[
             str | None,
             Field(
@@ -371,7 +361,6 @@ def _build_server() -> FastMCP:
             extra_overrides=extra_overrides,
             skip_verify=skip_verify,
             dry_run=dry_run,
-            source_ref=source_ref,
             source_repo=source_repo,
             enable_mlflow=enable_mlflow,
             mlflow_tracking_uri=mlflow_tracking_uri,
