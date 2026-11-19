@@ -31,7 +31,8 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 import modelopt.torch.opt as mto
-from modelopt.torch.models import hf_model_type, is_moe
+from modelopt.torch.models import is_moe
+from modelopt.torch.opt.session import ensure_modelopt_session
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
 from modelopt.torch.quantization.nn import (
@@ -404,6 +405,7 @@ def _resmooth_experts_for_export(
     model: nn.Module,
     state_dict: dict[str, Any] | None,
     *,
+    model_type: str | None,
     inplace: bool = False,
 ) -> tuple[dict[str, tuple[torch.Tensor, torch.Tensor | None]], set[str]]:
     """Prepare AWQ weights for vLLM fakequant export when several linears share one input quantizer.
@@ -434,7 +436,6 @@ def _resmooth_experts_for_export(
 
     names = module_name_maps(model) if inplace else None
 
-    model_type = hf_model_type(model)
     id_to_name: dict[int, str] = {id(m): n for n, m in model.named_modules()}
     out: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
     requant_weights: set[str] = set()
@@ -628,6 +629,7 @@ def _copy_source_config(model: nn.Module, export_dir: Path) -> None:
         shutil.copyfile(source_config, export_dir / "config.json")
 
 
+@ensure_modelopt_session
 def export_hf_vllm_fq_checkpoint(
     model: nn.Module,
     export_dir: Path | str,
@@ -648,6 +650,9 @@ def export_hf_vllm_fq_checkpoint(
     With ``inplace_mem_efficient=True``, resmooth runs **in place** on materialized
     weight parameters only (no ``state_dict``), before the inplace fakequant loop.
 
+    The export runs in the active ModelOpt session
+    (:class:`~modelopt.torch.opt.session.ModelOptSession`), else in one of its own.
+
     Args:
         model: In-memory quantized model.
         export_dir: Output dir for HF files and ``vllm_fq_modelopt_state.pth``.
@@ -656,6 +661,7 @@ def export_hf_vllm_fq_checkpoint(
             dict materialization. This is destructive — model weights are permanently
             modified and weight quantizers are not re-enabled after export.
     """
+    session = mto.ModelOptSession.active()
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
@@ -665,7 +671,9 @@ def export_hf_vllm_fq_checkpoint(
     with torch.inference_mode():
         if inplace_mem_efficient:
             # Resmooth shared-input groups, then fakequant (state dict and/or params).
-            pqs_overrides, requant_weights = _resmooth_experts_for_export(model, None, inplace=True)
+            pqs_overrides, requant_weights = _resmooth_experts_for_export(
+                model, None, model_type=session.model_type, inplace=True
+            )
             # Inplace path: iterate decoder layers, one offload<->onload per layer.
             decoder_layers = LayerActivationCollector.get_decoder_layers(model)
             if decoder_layers is None:
@@ -695,7 +703,7 @@ def export_hf_vllm_fq_checkpoint(
             state_dict = model.state_dict()
             # Resmooth shared-input groups, then fakequant (state dict and/or params).
             pqs_overrides, requant_weights = _resmooth_experts_for_export(
-                model, state_dict, inplace=False
+                model, state_dict, model_type=session.model_type, inplace=False
             )
 
             # Default path: fakequant into the resmoothed state_dict copy (do not refresh

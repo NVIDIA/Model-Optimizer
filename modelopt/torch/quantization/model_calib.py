@@ -36,6 +36,7 @@ from tqdm import tqdm
 from modelopt.torch.models import list_all_possible
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.searcher import ForwardLoop
+from modelopt.torch.opt.session import ensure_modelopt_session
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
@@ -2439,6 +2440,7 @@ def svdquant(
 
 
 @torch.no_grad()
+@ensure_modelopt_session
 def layerwise_calibrate(
     model: nn.Module,
     forward_loop: ForwardLoop,

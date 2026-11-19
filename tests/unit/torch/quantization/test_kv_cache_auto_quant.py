@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3, get_tiny_qwen3vl
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_kv_cache_dtype, get_quant_config
 from modelopt.torch.quantization import model_quant, tensor_quant
@@ -251,9 +252,15 @@ class _ToyKVModel(nn.Module):
 
 def test_kv_autoquant_rejects_missing_scale_after_calibration(monkeypatch):
     model = _ToyKVModel()
-    monkeypatch.setattr(model_quant, "calibrate", lambda *_args, **_kwargs: None)
+    session = mto.ModelOptSession()
+    sessions = []
+    monkeypatch.setattr(
+        model_quant,
+        "_calibrate",
+        lambda *_args, **_kwargs: sessions.append(mto.ModelOptSession.current()),
+    )
 
-    with pytest.raises(ValueError, match="no persistent export scale after calibration"):
+    with session, pytest.raises(ValueError, match="no persistent export scale after calibration"):
         mtq.auto_quantize(
             model,
             {"effective_bits": 8.0, "cost_model": "kv_cache"},
@@ -265,6 +272,8 @@ def test_kv_autoquant_rejects_missing_scale_after_calibration(monkeypatch):
         )
 
     assert hasattr(model, "_modelopt_state")
+    # The candidates calibrate in the workflow's one session.
+    assert sessions and all(c is session for c in sessions)
 
 
 def test_kv_eligible_layers_supports_hybrid_attention_mixers_only():

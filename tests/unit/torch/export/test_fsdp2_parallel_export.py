@@ -37,6 +37,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
 from modelopt.torch.export.unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
+from modelopt.torch.opt import ModelOptSession
 
 transformers = pytest.importorskip("transformers")
 from transformers import AutoModelForCausalLM, LlamaConfig
@@ -84,10 +85,12 @@ def test_streaming_export_matches_resident_path(tmp_path):
     ref_model = copy.deepcopy(model)  # export packs weights in place -> need two copies
 
     d = tmp_path
-    _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d)
+    with ModelOptSession().bind(model):
+        _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d)
     streamed = _load_all(d)
 
-    ref, _ = _export_transformers_checkpoint(ref_model, torch.bfloat16)
+    with ModelOptSession().bind(ref_model):
+        ref, _ = _export_transformers_checkpoint(ref_model, torch.bfloat16)
 
     assert set(streamed) == set(ref)
     for key in ref:
@@ -103,11 +106,13 @@ def test_streaming_export_of_a_sharded_w4a8_model(tmp_path, gloo_world_of_one):
     """
     # 128 wide, so that W4A8's 128-wide INT4 blocks tile every weight.
     ref_model = _tiny_quantized_llama(mtq.W4A8_AWQ_BETA_CFG, hidden_size=128)
-    ref, _ = _export_transformers_checkpoint(ref_model, torch.bfloat16)
+    with ModelOptSession().bind(ref_model):
+        ref, _ = _export_transformers_checkpoint(ref_model, torch.bfloat16)
     # Sharded before it is calibrated, as hf_ptq --use_fsdp2 does on one GPU.
     model = _tiny_quantized_llama(mtq.W4A8_AWQ_BETA_CFG, hidden_size=128, mesh=gloo_world_of_one)
 
-    _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=tmp_path)
+    with ModelOptSession().bind(model):
+        _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=tmp_path)
 
     streamed = _load_all(tmp_path)
     assert set(streamed) == set(ref)
@@ -118,7 +123,8 @@ def test_streaming_export_of_a_sharded_w4a8_model(tmp_path, gloo_world_of_one):
 def test_streaming_export_drops_tied_alias_and_writes_config(tmp_path):
     model = _tiny_quantized_llama()
     d = tmp_path
-    _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d)
+    with ModelOptSession().bind(model):
+        _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d)
 
     loaded = _load_all(d)
     assert "lm_head.weight" not in loaded  # tied alias dropped
@@ -142,7 +148,8 @@ def test_streaming_export_drops_tied_alias_without_hf_tie_map(tmp_path, monkeypa
         type(model), "all_tied_weights_keys", property(lambda self: None), raising=False
     )
 
-    _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=tmp_path)
+    with ModelOptSession().bind(model):
+        _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=tmp_path)
 
     loaded = _load_all(tmp_path)
     assert "lm_head.weight" not in loaded, "tied alias shipped as a duplicate copy"
@@ -153,7 +160,8 @@ def test_streaming_export_subsplits_by_max_shard_size(tmp_path):
     """A tiny max_shard_size forces several shard files; the index still maps every key."""
     model = _tiny_quantized_llama()
     d = tmp_path
-    _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d, max_shard_size=2048)
+    with ModelOptSession().bind(model):
+        _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d, max_shard_size=2048)
 
     index = json.loads((d / "model.safetensors.index.json").read_text())
     assert len(set(index["weight_map"].values())) > 1
@@ -167,7 +175,10 @@ def test_streaming_export_extra_state_dict_mtp(tmp_path):
     model = _tiny_quantized_llama()
     extra = {"model.layers.99.mtp.weight": torch.randn(8, 8, dtype=torch.bfloat16)}
     d = tmp_path
-    _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d, extra_state_dict=extra)
+    with ModelOptSession().bind(model):
+        _export_fsdp2_checkpoint_streaming(
+            model, torch.bfloat16, export_dir=d, extra_state_dict=extra
+        )
 
     loaded = _load_all(d)
     assert "model.layers.99.mtp.weight" in loaded
@@ -181,15 +192,16 @@ def _two_rank_streaming_export(rank, size, export_dir):
     try:
         # The unsharded reference is built and exported on every rank, so any collective its
         # calibration or export issues has a partner.
-        expected, _ = _export_transformers_checkpoint(
-            _tiny_quantized_llama(tie=False), torch.bfloat16
-        )
+        reference = _tiny_quantized_llama(tie=False)
+        with ModelOptSession().bind(reference):
+            expected, _ = _export_transformers_checkpoint(reference, torch.bfloat16)
         # Calibrating after sharding leaves the root's parameters unsharded: FSDP2 skips the
         # root's post-forward reshard. That is the state in which the owner's state_dict() used
         # to reshard them on its rank alone, so the next gather window ran a collective the
         # other rank skipped.
         model = _tiny_quantized_llama(tie=False, mesh=init_device_mesh("cpu", (size,)))
-        _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=export_dir)
+        with ModelOptSession().bind(model):
+            _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=export_dir)
         torch.distributed.barrier()
     finally:
         faulthandler.cancel_dump_traceback_later()

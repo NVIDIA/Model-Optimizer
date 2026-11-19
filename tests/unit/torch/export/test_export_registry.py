@@ -39,6 +39,7 @@ from modelopt.torch.export.registry import (
     _ExportHandlerRegistryCls,
 )
 from modelopt.torch.export.unified_export_hf import _process_quantized_modules
+from modelopt.torch.opt import ModelOptSession
 
 
 class _Experts(nn.Module):
@@ -271,7 +272,8 @@ def test_process_quantized_modules_exports_via_registry():
     model = ToyModel(dims=[16, 32, 16])
     mtq.quantize(model, partial_fp8_config, lambda module: module(torch.randn(2, 4, 16)))
 
-    _process_quantized_modules(model, torch.float16)
+    with ModelOptSession().bind(model):
+        _process_quantized_modules(model, torch.float16)
 
     state_dict = model.state_dict()
     fp8_weights = [key for key in state_dict if key.endswith("weight_scale")]

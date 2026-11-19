@@ -34,6 +34,7 @@ from modelopt.torch.export.quant_utils import get_activation_scaling_factor, pos
 from modelopt.torch.export.unified_export_hf import _process_quantized_modules
 from modelopt.torch.models import hf
 from modelopt.torch.models.nemotron_h import mtp as adapter
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.model_calib import (
@@ -352,7 +353,8 @@ def test_loading_calibration_and_export(
         projection = model.get_submodule(projection_name)
         assert projection.input_quantizer.amax.max() > 0
         expected_scale = get_activation_scaling_factor(projection).squeeze().clone()
-        _process_quantized_modules(model, torch.bfloat16)
+        with ModelOptSession().bind(model):
+            _process_quantized_modules(model, torch.bfloat16)
         exported = postprocess_state_dict(model.state_dict(), maxbound=448, quantization=None)
         torch.testing.assert_close(exported[f"{projection_name}.input_scale"], expected_scale)
 

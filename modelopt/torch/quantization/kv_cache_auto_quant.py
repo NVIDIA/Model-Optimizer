@@ -789,7 +789,7 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         }
 
     def _calibrate_candidates(self) -> None:
-        from .model_quant import calibrate
+        from .model_quant import _calibrate
 
         forward_step = self.config["forward_step"]
         num_calib_steps = self.config["num_calib_steps"]
@@ -819,10 +819,9 @@ class AutoQuantizeKVSearcher(BaseSearcher):
                 calibration_proxy = nn.Module()
                 calibration_proxy.quantizers = nn.ModuleList(active_quantizers)
                 with _freeze_existing_quantizers(self.model, active_quantizers):
-                    calibrate(
-                        calibration_proxy,
-                        algorithm=config.algorithm,
-                        forward_loop=lambda _: calibration_loop(self.model),
+                    # A step of the workflow: in its session, not bound to the proxy.
+                    _calibrate(
+                        calibration_proxy, config.algorithm, lambda _: calibration_loop(self.model)
                     )
 
             for hparam in self._hparams:
@@ -830,7 +829,7 @@ class AutoQuantizeKVSearcher(BaseSearcher):
 
         candidate_quantizers = self._candidate_quantizer_map
         _validate_persistent_candidate_scales(candidate_quantizers)
-        # The proxy is not a QuantModule, so calibrate() does not synchronize its scales.
+        # The proxy is not a QuantModule, so calibration does not synchronize its scales.
         if size() > 1:
             for layer_candidates in candidate_quantizers.values():
                 for quantizers in layer_candidates.values():

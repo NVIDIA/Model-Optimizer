@@ -28,6 +28,7 @@ from safetensors.torch import load_file
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.moe as moe
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
@@ -212,7 +213,8 @@ def _expert_parallel_calibration_and_export_job(rank, size, ckpt_dir, export_dir
         # whole model.
         export_hf_checkpoint(model, dtype=torch.bfloat16, export_dir=export_dir)
         if rank == 0:
-            written, _ = _export_transformers_checkpoint(whole, torch.bfloat16)
+            with ModelOptSession().bind(whole):
+                written, _ = _export_transformers_checkpoint(whole, torch.bfloat16)
             written = revert_weight_conversion_quant_aware(whole, dict(written))
             problems += _export_problems(export_dir, written)
         gathered = [None] * size

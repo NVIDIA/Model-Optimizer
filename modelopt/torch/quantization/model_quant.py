@@ -35,6 +35,7 @@ import modelopt.torch.utils.distributed as dist
 from modelopt import env
 from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
+from modelopt.torch.opt.session import ensure_modelopt_session
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
@@ -217,6 +218,7 @@ def _refuse_a_malformed_variable() -> None:
 
 
 # TODO: Descriptors for the supported algorithms
+@ensure_modelopt_session
 def calibrate(
     model: nn.Module,
     algorithm: QuantizeAlgoCfgType = "max",
@@ -226,6 +228,9 @@ def calibrate(
 
     In order to calibrate using custom user defined calibration algorithm, refer to
     :ref:`custom calibration algorithm <custom_calibration_algorithm>`
+
+    Calibration runs in the active ModelOpt session
+    (:class:`~modelopt.torch.opt.session.ModelOptSession`), else in one of its own.
 
     Args:
         model: A pytorch model with quantizer modules.
@@ -248,6 +253,18 @@ def calibrate(
     _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
     _refuse_unsupported_distributed_calibration(model, algorithm)
     _refuse_a_malformed_variable()
+    return _calibrate(model, algorithm, forward_loop)
+
+
+def _calibrate(
+    model: nn.Module, algorithm: QuantizeAlgoCfgType, forward_loop: ForwardLoop | None
+) -> nn.Module:
+    """Calibrate ``model`` with ``algorithm``, a step of the workflow in the active session.
+
+    :func:`calibrate` without its refusals, and without binding the session to ``model``: the
+    KV-cache AutoQuantize search calibrates a proxy holding only its candidate quantizers, while
+    the workflow's model runs the data.
+    """
     if forward_loop is not None:
         # get the number of arguments of forward_loop
         num_args = len(inspect.signature(forward_loop).parameters)
@@ -504,6 +521,7 @@ def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeCon
             )
 
 
+@ensure_modelopt_session
 def quantize(
     model: nn.Module,
     config: dict[str, Any | QuantizeConfig],
@@ -924,6 +942,7 @@ def _save_module_attributes(model: nn.Module) -> Callable[[], None]:
     return restore
 
 
+@ensure_modelopt_session
 def auto_quantize(
     model: nn.Module,
     constraints: dict[str, Any] | None = None,
@@ -957,6 +976,10 @@ def auto_quantize(
     The sensitivity scoring phase typically dominates the runtime of ``auto_quantize``, so decreasing the number of
     samples used for scoring (see ``num_score_steps``) is the recommended way for improving overall auto_quantize time
     with minimal accuracy impact.
+
+    The search runs in the active ModelOpt session
+    (:class:`~modelopt.torch.opt.session.ModelOptSession`), else in one of its own, and calibrates
+    every candidate in it, so the whole search is one workflow.
 
     Args:
         model: A pytorch model with quantizer modules.

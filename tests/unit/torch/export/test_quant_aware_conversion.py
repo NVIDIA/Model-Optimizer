@@ -62,6 +62,7 @@ from modelopt.torch.export.unified_export_hf_streaming import (
     _make_tensor_sink,
     _StreamingShardWriter,
 )
+from modelopt.torch.opt import ModelOptSession
 
 BLOCK = 16
 
@@ -1126,7 +1127,8 @@ def test_export_weight_specific_rename_keeps_config_aligned(tmp_path, quantized_
         exporter.export_layer(0, model.model.layers[0])
         config = exporter.finalize()
     elif export_mode == "streaming":
-        state, config = _export_transformers_checkpoint(model)
+        with ModelOptSession().bind(model):
+            state, config = _export_transformers_checkpoint(model)
         _stream_tensors(model, state, tmp_path)
         config = _revert_quant_config_names_best_effort(model, config)
     else:

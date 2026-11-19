@@ -507,7 +507,7 @@ class TestQuantFusedExperts:
         assert is_moe(model.moe)
 
         with pytest.raises(NotImplementedError):
-            _prepare_moe_inputs(model, torch.float16, is_modelopt_qlora=False)
+            _prepare_moe_inputs(model, torch.float16, is_modelopt_qlora=False, model_type=None)
 
     def test_a_state_saved_with_transposed_experts_quantized_no_longer_restores(self):
         """An earlier release quantized such a container, wrongly. Restoring that state now finds its
