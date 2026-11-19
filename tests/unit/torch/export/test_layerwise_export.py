@@ -169,7 +169,8 @@ def test_a_layerwise_export_takes_the_source_its_workflow_recorded(tmp_path):
     model = get_tiny_llama(num_hidden_layers=1).eval()
     model.config.architectures = ["LlamaForCausalLM"]
     model.config._name_or_path = "org/some-model"
-    with ModelOptSession(source=SourceCheckpoint(str(source))):
+    with ModelOptSession().bind(model) as session:
+        session.binding(model).source = SourceCheckpoint(str(source))
         mtq.quantize(
             model,
             _layerwise_fp8_cfg(tmp_path / "export"),

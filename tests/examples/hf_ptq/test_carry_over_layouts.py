@@ -70,7 +70,7 @@ def _add_to_main_shard(d, extra):
 def _recorded(d):
     with ModelOptSession() as session:
         load_pretrained(str(d))
-    return list(session.source.unplaced_keys)
+        return list(session.source.unplaced_keys)
 
 
 @pytest.fixture

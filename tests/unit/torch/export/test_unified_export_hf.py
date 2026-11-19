@@ -979,11 +979,9 @@ def test_export_hf_checkpoint_copies_the_source_non_model_files(tmp_path, given)
     (tmp_path / "decoy").mkdir()
     if given == "session":
         model.config._name_or_path = str(tmp_path / "decoy")
-    session = (
-        ModelOptSession(source=SourceCheckpoint(str(source), (mtp,)))
-        if given == "session"
-        else None
-    )
+    session = ModelOptSession().bind(model) if given == "session" else None
+    if session is not None:
+        session.binding(model).source = SourceCheckpoint(str(source), (mtp,))
 
     with session or contextlib.nullcontext():
         export_hf_checkpoint(model, export_dir=export)

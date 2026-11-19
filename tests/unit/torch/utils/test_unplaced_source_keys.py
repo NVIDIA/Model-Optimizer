@@ -121,7 +121,7 @@ def _load(path, auto_class=None, **kwargs):
     """The model and the source its load records in the active session."""
     with ModelOptSession() as session:
         model = load_pretrained(str(path), auto_class, **kwargs)
-    source = session.source
+        source = session.source
     if getattr(model, "_weight_conversions", None) is None:
         pytest.skip("this transformers does not record the conversions from_pretrained ran")
     return model, source
@@ -191,7 +191,7 @@ def test_the_hub_options_pick_the_snapshot_and_reach_the_loads_from_it(tmp_path,
 
     with ModelOptSession() as session:
         load_pretrained("org/model", models, **hub_kwargs)
-    source = session.source
+        source = session.source
 
     assert resolved[0] == ("org/model", hub_kwargs)
     # Anything resolved after that is the local snapshot.

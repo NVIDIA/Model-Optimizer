@@ -125,7 +125,8 @@ def test_the_fakequant_export_carries_the_tensors_of_the_source_its_session_hold
     model.config.architectures = ["LlamaForCausalLM"]
     model.config._name_or_path = "org/some-model"
 
-    with ModelOptSession(source=SourceCheckpoint(str(source), (mtp,))):
+    with ModelOptSession().bind(model) as session:
+        session.binding(model).source = SourceCheckpoint(str(source), (mtp,))
         mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 32, (1, 8))))
         vfq.export_hf_vllm_fq_checkpoint(model, export_dir=tmp_path / "export")
 

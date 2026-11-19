@@ -226,7 +226,7 @@ def _load_and_check(rank, size, ckpt_dir, knobs, expected):
     try:
         with ModelOptSession() as session:
             model = load_pretrained(ckpt_dir)
-        source = session.source
+            source = session.source
         whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16)
 
         params = dict(model.named_parameters())

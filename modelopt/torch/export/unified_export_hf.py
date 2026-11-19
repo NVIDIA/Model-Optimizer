@@ -2186,10 +2186,11 @@ def export_hf_checkpoint(
             runtime compatibility; other diffusion components omit them.
             Transformers components always retain them for KV-cache scales.
     """
+    ensure_modelopt_session_binding(model)
     # The workflow, as its session holds it.
     session = ModelOptSession.active()
     exporter = _layerwise_exporter(model)
-    source = session.source
+    source = session.binding(model).source
     if source is None and exporter is not None:
         # A layerwise export resolved its source before calibration packed the first layer.
         source = getattr(exporter, "_source", None)

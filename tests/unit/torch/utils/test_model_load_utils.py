@@ -2268,11 +2268,11 @@ def test_a_bound_session_is_refused_before_anything_loads(tmp_path):
     model is built."""
     previous = nn.Linear(2, 2)
     with ModelOptSession().bind(previous):
-        with pytest.raises(ValueError, match="a session describes one model"):
+        with pytest.raises(RuntimeError, match="a session describes one model"):
             load_pretrained(str(tmp_path / "absent"))
         del previous
         gc.collect()
-        with pytest.raises(ValueError, match="a session describes one model"):
+        with pytest.raises(RuntimeError, match="a session describes one model"):
             load_pretrained(str(tmp_path / "absent"))
 
 
@@ -2293,6 +2293,24 @@ def test_a_load_that_fails_leaves_its_session_free_to_load_again(tmp_path, monke
         assert session.model is model
 
 
+def test_a_load_binds_the_model_it_builds_by_name(tmp_path):
+    """A load binds the model it builds as the name it is given, with that model's own source: a
+    distillation loads its teacher into the session bound to its student, where a second "model"
+    is refused before anything loads. The default session follows code that loads another model."""
+    LlamaForCausalLM(LlamaConfig(**_TINY)).save_pretrained(tmp_path)
+    ckpt = str(tmp_path)
+    with ModelOptSession() as session:
+        student = load_pretrained(ckpt, device_map="cpu")
+        teacher = load_pretrained(ckpt, device_map="cpu", name="teacher")
+        assert session.model is student and session.binding(teacher).name == "teacher"
+        assert session.binding(teacher).source == hf_checkpoint_utils.SourceCheckpoint(ckpt)
+        with pytest.raises(RuntimeError, match="a session describes one model"):
+            load_pretrained(ckpt, device_map="cpu")
+    load_pretrained(ckpt, device_map="cpu")
+    second = load_pretrained(ckpt, device_map="cpu")
+    assert ModelOptSession.current() is None and ModelOptSession.active().model is second
+
+
 def _one_rank_bound_job(rank, size, ckpt):
     session = ModelOptSession()
     if rank == 0:
@@ -2300,7 +2318,7 @@ def _one_rank_bound_job(rank, size, ckpt):
     with bounded_collectives(), session:
         try:
             load_pretrained(ckpt, distribution=DistributionPlan(size), device_map="cpu")
-        except Exception as error:  # rank 0's own ValueError, as the others receive it
+        except Exception as error:  # rank 0's own RuntimeError, as the others receive it
             raised = str(error)
         else:
             raised = "no error"
@@ -2315,7 +2333,7 @@ def test_a_session_one_rank_refuses_fails_every_rank(cpu_dist_workers, tmp_path)
 
 
 def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed, placed, through):
-    model, refused, other = None, None, None
+    model, refused, other, recorded = None, None, None, None
     session = ModelOptSession(distribution=handed[rank]) if through == "session" else None
     plan = {} if session else {"distribution": handed[rank]}
     # Ranks without GPUs, whatever the host has: the pooled workers keep no CUDA context.
@@ -2330,16 +2348,17 @@ def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed, placed, through)
             refused = str(error)
         if session is not None and refused is None:
             # While its block runs, the session is bound to the model the load returned.
+            recorded = session.source
             try:
                 session.bind(nn.Linear(1, 1))
-            except ValueError as error:
+            except RuntimeError as error:
                 other = str(error)
     if isinstance(handed[0], DistributionPlan):
         assert refused is None and distribution_plan(model) == handed[0], (rank, refused)
         if session is not None:
             # The session records the plan every rank loaded by, and the source, for this model.
             assert session.distribution == handed[0], rank
-            assert session.source == hf_checkpoint_utils.SourceCheckpoint(ckpt), rank
+            assert recorded == hf_checkpoint_utils.SourceCheckpoint(ckpt), rank
             assert "describes one model" in str(other), rank
     else:
         # Rank 0's refusal, on every rank, rather than a rank left waiting in the broadcast.

@@ -71,7 +71,7 @@ from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_
 
 from modelopt import env
 from modelopt.torch.export.model_utils import get_language_model_from_vl
-from modelopt.torch.opt.session import ModelOptSession
+from modelopt.torch.opt.session import ModelName, ModelOptSession
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import moe
@@ -899,12 +899,13 @@ def _load_sharded(route, ckpt_path, load_kwargs) -> nn.Module:
     )
 
 
-def _refuse_a_bound_session(session: "ModelOptSession | None") -> None:
-    """Refuse, before anything loads, a session bound to a model: the load builds another."""
-    if session is not None and session.is_bound:
-        raise ValueError(
-            "The active ModelOptSession describes a workflow on another model, so it cannot "
-            "describe the model this load builds: a session describes one model."
+def _refuse_a_bound_session(session: ModelOptSession, name: "ModelName | None") -> None:
+    """Refuse, before anything loads, a session holding another model as ``name``."""
+    if session._refuses_another(name):
+        raise RuntimeError(
+            f"The active ModelOptSession describes a workflow on another model as "
+            f"{name or 'model'!r}, so it cannot describe the model this load builds: a session "
+            "describes one model under each name."
         )
 
 
@@ -914,6 +915,7 @@ def load_pretrained(
     *,
     model_type: str | None = None,
     distribution: DistributionPlan | None = None,
+    name: "ModelName | None" = None,
     **kwargs,
 ) -> nn.Module:
     """Load a Hugging Face model for ModelOpt to optimize and export, whole or distributed.
@@ -953,23 +955,26 @@ def load_pretrained(
       Nemotron-H checkpoint carries. ``model_type`` selects it; when omitted, the type of the
       ``config`` passed for the load, else of the checkpoint's config. A sharded load cannot run
       it, so it refuses a checkpoint the hook would build modules for.
-    * Inside an active ModelOpt session (:class:`~modelopt.torch.opt.session.ModelOptSession`), it
-      loads by the session's plan where ``distribution`` is not passed, and records in the session
-      the plan it loaded by and the source: the
+    * The active ModelOpt session (:class:`~modelopt.torch.opt.session.ModelOptSession`) binds the
+      model as ``name`` (``"model"`` by default; ``"teacher"`` for a distillation's teacher), and
+      the binding records the source: the
       :class:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.SourceCheckpoint` that names the
       local checkpoint and its tensors the model has no parameter for, which
-      ``export_hf_checkpoint`` carries over unchanged. It binds the session to the model. An active
-      session already bound to a model is refused before anything loads. The source is recorded
-      on the model too, as before, for an export outside the session to read back.
+      ``export_hf_checkpoint`` carries over unchanged. A session already holding another model as
+      that name is refused before anything loads, except the default session, which follows code
+      that opens no session to the model it loads. A session a ``with`` block opened also supplies
+      the plan to load ``"model"`` by where ``distribution`` is not passed, and records the plan it
+      loaded by. The source is recorded on the model too, as before, for an export outside the
+      session to read back.
       ``output_loading_info=True`` is refused, and so is a ``variant``: the source and the export
       read the checkpoint's default weight files.
     """
     # Importing modelopt.torch.models registers every model spec; only callers of this need them.
     from modelopt.torch.models.hf import prepare_model_for_loading
 
-    session = ModelOptSession.current()
-    if distribution is None and session is not None:
-        distribution = session.distribution
+    session, workflow = ModelOptSession.active(), ModelOptSession.current()
+    if distribution is None and workflow is not None and name in (None, "model"):
+        distribution = workflow.distribution
     # A launch whose processes set no group up (hf_ptq without --use_fsdp2): each loads alone.
     alone = dist.is_distributed_launch() and not dist.is_initialized()
     if alone and isinstance(distribution, DistributionPlan) and distribution.world_size > 1:
@@ -999,9 +1004,9 @@ def load_pretrained(
                 "inside distributed_run(), which sets it up."
             )
     # None is these options' own default: passed explicitly, it is no option to refuse.
-    for name in ("config", "variant", "hf_config"):
-        if name in kwargs and kwargs[name] is None:
-            del kwargs[name]
+    for key in ("config", "variant", "hf_config"):
+        if key in kwargs and kwargs[key] is None:
+            del kwargs[key]
     # The config to load with, or, as from_pretrained also takes it, a path to read it from.
     config = kwargs.get("config")
     config = config if isinstance(config, (PretrainedConfig, str, os.PathLike)) else None
@@ -1023,7 +1028,7 @@ def load_pretrained(
     decided = plan is None and dist.size() > 1
     # Each rank checks its own arguments; a refusal on one fails every rank before the fetch.
     with _refused_together("load arguments", alone):
-        _refuse_a_bound_session(session)
+        _refuse_a_bound_session(session, name)
         if decided:
             # Parsed in this check, a knob one rank cannot parse fails every rank.
             _ep_degree(None)
@@ -1090,9 +1095,9 @@ def load_pretrained(
     with _refused_together("load checks", alone):
         # Options only the FSDP2 load takes would reach from_pretrained, which has no use for them.
         if route is None:
-            for name, nothing in _ASKS_NOTHING.items():
-                if name in kwargs and kwargs[name] in nothing:
-                    del kwargs[name]
+            for key, nothing in _ASKS_NOTHING.items():
+                if key in kwargs and kwargs[key] in nothing:
+                    del kwargs[key]
         if route is None and (sharded := sorted(set(kwargs) & _FSDP2_ONLY)):
             raise TypeError(
                 f"{sharded} only apply to the FSDP2 load, but {plan!r} gives every rank the whole "
@@ -1100,9 +1105,9 @@ def load_pretrained(
             )
         # As do the options only the expert-parallel load takes, but for one passed as None, which
         # asks nothing of either load: its default holds, rather than None read as False.
-        for name in _EP_ONLY_LOAD_OPTIONS:
-            if name in kwargs and kwargs[name] is None:
-                del kwargs[name]
+        for key in _EP_ONLY_LOAD_OPTIONS:
+            if key in kwargs and kwargs[key] is None:
+                del kwargs[key]
         if route is None and (sharded := sorted(set(kwargs) & _EP_ONLY_LOAD_OPTIONS)):
             raise TypeError(
                 f"{sharded} only apply to the expert-parallel load, but {plan!r} gives every rank "
@@ -1198,12 +1203,11 @@ def load_pretrained(
     # On the model too, as before: an export the workflow's session does not reach, such as one
     # after its block ends, reads it back there.
     _record_source(model, source)
-    if session is None:
-        return model
     # Bound once nothing more can fail, so a load that failed leaves the workflow free to load again.
-    session.bind(model)
-    session.distribution = plan
-    session.source = source
+    binding = session.bind(model, name).binding(model)
+    binding.source = source
+    if workflow is not None and binding.name == "model":
+        workflow.distribution = plan
     return model
 
 

@@ -214,6 +214,13 @@ class ModelOptSession:
         self._bindings[name] = ModelBinding(name, hf_model_type(model), model)
         return self
 
+    def _refuses_another(self, name: ModelName | None) -> bool:
+        """Whether binding a model none of whose parts this session holds, as ``name``, raises."""
+        held = self._bindings.get(name or "model")
+        if held is None or held.model is None:
+            return False
+        return name is not None or not self._is_default
+
     def binding(self, model: _Model) -> ModelBinding:
         """The binding of the model ``model`` is or is a part of, the innermost where they nest.
 

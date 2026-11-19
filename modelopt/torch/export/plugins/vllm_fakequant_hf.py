@@ -668,7 +668,7 @@ def export_hf_vllm_fq_checkpoint(
             modified and weight quantizers are not re-enabled after export.
     """
     session = mto.ModelOptSession.active()
-    source = _resolve_source(model, session.source)
+    source = _resolve_source(model, session.binding(model).source)
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
