@@ -13,22 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Registries dispatching per-module logic for the unified HF export path.
+"""The registry dispatching per-module logic for the unified HF export path.
 
 This mirrors the registration-and-dispatch idiom of
 :class:`QuantModuleRegistry <modelopt.torch.quantization.nn.modules.quant_module.QuantModuleRegistry>`,
 but not its mechanism: quantization registers replacement classes and converts modules
-in place, whereas export registers functions that emit compressed weights and scale
+in place, whereas export registers handlers that emit compressed weights and scale
 buffers for a module without changing its class.
 
-Preparation and export use separate registries because they have independent matching
-precedence. Registering a handler for a new module type replaces what previously required
-editing if/elif chains inside ``unified_export_hf.py``.
+A handler (:class:`ModuleExportHandler`) defines what the export does to one kind of module
+in each phase it takes part in: preparing an MoE block's inputs, packing, and after packing.
+Registering a handler for a new module type replaces what previously required editing
+if/elif chains inside ``unified_export_hf.py``.
 """
 
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
 import torch.nn as nn
@@ -43,6 +45,7 @@ __all__ = [
     "ExportContext",
     "ExportHandler",
     "ExportModuleRegistry",
+    "ModuleExportHandler",
     "PrepareMoEInputsRegistry",
 ]
 
@@ -105,10 +108,86 @@ class ExportContext:
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]
+"""One phase of a :class:`ModuleExportHandler`, called as ``(name, module, ctx)`` with the export's
+:class:`ExportContext`."""
+
+_Registered = TypeVar("_Registered", bound=Callable[..., Any])
+
+
+class ModuleExportHandler:
+    """What the export does to one kind of module, in each phase it takes part in.
+
+    A subclass registered with :data:`ExportModuleRegistry` overrides the phases it takes part
+    in, as methods or static functions called ``(name, module, ctx)`` with the export's
+    :class:`ExportContext`; a phase it does not override is one it takes no part in.
+    A phase is named by its method on this class, as in
+    ``ExportModuleRegistry.match(module, ModuleExportHandler.on_post_pack)``. A phase may run on
+    one rank alone, as an FSDP2 export packs each unit on the rank that writes it, so it must not
+    start a collective.
+
+    Usage::
+
+        @ExportModuleRegistry.register("MyFusedExperts", prepend=True)
+        class _MyFusedExperts(ModuleExportHandler):
+            def on_pack(self, name, module, ctx): ...
+
+            def on_post_pack(self, name, module, ctx): ...
+
+    A model's own handlers live in its package under ``modelopt.torch.models`` and register there,
+    ahead of the built-in ones (``prepend=True``), once a model needs them: its ``modeling_ptq``
+    must not import the export when it is imported. Quantization imports it through its Hugging Face
+    plugin and the export imports quantization, a cycle that resolves at module scope only because
+    ``modelopt.torch`` imports quantization's core before its plugins.
+    """
+
+    def on_prepare_moe_inputs(self, name: str, module: nn.Module, ctx: ExportContext) -> None:
+        """Before packing, for an MoE block whose ``experts`` container the handler matches.
+
+        ``module`` is the block. The export refuses an MoE block whose experts no handler prepares.
+        """
+
+    def on_pack(self, name: str, module: nn.Module, ctx: ExportContext) -> None:
+        """In the walk that packs each module's quantized weights in place."""
+
+    def on_post_pack(self, name: str, module: nn.Module, ctx: ExportContext) -> None:
+        """Once the export has packed the module and every module under it.
+
+        For example, to stack experts it quantized one by one back into one weight.
+        """
+
+
+# The phases a handler can take part in, in the order an export runs them: ModuleExportHandler's
+# methods, which name them.
+_PHASES = tuple(
+    phase for name, phase in vars(ModuleExportHandler).items() if name.startswith("on_")
+)
+
+_Phase = Callable[[ModuleExportHandler, str, nn.Module, ExportContext], None]
+"""A phase, named by its method on :class:`ModuleExportHandler`."""
+
+
+def _phases_of(handler: type) -> dict[_Phase, ExportHandler]:
+    """The phases a registered handler class takes part in, each with its function.
+
+    A class taking part in none is refused, as is one defining an ``on_*`` method that is not a
+    phase, such as a misspelt one, which would never run.
+    """
+    if not issubclass(handler, ModuleExportHandler):
+        raise TypeError(f"{handler.__qualname__} is not a ModuleExportHandler.")
+    names = [phase.__name__ for phase in _PHASES]
+    unknown = sorted({name for name in dir(handler) if name.startswith("on_")} - set(names))
+    overridden = [phase for phase in _PHASES if getattr(handler, phase.__name__) is not phase]
+    if unknown or not overridden:
+        raise ValueError(
+            f"{handler.__qualname__} defines {unknown or 'no phase'}; a handler defines some of "
+            f"{names}."
+        )
+    instance = handler()
+    return {phase: getattr(instance, phase.__name__) for phase in overridden}
 
 
 class _ExportHandlerRegistryCls:
-    """Ordered, first-match-wins registry mapping modules to handler functions.
+    """Ordered registry mapping modules to the handlers of the export's phases.
 
     An entry can match a module by any combination of:
 
@@ -120,10 +199,11 @@ class _ExportHandlerRegistryCls:
       or on-the-fly generated quantized classes);
     - a predicate on the module instance, for structural detection.
 
-    When keys and a predicate are both given, both must match. Entries are tried in
-    registration order and the first match wins, so more specific handlers must be
-    registered before generic ones. External handlers can use ``prepend=True`` to take
-    precedence over built-in entries.
+    When keys and a predicate are both given, both must match. Each phase takes the first entry,
+    in registration order, that matches the module and defines that phase: more specific handlers
+    must be registered before generic ones, and a handler that takes no part in a phase never hides
+    one that does. External handlers can use ``prepend=True`` to take precedence over built-in
+    entries.
     """
 
     def __init__(self) -> None:
@@ -131,7 +211,8 @@ class _ExportHandlerRegistryCls:
             tuple[
                 tuple[type | str, ...],
                 Callable[[nn.Module], bool] | None,
-                ExportHandler,
+                dict[_Phase, ExportHandler],
+                tuple[str, ...],
             ]
         ] = []
 
@@ -140,53 +221,137 @@ class _ExportHandlerRegistryCls:
         *keys: type | str,
         predicate: Callable[[nn.Module], bool] | None = None,
         prepend: bool = False,
-    ) -> Callable[[ExportHandler], ExportHandler]:
-        """Return a decorator registering a handler function.
+    ) -> Callable[[_Registered], _Registered]:
+        """Return a decorator registering a :class:`ModuleExportHandler` subclass.
 
-        Re-registering the same handler (e.g. on module reload) replaces its existing
+        A plain function registers as a handler's ``on_pack``, as before handlers had phases.
+        Re-registering the same class or function (e.g. on module reload) replaces its existing
         entry in place instead of appending a duplicate.
-
-        Usage::
-
-            @ExportModuleRegistry.register(
-                "Llama4TextExperts",
-                "GptOssExperts",
-            )
-            def _export_bmm_experts(name, module, ctx): ...
         """
         assert keys or predicate is not None, "register() requires at least one key or a predicate"
 
+        def decorator(handler: _Registered) -> _Registered:
+            registered: Any = handler
+            phases: dict[_Phase, ExportHandler] = (
+                _phases_of(registered)
+                if isinstance(registered, type)
+                else {ModuleExportHandler.on_pack: registered}
+            )
+            self._add(keys, predicate, phases, registered, prepend)
+            return handler
+
+        return decorator
+
+    def _add(
+        self,
+        keys: tuple[type | str, ...],
+        predicate: Callable[[nn.Module], bool] | None,
+        phases: dict[_Phase, ExportHandler],
+        registered: Any,
+        prepend: bool,
+    ) -> None:
+        # A class is one handler, whatever phases it takes part in, so re-registering it replaces it.
+        # A function registered for two phases, as a plain one and through the deprecated
+        # PrepareMoEInputsRegistry, is two, one per registry before they merged.
+        identity = (registered.__module__, registered.__qualname__)
+        if not isinstance(registered, type):
+            identity += tuple(phase.__name__ for phase in phases)
+        entry = (keys, predicate, phases, identity)
+        for i, existing in enumerate(self._entries):
+            if existing[3] == identity:
+                self._entries[i] = entry
+                return
+        if prepend:
+            self._entries.insert(0, entry)
+        else:
+            self._entries.append(entry)
+
+    def match(
+        self, module: nn.Module, phase: _Phase = ModuleExportHandler.on_pack
+    ) -> ExportHandler | None:
+        """Return ``phase`` of the first registered handler that matches ``module`` and defines it.
+
+        ``phase`` is a phase's method on :class:`ModuleExportHandler`, by default ``on_pack``, the
+        one there was before handlers had phases. Anything else raises ``ValueError``.
+        """
+        if phase not in _PHASES:
+            raise ValueError(
+                f"{phase!r} is not one of the export's phases, "
+                f"{[known.__qualname__ for known in _PHASES]}."
+            )
+        mro = type(module).__mro__
+        mro_names: set[str] | None = None  # built once an entry with keys takes part in the phase
+        for keys, predicate, phases, _ in self._entries:
+            hook = phases.get(phase)
+            if hook is None:
+                continue
+            if keys:
+                if mro_names is None:
+                    mro_names = {cls.__name__ for cls in mro}
+                if not any(
+                    key in mro_names if isinstance(key, str) else key in mro for key in keys
+                ):
+                    continue
+            if predicate is not None and not predicate(module):
+                continue
+            return hook
+        return None
+
+
+# The registry of the export's handlers: a handler's ``on_prepare_moe_inputs`` matches an MoE
+# block's ``.experts`` container and is handed the block; its other phases match, and are handed,
+# the module itself.
+ExportModuleRegistry = _ExportHandlerRegistryCls()
+
+
+class _PrepareMoEInputsRegistryCls:
+    """Deprecated: the registry of MoE input preparation, now a phase of the export's handlers.
+
+    It registers a function as the ``on_prepare_moe_inputs`` phase of a handler in the registry it
+    serves, and matches that phase there, until it goes.
+    """
+
+    def __init__(self, registry: _ExportHandlerRegistryCls) -> None:
+        self._registry = registry
+
+    def register(
+        self,
+        *keys: type | str,
+        predicate: Callable[[nn.Module], bool] | None = None,
+        prepend: bool = False,
+    ) -> Callable[[ExportHandler], ExportHandler]:
+        """Return a decorator registering a function that prepares an MoE block's inputs.
+
+        It matches the block's ``experts`` container and is handed the block.
+        """
+        _warn_prepare_registry_deprecated()
+        assert keys or predicate is not None, "register() requires at least one key or a predicate"
+
         def decorator(handler: ExportHandler) -> ExportHandler:
-            entry = (keys, predicate, handler)
-            identity = (handler.__module__, handler.__qualname__)
-            for i, (_, _, existing) in enumerate(self._entries):
-                if (existing.__module__, existing.__qualname__) == identity:
-                    self._entries[i] = entry
-                    return handler
-            if prepend:
-                self._entries.insert(0, entry)
-            else:
-                self._entries.append(entry)
+            phases: dict[_Phase, ExportHandler] = {
+                ModuleExportHandler.on_prepare_moe_inputs: handler
+            }
+            self._registry._add(keys, predicate, phases, handler, prepend)
             return handler
 
         return decorator
 
     def match(self, module: nn.Module) -> ExportHandler | None:
-        """Return the first registered handler matching ``module``, or ``None``."""
-        mro = type(module).__mro__
-        mro_names = {cls.__name__ for cls in mro}
-        for keys, predicate, handler in self._entries:
-            if keys and not any(
-                key in mro_names if isinstance(key, str) else key in mro for key in keys
-            ):
-                continue
-            if predicate is not None and not predicate(module):
-                continue
-            return handler
-        return None
+        """Return the MoE input preparation of the first handler that matches ``module``, or None."""
+        _warn_prepare_registry_deprecated()
+        return self._registry.match(module, ModuleExportHandler.on_prepare_moe_inputs)
 
 
-# Matches an MoE block's ``.experts`` container; the handler receives the enclosing block.
-PrepareMoEInputsRegistry = _ExportHandlerRegistryCls()
-# Matches and passes the same module to the handler during the whole-model export walk.
-ExportModuleRegistry = _ExportHandlerRegistryCls()
+def _warn_prepare_registry_deprecated() -> None:
+    warnings.warn(
+        "PrepareMoEInputsRegistry is deprecated and will be removed in 0.51.0: register a "
+        "ModuleExportHandler defining on_prepare_moe_inputs with ExportModuleRegistry, and match "
+        "it with ExportModuleRegistry.match(module, ModuleExportHandler.on_prepare_moe_inputs).",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+# Deprecated: registers and matches the ``on_prepare_moe_inputs`` phase of ExportModuleRegistry's
+# handlers.
+PrepareMoEInputsRegistry = _PrepareMoEInputsRegistryCls(ExportModuleRegistry)

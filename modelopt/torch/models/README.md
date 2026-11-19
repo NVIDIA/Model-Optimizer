@@ -70,7 +70,11 @@ imported from transformers at module scope; remote-code classes via a callback a
 `CUSTOM_MODEL_PLUGINS`; a KV-cache wrapper for attention outside transformers' attention
 interface (T5's) by appending it to the plugin's `_QUANT_ATTENTION_WRAPPERS`, which tries it
 after the interface wrapper and before the AST-based fallback — and exports nothing
-(`__all__ = []`). Every package still has a `specs.py`, even when its spec only records
+(`__all__ = []`). Its export handlers (`ModuleExportHandler`) register with `prepend=True` from
+the function that registers its wrappers, once a model needs them, as Step's do: `modeling_ptq`
+must not import the export at module scope. Quantization imports it through the HF plugin and the
+export imports quantization, a cycle that resolves at module scope only because `modelopt.torch`
+imports quantization's core before its plugins. Every package still has a `specs.py`, even when its spec only records
 `model_type` and where the modeling code comes from. A family revision that shares another
 type's PTQ code (`step3p7` uses `step3p5`'s) still gets a `modeling_ptq.py` that imports the
 shared one, so loading it by model type works.

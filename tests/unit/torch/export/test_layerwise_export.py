@@ -24,6 +24,7 @@ import torch.nn as nn
 
 pytest.importorskip("transformers")
 
+from _test_utils.torch.export.utils import layerwise_fp8_config
 from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.quantization as mtq
@@ -68,27 +69,13 @@ def test_a_layerwise_export_that_cannot_bind_leaves_no_export_in_progress(tmp_pa
         assert session.model is model.model
 
 
-def _layerwise_fp8_cfg(export_dir):
-    cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
-    # max is amax-only, so the layer weights each shard captured stay valid.
-    cfg["algorithm"] = {
-        "method": "max",
-        "layerwise": {
-            "enable": True,
-            "export_dir": str(export_dir),
-            "calib_mutates_weights": False,
-        },
-    }
-    return cfg
-
-
 def test_a_layerwise_export_finishes_outside_any_workflow_session(tmp_path):
     """A pipeline that establishes no ModelOpt session calibrates layerwise, then finalizes the
     exporter calibration left on the model, which runs in a session of its own. Until then the
     model, which holds the pending export, can still be copied."""
     model = get_tiny_llama(num_hidden_layers=2).eval()
     model.config.architectures = ["LlamaForCausalLM"]
-    mtq.quantize(model, _layerwise_fp8_cfg(tmp_path), lambda m: m(torch.randint(0, 32, (1, 16))))
+    mtq.quantize(model, layerwise_fp8_config(tmp_path), lambda m: m(torch.randint(0, 32, (1, 16))))
 
     copy.deepcopy(model)
     getattr(model, LAYERWISE_EXPORTER_ATTR).finalize()
@@ -120,7 +107,7 @@ def test_a_layerwise_export_reads_the_type_of_the_model_it_writes(tmp_path):
     with pytest.raises(NotImplementedError, match="experts type 'Linear'"):
         mtq.quantize(
             root.model,
-            _layerwise_fp8_cfg(tmp_path),
+            layerwise_fp8_config(tmp_path),
             lambda m: m(torch.randint(0, 32, (1, 16))),
         )
 
@@ -137,7 +124,7 @@ def test_a_layerwise_export_of_a_part_is_refused_for_the_whole_model(tmp_path):
     with ModelOptSession().bind(vlm):
         mtq.quantize(
             language_model,
-            _layerwise_fp8_cfg(tmp_path / "export"),
+            layerwise_fp8_config(tmp_path / "export"),
             lambda m: m(torch.randint(0, 32, (1, 16))),
         )
         with pytest.raises(ValueError, match="neither, nor a part"):
@@ -152,7 +139,7 @@ def test_a_layerwise_export_that_fails_is_not_the_workflows(tmp_path, fails_at):
     the model first as hf_ptq does, writes through that one."""
     model = get_tiny_llama(num_hidden_layers=1).eval()
     model.config.architectures = ["LlamaForCausalLM"]
-    cfg = _layerwise_fp8_cfg(tmp_path / "failed")
+    cfg = layerwise_fp8_config(tmp_path / "failed")
 
     def calibrate(m):
         m(torch.randint(0, 32, (1, 16)))
@@ -170,7 +157,7 @@ def test_a_layerwise_export_that_fails_is_not_the_workflows(tmp_path, fails_at):
             mtq.quantize(model, cfg, first)
         assert session.runtime.layerwise_exporter is None
         LayerwiseExporter(model, tmp_path / "export")
-        mtq.quantize(model, _layerwise_fp8_cfg(tmp_path / "export"), calibrate)
+        mtq.quantize(model, layerwise_fp8_config(tmp_path / "export"), calibrate)
         unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_path / "export")
     assert (tmp_path / "export" / "model.safetensors.index.json").exists()
 
@@ -183,7 +170,7 @@ def test_a_layerwise_export_resumes_in_a_later_calibration_outside_any_session(
     the second, and the exporter left on the model finalizes it."""
     model = get_tiny_llama(num_hidden_layers=3).eval()
     model.config.architectures = ["LlamaForCausalLM"]
-    cfg = _layerwise_fp8_cfg(tmp_path / "export")
+    cfg = layerwise_fp8_config(tmp_path / "export")
     cfg["algorithm"]["layerwise"]["checkpoint_dir"] = str(tmp_path / "checkpoint")
     export_layer = LayerwiseExporter.export_layer
 
@@ -214,7 +201,7 @@ def test_a_layerwise_export_takes_the_source_its_workflow_recorded(tmp_path):
     with ModelOptSession(source=SourceCheckpoint(str(source))) as session:
         mtq.quantize(
             model,
-            _layerwise_fp8_cfg(tmp_path / "export"),
+            layerwise_fp8_config(tmp_path / "export"),
             lambda m: m(torch.randint(0, 32, (1, 16))),
         )
         getattr(model, LAYERWISE_EXPORTER_ATTR).finalize()

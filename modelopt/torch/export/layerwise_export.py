@@ -51,6 +51,8 @@ from .quant_utils import (
 )
 from .unified_export_hf import (
     _dispatch_export_handler,
+    _finish_packed,
+    _finish_packed_modules,
     _fuse_shared_input_modules,
     _prepare_moe_inputs,
     _refuse_unexportable_moe,
@@ -299,9 +301,6 @@ class LayerwiseExporter:
         a fusing format can rediscover which modules share an input; omit them only when
         nothing fuses.
         """
-        # Local, as in every other export module: see pack_quantized_weights.
-        from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
-
         assert self._bound, "export_layer() before bind()"
         assert not self._finalized, "export_layer() called after finalize()"
         if layer_module is not self._layers[layer_idx]:
@@ -331,7 +330,7 @@ class LayerwiseExporter:
                 for sub_name, sub_mod in layer_module.named_modules():
                     full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
                     _dispatch_export_handler(full_name, sub_mod, self._ctx)
-                _reconstruct_fused_moe_linear(layer_module)
+                _finish_packed_modules(layer_module, layer_name)
 
                 prefix = f"{layer_name}." if layer_name else ""
                 for key, tensor in layer_module.state_dict().items():
@@ -470,12 +469,14 @@ class LayerwiseExporter:
                     full_name = f"{name}.{sub_name}" if sub_name else name
                     _dispatch_export_handler(full_name, sub_mod, self._ctx)
                     handled_ids.add(id(sub_mod))
+                _finish_packed_modules(module, name)
                 prefix = f"{name}." if name else ""
                 for key, tensor in module.state_dict().items():
                     seen_keys.add(prefix + key)
                     self._collect(tail, prefix + key, tensor)
 
         # Everything already resident. On a model with no offload this is the whole tail.
+        resident = []
         for name, module in model.named_modules():
             if id(module) in decoder_owned_ids or id(module) in handled_ids:
                 continue
@@ -487,6 +488,9 @@ class LayerwiseExporter:
                     "and use export_hf_checkpoint() for this model."
                 )
             _dispatch_export_handler(name, module, self._ctx)
+            resident.append((name, module))
+        # Once the whole resident tail is packed, as a layer's modules are once the layer is.
+        _finish_packed(resident)
         for name, tensor in model.state_dict().items():
             if name.startswith(skip_prefixes) or name in seen_keys:
                 continue

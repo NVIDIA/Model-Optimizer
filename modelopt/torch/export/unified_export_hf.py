@@ -127,7 +127,7 @@ try:
 except ImportError:
     export_sparse_attention_config = None
 
-# Importing the built-in handlers installs their entries in the two registries.
+# Importing the built-in handlers installs their entries in the export's registry.
 from . import hf_export_handlers as _hf_export_handlers
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
@@ -171,7 +171,7 @@ from .quant_utils import (
     sync_tied_input_amax,
     to_quantized_weight,
 )
-from .registry import ExportContext, ExportHandler, ExportModuleRegistry, PrepareMoEInputsRegistry
+from .registry import ExportContext, ExportHandler, ExportModuleRegistry, ModuleExportHandler
 
 __all__ = ["export_hf_checkpoint", "export_speculative_decoding"]
 
@@ -191,7 +191,9 @@ def _moe_blocks(
     """
     for name, sub_module in model.named_modules():
         if is_moe(sub_module, model_type) and hasattr(sub_module, "experts"):
-            handler = PrepareMoEInputsRegistry.match(sub_module.experts)
+            handler = ExportModuleRegistry.match(
+                sub_module.experts, ModuleExportHandler.on_prepare_moe_inputs
+            )
             if handler is None:
                 raise NotImplementedError(
                     f"MoE model with experts type '{type(sub_module.experts).__name__}' is not "
@@ -844,12 +846,8 @@ def _export_quantized_weight(
     weight_scale: torch.Tensor | None = getattr(sub_module, quantizer_attrs.weight_scale, None)
     weight_scale_2: torch.Tensor | None = getattr(sub_module, quantizer_attrs.weight_scale_2, None)
 
-    # Transpose weight for bmm-style expert quantization (llama4, gpt-oss)
-    # Check if this is a BMM-style expert weight that needs transposition
-    is_bmm_expert_weight = weight.dim() == 3 and any(
-        expert_type in type(sub_module).__name__
-        for expert_type in ["Llama4TextExperts", "GptOssExperts"]
-    )
+    # Fused BMM-style experts store their weights transposed, which quantization must undo.
+    is_bmm_expert_weight = weight.dim() == 3 and _hf_export_handlers._is_bmm_experts(sub_module)
     # NVFP4StaticQuantizer + BMM-style experts: route through the static-aware
     # ``_from_quantizer`` helper so the pinned per-block ``_amax`` (e.g. set by
     # the MXFP4->NVFP4 cast to ``6 * 2^k_j``) is used to derive the FP8
@@ -1078,6 +1076,32 @@ def _process_quantized_modules() -> None:
             _dispatch_export_handler(name, sub_module, ctx)
 
 
+def _finish_packed_modules(model: nn.Module, prefix: str = "") -> None:
+    """Run the ``on_post_pack`` of each module of ``model`` that a registered handler takes.
+
+    Runs once the export has packed ``model`` and every module under it, so a handler can put its
+    module back into its own layout, such as a wrapper that quantized each expert as a linear of its
+    own stacking them back into one 3-D weight. ``prefix`` is ``model``'s name in the export's.
+    """
+    _finish_packed(
+        (".".join(filter(None, (prefix, name))), sub_module)
+        for name, sub_module in model.named_modules()
+    )
+
+
+def _finish_packed(modules: Iterable[tuple[str, nn.Module]]) -> None:
+    """Run the ``on_post_pack`` of each named module of ``modules`` that a registered handler takes.
+
+    For a part of a model, which the export packed module by module: :func:`_finish_packed_modules`
+    does it for a module and everything under it.
+    """
+    ctx = ExportContext.current()
+    for name, module in modules:
+        handler = ExportModuleRegistry.match(module, ModuleExportHandler.on_post_pack)
+        if handler is not None:
+            handler(name, module, ctx)
+
+
 @contextlib.contextmanager
 def _prepare_model_for_export(
     model, dtype, is_modelopt_qlora, carried_over_names=(), **fields
@@ -1138,19 +1162,15 @@ def _prepare_model_for_export(
 
 
 def pack_quantized_weights() -> None:
-    """Quantize every module's weight in place, then rebuild the fused MoE linears.
+    """Quantize the export model's weights in place, then put packed modules back in their layout.
 
     A step of the export in progress, whose context it packs with. That context's
     ``keep_fused_experts`` is for the no-gather distributed FSDP2 export: it leaves MoE experts
     fused and sharded through the fold, so each rank materializes only its LOCAL experts instead of
     all N on every rank. The per-expert split happens later, in the writer.
     """
-    # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
-    # per-model PTQ module at module scope here would risk an import cycle.
-    from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
-
     _process_quantized_modules()
-    _reconstruct_fused_moe_linear(ExportContext.current().model)
+    _finish_packed_modules(ExportContext.current().model)
 
 
 def _hf_shard_flags(model: nn.Module) -> tuple[bool, bool]:
@@ -1533,7 +1553,7 @@ def _export_diffusers_checkpoint(
 
             # Process quantized modules (convert weights, register scales)
             with _start_export(component, component_dtype):
-                _process_quantized_modules()
+                pack_quantized_weights()
 
             # Promote quantizer-owned tensors (AWQ pre_quant_scale and SVDQuant
             # LoRA factors) onto the module so they survive
