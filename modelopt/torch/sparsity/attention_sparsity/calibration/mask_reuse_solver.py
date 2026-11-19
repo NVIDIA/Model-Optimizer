@@ -491,7 +491,7 @@ class _SolverSession:
                     "randomCbcSeed 1",
                     "increment 1e-12",
                     "preprocess off",
-                    "primalTolerance 1e-12",
+                    "primalTolerance 1e-9",
                     "integerTolerance 1e-9",
                 ],
             )
