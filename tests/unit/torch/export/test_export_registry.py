@@ -15,6 +15,8 @@
 
 """Tests for the registries dispatching unified Hugging Face export handlers."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
@@ -38,7 +40,7 @@ from modelopt.torch.export.registry import (
     PrepareMoEInputsRegistry,
     _ExportHandlerRegistryCls,
 )
-from modelopt.torch.export.unified_export_hf import _process_quantized_modules
+from modelopt.torch.export.unified_export_hf import _process_quantized_modules, _start_export
 from modelopt.torch.opt import ModelOptSession
 
 
@@ -272,8 +274,8 @@ def test_process_quantized_modules_exports_via_registry():
     model = ToyModel(dims=[16, 32, 16])
     mtq.quantize(model, partial_fp8_config, lambda module: module(torch.randn(2, 4, 16)))
 
-    with ModelOptSession().bind(model):
-        _process_quantized_modules(model, torch.float16)
+    with ModelOptSession().bind(model), _start_export(model, torch.float16):
+        _process_quantized_modules()
 
     state_dict = model.state_dict()
     fp8_weights = [key for key in state_dict if key.endswith("weight_scale")]
@@ -290,3 +292,27 @@ def test_export_context_carries_no_resolver():
     # for large models, an avoidable O(#modules x #patterns x #params) alias-map pass.
     ctx = ExportContext(model=nn.Linear(2, 2), dtype=torch.float16)
     assert not hasattr(ctx, "resolver")
+
+
+def test_an_export_runs_in_the_workflows_modelopt_session():
+    model = nn.Linear(2, 2)
+    model.config = SimpleNamespace(model_type="llama")
+
+    # The workflow's session holds the export's context while it runs. The session comes bound to
+    # the model, as the export's public entry point binds it, and binding read the model's type.
+    with ModelOptSession().bind(model):
+        with _start_export(model, torch.float16) as outer:
+            assert ExportContext.current() is outer
+            assert outer.model is model
+            assert outer.model_type == "llama"
+            # An export started within another gives the workflow back the outer one when it ends.
+            with _start_export(model, torch.bfloat16) as inner:
+                assert ExportContext.current() is inner
+            assert ExportContext.current() is outer
+        # The export ends with its block.
+        with pytest.raises(RuntimeError):
+            ExportContext.current()
+
+    # Outside an export, there is no export context to find.
+    with ModelOptSession(), pytest.raises(RuntimeError):
+        ExportContext.current()

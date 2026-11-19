@@ -53,7 +53,7 @@ from modelopt.torch.export.quant_utils import (
     get_quant_config,
     process_layer_quant_config,
 )
-from modelopt.torch.export.unified_export_hf import _prepare_moe_inputs
+from modelopt.torch.export.unified_export_hf import _prepare_moe_inputs, _start_export
 from modelopt.torch.models import is_moe
 from modelopt.torch.opt.conversion import ApplyModeError
 from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
@@ -506,8 +506,12 @@ class TestQuantFusedExperts:
             register_fused_experts_on_the_fly(model)
         assert is_moe(model.moe)
 
-        with pytest.raises(NotImplementedError):
-            _prepare_moe_inputs(model, torch.float16, is_modelopt_qlora=False, model_type=None)
+        with (
+            mto.ModelOptSession().bind(model),
+            pytest.raises(NotImplementedError),
+            _start_export(model, torch.float16),
+        ):
+            _prepare_moe_inputs(model)
 
     def test_a_state_saved_with_transposed_experts_quantized_no_longer_restores(self):
         """An earlier release quantized such a container, wrongly. Restoring that state now finds its

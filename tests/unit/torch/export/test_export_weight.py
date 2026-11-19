@@ -26,6 +26,7 @@ from modelopt.torch.export.quant_utils import postprocess_state_dict
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _process_quantized_modules,
+    _start_export,
 )
 from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -237,8 +238,8 @@ def test_process_quantized_modules_fills_step3p5_moe_input_scale_for_unrouted_ex
     assert model.moe.experts[0].input_quantizer.amax is not None
     assert model.moe.experts[1].input_quantizer.amax is None
 
-    with ModelOptSession().bind(model):
-        _process_quantized_modules(model, torch.float32)
+    with ModelOptSession().bind(model), _start_export(model, torch.float32):
+        _process_quantized_modules()
 
     assert hasattr(model.moe.experts[0], "input_scale")
     assert hasattr(model.moe.experts[1], "input_scale")

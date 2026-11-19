@@ -66,6 +66,7 @@ from modelopt.torch.export.quant_aware_conversion import revert_weight_conversio
 from modelopt.torch.export.unified_export_hf import (
     _export_transformers_checkpoint,
     _process_quantized_modules,
+    _start_export,
     export_hf_checkpoint,
 )
 from modelopt.torch.opt import ModelOptSession
@@ -1105,8 +1106,12 @@ def test_packing_an_fsdp2_model_outside_the_no_gather_writer_is_refused(
     kept fused; anywhere else packing would need whole tensors. Refused, also under ``python -O``."""
     model = _fsdp2_shard(_load(_save(_llama_config(), tmp_path / "src")), gloo_world_of_one)
 
-    with pytest.raises(RuntimeError, match="cannot pack an FSDP2-sharded model"):
-        _process_quantized_modules(model, torch.bfloat16)
+    with (
+        pytest.raises(RuntimeError, match="cannot pack an FSDP2-sharded model"),
+        ModelOptSession().bind(model),
+        _start_export(model, torch.bfloat16),
+    ):
+        _process_quantized_modules()
 
 
 def test_nogather_export_saves_modelopt_state(gloo_world_of_one, tmp_path):

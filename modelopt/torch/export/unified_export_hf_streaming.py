@@ -55,7 +55,7 @@ from .unified_export_hf import (
     _dispatch_export_handler,
     _prepare_model_for_export,
     _prepare_moe_inputs,
-    _resolve_export_dtype,
+    _start_export,
     _warn_on_unsynced_moe_gate_up,
     requantize_resmooth_fused_llm_layers,
     save_non_weight_artifacts,
@@ -303,7 +303,6 @@ def _make_tensor_sink(
 
 def _export_transformers_checkpoint_streaming(
     model: nn.Module,
-    dtype: torch.dtype | None = None,
     is_modelopt_qlora: bool = False,
     export_dir: Path | str = ".",
     max_shard_size: int | str = "10GB",
@@ -317,6 +316,7 @@ def _export_transformers_checkpoint_streaming(
     decoder layer is materialized, exported, and written to a shard file before the next
     one is touched, bounding peak memory at one layer plus one shard buffer.
 
+    It is a step of the export in progress, which ``export_hf_checkpoint`` starts around it.
     Model-level preparation (MoE input handling, resmooth/requantize, quant config) matches
     the resident path. The per-tensor work does not: instead of ``postprocess_state_dict``
     over a finished dict, each tensor goes through :func:`_postprocess_single_tensor` as it
@@ -329,7 +329,6 @@ def _export_transformers_checkpoint_streaming(
 
     Args:
         model: the full torch model to export, carrying accelerate offload hooks.
-        dtype: weight dtype for unquantized layers, or the model's dtype if None.
         is_modelopt_qlora: whether the model is a ModelOpt QLoRA model.
         export_dir: directory to write shards and config artifacts into.
         max_shard_size: shard size limit, as bytes or a string such as ``"10GB"``.
@@ -356,9 +355,10 @@ def _export_transformers_checkpoint_streaming(
     names = module_name_maps(model)
 
     # --- Same model-level setup as _export_transformers_checkpoint ---
-    dtype = _resolve_export_dtype(model, dtype)
+    # A step of the export in progress, with the dtype and the flags it was started with.
+    ctx = ExportContext.current()
     model_type = ModelOptSession.active().binding(model).model_type
-    _prepare_moe_inputs(model, dtype, is_modelopt_qlora, model_type)
+    _prepare_moe_inputs(model)
 
     requantize_resmooth_fused_llm_layers(model, model_type)
 
@@ -422,15 +422,6 @@ def _export_transformers_checkpoint_streaming(
     # --- Stream tensors to shard files ---
     shard_size_bytes = _parse_shard_size(max_shard_size)
     writer = _StreamingShardWriter(export_dir, shard_size_bytes)
-    # No export handler reads model_type today -- only the prepare handlers do, and this
-    # path prepares from the root model above. Carried anyway so all three ExportContext
-    # constructions agree and a future handler cannot silently receive None here.
-    ctx = ExportContext(
-        model=model,
-        dtype=dtype,
-        is_modelopt_qlora=is_modelopt_qlora,
-        model_type=model_type,
-    )
     seen_keys: set[str] = set()
 
     _stream_tensor = _make_tensor_sink(
@@ -543,9 +534,21 @@ def collect_export_tensors(
     rank keeps roughly ``1/world`` of the model, ``"rank0"`` gives every unit to rank 0, which then
     holds the whole thing and must have room for it.
 
+    The units are packed in the export in progress, when this is a step of it; else in an export of
+    its own, from ``dtype`` and ``is_modelopt_qlora``, which ends when this returns.
+
     All the gathers finish before this returns, so the caller can write or postprocess without
     stalling anyone. Returning a list rather than a generator is what guarantees that.
     """
+    if ModelOptSession.active().runtime.export_context is not None:
+        return _collect_export_tensors(model, owner)
+    # Not a step of an export: this call is an export of its own.
+    with _start_export(model, dtype, is_modelopt_qlora):
+        return _collect_export_tensors(model, owner)
+
+
+def _collect_export_tensors(model: nn.Module, owner: str) -> list[tuple[str, torch.Tensor]]:
+    """:func:`collect_export_tensors`, as a step of the export in progress."""
     # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
     # per-model PTQ module at module scope here would risk an import cycle.
     from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
@@ -562,12 +565,10 @@ def collect_export_tensors(
             module.reshard()
     my_rank, world = _dist.rank(), _dist.size()
     names = module_name_maps(model)
-    ctx = ExportContext(
-        model=model,
-        dtype=dtype,
-        is_modelopt_qlora=is_modelopt_qlora,
-        model_type=ModelOptSession.active().binding(model).model_type,
-    )
+    # Its FSDP2 weight windows look modules up in the maps the gathers below use: the model's as it
+    # is now.
+    ctx = ExportContext.current()
+    ctx.module_names = names
     owned: list[tuple[str, torch.Tensor]] = []
     seen_keys: set[str] = set()
 
@@ -621,77 +622,78 @@ def _export_fsdp2_checkpoint_streaming(
     only its owner keeps and writes it, so a rank buffers its own share (~model / world) rather
     than the whole checkpoint. Rank 0 names the shards
     and writes the index at the end. Returns ``(None, quant_config)`` -- no state dict is built, and
-    the caller writes ``hf_quant_config.json``.
+    the caller writes ``hf_quant_config.json``. The export's context is kept in the workflow's
+    ModelOpt session while it runs.
     """
     export_dir = Path(export_dir)
     my_rank, world = _dist.rank(), _dist.size()
 
     # Setup only -- no global packing pass. Each layer is packed below once it has been gathered,
     # so the packer always sees a whole weight exactly as a single-process export would.
-    dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
+    with _prepare_model_for_export(model, dtype, is_modelopt_qlora) as prepared:
+        dtype, tied_map, quant_config = prepared
+        kv_cache_max_bound = 448
+        kv_cache_format = _get_kv_cache_postprocess_config(quant_config["quantization"])
 
-    kv_cache_max_bound = 448
-    kv_cache_format = _get_kv_cache_postprocess_config(quant_config["quantization"])
+        # Tied weights are dropped by name: with one unit in hand at a time there is no whole-dict
+        # view to compare storage against. tied_map covers dict-style and MoE ties.
+        tied_alias_keys = set(tied_map.alias_to_canonical) | _undeclared_tied_aliases(model)
 
-    # Tied weights are dropped by name: with one unit in hand at a time there is no whole-dict
-    # view to compare storage against. tied_map covers dict-style and MoE ties.
-    tied_alias_keys = set(tied_map.alias_to_canonical) | _undeclared_tied_aliases(model)
+        # Tensor transforms regroup state across keys, which a per-unit pass cannot do, so refuse
+        # rather than write tensors under mismatched hub names.
+        name_mapper = _build_reverse_name_mapper_or_none(model)
+        if name_mapper is not None:
+            tied_alias_keys = {name_mapper(k) for k in tied_alias_keys}
 
-    # Tensor transforms regroup state across keys, which a per-unit pass cannot do, so refuse
-    # rather than write tensors under mismatched hub names.
-    name_mapper = _build_reverse_name_mapper_or_none(model)
-    if name_mapper is not None:
-        tied_alias_keys = {name_mapper(k) for k in tied_alias_keys}
+        writer = _StreamingShardWriter(
+            export_dir, _parse_shard_size(max_shard_size), part_tag=f"r{my_rank:02d}_"
+        )
+        seen_keys: set[str] = set()
 
-    writer = _StreamingShardWriter(
-        export_dir, _parse_shard_size(max_shard_size), part_tag=f"r{my_rank:02d}_"
-    )
-    seen_keys: set[str] = set()
+        _stream = _make_tensor_sink(
+            writer,
+            name_mapper,
+            tied_alias_keys,
+            kv_cache_max_bound,
+            kv_cache_format,
+            is_modelopt_qlora,
+        )
 
-    _stream = _make_tensor_sink(
-        writer,
-        name_mapper,
-        tied_alias_keys,
-        kv_cache_max_bound,
-        kv_cache_format,
-        is_modelopt_qlora,
-    )
-
-    # Every gather is done before this returns, so no rank waits on any other below: all ranks
-    # postprocess and write their own share at the same time, and a slow writer delays nobody.
-    owned = collect_export_tensors(model, dtype, is_modelopt_qlora, owner="share")
-    for full_key, tensor in owned:
-        if full_key in seen_keys:
-            continue
-        seen_keys.add(full_key)
-        _stream(full_key, tensor)
-    owned.clear()
-
-    # Tensors the model never held (e.g. MTP weights). Rank 0 owns that slot, and they are already
-    # materialized, so they skip the per-tensor postprocessing -- only the hub-name reversal applies.
-    if my_rank == 0:
-        for name, tensor in (extra_state_dict or {}).items():
-            if name in seen_keys:
+        # Every gather is done before this returns, so no rank waits on any other below: all ranks
+        # postprocess and write their own share at the same time, and a slow writer delays nobody.
+        owned = collect_export_tensors(model, dtype, is_modelopt_qlora, owner="share")
+        for full_key, tensor in owned:
+            if full_key in seen_keys:
                 continue
-            seen_keys.add(name)
-            writer.add(
-                name_mapper(name) if name_mapper is not None else name,
-                tensor.detach().contiguous().cpu(),
-            )
+            seen_keys.add(full_key)
+            _stream(full_key, tensor)
+        owned.clear()
 
-    # Rank 0 can only name the shards once every rank has finished writing its parts.
-    closed = writer.close()
-    _dist.barrier()
-    gathered: list[Any]
-    if world > 1:
-        # gather_object wants the receive list on the destination rank and None everywhere else.
-        recv: list[Any] | None = [None] * world if my_rank == 0 else None
-        torch.distributed.gather_object(closed, recv, dst=0)
-        gathered = recv or []
-    else:
-        gathered = [closed]
-    if my_rank == 0:
-        name_shards_and_write_index(export_dir, gathered)
-        save_non_weight_artifacts(model, export_dir)
+        # Tensors the model never held (e.g. MTP weights). Rank 0 owns that slot, and they are already
+        # materialized, so they skip the per-tensor postprocessing -- only the hub-name reversal applies.
+        if my_rank == 0:
+            for name, tensor in (extra_state_dict or {}).items():
+                if name in seen_keys:
+                    continue
+                seen_keys.add(name)
+                writer.add(
+                    name_mapper(name) if name_mapper is not None else name,
+                    tensor.detach().contiguous().cpu(),
+                )
 
-    return None, quant_config
+        # Rank 0 can only name the shards once every rank has finished writing its parts.
+        closed = writer.close()
+        _dist.barrier()
+        gathered: list[Any]
+        if world > 1:
+            # gather_object wants the receive list on the destination rank and None everywhere else.
+            recv: list[Any] | None = [None] * world if my_rank == 0 else None
+            torch.distributed.gather_object(closed, recv, dst=0)
+            gathered = recv or []
+        else:
+            gathered = [closed]
+        if my_rank == 0:
+            name_shards_and_write_index(export_dir, gathered)
+            save_non_weight_artifacts(model, export_dir)
+
+        return None, quant_config

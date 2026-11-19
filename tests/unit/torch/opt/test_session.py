@@ -28,7 +28,7 @@ from modelopt.torch.opt import ModelOptSession
 def test_a_session_describes_one_model():
     """A session binds to the first model the workflow gives it, its root. Binding a part of the
     root, as a VLM's language model is, keeps the root; any other model is refused, one containing
-    the root included. A copy of the session is unbound."""
+    the root included. A copy of the session is unbound and holds no live objects."""
     vlm = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
     language_model = vlm[0]
 
@@ -39,8 +39,9 @@ def test_a_session_describes_one_model():
             session.bind(other)
     with pytest.raises(RuntimeError, match="a session describes one model"):
         ModelOptSession().bind(language_model).bind(vlm)
+    session.runtime.export_context = object()
     for copied in (copy.deepcopy(session), pickle.loads(pickle.dumps(session))):
-        assert copied.model is None
+        assert copied.model is None and copied.runtime.export_context is None
         copied.bind(torch.nn.Linear(2, 2))
 
 

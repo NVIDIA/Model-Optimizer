@@ -26,7 +26,9 @@ from torch.distributed.tensor import Shard, distribute_tensor
 
 import modelopt.torch.export.hf_export_handlers as handlers
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
+from modelopt.torch.export.registry import ExportModuleRegistry
+from modelopt.torch.export.unified_export_hf import _start_export
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
@@ -85,26 +87,29 @@ def _packing_job(rank, world_size):
     refs = copy.deepcopy(model)
     for name, _ in linears:
         ref = refs.get_submodule(name)
-        ExportModuleRegistry.match(ref)(name, ref, ExportContext(model=ref, dtype=torch.bfloat16))
+        with ModelOptSession().bind(ref), _start_export(ref, torch.bfloat16) as ref_ctx:
+            ExportModuleRegistry.match(ref)(name, ref, ref_ctx)
     for unit in model.units:
         fully_shard(unit, mesh=mesh)
     fully_shard(model, mesh=mesh)
     set_distribution_plan(model, DistributionPlan(world_size, dense="fsdp"))
-    ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
+    with (
+        ModelOptSession().bind(model),
+        _start_export(model, torch.bfloat16, keep_fused_experts=True) as ctx,
+    ):
+        # A rank left waiting in a window's unshard fails the test at pytest's per-test timeout, after
+        # which the worker pool kills its ranks.
+        with handlers.held_fsdp2_weight_windows(ctx):
+            for name, linear in linears:
+                ExportModuleRegistry.match(linear)(name, linear, ctx)
 
-    # A rank left waiting in a window's unshard fails the test at pytest's per-test timeout, after
-    # which the worker pool kills its ranks.
-    with handlers.held_fsdp2_weight_windows(ctx):
-        for name, linear in linears:
-            ExportModuleRegistry.match(linear)(name, linear, ctx)
-
-    sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
-    for name, _ in linears:
-        ref = refs.get_submodule(name)
-        assert torch.equal(sd[f"{name}.weight"].full_tensor().cpu(), ref.weight.cpu()), name
-        for leaf in ("weight_scale", "weight_scale_2", "input_scale"):
-            got = _raw_bytes(sd[f"{name}.{leaf}"])
-            assert torch.equal(got, _raw_bytes(getattr(ref, leaf))), (name, leaf)
+        sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
+        for name, _ in linears:
+            ref = refs.get_submodule(name)
+            assert torch.equal(sd[f"{name}.weight"].full_tensor().cpu(), ref.weight.cpu()), name
+            for leaf in ("weight_scale", "weight_scale_2", "input_scale"):
+                got = _raw_bytes(sd[f"{name}.{leaf}"])
+                assert torch.equal(got, _raw_bytes(getattr(ref, leaf))), (name, leaf)
 
 
 def test_sharded_packing_matches_the_unsharded_bytes_over_nccl(need_2_gpus, dist_workers):
