@@ -539,13 +539,14 @@ def _ensure_source_checkout(source_repo: str | None = None) -> dict:
 
     configured_repo = os.environ.get("MODELOPT_MCP_SOURCE_REPO") or _DEFAULT_SOURCE_REPO
     # The checkout runs locally, so the agent may only pick repos the operator configured.
-    if source_repo and source_repo not in {configured_repo, _DEFAULT_SOURCE_REPO}:
+    allowed_repos = sorted({configured_repo, _DEFAULT_SOURCE_REPO})
+    if source_repo and source_repo not in allowed_repos:
         return {
             "ok": False,
             "reason": "source_repo_not_allowed",
             "diagnostic": (
-                f"source_repo {source_repo!r} is not allowed. Use the default repo, or set "
-                "MODELOPT_MCP_SOURCE_REPO in the MCP server environment."
+                f"source_repo {source_repo!r} is not allowed. Allowed: {allowed_repos}; "
+                f"omit source_repo to use {configured_repo}."
             ),
             "source_repo": source_repo,
         }

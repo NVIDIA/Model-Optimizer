@@ -89,7 +89,7 @@ finalize the externally owned lifecycle run.
 1. `MODELOPT_MCP_SOURCE_REF`, if set.
 2. `main`.
 
-The ref is not a tool argument, so only the operator can choose which code runs.
+The ref is not a tool argument, so only the operator chooses it. Callers can still pick `source_repo`, but only the default repo or `MODELOPT_MCP_SOURCE_REPO`, and the same ref can point to different code in each.
 
 It resolves that ref against `source_repo` / `MODELOPT_MCP_SOURCE_REPO` / `https://github.com/NVIDIA/Model-Optimizer.git`, creates a cached checkout under `MODELOPT_MCP_SOURCE_CACHE` (default `$XDG_CACHE_HOME/modelopt-mcp/sources` or `~/.cache/modelopt-mcp/sources`), and runs:
 
