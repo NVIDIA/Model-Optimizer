@@ -38,6 +38,8 @@ pytest.importorskip("diffusers")
 pytest.importorskip("transformers")
 
 import diffusers
+from diffusers.configuration_utils import ConfigMixin, register_to_config
+from diffusers.models.modeling_utils import ModelMixin
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import (
@@ -751,3 +753,45 @@ def test_diffusion_model_type_refuses_what_the_export_does_not_take(monkeypatch)
         get_diffusion_model_type(nn.Linear(1, 1))
     with pytest.raises(TypeError):
         get_diffusion_model_type("pipe")
+
+
+class _ExpertsAsOneModule(nn.Module):  # every expert in one module, which no export handler takes
+    def __init__(self, num_experts, dim):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(num_experts, dim, dim) * 0.1)
+
+    def forward(self, x):
+        return torch.einsum("bd,ned->be", x, self.weight)
+
+
+class _MoEBlock(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.router = nn.Linear(dim, 2)
+        self.experts = _ExpertsAsOneModule(2, dim)
+
+    def forward(self, x):
+        return self.experts(x)
+
+
+class _TinyMoEDiT(ModelMixin, ConfigMixin):
+    @register_to_config
+    def __init__(self, dim: int = 16):
+        super().__init__()
+        self.proj_in = nn.Linear(dim, dim)
+        self.moe = _MoEBlock(dim)
+        self.proj_out = nn.Linear(dim, dim)
+
+    def forward(self, x):
+        return self.proj_out(self.moe(self.proj_in(x)))
+
+
+def test_a_run_that_exports_a_diffusers_model_refuses_none_of_its_moe_blocks(tmp_path):
+    """The diffusers export prepares no MoE inputs, so a run that exports does not refuse a diffusers
+    model up front for an MoE block whose experts no export handler takes: it quantizes and exports
+    the model."""
+    model = _TinyMoEDiT()
+    with ModelOptSession(export=True):
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
+        export_hf_checkpoint(model, export_dir=tmp_path)
+    assert (tmp_path / "diffusion_pytorch_model.safetensors").exists()

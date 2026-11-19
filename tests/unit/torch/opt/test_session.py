@@ -41,9 +41,12 @@ def test_a_session_describes_one_model():
     assert session.bind(language_model).model is vlm
     with pytest.raises(ValueError, match="a session describes one model"):
         session.bind(torch.nn.Linear(2, 2))
+
     session.runtime.export_context = object()
+    session.runtime.layerwise_exporter = object()
     for copied in (copy.deepcopy(session), pickle.loads(pickle.dumps(session))):
         assert copied.model is None and copied.runtime.export_context is None
+        assert copied.runtime.layerwise_exporter is None
         copied.bind(torch.nn.Linear(2, 2))
     held = weakref.ref(vlm)
     del vlm, language_model

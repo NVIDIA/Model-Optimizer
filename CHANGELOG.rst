@@ -20,6 +20,8 @@ Changelog
 
 *Quantization - Export & Deployment*
 
+- With the active ``ModelOptSession``'s ``export`` set, ``mtq.quantize``, ``mtq.calibrate`` and ``mtq.auto_quantize`` refuse, before calibrating, a model ``export_hf_checkpoint`` could not write, and a layerwise calibration hands its exporter to the export through the session.
+
 *Quantization - Recipes*
 
 *Speculative Decoding*

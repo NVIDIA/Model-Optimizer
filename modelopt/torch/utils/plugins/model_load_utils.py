@@ -18,6 +18,7 @@
 import contextlib
 import copy
 import dataclasses
+import functools
 import inspect
 import json
 import logging
@@ -29,7 +30,7 @@ import warnings
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import chain
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar, cast
 
 import torch
 import torch.distributed.checkpoint as dcp
@@ -41,7 +42,7 @@ from huggingface_hub import snapshot_download
 from packaging.version import parse
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 from safetensors.torch import safe_open
 from torch.distributed import device_mesh
 from torch.distributed.checkpoint import HuggingFaceStorageReader
@@ -908,6 +909,31 @@ def _refuse_a_bound_session(session: "ModelOptSession | None") -> None:
         )
 
 
+_Load = TypeVar("_Load", bound="Callable[..., Any]")
+
+
+def _unbound_if_it_fails(load: _Load) -> _Load:
+    """``load``, which leaves the workflow's session unbound, as it found it, when it fails.
+
+    The load binds the session once nothing more can fail, but ``init_quantized_weights``
+    quantizes the model as it builds it, which binds the session before the load can still fail.
+    """
+
+    @functools.wraps(load)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        session = ModelOptSession.current()
+        if session is None or session.is_bound:  # one the load refuses, unchanged
+            return load(*args, **kwargs)
+        try:
+            return load(*args, **kwargs)
+        except BaseException:
+            session._unbind()
+            raise
+
+    return cast("_Load", run)
+
+
+@_unbound_if_it_fails
 def load_pretrained(
     ckpt_path: str,
     auto_class: Any = None,
