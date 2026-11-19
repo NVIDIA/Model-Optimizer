@@ -26,7 +26,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt.torch.models import hf_model_type, is_moe
-from modelopt.torch.opt.session import ModelOptSession
+from modelopt.torch.opt.session import ensure_modelopt_session_binding
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils.core_utils import (
     enable_weight_access_and_writeback,
@@ -374,8 +374,8 @@ class LayerwiseExporter:
         so only the hub-name reversal applies, and they win on a name clash exactly as they
         do in ``export_hf_checkpoint``.
 
-        It runs in the active ModelOpt session, else in one of its own, as a public ModelOpt call
-        does: a pipeline that establishes no session calls it outside any.
+        It runs in the active ModelOpt session, the workflow's or the default one, as a public
+        ModelOpt call does.
         """
         if not self._bound:
             raise RuntimeError(
@@ -384,9 +384,9 @@ class LayerwiseExporter:
             )
         if self._finalized:
             raise RuntimeError("finalize() called twice; the checkpoint is already written.")
-        with ModelOptSession.ensure(self._model):
-            self._finalized = True
-            return self._finalize(extra_state_dict)
+        ensure_modelopt_session_binding(self._model)
+        self._finalized = True
+        return self._finalize(extra_state_dict)
 
     def _finalize(self, extra_state_dict: dict[str, torch.Tensor] | None) -> dict:
         """:meth:`finalize`, in the ModelOpt session it runs in."""

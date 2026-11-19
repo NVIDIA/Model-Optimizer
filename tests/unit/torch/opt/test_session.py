@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A ModelOpt workflow runs in one ModelOptSession, which describes one model."""
+"""A ModelOpt workflow runs in one ModelOptSession, which binds each of its models by name."""
 
 import copy
 import gc
@@ -25,7 +25,7 @@ import pytest
 import torch
 
 from modelopt.torch.opt import ModelOptSession
-from modelopt.torch.opt.session import ensure_modelopt_session
+from modelopt.torch.opt.session import ensure_modelopt_session_binding
 
 
 def test_a_session_describes_one_model():
@@ -108,19 +108,18 @@ def test_binding_reads_the_models_type():
 
 
 def test_a_workflow_runs_in_one_session():
-    """A public call runs in the active session, bound to its model, so the calls of a workflow,
-    nested ones too, share one; outside any, each call runs in one of its own, which ends with it.
-    A second session opened while one is active is refused, and an exception ends the active one."""
+    """A public call runs in the session a block opened, bound to its model, so the calls of a
+    workflow share one. A session opened while one is active is refused, as is opening the default
+    one, and an exception ends the active one."""
 
-    @ensure_modelopt_session
-    def call(model, inner=None):
-        session = ModelOptSession.active()
-        return session, inner(model) if inner else None
+    def call(model):
+        ensure_modelopt_session_binding(model)
+        return ModelOptSession.active()
 
     model = torch.nn.Linear(2, 2)
     with ModelOptSession() as workflow:
         assert ModelOptSession.current() is workflow
-        assert call(model, inner=call) == (workflow, (workflow, None))
+        assert call(model) is workflow and call(model) is workflow
         assert workflow.model is model
         with pytest.raises(RuntimeError, match="already active"), ModelOptSession():
             pass
@@ -129,15 +128,54 @@ def test_a_workflow_runs_in_one_session():
     # The workflow's block ended, and the session let go of its model.
     assert workflow.model is None
 
-    with pytest.raises(TypeError):
-        call()  # the call's own error for its missing model, not one from looking the model up
-    first, (nested, _) = call(model, inner=call)
-    assert nested is first and first is not workflow
-    assert call(model)[0] is not first
-    assert ModelOptSession.current() is None
-    with pytest.raises(RuntimeError, match="No ModelOptSession is active"):
-        ModelOptSession.active()
-
+    with pytest.raises(RuntimeError, match="never opened"), ModelOptSession.active():
+        pass
     with pytest.raises(ZeroDivisionError), ModelOptSession():
         1 / 0
     assert ModelOptSession.current() is None
+
+
+def test_code_that_opens_no_session_runs_in_the_default_one():
+    """Outside any block, calls run in the process's default session, which is never closed: it
+    follows the model the code moves on to, a model containing it included, keeps it for a call on
+    a part, and holds it weakly, so code that drops the model frees it. A name given explicitly
+    stays strict."""
+    default = ModelOptSession.active()
+    assert ModelOptSession.current() is None and ModelOptSession.active() is default
+    vlm = torch.nn.Sequential(torch.nn.Linear(2, 2))
+    assert ensure_modelopt_session_binding(vlm[0]).model is vlm[0]
+    assert ensure_modelopt_session_binding(vlm).model is vlm and default.model is vlm
+    assert ensure_modelopt_session_binding(vlm[0]).model is vlm
+
+    other = torch.nn.Linear(2, 2)
+    assert ensure_modelopt_session_binding(other).model is other and default.model is other
+    with pytest.raises(RuntimeError, match="describes one model"):
+        default.bind(vlm, name="model")
+    held = weakref.ref(other)
+    del other
+    gc.collect()
+    assert held() is None and default.model is None
+
+
+def test_a_session_binds_each_model_of_its_workflow_by_name():
+    """A distillation binds its teacher by name. A call on the teacher, or on a part of it, runs
+    under that name, the innermost where the student holds its teacher, and the name refuses
+    another model, in the default session too."""
+    student, teacher = torch.nn.Module(), torch.nn.Module()
+    student.config = SimpleNamespace(model_type="student")
+    teacher.config = SimpleNamespace(model_type="teacher")
+    student.layer, teacher.layer = torch.nn.Linear(2, 2), torch.nn.Linear(2, 2)
+    student.teacher = teacher  # as ModelOpt's distillation holds its teacher
+
+    with ModelOptSession() as session:
+        session.bind(student).bind(teacher, name="teacher")
+        assert session.binding(student.layer).name == "model"
+        assert ensure_modelopt_session_binding(teacher.layer).name == "teacher"
+        assert session.binding(teacher).model_type == "teacher" and session.model_type == "student"
+        with pytest.raises(RuntimeError, match="describes one model"):
+            session.bind(torch.nn.Linear(2, 2), name="teacher")
+    with pytest.raises(RuntimeError, match="binds no model"):
+        ModelOptSession().binding(teacher)
+    ModelOptSession.active().bind(teacher, name="teacher")
+    with pytest.raises(RuntimeError, match="describes one model"):
+        ModelOptSession.active().bind(torch.nn.Linear(2, 2), name="teacher")

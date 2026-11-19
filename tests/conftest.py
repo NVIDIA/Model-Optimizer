@@ -33,9 +33,12 @@ from modelopt.torch.opt import session as _modelopt_session
 
 @pytest.fixture(autouse=True)
 def _no_modelopt_session_left_active():
-    """Fail a test that leaves a ModelOptSession active, and clear it for the next test."""
+    """Fail a test that leaves a ModelOptSession active; give the next test a fresh default one."""
     yield
     leaked, _modelopt_session._active = _modelopt_session._active, None
+    default = _modelopt_session.ModelOptSession()
+    default._is_default = True
+    _modelopt_session._default = default
     assert leaked is None, "The test left a ModelOptSession active."
 
 

@@ -33,7 +33,7 @@ from safetensors.torch import save_file
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
-from modelopt.torch.opt.session import ModelOptSession, ensure_modelopt_session
+from modelopt.torch.opt.session import ModelOptSession, ensure_modelopt_session_binding
 from modelopt.torch.quantization.utils.core_utils import (
     _get_fsdp2_mesh,
     enable_weight_access_and_writeback,
@@ -357,7 +357,7 @@ def _export_transformers_checkpoint_streaming(
 
     # --- Same model-level setup as _export_transformers_checkpoint ---
     dtype = _resolve_export_dtype(model, dtype)
-    model_type = ModelOptSession.active().model_type
+    model_type = ModelOptSession.active().binding(model).model_type
     _prepare_moe_inputs(model, dtype, is_modelopt_qlora, model_type)
 
     requantize_resmooth_fused_llm_layers(model, model_type)
@@ -533,7 +533,6 @@ def _assert_fsdp2_owns_every_mesh_dim(model: nn.Module) -> None:
             )
 
 
-@ensure_modelopt_session
 def collect_export_tensors(
     model: nn.Module, dtype: torch.dtype, is_modelopt_qlora: bool, *, owner: str
 ) -> list[tuple[str, torch.Tensor]]:
@@ -549,6 +548,7 @@ def collect_export_tensors(
     """
     # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
     # per-model PTQ module at module scope here would risk an import cycle.
+    ensure_modelopt_session_binding(model)
     from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
 
     _assert_fsdp2_owns_every_mesh_dim(model)
@@ -567,7 +567,7 @@ def collect_export_tensors(
         model=model,
         dtype=dtype,
         is_modelopt_qlora=is_modelopt_qlora,
-        model_type=ModelOptSession.active().model_type,
+        model_type=ModelOptSession.active().binding(model).model_type,
     )
     owned: list[tuple[str, torch.Tensor]] = []
     seen_keys: set[str] = set()

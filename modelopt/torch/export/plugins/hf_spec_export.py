@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from modelopt.torch.opt.session import ModelOptSession
+from modelopt.torch.opt.session import ensure_modelopt_session_binding
 
 from ..quant_aware_conversion import revert_quant_config_names
 from .hf_spec_configs import kimik2_eagle_template_config, llama_eagle_template_config
@@ -285,8 +285,8 @@ class EagleExporter(SpeculativeDecodingExporter):
         if has_quant_opt(self.model):
             from ..unified_export_hf import _export_transformers_checkpoint
 
-            with ModelOptSession.ensure(self.model):
-                full_sd, hf_quant_config = _export_transformers_checkpoint(self.model, dtype)
+            ensure_modelopt_session_binding(self.model)
+            full_sd, hf_quant_config = _export_transformers_checkpoint(self.model, dtype)
         else:
             full_sd, hf_quant_config = self.model.state_dict(), None
 
@@ -474,8 +474,8 @@ class DFlashExporter(SpeculativeDecodingExporter):
             from ..unified_export_hf import _export_transformers_checkpoint
 
             module_names = tuple(name for name, _ in self.model.named_modules())
-            with ModelOptSession.ensure(self.model):
-                full_sd, hf_quant_config = _export_transformers_checkpoint(self.model, dtype)
+            ensure_modelopt_session_binding(self.model)
+            full_sd, hf_quant_config = _export_transformers_checkpoint(self.model, dtype)
             if hf_quant_config is not None:
                 revert_quant_config_names(
                     hf_quant_config.get("quantization", {}),

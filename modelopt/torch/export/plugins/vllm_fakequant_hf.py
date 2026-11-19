@@ -32,7 +32,7 @@ from safetensors.torch import save_file
 
 import modelopt.torch.opt as mto
 from modelopt.torch.models import is_moe
-from modelopt.torch.opt.session import ensure_modelopt_session
+from modelopt.torch.opt.session import ensure_modelopt_session_binding
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
 from modelopt.torch.quantization.nn import (
@@ -629,7 +629,6 @@ def _copy_source_config(model: nn.Module, export_dir: Path) -> None:
         shutil.copyfile(source_config, export_dir / "config.json")
 
 
-@ensure_modelopt_session
 def export_hf_vllm_fq_checkpoint(
     model: nn.Module,
     export_dir: Path | str,
@@ -651,7 +650,7 @@ def export_hf_vllm_fq_checkpoint(
     weight parameters only (no ``state_dict``), before the inplace fakequant loop.
 
     The export runs in the active ModelOpt session
-    (:class:`~modelopt.torch.opt.session.ModelOptSession`), else in one of its own.
+    (:class:`~modelopt.torch.opt.session.ModelOptSession`): the workflow's, else the default one.
 
     Args:
         model: In-memory quantized model.
@@ -661,6 +660,7 @@ def export_hf_vllm_fq_checkpoint(
             dict materialization. This is destructive — model weights are permanently
             modified and weight quantizers are not re-enabled after export.
     """
+    ensure_modelopt_session_binding(model)
     session = mto.ModelOptSession.active()
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -672,7 +672,7 @@ def export_hf_vllm_fq_checkpoint(
         if inplace_mem_efficient:
             # Resmooth shared-input groups, then fakequant (state dict and/or params).
             pqs_overrides, requant_weights = _resmooth_experts_for_export(
-                model, None, model_type=session.model_type, inplace=True
+                model, None, model_type=session.binding(model).model_type, inplace=True
             )
             # Inplace path: iterate decoder layers, one offload<->onload per layer.
             decoder_layers = LayerActivationCollector.get_decoder_layers(model)
@@ -703,7 +703,7 @@ def export_hf_vllm_fq_checkpoint(
             state_dict = model.state_dict()
             # Resmooth shared-input groups, then fakequant (state dict and/or params).
             pqs_overrides, requant_weights = _resmooth_experts_for_export(
-                model, state_dict, model_type=session.model_type, inplace=False
+                model, state_dict, model_type=session.binding(model).model_type, inplace=False
             )
 
             # Default path: fakequant into the resmoothed state_dict copy (do not refresh

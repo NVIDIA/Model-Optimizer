@@ -37,7 +37,7 @@ from safetensors.torch import save_file
 
 from modelopt import env
 from modelopt.torch.models import is_moe
-from modelopt.torch.opt.session import ModelOptSession, ensure_modelopt_session
+from modelopt.torch.opt.session import ModelOptSession, ensure_modelopt_session_binding
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     copy_off_index_safetensors,
@@ -1019,7 +1019,7 @@ def _process_quantized_modules(
         model=model,
         dtype=dtype,
         is_modelopt_qlora=is_modelopt_qlora,
-        model_type=ModelOptSession.active().model_type,
+        model_type=ModelOptSession.active().binding(model).model_type,
         keep_fused_experts=keep_fused_experts,
     )
 
@@ -1039,7 +1039,7 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
     the quant config.
     """
     dtype = _resolve_export_dtype(model, dtype)
-    model_type = ModelOptSession.active().model_type
+    model_type = ModelOptSession.active().binding(model).model_type
     # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
     # Sourced from HF's name-based all_tied_weights_keys, so it is correct even under FSDP/offload.
     tied_map = TiedWeightMap(model)
@@ -1743,13 +1743,13 @@ def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
     _copy_non_model_files_from_source(model, export_dir)
 
 
-@ensure_modelopt_session
 def export_speculative_decoding(
     model: torch.nn.Module,
     dtype: torch.dtype | None = None,
     export_dir: Path | str = tempfile.gettempdir(),
 ) -> None:
     """Export speculative decoding HuggingFace model checkpoint."""
+    ensure_modelopt_session_binding(model)
     assert has_spec_opt(model), "Model is not optimized for speculative decoding."
 
     exporter: SpeculativeDecodingExporter = model.get_exporter()
@@ -2092,7 +2092,6 @@ def _no_gather_export_asked() -> bool:
     return env.fsdp2_export() == "nogather"
 
 
-@ensure_modelopt_session
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -2111,7 +2110,8 @@ def export_hf_checkpoint(
     Under ``torch.distributed`` (e.g. FSDP2), all ranks participate in the
     collective state-dict gather inside ``_export_transformers_checkpoint``;
     only rank 0 writes files. A final barrier syncs the other ranks. The export runs in the active
-    ModelOpt session (:class:`~modelopt.torch.opt.session.ModelOptSession`), else in one of its own.
+    ModelOpt session (:class:`~modelopt.torch.opt.session.ModelOptSession`): the workflow's, else
+    the default one.
 
     Args:
         model: The full torch model to export. The actual quantized model may be a submodule.
@@ -2146,6 +2146,7 @@ def export_hf_checkpoint(
     # expert params across the EP group. Computed here rather than with the other predicates below
     # because the carry-over gate needs it and runs ahead of them (the layerwise and diffusers paths
     # return before those are reached).
+    ensure_modelopt_session_binding(model)
     _fsdp2_sharded, _ep_sharded = _hf_shard_flags(model)
     # Under expert parallelism each rank holds only its own experts' ModelOpt state, so the
     # rank-0 save would write an incomplete one. Refused before any collective, alike on every rank.

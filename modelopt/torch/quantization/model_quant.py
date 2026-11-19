@@ -35,7 +35,7 @@ import modelopt.torch.utils.distributed as dist
 from modelopt import env
 from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
-from modelopt.torch.opt.session import ensure_modelopt_session
+from modelopt.torch.opt.session import ensure_modelopt_session_binding
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
@@ -218,7 +218,6 @@ def _refuse_a_malformed_variable() -> None:
 
 
 # TODO: Descriptors for the supported algorithms
-@ensure_modelopt_session
 def calibrate(
     model: nn.Module,
     algorithm: QuantizeAlgoCfgType = "max",
@@ -230,7 +229,7 @@ def calibrate(
     :ref:`custom calibration algorithm <custom_calibration_algorithm>`
 
     Calibration runs in the active ModelOpt session
-    (:class:`~modelopt.torch.opt.session.ModelOptSession`), else in one of its own.
+    (:class:`~modelopt.torch.opt.session.ModelOptSession`): the workflow's, else the default one.
 
     Args:
         model: A pytorch model with quantizer modules.
@@ -250,6 +249,7 @@ def calibrate(
 
     Returns: The calibrated pytorch model.
     """
+    ensure_modelopt_session_binding(model)
     _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
     _refuse_unsupported_distributed_calibration(model, algorithm)
     _refuse_a_malformed_variable()
@@ -521,7 +521,6 @@ def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeCon
             )
 
 
-@ensure_modelopt_session
 def quantize(
     model: nn.Module,
     config: dict[str, Any | QuantizeConfig],
@@ -619,6 +618,7 @@ def quantize(
 
     Returns: A pytorch model which has been quantized and calibrated.
     """
+    ensure_modelopt_session_binding(model)
     quantize_config = QuantizeConfig(**dict(config))
     _refuse_awq_on_a_sharded_fsdp2_model(model, config.get("algorithm"))
     _refuse_unsupported_distributed_calibration(model, config.get("algorithm"))
@@ -942,7 +942,6 @@ def _save_module_attributes(model: nn.Module) -> Callable[[], None]:
     return restore
 
 
-@ensure_modelopt_session
 def auto_quantize(
     model: nn.Module,
     constraints: dict[str, Any] | None = None,
@@ -978,8 +977,8 @@ def auto_quantize(
     with minimal accuracy impact.
 
     The search runs in the active ModelOpt session
-    (:class:`~modelopt.torch.opt.session.ModelOptSession`), else in one of its own, and calibrates
-    every candidate in it, so the whole search is one workflow.
+    (:class:`~modelopt.torch.opt.session.ModelOptSession`), the workflow's or the default one, and
+    calibrates every candidate in it, so the whole search is one workflow.
 
     Args:
         model: A pytorch model with quantizer modules.
@@ -1221,6 +1220,7 @@ def auto_quantize(
         might not be readily deployable to TensorRT-LLM yet.
 
     """
+    ensure_modelopt_session_binding(model)
     if quantization_formats is not None:
         if isinstance(quantization_formats, str) or not isinstance(quantization_formats, Sequence):
             raise TypeError("`quantization_formats` must be a sequence of formats.")

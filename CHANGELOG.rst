@@ -28,7 +28,7 @@ Changelog
 
 *Misc*
 
-- Add ``modelopt.torch.opt.ModelOptSession``, the session a ModelOpt workflow runs in: run the workflow inside ``with ModelOptSession():`` and the quantization, calibration and Hugging Face export calls it makes run in that session, which describes the workflow and its one model. A call made outside any session runs in one of its own, as before.
+- Add ``modelopt.torch.opt.ModelOptSession``, the session a ModelOpt workflow runs in: run the workflow inside ``with ModelOptSession():`` and the quantization, calibration and Hugging Face export calls it makes run in that session, which binds the workflow's models by name (``model``, and ``teacher`` for distillation). A call made outside any ``with`` block runs in the process's default session, which is never closed and holds its models weakly.
 
 **Backward Breaking Changes**
 
