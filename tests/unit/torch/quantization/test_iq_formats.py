@@ -411,6 +411,20 @@ def test_rejects_invalid_importance(name, importance, match):
 
 
 @pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -1.0, -1e-4])
+def test_rejects_invalid_scales(name, bad):
+    """A non-finite scale decodes to garbage; a negative one inverts every decoded element.
+
+    The encoders check the values, as they do importance's, so the CUDA packers need not read them
+    back on every encode.
+    """
+    _, quantize, *_ = _parts(name)
+
+    with pytest.raises(ValueError, match="scales must be finite and non-negative"):
+        quantize(torch.randn(1, 256), scales=torch.full((1,), bad, dtype=torch.float16))
+
+
+@pytest.mark.parametrize("name", NAMES)
 def test_fixed_choices_take_each_group_from_that_choices_encoding(name):
     """A fixed choice decodes as the encoding giving every group that choice; the search's own pick
     is the choice of least squared error."""

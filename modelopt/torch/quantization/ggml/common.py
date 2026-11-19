@@ -15,6 +15,8 @@
 
 """Shared validation for GGML-compatible block quantizers."""
 
+import contextlib
+import contextvars
 import itertools
 import math
 import weakref
@@ -1045,7 +1047,11 @@ def super_block_scales(
             f"scales must hold one float16 value per block ({len(blocks)}), got "
             f"{scales.dtype} {tuple(scales.shape)}"
         )
-    return scales.reshape(-1).to(blocks.device)
+    scales = scales.reshape(-1).to(blocks.device)
+    checked = _ENCODE_INPUTS_CHECKED.get()
+    if not checked and not (torch.isfinite(scales) & (scales >= 0)).all():
+        raise ValueError("scales must be finite and non-negative")
+    return scales
 
 
 def dequantize_blocks(
@@ -1122,6 +1128,31 @@ def floored_second_moments(second_moments: torch.Tensor | None) -> torch.Tensor 
     return second_moments.clamp_min(_IMPORTANCE_FLOOR * mean)
 
 
+# Set by checked_encode_inputs: the encodes inside take their importance, choices and scales as
+# checked.
+_ENCODE_INPUTS_CHECKED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_ENCODE_INPUTS_CHECKED", default=False
+)
+
+
+@contextlib.contextmanager
+def checked_encode_inputs(importance: torch.Tensor | None = None):
+    """Encode inside without checking each encode's importance, choices and scales again.
+
+    Each check reads a reduction back from the GPU, which stalls the host until all queued work is
+    done. GPTQ's group loop and the choice search encode many times, each with a slice of one
+    importance vector, and choices and scales derived inside the loop; ``importance`` is checked
+    here, once.
+    """
+    if importance is not None and not (torch.isfinite(importance) & (importance >= 0)).all():
+        raise ValueError("importance must be finite and non-negative")
+    token = _ENCODE_INPUTS_CHECKED.set(True)
+    try:
+        yield
+    finally:
+        _ENCODE_INPUTS_CHECKED.reset(token)
+
+
 def importance_blocks(
     importance: torch.Tensor | None, weight: torch.Tensor, format_name: str
 ) -> torch.Tensor | None:
@@ -1137,7 +1168,8 @@ def importance_blocks(
             f"{importance.dtype} {tuple(importance.shape)}"
         )
     importance = importance.to(device=weight.device, dtype=torch.float32)
-    if not (torch.isfinite(importance) & (importance >= 0)).all():
+    checked = _ENCODE_INPUTS_CHECKED.get()
+    if not checked and not (torch.isfinite(importance) & (importance >= 0)).all():
         raise ValueError(f"{format_name} importance must be finite and non-negative")
     return importance.reshape(-1, GGML_BLOCK_SIZE)
 
@@ -1167,7 +1199,8 @@ def choice_blocks(
             f"{choices.dtype} {tuple(choices.shape)}"
         )
     choices = choices.to(device=weight.device, dtype=torch.int64).reshape(-1, groups)
-    if not ((choices >= 0) & (choices < num_choices)).all():
+    checked = _ENCODE_INPUTS_CHECKED.get()
+    if not checked and not ((choices >= 0) & (choices < num_choices)).all():
         raise ValueError(f"{format_name} choices must lie in [0, {num_choices})")
     return choices
 
