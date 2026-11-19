@@ -32,6 +32,9 @@ Changelog
 
 *Misc*
 
+- Move agent skills to the repository-root ``skills/`` directory, with symlinks for agent discovery.
+- Prefix agent skill names with ``modelopt-``; existing names remain available as forwarding stubs.
+
 **Backward Breaking Changes**
 
 **Deprecations**
