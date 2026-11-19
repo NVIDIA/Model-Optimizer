@@ -37,6 +37,7 @@ from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, GenerationMixin, LlamaConfig
 
 from modelopt.torch.models import PTQSpec
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
@@ -857,14 +858,15 @@ _TINY = {
     ],
     ids=["str", "torch_device", "single_process", "cpu"],
 )
+@pytest.mark.parametrize("through", ["argument", "session"])
 def test_a_rank_device_pins_the_whole_model_to_it(
-    monkeypatch, tmp_path, device, world_size, device_map
+    monkeypatch, tmp_path, device, world_size, device_map, through
 ):
     """Under torchrun each rank asks for its own cuda:<local_rank>; "auto" would let every rank's
     accelerate pick the same idle GPU. A single process spreads the model over the GPUs, whatever
     GPU it names, and keeps it on a CPU it names, as the torch.device hf_ptq's run hands in. Only a
     single process's load is held to a memory limit sized over the node's GPUs: the pinned map would
-    ignore one."""
+    ignore one. The plan the workflow's session holds places the model alike."""
     LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
     # No GPU on the node holds the model, so sizing it over the node limits its memory.
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 0, "cpu": 1 << 40})
@@ -879,7 +881,11 @@ def test_a_rank_device_pins_the_whole_model_to_it(
 
     monkeypatch.setattr(example_utils, "load_pretrained", load_pretrained)
 
-    example_utils.get_model(str(tmp_path), device=device, distribution=plan)
+    if through == "session":
+        with ModelOptSession(distribution=plan):
+            example_utils.get_model(str(tmp_path), device=device)
+    else:
+        example_utils.get_model(str(tmp_path), device=device, distribution=plan)
 
     assert placed == [(device_map, world_size == 1)]
 
