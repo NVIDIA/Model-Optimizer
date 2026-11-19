@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-from transformers import Cache
+from transformers import Cache, DynamicCache
 from transformers.models.llama.modeling_llama import LlamaRMSNorm, LlamaRotaryEmbedding
 
 __all__ = ["EagleBaseModelOutput", "EagleModule"]
@@ -80,6 +80,10 @@ class EagleModule(nn.Module):
                 config.hidden_size, eps=config.rms_norm_eps
             )
             self.layers[0].hidden_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def make_cache(self) -> Cache:
+        """Create a KV cache using the draft's attention configuration."""
+        return DynamicCache(config=self.config)
 
     def _maybe_init_rope(self, device=None):
         if self.config.eagle_decoder_type == "llama" and not hasattr(self, "rotary_emb"):

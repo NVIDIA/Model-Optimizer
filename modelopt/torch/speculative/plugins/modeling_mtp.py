@@ -21,7 +21,7 @@ from typing import NamedTuple
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
-from transformers import Cache, PretrainedConfig, PreTrainedModel
+from transformers import Cache, DynamicCache, PretrainedConfig, PreTrainedModel
 
 from ..config import EagleConfig, MTPConfig
 from ..eagle.conversion import EagleDMRegistry
@@ -46,6 +46,13 @@ class MTPModule(nn.Module, ABC):
         super().__init__()
         self.config = config
         self.state_shape = (config.hidden_size,) if state_shape is None else state_shape
+
+    def make_cache(self) -> Cache:
+        """Keep every round's keys for EAGLE's training-time-test attention masks.
+
+        Native attention windows belong in the adapter's attention, not cache eviction.
+        """
+        return DynamicCache()
 
     def _maybe_init_rope(self, device):
         """Adapters may initialize rotary buffers here, before the shared round loop."""

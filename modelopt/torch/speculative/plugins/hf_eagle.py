@@ -746,7 +746,7 @@ class HFEagleModel(EagleModel):
         if not isinstance(past_key_values, Cache):
             past_key_values = DynamicCache(config=self._base_llm_config)
         if not isinstance(eagle_cache, Cache):
-            eagle_cache = DynamicCache(config=self.eagle_module.config)
+            eagle_cache = self.eagle_module.make_cache()
         past_key_values.eagle_cache = eagle_cache
 
         # ====Prepare inputs for the first eagle forward pass====

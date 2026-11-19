@@ -114,7 +114,7 @@ def _register_tiny_adapter(monkeypatch):
     register_native_mtp_adapter(TinyMTPAdapter)
 
 
-def _write_base(path, streams=1, tied=True):
+def _write_base(path, streams=1, tied=True, **config_kwargs):
     torch.manual_seed(7)
     architecture = LlamaConfig(
         vocab_size=11,
@@ -128,6 +128,7 @@ def _write_base(path, streams=1, tied=True):
         max_position_embeddings=512,
         tie_word_embeddings=tied,
         dtype="float32",
+        **config_kwargs,
     )
     (path / "config.json").write_text(architecture.to_json_string())
     mtp = TinyMTPModule(architecture)
@@ -209,7 +210,7 @@ def _reference(model, batch):
         mask = mask.expand(tokens.shape[0], -1, -1, -1).clone()
         mask.masked_fill_(invalid[:, None, None], torch.finfo(state.dtype).min)
     history, losses = [state], []
-    cache = None if cfg.mtp_mix_hidden_states else DynamicCache(config=model.eagle_module.config)
+    cache = None if cfg.mtp_mix_hidden_states else DynamicCache()
     steps = cfg.mtp_ttt_steps if model.training else 1
     for depth in range(steps):
         attn = (
@@ -247,21 +248,41 @@ def _reference(model, batch):
 
 @pytest.mark.parametrize("streams", [1, 3])
 @pytest.mark.parametrize(
-    ("loss_type", "steps", "mix_hidden_states", "length", "dtype", "prenorm"),
+    ("loss_type", "steps", "mix_hidden_states", "length", "dtype", "prenorm", "cache_config"),
     [
-        ("lk_lambda", 1, False, 7, torch.float32, False),
-        ("lk_lambda", 3, False, 7, torch.float32, True),
-        ("lk_lambda", 3, True, 7, torch.float32, False),
-        ("soft_target_ce", 3, True, 7, torch.float32, True),
-        ("lk_lambda", 3, True, 257, torch.float32, False),
-        ("lk_lambda", 3, True, 7, torch.bfloat16, True),
+        ("lk_lambda", 1, False, 7, torch.float32, False, {}),
+        ("lk_lambda", 3, False, 7, torch.float32, True, {}),
+        ("lk_lambda", 3, True, 7, torch.float32, False, {}),
+        ("soft_target_ce", 3, True, 7, torch.float32, True, {}),
+        ("lk_lambda", 3, True, 257, torch.float32, False, {"sliding_window": 128}),
+        ("lk_lambda", 3, True, 7, torch.bfloat16, True, {}),
+        pytest.param(
+            "lk_lambda",
+            3,
+            False,
+            300,
+            torch.float32,
+            False,
+            {"sliding_window": 128},
+            id="inferred-sliding-cache",
+        ),
+        pytest.param(
+            "lk_lambda",
+            3,
+            False,
+            300,
+            torch.float32,
+            False,
+            {"sliding_window": 128, "layer_types": ["sliding_attention"]},
+            id="explicit-sliding-cache",
+        ),
     ],
 )
 def test_native_rounds_share_eagle_alignment_and_gradients(
-    tmp_path, streams, loss_type, steps, mix_hidden_states, length, dtype, prenorm
+    tmp_path, streams, loss_type, steps, mix_hidden_states, length, dtype, prenorm, cache_config
 ):
     model = create_native_mtp_boost_model(
-        _write_base(tmp_path, streams, tied=streams == 1),
+        _write_base(tmp_path, streams, tied=streams == 1, **cache_config),
         dtype=dtype,
         mtp_ttt_steps=steps,
         mtp_mix_hidden_states=mix_hidden_states,
