@@ -56,7 +56,7 @@ class DataArguments(BaseModel):
 
     # Derived in ``_check_mode_requirements`` from the data-source fields; accepted as input
     # only for backward compatibility (existing ``mode:`` keys / overrides), then overwritten.
-    mode: Literal["online", "offline", "streaming", "sparse"] | None = None
+    mode: Literal["online", "offline", "streaming", "sparse", "packed"] | None = None
     data_path: str | None = None
     offline_data_path: str | None = None
     # Dumped top-k teacher deployment policy (external draft mode); see sparse_data.py.
@@ -68,6 +68,13 @@ class DataArguments(BaseModel):
     # which fails when the dump lives on a read-only mount -- the normal case for a shared
     # corpus -- and leaves concurrent runs over the same shards fighting over one cache.
     sparse_cache_dir: str | None = None
+    # A ``datasets.save_to_disk`` directory of FIXED-LENGTH blocks with an ``input_ids``
+    # column (``labels`` optional; defaults to ``input_ids``). This is the pretraining-style
+    # path: raw corpus text has no conversation structure, so the chat-template collator the
+    # online path uses cannot express it. Packing stays the caller's job on purpose -- it is
+    # expensive, it must be byte-identical across compared runs, and tokenizer policy does
+    # not belong to this library.
+    packed_data_path: str | None = None
     lazy_preprocess: bool = True
     draft_vocab_cache: str | None = None
     chat_template: str | None = None
@@ -97,10 +104,11 @@ class DataArguments(BaseModel):
         has_offline = self.offline_data_path is not None
         has_streaming = self.streaming_server_url is not None
         has_sparse = self.sparse_data_path is not None
-        if sum([has_offline, has_streaming, has_sparse]) > 1:
+        has_packed = self.packed_data_path is not None
+        if sum([has_offline, has_streaming, has_sparse, has_packed]) > 1:
             raise ValueError(
                 "ambiguous: set only one of data.offline_data_path / "
-                "data.streaming_server_url / data.sparse_data_path"
+                "data.streaming_server_url / data.sparse_data_path / data.packed_data_path"
             )
         self.mode = (
             "sparse"
@@ -109,6 +117,8 @@ class DataArguments(BaseModel):
             if has_offline
             else "streaming"
             if has_streaming
+            else "packed"
+            if has_packed
             else "online"
         )
         if self.mode == "streaming" and not self.streaming_model_name:
