@@ -514,7 +514,6 @@ def test_auto_quantize_fixed_ptq_baseline_honors_full_model_disables():
 
 def test_auto_quantize_fixed_ptq_baseline_isolated_from_search_calibration(monkeypatch):
     model = TransformerBlock()
-    session = mto.ModelOptSession()
     calibration_states = []
     original_calibrate = model_quant.calibrate
 
@@ -525,33 +524,29 @@ def test_auto_quantize_fixed_ptq_baseline_isolated_from_search_calibration(monke
                 "algorithm": algorithm_name,
                 "fixed_enabled": model.attn.q_proj.weight_quantizer.is_enabled,
                 "fixed_num_bits": model.attn.q_proj.weight_quantizer.num_bits,
-                "session": mto.ModelOptSession.current(),
             }
         )
         return original_calibrate(model, algorithm=algorithm, forward_loop=forward_loop)
 
     monkeypatch.setattr(model_quant, "calibrate", recording_calibrate)
 
-    with session:
-        searched_model, _ = mtq.auto_quantize(
-            model,
-            constraints={"effective_bits": 8.0},
-            fixed_quantization_config=mtq.FP8_DEFAULT_CFG,
-            module_search_spaces=[
-                {
-                    "module_name_patterns": ["*mlp*"],
-                    "quantization_formats": [mtq.INT4_AWQ_CFG],
-                }
-            ],
-            data_loader=[model.get_input()],
-            forward_step=lambda model, batch: model(batch),
-            loss_func=lambda output, data: output.sum(),
-            num_calib_steps=1,
-            num_score_steps=1,
-        )
+    searched_model, _ = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0},
+        fixed_quantization_config=mtq.FP8_DEFAULT_CFG,
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["*mlp*"],
+                "quantization_formats": [mtq.INT4_AWQ_CFG],
+            }
+        ],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
 
-    # Every candidate calibrates in the workflow's one session.
-    assert all(state["session"] is session for state in calibration_states)
     awq_state = next(state for state in calibration_states if "awq" in state["algorithm"])
     fp8_state = next(state for state in calibration_states if state["algorithm"] == "max")
     assert not awq_state["fixed_enabled"]

@@ -37,7 +37,7 @@ from safetensors.torch import save_file
 
 from modelopt import env
 from modelopt.torch.models import is_moe
-from modelopt.torch.opt.session import ModelOptSession, ensure_modelopt_session_binding
+from modelopt.torch.opt.session import ModelOptSession
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     copy_off_index_safetensors,
@@ -557,7 +557,8 @@ def _llm_dummy_forward(model: torch.nn.Module, model_type: str | None) -> None:
 def requantize_resmooth_fused_llm_layers(model: torch.nn.Module, model_type: str | None):
     """Group modules that take the same input and register shared parameters in module.
 
-    ``model_type`` is the model's, as the workflow's ModelOpt session read it when binding it.
+    ``model_type`` is the model's Hugging Face type, which the export reads from the session's
+    binding of the model.
     """
     quantization_format = get_quantization_format(model)
     module_names = set()
@@ -1034,9 +1035,8 @@ def _process_quantized_modules(
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
     """Run the shared export setup. Packing the weights is a separate step.
 
-    Both export paths call this so they cannot drift. It prepares the model by the model type the
-    workflow's ModelOpt session read when binding it. Returns the dtype, the tied-weight map and
-    the quant config.
+    Both export paths call this so they cannot drift. It prepares the model by the model type of
+    the session's binding of the model. Returns the dtype, the tied-weight map and the quant config.
     """
     dtype = _resolve_export_dtype(model, dtype)
     model_type = ModelOptSession.active().binding(model).model_type
@@ -1749,7 +1749,6 @@ def export_speculative_decoding(
     export_dir: Path | str = tempfile.gettempdir(),
 ) -> None:
     """Export speculative decoding HuggingFace model checkpoint."""
-    ensure_modelopt_session_binding(model)
     assert has_spec_opt(model), "Model is not optimized for speculative decoding."
 
     exporter: SpeculativeDecodingExporter = model.get_exporter()
@@ -2109,9 +2108,10 @@ def export_hf_checkpoint(
 
     Under ``torch.distributed`` (e.g. FSDP2), all ranks participate in the
     collective state-dict gather inside ``_export_transformers_checkpoint``;
-    only rank 0 writes files. A final barrier syncs the other ranks. The export runs in the active
-    ModelOpt session (:class:`~modelopt.torch.opt.session.ModelOptSession`): the workflow's, else
-    the default one.
+    only rank 0 writes files. A final barrier syncs the other ranks. In a workflow's ModelOpt session
+    (:class:`~modelopt.torch.opt.session.ModelOptSession`), the export reads the model's type from
+    the session's binding of the model, so the workflow binds the model first; outside any session
+    it reads it off the model.
 
     Args:
         model: The full torch model to export. The actual quantized model may be a submodule.
@@ -2146,7 +2146,6 @@ def export_hf_checkpoint(
     # expert params across the EP group. Computed here rather than with the other predicates below
     # because the carry-over gate needs it and runs ahead of them (the layerwise and diffusers paths
     # return before those are reached).
-    ensure_modelopt_session_binding(model)
     _fsdp2_sharded, _ep_sharded = _hf_shard_flags(model)
     # Under expert parallelism each rank holds only its own experts' ModelOpt state, so the
     # rank-0 save would write an incomplete one. Refused before any collective, alike on every rank.

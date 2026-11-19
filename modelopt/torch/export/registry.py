@@ -61,8 +61,8 @@ class ExportContext:
     is_modelopt_qlora: bool = False
     model_type: str | None = None
     """The model's HF model type (``model.config.model_type``), used to resolve the
-    model's spec in ``modelopt.torch.models``: an export takes it from the workflow's ModelOpt
-    session, which read it off the model when binding it. ``None`` means unknown: spec lookups then
+    model's spec in ``modelopt.torch.models``: an export takes it from the model's binding in the
+    workflow's ModelOpt session, else off the model. ``None`` means unknown: spec lookups then
     fail loudly instead of guessing."""
 
     keep_fused_experts: bool = False

@@ -32,7 +32,6 @@ from safetensors.torch import save_file
 
 import modelopt.torch.opt as mto
 from modelopt.torch.models import is_moe
-from modelopt.torch.opt.session import ensure_modelopt_session_binding
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
 from modelopt.torch.quantization.nn import (
@@ -649,8 +648,10 @@ def export_hf_vllm_fq_checkpoint(
     With ``inplace_mem_efficient=True``, resmooth runs **in place** on materialized
     weight parameters only (no ``state_dict``), before the inplace fakequant loop.
 
-    The export runs in the active ModelOpt session
-    (:class:`~modelopt.torch.opt.session.ModelOptSession`): the workflow's, else the default one.
+    In a workflow's ModelOpt session
+    (:class:`~modelopt.torch.opt.session.ModelOptSession`), the export reads the model's type from
+    the session's binding of the model, so the workflow binds the model first; outside any session
+    it reads it off the model.
 
     Args:
         model: In-memory quantized model.
@@ -660,7 +661,6 @@ def export_hf_vllm_fq_checkpoint(
             dict materialization. This is destructive — model weights are permanently
             modified and weight quantizers are not re-enabled after export.
     """
-    ensure_modelopt_session_binding(model)
     session = mto.ModelOptSession.active()
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)

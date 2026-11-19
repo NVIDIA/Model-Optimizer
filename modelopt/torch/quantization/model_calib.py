@@ -36,7 +36,6 @@ from tqdm import tqdm
 from modelopt.torch.models import list_all_possible
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.searcher import ForwardLoop
-from modelopt.torch.opt.session import ensure_modelopt_session_binding
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
@@ -2457,7 +2456,6 @@ def layerwise_calibrate(
     documents them; ``export_dir`` additionally leaves the model in export form, so it
     must not be used for inference afterwards.
     """
-    ensure_modelopt_session_binding(model)
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
     export_dir = calib_kwargs.pop("export_dir", None)
     qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", True)

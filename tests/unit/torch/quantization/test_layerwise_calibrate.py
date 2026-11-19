@@ -24,7 +24,6 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import (
@@ -447,21 +446,6 @@ def test_layerwise_max_outside_calibration_uses_configured_forward_behavior(
     mtq.quantize(model, config, forward_loop=forward_loop)
 
     assert forward_calls == expected_forward_calls
-
-
-def test_layerwise_calibration_refuses_another_models_session():
-    """A layerwise calibration runs in the active session, bound to the model it calibrates, so a
-    session describing another model is refused."""
-    other = _TransformerWithLMHead(n_layers=2, dim=16)
-    with (
-        ModelOptSession().bind(other),
-        pytest.raises(RuntimeError, match="describes one model"),
-    ):
-        layerwise_calibrate(
-            _TransformerWithLMHead(n_layers=2, dim=16),
-            lambda m: m(torch.randint(0, 32, (2, 8))),
-            lambda *_args, **_kwargs: None,
-        )
 
 
 def test_layerwise_export_rejects_enabled_outside_quantizer(monkeypatch, tmp_path):

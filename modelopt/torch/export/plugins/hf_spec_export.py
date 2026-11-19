@@ -25,8 +25,6 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from modelopt.torch.opt.session import ensure_modelopt_session_binding
-
 from ..quant_aware_conversion import revert_quant_config_names
 from .hf_spec_configs import kimik2_eagle_template_config, llama_eagle_template_config
 
@@ -125,7 +123,7 @@ class SpeculativeDecodingExporter(ABC):
         export_dir: Path | str,
         dtype: torch.dtype | None = None,
     ):
-        """Export the model to the deployment format, in the active ModelOpt session if any."""
+        """Export the model to the deployment format."""
         raise NotImplementedError("Subclasses must implement this method.")
 
 
@@ -276,7 +274,7 @@ class EagleExporter(SpeculativeDecodingExporter):
         export_dir: Path | str,
         dtype: torch.dtype | None = None,
     ):
-        """Export the model to the deployment format, in the active ModelOpt session if any."""
+        """Export the model to the deployment format."""
         # Make export dir
         export_dir = Path(export_dir)
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -285,7 +283,6 @@ class EagleExporter(SpeculativeDecodingExporter):
         if has_quant_opt(self.model):
             from ..unified_export_hf import _export_transformers_checkpoint
 
-            ensure_modelopt_session_binding(self.model)
             full_sd, hf_quant_config = _export_transformers_checkpoint(self.model, dtype)
         else:
             full_sd, hf_quant_config = self.model.state_dict(), None
@@ -465,7 +462,7 @@ class DFlashExporter(SpeculativeDecodingExporter):
         return config
 
     def export(self, export_dir: Path | str, dtype: torch.dtype | None = None):
-        """Export the DFlash draft model to deployment format, in the active ModelOpt session if any."""
+        """Export the DFlash draft model to deployment format."""
         export_dir = Path(export_dir)
         export_dir.mkdir(parents=True, exist_ok=True)
 
@@ -474,7 +471,6 @@ class DFlashExporter(SpeculativeDecodingExporter):
             from ..unified_export_hf import _export_transformers_checkpoint
 
             module_names = tuple(name for name, _ in self.model.named_modules())
-            ensure_modelopt_session_binding(self.model)
             full_sd, hf_quant_config = _export_transformers_checkpoint(self.model, dtype)
             if hf_quant_config is not None:
                 revert_quant_config_names(

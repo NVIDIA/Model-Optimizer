@@ -33,7 +33,7 @@ from safetensors.torch import save_file
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
-from modelopt.torch.opt.session import ModelOptSession, ensure_modelopt_session_binding
+from modelopt.torch.opt.session import ModelOptSession
 from modelopt.torch.quantization.utils.core_utils import (
     _get_fsdp2_mesh,
     enable_weight_access_and_writeback,
@@ -548,7 +548,6 @@ def collect_export_tensors(
     """
     # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
     # per-model PTQ module at module scope here would risk an import cycle.
-    ensure_modelopt_session_binding(model)
     from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
 
     _assert_fsdp2_owns_every_mesh_dim(model)

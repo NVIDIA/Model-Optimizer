@@ -82,11 +82,9 @@ def main(args):
         base_model_dir = export_dir
 
     try:
-        # The script's workflow, whose session the export's steps run in.
-        with mto.ModelOptSession().bind(model):
-            post_state_dict, hf_quant_config = _export_transformers_checkpoint(
-                model, is_modelopt_qlora=is_qlora
-            )
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(
+            model, is_modelopt_qlora=is_qlora
+        )
 
         with open(f"{base_model_dir}/hf_quant_config.json", "w") as file:
             json.dump(hf_quant_config, file, indent=4)
