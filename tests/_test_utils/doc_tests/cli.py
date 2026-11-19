@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Check README Python CLI option names against each script's public help."""
+"""Extract README Python commands, override test inputs, and validate public CLI flags."""
 
 import os
 import re
@@ -26,7 +26,7 @@ from pathlib import Path
 
 from .parser import DocTestError, parse_markdown
 
-__all__ = ["PythonCommand", "check_cli_options", "python_commands"]
+__all__ = ["PythonCommand", "check_cli_options", "python_commands", "readme_command"]
 
 
 @dataclass(frozen=True)
@@ -93,6 +93,59 @@ def python_commands(path, *, cwd, cwd_overrides=None):
                 )
             )
     return commands
+
+
+def readme_command(path, snippet, script, *, overrides=None, cwd_overrides=None):
+    """Extract one invocation, replacing explicit CI inputs without executing shell text."""
+    path = Path(path)
+    commands = [
+        command
+        for command in python_commands(path, cwd=path.parent, cwd_overrides=cwd_overrides)
+        if command.snippet == snippet and command.script.name == script
+    ]
+    if len(commands) != 1:
+        raise DocTestError(
+            f"{path}: {snippet}: expected one {script} invocation, found {len(commands)}"
+        )
+    command = commands[0]
+    options = {
+        key if key.startswith("-") else "--" + key: value
+        for key, value in (overrides or {}).items()
+    }
+    result = []
+    tokens = list(command.argv)
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        option = token.split("=", 1)[0]
+        if option not in options:
+            result.append(token)
+            index += 1
+            continue
+        value = options.pop(option)
+        result.extend([option, str(value)])
+        index += 1
+        if "=" not in token:
+            if index < len(tokens) and not re.match(r"--?[A-Za-z]", tokens[index]):
+                index += 1
+    for option, value in options.items():
+        result.extend([option, str(value)])
+
+    def expand_default(match):
+        default = match.group(1)
+        if default is None:
+            raise DocTestError(
+                f"{path}:{command.line}: {snippet}: unresolved shell variable {match.group(0)}"
+            )
+        return default
+
+    expanded = [
+        re.sub(r"\$\{\w+(?::-([^{}]*))?\}|\$[A-Za-z_]\w*", expand_default, token)
+        for token in result
+    ]
+    if any("$" in token for token in expanded):
+        raise DocTestError(f"{path}:{command.line}: {snippet}: unresolved shell expression")
+    return expanded
 
 
 @cache

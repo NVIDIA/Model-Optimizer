@@ -32,24 +32,34 @@ def _scenario(tmp_path, code, *, language="sh", timeout_seconds=60):
     )[0]
 
 
-def test_named_fence_parsing_and_selection(tmp_path):
+@pytest.mark.parametrize("prefix", ["", "> ", "> > "])
+def test_named_fence_parsing_and_selection(tmp_path, prefix):
     path = tmp_path / "README.md"
-    path.write_text("""<!-- modelopt-snippet: shell -->
+    path.write_text(f"""<!-- modelopt-snippet: shell -->
 ~~~bash
 printf 'hello'
 ~~~
-> <!-- modelopt-snippet: python -->
-> ```python
-> answer = 42
-> ```
+{prefix}<!-- modelopt-snippet: python -->
+{prefix}```python
+{prefix}answer = 42
+{prefix}```
+<!-- modelopt-snippet: template -->
+````markdown
+```python
+answer = 42
+```
+````
 """)
     snippets = parse_markdown(path)
     assert [(s.id, s.kind, s.line, s.code) for s in snippets.values()] == [
         ("shell", "run", 3, "printf 'hello'\n"),
         ("python", "python", 7, "answer = 42\n"),
+        ("template", "unsupported:markdown", 11, "```python\nanswer = 42\n```\n"),
     ]
     (scenario,) = resolve_scenarios(
-        path, [Scenario("smoke", ["python"])], excluded={"shell": "Illustrative command"}
+        path,
+        [Scenario("smoke", ["python"])],
+        excluded={"shell": "Illustrative command", "template": "Markdown illustration"},
     )
     assert scenario.path == path
     assert scenario.steps == [snippets["python"]]

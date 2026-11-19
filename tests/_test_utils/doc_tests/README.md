@@ -1,7 +1,8 @@
 # Executable Markdown tests
 
-The QAT and Megatron Bridge READMEs use the same parser, subprocess runner and
-pytest adapter. Example-specific code only prepares inputs and verifies results.
+The QAT and Megatron Bridge READMEs use Sybil's Markdown fence lexer with a shared
+snippet-ID adapter, subprocess runner and pytest adapter. Example-specific code
+only prepares inputs and verifies results.
 Standalone snippets execute as written; existing end-to-end tests substitute explicit
 CI inputs in the extracted command arguments. Neither path mocks model operations.
 These are trusted repository tests with the same privileges as pytest.
@@ -12,6 +13,13 @@ Pytest provides collection, fixtures, assertions and manual/resource markers, wh
 pytest-timeout provides an outer test deadline. The snippet layer adds Markdown
 extraction, complete ID accounting, source locations and a worker deadline covering
 setup, execution and verification, with process-group cleanup.
+
+Sybil is a test-only dependency installed by `.[dev-test]`. It handles fence
+boundaries, quoted blocks and source offsets; its collectors and evaluators are
+not enabled. Existing pytest tests retain scenario selection and resource checks,
+and the worker retains shell state, deadlines, background services and cleanup.
+Unclosed fences extend to the end of the document, following Sybil's Markdown
+semantics.
 
 `tests/_test_utils/examples/run_command.py` runs individual example commands and
 supports streaming output and Hub retries. It does not extract README fences or
@@ -158,7 +166,7 @@ workspace or second distillation prerequisite. Other architecture and recipe
 cases retain their existing commands. Full-scale manual integrations retain their
 resource metadata and artifact checks; CLI help is checked by the preflight.
 
-`_test_utils.examples.readme.readme_command` selects one Python invocation from an
+`_test_utils.doc_tests.cli.readme_command` selects one Python invocation from an
 existing named fence and returns an argument list for the existing command runner.
 It substitutes explicit test overrides and literal shell defaults, preserving
 other published flags. It neither evaluates shell expressions nor runs commands;
@@ -264,12 +272,9 @@ own GPU requirements.
 | `parser.py` | Extract named fences and check references, fence coverage, and executable languages. |
 | `runner.py` | Execute resolved plans with worker-side handlers, deadlines, shared state, and cleanup. |
 | `pytest_utils.py` | Common collection, manual markers and resource checks, independent of the example. |
-| `tests/_test_utils/examples/readme.py` | Extract README command arguments for existing end-to-end tests; no separate command runner. |
-| `fixtures/llm_qat_readme.py`, `fixtures/megatron_bridge_readme.py` | Worker-side scenario setup and verification moved out of Markdown. |
+| `cli.py` | Extract README commands, substitute explicit end-to-end inputs, and validate flags against script help. |
+| `fixtures/llm_qat_readme.py`, `fixtures/megatron_bridge_readme.py` | Worker-side setup and verification, including QAT installation/serving and manual Bridge checks. |
 | `fixtures/llm_qat.py` | Inputs and assertions for the remaining QAT Python/API and standalone snippets. |
-| `fixtures/megatron_bridge.py` | Working-directory and export checks for full-scale manual Bridge integrations. |
-| `fixtures/llm_qat_installation.py` | QAT requirements in a disposable venv and QAT dependency import verification. |
-| `fixtures/llm_qat_serving.py` | QAT QLoRA checkpoint layout, adapter-server readiness and a real completion request. |
 | `tests/unit/doc_tests/test_markdown.py` | Focused fence parsing, failure-location, and timeout-cleanup regressions. |
 | `tests/examples/llm_qat/test_llm_qat_readme.py` | Collect QAT scenarios through the common pytest adapter. |
 | `tests/examples/megatron_bridge/test_megatron_bridge_readme.py` | Collect Bridge scenarios through the same adapter. |

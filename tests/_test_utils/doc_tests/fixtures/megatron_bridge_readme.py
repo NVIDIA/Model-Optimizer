@@ -19,11 +19,6 @@ import json
 import os
 from pathlib import Path
 
-from _test_utils.doc_tests.fixtures.megatron_bridge import (
-    prepare_bridge_full_scale,
-    verify_bridge_hf_export,
-)
-
 __all__ = [
     "bridge_generation",
     "bridge_import",
@@ -119,3 +114,17 @@ def bridge_generation(ctx):
     """Run and verify the bridge-generation scenario."""
     ctx.cwd = ctx.repo / "examples/megatron_bridge"
     ctx.run()
+
+
+def prepare_bridge_full_scale(ctx):
+    """Set the Bridge working/output directories; callers supply full-scale inputs."""
+    ctx.cwd = ctx.repo / "examples/megatron_bridge"
+    ctx.env["OUTPUT_ROOT"] = str(ctx.tmp / "outputs")
+    Path(ctx.env["OUTPUT_ROOT"]).mkdir()
+
+
+def verify_bridge_hf_export(path):
+    """Check config and weight-file presence for full-scale Bridge HF exports."""
+    assert json.loads((path / "config.json").read_text())["model_type"]
+    weights = list(path.glob("*.safetensors"))
+    assert weights and all(weight.stat().st_size > 0 for weight in weights)

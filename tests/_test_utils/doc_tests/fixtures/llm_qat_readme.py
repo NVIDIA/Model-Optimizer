@@ -19,6 +19,11 @@ import json
 import math
 import os
 import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
 from pathlib import Path
 
 __all__ = [
@@ -37,15 +42,29 @@ __all__ = [
 
 def llm_qat_install(ctx):
     """Run and verify the llm-qat-install scenario."""
-    # Optional ML dependencies are imported only inside the scenario worker.
-    from _test_utils.doc_tests.fixtures.llm_qat_installation import (
-        prepare_llm_qat_installation,
-        verify_llm_qat_installation,
-    )
-
-    prepare_llm_qat_installation(ctx)
+    venv = ctx.tmp / "venv"
+    subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+    ctx.cwd = ctx.tmp
+    target = ctx.tmp / "examples/llm_qat"
+    target.mkdir(parents=True)
+    shutil.copy2(ctx.repo / "examples/llm_qat/requirements.txt", target / "requirements.txt")
+    ctx.env["PATH"] = str(venv / "bin") + os.pathsep + ctx.env["PATH"]
+    ctx.env.pop("PYTHONPATH", None)
+    ctx.env.pop("VIRTUAL_ENV", None)
     ctx.run()
-    verify_llm_qat_installation(ctx)
+    result = subprocess.run(
+        [
+            str(ctx.tmp / "venv/bin/python"),
+            "-c",
+            "import json, modelopt, accelerate, peft; print(json.dumps(modelopt.__file__))",
+        ],
+        cwd=ctx.cwd,
+        env=ctx.env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert Path(json.loads(result.stdout.strip().splitlines()[-1])).is_relative_to(ctx.tmp / "venv")
 
 
 def llm_qat_simple(ctx):
@@ -63,15 +82,36 @@ def llm_qat_simple(ctx):
 
 def llm_qlora_serve(ctx):
     """Run and verify the llm-qlora-serve scenario."""
-    # Optional ML dependencies are imported only inside the scenario worker.
-    from _test_utils.doc_tests.fixtures.llm_qat_serving import (
-        prepare_llm_qat_adapter_server,
-        verify_llm_qat_adapter_server,
-    )
-
-    prepare_llm_qat_adapter_server(ctx)
+    checkpoint = Path(ctx.env["MODELOPT_DOC_QLORA_CHECKPOINT"]).resolve()
+    assert (checkpoint / "adapter_config.json").is_file()
+    assert (checkpoint / "base_model/config.json").is_file()
+    ctx.cwd = ctx.tmp
+    (ctx.cwd / "qwen3-8b-fp4-qlora-hf").symlink_to(checkpoint, target_is_directory=True)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        ctx.env["PORT"] = str(sock.getsockname()[1])
     ctx.run()
-    verify_llm_qat_adapter_server(ctx)
+    url = f"http://127.0.0.1:{ctx.env['PORT']}"
+    deadline = time.monotonic() + 600
+    while True:
+        try:
+            with urllib.request.urlopen(url + "/health", timeout=5) as response:
+                assert response.status == 200
+            break
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("vLLM did not become ready") from None
+            time.sleep(1)
+    request = urllib.request.Request(
+        url + "/v1/completions",
+        data=json.dumps(
+            {"model": "adapter", "prompt": "The capital of France is", "max_tokens": 4}
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        result = json.load(response)
+    assert result["choices"] and result["usage"]["completion_tokens"] > 0
 
 
 def llm_qat_python(ctx):

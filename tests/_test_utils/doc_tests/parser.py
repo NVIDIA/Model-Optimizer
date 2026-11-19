@@ -20,6 +20,9 @@ import textwrap
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from sybil import Document
+from sybil.parsers.markdown.lexers import FencedCodeBlockLexer
+
 __all__ = ["DocTestError", "Scenario", "Snippet", "parse_markdown", "resolve_scenarios"]
 
 _ID = r"[a-z0-9][a-z0-9-]*"
@@ -63,63 +66,58 @@ class Scenario:
 def parse_markdown(path: Path, *, require_ids: bool = False) -> dict[str, Snippet]:
     """Extract ID-marked fences without executing code; optionally require IDs on every fence."""
     path = Path(path).resolve()
-    lines = path.read_text().splitlines(keepends=True)
+    source = path.read_text()
+    document = Document(source, str(path))
     snippets = {}
-    pending = None
-    i = 0
+    position = 0
 
     def fail(message, line):
         raise DocTestError(f"{path}:{line}: {message}")
 
-    def unquote(text):
-        return re.sub(r"^ {0,3}> ?", "", text)
+    def marker_before(end):
+        pending = None
+        start_line = source.count("\n", 0, position) + 1
+        for line, text in enumerate(source[position:end].splitlines(), start_line):
+            text = re.sub(r"^ {0,3}(?:> ?)*", "", text).strip()
+            if pending and text:
+                fail(
+                    "snippet ID must be immediately followed by a fence (blank lines allowed)", line
+                )
+            if "modelopt-doc-test:" in text:
+                fail(
+                    "legacy doc-test directives are unsupported; use snippet IDs and Python tests",
+                    line,
+                )
+            if "modelopt-snippet:" in text:
+                match = re.fullmatch(r"<!-- modelopt-snippet: (" + _ID + r") -->", text)
+                if not match:
+                    fail("invalid snippet ID marker", line)
+                pending = match.group(1)
+                if pending in snippets:
+                    fail(f"duplicate snippet ID: {pending}", line)
+        return pending
 
-    while i < len(lines):
-        line = i + 1
-        text = unquote(lines[i]).strip()
-        fence = re.fullmatch(r"(`{3,}|~{3,})([^`~]*)", text)
-        if fence:
-            delimiter, language = fence.groups()
-            quoted = lines[i].lstrip().startswith(">")
-            start = i + 1
-            i += 1
-            while i < len(lines) and not re.fullmatch(
-                re.escape(delimiter[0]) + "{" + str(len(delimiter)) + r",}\s*",
-                (unquote(lines[i]) if quoted else lines[i]).strip(),
-            ):
-                i += 1
-            if i == len(lines) and (pending or require_ids):
-                fail("unclosed snippet fence", line)
-            if pending:
-                code = textwrap.dedent(
-                    "".join(unquote(part) if quoted else part for part in lines[start:i])
-                )
-                language = language.strip()
-                kind = {"bash": "run", "sh": "run", "python": "python"}.get(
-                    language, "unsupported:" + language
-                )
-                snippets[pending] = Snippet(pending, kind, code, start + 1)
-                pending = None
-            elif require_ids:
-                fail("unaccounted fence: add a snippet ID and a test or exclusion", line)
-            i += 1
+    fences = sorted(FencedCodeBlockLexer(language=".*")(document), key=lambda fence: fence.start)
+    for fence in fences:
+        # Nested fences are literal contents of their enclosing snippet.
+        if fence.start < position:
             continue
-        if pending and text:
-            fail("snippet ID must be immediately followed by a fence (blank lines allowed)", line)
-        if "modelopt-doc-test:" in text:
-            fail(
-                "legacy doc-test directives are unsupported; use snippet IDs and Python tests", line
+        pending = marker_before(fence.start)
+        if pending:
+            code = fence.lexemes["source"]
+            language = fence.lexemes["language"].strip()
+            kind = {"bash": "run", "sh": "run", "python": "python"}.get(
+                language, "unsupported:" + language
             )
-        if "modelopt-snippet:" in text:
-            match = re.fullmatch(r"<!-- modelopt-snippet: (" + _ID + r") -->", text)
-            if not match:
-                fail("invalid snippet ID marker", line)
-            pending = match.group(1)
-            if pending in snippets:
-                fail(f"duplicate snippet ID: {pending}", line)
-        i += 1
+            line = source.count("\n", 0, fence.start + code.offset) + 1
+            snippets[pending] = Snippet(pending, kind, textwrap.dedent(code), line)
+        elif require_ids:
+            line = source.count("\n", 0, fence.start) + 1
+            fail("unaccounted fence: add a snippet ID and a test or exclusion", line)
+        position = fence.end
+    pending = marker_before(len(source))
     if pending:
-        fail(f"snippet ID {pending} missing its fence", len(lines))
+        fail(f"snippet ID {pending} missing its fence", len(source.splitlines()))
     return snippets
 
 

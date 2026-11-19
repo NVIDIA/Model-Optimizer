@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from _test_utils.examples.readme import readme_command
+from _test_utils.doc_tests.cli import readme_command
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir

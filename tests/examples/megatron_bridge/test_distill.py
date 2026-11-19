@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from _test_utils.examples.readme import readme_command
+from _test_utils.doc_tests.cli import readme_command
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
 from _test_utils.torch.transformers_models import (
