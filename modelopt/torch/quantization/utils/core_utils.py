@@ -34,6 +34,8 @@ from modelopt.torch.quantization.config import QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 from modelopt.torch.utils.network import temporarily_remove_accelerate_hook
 
+from .packed_experts import holds_packed_experts, unpacked
+
 if TYPE_CHECKING:
     from collections.abc import Generator
 
@@ -710,7 +712,8 @@ def enable_weight_access_and_writeback(
     else:
         context = nullcontext()
 
-    with context:
+    # Experts stored packed decompress inside whatever window makes their packed bytes readable.
+    with context, unpacked(module, writeback):
         yield
 
 
@@ -724,6 +727,8 @@ def requires_weight_materialization(module, root_model, names: "ModuleNames | No
     materialize them. Modules already materialized are excluded -- re-entering a window
     would re-run export handlers over already-packed weights.
     """
+    if holds_packed_experts(module):
+        return True
     if not any(
         t is not None and (t.is_meta or isinstance(t, DTensor))
         for t in itertools.chain(module._parameters.values(), module._buffers.values())

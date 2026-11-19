@@ -662,6 +662,7 @@ def get_model(
     max_cpu_memory_gb=None,
     max_gpu_memory_gb=None,
     distribution: DistributionPlan | None = None,
+    keep_compressed: bool = False,
 ):
     print(f"Initializing model from {ckpt_path}")
     # The plan to load the whole model by on every rank; a single process's by default. Only a plan
@@ -673,7 +674,7 @@ def get_model(
             f"{plan!r} shards the model over the ranks, but get_model loads the whole model on "
             "every rank: load it with load_pretrained."
         )
-    routing = {} if distribution is None else {"distribution": distribution}
+    routing: dict[str, Any] = {} if distribution is None else {"distribution": distribution}
 
     _disk_offload = offload_folder is not None
     if _disk_offload and max_cpu_memory_gb is None:
@@ -714,6 +715,11 @@ def get_model(
     except Exception as e:
         print(f"Error: Could not load config from {ckpt_path}: {e}")
         raise RuntimeError(f"Failed to load model configuration from {ckpt_path}") from e
+    if keep_compressed and get_original_hf_quant_method(hf_config) != "mxfp4":
+        raise ValueError(
+            f"keep_compressed keeps the experts of an MXFP4 checkpoint packed, and {ckpt_path} "
+            "is not one."
+        )
     ptq = get_ptq_spec(hf_model_type(hf_config))
     if ptq.no_auto_device_map is not None:
         print(f"Loading without an automatic device map: {ptq.no_auto_device_map}.")
@@ -816,7 +822,8 @@ def get_model(
         # quantizers: the packed-kernel experts wrapper (``Mxfp4GptOssExperts``,
         # used when the optional ``kernels`` package is present) is not supported by
         # the unified HF export. Force dequantization regardless of whether
-        # ``kernels`` is installed.
+        # ``kernels`` is installed; ``keep_compressed`` keeps the experts packed instead,
+        # dequantized on use.
         # Local import: ``Mxfp4Config`` only exists in newer Transformers (gpt-oss support);
         # importing it at module scope would break example_utils for users on older
         # Transformers running unrelated (non-MXFP4) models.
@@ -834,6 +841,7 @@ def get_model(
             model_type=hf_config.model_type,
             **routing,
             device_map="cpu" if on_cpu else pinned or "sequential",
+            keep_compressed=keep_compressed,
             **model_kwargs,
         )
     else:

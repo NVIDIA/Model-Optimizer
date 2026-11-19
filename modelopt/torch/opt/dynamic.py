@@ -621,6 +621,14 @@ class DynamicModule(nn.Module):
             ):
                 return
 
+            # A forward that calls the class's own forward, looked up when called, reaches the
+            # converted class's forward by itself, as does accelerate's hook around one: kept.
+            inner = (
+                getattr(self, "_old_forward", None) if hasattr(self, "_hf_hook") else self.forward
+            )
+            if getattr(inner, "_modelopt_calls_class_forward", False):
+                return
+
             if hasattr(self, "_hf_hook"):
                 # accelerate patched module
                 bind_forward_method(self, self.__class__.forward)

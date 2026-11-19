@@ -31,6 +31,7 @@ __all__ = [
     "E4M3_KMIN",
     "E4M3_MAX",
     "E8M0_BIAS",
+    "dequantize_mxfp4",
     "mxfp4_to_nvfp4_global_amax",
     "mxfp4_to_nvfp4_per_block_amax",
 ]
@@ -56,6 +57,45 @@ def _e2m1_magnitude_table(device: torch.device, dtype: torch.dtype = torch.float
         cached = torch.tensor(_E2M1_MAGNITUDE, dtype=dtype, device=device)
         _E2M1_MAG_CACHE[key] = cached
     return cached
+
+
+# Rows of 32 values dequantize_mxfp4 decodes at once, which bounds its float32 temporaries.
+_DEQUANT_ROWS = 1 << 18
+
+
+def dequantize_mxfp4(
+    blocks: torch.Tensor, e8m0_scales: torch.Tensor, dtype: torch.dtype = torch.bfloat16
+) -> torch.Tensor:
+    """Decode MXFP4 values: two E2M1 nibbles a byte, low nibble first, and an E8M0 scale per 32.
+
+    Args:
+        blocks: the packed values, ``(..., n // 2)`` or ``(..., n // 32, 16)``, one byte each.
+        e8m0_scales: the scales, ``(..., n // 32)``, one byte each.
+        dtype: the dtype to decode to.
+
+    Returns:
+        ``(..., n)`` in ``dtype``. Exact in bfloat16 and float32: an E2M1 value times a power of
+        two has three significant bits, so every decoder of the format gives the same result.
+    """
+    rows = e8m0_scales.numel()
+    if blocks.element_size() != 1 or e8m0_scales.element_size() != 1 or blocks.numel() != 16 * rows:
+        raise ValueError(
+            f"MXFP4 values {tuple(blocks.shape)} {blocks.dtype} and scales "
+            f"{tuple(e8m0_scales.shape)} {e8m0_scales.dtype}: expected one byte per two values "
+            "and one per 32."
+        )
+    packed = blocks.reshape(rows, 16).view(torch.uint8)
+    scales = e8m0_scales.reshape(rows).view(torch.uint8)
+    # The E2M1 value of each nibble: its magnitude in the low three bits, its sign in the fourth.
+    magnitude = _e2m1_magnitude_table(blocks.device)
+    table = torch.cat((magnitude, -magnitude))
+    out = torch.empty(rows, 32, dtype=dtype, device=blocks.device)
+    for start in range(0, rows, _DEQUANT_ROWS):
+        chunk = packed[start : start + _DEQUANT_ROWS]
+        values = torch.stack((table[(chunk & 0x0F).int()], table[(chunk >> 4).int()]), dim=-1)
+        exponent = scales[start : start + _DEQUANT_ROWS].int() - E8M0_BIAS
+        out[start : start + _DEQUANT_ROWS] = torch.ldexp(values.flatten(1), exponent.unsqueeze(-1))
+    return out.reshape(*e8m0_scales.shape[:-1], 32 * e8m0_scales.shape[-1])
 
 
 def mxfp4_to_nvfp4_global_amax(e8m0_scales: torch.Tensor) -> tuple[float, dict]:

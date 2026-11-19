@@ -259,6 +259,8 @@ The cast pins each NVFP4 block's `scale_2 = 2^(k_max - 8)` and `_amax = 6 * 2^k_
 
 > *`--cast_mxfp4_to_nvfp4` requires an NVFP4-family `--qformat` (e.g. `nvfp4_mlp_only`, `nvfp4_experts_only`, `nvfp4`) and is incompatible with AutoQuantize recipes (multi-format search).*
 
+`hf_ptq.py` keeps an MXFP4 checkpoint's routed experts packed through calibration, at 4.25 bits a weight instead of bf16's 16, and decompresses them on use. A model that needs several GPUs in bf16 (`gpt-oss-120b`: 229 GB of experts) can then fit on fewer, and the export is the same. A calibration that may update the experts' weights in place (AutoQuantize, or an algorithm other than max, such as GPTQ or AWQ) loads them decompressed instead. `--no-keep_compressed_experts` always decompresses them, and `--keep_compressed_experts` always keeps them packed.
+
 #### Deepseek R1
 
 [PTQ for DeepSeek](../deepseek/README.md) shows how to quantize the DeepSeek model with FP4 and export to TensorRT-LLM.
