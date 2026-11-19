@@ -11,7 +11,7 @@ These are trusted repository tests with the same privileges as pytest.
 
 Pytest provides collection, fixtures, assertions and manual/resource markers, while
 pytest-timeout provides an outer test deadline. The snippet layer adds Markdown
-extraction, complete ID accounting, source locations and a worker deadline covering
+extraction, named-snippet accounting, source locations and a worker deadline covering
 setup, execution and verification, with process-group cleanup.
 
 Sybil is a test-only dependency installed by `.[dev-test]`. It handles fence
@@ -44,9 +44,10 @@ needs the same behavior with a clear parameter contract.
 
 ## Snippet IDs and Python scenarios
 
-A README contains only one ID marker immediately before each fence (blank lines
-are allowed). IDs are unique within the document and remain stable when prose or
-snippets move. Code is extracted directly, without substitutions:
+Add one ID marker immediately before each fence selected for testing (blank
+lines are allowed). Untagged fences are ignored and are outside test coverage.
+IDs are unique within the document and remain stable when prose or snippets move.
+Code is extracted directly, without substitutions:
 
 ````markdown
 <!-- modelopt-snippet: example-command -->
@@ -89,10 +90,12 @@ def smoke(ctx):
 ```
 
 - `parse_markdown(path)` extracts named fences and source locations without
-  executing them. `resolve_scenarios` requires an ID on **every** fence and
-  validates that each ID is referenced or explicitly excluded with a reason.
-  Missing/duplicate IDs, unknown references, stale exclusions, and tested/excluded
-  overlaps fail collection. Accounting does **not** mean manual/excluded code passed.
+  executing them. `resolve_scenarios` validates that every named fence is
+  referenced or explicitly excluded with a reason. Untagged fences do not
+  participate. Duplicate IDs, unknown references, unaccounted named fences, stale
+  exclusions, and tested/excluded overlaps fail collection. Removing or renaming
+  a referenced ID also fails collection. Accounting does **not** mean
+  manual/excluded code passed.
   Scenario metadata is trusted Python test configuration; the resolver does not
   duplicate type or format checks for resource fields and handler names.
 - `Scenario` requires a unique scenario ID and a nonempty ordered list of snippet
@@ -230,7 +233,7 @@ visibility disabled. Missing scripts, failed help commands and unknown flags
 report the README path, snippet ID and command line number.
 
 Only existing ID-marked fences are inspected; these checks add no README markers
-and do not enforce fence coverage. The checks run in the installed example environment but do not launch training,
+and do not enforce named-snippet accounting. The checks run in the installed example environment but do not launch training,
 models or distributed workers. Imports still require the example dependencies.
 The QAT evaluation and Bridge vLLM scripts need their optional manual environments;
 their CLI checks use `--run-manual`. Values, config contents, launcher flags,
@@ -269,7 +272,7 @@ own GPU requirements.
 
 | File | Purpose in this extension |
 | --- | --- |
-| `parser.py` | Extract named fences and check references, fence coverage, and executable languages. |
+| `parser.py` | Extract named fences and check references, named-snippet accounting, and executable languages. |
 | `runner.py` | Execute resolved plans with worker-side handlers, deadlines, shared state, and cleanup. |
 | `pytest_utils.py` | Common collection, manual markers and resource checks, independent of the example. |
 | `cli.py` | Extract README commands, substitute explicit end-to-end inputs, and validate flags against script help. |

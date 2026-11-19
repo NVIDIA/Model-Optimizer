@@ -26,7 +26,7 @@ __all__ = ["execute_scenario", "scenario_parameters"]
 
 
 def scenario_parameters(path, scenarios, *, excluded=None):
-    """Collect every scenario, enforcing a documented disposition for every fence."""
+    """Collect every scenario, enforcing a documented disposition for every named fence."""
     result = []
     for scenario in resolve_scenarios(path, scenarios, excluded=excluded):
         marks = [pytest.mark.timeout(scenario.timeout_seconds + 30)]

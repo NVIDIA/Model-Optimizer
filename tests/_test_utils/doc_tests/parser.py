@@ -63,8 +63,8 @@ class Scenario:
         return self.steps[0].line
 
 
-def parse_markdown(path: Path, *, require_ids: bool = False) -> dict[str, Snippet]:
-    """Extract ID-marked fences without executing code; optionally require IDs on every fence."""
+def parse_markdown(path: Path) -> dict[str, Snippet]:
+    """Extract ID-marked fences without executing code; ignore untagged fences."""
     path = Path(path).resolve()
     source = path.read_text()
     document = Document(source, str(path))
@@ -111,9 +111,6 @@ def parse_markdown(path: Path, *, require_ids: bool = False) -> dict[str, Snippe
             )
             line = source.count("\n", 0, fence.start + code.offset) + 1
             snippets[pending] = Snippet(pending, kind, textwrap.dedent(code), line)
-        elif require_ids:
-            line = source.count("\n", 0, fence.start) + 1
-            fail("unaccounted fence: add a snippet ID and a test or exclusion", line)
         position = fence.end
     pending = marker_before(len(source))
     if pending:
@@ -122,9 +119,9 @@ def parse_markdown(path: Path, *, require_ids: bool = False) -> dict[str, Snippe
 
 
 def resolve_scenarios(path, scenarios, *, excluded=None):
-    """Validate references and account for every fence before any scenario can execute."""
+    """Validate references and account for every named fence before scenarios execute."""
     path = Path(path).resolve()
-    snippets = parse_markdown(path, require_ids=True)
+    snippets = parse_markdown(path)
     excluded = {} if excluded is None else excluded
     unknown = excluded.keys() - snippets.keys()
     if unknown:

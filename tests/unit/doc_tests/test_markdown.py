@@ -35,7 +35,11 @@ def _scenario(tmp_path, code, *, language="sh", timeout_seconds=60):
 @pytest.mark.parametrize("prefix", ["", "> ", "> > "])
 def test_named_fence_parsing_and_selection(tmp_path, prefix):
     path = tmp_path / "README.md"
-    path.write_text(f"""<!-- modelopt-snippet: shell -->
+    path.write_text(f"""```bash
+printf 'setup'
+```
+
+<!-- modelopt-snippet: shell -->
 ~~~bash
 printf 'hello'
 ~~~
@@ -52,9 +56,9 @@ answer = 42
 """)
     snippets = parse_markdown(path)
     assert [(s.id, s.kind, s.line, s.code) for s in snippets.values()] == [
-        ("shell", "run", 3, "printf 'hello'\n"),
-        ("python", "python", 7, "answer = 42\n"),
-        ("template", "unsupported:markdown", 11, "```python\nanswer = 42\n```\n"),
+        ("shell", "run", 7, "printf 'hello'\n"),
+        ("python", "python", 11, "answer = 42\n"),
+        ("template", "unsupported:markdown", 15, "```python\nanswer = 42\n```\n"),
     ]
     (scenario,) = resolve_scenarios(
         path,
@@ -63,6 +67,10 @@ answer = 42
     )
     assert scenario.path == path
     assert scenario.steps == [snippets["python"]]
+    with pytest.raises(DocTestError):
+        resolve_scenarios(path, [Scenario("smoke", ["missing"])])
+    with pytest.raises(DocTestError):
+        resolve_scenarios(path, [Scenario("smoke", ["python"])])
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Requires bash/POSIX")
