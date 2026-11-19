@@ -53,6 +53,8 @@ from modelopt.torch.export.moe_utils import (
     split_fused_experts_state_dict,
 )
 from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
+from modelopt.torch.export.unified_export_hf import _start_export
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
@@ -773,19 +775,21 @@ def test_fused_experts_handler_keeps_experts_fused_only_when_asked(keep_fused):
     container = nn.Module()
     container.experts = experts
     assert ExportContext(model=container, dtype=torch.bfloat16).keep_fused_experts is False
-    ctx = ExportContext(model=container, dtype=torch.bfloat16, keep_fused_experts=keep_fused)
+    with (
+        ModelOptSession().bind(container),
+        _start_export(container, torch.bfloat16, keep_fused_experts=keep_fused) as ctx,
+    ):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ExportModuleRegistry.match(experts)(PREFIX, experts, ctx)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        ExportModuleRegistry.match(experts)(PREFIX, experts, ctx)
-
-    names = set(experts.state_dict())
-    if keep_fused:
-        assert {"gate_up_proj", "gate_up_proj_weight_scale", "down_proj"} <= names
-        assert not any(n.startswith("0.") for n in names)
-    else:
-        assert "0.gate_proj.weight" in names
-        assert "gate_up_proj" not in names
+        names = set(experts.state_dict())
+        if keep_fused:
+            assert {"gate_up_proj", "gate_up_proj_weight_scale", "down_proj"} <= names
+            assert not any(n.startswith("0.") for n in names)
+        else:
+            assert "0.gate_proj.weight" in names
+            assert "gate_up_proj" not in names
 
 
 def test_keep_fused_refuses_fused_experts_not_named_experts():
@@ -795,12 +799,14 @@ def test_keep_fused_refuses_fused_experts_not_named_experts():
     container = nn.Module()
     container.moe = experts
     before = copy.deepcopy(experts.state_dict())
-    ctx = ExportContext(model=container, dtype=torch.bfloat16, keep_fused_experts=True)
+    with (
+        ModelOptSession().bind(container),
+        _start_export(container, torch.bfloat16, keep_fused_experts=True) as ctx,
+    ):
+        with pytest.raises(NotImplementedError, match="named 'moe'"):
+            ExportModuleRegistry.match(experts)("model.layers.0.mlp.moe", experts, ctx)
 
-    with pytest.raises(NotImplementedError, match="named 'moe'"):
-        ExportModuleRegistry.match(experts)("model.layers.0.mlp.moe", experts, ctx)
-
-    torch.testing.assert_close(experts.state_dict(), before, rtol=0, atol=0)
+        torch.testing.assert_close(experts.state_dict(), before, rtol=0, atol=0)
 
 
 class GptOssExperts(nn.Module):
@@ -814,9 +820,11 @@ def test_keep_fused_refuses_bmm_experts():
     experts = GptOssExperts()
     experts.gate_up_proj = nn.Parameter(torch.randn(NUM_EXPERTS, HIDDEN_DIM, 2 * INTERMEDIATE_DIM))
     before = copy.deepcopy(experts.state_dict())
-    ctx = ExportContext(model=experts, dtype=torch.bfloat16, keep_fused_experts=True)
+    with (
+        ModelOptSession().bind(experts),
+        _start_export(experts, torch.bfloat16, keep_fused_experts=True) as ctx,
+    ):
+        with pytest.raises(NotImplementedError, match="stores its experts transposed"):
+            ExportModuleRegistry.match(experts)(PREFIX, experts, ctx)
 
-    with pytest.raises(NotImplementedError, match="stores its experts transposed"):
-        ExportModuleRegistry.match(experts)(PREFIX, experts, ctx)
-
-    torch.testing.assert_close(experts.state_dict(), before, rtol=0, atol=0)
+        torch.testing.assert_close(experts.state_dict(), before, rtol=0, atol=0)

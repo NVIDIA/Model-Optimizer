@@ -388,8 +388,9 @@ class TestDSparkExporter:
             )
             model.get_exporter().export(tmp_path, dtype=torch.bfloat16)
             if in_session:
-                # The export ran in the active session.
+                # The export ran in the active session, and ended there.
                 assert ctx.model is model
+                assert ctx.runtime.export_context is None
         cfg = json.loads((tmp_path / "config.json").read_text())
         quant_cfg = json.loads((tmp_path / "hf_quant_config.json").read_text())
         assert cfg["quantization_config"] == quant_cfg

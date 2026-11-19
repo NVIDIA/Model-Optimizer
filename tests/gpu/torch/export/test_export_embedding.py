@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.unified_export_hf import _process_quantized_modules
+from modelopt.torch.export.unified_export_hf import _process_quantized_modules, _start_export
 from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
@@ -90,8 +90,8 @@ class TestQuantEmbeddingExport:
         model = mtq.quantize(
             model, _embedding_nvfp4_cfg(), lambda m: m(torch.randint(0, VOCAB_SIZE, (2, 4)))
         )
-        with ModelOptSession().bind(model):
-            _process_quantized_modules(model, dtype=torch.float16)
+        with ModelOptSession().bind(model), _start_export(model, torch.float16):
+            _process_quantized_modules()
 
         attrs = quantizer_attr_names("weight")
         assert model.embedding.weight.dtype == torch.uint8
@@ -110,8 +110,12 @@ class TestQuantEmbeddingExport:
             model, _embedding_nvfp4_cfg(), lambda m: m(torch.randint(0, VOCAB_SIZE, (2, 4)))
         )
         orig_dtype = model.embedding.weight.dtype
-        with ModelOptSession().bind(model), pytest.warns(UserWarning, match="tied"):
-            _process_quantized_modules(model, dtype=torch.float16)
+        with (
+            ModelOptSession().bind(model),
+            pytest.warns(UserWarning, match="tied"),
+            _start_export(model, torch.float16),
+        ):
+            _process_quantized_modules()
 
         # Weight Parameter unchanged (not packed to uint8) and still tied.
         assert model.embedding.weight.dtype == orig_dtype

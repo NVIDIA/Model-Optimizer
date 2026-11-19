@@ -25,7 +25,7 @@ import traceback
 import warnings
 from builtins import ValueError
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -939,28 +939,60 @@ def _resolve_export_dtype(model: nn.Module, dtype: torch.dtype | None) -> torch.
     return dtype
 
 
-def _prepare_moe_inputs(
+def _start_export(
     model: nn.Module,
     dtype: torch.dtype,
-    is_modelopt_qlora: bool,
-    model_type: str | None,
-) -> None:
+    is_modelopt_qlora: bool = False,
+    **fields: Any,
+) -> "_Export":
+    """One export of ``model`` in the active ModelOpt session, for a ``with`` block.
+
+    The block gets the export's context (:class:`ExportContext`), which the workflow's session holds
+    while the block runs, so the export's steps and handlers share what it holds, such as
+    ``model``'s name maps, and the model's type, which the workflow's session read when binding it.
+    The export ends with the block, which gives the workflow back what it held before.
+    """
+    return _Export(
+        ExportContext(
+            model=model,
+            dtype=dtype,
+            is_modelopt_qlora=is_modelopt_qlora,
+            model_type=ModelOptSession.active().model_type,
+            **fields,
+        )
+    )
+
+
+class _Export:
+    """An export :func:`_start_export` started, which runs for a ``with`` block.
+
+    An object rather than a generator: a layerwise exporter holds its export from calibration to the
+    export, and the model holding the exporter can still be copied or pickled.
+    """
+
+    def __init__(self, export_context: ExportContext) -> None:
+        self._export_context = export_context
+
+    def __enter__(self) -> ExportContext:
+        self._runtime = ModelOptSession.active().runtime
+        self._held = self._runtime.export_context
+        self._runtime.export_context = self._export_context
+        return self._export_context
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._runtime.export_context = self._held
+
+
+def _prepare_moe_inputs(model: nn.Module) -> None:
     """Handle input quantizers of experts that are not calibrated.
 
-    Each MoE block is dispatched by its experts container to the matching preparation
-    handler.
-
-    ``model_type`` is the root model's HF model type: the layerwise export passes one decoder
-    layer, which has none.
+    Each MoE block of ``model``, the export's model or the decoder layer a layerwise export packs,
+    is dispatched by its experts container to the matching preparation handler, with the session
+    of the export in progress.
     """
-    prepare_ctx = ExportContext(
-        model=model,
-        dtype=dtype,
-        is_modelopt_qlora=is_modelopt_qlora,
-        model_type=model_type,
-    )
+    ctx = ExportContext.current()
     for name, sub_module in model.named_modules():
-        if is_moe(sub_module, prepare_ctx.model_type) and hasattr(sub_module, "experts"):
+        if is_moe(sub_module, ctx.model_type) and hasattr(sub_module, "experts"):
             handler = PrepareMoEInputsRegistry.match(sub_module.experts)
             if handler is None:
                 # Unsupported MoE model structure
@@ -968,7 +1000,7 @@ def _prepare_moe_inputs(
                     f"MoE model with experts type '{type(sub_module.experts).__name__}' is not supported in export."
                     f"Please file an issue or add support for this model architecture."
                 )
-            handler(name, sub_module, prepare_ctx)
+            handler(name, sub_module, ctx)
 
 
 def _warn_on_unsynced_moe_gate_up(model: nn.Module, model_type: str | None) -> None:
@@ -987,117 +1019,104 @@ def _warn_on_unsynced_moe_gate_up(model: nn.Module, model_type: str | None) -> N
         )
 
 
-def _process_quantized_modules(
-    model: nn.Module,
-    dtype: torch.dtype,
-    is_modelopt_qlora: bool = False,
-    keep_fused_experts: bool = False,
-) -> None:
-    """Process all quantized modules in model, export weights in-place.
+def _process_quantized_modules() -> None:
+    """Process all quantized modules of the export's model, export weights in-place.
 
-    This function iterates through all modules in the model and invokes the first matching
-    handler in :data:`ExportModuleRegistry`. Modules matching no handler are left untouched.
-
-    Args:
-        model: The model containing quantized modules.
-        dtype: The data type for weight conversion.
-        is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
-            If True, modules with base_layer attribute are skipped.
+    This function iterates through all modules of the model of the export in progress and invokes
+    the first matching handler in :data:`ExportModuleRegistry`, with the export's context. Modules
+    matching no handler are left untouched; when the export's ``is_modelopt_qlora`` is set, modules
+    with a ``base_layer`` are skipped.
     """
+    ctx = ExportContext.current()
     # No per-module dedup cache: tied duplicates are dropped by name in postprocess_state_dict.
     # The handlers pack whatever weight they are handed, and nothing here materializes a shard --
     # FSDP2 models go through collect_export_tensors instead, which packs inside a gather window.
     # The no-gather writer is the deliberate exception: it packs each rank's LOCAL shard and never
     # materializes a full tensor, and the experts stay fused for that, so keep_fused_experts, which
-    # only the no-gather writer passes, is what allows a sharded model here.
-    if is_fsdp2_model(model) and not keep_fused_experts:
+    # only the no-gather writer sets, is what allows a sharded model here.
+    if is_fsdp2_model(ctx.model) and not ctx.keep_fused_experts:
         raise RuntimeError(
             "_process_quantized_modules cannot pack an FSDP2-sharded model: pack it in "
             "collect_export_tensors' gather windows, or export it with the no-gather writer."
         )
-    ctx = ExportContext(
-        model=model,
-        dtype=dtype,
-        is_modelopt_qlora=is_modelopt_qlora,
-        model_type=ModelOptSession.active().model_type,
-        keep_fused_experts=keep_fused_experts,
-    )
 
-    # The no-gather export sets keep_fused_experts on this context, which lets a sharded model past
+    # The no-gather export sets keep_fused_experts on the context, which lets a sharded model past
     # the check above: each FSDP2 unit's modules are then packed in one weight window, held across
     # them.
     with _hf_export_handlers.held_fsdp2_weight_windows(ctx):
-        for name, sub_module in model.named_modules():
+        for name, sub_module in ctx.model.named_modules():
             _dispatch_export_handler(name, sub_module, ctx)
 
 
-def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
-    """Run the shared export setup. Packing the weights is a separate step.
+@contextlib.contextmanager
+def _prepare_model_for_export(
+    model, dtype, is_modelopt_qlora, **fields
+) -> Generator[tuple[torch.dtype, TiedWeightMap, dict[str, Any]], None, None]:
+    """Run the shared export setup, for an export that lasts as long as the ``with`` block.
 
-    Both export paths call this so they cannot drift. It prepares the model by the model type the
-    workflow's ModelOpt session read when binding it. Returns the dtype, the tied-weight map and
-    the quant config.
+    Both export paths call this so they cannot drift. It starts the export (:func:`_start_export`),
+    with ``fields`` set on its context, in the active ModelOpt session, where each later step of the
+    export seeks it, and yields the export dtype, the tied-weight map and the quant config. Packing
+    the weights is a separate step.
     """
     dtype = _resolve_export_dtype(model, dtype)
     model_type = ModelOptSession.active().model_type
-    # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
-    # Sourced from HF's name-based all_tied_weights_keys, so it is correct even under FSDP/offload.
-    tied_map = TiedWeightMap(model)
-    _prepare_moe_inputs(model, dtype, is_modelopt_qlora, model_type)
+    with _start_export(model, dtype, is_modelopt_qlora, **fields):
+        # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
+        # Sourced from HF's name-based all_tied_weights_keys, so it is correct even under FSDP/offload.
+        tied_map = TiedWeightMap(model)
+        _prepare_moe_inputs(model)
 
-    # Resmooth and requantize fused layers
-    # TODO: Handle mixed precision
-    requantize_resmooth_fused_llm_layers(model, model_type)
+        # Resmooth and requantize fused layers
+        # TODO: Handle mixed precision
+        requantize_resmooth_fused_llm_layers(model, model_type)
 
-    # Offloaded models need their weights materialized layer-by-layer, which this
-    # whole-state-dict path cannot do; export_hf_checkpoint() streams them instead.
-    if has_accelerate_offload(model):
-        raise NotImplementedError(
-            "_export_transformers_checkpoint does not support disk/CPU-offloaded models. "
-            "Use export_hf_checkpoint() which dispatches to _export_transformers_checkpoint_streaming."
-        )
+        # Offloaded models need their weights materialized layer-by-layer, which this
+        # whole-state-dict path cannot do; export_hf_checkpoint() streams them instead.
+        if has_accelerate_offload(model):
+            raise NotImplementedError(
+                "_export_transformers_checkpoint does not support disk/CPU-offloaded models. "
+                "Use export_hf_checkpoint() which dispatches to _export_transformers_checkpoint_streaming."
+            )
 
-    # Remove all hooks from the model
-    try:
-        from accelerate.hooks import remove_hook_from_module
+        # Remove all hooks from the model
+        try:
+            from accelerate.hooks import remove_hook_from_module
 
-        remove_hook_from_module(model, recurse=True)
-    except ImportError:
-        pass  # no accelerate installed → no offload hooks exist to remove
+            remove_hook_from_module(model, recurse=True)
+        except ImportError:
+            pass  # no accelerate installed → no offload hooks exist to remove
 
-    quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
+        quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
 
-    _warn_on_unsynced_moe_gate_up(model, model_type)
+        _warn_on_unsynced_moe_gate_up(model, model_type)
 
-    # Merge per-side input_quantizer amaxes BEFORE export, so the retained tied weight's single
-    # input_scale covers every side's activation range (else the dropped side clips at inference).
-    synced_input = sync_tied_input_amax(model, tied_map)
-    if synced_input:
-        print(
-            f"sync_tied_input_amax: max-merged input_quantizer amaxes across "
-            f"{synced_input} tied module group(s)"
-        )
+        # Merge per-side input_quantizer amaxes BEFORE export, so the retained tied weight's single
+        # input_scale covers every side's activation range (else the dropped side clips at inference).
+        synced_input = sync_tied_input_amax(model, tied_map)
+        if synced_input:
+            print(
+                f"sync_tied_input_amax: max-merged input_quantizer amaxes across "
+                f"{synced_input} tied module group(s)"
+            )
 
-    return dtype, tied_map, quant_config
+        yield dtype, tied_map, quant_config
 
 
-def pack_quantized_weights(
-    model, dtype, is_modelopt_qlora: bool = False, keep_fused_experts: bool = False
-) -> None:
+def pack_quantized_weights() -> None:
     """Quantize every module's weight in place, then rebuild the fused MoE linears.
 
+    A step of the export in progress, whose context it packs with. That context's
     ``keep_fused_experts`` is for the no-gather distributed FSDP2 export: it leaves MoE experts
-    fused and sharded through the fold, so each rank materializes only its LOCAL experts instead
-    of all N on every rank. The per-expert split happens later, in the writer.
+    fused and sharded through the fold, so each rank materializes only its LOCAL experts instead of
+    all N on every rank. The per-expert split happens later, in the writer.
     """
     # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
     # per-model PTQ module at module scope here would risk an import cycle.
     from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
 
-    _process_quantized_modules(
-        model, dtype, is_modelopt_qlora, keep_fused_experts=keep_fused_experts
-    )
-    _reconstruct_fused_moe_linear(model)
+    _process_quantized_modules()
+    _reconstruct_fused_moe_linear(ExportContext.current().model)
 
 
 def _hf_shard_flags(model: nn.Module) -> tuple[bool, bool]:
@@ -1125,11 +1144,15 @@ def _process_hf_model_for_export(
     there the fused MoE experts stay fused, since each rank folds only its local shard, and the
     writer then splits each rank's experts into per-expert tensors.
     """
-    dtype, _, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
     # Only the no-gather writer calls this, and only for a sharded model, so the experts stay fused
     # without reading the plan a second time.
-    pack_quantized_weights(model, dtype, is_modelopt_qlora, keep_fused_experts=True)
-    return quant_config
+    with _prepare_model_for_export(model, dtype, is_modelopt_qlora, keep_fused_experts=True) as (
+        _,
+        _,
+        quant_config,
+    ):
+        pack_quantized_weights()
+        return quant_config
 
 
 def _diffusion_quantization_target_types(model: nn.Module) -> list[str]:
@@ -1178,35 +1201,35 @@ def _export_transformers_checkpoint(
     Raises:
         NotImplementedError: if the model has accelerate offload hooks.
     """
-    dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
+    with _prepare_model_for_export(model, dtype, is_modelopt_qlora) as prepared:
+        dtype, tied_map, quant_config = prepared
+        if is_fsdp2_model(model):
+            # Imported here rather than at module scope: the streaming exporter imports the
+            # shared prep helpers from this module, so a top-level import would be circular.
+            from .unified_export_hf_streaming import collect_export_tensors
 
-    if is_fsdp2_model(model):
-        # Imported here rather than at module scope: the streaming exporter imports the
-        # shared prep helpers from this module, so a top-level import would be circular.
-        from .unified_export_hf_streaming import collect_export_tensors
+            # Packs each unit once it has been gathered, and keeps every unit on rank 0 -- which
+            # therefore holds the whole model, so this needs the checkpoint to fit in host RAM.
+            quantized_state_dict = dict(
+                collect_export_tensors(model, dtype, is_modelopt_qlora, owner="rank0")
+            )
+        else:
+            pack_quantized_weights()
+            quantized_state_dict = model.state_dict()
 
-        # Packs each unit once it has been gathered, and keeps every unit on rank 0 -- which
-        # therefore holds the whole model, so this needs the checkpoint to fit in host RAM.
-        quantized_state_dict = dict(
-            collect_export_tensors(model, dtype, is_modelopt_qlora, owner="rank0")
+        # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
+        kv_cache_max_bound = 448
+        kv_cache_postprocess_config = _get_kv_cache_postprocess_config(quant_config["quantization"])
+
+        quantized_state_dict = postprocess_state_dict(
+            quantized_state_dict,
+            kv_cache_max_bound,
+            kv_cache_postprocess_config,
+            is_modelopt_qlora,
+            tied_map=tied_map,
         )
-    else:
-        pack_quantized_weights(model, dtype, is_modelopt_qlora)
-        quantized_state_dict = model.state_dict()
 
-    # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
-    kv_cache_max_bound = 448
-    kv_cache_postprocess_config = _get_kv_cache_postprocess_config(quant_config["quantization"])
-
-    quantized_state_dict = postprocess_state_dict(
-        quantized_state_dict,
-        kv_cache_max_bound,
-        kv_cache_postprocess_config,
-        is_modelopt_qlora,
-        tied_map=tied_map,
-    )
-
-    return quantized_state_dict, quant_config
+        return quantized_state_dict, quant_config
 
 
 def _fuse_qkv_linears_diffusion(
@@ -1476,7 +1499,8 @@ def _export_diffusers_checkpoint(
                 )
 
             # Process quantized modules (convert weights, register scales)
-            _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
+            with _start_export(component, component_dtype):
+                _process_quantized_modules()
 
             # Promote quantizer-owned tensors (AWQ pre_quant_scale and SVDQuant
             # LoRA factors) onto the module so they survive
@@ -2282,14 +2306,15 @@ def export_hf_checkpoint(
                     "save_modelopt_state=True is not supported in the streaming offload export "
                     "path and will be ignored."
                 )
-            _, hf_quant_config = _export_transformers_checkpoint_streaming(
-                model,
-                dtype,
-                export_dir=export_dir,
-                max_shard_size=max_shard_size,
-                extra_state_dict=extra_state_dict,
-                **kwargs,
-            )
+            _qlora = kwargs.get("is_modelopt_qlora", False)
+            with _start_export(model, _resolve_export_dtype(model, dtype), _qlora):
+                _, hf_quant_config = _export_transformers_checkpoint_streaming(
+                    model,
+                    export_dir=export_dir,
+                    max_shard_size=max_shard_size,
+                    extra_state_dict=extra_state_dict,
+                    **kwargs,
+                )
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
             hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
