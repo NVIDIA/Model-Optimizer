@@ -25,8 +25,8 @@ from torch.nn.attention.flex_attention import BlockMask
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import EAGLE3_DEFAULT_CFG
 from modelopt.torch.speculative.losses import (
+    _masked_soft_target_cross_entropy,
     masked_lk_lambda_loss,
-    masked_soft_target_cross_entropy,
 )
 
 
@@ -86,7 +86,7 @@ def test_eagle_loss_vocabulary_compatibility(loss_type, vocabulary):
     else:
         if indices is not None:
             teacher = teacher[..., indices]
-        expected = masked_soft_target_cross_entropy(
+        expected = _masked_soft_target_cross_entropy(
             teacher.softmax(-1), draft_logits[-1][:, :-1], loss_mask[:, 1:]
         )
     torch.testing.assert_close(output.loss, expected)

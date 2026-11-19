@@ -34,8 +34,8 @@ from modelopt.torch.speculative.eagle.utils import (
     OfflineSupervisedDataset,
 )
 from modelopt.torch.speculative.losses import (
+    _masked_soft_target_cross_entropy,
     masked_lk_lambda_loss,
-    masked_soft_target_cross_entropy,
 )
 from modelopt.torch.speculative.mtp import (
     NativeMTPAdapter,
@@ -231,7 +231,7 @@ def _reference(model, batch):
                 teacher[:, depth + 1 :], student, loss_mask, eta=cfg.mtp_lk_eta
             )
         else:
-            loss = masked_soft_target_cross_entropy(
+            loss = _masked_soft_target_cross_entropy(
                 teacher.softmax(-1)[:, depth + 1 :], student, loss_mask
             )
         losses.append(loss * cfg.mtp_loss_decay_factor**depth)

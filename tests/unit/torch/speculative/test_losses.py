@@ -19,8 +19,8 @@ import pytest
 import torch
 
 from modelopt.torch.speculative.losses import (
+    _masked_soft_target_cross_entropy,
     masked_lk_lambda_loss,
-    masked_soft_target_cross_entropy,
 )
 
 
@@ -153,33 +153,32 @@ def test_lk_retains_only_inputs_and_compact_statistics(vocab_size):
 
 
 @pytest.mark.parametrize("case", ["finite", "zero_target", "mixed_mask", "empty_mask"])
-def test_soft_target_ce_values_and_teacher_student_gradients(case):
-    teacher = torch.tensor([[[0.25, 0.75, 0.0], [1.0, 0.0, 0.0], [0.0, 0.5, 0.5]]])
-    student = torch.tensor([[[0.2, -0.3, 1.1], [0.0, -2.0, -3.0], [0.4, -0.2, 0.7]]])
-    mask = torch.tensor([[1.0, 0.5, 0.25]])
-    if case != "finite":
-        student[0, 1, 1:] = -torch.inf
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_soft_target_ce_matches_original_eagle_values_and_gradients(case, dtype):
+    teacher = torch.tensor([[[0.25, 0.75, 0.0], [1.0, 0.0, 0.0], [0.0, 0.5, 0.5]]], dtype=dtype)
+    if case == "finite":
+        teacher = (teacher + 0.25) / 1.75
+    student = torch.tensor([[[0.2, -0.3, 1.1], [0.0, -2.0, -3.0], [0.4, -0.2, 0.7]]], dtype=dtype)
+    mask = torch.tensor([[1.0, 0.5, 0.25, 1.0]])
     if case == "mixed_mask":
         mask[0, 2] = 0
-        student[0, 2] = -torch.inf
     elif case == "empty_mask":
         mask.zero_()
-        student.fill_(-torch.inf)
     teacher.requires_grad_()
     student.requires_grad_()
-    valid = mask != 0
-    p = teacher.detach()[valid]
-    log_q = student.detach()[valid].log_softmax(-1)
-    weights = mask[valid, None] / (mask.sum() + 1e-5)
-    positive = p > 0
-    expected = -(p * weights)[positive].mul(log_q[positive]).sum()
-    expected_student_grad = torch.zeros_like(student)
-    expected_student_grad[valid] = (log_q.exp() - p) * weights
-    expected_teacher_grad = torch.zeros_like(teacher)
-    expected_teacher_grad[valid] = -log_q.nan_to_num(neginf=0) * weights
+    reference_teacher = teacher.detach().clone().requires_grad_()
+    reference_student = student.detach().clone().requires_grad_()
+    # Original HFEagleModel._eagle_loss arithmetic, including base-LoRA teacher gradients.
+    reference_mask = mask[:, : student.shape[1], None]
+    expected = -torch.sum(
+        torch.sum(
+            reference_mask * reference_teacher * torch.log_softmax(reference_student, dim=2), 2
+        )
+    ) / (reference_mask.sum() + 1e-5)
 
-    loss = masked_soft_target_cross_entropy(teacher, student, mask)
-    torch.testing.assert_close(loss, expected)
+    loss = _masked_soft_target_cross_entropy(teacher, student, mask)
+    torch.testing.assert_close(loss, expected, rtol=0, atol=0)
+    expected.backward()
     loss.backward()
-    torch.testing.assert_close(student.grad, expected_student_grad)
-    torch.testing.assert_close(teacher.grad, expected_teacher_grad)
+    torch.testing.assert_close(student.grad, reference_student.grad, rtol=0, atol=0)
+    torch.testing.assert_close(teacher.grad, reference_teacher.grad, rtol=0, atol=0)

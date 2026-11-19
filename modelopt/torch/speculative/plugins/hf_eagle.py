@@ -32,7 +32,7 @@ from ...export.plugins.hf_spec_export import EagleExporter, SpeculativeDecodingE
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
 from ..eagle.utils import expand_mask, make_causal_mask
-from ..losses import masked_lk_lambda_loss, masked_soft_target_cross_entropy
+from ..losses import _masked_soft_target_cross_entropy, masked_lk_lambda_loss
 from ..utils import (
     AcceptanceRateValidation,
     _setup_kimi_k2_decoder,
@@ -902,7 +902,7 @@ class HFEagleModel(EagleModel):
                 eta=self.eagle_lk_eta,
             )
         else:
-            classification_loss = masked_soft_target_cross_entropy(
+            classification_loss = _masked_soft_target_cross_entropy(
                 base_output_targets, eagle_logits, loss_mask
             )
         # Compute accuracy (returned as tensor to avoid sync; .item() called after TTT loop)
