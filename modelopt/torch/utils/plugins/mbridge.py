@@ -294,7 +294,7 @@ def load_modelopt_megatron_checkpoint(
             weights. Set ``False`` to load weights only -- e.g. to reload a full-precision distilled
             student without reconstructing the ``kd_loss`` mode (which would require a teacher model).
         preserve_checkpoint_dtype: Match floating destination tensors to checkpoint storage before
-            DCP copies values, preserving mixed native precision during deployment export.
+            DCP copies values, preserving mixed native precision during training or export.
 
     Returns:
         The modules loaded into: ``.language_model`` for a language-model-only VLM checkpoint,

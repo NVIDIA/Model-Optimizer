@@ -184,6 +184,12 @@ The [distill.py](distill.py) script supports both standard HuggingFace checkpoin
 
 To distill a student whose weights live in a **Megatron checkpoint** (e.g. a quantized checkpoint from [quantize.py](quantize.py) for [Quantization Aware Distillation](#quantization-aware-distillation-qad), or a pruned checkpoint), additionally pass `--student_megatron_path` — `--student_hf_path` is still required to build the student architecture.
 
+The student restores the expert layout saved in that checkpoint. Add
+`--preserve_checkpoint_dtype` to restore its floating-point storage dtypes before
+loading weights, retaining stored FP32 exceptions through mixed-precision wrapping.
+The teacher and students initialized from HF retain their provider's expert layout
+unless `--no_moe_grouped_gemm` is given.
+
 ### Data Preparation
 
 The distillation script expects pre-tokenized data in Megatron's binary format (`.bin` / `.idx` files).

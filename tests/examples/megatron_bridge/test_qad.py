@@ -147,7 +147,13 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
     # ModelOpt state so the quantizers survive distillation.
     # The LoRA case trains only adapters, so its base weights would not exercise the cache's gradient.
     distill_cmd = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"]
+        [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "distill.py",
+            "--use_mock_data",
+            "--preserve_checkpoint_dtype",
+        ]
         + ([] if lora_rank else ["--fake_quant_weight_cache"])
         + (["--trainable_params", *trainable_patterns] if full_rank else []),
         student_hf_path=hf_model_path,

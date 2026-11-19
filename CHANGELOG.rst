@@ -26,6 +26,7 @@ Changelog
 *Megatron Framework (M-LM / M-Bridge)*
 
 - The Megatron-Bridge examples accept an explicit ``--export_backend bridge`` for real-quant HF checkpoints. The existing ModelOpt export backend remains the default.
+- Distillation restores checkpoint expert layouts and can preserve saved floating-point storage dtypes with ``--preserve_checkpoint_dtype``.
 
 *Misc*
 
