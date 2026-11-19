@@ -1186,14 +1186,6 @@ def quantize_main(
 
     vlm_wrapper = get_ptq_spec(model_type).vlm_wrapper
 
-    if not (
-        args.vllm_fakequant_export
-        or has_spec_opt(full_model)
-        or exports_tensorrt_llm_checkpoint(args, model_type)
-    ):
-        # The run ends in export_hf_checkpoint, so calibration first refuses what that can't write.
-        mto.ModelOptSession.active().export = True
-
     preview_input_ids, preview_attention_mask, generated_ids_before_ptq = pre_quantize(
         args, full_model, model_type, tokenizer, calib_dataloader, vlm_wrapper
     )

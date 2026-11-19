@@ -783,32 +783,6 @@ def test_a_finalizing_run_sizes_its_batch_for_the_finalize_algorithm(monkeypatch
     assert batch_sizes == [7 if scored else 3]
 
 
-@pytest.mark.parametrize(
-    ("cli", "exports_hf"),
-    [((), True), (("--vllm_fakequant_export",), False)],
-    ids=["hf-export", "vllm-fakequant-export"],
-)
-def test_only_a_run_ending_in_export_hf_checkpoint_says_it_exports(monkeypatch, cli, exports_hf):
-    """The run's session says the run exports, so calibration refuses up front a model
-    export_hf_checkpoint could not write, only when the run ends in that export."""
-    hf_ptq, args = _parse_hf_ptq_args(
-        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--qformat", "fp8", *cli
-    )
-    monkeypatch.setattr(hf_ptq, "get_max_batch_size", lambda *_args, **_kwargs: 1)
-    monkeypatch.setattr(hf_ptq, "make_calib_dataloader", lambda *_args, **_kwargs: (None, None))
-
-    class _CalibrationReachedError(Exception):
-        pass
-
-    def pre_quantize(*_args, **_kwargs):
-        raise _CalibrationReachedError
-
-    monkeypatch.setattr(hf_ptq, "pre_quantize", pre_quantize)
-    with ModelOptSession() as session, pytest.raises(_CalibrationReachedError):
-        hf_ptq.quantize_main(args, None, None, None, False, None, None, torch.device("cpu"))
-    assert session.export is exports_hf
-
-
 def test_calib_seq_must_be_positive(monkeypatch):
     with pytest.raises(SystemExit):
         _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--calib_seq", "0")
