@@ -51,6 +51,7 @@ from modelopt.torch.models.hf import (
     prefers_bundled_code,
     prepare_model_for_loading,
 )
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.mode import get_modelike_from_algo_cfg
 from modelopt.torch.speculative.utils import is_speculative_config
 from modelopt.torch.utils import distributed as dist_utils
@@ -664,6 +665,9 @@ def get_model(
     distribution: DistributionPlan | None = None,
 ):
     print(f"Initializing model from {ckpt_path}")
+    if distribution is None and (session := ModelOptSession.current()) is not None:
+        # The plan the workflow's session holds, which load_pretrained would load by.
+        distribution = session.distribution
     # The plan to load the whole model by on every rank; a single process's by default. Only a plan
     # the caller gave reaches load_pretrained: without one it decides itself as before, and refuses
     # MODELOPT_* knobs asking to shard over a launch whose process group is not set up.
@@ -964,16 +968,16 @@ def is_model_on_gpu(model) -> bool:
     return all("cuda" in str(param.device) for param in model.parameters())
 
 
-def generate_excludes_prompt(model) -> bool:
+def generate_excludes_prompt(model, model_type: str | None) -> bool:
     """Return whether ``model.generate()`` returns only the decoder sequence, without the prompt.
 
     True for encoder-decoder models, so ``hf_ptq.py`` decodes their preview output whole instead
     of slicing off a prompt-length prefix. A model whose spec says ``generate()`` includes the
     prompt, though it is structurally encoder-decoder, is excluded (AR-style decode applies).
+    ``model_type`` is the model's, as the workflow's ModelOpt session read it.
     """
-    config = model.config
-    includes_prompt = get_ptq_spec(hf_model_type(config)).generate_includes_prompt
-    return bool(getattr(config, "is_encoder_decoder", False)) and includes_prompt is None
+    includes_prompt = get_ptq_spec(model_type).generate_includes_prompt
+    return bool(getattr(model.config, "is_encoder_decoder", False)) and includes_prompt is None
 
 
 def save_source_config(args, export_path) -> None:
@@ -988,13 +992,16 @@ def save_source_config(args, export_path) -> None:
 
 
 def _prepare_quant_cfg(
-    args: argparse.Namespace, quant_cfg: dict[str, Any], full_model: torch.nn.Module
+    args: argparse.Namespace,
+    quant_cfg: dict[str, Any],
+    full_model: torch.nn.Module,
+    model_type: str | None,
 ) -> dict[str, Any]:
     """Apply shared checkpoint-local adjustments to a PTQ configuration."""
     # Resolve the real export directory before resolve_checkpoint_dir hashes the config; otherwise
     # distinct --export_path values containing the placeholder would share one checkpoint path.
     if args.layerwise_export:
-        assert_layerwise_export_compatible(args, full_model, quant_cfg.get("algorithm"))
+        assert_layerwise_export_compatible(args, full_model, quant_cfg.get("algorithm"), model_type)
         quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)
         print(f"Layerwise export enabled: writing quantized shards to {args.export_path}")
         # Shards are resumable only while the manifest naming their resume point remains beside
@@ -1023,6 +1030,7 @@ def assert_layerwise_export_compatible(
     args: argparse.Namespace,
     full_model: torch.nn.Module,
     algorithm: str | dict | list | None,
+    model_type: str | None,
 ) -> None:
     """Refuse layerwise export before calibration starts, not after the run is paid for.
 
@@ -1066,7 +1074,7 @@ def assert_layerwise_export_compatible(
         ),
         (
             "an encoder-decoder model_type",
-            is_trtllm_enc_dec_export(hf_model_type(full_model)),
+            is_trtllm_enc_dec_export(model_type),
             "export_tensorrt_llm_checkpoint()",
         ),
     ):

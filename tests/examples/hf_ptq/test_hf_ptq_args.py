@@ -35,6 +35,7 @@ from modelopt.recipe.config import (
     ModelOptAutoQuantizeRecipe,
 )
 from modelopt.recipe.presets import QUANT_CFG_CHOICES, RecipeSupersededAction
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils import mlflow as mlflow_lib
@@ -169,23 +170,30 @@ def test_hf_ptq_runs_weight_then_kv_autoquantize_stages(monkeypatch):
     )
     recipe = ModelOptAutoQuantizeRecipe(auto_quantize=weight_aq, kv_auto_quantize=kv_aq)
     calls = []
-    monkeypatch.setattr(hf_ptq, "auto_quantize", lambda *_args, **kwargs: calls.append(kwargs))
-
-    hf_ptq._run_auto_quantize_recipe(
-        SimpleNamespace(
-            auto_quantize_checkpoint="weight-search.pth",
-            kv_auto_quantize_checkpoint="kv-search.pth",
-        ),
-        recipe,
-        torch.nn.Module(),
-        torch.nn.Module(),
-        None,
-        False,
-        [],
-        False,
+    monkeypatch.setattr(
+        hf_ptq,
+        "auto_quantize",
+        lambda *_args, **kwargs: calls.append({**kwargs, "session": ModelOptSession.current()}),
     )
 
+    with ModelOptSession() as session:
+        hf_ptq._run_auto_quantize_recipe(
+            SimpleNamespace(
+                auto_quantize_checkpoint="weight-search.pth",
+                kv_auto_quantize_checkpoint="kv-search.pth",
+            ),
+            recipe,
+            torch.nn.Module(),
+            torch.nn.Module(),
+            None,
+            False,
+            [],
+            False,
+        )
+
     assert [call["aq_config"] for call in calls] == [weight_aq, kv_aq]
+    # Both searches run in the run's one session.
+    assert all(call["session"] is session for call in calls)
     assert calls[0]["allow_uniform_kv"] is False
     assert calls[0]["checkpoint"] == "weight-search.pth"
     assert calls[1]["checkpoint"] == "kv-search.pth"
@@ -775,6 +783,32 @@ def test_a_finalizing_run_sizes_its_batch_for_the_finalize_algorithm(monkeypatch
     assert batch_sizes == [7 if scored else 3]
 
 
+@pytest.mark.parametrize(
+    ("cli", "exports_hf"),
+    [((), True), (("--vllm_fakequant_export",), False)],
+    ids=["hf-export", "vllm-fakequant-export"],
+)
+def test_only_a_run_ending_in_export_hf_checkpoint_says_it_exports(monkeypatch, cli, exports_hf):
+    """The run's session says the run exports, so calibration refuses up front a model
+    export_hf_checkpoint could not write, only when the run ends in that export."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--qformat", "fp8", *cli
+    )
+    monkeypatch.setattr(hf_ptq, "get_max_batch_size", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(hf_ptq, "make_calib_dataloader", lambda *_args, **_kwargs: (None, None))
+
+    class _CalibrationReachedError(Exception):
+        pass
+
+    def pre_quantize(*_args, **_kwargs):
+        raise _CalibrationReachedError
+
+    monkeypatch.setattr(hf_ptq, "pre_quantize", pre_quantize)
+    with ModelOptSession() as session, pytest.raises(_CalibrationReachedError):
+        hf_ptq.quantize_main(args, None, None, None, False, None, None, torch.device("cpu"))
+    assert session.export is exports_hf
+
+
 def test_calib_seq_must_be_positive(monkeypatch):
     with pytest.raises(SystemExit):
         _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--calib_seq", "0")
@@ -1308,12 +1342,13 @@ def test_one_rank_per_node_runs_the_gpu_memory_monitor(
     hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", str(tmp_path))
     args.dist_state = SimpleNamespace(is_main=rank == 0, rank=rank, world_size=8)
     monkeypatch.setattr(hf_ptq, "local_rank", lambda: node_rank)
-    launched = []
+    launched, sessions = [], []
 
     class _LoadReachedError(Exception):
         pass
 
     def load_model(args):
+        sessions.append(ModelOptSession.current())
         raise _LoadReachedError
 
     monkeypatch.setattr(torch.compiler, "set_stance", lambda *args, **kwargs: None)
@@ -1325,6 +1360,8 @@ def test_one_rank_per_node_runs_the_gpu_memory_monitor(
         hf_ptq._main_inner(args)
 
     assert len(launched) == launches
+    # The run loads in its one ModelOptSession, as every later step of it runs, which ends with it.
+    assert sessions[0] is not None and ModelOptSession.current() is None
 
 
 def test_tensorrt_llm_export_copies_non_model_files_from_the_local_copy(monkeypatch, tmp_path):

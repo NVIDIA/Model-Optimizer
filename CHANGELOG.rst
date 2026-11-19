@@ -21,6 +21,7 @@ Changelog
 *Quantization - Export & Deployment*
 
 - In a ``with ModelOptSession():`` block, a layerwise calibration hands its exporter to the export through the session once every layer is written.
+- ``examples/hf_ptq/hf_ptq.py`` runs its whole workflow in one ``ModelOptSession``, so it refuses a model its Hugging Face export could not write before calibrating it rather than after.
 
 *Quantization - Recipes*
 
