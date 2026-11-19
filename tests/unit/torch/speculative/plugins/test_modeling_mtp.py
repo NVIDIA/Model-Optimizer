@@ -29,6 +29,7 @@ from torch.nn import functional as F
 pytest.importorskip("transformers")
 from transformers import DynamicCache, LlamaConfig, Trainer, TrainingArguments
 
+from modelopt.torch.speculative.config import MTPConfig
 from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
@@ -426,8 +427,7 @@ def test_trainer_checkpoint_roundtrip_preserves_dtype_and_frozen_endpoints(
     )
     assert not (destination / "modelopt_state.pth").exists()
     metadata = json.loads((destination / "config.json").read_text())["mtp_boost"]
-    assert metadata["mtp_adapter"] == TinyMTPAdapter.name
-    assert metadata["mtp_loss_type"] == "lk_lambda"
+    assert metadata == MTPConfig(mtp_adapter=TinyMTPAdapter.name).model_dump()
     restored = create_native_mtp_boost_model(base, dtype=dtype, **metadata)
     frozen = {
         k: v.clone() for k, v in restored.state_dict().items() if not k.startswith("eagle_module.")
@@ -454,6 +454,7 @@ def test_trainer_checkpoint_roundtrip_preserves_dtype_and_frozen_endpoints(
         {"mtp_lk_eta": float("nan")},
         {"mtp_loss_decay_factor": 0},
         {"mtp_loss_type": "unknown"},
+        {"mtp_ttt_step": 2},
     ],
 )
 def test_invalid_training_configuration(tmp_path, options):
@@ -464,6 +465,8 @@ def test_invalid_training_configuration(tmp_path, options):
 def test_adapter_selection_rejects_unsupported_and_ambiguous_checkpoints(tmp_path):
     with pytest.raises(NativeMTPCheckpointError):
         get_native_mtp_adapter(tmp_path)
+    with pytest.raises(NativeMTPCheckpointError):
+        get_native_mtp_adapter(tmp_path, TinyMTPAdapter.name)
     base = _write_base(tmp_path)
     with pytest.raises(ValueError):
         register_native_mtp_adapter(TinyMTPAdapter)
@@ -477,3 +480,7 @@ def test_adapter_selection_rejects_unsupported_and_ambiguous_checkpoints(tmp_pat
     assert get_native_mtp_adapter(base, TinyMTPAdapter.name) is TinyMTPAdapter
     with pytest.raises(NativeMTPCheckpointError):
         get_native_mtp_adapter(base, "unknown")
+
+    adapter_registry._ADAPTERS.clear()
+    with pytest.raises(NativeMTPCheckpointError):
+        get_native_mtp_adapter(base)

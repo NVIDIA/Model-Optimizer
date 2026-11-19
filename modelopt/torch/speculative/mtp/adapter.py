@@ -97,15 +97,24 @@ def register_native_mtp_adapter(adapter: type[NativeMTPAdapter]) -> type[NativeM
 
 def get_native_mtp_adapter(model_path: str | Path, adapter: str = "auto") -> type[NativeMTPAdapter]:
     """Resolve exactly one matching adapter, or validate the explicitly selected one."""
+    if not _ADAPTERS:
+        raise NativeMTPCheckpointError(
+            "No native MTP adapters are registered. Import the adapter module before selecting one."
+        )
     if adapter != "auto":
         selected = _ADAPTERS.get(adapter)
-        if selected is None or not selected.supports(model_path):
+        if selected is None:
+            raise NativeMTPCheckpointError(
+                f"Unknown native MTP adapter {adapter!r}. Registered adapters: {sorted(_ADAPTERS)}"
+            )
+        if not selected.supports(model_path):
             raise NativeMTPCheckpointError(f"Adapter {adapter!r} does not support {model_path}")
         return selected
     matches = [candidate for candidate in _ADAPTERS.values() if candidate.supports(model_path)]
     if len(matches) != 1:
         raise NativeMTPCheckpointError(
-            f"Expected one native MTP adapter for {model_path}; matched {[a.name for a in matches]}"
+            f"Expected one native MTP adapter for {model_path}; matched {[a.name for a in matches]}. "
+            f"Registered adapters: {sorted(_ADAPTERS)}"
         )
     return matches[0]
 
@@ -115,26 +124,13 @@ def create_native_mtp_boost_model(
     *,
     dtype: torch.dtype = torch.bfloat16,
     device: torch.device | str | None = None,
-    mtp_adapter: str = "auto",
-    mtp_ttt_steps: int = 1,
-    mtp_mix_hidden_states: bool = False,
-    mtp_mix_hidden_states_mode: str = "uniform_layer_sample",
-    mtp_loss_type: str = "lk_lambda",
-    mtp_lk_eta: float = 3.0,
-    mtp_loss_decay_factor: float = 1.0,
-    mtp_use_torch_compile: bool = True,
+    **config_kwargs,
 ) -> nn.Module:
-    """Load native MTP weights for offline training through a registered adapter."""
-    config = MTPConfig(
-        mtp_adapter=mtp_adapter,
-        mtp_ttt_steps=mtp_ttt_steps,
-        mtp_mix_hidden_states=mtp_mix_hidden_states,
-        mtp_mix_hidden_states_mode=mtp_mix_hidden_states_mode,
-        mtp_loss_type=mtp_loss_type,
-        mtp_lk_eta=mtp_lk_eta,
-        mtp_loss_decay_factor=mtp_loss_decay_factor,
-        mtp_use_torch_compile=mtp_use_torch_compile,
-    )
+    """Load native MTP weights for offline training through a registered adapter.
+
+    Additional keyword arguments are validated by :class:`MTPConfig`, which defines their defaults.
+    """
+    config = MTPConfig(**config_kwargs)
     selected = get_native_mtp_adapter(model_path, config.mtp_adapter)
     config.mtp_adapter = selected.name
     return selected.create(model_path, dtype=dtype, device=device, config=config)

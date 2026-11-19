@@ -777,7 +777,8 @@ class EagleConfig(ModeloptBaseConfig):
     eagle_base_lora_logits_detach_prob: float = ModeloptField(
         default=0.5,
         description=(
-            "After warmup, probability of detaching base_output_softmax_logits each step. "
+            "After warmup, probability of detaching the teacher distribution from the EAGLE loss "
+            "each step. "
             "Acts as dropout regularization on the eagle-loss-to-LoRA gradient path through "
             "logits, preventing LoRA from degenerating to maximize EAGLE accuracy at the cost "
             "of base model quality. 1.0 = always detach (no logits gradient), 0.0 = never detach."
