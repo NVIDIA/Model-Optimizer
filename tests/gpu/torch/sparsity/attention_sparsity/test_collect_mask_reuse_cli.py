@@ -903,6 +903,29 @@ def whole_resume_case(resume_case, tmp_path, monkeypatch):
     return args
 
 
+def test_finished_whole_prefill_capture_resumes_after_sort_failure(
+    whole_resume_case, tmp_path, monkeypatch
+):
+    args = whole_resume_case
+    with monkeypatch.context() as patch:
+
+        def fail_sort(*args):
+            raise OSError("sort output is full")
+
+        patch.setattr(collect_mask_reuse_cli, "_normalize_stream_file", fail_sort)
+        with pytest.raises(OSError, match="sort output"):
+            collect_mask_reuse_cli.run(args)
+    prior = Path(args.output).parent
+    receipt = json.loads((prior / "capture.failure.json").read_bytes())
+    assert receipt["completed_capture_count"] == receipt["planned_capture_count"]
+    assert receipt["resumable_prefix"]
+    args.resume_from = prior
+    args.output = str(tmp_path / "resumed/captures.jsonl")
+    _, manifest = collect_mask_reuse_cli.run(args)
+    assert json.loads(manifest.read_bytes())["capture_count"] > 0
+    assert _StreamLLM.instances[-1].events.count("generate") == 0
+
+
 @pytest.mark.parametrize("discovery", [False, True])
 def test_whole_prefill_collector_output_runs_through_refit(
     whole_resume_case, tmp_path, monkeypatch, discovery

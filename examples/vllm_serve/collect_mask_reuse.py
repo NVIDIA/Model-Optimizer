@@ -48,13 +48,12 @@ import argparse
 import importlib.metadata
 import importlib.util
 import json
+import math
 import os
-import sqlite3
 import stat
 import sys
 import tempfile
 import time
-from contextlib import closing
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -1261,69 +1260,63 @@ def _load_capture_engine(args, inputs, journal):
 
 
 def _normalize_stream_file(path, streams, fit, manifests, *, destination=None):
-    """Sort on disk and insert explicitly analytical all-keep rows before publication."""
+    """Sort row offsets and stream payloads without copying the capture into a sort database."""
     digest = sha256()
     ordered_manifests = []
-    with (
-        tempfile.TemporaryDirectory(dir=path.parent) as directory,
-        closing(sqlite3.connect(str(Path(directory) / "sort.sqlite"))) as db,
-    ):
-        db.execute(
-            "CREATE TABLE captures (lo INTEGER, hi INTEGER, split TEXT, prompt TEXT, "
-            "target REAL, payload BLOB, metadata BLOB)"
+    index = []
+
+    def key(row):
+        inv = row["invocation"]
+        hi = inv["max_kv_tokens"]
+        return (
+            inv["min_kv_tokens"],
+            math.inf if hi is None else hi,
+            inv["split"],
+            inv["prompt_id"],
+            float.fromhex(inv["target_sparsity_hex"]),
         )
 
-        def insert(row, metadata):
-            inv = row["invocation"]
-            db.execute(
-                "INSERT INTO captures VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    inv["min_kv_tokens"],
-                    inv["max_kv_tokens"],
-                    inv["split"],
-                    inv["prompt_id"],
-                    float.fromhex(inv["target_sparsity_hex"]),
-                    _canonical_capture_line(row),
-                    _canonical_capture_line(metadata),
-                ),
-            )
-
+    with tempfile.TemporaryDirectory(dir=path.parent) as directory, path.open("rb") as source:
+        offset = 0
         template = None
-        with path.open("rb") as source:
-            for line, metadata in zip(source, manifests, strict=True):
-                template = json.loads(line)
-                insert(template, metadata)
+        for line, metadata in zip(source, manifests, strict=True):
+            template = json.loads(line)
+            index.append((key(template), source, offset, len(line), metadata))
+            offset += len(line)
         if template is None:
             raise CaptureContractError("no measured capture supplies head/layer geometry")
-        for request in streams:
-            for chunk in request["chunks"]:
-                if chunk["dense_reason"] != "threshold_disabled":
-                    continue
-                row = build_analytical_dense_capture(
-                    request, chunk, fit=fit, measured_template=template
-                )
-                cells = template["global_num_heads"] ** 2 * (
-                    sum(len(v) for v in template["consumer_candidates_by_layer"].values())
-                    if "consumer_candidates_by_layer" in template
-                    else len(template["consumer_layers"])
-                )
-                insert(
-                    row,
-                    {
+        with tempfile.TemporaryFile(dir=directory) as analytical:
+            for request in streams:
+                for chunk in request["chunks"]:
+                    if chunk["dense_reason"] != "threshold_disabled":
+                        continue
+                    row = build_analytical_dense_capture(
+                        request, chunk, fit=fit, measured_template=template
+                    )
+                    payload = _canonical_capture_line(row)
+                    cells = template["global_num_heads"] ** 2 * (
+                        sum(len(v) for v in template["consumer_candidates_by_layer"].values())
+                        if "consumer_candidates_by_layer" in template
+                        else len(template["consumer_layers"])
+                    )
+                    metadata = {
                         "candidate_cell_count": cells,
                         "analytical_dense": row["analytical_dense"],
-                    },
-                )
-        ordered = Path(directory) / "captures.jsonl"
-        with ordered.open("wb") as target:
-            for payload, metadata in db.execute(
-                "SELECT payload, metadata FROM captures ORDER BY lo, hi, split, prompt, target"
-            ):
-                target.write(payload)
-                digest.update(payload)
-                ordered_manifests.append(json.loads(metadata))
-            target.flush()
-            os.fsync(target.fileno())
+                    }
+                    index.append((key(row), analytical, analytical.tell(), len(payload), metadata))
+                    analytical.write(payload)
+            ordered = Path(directory) / "captures.jsonl"
+            with ordered.open("wb") as target:
+                for _, stream, offset, count, metadata in sorted(index, key=lambda entry: entry[0]):
+                    stream.seek(offset)
+                    payload = stream.read(count)
+                    if len(payload) != count:
+                        raise CaptureContractError("capture changed while ordering rows")
+                    target.write(payload)
+                    digest.update(payload)
+                    ordered_manifests.append(metadata)
+                target.flush()
+                os.fsync(target.fileno())
         if destination is None:
             os.replace(ordered, path)
         elif destination.exists():
@@ -1997,16 +1990,20 @@ def _run(args: argparse.Namespace, state: dict) -> tuple[Path, Path]:
         assert temporary_path is not None
         temporary_path.unlink(missing_ok=True)
         raise
+    state["stage"] = "publication"
     capture_sha256 = capture_digest.hexdigest()
     if whole_prefill:
-        capture_sha256, capture_manifests = _normalize_stream_file(
-            temporary_path, streams, threshold_scale_factor, capture_manifests
-        )
+        try:
+            capture_sha256, capture_manifests = _normalize_stream_file(
+                temporary_path, streams, threshold_scale_factor, capture_manifests
+            )
+        except BaseException:
+            temporary_path.unlink(missing_ok=True)
+            raise
         capture_count = len(capture_manifests)
         candidate_cell_count = sum(
             cast("int", m["candidate_cell_count"]) for m in capture_manifests
         )
-    state["stage"] = "publication"
     manifest = _capture_manifest(
         args,
         inputs,
