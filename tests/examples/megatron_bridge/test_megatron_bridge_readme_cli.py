@@ -19,9 +19,38 @@ from pathlib import Path
 
 import pytest
 from _test_utils.doc_tests.cli import check_cli_options, python_commands
+from _test_utils.doc_tests.parser import resolve_scenarios
 
 REPO = Path(__file__).resolve().parents[3]
 README = REPO / "examples/megatron_bridge/README.md"
+
+EXCLUDED = {
+    "bridge-quantize": "Executed by test_quantize_export.py::test_quantize_and_export[readme].",
+    "bridge-export": "Executed by test_quantize_export.py::test_quantize_and_export[readme].",
+    "bridge-distill": "Executed by test_distill.py::test_distill_llm_hf_export.",
+    "bridge-distill-export": "Executed by test_distill.py::test_distill_llm_hf_export.",
+    "bridge-prune-params": "Executed by test_prune_minitron.py::test_prune_minitron[qwen3].",
+    "bridge-prune-manual": "Executed by test_prune_minitron.py::test_prune_minitron[readme-manual].",
+    "bridge-distill-help": "Validated by the README CLI preflight.",
+    "bridge-prune-minitron-help": "Validated by the README CLI preflight.",
+    "bridge-lora-ptq": "Separate LoRA PTQ integration; full-model adapter calibration is outside this pilot.",
+    "bridge-docker": "Interactive container provisioning runs outside pytest; CI supplies the container.",
+    "bridge-vlm-template": "Incomplete template; concrete training/export snippets are tested.",
+    "bridge-inline-export-template": "Incomplete template; concrete training/export snippets are tested.",
+    "bridge-single-export-template": "User-selected model/iteration; multi-iteration conversion is tested.",
+    "bridge-output-tree": "Illustrative output tree, not executable code.",
+    "bridge-login": "Interactive authentication is supplied by the user, outside CI.",
+    "bridge-import": "Full-checkpoint conversion needs a separate model environment; outside this pilot.",
+    "bridge-mlflow": "Requires a live tracking service and full checkpoint; outside this pilot.",
+    "bridge-real-data": "Full-scale training with external data is outside this pilot; mock data is tested.",
+    "bridge-qad": "Full-scale QAD needs prepared checkpoints and external data; outside this pilot.",
+    "bridge-prune-active": "Full-model active-parameter search is outside this pilot; other pruning targets run in CI.",
+    "bridge-prune-memory": "Full-model memory-target search is outside this pilot; parameter/manual pruning is tested.",
+    "bridge-prune-vlm": "Full-model VLM pruning is outside this pilot; text-model pruning is tested.",
+    "bridge-generation": "Requires a prepared export and vLLM environment; outside this pilot.",
+}
+
+resolve_scenarios(README, [], excluded=EXCLUDED)
 
 
 @pytest.mark.timeout(90)

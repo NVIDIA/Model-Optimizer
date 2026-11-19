@@ -26,13 +26,6 @@ REPO = Path(__file__).resolve().parents[3]
 README = REPO / "examples/llm_qat/README.md"
 
 SCENARIOS = [
-    Scenario(
-        "llm-qat-install",
-        ["llm-qat-install"],
-        timeout_seconds=7200,
-        handler="_test_utils.doc_tests.fixtures.llm_qat_readme:llm_qat_install",
-        manual=True,
-    ),
     Scenario("llm-qat-recipes", ["llm-qat-recipes"], timeout_seconds=30),
     Scenario(
         "llm-qat-simple",
@@ -40,16 +33,6 @@ SCENARIOS = [
         profile="gpu",
         timeout_seconds=900,
         handler="_test_utils.doc_tests.fixtures.llm_qat_readme:llm_qat_simple",
-    ),
-    Scenario(
-        "llm-qlora-serve",
-        ["llm-qlora-serve"],
-        profile="gpu",
-        timeout_seconds=900,
-        handler="_test_utils.doc_tests.fixtures.llm_qat_readme:llm_qlora_serve",
-        manual=True,
-        requires=["vllm"],
-        background=True,
     ),
     Scenario(
         "llm-qat-python",
@@ -92,18 +75,12 @@ SCENARIOS = [
         timeout_seconds=900,
         handler="_test_utils.doc_tests.fixtures.llm_qat_readme:llm_qat_cli_override",
     ),
-    Scenario(
-        "llm-qat-evaluation",
-        ["llm-qat-evaluation"],
-        profile="gpu",
-        timeout_seconds=7200,
-        handler="_test_utils.doc_tests.fixtures.llm_qat_readme:llm_qat_evaluation",
-        manual=True,
-        requires=["lm_eval"],
-    ),
 ]
 
 EXCLUDED = {
+    "llm-qat-install": "Package installation is supplied by CI; disposable-venv integration is outside this pilot.",
+    "llm-qlora-serve": "Requires a prepared adapter and vLLM server; serving integration is outside this pilot.",
+    "llm-qat-evaluation": "Requires a trained checkpoint and external evaluation data; outside this pilot.",
     "llm-qat-dataset": "Executed by test_llm_qat.py::test_dataset_utils_pretokenize.",
     "llm-qat-quickstart": "Executed by test_llm_qat.py::test_qwen3_qat_nvfp4 through run_example_command.",
     "llm-qad-quickstart": "Executed by test_llm_qat.py::test_qwen3_qad_nvfp4 through run_example_command.",

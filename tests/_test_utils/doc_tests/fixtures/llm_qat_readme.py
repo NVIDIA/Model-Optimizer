@@ -17,54 +17,17 @@
 
 import json
 import math
-import os
 import shutil
-import socket
-import subprocess
-import sys
-import time
-import urllib.request
-from pathlib import Path
 
 __all__ = [
     "llm_qad_trainer",
     "llm_qat_cli_override",
     "llm_qat_copy_config",
-    "llm_qat_evaluation",
-    "llm_qat_install",
     "llm_qat_llama_wrap",
     "llm_qat_python",
     "llm_qat_simple",
     "llm_qat_trainer",
-    "llm_qlora_serve",
 ]
-
-
-def llm_qat_install(ctx):
-    """Run and verify the llm-qat-install scenario."""
-    venv = ctx.tmp / "venv"
-    subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
-    ctx.cwd = ctx.tmp
-    target = ctx.tmp / "examples/llm_qat"
-    target.mkdir(parents=True)
-    shutil.copy2(ctx.repo / "examples/llm_qat/requirements.txt", target / "requirements.txt")
-    ctx.env["PATH"] = str(venv / "bin") + os.pathsep + ctx.env["PATH"]
-    ctx.env.pop("PYTHONPATH", None)
-    ctx.env.pop("VIRTUAL_ENV", None)
-    ctx.run()
-    result = subprocess.run(
-        [
-            str(ctx.tmp / "venv/bin/python"),
-            "-c",
-            "import json, modelopt, accelerate, peft; print(json.dumps(modelopt.__file__))",
-        ],
-        cwd=ctx.cwd,
-        env=ctx.env,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert Path(json.loads(result.stdout.strip().splitlines()[-1])).is_relative_to(ctx.tmp / "venv")
 
 
 def llm_qat_simple(ctx):
@@ -78,40 +41,6 @@ def llm_qat_simple(ctx):
     ctx.run()
     assert (ctx.cwd / "qat_model/modelopt_state.pth").is_file()
     assert (ctx.cwd / "qat_model/model.safetensors").stat().st_size > 0
-
-
-def llm_qlora_serve(ctx):
-    """Run and verify the llm-qlora-serve scenario."""
-    checkpoint = Path(ctx.env["MODELOPT_DOC_QLORA_CHECKPOINT"]).resolve()
-    assert (checkpoint / "adapter_config.json").is_file()
-    assert (checkpoint / "base_model/config.json").is_file()
-    ctx.cwd = ctx.tmp
-    (ctx.cwd / "qwen3-8b-fp4-qlora-hf").symlink_to(checkpoint, target_is_directory=True)
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        ctx.env["PORT"] = str(sock.getsockname()[1])
-    ctx.run()
-    url = f"http://127.0.0.1:{ctx.env['PORT']}"
-    deadline = time.monotonic() + 600
-    while True:
-        try:
-            with urllib.request.urlopen(url + "/health", timeout=5) as response:
-                assert response.status == 200
-            break
-        except OSError:
-            if time.monotonic() >= deadline:
-                raise TimeoutError("vLLM did not become ready") from None
-            time.sleep(1)
-    request = urllib.request.Request(
-        url + "/v1/completions",
-        data=json.dumps(
-            {"model": "adapter", "prompt": "The capital of France is", "max_tokens": 4}
-        ).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        result = json.load(response)
-    assert result["choices"] and result["usage"]["completion_tokens"] > 0
 
 
 def llm_qat_python(ctx):
@@ -192,17 +121,3 @@ def llm_qat_cli_override(ctx):
     )
     base_rates = scheduler["base_lrs"]
     assert base_rates and all(math.isclose(rate, 5e-5) for rate in base_rates), base_rates
-
-
-def llm_qat_evaluation(ctx):
-    """Run and verify the llm-qat-evaluation scenario."""
-    checkpoint = Path(os.environ["MODELOPT_DOC_EVAL_CHECKPOINT"]).resolve()
-    assert (checkpoint / "modelopt_state.pth").is_file()
-    ctx.cwd = ctx.tmp / "examples/llm_qat"
-    ctx.cwd.mkdir(parents=True)
-    (ctx.cwd / "qwen3-8b-qat-nvfp4").symlink_to(checkpoint, target_is_directory=True)
-    shutil.copytree(ctx.repo / "examples/llm_eval", ctx.cwd.parent / "llm_eval")
-    ctx.env["EVAL_OUTPUT"] = str(ctx.tmp / "eval-results")
-    ctx.run()
-    files = list((ctx.tmp / "eval-results").rglob("results*.json"))
-    assert files and json.loads(files[0].read_text())["results"]

@@ -51,10 +51,6 @@ class Scenario:
     profile: str = "cpu"
     timeout_seconds: int = 60
     handler: str | None = None
-    manual: bool = False
-    min_gpus: int = 0
-    requires: list[str] = field(default_factory=list)
-    background: bool = False
     path: Path | None = None
     steps: list[Snippet] = field(default_factory=list)
 
@@ -142,10 +138,6 @@ def resolve_scenarios(path, scenarios, *, excluded=None):
         kinds = {step.kind for step in steps}
         if not kinds <= {"run", "python"} or len(kinds) != 1:
             fail("select only shell fences or only Python fences in each scenario")
-        if scenario.background:
-            if kinds != {"run"} or scenario.handler is None:
-                fail("background requires shell snippets and a verification handler")
-            steps = [*steps[:-1], replace(steps[-1], kind="background")]
         for step in steps:
             if step.kind == "python":
                 try:

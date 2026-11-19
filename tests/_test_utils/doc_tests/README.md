@@ -9,7 +9,7 @@ These are trusted repository tests with the same privileges as pytest.
 
 ## Why a snippet runner
 
-Pytest provides collection, fixtures, assertions and manual/resource markers, while
+Pytest provides collection, fixtures, assertions and GPU resource checks, while
 pytest-timeout provides an outer test deadline. The snippet layer adds Markdown
 extraction, named-snippet accounting, source locations and a worker deadline covering
 setup, execution and verification, with process-group cleanup.
@@ -17,7 +17,7 @@ setup, execution and verification, with process-group cleanup.
 Sybil is a test-only dependency installed by `.[dev-test]`. It handles fence
 boundaries, quoted blocks and source offsets; its collectors and evaluators are
 not enabled. Existing pytest tests retain scenario selection and resource checks,
-and the worker retains shell state, deadlines, background services and cleanup.
+and the worker retains snippet execution, deadlines and process cleanup.
 Unclosed fences extend to the end of the document, following Sybil's Markdown
 semantics.
 
@@ -29,18 +29,15 @@ CPU-only documentation checks run without importing the ML stack. The migrated C
 from README fences.
 
 Stdlib doctest checks Python prompt/output examples. These READMEs also contain
-shell pipelines, distributed training, background services and artifact assertions,
+shell pipelines, distributed training and artifact assertions,
 which need the scenario/handler contract described below.
 
 ## Fixture scope
 
 The parser, runner and pytest adapter are generic. Helpers under `fixtures/`
-implement inputs and output checks for the remaining standalone/manual scenarios: use `llm_qat` or `bridge`
-in helper names, and prefix standalone QAT fixture modules with `llm_qat_`.
-Installation copies QAT requirements and checks its dependencies; serving expects
-the QAT README's QLoRA checkpoint layout and adapter name. These are not general
-installation or serving APIs. Add a shared abstraction only when another example
-needs the same behavior with a clear parameter contract.
+implement inputs and output checks for the remaining standalone QAT scenarios.
+Bridge commands reuse the existing end-to-end tests and their fixtures. Add a shared
+abstraction only when another example needs the same behavior with a clear contract.
 
 ## Snippet IDs and Python scenarios
 
@@ -95,13 +92,12 @@ def smoke(ctx):
   participate. Duplicate IDs, unknown references, unaccounted named fences, stale
   exclusions, and tested/excluded overlaps fail collection. Removing or renaming
   a referenced ID also fails collection. Accounting does **not** mean
-  manual/excluded code passed.
+  excluded code passed.
   Scenario metadata is trusted Python test configuration; the resolver does not
   duplicate type or format checks for resource fields and handler names.
 - `Scenario` requires a unique scenario ID and a nonempty ordered list of snippet
   IDs. Defaults are `profile="cpu"` and `timeout_seconds=60`. Optional metadata:
-  `profile="gpu"`, `min_gpus=2`, `requires=["megatron.bridge"]`, `manual=True`,
-  `background=True`, and `handler="module:function"`.
+  `profile="gpu"` and `handler="module:function"`.
 - Handlers are imported only by the worker. Collection does not import their ML
   dependencies or discover GPUs. Keep optional ML imports in the worker path so
   CPU-only scenarios can still run independently. Without a handler, the worker
@@ -110,16 +106,11 @@ def smoke(ctx):
   `ctx.env` is mutable. Select a temporary workspace when isolation is needed.
 - Shell snippets run in test-defined order in one Bash process with
   `set -Eeuo pipefail`. Variables, directory changes, and exported environment
-  persist; the handler sees final `ctx.cwd` and `ctx.env` after `ctx.run()`.
+  persist within that process. Shell state is not copied back into the handler.
 - Python snippets share the dictionary supplied to `ctx.run(namespace)`, which is
   also returned for assertions. The worker supplies `ctx`, `__name__="__main__"`,
   and `__file__` pointing to the README. Before execution it applies `ctx.cwd` and
-  `ctx.env`; afterward it records their final values. Keep Python and shell
-  snippets in separate scenarios.
-- `background=True` starts the **last shell snippet** asynchronously. A handler
-  must verify readiness and behavior after `ctx.run()`. `ctx.background_pid`
-  identifies its shell process. Background changes to directory/environment do
-  not propagate back; configure server settings before running the snippets.
+  `ctx.env`. Keep Python and shell snippets in separate scenarios.
 - The parent passes a JSON execution plan to the worker; the worker does not
   reparse the README or import pytest modules. The deadline covers handler import,
   setup, snippet execution, and verification. The process group is terminated on
@@ -130,22 +121,18 @@ def smoke(ctx):
   are removed while workspace artifacts remain in pytest's temporary directory.
 - Commands must not detach, disable error checking, or replace/exit the shell.
   These are trusted repository tests, not a security sandbox.
-- The runner prepends the checkout and test utilities to `PYTHONPATH`. The separate
-  installation test removes it and uses a disposable virtualenv to test the
-  installed package without replacing the checkout environment.
-- Manual scenarios use the existing `--run-manual` option. Missing declared
-  modules or insufficient GPUs produce explicit skips. A GPU profile requires
-  at least one device. Manual prerequisites remain the operator's responsibility.
+- The runner prepends the checkout and test utilities to `PYTHONPATH`. A GPU
+  profile requires at least one device; an unavailable GPU produces an explicit skip.
 
 The old `modelopt-doc-test:begin/setup/run/verify/end/skip` format is unsupported.
 Test-only setup, assertions, metadata, and exclusion reasons belong in Python.
 
 ## Coverage and limits
 
-| README | Default smoke scenarios | Opt-in integration scenarios | Exclusions |
-| --- | --- | --- | --- |
-| `llm_qat` | QAT/QAD/QLoRA in existing end-to-end tests; recipes; simple Llama demo; three Python APIs; FSDP2 layer override; config copy; CLI learning-rate override; dataset cache | Installation; vLLM adapter serving; MMLU/WikiText evaluation | Quickstart fences are externally covered by `test_llm_qat.py`, not duplicated as scenarios |
-| `megatron_bridge` | PTQ/export, mock-data distill/export, parameter-target/manual pruning in existing end-to-end tests; CLI preflight | Login; checkpoint import; MLflow PTQ; real-data distillation/QAD; active-parameter/memory NAS targets; VLM pruning; vLLM generation | Migrated fences are externally covered; Docker setup, LoRA integration, incomplete templates and illustrative output remain excluded |
+| README | Default smoke coverage | Exclusions |
+| --- | --- | --- |
+| `llm_qat` | QAT/QAD/QLoRA in existing end-to-end tests; recipes; simple Llama demo; three Python APIs; FSDP2 layer override; config copy; CLI learning-rate override; dataset cache | Installation, serving and evaluation integrations are outside this pilot; quickstarts are covered by `test_llm_qat.py` |
+| `megatron_bridge` | PTQ/export, mock-data distill/export, parameter-target/manual pruning in existing end-to-end tests; CLI preflight | Login, full-scale conversion/training/pruning, tracking and generation integrations; Docker setup, LoRA integration, incomplete templates and illustrative output |
 
 QAT/QAD/QLoRA quickstarts and dataset pre-tokenization run through `test_llm_qat.py` and its existing shared
 PTQ model, dataset cache, backends and export checks. Commands are read from their
@@ -157,8 +144,8 @@ in `CUDA_VISIBLE_DEVICES` (or device 0 when unset) to their worker. This prevent
 Trainer from using threaded DataParallel, which races shared attention patching;
 existing end-to-end tests retain distributed coverage. Dataset pre-tokenization
 uses the existing dataset CLI test.
-Manual installation, serving and evaluation
-checks remain separate because the existing CLI tests do not exercise them.
+Installation, serving and evaluation integrations are explicitly excluded from
+execution coverage; their former manual-only handlers are removed.
 
 Bridge PTQ/export uses the `readme` case in `test_quantize_export.py`; mock-data
 distillation and all-iteration export use `test_distill_llm_hf_export`; pruning
@@ -166,8 +153,9 @@ uses the existing `qwen3` case plus a `readme-manual` case in `test_prune_minitr
 These tests use the existing `run_example_command` runner and its fixture inputs,
 checkpoint assertions and GPU-count handling. There is no separate Bridge smoke
 workspace or second distillation prerequisite. Other architecture and recipe
-cases retain their existing commands. Full-scale manual integrations retain their
-resource metadata and artifact checks; CLI help is checked by the preflight.
+cases retain their existing commands. Full-scale integrations are excluded with
+reasons in the Bridge CLI module, which also enforces named-snippet accounting.
+CLI help is checked by the preflight.
 
 `_test_utils.doc_tests.cli.readme_command` selects one Python invocation from an
 existing named fence and returns an argument list for the existing command runner.
@@ -201,29 +189,16 @@ python -m pytest tests/unit/doc_tests --confcutdir=tests/unit/doc_tests -o addop
 
 # Collect and inspect skip reasons in the normal test environment.
 python -m pytest tests/examples/llm_qat/test_llm_qat_readme.py --collect-only --no-cov
-python -m pytest tests/examples/megatron_bridge/test_megatron_bridge_readme.py --collect-only --no-cov
+python -m pytest tests/examples/megatron_bridge/test_megatron_bridge_readme_cli.py --collect-only --no-cov
 
-# Bounded defaults; manual integrations are skipped.
+# Bounded default execution coverage.
 CUDA_VISIBLE_DEVICES=0 python -m pytest tests/examples/llm_qat/test_llm_qat_readme.py --no-cov -rs
 python -m pytest tests/examples/llm_qat/test_llm_qat.py --no-cov -k 'qat_nvfp4 or qad_nvfp4 or qlora_nvfp4' -rs
 python -m pytest tests/examples/megatron_bridge/test_quantize_export.py --no-cov -k readme -rs
 python -m pytest tests/examples/megatron_bridge/test_distill.py --no-cov -k test_distill_llm_hf_export -rs
 python -m pytest tests/examples/megatron_bridge/test_prune_minitron.py --no-cov -k 'qwen3 or readme-manual' -rs
 
-# Select ONE manual integration with its prerequisites already supplied.
-# MODELOPT_DOC_QLORA_CHECKPOINT: exported adapter directory containing base_model/.
-python -m pytest tests/examples/llm_qat/test_llm_qat_readme.py --no-cov --run-manual -k llm-qlora-serve
-# MODELOPT_DOC_EVAL_CHECKPOINT: fake-quantized QAT checkpoint; lm_eval and dataset access required.
-python -m pytest tests/examples/llm_qat/test_llm_qat_readme.py --no-cov --run-manual -k llm-qat-evaluation
 ```
-
-Installation downloads packages into a temporary virtualenv and may compile GPU
-extensions. Bridge manual tests need the full models, gated-data access and the
-GPU count declared in their scenario. Login requires `HF_TOKEN` and writes into a
-temporary `HF_HOME`; no token belongs in Markdown. Real-data training needs
-`DATA_PREFIX_1` and `DATA_PREFIX_2`; QAD also needs `QUANTIZED_CHECKPOINT`. MLflow
-requires `MLFLOW_TRACKING_URI`; generation requires `PRUNED_CHECKPOINT`.
-Manual tests can run for hours and are never enabled by the example CI command.
 
 ## CPU CLI drift checks
 
@@ -235,7 +210,8 @@ visibility disabled. Missing scripts, failed help commands and unknown flags
 report the README path, snippet ID and command line number.
 
 Only existing ID-marked fences are inspected; these checks add no README markers
-and do not enforce named-snippet accounting. The checks run in the installed example environment but do not launch training,
+and the Bridge module also accounts for named fences covered by existing tests
+or excluded with a reason. The checks run in the installed example environment but do not launch training,
 models or distributed workers. Imports still require the example dependencies.
 The QAT evaluation and Bridge vLLM scripts need their optional manual environments;
 their CLI checks use `--run-manual`. Values, config contents, launcher flags,
@@ -261,14 +237,13 @@ python -m pytest tests/examples/megatron_bridge/test_megatron_bridge_readme_cli.
 
 ## CI triggers
 
-Both README test modules are collected by the existing example jobs. The
+The CLI preflights and QAT standalone scenarios are collected by the existing example jobs. The
 workflow runs nightly, on demand, and on pushes to copied PR branches
 `pull-request/<number>` after unit tests pass. README-only changes explicitly
 activate their respective Torch or Megatron lane despite the general Markdown
 exclusion. Changes to shared test utilities activate every lane. Migrated Bridge
 commands use the existing end-to-end tests' GPU-count fixture, including single-GPU
-PR runners and two-GPU nightly runners. Optional full-scale scenarios retain their
-own GPU requirements.
+PR runners and two-GPU nightly runners.
 
 ## File responsibilities
 
@@ -276,15 +251,15 @@ own GPU requirements.
 | --- | --- |
 | `parser.py` | Extract named fences and check references, named-snippet accounting, and executable languages. |
 | `runner.py` | Execute resolved plans with worker-side handlers, deadlines, shared state, and cleanup. |
-| `pytest_utils.py` | Common collection, manual markers and resource checks, independent of the example. |
+| `pytest_utils.py` | Common collection and GPU availability checks, independent of the example. |
 | `cli.py` | Extract README commands, substitute explicit end-to-end inputs, and validate flags against script help. |
-| `fixtures/llm_qat_readme.py`, `fixtures/megatron_bridge_readme.py` | Worker-side setup and verification, including QAT installation/serving and manual Bridge checks. |
+| `fixtures/llm_qat_readme.py` | Worker-side setup and verification for default QAT standalone snippets. |
 | `fixtures/llm_qat.py` | Inputs and assertions for the remaining QAT Python/API and standalone snippets. |
 | `tests/unit/doc_tests/test_markdown.py` | Focused fence parsing, failure-location, and timeout-cleanup regressions. |
 | `tests/examples/llm_qat/test_llm_qat_readme.py` | Collect QAT scenarios through the common pytest adapter. |
-| `tests/examples/megatron_bridge/test_megatron_bridge_readme.py` | Collect Bridge scenarios through the same adapter. |
+| `tests/examples/megatron_bridge/test_megatron_bridge_readme_cli.py` | Check CLI flags and account for Bridge fences covered elsewhere or excluded. |
 | `examples/llm_qat/README.md` | Annotate the remaining snippets; correct QAD teacher construction and incomplete training commands. |
-| `examples/megatron_bridge/README.md` | Annotate smoke/manual scenarios, expose input/scale overrides and account for non-executable templates. |
+| `examples/megatron_bridge/README.md` | Name command fences for CLI and existing end-to-end coverage; expose input/scale overrides. |
 | `.github/workflows/example_tests.yml` | Trigger the Megatron lane for README-only changes. |
 | `tests/examples/README.md` | Point example authors to the shared shell/Python test mechanism. |
 | `tests/_test_utils/doc_tests/README.md` | Document the contract, scope, prerequisites, limits and CI behavior. |

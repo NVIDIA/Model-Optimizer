@@ -76,7 +76,11 @@ answer = 42
 @pytest.mark.skipif(os.name != "posix", reason="Requires bash/POSIX")
 @pytest.mark.parametrize(
     ("language", "code"),
-    [("sh", "false | cat\ntouch forbidden"), ("python", "raise RuntimeError('snippet failed')")],
+    [
+        ("sh", "false | cat\ntouch forbidden"),
+        ("sh", "exit 0\ntouch forbidden"),
+        ("python", "raise RuntimeError('snippet failed')"),
+    ],
 )
 def test_failure_reports_snippet_and_markdown_line(tmp_path, language, code):
     scenario = _scenario(tmp_path, code, language=language)

@@ -91,7 +91,7 @@ def run_scenario(scenario, repo: Path, tmp: Path) -> str:
         output.seek(0)
         text = output.read().decode(errors="replace")
         for index, step in enumerate(scenario.steps):
-            if step.kind in {"run", "background"}:
+            if step.kind == "run":
                 text = text.replace(
                     str(Path(control_dir) / f"fence-{index}.sh"), str(scenario.path)
                 )
@@ -127,7 +127,6 @@ def _execute(scenario, repo, tmp, control):
                     compile("\n" * (step.line - 1) + step.code, str(scenario.path), "exec"),
                     namespace,
                 )
-            ctx.cwd, ctx.env = Path.cwd(), dict(os.environ)
         else:
             _execute_shell(scenario, ctx, control)
         completed = True
@@ -145,10 +144,9 @@ def _execute(scenario, repo, tmp, control):
 
 
 def _execute_shell(scenario, ctx, control):
+    completed = control / "shell-completed"
     script = ["set -Eeuo pipefail", f"DOC_TEST_SOURCE={shlex.quote(str(scenario.path))}"]
     for index, step in enumerate(scenario.steps):
-        if step.kind not in {"run", "background"}:
-            continue
         source = control / f"fence-{index}.sh"
         source.write_text("\n" * (step.line - 1) + step.code)
         script.append(f"printf '%s\\n' {shlex.quote(f'{scenario.path}:{step.line}: {step.id}')}")
@@ -158,26 +156,16 @@ def _execute_shell(scenario, ctx, control):
             'trap \'printf "%s:%s: %s: shell command failed\\n" '
             '"$DOC_TEST_SOURCE" "$LINENO" "$DOC_TEST_SNIPPET" >&2\' ERR'
         )
-        command = f"source {shlex.quote(str(source))}"
-        if step.kind == "background":
-            command += f" &\necho $! > {shlex.quote(str(control / 'background_pid'))}"
-        script.append(command)
-    script.extend(
-        [
-            f"pwd -P > {shlex.quote(str(control / 'cwd'))}",
-            f"env -0 > {shlex.quote(str(control / 'env'))}",
-        ]
-    )
+        script.append(f"source {shlex.quote(str(source))}")
+    script.append(f"touch {shlex.quote(str(completed))}")
     shell = control / "scenario.sh"
     shell.write_text("\n".join(script) + "\n")
     # Inherit stdout so the parent retains partial output even if the scenario times out.
     result = subprocess.run(["bash", "--noprofile", "--norc", str(shell)], cwd=ctx.cwd, env=ctx.env)
     if result.returncode:
         raise DocTestError(f"shell exited with {result.returncode}")
-    ctx.cwd = Path((control / "cwd").read_text().rstrip("\n"))
-    ctx.env = dict(item.split("=", 1) for item in (control / "env").read_text().split("\0") if item)
-    if (control / "background_pid").exists():
-        ctx.background_pid = int((control / "background_pid").read_text())
+    if not completed.is_file():
+        raise DocTestError("shell exited before completing the scenario")
 
 
 if __name__ == "__main__":

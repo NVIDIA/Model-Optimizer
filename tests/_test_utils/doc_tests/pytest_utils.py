@@ -15,8 +15,6 @@
 
 """Common pytest collection and resource checks for executable documentation."""
 
-import importlib.util
-
 import pytest
 
 from .parser import resolve_scenarios
@@ -27,31 +25,22 @@ __all__ = ["execute_scenario", "scenario_parameters"]
 
 def scenario_parameters(path, scenarios, *, excluded=None):
     """Collect every scenario, enforcing a documented disposition for every named fence."""
-    result = []
-    for scenario in resolve_scenarios(path, scenarios, excluded=excluded):
-        marks = [pytest.mark.timeout(scenario.timeout_seconds + 30)]
-        if scenario.manual:
-            marks.append(pytest.mark.manual)
-        result.append(pytest.param(scenario, id=scenario.id, marks=marks))
-    return result
+    return [
+        pytest.param(
+            scenario, id=scenario.id, marks=pytest.mark.timeout(scenario.timeout_seconds + 30)
+        )
+        for scenario in resolve_scenarios(path, scenarios, excluded=excluded)
+    ]
 
 
 def execute_scenario(scenario, repo, tmp_path, monkeypatch):
     """Check declared resources and execute the same runner for any example."""
-    for dependency in scenario.requires:
-        try:
-            available = importlib.util.find_spec(dependency)
-        except ModuleNotFoundError:
-            available = None
-        if available is None:
-            pytest.skip(f"README scenario requires {dependency}")
-    if scenario.profile == "gpu" or scenario.min_gpus:
+    if scenario.profile == "gpu":
         # GPU discovery is deliberately deferred until execution, not collection.
         import torch
 
-        needed = max(1, scenario.min_gpus)
-        if torch.cuda.device_count() < needed:
-            pytest.skip(f"README scenario requires {needed} CUDA devices")
+        if not torch.cuda.device_count():
+            pytest.skip("README scenario requires a CUDA device")
     for key in (
         "RANK",
         "LOCAL_RANK",
