@@ -133,11 +133,6 @@ torchrun --nproc_per_node 2 export_quantized_megatron_to_hf.py \
 
 To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export_quantized_megatron_to_hf.py --help`).
 
-For frozen calibration tokens, pass a local JSONL file as `--calib_dataset_name` and
-add `--calib_pretokenized`. Each row contains `input_ids` and an optional binary
-`attention_mask`; this mode currently requires CP1 and preserves token boundaries.
-For ordinary text calibration, `--no_calib_packing` keeps documents separate.
-
 `export_quantized_megatron_to_hf.py --export_backend bridge` uses Bridge's
 `save_hf_pretrained_modelopt` API to write real-quant weights and metadata. It
 requires a Bridge version that implements that API and the selected model's

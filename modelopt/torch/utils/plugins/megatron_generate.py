@@ -138,8 +138,6 @@ def megatron_prefill(
     image_sizes: torch.LongTensor | None = None,
     position_ids: torch.LongTensor | None = None,
     skip_return_logits: bool = False,
-    *,
-    padding_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """A simple prefill function for Megatron Core V(LM) models.
 
@@ -191,16 +189,6 @@ def megatron_prefill(
     _assert_mamba_within_int32_indexing(model, batch_size, padded_seq_len)
 
     cp_size = mpu.get_context_parallel_world_size()
-    if padding_mask is not None:
-        if cp_size > 1 or _masks_causally_itself(model):
-            raise ValueError(
-                "An explicit padding_mask requires ordinary causal attention and CP=1."
-            )
-        if padding_mask.shape != input_ids.shape:
-            raise ValueError("padding_mask must have the same shape as input_ids.")
-        padding_mask = torch.nn.functional.pad(
-            padding_mask.to(device=device, dtype=torch.bool), (0, num_pad_tokens), value=False
-        )
 
     # Under CP a local triu mask would be wrong for the per-rank zigzag chunks; pass None and let
     # the CP-aware causal attention build it. DeepSeek-V4 hybrid attention masks causally itself.
@@ -215,8 +203,6 @@ def megatron_prefill(
             .bool()
             .view(batch_size, 1, padded_seq_len, padded_seq_len)
         )
-        if padding_mask is not None:
-            attention_mask |= ~padding_mask[:, None, None, :]
 
     # position_ids feed only absolute/learned embeddings (RoPE is internal). Default to a contiguous
     # local range; CP callers pass the partitioned global positions.

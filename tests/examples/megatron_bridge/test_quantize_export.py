@@ -47,10 +47,10 @@ _DENSE_KWARGS = {
 }
 
 
-def test_pretokenized_ptq_and_bridge_checkpoint_export(tmp_path):
+def test_ptq_and_bridge_checkpoint_export(tmp_path):
     source = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, **_DENSE_KWARGS)
-    calibration = tmp_path / "tokens.jsonl"
-    calibration.write_text("\n".join(json.dumps({"input_ids": [1, 2, 3, 4] * 4}) for _ in range(4)))
+    calibration = tmp_path / "calibration.jsonl"
+    calibration.write_text("\n".join(json.dumps({"text": "Hello world! " * 16}) for _ in range(4)))
     checkpoint, output = tmp_path / "megatron", tmp_path / "hf"
     quantize = extend_cmd_parts(
         [
@@ -58,7 +58,6 @@ def test_pretokenized_ptq_and_bridge_checkpoint_export(tmp_path):
             "--nproc_per_node=1",
             "quantize.py",
             "--skip_generate",
-            "--calib_pretokenized",
         ],
         hf_model_name_or_path=source,
         recipe="general/ptq/nvfp4_default",

@@ -16,10 +16,8 @@
 """Shared calibration forward-loop builder for Megatron-Core models."""
 
 import copy
-import json
 import math
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -52,7 +50,6 @@ def get_megatron_calibration_dataloader(
     device: torch.device | str | None = "cuda",
     apply_chat_template: bool = True,
     pack: bool = False,
-    pretokenized: bool = False,
 ) -> torch.utils.data.DataLoader:
     """Build a DP-sharded calibration dataloader for Megatron-Core models.
 
@@ -70,61 +67,6 @@ def get_megatron_calibration_dataloader(
 
     # Shard calibration data across DP ranks; amax is max-reduced across DP inside ``mtq``.
     dp_size = mpu.get_data_parallel_world_size()
-    if pretokenized:
-        if pack or not isinstance(dataset_name, str) or not isinstance(num_samples, int):
-            raise ValueError("Pretokenized calibration requires one JSONL file and pack=False.")
-        if num_samples <= 0 or batch_size <= 0 or seq_length <= 0:
-            raise ValueError(
-                "Calibration sample count, batch size and sequence length must be positive."
-            )
-        rows = []
-        with Path(dataset_name).open() as source:
-            for line in source:
-                if line.strip():
-                    row = json.loads(line)
-                    ids = row["input_ids"]
-                    if len(ids) == 1 and isinstance(ids[0], list):
-                        ids = ids[0]
-                    mask = row.get("attention_mask", [1] * len(ids))
-                    if len(mask) == 1 and isinstance(mask[0], list):
-                        mask = mask[0]
-                    if (
-                        not ids
-                        or any(type(token) is not int or token < 0 for token in ids)
-                        or len(mask) != len(ids)
-                        or any(value not in (0, 1) for value in mask)
-                    ):
-                        raise ValueError("Invalid calibration input_ids or attention_mask.")
-                    ids, mask = ids[:seq_length], mask[:seq_length]
-                    if not any(mask):
-                        raise ValueError(
-                            "Calibration attention_mask has no valid tokens after truncation."
-                        )
-                    rows.append(
-                        {
-                            "input_ids": torch.tensor(ids, dtype=torch.long),
-                            "attention_mask": torch.tensor(mask, dtype=torch.bool),
-                        }
-                    )
-                    if len(rows) == num_samples:
-                        break
-        if len(rows) != num_samples or num_samples % dp_size:
-            raise ValueError("Calibration samples must be available and divisible by DP size.")
-        local_rows = rows[mpu.get_data_parallel_rank() :: dp_size]
-
-        def collate(samples):
-            length = max(row["input_ids"].numel() for row in samples)
-            result = {}
-            for key, value in (("input_ids", tokenizer.pad_token_id), ("attention_mask", 0)):
-                tensors = []
-                for row in samples:
-                    padding = length - row[key].numel()
-                    sides = (padding, 0) if tokenizer.padding_side == "left" else (0, padding)
-                    tensors.append(torch.nn.functional.pad(row[key], sides, value=value))
-                result[key] = torch.stack(tensors).to(device)
-            return result
-
-        return torch.utils.data.DataLoader(local_rows, batch_size=batch_size, collate_fn=collate)
     return get_dataset_dataloader(
         dataset_name=dataset_name,
         tokenizer=tokenizer,
@@ -153,7 +95,6 @@ def get_megatron_calibration_forward_loop(
     device: torch.device | str | None = "cuda",
     apply_chat_template: bool = True,
     pack: bool = False,
-    pretokenized: bool = False,
 ) -> Callable[[torch.nn.Module], None]:
     """Build a Megatron-Core calibration ``forward_loop(model)``.
 
@@ -175,13 +116,10 @@ def get_megatron_calibration_forward_loop(
         device=device,
         apply_chat_template=apply_chat_template,
         pack=pack,
-        pretokenized=pretokenized,
     )
 
     def _forward_loop(model: torch.nn.Module) -> None:
         cp_size = mpu.get_context_parallel_world_size()
-        if pretokenized and cp_size > 1:
-            raise ValueError("Pretokenized calibration currently requires CP=1.")
         cp_group = mpu.get_context_parallel_group()
         for sample in tqdm(dataloader, disable=not dist.is_master()):
             if cp_size > 1:
@@ -190,12 +128,7 @@ def get_megatron_calibration_forward_loop(
                     model, input_ids, position_ids=position_ids, skip_return_logits=True
                 )
             else:
-                megatron_prefill(
-                    model,
-                    sample["input_ids"],
-                    skip_return_logits=True,
-                    **({"padding_mask": sample["attention_mask"]} if pretokenized else {}),
-                )
+                megatron_prefill(model, sample["input_ids"], skip_return_logits=True)
 
     return _forward_loop
 
