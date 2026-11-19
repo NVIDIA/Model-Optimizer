@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Dense Qwen3.5 Vision Encoder FP8 with a high-precision language model and KV cache.
+# Dense Qwen3.5 vision-merger FP8 with a high-precision language model and KV cache.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
@@ -22,9 +22,8 @@ imports:
 
 metadata:
   description: >-
-    FP8 quantization of dense Qwen3.5 Vision Encoder Linear layers, including any merger Linears;
-    the language model, KV cache, patch embedding, and vision-attention operands remain in high
-    precision.
+    FP8 quantization of dense Qwen3.5 vision-merger Linears; the vision blocks, language model,
+    KV cache, and patch embedding remain in high precision for vLLM compatibility.
 
 quantize:
   algorithm: max

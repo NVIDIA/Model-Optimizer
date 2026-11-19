@@ -17,10 +17,10 @@
 
 import argparse
 import sys
-import tempfile
 from pathlib import Path
 
-from modelopt.onnx.logging_config import logger
+from modelopt.onnx.logging_config import configure_logging, logger
+from modelopt.onnx.quantization.autotune.benchmark import default_timing_cache_file
 from modelopt.onnx.quantization.autotune.utils import (
     DEFAULT_NUM_SCHEMES,
     DEFAULT_TIMING_RUNS,
@@ -38,7 +38,6 @@ from modelopt.onnx.quantization.autotune.workflows import (
 DEFAULT_OUTPUT_DIR = "./autotuner_output"
 DEFAULT_QUANT_TYPE = "int8"
 DEFAULT_DQ_DTYPE = "float32"
-DEFAULT_TIMING_CACHE = str(Path(tempfile.gettempdir()) / "trtexec_timing.cache")
 
 
 def apply_mode_presets(args) -> None:
@@ -94,6 +93,8 @@ def run_autotune() -> int:
     """
     args = get_parser().parse_args()
     apply_mode_presets(args)
+    configure_logging("DEBUG" if args.verbose else "INFO")
+    args.timing_cache = args.timing_cache or default_timing_cache_file()
     model_path = validate_file_path(args.onnx_path, "Model file")
     validate_file_path(args.qdq_baseline, "QDQ baseline model")
     output_dir = Path(args.output_dir)
@@ -109,6 +110,7 @@ def run_autotune() -> int:
         warmup_runs=args.warmup_runs,
         timing_runs=args.timing_runs,
         trtexec_args=trtexec_args,
+        remote_model_path=args.remote_model_path,
     )
 
     if benchmark_instance is None:
@@ -279,8 +281,8 @@ Examples:
     trt_group.add_argument(
         "--timing_cache",
         type=str,
-        default=DEFAULT_TIMING_CACHE,
-        help=f"TensorRT timing cache file (default: {DEFAULT_TIMING_CACHE})",
+        default=None,
+        help="TensorRT timing cache file (default: a file in a private temporary directory)",
     )
     trt_group.add_argument(
         "--warmup_runs",
@@ -313,6 +315,17 @@ Examples:
         default=None,
         help="Additional command-line arguments to pass to trtexec as a single quoted string. "
         "Example: --trtexec_benchmark_args '--fp16 --workspace=4096 --verbose'",
+    )
+    trt_group.add_argument(
+        "--remote_model_path",
+        type=str,
+        default=None,
+        help=(
+            "Path for the engine on the remote device. By default, a unique filename is created "
+            "in the remote user's working directory. Custom paths are overwritten and removed "
+            "after each benchmark; concurrent runs must use distinct paths. Only letters, digits, "
+            "'.', '_', '/', and '-' are accepted; '~' is not expanded."
+        ),
     )
 
     # Logging

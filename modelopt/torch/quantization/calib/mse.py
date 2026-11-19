@@ -16,11 +16,12 @@
 """Calibrator that returns the MSE amax of all collected tensors."""
 
 import math
-import os
 from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
+
+from modelopt import env
 
 from .. import utils as quant_utils
 from .calibrator import _Calibrator
@@ -233,7 +234,7 @@ class NVFP4MSECalibrator(MseCalibrator):
         """
         if not x.is_cuda:
             return False
-        if os.environ.get("MODELOPT_NVFP4_TRITON_SWEEP", "1") == "0":
+        if not env.nvfp4_triton_sweep():
             return False
         if self._initial_amax is None:
             return False

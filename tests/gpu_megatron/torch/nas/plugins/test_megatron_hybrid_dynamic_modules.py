@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import pytest
 import torch
 from _test_utils.import_helper import skip_if_no_mamba
 
@@ -133,6 +134,7 @@ def _test_mamba_search_space(rank, size):
     assert not any(named_dynamic_modules(model))
 
 
+@pytest.mark.timeout(150)  # usually ~70s, but up to 123s on slow runners
 def test_mamba_search_space(dist_workers):
     dist_workers.run(_test_mamba_search_space)
 

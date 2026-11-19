@@ -2,7 +2,7 @@
 
 ## Installation
 
-This benchmark is meant to be a lightweight layer ontop of an existing vLLM/SGLang/TRTLLM installation. For example, no install
+This benchmark is meant to be a lightweight layer on top of an existing vLLM/SGLang/TRTLLM installation. For example, no install
 is required if one is running in the following dockers: `vllm/vllm-openai:v0.11.0` (vLLM), `lmsysorg/sglang:v0.5.4.post2` (SGLang), or
 `nvcr.io/nvidia/tensorrt-llm/release:1.2.0` (TRT-LLM).
 
@@ -63,6 +63,8 @@ python3 run.py \
 ```
 
 ### Running [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) on Llama 3.3 70B + Eagle 3
+
+The `prepare_data.py` script now supports SPEED-Bench v1.1. SPEED-Bench v1.0 is no longer supported.
 
 1. Install the requirements file using `pip install -r requirements.txt`
 

@@ -23,6 +23,8 @@ Supports two weight formats:
 Original paper: Carreira & Zisserman, "Quo Vadis, Action Recognition?", CVPR 2017.
 """
 
+import pickle
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -202,30 +204,28 @@ def load_i3d(
     piergiaj/pytorch-i3d (MIT License). Only state_dict tensors are loaded.
 
     Args:
-        allow_unsafe_pickle: permit ``weights_only=False`` fallback for legacy
-            checkpoints. Only enable this for internally-managed or
-            checksum-verified files — never for user-supplied paths.
+        allow_unsafe_pickle: Legacy argument permitting trusted TorchScript
+            archives. Only enable for checksum-verified files. Arbitrary pickle
+            objects are no longer supported; convert legacy files to state dicts.
     """
     model = InceptionI3d()
 
     try:
-        jit_model = torch.jit.load(weights_path, map_location="cpu")
-        raw_state = jit_model.state_dict()
-        state = _map_torchscript_keys(raw_state)
-    except Exception as exc:
+        state = torch.load(weights_path, map_location="cpu", weights_only=True)
+    except (pickle.UnpicklingError, RuntimeError) as exc:
+        if not allow_unsafe_pickle:
+            raise RuntimeError(
+                "Checkpoint is not a restricted state dict. Only checksum-verified "
+                "TorchScript archives may be loaded with allow_unsafe_pickle=True."
+            ) from exc
         try:
-            state = torch.load(weights_path, map_location="cpu", weights_only=True)
-        except Exception:
-            if not allow_unsafe_pickle:
-                raise RuntimeError(
-                    "Checkpoint requires unsafe pickle deserialization. "
-                    "Only enable this for trusted, verified weights."
-                ) from exc
-            # Safe: caller has verified this is an internally-managed checkpoint
-            # (e.g. auto-downloaded with SHA-256 verification).
-            # weights_only=False is required because the checkpoint was saved
-            # with an older PyTorch version that includes non-tensor metadata.
-            state = torch.load(weights_path, map_location="cpu", weights_only=False)
+            jit_model = torch.jit.load(weights_path, map_location="cpu")
+        except RuntimeError as jit_exc:
+            raise RuntimeError(
+                "Checkpoint must contain a restricted state dict or a trusted "
+                "TorchScript archive. Unsafe pickle fallback has been removed."
+            ) from jit_exc
+        state = _map_torchscript_keys(jit_model.state_dict())
 
     state = {k: v for k, v in state.items() if not k.startswith("conv3d_0c_1x1")}
     missing, unexpected = model.load_state_dict(state, strict=False)

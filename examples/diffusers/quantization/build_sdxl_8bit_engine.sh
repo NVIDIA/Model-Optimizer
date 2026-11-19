@@ -15,6 +15,7 @@
 # limitations under the License.
 
 set -e
+printf '%s\n' 'WARNING: The Diffusers ONNX/TensorRT workflow is deprecated in ModelOpt 0.48.0 and will be removed no earlier than 0.49.0. Export a unified Hugging Face checkpoint with quantize.py --hf-ckpt-dir and use a compatible diffusion deployment backend.' >&2
 set -x
 
 # Default format

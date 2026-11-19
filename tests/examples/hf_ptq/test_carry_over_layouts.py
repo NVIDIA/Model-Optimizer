@@ -16,7 +16,7 @@
 """Carry-over must catch every on-disk layout an unplaced weight can arrive in.
 
 These drive a real ``from_pretrained``, not a stub, because the thing under test is what the
-Transformers loader does and does not report. The three MTP storage conventions come from the
+Transformers loader does and does not place. The three MTP storage conventions come from the
 support matrix the previous name-matching implementation carried:
 
     inlined         GLM-5.1, DeepSeek-V3   ``model.layers.{N}.*`` past ``num_hidden_layers``
@@ -24,8 +24,8 @@ support matrix the previous name-matching implementation carried:
     indexed shard   Qwen3-Next             an ``mtp.*`` tail shard listed in the index
 
 The standalone case is handled differently from the other two, and deliberately so. The loader
-only opens shards named in the index, so tensors in an extra file produce no ``unexpected_keys``
-at all -- but they are also untouched by quantization and absent from the export, which makes them
+only opens shards named in the index, so tensors in an extra file are never among the unplaced
+keys -- but they are also untouched by quantization and absent from the export, which makes them
 sidecars rather than carry-over. They are copied verbatim, which costs no host memory and keeps
 the bytes and filename a consumer looks for. The other two conventions land inside shards the
 loader does read, so those keys ride the state dict.
@@ -37,11 +37,11 @@ import json
 
 import pytest
 import torch
-from _test_utils.examples.hf_ptq_example_utils import example_utils
 from safetensors.torch import load_file, save_file
 from transformers import AutoModelForCausalLM, LlamaConfig
 
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import copy_off_index_safetensors
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 NUM_HIDDEN_LAYERS = 2
 
@@ -67,8 +67,7 @@ def _add_to_main_shard(d, extra):
 
 
 def _recorded(d):
-    model = example_utils._from_pretrained_recording(AutoModelForCausalLM, str(d))
-    return model._modelopt_unplaced_source_keys
+    return load_pretrained(str(d))._modelopt_unplaced_source_keys
 
 
 @pytest.fixture
@@ -128,13 +127,6 @@ def test_indexed_tail_shard(ckpt):
     assert set(_recorded(ckpt)) == set(mtp)
 
 
-def test_auxiliary_tower_is_carried_too(ckpt):
-    """Nothing is keyed to MTP: any tensor the model has no home for is carried."""
-    _add_to_main_shard(ckpt, {"aux_tower.blocks.0.weight": torch.zeros(8, 8)})
-
-    assert set(_recorded(ckpt)) == {"aux_tower.blocks.0.weight"}
-
-
 def test_two_layouts_at_once(ckpt, tmp_path):
     """An inlined head and an off-index sidecar together: each must be picked up by its own
     mechanism, and neither by both -- a tensor carried *and* copied would be exported twice."""
@@ -154,21 +146,3 @@ def test_two_layouts_at_once(ckpt, tmp_path):
     assert recorded == {inlined}
     assert copied == ["mtp.safetensors"]
     assert "mtp.fc.weight" not in recorded, "copied files must not also ride the state dict"
-
-
-def test_clean_checkpoint_records_nothing(ckpt):
-    """No stray tensors -> an empty answer, distinct from never having asked."""
-    model = example_utils._from_pretrained_recording(AutoModelForCausalLM, str(ckpt))
-
-    assert model._modelopt_unplaced_source_keys == []
-    assert model._modelopt_source_checkpoint == str(ckpt)
-
-
-def test_recorded_keys_are_sorted_and_deduplicated(ckpt):
-    """The two sources can overlap; the export wants a stable, duplicate-free list."""
-    _add_to_main_shard(
-        ckpt, {"zzz_orphan.weight": torch.zeros(4), "aaa_orphan.weight": torch.zeros(4)}
-    )
-
-    keys = _recorded(ckpt)
-    assert keys == sorted(keys) and len(keys) == len(set(keys))

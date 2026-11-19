@@ -59,7 +59,10 @@ def test_export_quantized_model(use_trtexec, simple_conv_model):
     output_path = output_dir + ".quant.onnx"
 
     try:
-        init_benchmark_instance(use_trtexec=use_trtexec, timing_runs=100)
+        # trtexec measures for at least 3 s by default; --duration=0 stops after timing_runs iterations
+        init_benchmark_instance(
+            use_trtexec=use_trtexec, timing_runs=100, trtexec_args=["--duration=0"]
+        )
         autotuner = region_pattern_autotuning_workflow(baseline_model_path, Path(output_dir))
 
         # Export model with Q/DQ insertion

@@ -62,6 +62,7 @@ The table below lists key command-line arguments of the ONNX PTQ example script.
 | `--use_zero_point` | Default: zero-point is disabled | Use this option to enable zero-point based quantization. |
 | `--block-size` | 32, 64, 128 (default) | Block size for AWQ. |
 | `--awqlite_alpha_step` | 0.1 (default) | Step-size for AWQ scale search, user-defined |
+| `--awqlite_reuse_activations` | Disabled by default | Opt in to reusing calibration activations for adjacent weights sharing an input in per-node AWQ Lite. No model-specific selection is applied. |
 | `--awqlite_run_per_subgraph` | Default: run_per_subgraph is disabled | Use this option to run AWQ scale search at the subgraph level |
 | `--awqlite_disable_fuse_nodes` | Default: fuse_nodes enabled | Use this option to disable fusion of input scales in parent nodes. |
 | `--awqclip_alpha_step` | 0.05 (default) | Step-size for AWQ weight clipping, user-defined |
@@ -81,6 +82,15 @@ Run the following command to view all available parameters in the script:
 ```bash
 python quantize.py --help
 ```
+
+Activation reuse is opt-in: pass `--awqlite_reuse_activations` or set
+`awqlite_reuse_activations=True` in the INT4 Python API. This skips repeated calibration
+passes for adjacent weights that share an input, such as Q/K/V or gate/up projections.
+For deterministic execution, the reused activation values are unchanged; with random operators,
+those weights share one captured calibration sample. Reuse does not modify random operators,
+seeds, or backend determinism. Independent per-weight captures require reuse to
+remain disabled in per-node mode with `enable_fast_path_using_high_sysram=False`; disabling
+reuse alone does not guarantee independent captures in other modes.
 
 Note:
 
@@ -128,7 +138,7 @@ The quantization strategy selects which layers to quantize to INT8 vs INT4:
 
 1. **INT8 Layers** (Higher Precision): Important layers that significantly impact model quality. Quantized per-channel
 
-2. **INT4 Layers** (Maximum Compression): All other layers. Qunatized blockwise.
+2. **INT4 Layers** (Maximum Compression): All other layers. Quantized blockwise.
 
 This strategy preserves accuracy for the most sensitive layers while maintaining aggressive compression elsewhere.
 
@@ -172,6 +182,37 @@ The `--layers_8bit` option allows you to manually specify which layers to quanti
 - **Automatic Detection**: The `--layers_8bit` option automatically enables mixed quantization
 
 For more benchmark results and detailed accuracy metrics, refer to the [Benchmark Guide](../../Benchmark.md).
+
+### Hybrid decoder inputs
+
+Install this example's requirements before calibration. Hybrid configuration loading
+requires Transformers 5.x; the supported range is `>=5.5,<5.19`.
+
+The quantization script also handles text-only calibration of hybrid decoder exports
+that take `inputs_embeds` or linear-attention `past_key_values.*.conv_state` and
+`recurrent_state` inputs. It reads the ONNX input signature to build calibration
+feeds and TensorRT execution-provider shape profiles. Ordinary token/key/value
+exports retain the existing input preparation path, including unnamed dynamic
+dimensions. Signature-based calibration requires known dimension sizes or
+recognized batch/sequence/cache names; it rejects unspecified dimensions.
+
+For embedding-only exports, `--model_name` must identify the matching Hugging Face
+checkpoint or a local checkpoint directory containing safetensors weights. The
+script uses `hf_hub_download` to cache the embedding shard and `safe_open` to
+memory-map the tensor. Only selected token rows are converted to the ONNX input
+dtype; float32 inputs retain float32 checkpoint precision. Nonfinite or overflowing
+selected values are rejected. The first Hub download fetches the entire shard,
+including any other weights in it. Subsequent runs reuse the standard Hugging Face
+cache, including with `HF_HUB_OFFLINE=1` once the index and shard are cached.
+Authentication uses the standard Hugging Face token configuration. There is no
+separate converted embedding cache. Unknown inputs or symbolic dimensions are
+rejected rather than assigned guessed values. This path prepares text calibration,
+not image or video inputs. Zero cache/state arrays are shared across samples with
+the same resolved shape and dtype; calibration consumers must treat them as read-only.
+
+The download cache remains `C:\tmp` on Windows and uses `~/.cache/modelopt` on
+Linux/WSL. Small ONNX constants remain inline when external weights are saved so
+that ONNX Runtime can use them during shape inference.
 
 ## Evaluate the Quantized Model
 
@@ -244,4 +285,4 @@ Refer to the following example scripts and tutorials for deployment:
 
 1. **Error - Invalid Position-IDs input to the ONNX model**
 
-   The ONNX models produced using ONNX GenerativeAI (GenAI) have different IO bindings for models produced using different execution-providers (EPs). For instance, model built with DML EP has position-ids input in the ONNX model but models builts using CUDA EP or NvTensorRtRtx EP don't have position-ids inputs. So, if base model requires, use `--add_position_ids` command-line argument for enabling position_ids calibration input or set "add_position_ids" variable to `True` value (hard-code) in the quantize script if required.
+   The ONNX models produced using ONNX GenerativeAI (GenAI) have different IO bindings for models produced using different execution-providers (EPs). For instance, model built with DML EP has position-ids input in the ONNX model but models built using CUDA EP or NvTensorRtRtx EP don't have position-ids inputs. So, if base model requires, use `--add_position_ids` command-line argument for enabling position_ids calibration input or set "add_position_ids" variable to `True` value (hard-code) in the quantize script if required.

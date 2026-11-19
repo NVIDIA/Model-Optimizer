@@ -1,0 +1,117 @@
+name: Run example tests
+description: Install the requirements of one example, run its tests with coverage and upload the coverage under the flag `examples-<example>`. Used by _example_tests_runner.yml,
+  once per example, so that examples sharing a job still get their own step, requirements and Codecov flag. A failing install or failing tests do not fail
+  this action; it reports them in `failed`, so that the caller can run the remaining examples first.
+
+inputs:
+  example:
+    description: Example directory name, e.g. `llm_distill` (tests/examples/<example>, examples/<example>).
+    required: true
+  allow-failure-examples:
+    description: Comma-separated example names (whitespace is ignored) whose failures are reported as a warning instead of as a failed example.
+    required: false
+    default: ""
+  codecov-token:
+    description: Codecov upload token (composite actions cannot read secrets).
+    required: false
+    default: ""
+
+outputs:
+  failed:
+    description: "'true' if the example's install or tests failed and the example is not in the allow-failure list."
+    value: ${{ steps.verdict.outputs.failed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run tests
+      id: run_tests
+      shell: bash
+      env:
+        # Absolute paths so subprocesses running from different working directories
+        # all find the config and write .coverage.* files to the same location.
+        COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
+        COVERAGE_FILE: ${{ github.workspace }}/.coverage
+        # sys.monitoring records the same lines as the default C tracer at a fraction of the
+        # overhead; the tracer slowed each hf_ptq example run by ~60%. Needs Python 3.12+.
+        COVERAGE_CORE: sysmon
+      run: |
+        # Nothing here may fail the step: a failed step ends the whole job at once, whatever continue-on-error
+        # the caller puts on this action's step, and the later examples would be skipped. The exit status goes
+        # to the verdict below instead.
+        status=0
+
+        # Examples of one job share the GPU and the environment one after the other: log both, so a failure
+        # caused by an earlier example is easy to trace.
+        echo "::group::GPU state before ${{ inputs.example }}"
+        nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv || true
+        nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv || true
+        echo "::endgroup::"
+
+        if [[ "${{ inputs.example }}" == "diffusers" ]]; then
+          echo "Uninstalling apex for diffusers: T5 Int8 (PixArt) + Apex is not supported as per https://github.com/huggingface/transformers/issues/21391"
+          python3 -m pip uninstall -y apex || true
+        fi
+
+        # Installed right before this example's tests, not up front for all examples of the job: an example
+        # that pins or upgrades packages (e.g. gpt-oss upgrades datasets, torch_trt downgrades torch) must not
+        # change the environment of the examples that run before it.
+        packages_before="${RUNNER_TEMP:-/tmp}/packages-before-${{ inputs.example }}.txt"
+        python3 -m pip freeze 2>/dev/null > "$packages_before" || true
+        echo "::group::Install requirements of ${{ inputs.example }}"
+        find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python3 -m pip install -r "$req_file" || exit 1; done || status=$?
+        echo "::endgroup::"
+        echo "::group::Packages changed by the requirements of ${{ inputs.example }} (< before, > after)"
+        { python3 -m pip freeze 2>/dev/null | diff "$packages_before" - || true; } | grep "^[<>]" || echo "none"
+        echo "::endgroup::"
+
+        if (( status == 0 )); then
+          echo "Running tests for: ${{ inputs.example }}"
+          pytest_args=()
+          if [[ "${{ inputs.example }}" == "diffusers" ]]; then
+            # Keep legacy ONNX/TRT tests available manually during deprecation.
+            pytest_args+=(--ignore=tests/examples/diffusers/test_diffusers_onnx_trt.py)
+          fi
+          if [[ "${{ inputs.example }}" == "hf_ptq" && "${{ github.ref }}" == refs/heads/pull-request/* ]]; then
+            # One GPU on PR runners: small-model tests share it and the rest run alone on it
+            # (tests/examples/hf_ptq/conftest.py). The 2-GPU nightly stays serial.
+            pytest_args+=(-n 4)
+          fi
+          if [[ "${{ github.ref }}" != refs/heads/pull-request/* ]]; then
+            # The scheduled and on-demand runs also run the tests marked nightly (tests/conftest.py).
+            pytest_args+=(--run-nightly)
+          fi
+          python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}" || status=$?
+        fi
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+    - name: Verdict
+      id: verdict
+      shell: bash
+      env:
+        STATUS: ${{ steps.run_tests.outputs.status }}
+        EXAMPLE: ${{ inputs.example }}
+        ALLOW_FAILURE_EXAMPLES: ${{ inputs.allow-failure-examples }}
+      run: |
+        failed=false
+        if [[ "$STATUS" != "0" ]]; then
+          if [[ ",${ALLOW_FAILURE_EXAMPLES//[[:space:]]/}," == *",$EXAMPLE,"* ]]; then
+            echo "::warning title=Allowed example failure::'$EXAMPLE' failed but is in the allow-failure list (vars.ALLOW_FAILURE_EXAMPLE_TESTS); not blocking. Remove it from the variable once fixed."
+          else
+            echo "::error title=Example failed::The requirements install or the tests of '$EXAMPLE' failed (see the log of its Run tests step). The job fails after the remaining examples have run."
+            failed=true
+          fi
+        fi
+        echo "failed=$failed" >> "$GITHUB_OUTPUT"
+    - name: Upload coverage to Codecov
+      # A failed run, allowed or not, only has partial coverage
+      if: ${{ steps.run_tests.outputs.status == '0' }}
+      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      with:
+        token: ${{ inputs.codecov-token }}
+        files: coverage.xml
+        # One flag per example, not a shared `examples`: carryforward only applies to a flag
+        # with no upload, so a shared flag would replace every lane's coverage with the subset
+        # that ran once lanes are gated independently.
+        flags: examples-${{ inputs.example }}
+        fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
+        verbose: true

@@ -15,6 +15,7 @@
 
 """Unit tests for ModelOptArgParser."""
 
+import argparse
 from dataclasses import field
 from pathlib import Path
 
@@ -22,6 +23,7 @@ import pytest
 
 pytest.importorskip("transformers")
 
+from modelopt.torch.distill.plugins.huggingface import DistillArguments
 from modelopt.torch.opt.plugins.transformers import ModelOptArgParser, ModelOptHFArguments
 
 
@@ -35,8 +37,71 @@ class _TrainArgs(ModelOptHFArguments):
     epochs: int = field(default=3, metadata={"help": "Number of epochs."})
 
 
+class _NewWarmupArgs(ModelOptHFArguments):
+    """transformers >= 5.15: only ``warmup_steps`` (a float; below 1 it is a ratio)."""
+
+    warmup_steps: float = field(default=0)
+
+
+class _OldWarmupArgs(ModelOptHFArguments):
+    """transformers < 5.15: a float ``warmup_steps`` plus ``warmup_ratio``."""
+
+    warmup_steps: float = field(default=0)
+    warmup_ratio: float = field(default=0.0)
+
+
+@pytest.mark.parametrize(
+    ("arg_type", "yaml", "expected"),
+    [
+        (_NewWarmupArgs, "warmup_ratio: 0.05\n", {"warmup_steps": 0.05}),
+        (_NewWarmupArgs, "warmup_steps: 0.05\n", {"warmup_steps": 0.05}),
+        (_OldWarmupArgs, "warmup_steps: 0.05\n", {"warmup_steps": 0.05, "warmup_ratio": 0.0}),
+        (_OldWarmupArgs, "warmup_ratio: 0.05\n", {"warmup_steps": 0, "warmup_ratio": 0.05}),
+    ],
+)
+def test_yaml_warmup_spelling_follows_transformers(tmp_path, arg_type, yaml, expected):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml)
+
+    (args,) = ModelOptArgParser((arg_type,)).parse_args_into_dataclasses(
+        args=["--config", str(config_file)]
+    )
+    assert {k: getattr(args, k) for k in expected} == expected
+
+
 class TestModelOptArgParser:
     """Tests for ModelOptArgParser --config and --generate_docs features."""
+
+    @pytest.mark.parametrize(
+        "formatter_class",
+        [argparse.ArgumentDefaultsHelpFormatter, argparse.MetavarTypeHelpFormatter],
+    )
+    @pytest.mark.parametrize(
+        "entry_point", ["parse_args_into_dataclasses", "parse_args", "parse_known_args"]
+    )
+    def test_help_matches_entry_point(self, capsys, formatter_class, entry_point):
+        parser = ModelOptArgParser((_ModelArgs, _TrainArgs), formatter_class=formatter_class)
+        with pytest.raises(SystemExit) as exc_info:
+            getattr(parser, entry_point)(args=["--help"])
+        assert exc_info.value.code == 0
+        help_text = capsys.readouterr().out
+        dataclass_help = entry_point == "parse_args_into_dataclasses"
+        assert ("--config PATH" in help_text) == dataclass_help
+        assert ("--generate_docs [PATH]" in help_text) == dataclass_help
+        if dataclass_help and formatter_class is argparse.ArgumentDefaultsHelpFormatter:
+            docs_help = " ".join(help_text.split("--generate_docs [PATH]")[-1].split())
+            assert "(default: ARGUMENTS.md)" in docs_help
+            assert "(default: None)" not in docs_help
+        assert "--config" not in parser.format_help()
+        assert "--generate_docs" not in parser.format_help()
+
+    def test_distill_help_formats_loss_percentages(self, capsys):
+        parser = ModelOptArgParser((DistillArguments,))
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args_into_dataclasses(args=["--help"])
+        assert exc_info.value.code == 0
+        help_text = capsys.readouterr().out
+        assert "70% KD loss + 30% CE loss" in " ".join(help_text.split())
 
     def test_cli_args_only(self):
         parser = ModelOptArgParser((_ModelArgs, _TrainArgs))

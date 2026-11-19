@@ -15,13 +15,11 @@
 import pytest
 import torch
 from _test_utils.torch.quantization.models import OneLayerLinear
-from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-    cutlass_fp4_scale_to_modelopt_fp4_scale,
-)
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import cutlass_fp4_scale_to_modelopt_fp4_scale
 
 
 @pytest.mark.skipif(not fp4_compatible(), reason="FP4 is not supported on this GPU")

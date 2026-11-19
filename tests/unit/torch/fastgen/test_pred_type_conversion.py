@@ -27,8 +27,6 @@ Covers three round-1 fix guards:
    even when the live model is ``bfloat16``.
 """
 
-from __future__ import annotations
-
 import copy
 from unittest import mock
 

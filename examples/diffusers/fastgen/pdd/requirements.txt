@@ -1,0 +1,4 @@
+# PDD's AutoModel compatibility seam and Qwen forward are pinned to these exact releases.
+-r ../requirements.txt
+diffusers==0.39.0
+nemo_automodel[diffusion]==0.5.0

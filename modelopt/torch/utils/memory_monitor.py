@@ -85,6 +85,7 @@ class GPUMemoryMonitor:
         self.peak_memory = {}  # GPU index to peak memory mapping
         self.is_running = False
         self.monitor_thread = None
+        self._stopped = False
         nvmlInit()
         self.device_count = nvmlDeviceGetCount()
 
@@ -116,9 +117,17 @@ class GPUMemoryMonitor:
         GPU that was monitored, and properly shuts down the NVML interface. It will
         wait for the monitoring thread to complete before returning.
 
-        The peak memory usage is displayed in GB for each GPU index.
+        The peak memory usage is displayed in GB for each GPU index. Stopping a stopped monitor does
+        nothing, as when a caller stops it and the exit hook :func:`launch_memory_monitor` registered
+        runs too.
         """
+        if self._stopped:
+            return
+        self._stopped = True
         self.is_running = False
+        # The thread can be inside a sampling pass, still adding to peak_memory: let it finish first.
+        if self.monitor_thread:
+            self.monitor_thread.join()
         # Print peak memory usage
         print("########")
         for gpu_idx, peak_mem in self.peak_memory.items():
@@ -126,8 +135,6 @@ class GPUMemoryMonitor:
                 f"GPU {gpu_idx}: Peak memory usage = {peak_mem:.2f} GB for all processes on the GPU"
             )
         print("########")
-        if self.monitor_thread:
-            self.monitor_thread.join()
         nvmlShutdown()
 
 
@@ -140,8 +147,15 @@ def launch_memory_monitor(monitor_interval: float = 1.0) -> GPUMemoryMonitor | N
     Returns:
         GPUMemoryMonitor: The monitor instance that was launched
     """
+    # Probe that NVML can report memory on this host before starting the monitor. NVML must be
+    # initialized for the probe itself; without it every call raises NVMLError_Uninitialized, and
+    # the monitor would never start anywhere.
     try:
-        nvmlDeviceGetMemoryInfo(nvmlDeviceGetHandleByIndex(0))
+        nvmlInit()
+        try:
+            nvmlDeviceGetMemoryInfo(nvmlDeviceGetHandleByIndex(0))
+        finally:
+            nvmlShutdown()
     except Exception as e:
         print(f"Failed to get GPU memory info: {e}. Stopping GPU memory monitor.")
         return None

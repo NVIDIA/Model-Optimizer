@@ -32,12 +32,7 @@ def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertRetu
     # initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
-    original_cls = type(model)
-    if original_cls not in EagleDMRegistry:
-        for cls in EagleDMRegistry._registry:
-            if issubclass(original_cls, cls):
-                EagleDMRegistry.register({original_cls: "base_model_class"})(EagleDMRegistry[cls])
-                break
+    EagleDMRegistry.register_subclass(type(model), "base_model_class")
 
     # merge custom config with default config
     default_arch_config = {

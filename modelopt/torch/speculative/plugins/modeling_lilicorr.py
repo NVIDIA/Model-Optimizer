@@ -527,14 +527,16 @@ class LiLiCorrModule(DFlashModule):
         ``DFlashDecoderLayer`` already exposes, so the convolution itself is shared code
         rather than a second implementation of the same arithmetic.
 
-        The initialization is the one deliberate difference. DFlash2 draws
-        ``kernel_projection`` from ``normal_(0, initializer_range)``, so its convolution
-        is not the identity at step 0. Here it is zero by default, and since
-        ``base_kernel`` is identity at tap 0 the whole wrapper is then an *exact*
-        identity at init: ``prepare`` emits a zero dynamic kernel, ``coefficients ==
-        base``, and the convolution returns its input unchanged. That makes the
-        difference between a conv and a non-conv run attributable to the convolutions
-        rather than to a perturbed starting point.
+        The initialization is written here rather than inherited.
+        ``conv_projection_init_std`` is zero by default, and since ``base_kernel`` is
+        identity at tap 0 the whole wrapper is then an *exact* identity at init:
+        ``prepare`` emits a zero dynamic kernel, ``coefficients == base``, and the
+        convolution returns its input unchanged. That makes the difference between a
+        conv and a non-conv run attributable to the convolutions rather than to a
+        perturbed starting point. Assigning the weight explicitly is what keeps that
+        property LiLiCorr's own: it holds whatever ``DFlashGroupedConv`` does for
+        DFlash2, which since the DFlash2 merge also zeroes the projection in its own
+        constructor.
 
         ``conv_projection_init_std`` is a separate key from ``initializer_range`` on
         purpose: the latter also seeds the reranker, so overloading it would couple two

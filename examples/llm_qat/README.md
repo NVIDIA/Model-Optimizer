@@ -1,22 +1,23 @@
 # Quantization Aware Training (QAT) and Distillation (QAD)
 
-Quantization Aware Training (QAT) improves model accuracy beyond post-training quantization (PTQ) at low precisions (e.g., INT4, FP4 on [NVIDIA Blackwell](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/)). Quantization Aware Distillation (QAD) further improves accuracy by using the original full-precision model as a teacher.
+This tutorial shows how to run QAT and QAD with Hugging Face Transformers: set up the environment, quantize a model, train it, evaluate the checkpoint, and export it for deployment.
 
-For background on how QAT enables low-precision accuracy recovery, see the [QAT/QAD blog post](https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/).
+For background on QAT and QAD and help choosing between Hugging Face, Megatron Bridge, and Megatron-LM, start with the [QAT/QAD guide](https://nvidia.github.io/Model-Optimizer/guides/quantization_aware_training_and_distillation.html).
+
+For an experimental native NeMo AutoModel expert integration, see the [NVFP4 adapter](nemo_automodel/README.md).
 
 <div align="center">
 
-| **Section** | **Description** | **Link** | **Docs** |
-| :---: | :---: | :---: | :---: |
-| Quick Start | Prerequisites and setup | \[[Link](#quick-start)\] | |
-| End-to-End Example | Run QAT/QAD in 3 steps: quantize, train, export | \[[Link](#run-end-to-end-qatqad-example)\] | |
-| Arguments | Full CLI/YAML argument reference | \[[Link](ARGUMENTS.md)\] | |
-| Background | How QAT/QAD work and when to use each | \[[Link](#background)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Support Matrix | Supported models, quantization formats, and backends | \[[Link](#support-matrix)\] | |
-| QLoRA | Model training with reduced GPU memory | \[[Link](#qlora-real-quantization)\] | |
-| Advanced Topics | FSDP2 config, YAML options | \[[Link](#advanced-topics)\] | |
-| Results | Accuracy benchmarks | \[[Link](#results)\] | |
-| Resources | Extra links and references | \[[Link](#resources)\] | |
+| **Section** | **Description** | **Link** |
+| :---: | :---: | :---: |
+| Quick Start | Prerequisites and setup | \[[Link](#quick-start)\] |
+| End-to-End Example | Run QAT/QAD in 3 steps: quantize, train, export | \[[Link](#run-end-to-end-qatqad-example)\] |
+| Arguments | Full CLI/YAML argument reference | \[[Link](ARGUMENTS.md)\] |
+| Support Matrix | Supported models, quantization formats, and backends | \[[Link](#support-matrix)\] |
+| QLoRA | Model training with reduced GPU memory | \[[Link](#qlora-real-quantization)\] |
+| Advanced Topics | Trainer APIs, FSDP2 config, YAML options | \[[Link](#advanced-topics)\] |
+| Results | Accuracy benchmarks | \[[Link](#results)\] |
+| Resources | Extra links and references | \[[Link](#resources)\] |
 
 </div>
 
@@ -26,25 +27,50 @@ For background on how QAT enables low-precision accuracy recovery, see the [QAT/
 
 Please refer to [hf_ptq/README.md](../hf_ptq/README.md#pre-requisites) for container
 recommendations and base ModelOpt installation guidance. For this QAT/QAD example,
-install the Hugging Face dependencies and the example-specific requirements:
+run the following commands from the Model-Optimizer repository root:
 
 ```bash
 pip install -U nvidia-modelopt[hf]
+pip install packaging psutil ninja wheel
+pip install --no-build-isolation "flash-attn>=2.6.0"
 pip install -r examples/llm_qat/requirements.txt
 ```
 
+FlashAttention is installed separately with `--no-build-isolation` so its build
+can use the installed PyTorch.
+
+FlashAttention must be compatible with the installed PyTorch/CUDA build. If these
+commands change PyTorch, reinstall a compatible FlashAttention build or rebuild
+it against the installed PyTorch. Verify that `python -c "import torch, flash_attn"`
+succeeds before running the example.
+
 The Qwen3-8B example below requires a minimum of **2 x 80GB GPUs**.
+
+> ModelOpt provides accelerated quantization kernels using Triton for NVFP4 QAT. See the [installation guide](https://nvidia.github.io/Model-Optimizer/getting_started/_installation_for_Linux.html#accelerated-quantization-with-triton-kernels).
 
 ## Run End-to-End QAT/QAD Example
 
 All arguments can be set via YAML, CLI, or both (CLI overrides YAML). See
-[ARGUMENTS.md](ARGUMENTS.md), `--help`, and [Configuration](#advanced-configuration).
+[ARGUMENTS.md](ARGUMENTS.md), `--help`, and [Advanced Topics](#advanced-topics).
+
+### Quantization Recipes
+
+Recipes are declarative YAML files that specify the quantization configuration. Built-in recipes are available in [`modelopt_recipes/`](../../modelopt_recipes/):
+
+```sh
+# From the Model-Optimizer repository root, list available built-in recipes
+ls modelopt_recipes/general/ptq/
+```
+
+See [custom calibration](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#advanced-configuration-creation) for creating your own recipe.
 
 ### QAT
 
-Quantize, fine-tune on labeled data, and export:
+Quantize, fine-tune on labeled data, and export. Start from the repository root:
 
 ```sh
+cd examples/llm_qat
+
 # 1. Quantize
 python quantize.py \
   --model_name_or_path Qwen/Qwen3-8B \
@@ -98,96 +124,6 @@ Exported checkpoints can be deployed on [TensorRT-LLM](https://github.com/NVIDIA
 
 > [!TIP]
 > For more performant QAD, please refer to [examples/megatron_bridge/README.md](../megatron_bridge/README.md) for example scripts for PTQ / QAD with Megatron-Bridge which is generally more performant than the Hugging Face scripts.
-
-## Background
-
-### What is QAT?
-
-**Quantization Aware Training (QAT)** inserts simulated quantization operations into the model graph and then fine-tunes the model so its weights learn to compensate for quantization error. During training, quantization scales are frozen while weights are updated. QAT is a general technique — it learns from labeled data on a quantized model.
-
-```python
-import modelopt.torch.quantization as mtq
-from modelopt.recipe import load_recipe
-
-# 1. Load a quantization recipe
-recipe = load_recipe("general/ptq/nvfp4_default-kv_fp8")
-
-# 2. Quantize the model in-place
-model = mtq.quantize(model, recipe.quantize, forward_loop)
-
-# 3. Fine-tune the quantized model
-trainer.train()
-trainer.save_model()
-```
-
-> ModelOpt provides accelerated quantization kernels using Triton for NVFP4 QAT. See the [installation guide](https://nvidia.github.io/Model-Optimizer/getting_started/_installation_for_Linux.html#accelerated-quantization-with-triton-kernels).
-
-### What is QAD?
-
-**Quantization Aware Distillation (QAD)** is a special case of QAT that uses a teacher model (typically the original unquantized model) to guide the quantized student via a distillation loss. QAD is a **pure accuracy recovery technique** — its goal is to recover accuracy lost from quantization, not to teach the model a new task.
-
-To learn more, read the [QAT/QAD blog post](https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/).
-
-### When to Use QAT vs QAD
-
-| | **QAT** (without distillation) | **QAD** (with distillation) |
-|-|---------|----------------------|
-| **What it does** | Fine-tunes a quantized model on labeled data | Recovers quantization accuracy using the original model as teacher |
-| **When to use** | The model is already quantized and you want to fine-tune it for a **new task** (e.g., fine-tuning a [GPT-OSS](../gpt-oss/) quantized checkpoint) | You want the **best possible accuracy recovery** after quantization |
-| **Recommended workflow** | Start from a quantized checkpoint, fine-tune with task-specific data | Full-precision fine-tuning first, then QAD to recover quantization loss |
-
-**QAD is Model Optimizer's recommended strategy for accuracy recovery after quantization.** In our experiments, full-precision fine-tuning followed by QAD delivers the best accuracy, especially at aggressive quantization levels (e.g., NVFP4). The optimal balance between QAT and QAD for a given model and task is an active area of research.
-
-### Using `QATTrainer` and `QADTrainer`
-
-`QATTrainer` is a drop-in replacement for HuggingFace's `Trainer` that handles quantization-aware training seamlessly with various distributed backends (FSDP2, DeepSpeed, DDP):
-
-```python
-from modelopt.torch.quantization.plugins.transformers_trainer import QATTrainer
-
-trainer = QATTrainer(
-    model=model,            # pre-quantized model
-    processing_class=tokenizer,
-    args=training_args,
-    **data_module,
-)
-trainer.train()
-trainer.save_model()
-```
-
-`QADTrainer` extends `QATTrainer` with distillation. Pass the teacher model and a `DistillArguments` instance:
-
-```python
-from modelopt.torch.distill.plugins.huggingface import DistillArguments
-from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer
-
-distill_args = DistillArguments(
-    distill=True,
-    teacher_model="Qwen/Qwen3-8B",
-    criterion="logits_loss",
-)
-
-trainer = QADTrainer(
-    model=model,            # pre-quantized model
-    processing_class=tokenizer,
-    args=training_args,
-    distill_args=distill_args,
-    **data_module,
-)
-trainer.train()
-trainer.save_model()
-```
-
-### Quantization Recipes
-
-Recipes are declarative YAML files that specify the quantization configuration. Built-in recipes are available in [`modelopt_recipes/`](../../modelopt_recipes/):
-
-```sh
-# List available built-in recipes
-ls modelopt_recipes/general/ptq/
-```
-
-See [custom calibration](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#advanced-configuration-creation) for creating your own recipe.
 
 ## Support Matrix
 
@@ -262,6 +198,66 @@ vllm serve qwen3-8b-fp4-qlora-hf/base_model --enable-lora \
 
 ## Advanced Topics
 
+### Quantize and Fine-Tune with Python
+
+```python
+import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
+
+# 1. Load a quantization recipe
+recipe = load_recipe("general/ptq/nvfp4_default-kv_fp8")
+
+# 2. Quantize the model in-place
+model = mtq.quantize(model, recipe.quantize, forward_loop)
+
+# 3. Fine-tune the quantized model
+trainer.train()
+trainer.save_model()
+```
+
+### Using `QATTrainer` and `QADTrainer`
+
+`QATTrainer` is a drop-in replacement for HuggingFace's `Trainer` that handles quantization-aware training seamlessly with various distributed backends (FSDP2, DeepSpeed, DDP):
+
+```python
+from modelopt.torch.quantization.plugins.transformers_trainer import QATTrainer
+
+trainer = QATTrainer(
+    model=model,            # pre-quantized model
+    processing_class=tokenizer,
+    args=training_args,
+    **data_module,
+)
+trainer.train()
+trainer.save_model()
+```
+
+`QADTrainer` extends `QATTrainer` with distillation. Load the teacher first and pass a `DistillArgsWithTeacherModel` instance:
+
+```python
+from transformers import AutoModelForCausalLM
+
+from modelopt.torch.distill.plugins.huggingface import DistillArgsWithTeacherModel
+from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer
+
+teacher = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B", dtype=model.dtype)
+distill_args = DistillArgsWithTeacherModel(
+    distill=True,
+    teacher_model=teacher,
+    criterion="logits_loss",
+)
+
+trainer = QADTrainer(
+    model=model,            # pre-quantized model
+    processing_class=tokenizer,
+    args=training_args,
+    distill_args=distill_args,
+    **data_module,
+)
+trainer.train()
+trainer.save_model()
+```
+
 <details>
 <summary><b>FSDP2 and Model-Specific Layer Wrapping</b></summary>
 
@@ -274,7 +270,8 @@ You can either:
    ```sh
    accelerate launch --config-file configs/accelerate/fsdp2.yaml \
      --fsdp_transformer_layer_cls_to_wrap LlamaDecoderLayer \
-     train.py --config configs/train/qat_nvfp4.yaml ...
+     train.py --config configs/train/qat_nvfp4.yaml \
+     --model_name_or_path llama-quantized --output_dir llama-qat
    ```
 
 2. **Create a custom config** (recommended for repeated use):
@@ -306,7 +303,8 @@ There are two types of configs:
 ```sh
 # YAML + CLI override
 accelerate launch --config-file configs/accelerate/fsdp2.yaml train.py \
-  --config configs/train/qat_nvfp4.yaml --learning_rate 5e-5
+  --config configs/train/qat_nvfp4.yaml --learning_rate 5e-5 \
+  --model_name_or_path qwen3-8b-quantized --output_dir qwen3-8b-qat-override
 ```
 
 See [Dataset Configuration](configs/dataset/README.md) for custom dataset blends and adding new datasets.
@@ -330,7 +328,7 @@ The cached dataset is stored under `.dataset_cache/tokenized/` by default (confi
 
 ## Results
 
-\[Coming Soon\]
+See [Qwen3-8B evaluation results](evaluation/README.md) for the teacher, PTQ, and PTQ → QAD comparison.
 
 ## Native Fake-Quantized Evaluation
 

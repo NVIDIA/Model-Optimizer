@@ -340,6 +340,21 @@ class TestNormalizeQuantCfgList:
         assert len(default_entries) == 1
         assert default_entries[0]["enable"] is False
 
+    def test_legacy_flat_dict_default_key_comes_first(self):
+        """Legacy 'default' key becomes the first entry wherever it appears in the dict."""
+        raw = {
+            "*weight_quantizer": {"num_bits": 8},
+            "*input_quantizer": {"num_bits": 8},
+            "default": {"enable": False},
+        }
+        result = normalize_quant_cfg_list(raw)
+        assert [e["quantizer_name"] for e in result] == [
+            "*",
+            "*weight_quantizer",
+            "*input_quantizer",
+        ]
+        assert result[0]["enable"] is False
+
     def test_legacy_nn_class_multi_key(self):
         """Legacy nn.* scoped format with multiple sub-keys produces multiple entries."""
         raw = [
@@ -710,3 +725,9 @@ class TestFourOverSixBlockSizes:
     def test_nvfp4_four_over_six_cfg_needs_calibration(self):
         """The 4/6 preset is statically calibrated, so it requires calibration."""
         assert need_calibration(mtq.NVFP4_FOUR_OVER_SIX_CFG)
+
+
+@pytest.mark.parametrize("block_size", [0, -256])
+def test_gptq_block_size_must_be_positive(block_size):
+    with pytest.raises(ValidationError):
+        GPTQCalibConfig(block_size=block_size)

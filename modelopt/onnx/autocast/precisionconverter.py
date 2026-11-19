@@ -95,8 +95,8 @@ class PrecisionConverter:
         custom_ops: set[str] | None = None,
         min_opset: int = 13,
         max_ir_version: int | None = None,
-        trt_plugins: list[str] | None = [],
-        tensor_block_dict: dict[str, dict[str, list[int]]] = {},
+        trt_plugins: list[str] | None = None,
+        tensor_block_dict: dict[str, dict[str, list[int]]] | None = None,
         use_standalone_type_inference: bool = False,
         original_network_io_metadata: dict[str, list[onnx.ValueInfoProto]] | None = None,
         sanitize_model: bool = True,
@@ -162,7 +162,7 @@ class PrecisionConverter:
         }
         self.min_opset = min_opset
         self.max_ir_version = max_ir_version
-        self.trt_plugins = trt_plugins
+        self.trt_plugins = [] if trt_plugins is None else trt_plugins
         self.use_standalone_type_inference = use_standalone_type_inference
 
         # Detect additional ops not supported in low precision according to the model's opset version
@@ -175,7 +175,9 @@ class PrecisionConverter:
         )
 
         # Custom mapping of op types to indices of inputs that should not be converted to low precision
-        self.skip_inputs_map = self._create_skip_inputs_mapping(tensor_block_dict)
+        self.skip_inputs_map = self._create_skip_inputs_mapping(
+            {} if tensor_block_dict is None else tensor_block_dict
+        )
 
         # Flags to log initializer value range warnings only once
         self._warned_values_clamp_max = False
@@ -298,11 +300,36 @@ class PrecisionConverter:
         # Remove redundant casts
         self._cleanup()
 
+        # Runs after cleanup, which can rename a cast after an FP32 producer to a graph output.
+        self._fill_unknown_output_dims()
         self._restore_original_io_metadata()
 
         self._sanity_check()
 
         return self.model
+
+    def _fill_unknown_output_dims(self) -> None:
+        """Restore graph output dims that shape inference could not re-derive.
+
+        Clearing shapes before inference leaves an output dim with neither a value nor a name when
+        inference cannot derive it again, for example when ONNX shape inference fails and the
+        type-only fallback runs. Precision conversion never changes an output's shape, so such a
+        dim takes back the value or name the original model declared for it.
+        """
+        original_outputs = {
+            output.name: output for output in self.original_network_io_metadata.get("output", [])
+        }
+        for output in self.model.graph.output:
+            original = original_outputs.get(output.name)
+            if original is None or not output.type.tensor_type.HasField("shape"):
+                continue
+            dims = output.type.tensor_type.shape.dim
+            original_dims = original.type.tensor_type.shape.dim
+            if len(dims) != len(original_dims):
+                continue
+            for dim, original_dim in zip(dims, original_dims):
+                if not dim.HasField("dim_value") and not dim.HasField("dim_param"):
+                    dim.CopyFrom(original_dim)
 
     def _ensure_types_are_defined(self):
         """Ensure that all tensor types are defined."""
@@ -548,7 +575,7 @@ class PrecisionConverter:
             # Propagate tensor types to the children nodes (until another Cast or Q node is met)
             _propagate_cast_type_through_nodes(node, np_type)
 
-        return gs.export_onnx(graph)
+        return onnx_utils.export_onnx(graph)
 
     def _restore_original_io_metadata(self) -> None:
         """Preserve complete public I/O metadata when keep_io_types=True."""
@@ -1240,7 +1267,7 @@ class PrecisionConverter:
                     self._warned_values_clamp_min = True
                 np_array = np.where(
                     (np_array != 0.0) & (np.abs(np_array) < data_lowest),
-                    data_lowest,
+                    np.copysign(data_lowest, np_array),
                     np_array,
                 )
             new_array = np_array.astype(to_type.numpy_type)
@@ -1857,9 +1884,9 @@ class PrecisionConverter:
         skip_inputs_map = {}
         match self.low_precision_type.str_short:
             case "fp16":
-                skip_inputs_map = SKIP_LOW_PRECISION_MAPPING_FP16
+                skip_inputs_map = dict(SKIP_LOW_PRECISION_MAPPING_FP16)
             case "bf16":
-                skip_inputs_map = SKIP_LOW_PRECISION_MAPPING_BF16
+                skip_inputs_map = dict(SKIP_LOW_PRECISION_MAPPING_BF16)
             case _:
                 raise ValueError(f"Unsupported low precision type: {self.low_precision_type}")
 

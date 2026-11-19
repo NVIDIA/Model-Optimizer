@@ -15,6 +15,8 @@
 
 """DFlash conversion/restore utilities."""
 
+import warnings
+
 from torch import nn
 
 from modelopt.torch.opt.conversion import ModelLikeModule
@@ -35,12 +37,62 @@ DominoDMRegistry = _DMRegistryCls(prefix="Domino")
 # ``dflash_architecture_config.projector_type == "dspark"`` and kept in its own
 # registry so its wrapper (HFDSparkModel) does not overwrite HFDFlashModel.
 DSparkDMRegistry = _DMRegistryCls(prefix="DSpark")
+# DFlash2 also reuses the dflash mode/config/recipe, converting the base model to a
+# DFlash backbone whose sublayers are wrapped in grouped dynamic convolutions, plus a
+# low-rank candidate selector. Selected via
+# ``dflash_architecture_config.projector_type == "dflash2"`` and kept in its own
+# registry so its wrapper (HFDFlash2Model) does not overwrite HFDFlashModel.
+DFlash2DMRegistry = _DMRegistryCls(prefix="DFlash2")
 # LiLiCorr also reuses the dflash mode/config/recipe, converting the base model to a
 # DFlash backbone augmented with a reranker over the candidate lattice the backbone
 # already produces. Selected via
 # ``dflash_architecture_config.projector_type == "lilicorr"`` and kept in its own
 # registry so its wrapper (HFLiLiCorrModel) does not overwrite HFDFlashModel.
 LiLiCorrDMRegistry = _DMRegistryCls(prefix="LiLiCorr")
+
+# dflash_architecture_config.projector_type -> the registry holding that variant's wrapper.
+_REGISTRY_BY_PROJECTOR_TYPE = {
+    None: DFlashDMRegistry,
+    "dflash": DFlashDMRegistry,
+    "domino": DominoDMRegistry,
+    "dspark": DSparkDMRegistry,
+    "dflash2": DFlash2DMRegistry,
+    "lilicorr": LiLiCorrDMRegistry,
+}
+
+# Deprecated dflash_architecture_config keys (removed in 0.50), each with the model attribute
+# that now fixes its value, and why.
+_DEPRECATED_ARCHITECTURE_KEYS = {
+    "shift_label": (
+        "_label_shift",
+        (
+            "projector_type fixes the label alignment (dspark and domino predict the token at "
+            "anchor + k + 1, the others the token at anchor + k)"
+        ),
+    ),
+}
+
+
+def _drop_deprecated_keys(arch_config: dict, dm_cls: type) -> dict:
+    """Return ``arch_config`` without the deprecated keys, warning on each value ``dm_cls`` matches.
+
+    A value ``dm_cls`` contradicts raises instead: it never took effect, so the run would not
+    train what its config says.
+    """
+    for key in sorted(_DEPRECATED_ARCHITECTURE_KEYS.keys() & arch_config.keys()):
+        attr, reason = _DEPRECATED_ARCHITECTURE_KEYS[key]
+        if arch_config[key] != getattr(dm_cls, attr):
+            raise ValueError(
+                f"dflash_architecture_config.{key}={arch_config[key]!r} contradicts the model: "
+                f"{reason}. Remove it."
+            )
+        warnings.warn(
+            f"dflash_architecture_config.{key} is deprecated and will be removed in 0.50: "
+            f"{reason}. Remove it.",
+            FutureWarning,
+            stacklevel=2,
+        )
+    return {k: v for k, v in arch_config.items() if k not in _DEPRECATED_ARCHITECTURE_KEYS}
 
 
 def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertReturnType:
@@ -53,28 +105,19 @@ def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertRe
     custom_config = config.dflash_architecture_config
     config.dflash_architecture_config = {**default_dflash_config, **custom_config}
 
-    # Route to the Domino registry when the architecture asks for the Domino head.
     projector_type = config.dflash_architecture_config.get("projector_type")
-    if projector_type == "domino":
-        registry = DominoDMRegistry
-    elif projector_type == "dspark":
-        registry = DSparkDMRegistry
-    elif projector_type == "lilicorr":
-        registry = LiLiCorrDMRegistry
-    elif projector_type in (None, "dflash"):
-        registry = DFlashDMRegistry
-    else:
+    registry = _REGISTRY_BY_PROJECTOR_TYPE.get(projector_type)
+    if registry is None:
+        supported = [name for name in _REGISTRY_BY_PROJECTOR_TYPE if name is not None]
         raise ValueError(
             f"Unsupported dflash_architecture_config.projector_type: {projector_type!r}. "
-            "Expected 'dflash' (default), 'domino', 'dspark' or 'lilicorr'."
+            f"Expected one of {supported} ('dflash' is the default)."
         )
 
-    original_cls = type(model)
-    if original_cls not in registry:
-        for cls in registry._registry:
-            if issubclass(original_cls, cls):
-                registry.register({original_cls: "base_model_class"})(registry[cls])
-                break
+    registry.register_subclass(type(model), "base_model_class")
+    config.dflash_architecture_config = _drop_deprecated_keys(
+        config.dflash_architecture_config, registry[type(model)]
+    )
 
     dflash_model = registry.convert(model)
     dflash_model.modify(config)
@@ -91,4 +134,10 @@ def restore_dflash_model(
     # Warm start is a one-time training-time init; the restored weights would overwrite it
     # anyway, and replaying it on the meta device would raise.
     config = config.model_copy(update={"dflash_init_checkpoint": None})
+    # Unchecked: checkpoints saved before the deprecation carry values that never took effect.
+    config.dflash_architecture_config = {
+        k: v
+        for k, v in config.dflash_architecture_config.items()
+        if k not in _DEPRECATED_ARCHITECTURE_KEYS
+    }
     return convert_to_dflash_model(model, config)[0]

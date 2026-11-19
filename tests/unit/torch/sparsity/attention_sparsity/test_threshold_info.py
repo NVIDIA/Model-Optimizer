@@ -21,7 +21,7 @@ pytest.importorskip("transformers")
 
 from _test_utils.torch.sparsity.sparse_attention_common import SimpleAttentionModel
 
-from modelopt.torch.sparsity.attention_sparsity import sparsify
+from modelopt.torch.sparsity import sparsify
 from modelopt.torch.sparsity.attention_sparsity.methods.flash_skip_softmax import FlashSkipSoftmax
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 

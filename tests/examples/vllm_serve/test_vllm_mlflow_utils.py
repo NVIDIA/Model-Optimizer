@@ -65,51 +65,9 @@ QUANT_CONFIG = {
 }
 
 
-class FakeMlflow:
-    """Stand-in for the mlflow module, so these tests need no server and no dependency."""
-
-    def __init__(self):
-        self.tracking_uri = None
-        self.experiment = None
-        self.run_name = None
-        self.status = None
-        self.params = {}
-        self.tags = {}
-        self.texts = {}
-        self.metrics = {}
-        self.artifacts = {}
-
-    def set_tracking_uri(self, uri):
-        self.tracking_uri = uri
-
-    def set_experiment(self, name):
-        self.experiment = name
-
-    def start_run(self, run_name=None):
-        self.run_name = run_name
-        return SimpleNamespace(info=SimpleNamespace(experiment_id="7", run_id="deadbeef"))
-
-    def log_params(self, params):
-        self.params.update(params)
-
-    def set_tags(self, tags):
-        self.tags.update(tags)
-
-    def log_text(self, text, artifact_file):
-        self.texts[artifact_file] = text
-
-    def log_artifact(self, local_path, artifact_path=None):
-        self.artifacts[Path(local_path).name] = (artifact_path, Path(local_path).read_text())
-
-    def log_metrics(self, metrics):
-        self.metrics.update(metrics)
-
-    def end_run(self, status=None):
-        self.status = status
-
-
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
+    """Local rather than shared: this suite also clears the launcher-to-worker variables."""
     monkeypatch.setattr(getpass, "getuser", lambda: "tester")
     for name in _TRACKED_ENV:
         monkeypatch.delenv(name, raising=False)
@@ -119,13 +77,6 @@ def clean_env(monkeypatch):
 def mlflow_utils(monkeypatch):
     monkeypatch.syspath_prepend(str(_EXAMPLES_DIR))
     return importlib.import_module("vllm_mlflow_utils")
-
-
-@pytest.fixture
-def fake_mlflow(monkeypatch):
-    fake = FakeMlflow()
-    monkeypatch.setitem(sys.modules, "mlflow", fake)
-    return fake
 
 
 def _resolve(mlflow_utils, monkeypatch, model="/ckpts/Qwen3-0.6B", **flags):
@@ -329,21 +280,26 @@ def test_worker_names_the_experiment_when_started_without_the_launcher(mlflow_ut
 
 
 def test_start_uploads_the_launchers_command_and_the_serving_settings(
-    mlflow_utils, monkeypatch, fake_mlflow
+    mlflow_utils, monkeypatch, fake_mlflow, tmp_path
 ):
     monkeypatch.setenv("MLFLOW_TRACKING_URI", URI)
     monkeypatch.setenv("MLFLOW_EXPERIMENT_NAME", "tester/vllm_serve_fakequant/Qwen3-0.6B-nvfp4")
     monkeypatch.setenv(
         "MODELOPT_MLFLOW_COMMAND", "python3 vllm_serve_fakequant.py /ckpts/x -tp 8\n"
     )
+    recipe_path = tmp_path / "quant_recipe.yaml"
+    recipe_path.write_text(yaml.safe_dump({"model.layers.0.input_quantizer": {"_disabled": True}}))
     tracker = mlflow_utils.FakeQuantMlflowTracker(
-        _worker(served_model_name="qwen", max_model_len=4096), QUANT_CONFIG
+        _worker(served_model_name="qwen", max_model_len=4096),
+        {**QUANT_CONFIG, "recipe_path": str(recipe_path)},
     )
     tracker.start()
     tracker.finish("FINISHED")
 
     assert fake_mlflow.experiment == "tester/vllm_serve_fakequant/Qwen3-0.6B-nvfp4"
     assert fake_mlflow.texts["command.txt"].startswith("python3 vllm_serve_fakequant.py")
+    assert fake_mlflow.texts["recipe/quant_recipe.yaml"] == recipe_path.read_text()
+    assert "recipe/resolved_recipe.yaml" not in fake_mlflow.texts
     # The quantization settings and the serving settings are both searchable.
     assert fake_mlflow.params["quant_cfg"] == "NVFP4_DEFAULT_CFG"
     assert fake_mlflow.params["calib_size"] == 512

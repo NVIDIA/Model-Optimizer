@@ -56,7 +56,7 @@ def safe_save(obj: Any, f: str | os.PathLike | BinaryIO, **kwargs) -> None:
 def safe_load(f: str | os.PathLike | BinaryIO | bytes, **kwargs) -> Any:
     """Load a checkpoint securely using ``weights_only=True`` by default.
 
-    NOTE: We dont set default ``weights_only`` (interpret as True for torch>=2.6) so you can override it with
+    NOTE: We don't set default ``weights_only`` (interpret as True for torch>=2.6) so you can override it with
     ``export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1`` if you see ``pickle.UnpicklingError`` and trust the checkpoint.
     """
     if isinstance(f, (bytes, bytearray)):
