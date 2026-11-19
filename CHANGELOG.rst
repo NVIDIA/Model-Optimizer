@@ -22,6 +22,8 @@ Changelog
 
 *Quantization - Recipes*
 
+- Add a sub-4-bit AutoQuantize recipe for Qwen3.6-35B-A3B at 2.75 bits, which searches the routed experts over GGML IQ2 formats with GPTQ and imatrix, weight-only NVFP4 and FP8, and BF16. Select it under ``models/Qwen/Qwen3.6-35B-A3B/auto_quantize/``.
+
 *Speculative Decoding*
 
 *Megatron Framework (M-LM / M-Bridge)*
