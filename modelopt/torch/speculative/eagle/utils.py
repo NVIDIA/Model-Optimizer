@@ -146,8 +146,9 @@ class OfflineSupervisedDataset(Dataset):
 
     def _aux_hidden_states(self, offline_data):
         """Aux planes from the dump, or an empty plane when the consumer never reads them."""
-        if "aux_hidden_states" in offline_data:
-            return offline_data["aux_hidden_states"]
+        aux = offline_data.get("aux_hidden_states")
+        if aux is not None and aux.numel() > 0:
+            return aux
         if not self.aux_hidden_states_optional:
             raise KeyError(
                 "aux_hidden_states missing from the offline dump. Re-dump without "

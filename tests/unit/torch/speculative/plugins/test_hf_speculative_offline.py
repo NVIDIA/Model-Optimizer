@@ -796,11 +796,18 @@ def test_offline_dataset_len_and_getitem(tmp_path):
         (True, "empty"),
     ],
 )
-def test_offline_dataset_handles_a_dump_without_aux_hidden_states(tmp_path, optional, expect):
-    """--no-aux-hidden-states dumps are readable only by modes that opt in."""
+@pytest.mark.parametrize("aux_storage", ["missing", "empty"])
+def test_offline_dataset_handles_a_dump_without_aux_hidden_states(
+    tmp_path, optional, expect, aux_storage
+):
+    """Missing or empty aux planes are readable only by modes that opt in."""
     p = tmp_path / "sample.pt"
     data = _make_offline_pt(p)
-    del data["aux_hidden_states"]
+    if aux_storage == "empty":
+        # vLLM writes this placeholder when only the final layer is extracted.
+        data["aux_hidden_states"] = torch.empty(0)
+    else:
+        del data["aux_hidden_states"]
     torch.save(data, p)
 
     ds = OfflineSupervisedDataset([str(p)], aux_hidden_states_optional=optional)
@@ -808,7 +815,11 @@ def test_offline_dataset_handles_a_dump_without_aux_hidden_states(tmp_path, opti
         with pytest.raises(KeyError, match="aux_hidden_states missing"):
             ds[0]
     else:
-        assert ds[0]["aux_hidden_states"].shape == (SEQ_LEN, 0)
+        item = ds[0]
+        assert item["aux_hidden_states"].shape == (SEQ_LEN, 0)
+        collator = EagleOfflineDataCollator(train_len=SEQ_LEN + 1)
+        batch = collator([item, item])
+        assert batch["base_model_outputs"]["aux_hidden_states"].shape == (2, SEQ_LEN + 1, 0)
 
 
 def test_offline_dataset_labels_shift(tmp_path):
