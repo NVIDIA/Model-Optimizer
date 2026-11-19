@@ -220,12 +220,19 @@ def _puzzle_renames(config: dict):
     if not _has_puzzle_language_model(config):
         yield
         return
+    import transformers
     from transformers import conversion_mapping
 
-    if conversion_mapping.get_checkpoint_conversion_mapping("nemotron_h_puzzle") is None:
-        conversion_mapping.register_checkpoint_conversion_mapping(
-            "nemotron_h_puzzle", [conversion_mapping.WeightRenaming("backbone.", "model.")]
+    rename = conversion_mapping.WeightRenaming("backbone.", "model.")
+    if not hasattr(rename, "scope_prefix"):
+        # Unscoped, the export's reverse rename would also rewrite the `model.` of `language_model.`.
+        raise RuntimeError(
+            "Loading a nemotron_h_puzzle language model needs a transformers release that limits a "
+            "sub-model's weight renames to that sub-model (5.9 or later); found "
+            f"{transformers.__version__}."
         )
+    if conversion_mapping.get_checkpoint_conversion_mapping("nemotron_h_puzzle") is None:
+        conversion_mapping.register_checkpoint_conversion_mapping("nemotron_h_puzzle", [rename])
     # Built by the lookup above. Hidden for this load only: a load of the port still needs them.
     cache = conversion_mapping._checkpoint_conversion_mapping_cache
     hidden = {name: cache.pop(name) for name in config.get("architectures") or () if name in cache}

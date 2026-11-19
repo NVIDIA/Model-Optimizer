@@ -27,7 +27,7 @@ pytest.importorskip("transformers")
 
 from huggingface_hub import constants as hub_constants
 from safetensors.torch import load_file, save_file
-from transformers import AutoModelForCausalLM, PreTrainedModel
+from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, conversion_mapping
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_activation_scaling_factor, postprocess_state_dict
@@ -537,11 +537,26 @@ def test_calibration_removes_capture_hook_on_error(tiny_checkpoint, failure):
 
 def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch):
     """A puzzle Omni checkpoint (Nemotron 3.5 Bolt) loads in its own code and keeps its names."""
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["NemotronH_Omni_Reasoning_V3"],
+                "model_type": "nemotron_h_omni",
+                "llm_config": {"model_type": "nemotron_h_puzzle"},
+            }
+        )
+    )
+    if not hasattr(conversion_mapping.WeightRenaming("a", "b"), "scope_prefix"):
+        # Its renames would apply to every key, and their reverse corrupt the export's names.
+        with (
+            pytest.raises(RuntimeError, match="limits a sub-model's weight renames"),
+            hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True),
+        ):
+            pass
+        return
     native = pytest.importorskip("transformers.models.nemotron_h.modeling_nemotron_h")
-    from transformers import PretrainedConfig, conversion_mapping
-
     if not hasattr(conversion_mapping, "USER_REGISTERED_MAPPINGS"):
-        pytest.skip("older transformers applies a sub-model's renames to every key")
+        pytest.skip("this test resets USER_REGISTERED_MAPPINGS, which this transformers lacks")
     # Leave transformers' registry as the test found it.
     monkeypatch.setattr(conversion_mapping, "_checkpoint_conversion_mapping_cache", None)
     monkeypatch.setattr(conversion_mapping, "USER_REGISTERED_MAPPINGS", set())
@@ -595,15 +610,6 @@ def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch)
         for name, tensor in source.state_dict().items()
     }
     save_file(checkpoint, tmp_path / "model.safetensors")
-    (tmp_path / "config.json").write_text(
-        json.dumps(
-            {
-                "architectures": [omni_class.__name__],
-                "model_type": "nemotron_h_omni",
-                "llm_config": {"model_type": "nemotron_h_puzzle"},
-            }
-        )
-    )
 
     def loaded_source_tensors(model):
         state = model.state_dict()
