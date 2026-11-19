@@ -269,12 +269,12 @@ Choose between question-level and repetition-level analysis
 Both approaches are valid. Choose based on your goal and the balance between precision and
 evaluation speed:
 
-- **Estimate accuracy on a fixed benchmark.** Treat its question set as a black box: compute one average
-  score per complete run, then estimate uncertainty across independent runs. Multiple complete
-  passes can be expensive.
-- **Get accurate results quickly for the domain represented by a benchmark.** Use representative questions:
-  compute an average score per question across repetitions, then estimate uncertainty across
-  questions. With sufficiently independent questions, this approach can support faster experimentation.
+- **Repetition-level: estimate accuracy on a fixed benchmark.** Treat its question set as a black box:
+  compute one average score per complete run, then estimate uncertainty across independent runs.
+  Multiple complete passes can be expensive.
+- **Question-level: get accurate results quickly for the domain represented by a benchmark.**
+  Use representative questions: compute an average score per question across repetitions, then
+  estimate uncertainty across questions. With sufficiently independent questions, this approach can support faster experimentation.
 
 Is question-level analysis reliable on real benchmarks compared with repetition-level analysis?
 We compare the two approaches by spending the same response budget on more unique questions or
