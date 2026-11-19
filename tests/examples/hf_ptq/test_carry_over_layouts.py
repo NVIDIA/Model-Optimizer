@@ -40,6 +40,7 @@ import torch
 from safetensors.torch import load_file, save_file
 from transformers import AutoModelForCausalLM, LlamaConfig
 
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import copy_off_index_safetensors
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
@@ -67,7 +68,9 @@ def _add_to_main_shard(d, extra):
 
 
 def _recorded(d):
-    return load_pretrained(str(d))._modelopt_unplaced_source_keys
+    with ModelOptSession() as session:
+        load_pretrained(str(d))
+    return list(session.source.unplaced_keys)
 
 
 @pytest.fixture

@@ -24,6 +24,7 @@ tests of each part use a process group, two gloo ranks.
 
 import copy
 import dataclasses
+import gc
 import importlib
 import importlib.util
 import inspect
@@ -95,6 +96,7 @@ import modelopt.torch.utils.distributed as dist
 import modelopt.torch.utils.moe as moe
 from modelopt.torch.export.unified_export_hf import _llm_dummy_forward
 from modelopt.torch.models import _onfly_decompress, get_spec
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -243,18 +245,14 @@ def test_unplaced_keys_preserve_registered_qwen_vlm_parameters(tmp_path, factory
 # --- recording what the load could not place -----------------------------------------------------
 
 
-def test_record_unplaced_source_keys_stores_sorted_keys_and_provenance():
+def test_the_deprecated_record_still_stores_sorted_keys_and_provenance():
+    """Kept for its callers for a release, deprecated, so it warns."""
     model = torch.nn.Linear(2, 2)
-    keys = record_unplaced_source_keys(model, "/ckpt/path", ["z.weight", "a.weight"])
+    with pytest.deprecated_call():
+        keys = record_unplaced_source_keys(model, "/ckpt/path", iter(["z.weight", "a.weight"]))
 
-    assert keys == ["a.weight", "z.weight"]
-    assert model._modelopt_unplaced_source_keys == ["a.weight", "z.weight"]
+    assert keys == model._modelopt_unplaced_source_keys == ["a.weight", "z.weight"]
     assert model._modelopt_source_checkpoint == "/ckpt/path"
-
-
-def test_record_unplaced_source_keys_accepts_any_iterable():
-    model = torch.nn.Linear(2, 2)
-    assert record_unplaced_source_keys(model, "/c", iter(["b", "a"])) == ["a", "b"]
 
 
 @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
@@ -1786,11 +1784,7 @@ def test_a_rank_that_cannot_see_the_checkpoint_fails_every_rank(cpu_dist_workers
 
 
 class _Loaded(torch.nn.Module):
-    """What a sharded loader returns: a model whose load recorded what it could not place."""
-
-    def __init__(self):
-        super().__init__()
-        self._modelopt_unplaced_source_keys = []
+    """What a sharded loader returns: a model."""
 
 
 @pytest.fixture
@@ -2268,21 +2262,91 @@ def test_a_model_its_spec_refuses_is_refused_with_its_config_handed_in(
     assert loaders == {}
 
 
-def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed, placed):
-    model, refused = None, None
+def test_a_bound_session_is_refused_before_anything_loads(tmp_path):
+    """A load builds a new model, which an active session already bound to one cannot describe,
+    also once that model is freed: it is refused before the checkpoint is even read, not once the
+    model is built."""
+    previous = nn.Linear(2, 2)
+    with ModelOptSession().bind(previous):
+        with pytest.raises(ValueError, match="a session describes one model"):
+            load_pretrained(str(tmp_path / "absent"))
+        del previous
+        gc.collect()
+        with pytest.raises(ValueError, match="a session describes one model"):
+            load_pretrained(str(tmp_path / "absent"))
+
+
+def test_a_load_that_fails_leaves_its_session_free_to_load_again(tmp_path, monkeypatch):
+    """A load whose read of the source fails binds nothing, so the workflow can load again."""
+    LlamaForCausalLM(LlamaConfig(**_TINY)).save_pretrained(tmp_path)
+
+    def unreadable(*args, **kwargs):
+        raise OSError("unreadable index")
+
+    with ModelOptSession() as session:
+        monkeypatch.setattr(model_load_utils, "unplaced_source_keys", unreadable)
+        with pytest.raises(OSError, match="unreadable"):
+            load_pretrained(str(tmp_path), device_map="cpu")
+        assert not session.is_bound
+        monkeypatch.undo()
+        model = load_pretrained(str(tmp_path), device_map="cpu")
+        assert session.model is model
+
+
+def _one_rank_bound_job(rank, size, ckpt):
+    session = ModelOptSession()
+    if rank == 0:
+        session.bind(nn.Linear(2, 2))
+    with bounded_collectives(), session:
+        try:
+            load_pretrained(ckpt, distribution=DistributionPlan(size), device_map="cpu")
+        except Exception as error:  # rank 0's own ValueError, as the others receive it
+            raised = str(error)
+        else:
+            raised = "no error"
+    # Rank 0's refusal, on every rank, rather than rank 1 left waiting in the load's next collective.
+    assert "a session describes one model" in raised, (rank, raised)
+
+
+def test_a_session_one_rank_refuses_fails_every_rank(cpu_dist_workers, tmp_path):
+    """A refusal on any rank raises on every rank before the load, the active session's too."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(_one_rank_bound_job, ckpt=str(tmp_path))
+
+
+def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed, placed, through):
+    model, refused, other = None, None, None
+    session = ModelOptSession(distribution=handed[rank]) if through == "session" else None
+    plan = {} if session else {"distribution": handed[rank]}
     # Ranks without GPUs, whatever the host has: the pooled workers keep no CUDA context.
-    with bounded_collectives(), mock.patch.object(torch.cuda, "is_available", return_value=False):
+    with (
+        bounded_collectives(),
+        mock.patch.object(torch.cuda, "is_available", return_value=False),
+        session or nullcontext(),
+    ):
         try:  # not pytest.raises: its failure would end the pooled worker instead of the job
-            model = load_pretrained(ckpt, distribution=handed[rank], **placed)
+            model = load_pretrained(ckpt, **plan, **placed)
         except Exception as error:
             refused = str(error)
+        if session is not None and refused is None:
+            # While its block runs, the session is bound to the model the load returned.
+            try:
+                session.bind(nn.Linear(1, 1))
+            except ValueError as error:
+                other = str(error)
     if isinstance(handed[0], DistributionPlan):
         assert refused is None and distribution_plan(model) == handed[0], (rank, refused)
+        if session is not None:
+            # The session records the plan every rank loaded by, and the source, for this model.
+            assert session.distribution == handed[0], rank
+            assert session.source == hf_checkpoint_utils.SourceCheckpoint(ckpt), rank
+            assert "describes one model" in str(other), rank
     else:
         # Rank 0's refusal, on every rank, rather than a rank left waiting in the broadcast.
         assert "expected a DistributionPlan" in str(refused), (rank, refused)
 
 
+@pytest.mark.parametrize("through", ["argument", "session"])
 @pytest.mark.parametrize(
     ("handed", "placed"),
     [
@@ -2293,14 +2357,21 @@ def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed, placed):
     ],
     ids=["another-plan", "none", "not-a-plan", "placed-by-default"],
 )
-def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path, handed, placed):
+def test_every_rank_loads_the_plan_rank0_was_handed(
+    cpu_dist_workers, tmp_path, handed, placed, through
+):
     """Over a real broadcast, whatever rank 1 was handed. Ranks loading different plans would build
     mismatched meshes, and one handed none would decide a plan through collectives the others never
     join: both would hang. A distribution rank 0 refuses fails every rank. Placed by default, each
-    rank takes the model onto its GPU, and a run without GPUs, as these ranks are, loads it whole."""
+    rank takes the model onto its GPU, and a run without GPUs, as these ranks are, loads it whole.
+    Handed in the active session, the plan is rank 0's too, and the session records it."""
     LlamaForCausalLM(LlamaConfig(**_TINY)).save_pretrained(tmp_path)
     cpu_dist_workers.run(
-        _every_rank_loads_rank0s_plan_job, ckpt=str(tmp_path), handed=handed, placed=placed
+        _every_rank_loads_rank0s_plan_job,
+        ckpt=str(tmp_path),
+        handed=handed,
+        placed=placed,
+        through=through,
     )
 
 
@@ -3380,7 +3451,7 @@ def test_a_plan_whose_expert_containers_match_no_module_is_refused(ep_world_of_t
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args, **kwargs: [])
+    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", lambda *args, **kwargs: [])
     config = SimpleNamespace(
         model_type=_NO_SPEC,
         base_model_ep_plan={"layers.*.mlp.experts.*.gate_up_proj": "grouped_gemm"},
@@ -3406,7 +3477,7 @@ def test_routed_experts_without_experts_in_their_names_are_refused(ep_world_of_t
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args, **kwargs: [])
+    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", lambda *args, **kwargs: [])
     config = SimpleNamespace(
         model_type=_NO_SPEC,
         base_model_ep_plan={
@@ -3488,7 +3559,7 @@ def test_an_expert_count_the_config_does_not_name_is_read_off_the_loaded_experts
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args, **kwargs: [])
+    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", lambda *args, **kwargs: [])
     monkeypatch.setattr(model_load_utils, "_refuse_unquantizable_experts", next_check)
     config = SimpleNamespace(
         model_type=_NO_SPEC,
@@ -3550,7 +3621,7 @@ def test_the_model_keeps_the_plan_its_checkpoint_declares(
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args, **kwargs: [])
+    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", lambda *args, **kwargs: [])
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
 
     class _Config(transformers.PretrainedConfig):
@@ -3612,7 +3683,7 @@ def test_a_loaded_model_keeps_its_sharding_styles_out_of_its_saved_config(
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: mesh
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args, **kwargs: [])
+    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", lambda *args, **kwargs: [])
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
     config = Qwen3MoeConfig(
         hidden_size=16,
@@ -4254,7 +4325,7 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
         patches += [
             mock.patch("torch.distributed.device_mesh.init_device_mesh", return_value=_Mesh()),
             mock.patch.object(model_load_utils, "_auto_class", return_value=loader),
-            mock.patch.object(model_load_utils, "record_unplaced_source_keys", side_effect=record),
+            mock.patch.object(model_load_utils, "unplaced_source_keys", side_effect=record),
         ]
     else:
         patches.append(
@@ -4747,7 +4818,7 @@ def test_a_dense_part_from_pretrained_did_not_leave_on_meta_is_refused(
     )
     monkeypatch.setattr(model_load_utils, "ensure_local_checkpoint", lambda p, **k: (None, p))
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
+    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", lambda *args, **kwargs: [])
     monkeypatch.setattr(model_load_utils, "_load_ep_dense_distributed", dense_load)
     config = SimpleNamespace(
         model_type=_NO_SPEC,
@@ -4782,7 +4853,7 @@ def test_the_dense_load_shards_first_then_asks_for_exactly_the_meta_dense_params
         layer.A_log = nn.Parameter(torch.zeros(4))
     loads = []
 
-    def record_load(loaded, local_dir, device, *, load_names):
+    def record_load(loaded, local_dir, device, *, load_names, unplaced):
         sharded = [isinstance(layer.self_attn.weight, DTensor) for layer in loaded.model.layers]
         loads.append((local_dir, device, load_names, sharded))
 
@@ -4813,7 +4884,7 @@ def test_the_dense_load_materializes_on_the_gpu_the_rank_is_bound_to(fsdp_mesh, 
         monkeypatch.setattr(torch.cuda, name, lambda value=value: value)
     monkeypatch.setattr(model_load_utils, "_fsdp2_shard_dense", lambda *args: 0)
 
-    def record_load(model, local_dir, device, *, load_names):
+    def record_load(model, local_dir, device, *, load_names, unplaced):
         loads.append(device)
 
     monkeypatch.setattr(model_load_utils, "_meta_dcp_load", record_load)

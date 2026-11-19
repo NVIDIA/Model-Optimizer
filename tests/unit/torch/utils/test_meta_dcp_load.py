@@ -572,8 +572,8 @@ def _with_a_meta_buffer(model):
     model.model.register_buffer("scratch", torch.empty(2, device="meta"), persistent=False)
 
 
-def _recorded_as_carried_over(model):
-    model._modelopt_unplaced_source_keys = ["model.norm.weight"]
+def _found_no_param_for(model):
+    return ["model.norm.weight"]  # the load found no param for it: the export carries it raw
 
 
 def _with_another_vocab_size(model):
@@ -586,7 +586,7 @@ def _with_another_vocab_size(model):
     [
         (_root_sharded, "root module is fully_shard-ed"),
         (_with_a_meta_buffer, r"buffer\(s\) are on meta"),
-        (_recorded_as_carried_over, "recorded them as having no param"),
+        (_found_no_param_for, "found no param for them"),
         (_with_another_vocab_size, r"lm_head.weight \(32, 32\) -> lm_head.weight \(64, 32\)"),
     ],
     ids=["root-sharded", "meta-buffer", "carried-over-raw", "other-shape"],
@@ -601,10 +601,10 @@ def test_a_load_it_cannot_do_rightly_is_refused_before_anything_changes(
     is refused with every param still on meta."""
     ckpt_dir = _save(tmp_path, get_tiny_llama().state_dict())
     model = _meta_twin(get_tiny_llama)
-    change(model)
+    unplaced = change(model) or ()
 
     with pytest.raises(RuntimeError, match=match):
-        _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model))
+        _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model), unplaced=unplaced)
     assert all(p.is_meta for p in model.parameters())
 
 

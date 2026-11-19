@@ -31,6 +31,7 @@ from modelopt.torch.export import layerwise_export
 from modelopt.torch.export.layerwise_export import LAYERWISE_EXPORTER_ATTR, LayerwiseExporter
 from modelopt.torch.export.registry import ExportContext
 from modelopt.torch.opt import ModelOptSession
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import SourceCheckpoint
 
 
 def test_a_layerwise_export_runs_in_the_workflows_modelopt_session(tmp_path):
@@ -148,3 +149,23 @@ def test_a_layerwise_export_resumes_in_a_later_calibration_outside_any_session(
     mtq.calibrate(model, cfg["algorithm"], lambda m: m(torch.randint(0, 32, (1, 16))))
     getattr(model, LAYERWISE_EXPORTER_ATTR).finalize()
     assert (tmp_path / "export" / "model.safetensors.index.json").exists()
+
+
+def test_a_layerwise_export_takes_the_source_its_workflow_recorded(tmp_path):
+    """The source checkpoint the workflow's session holds wins over the one the model names, as it
+    does for the whole-model export: its non-model files are copied, though the model names a Hub
+    ID."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tokenizer_config.json").write_text("{}")
+    model = get_tiny_llama(num_hidden_layers=1).eval()
+    model.config.architectures = ["LlamaForCausalLM"]
+    model.config._name_or_path = "org/some-model"
+    with ModelOptSession(source=SourceCheckpoint(str(source))):
+        mtq.quantize(
+            model,
+            _layerwise_fp8_cfg(tmp_path / "export"),
+            lambda m: m(torch.randint(0, 32, (1, 16))),
+        )
+        getattr(model, LAYERWISE_EXPORTER_ATTR).finalize()
+    assert (tmp_path / "export" / "tokenizer_config.json").exists()

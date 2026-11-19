@@ -50,13 +50,16 @@ from modelopt.torch.quantization.utils.core_utils import (
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import get_unwrapped_name, safe_save
-from modelopt.torch.utils.plugins.hf_checkpoint_utils import copy_off_index_safetensors
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    SourceCheckpoint,
+    copy_off_index_safetensors,
+)
 
 from ..layer_utils import get_experts_list
 from ..quant_utils import get_quantization_format
 from ..unified_export_hf import (
     _copy_non_model_files_from_source,
-    _source_checkpoint,
+    _resolve_source,
     collect_shared_input_modules,
     read_unplaced_weights,
 )
@@ -544,7 +547,7 @@ def _resmooth_experts_for_export(
     return out, requant_weights
 
 
-def _carry_over_unplaced_weights(export_dir: Path, model: nn.Module) -> None:
+def _carry_over_unplaced_weights(export_dir: Path, source: SourceCheckpoint | None) -> None:
     """Write checkpoint weights the model never held as an extra safetensors shard.
 
     ``save_pretrained`` only ever writes ``model.state_dict()`` (or a copy of it), so a
@@ -558,7 +561,7 @@ def _carry_over_unplaced_weights(export_dir: Path, model: nn.Module) -> None:
     A no-op when there is nothing to carry (the common case: most models have no
     unplaced weights at all).
     """
-    extra = read_unplaced_weights(model)
+    extra = read_unplaced_weights(source)
     if not extra:
         return
 
@@ -651,7 +654,10 @@ def export_hf_vllm_fq_checkpoint(
     weight parameters only (no ``state_dict``), before the inplace fakequant loop.
 
     The export runs in the active ModelOpt session
-    (:class:`~modelopt.torch.opt.session.ModelOptSession`), else in one of its own.
+    (:class:`~modelopt.torch.opt.session.ModelOptSession`), else in one of its own. The tensors of
+    the source checkpoint the session holds that the model has no parameter for are carried over;
+    without one, those of the checkpoint the model names: the one its load recorded on it, else its
+    ``config._name_or_path``.
 
     Args:
         model: In-memory quantized model.
@@ -662,6 +668,7 @@ def export_hf_vllm_fq_checkpoint(
             modified and weight quantizers are not re-enabled after export.
     """
     session = mto.ModelOptSession.active()
+    source = _resolve_source(model, session.source)
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
@@ -821,9 +828,10 @@ def export_hf_vllm_fq_checkpoint(
         # the one thing save_pretrained's state_dict= path cannot do for the
         # inplace_mem_efficient branch (it deliberately omits state_dict= there -- see the
         # comment above -- so there is no state_dict to merge extras into).
-        _carry_over_unplaced_weights(export_dir, model)
-        copy_off_index_safetensors(_source_checkpoint(model), export_dir)
-        _copy_non_model_files_from_source(model, export_dir)
+        _carry_over_unplaced_weights(export_dir, source)
+        if source is not None:
+            copy_off_index_safetensors(source.path, export_dir)
+        _copy_non_model_files_from_source(source, export_dir)
         _copy_source_config(model, export_dir)
 
     finally:
