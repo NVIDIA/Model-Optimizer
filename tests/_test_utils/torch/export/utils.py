@@ -13,7 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+
 import torch
+
+import modelopt.torch.quantization as mtq
 
 
 # Models
@@ -323,3 +327,18 @@ only_output_quantizer_fp8_config = {
     ],
     "algorithm": "max",
 }
+
+
+def layerwise_fp8_config(export_dir):
+    """FP8 calibrated layer by layer, each layer exported into ``export_dir`` as it is calibrated."""
+    cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    # max is amax-only, so the layer weights each shard captured stay valid.
+    cfg["algorithm"] = {
+        "method": "max",
+        "layerwise": {
+            "enable": True,
+            "export_dir": str(export_dir),
+            "calib_mutates_weights": False,
+        },
+    }
+    return cfg

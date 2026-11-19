@@ -17,7 +17,7 @@ The plugin works as follows:
    ModelOpt's per-channel and per-block quantization expect the input dimension last, but these weights are ``(num_experts, in_dim, out_dim)``, so they are quantized transposed.
 #. Register ``_QuantLlama4TextExperts`` to replace ``Llama4TextExperts`` from the ``transformers`` library.
 #. Quantize the model after the plugin is registered, for example with the `hf_ptq example <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq>`_.
-#. Export the quantized model with :meth:`export_hf_checkpoint <modelopt.torch.export.unified_export_hf.export_hf_checkpoint>`. A new module type may also need an export handler; see ``modelopt/torch/export/hf_export_handlers.py``.
+#. Export the quantized model with :meth:`export_hf_checkpoint <modelopt.torch.export.unified_export_hf.export_hf_checkpoint>`. A new module type may also need an export handler: register a :class:`ModuleExportHandler <modelopt.torch.export.registry.ModuleExportHandler>` for it with ``ExportModuleRegistry``, as the built-in handlers in ``modelopt/torch/export/hf_export_handlers.py`` do. Experts stored for ``torch.bmm``, as ``Llama4TextExperts`` are, are packed as such only when the model's spec names their class (``ExportSpec.bmm_experts_names`` in ``modelopt/torch/models``): a handler alone would quantize their transposed weights in the wrong blocks.
    If the customized model is not supported by TensorRT-LLM, add support in its PyTorch backend. See the :doc:`unified HF export guide <../deployment/3_unified_hf>` or :doc:`contact us <../support/1_contact>` for help.
 
 The following code snippet is simplified from the plugin in ``modelopt/torch/quantization/plugins/huggingface.py``, which also handles weight-only calibration.

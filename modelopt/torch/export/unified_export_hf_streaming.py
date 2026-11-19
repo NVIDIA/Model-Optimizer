@@ -55,6 +55,7 @@ from .quant_utils import (
 from .registry import ExportContext
 from .unified_export_hf import (
     _dispatch_export_handler,
+    _finish_packed_modules,
     _prepare_model_for_export,
     _prepare_moe_inputs,
     _start_export,
@@ -352,10 +353,6 @@ def _export_transformers_checkpoint_streaming(
         NotImplementedError: if the model's conversion mapping regroups tensors.
         RuntimeError: if decoder layers cannot be discovered for layer-wise materialization.
     """
-    # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
-    # per-model PTQ module at module scope here would risk an import cycle.
-    from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
-
     export_dir = Path(export_dir)
     # Materialization dispatch walks the module tree from the root; without these maps each
     # call re-derives them, which is O(N^2) over a MoE model's expert modules.
@@ -453,7 +450,7 @@ def _export_transformers_checkpoint_streaming(
             for sub_name, sub_mod in layer_module.named_modules():
                 full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
-            _reconstruct_fused_moe_linear(layer_module)
+            _finish_packed_modules(layer_module, layer_name)
             prefix = f"{layer_name}." if layer_name else ""
             for key, tensor in layer_module.state_dict().items():
                 full_key = prefix + key
@@ -474,6 +471,7 @@ def _export_transformers_checkpoint_streaming(
             for sub_name, sub_mod in module.named_modules():
                 full_name = f"{name}.{sub_name}" if sub_name else name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
+            _finish_packed_modules(module, name)
             prefix = f"{name}." if name else ""
             for key, tensor in module.state_dict().items():
                 full_key = prefix + key
@@ -559,10 +557,6 @@ def collect_export_tensors(
 
 def _collect_export_tensors(model: nn.Module, owner: str) -> list[tuple[str, torch.Tensor]]:
     """:func:`collect_export_tensors`, as a step of the export in progress."""
-    # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
-    # per-model PTQ module at module scope here would risk an import cycle.
-    from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
-
     _assert_fsdp2_owns_every_mesh_dim(model)
     # A forward leaves the root's parameters unsharded (FSDP2 skips the root's post-forward
     # reshard), and FSDP2's state_dict() pre-hook reshards a module's whole parameter group. Only
@@ -604,7 +598,7 @@ def _collect_export_tensors(model: nn.Module, owner: str) -> list[tuple[str, tor
                 for sub_name, sub_module in module.named_modules():
                     full_name = f"{base}.{sub_name}" if sub_name else base
                     _dispatch_export_handler(full_name, sub_module, ctx)
-                _reconstruct_fused_moe_linear(module)
+                _finish_packed_modules(module, base)
                 prefix = f"{base}." if base else ""
                 for key, tensor in module.state_dict().items():
                     full_key = prefix + key

@@ -60,6 +60,8 @@ from modelopt.torch.export.diffusers_utils import (
     get_diffusion_model_type,
     hide_quantizers_from_state_dict,
 )
+from modelopt.torch.export.layer_utils import is_quantlinear
+from modelopt.torch.export.registry import ExportModuleRegistry, ModuleExportHandler
 from modelopt.torch.export.unified_export_hf import _postprocess_safetensors, export_hf_checkpoint
 from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -129,6 +131,26 @@ def test_export_diffusers_save_modelopt_state(
     export_hf_checkpoint(model, export_dir=export_dir, save_modelopt_state=save_modelopt_state)
 
     assert (export_dir / "modelopt_state.pth").is_file() == save_modelopt_state
+
+
+@torch.no_grad()
+def test_export_diffusers_finishes_the_modules_it_packed(tmp_path, monkeypatch):
+    """The diffusers export runs on_post_pack on every module it packed, as the others do."""
+    monkeypatch.setattr(ExportModuleRegistry, "_entries", list(ExportModuleRegistry._entries))
+    finished = []
+
+    @ExportModuleRegistry.register(predicate=is_quantlinear, prepend=True)
+    class _Finished(ModuleExportHandler):
+        def on_post_pack(self, name, module, ctx):
+            finished.append(name)
+
+    model = get_tiny_unet().eval()
+    inputs = generate_diffusion_dummy_inputs(model, torch.device("cpu"), torch.float32)
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(**inputs))
+    packed = sorted(name for name, module in model.named_modules() if is_quantlinear(module))
+
+    export_hf_checkpoint(model, export_dir=tmp_path / "export_unet")
+    assert packed and sorted(finished) == packed
 
 
 @pytest.fixture

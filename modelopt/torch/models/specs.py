@@ -304,6 +304,14 @@ class ExportSpec(SpecSection):
     pre_quant_scale fusion). A structural fallback (``zero_centered_gamma``) stays
     in the engine."""
 
+    bmm_experts_names: tuple[str, ...] = ()
+    """Class names of fused BMM-style experts modules: one module holding every expert in
+    two 3-D weights, ``gate_up_proj`` and ``down_proj``, stored ``(num_experts, in_dim,
+    out_dim)`` and run through ``torch.bmm``, which modelopt quantizes with one weight and
+    one input quantizer per projection. The export fills their missing input amax and
+    packs those weights whole. Matched against a module's MRO (case-insensitive exact
+    names); every model's names apply to every module the export walks."""
+
 
 @dataclass(kw_only=True)
 class PTQSpec(SpecSection):

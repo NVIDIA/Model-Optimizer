@@ -25,14 +25,20 @@ import torch.nn.functional as F
 pytest.importorskip("transformers")
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.hf_export_handlers import _export_moe_linear
-from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
+from modelopt.torch.export.registry import ExportModuleRegistry
+from modelopt.torch.export.unified_export_hf import (
+    _finish_packed_modules,
+    _start_export,
+    pack_quantized_weights,
+)
 from modelopt.torch.models.step3p5.modeling_ptq import (
+    _export_moe_linear,
     _is_expert_indexed_moe_linear,
     _QuantMoELinear,
     _reconstruct_fused_moe_linear,
     register_moe_linear_on_the_fly,
 )
+from modelopt.torch.opt import ModelOptSession
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 
 NUM_EXPERTS = 4
@@ -350,7 +356,9 @@ def test_expert_indexed_moe_is_quantized_and_reconstructed():
     # The router stays untouched.
     assert not model.moe.gate.weight_quantizer.is_enabled
 
-    _reconstruct_fused_moe_linear(model)
+    # The export's post-pack walk finds the handler the Step package registered for its wrapper.
+    with ModelOptSession().bind(model), _start_export(model, torch.float16):
+        _finish_packed_modules(model)
 
     # Back to the original ``[num_experts, out_features, in_features]`` parameter, so the
     # exported keys match the hub checkpoint instead of per-expert names.
@@ -378,18 +386,25 @@ def test_export_handler_matches_a_differently_named_wrapper():
     assert ExportModuleRegistry.match(converted) is _export_moe_linear
 
 
-def test_export_handler_fills_input_amax_for_unrouted_experts():
-    """The handler is what gives never-routed experts an input amax before export."""
+def test_packing_gives_unrouted_experts_an_input_scale_and_restacks_them():
+    """Packing runs the two handlers the Step package registers for its wrapper: before the
+    experts are packed, never-routed ones get an input amax, so every expert gets an input scale;
+    once they are, the experts are stacked back into the wrapper's 3-D weight and scales."""
     torch.manual_seed(0)
     model = _TinyStepModel()
     mtq.quantize(model, _moe_quant_cfg(), forward_loop=lambda m: m(torch.randn(2, 8, HIDDEN_SIZE)))
 
-    experts = model.moe.up_proj.experts
+    up_proj = model.moe.up_proj
+    experts = up_proj.experts
     # Simulate an expert that calibration never routed a token to.
     experts[0].input_quantizer.reset_amax()
     assert experts[0].input_quantizer.amax is None
     assert any(e.input_quantizer.amax is not None for e in experts), "need a donor amax"
 
-    _export_moe_linear("moe.up_proj", model.moe.up_proj, ExportContext(model, torch.float16))
+    with ModelOptSession().bind(model), _start_export(model, torch.float16):
+        pack_quantized_weights()
 
-    assert experts[0].input_quantizer.amax is not None
+    assert not hasattr(up_proj, "experts")
+    assert up_proj.weight.shape[0] == NUM_EXPERTS
+    # Stacked only when every expert has one, the never-routed one included.
+    assert up_proj.input_scale.shape[0] == NUM_EXPERTS

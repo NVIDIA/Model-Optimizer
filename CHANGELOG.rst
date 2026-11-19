@@ -22,6 +22,7 @@ Changelog
 
 - With the active ``ModelOptSession``'s ``export`` set, ``mtq.quantize``, ``mtq.calibrate`` and ``mtq.auto_quantize`` refuse, before calibrating, a model ``export_hf_checkpoint`` could not write, and a layerwise calibration hands its exporter to the export through the session.
 - ``examples/hf_ptq/hf_ptq.py`` runs its whole workflow in one ``ModelOptSession``, so it refuses a model its Hugging Face export could not write before calibrating it rather than after.
+- An export handler, ``modelopt.torch.export.ModuleExportHandler``, now defines what the Hugging Face export does to a kind of module in each phase it takes part in (``on_prepare_moe_inputs``, ``on_pack``, ``on_post_pack``), and all handlers register with ``ExportModuleRegistry``; a plain function still registers as ``on_pack``.
 
 *Quantization - Recipes*
 
@@ -43,6 +44,7 @@ Changelog
 **Deprecations**
 
 - ``modelopt.torch.utils.plugins.model_load_utils.record_unplaced_source_keys`` is deprecated and will be removed in 0.51.0: ``load_pretrained`` records the source checkpoint itself, on the model and in the workflow's ``ModelOptSession``.
+- ``modelopt.torch.export.PrepareMoEInputsRegistry`` is deprecated and will be removed in 0.51.0: register a ``ModuleExportHandler`` that defines ``on_prepare_moe_inputs`` with ``ExportModuleRegistry`` instead.
 
 **Bug Fixes**
 

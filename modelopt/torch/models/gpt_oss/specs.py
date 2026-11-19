@@ -15,7 +15,7 @@
 
 """GPT-OSS specs (HF model type ``gpt_oss``)."""
 
-from ..specs import EPSpec, ModelSpec, MoESpec, register
+from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
@@ -38,5 +38,6 @@ register(
             expert_linear_names=("gate_up_proj", "down_proj"),
             fused_expert_names=True,
         ),
+        export_spec=ExportSpec(bmm_experts_names=("GptOssExperts",)),
     )
 )
