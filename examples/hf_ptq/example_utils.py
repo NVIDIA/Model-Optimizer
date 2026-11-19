@@ -677,7 +677,7 @@ def get_model(
             f"{plan!r} shards the model over the ranks, but get_model loads the whole model on "
             "every rank: load it with load_pretrained."
         )
-    routing = {} if distribution is None else {"distribution": distribution}
+    routing: dict[str, Any] = {} if distribution is None else {"distribution": distribution}
 
     _disk_offload = offload_folder is not None
     if _disk_offload and max_cpu_memory_gb is None:

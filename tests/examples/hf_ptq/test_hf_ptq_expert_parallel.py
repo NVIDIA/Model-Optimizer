@@ -1001,7 +1001,8 @@ def test_only_rank_0_writes_a_replicated_model(hf_ptq, monkeypatch, plan, rank, 
     )
 
     model = _planned(plan)
-    with ModelOptSession(source=source):
+    with ModelOptSession().bind(model) as session:
+        session.binding(model).source = source
         hf_ptq.export_quantized(args, model, model, "qwen3_moe")
 
     assert written == ["config"] * (rank == 0) + [("checkpoint", source)] * exports
