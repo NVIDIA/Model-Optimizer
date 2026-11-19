@@ -958,7 +958,7 @@ def _start_export(
             model=model,
             dtype=dtype,
             is_modelopt_qlora=is_modelopt_qlora,
-            model_type=ModelOptSession.active().model_type,
+            model_type=ModelOptSession.active().binding(model).model_type,
             **fields,
         )
     )

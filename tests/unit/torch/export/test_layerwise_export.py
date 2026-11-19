@@ -34,37 +34,46 @@ from modelopt.torch.opt import ModelOptSession
 
 
 def test_a_layerwise_export_runs_in_the_workflows_modelopt_session(tmp_path):
+    """The exporter's binding starts its export in the workflow's session, with the type of the
+    model the checkpoint describes, read from that model's binding: a workflow's session bound only
+    to the calibrated part refuses the export, while code that opens no session reads the whole
+    model's type off it."""
     model = get_tiny_llama(num_hidden_layers=1)
-    with ModelOptSession().bind(model) as session:
-        exporter = LayerwiseExporter(model, tmp_path)
-        exporter.bind(list(model.model.layers))
+    # A part with a type of its own, as a VLM's language model has.
+    model.model.config = copy.deepcopy(model.config)
+    model.model.config.model_type = "llama_text"
+    with ModelOptSession().bind(model):
+        LayerwiseExporter(model, tmp_path).bind(list(model.model.layers))
 
-        # From the binding, the workflow's session holds the layerwise export's context, and the
-        # model's type.
+        # From the binding, the workflow's session holds the layerwise export's context, with the
+        # whole model's type.
         assert ExportContext.current().model is model
-        assert session.model_type == "llama"
+        assert ExportContext.current().model_type == "llama"
 
-    # A calibration resumed in another session, of a part of the model, binds it again: that
-    # session takes the root the checkpoint describes.
-    with ModelOptSession().bind(model.model) as resumed:
-        exporter.bind(list(model.model.layers))
-        assert resumed.model is model
+    LayerwiseExporter(model, tmp_path / "default").bind(list(model.model.layers))
+    assert ExportContext.current().model_type == "llama"
+
+    with (
+        ModelOptSession().bind(model.model),
+        pytest.raises(RuntimeError, match="binds no model"),
+    ):
+        LayerwiseExporter(model, tmp_path / "part").bind(list(model.model.layers))
 
 
 def test_a_layerwise_export_that_cannot_bind_leaves_no_export_in_progress(tmp_path, monkeypatch):
     """The exporter starts its export, and binds the workflow's session to its model, once nothing
-    else in binding it can fail: a session bound to the part calibration was handed stays there."""
+    else in binding it can fail: a failure leaves no export in progress and the session unbound."""
 
     def unreadable(*args, **kwargs):
         raise RuntimeError("unreadable quantizer state")
 
     monkeypatch.setattr(layerwise_export, "get_quant_config", unreadable)
     model = get_tiny_llama(num_hidden_layers=1)
-    with ModelOptSession().bind(model.model) as session:
+    with ModelOptSession() as session:
         with pytest.raises(RuntimeError, match="unreadable"):
             LayerwiseExporter(model, tmp_path).bind(list(model.model.layers))
         assert session.runtime.export_context is None
-        assert session.model is model.model
+        assert session.model is None
 
 
 def _layerwise_fp8_cfg(export_dir):
