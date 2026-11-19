@@ -1037,7 +1037,11 @@ def super_block_scales(
             f"scales must hold one float16 value per block ({len(blocks)}), got "
             f"{scales.dtype} {tuple(scales.shape)}"
         )
-    return scales.reshape(-1).to(blocks.device)
+    scales = scales.reshape(-1).to(blocks.device)
+    checked = _ENCODE_INPUTS_CHECKED.get()
+    if not checked and not (torch.isfinite(scales) & (scales >= 0)).all():
+        raise ValueError("scales must be finite and non-negative")
+    return scales
 
 
 def dequantize_blocks(
@@ -1114,7 +1118,8 @@ def floored_second_moments(second_moments: torch.Tensor | None) -> torch.Tensor 
     return second_moments.clamp_min(_IMPORTANCE_FLOOR * mean)
 
 
-# Set by checked_encode_inputs: the encodes inside take their importance and choices as checked.
+# Set by checked_encode_inputs: the encodes inside take their importance, choices and scales as
+# checked.
 _ENCODE_INPUTS_CHECKED: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_ENCODE_INPUTS_CHECKED", default=False
 )
@@ -1122,11 +1127,12 @@ _ENCODE_INPUTS_CHECKED: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 @contextlib.contextmanager
 def checked_encode_inputs(importance: torch.Tensor | None = None):
-    """Encode inside without checking each encode's importance and choices again.
+    """Encode inside without checking each encode's importance, choices and scales again.
 
     Each check reads a reduction back from the GPU, which stalls the host until all queued work is
     done. GPTQ's group loop and the choice search encode many times, each with a slice of one
-    importance vector and choices the search itself picked; ``importance`` is checked here, once.
+    importance vector, and choices and scales derived inside the loop; ``importance`` is checked
+    here, once.
     """
     if importance is not None and not (torch.isfinite(importance) & (importance >= 0)).all():
         raise ValueError("importance must be finite and non-negative")

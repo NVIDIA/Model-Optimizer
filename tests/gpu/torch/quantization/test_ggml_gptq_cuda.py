@@ -15,7 +15,6 @@
 """GGML GPTQ with the CUDA encoders, through ``mtq.quantize`` and ``mtq.auto_quantize``."""
 
 import copy
-import warnings
 
 import pytest
 import torch
@@ -104,14 +103,12 @@ def _host_syncs_in_gptq(width, local_hessian_scales):
     }
     config = _iq1_s_config(algorithm)
     config["quant_cfg"][1]["cfg"]["num_bits"] = "iq2_s"
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        torch.cuda.set_sync_debug_mode("warn")
-        try:
-            mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
-        finally:
-            torch.cuda.set_sync_debug_mode("default")
-    return sum("synchroniz" in str(warning.message) for warning in caught)
+    # The profiler records every CUDA runtime call, the CUDA extensions' too, which sync debug mode
+    # does not report.
+    activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    with torch.profiler.profile(activities=activities) as profile:
+        mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+    return sum(event.count for event in profile.key_averages() if "Synchronize" in event.key)
 
 
 @pytest.mark.parametrize("local_hessian_scales", [False, True])
