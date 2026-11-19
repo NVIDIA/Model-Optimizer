@@ -52,6 +52,8 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
+- Preserve model-specific hybrid stacks when selecting MoE expert layouts in Megatron-Bridge, and reject grouped GEMM when a custom factory returns sequential experts. Custom built stack ``ModuleSpec`` values are now rejected; assign a named factory function instead.
+
 *Misc*
 
 0.49.0 (2026-12-xx)
