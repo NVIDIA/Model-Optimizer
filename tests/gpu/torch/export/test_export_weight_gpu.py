@@ -39,6 +39,7 @@ from modelopt.torch.export.quant_utils import (
     to_quantized_weight,
 )
 from modelopt.torch.export.quantized_weight_export import (
+    capture_kv_cache_export_state,
     capture_quantized_weight_export_state,
     export_quantized_weight_tensors,
     select_quantized_weight_export_state,
@@ -146,6 +147,10 @@ def test_export_per_block_quantized_weight():
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
 
 
+_W4A16_MXFP4_CFG = copy.deepcopy(mtq.MXFP4_DEFAULT_CFG)
+_W4A16_MXFP4_CFG["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
+
+
 @pytest.mark.parametrize(
     "quant_cfg",
     [
@@ -155,6 +160,7 @@ def test_export_per_block_quantized_weight():
         mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
         mtq.MXFP8_DEFAULT_CFG,
         mtq.MXFP4_DEFAULT_CFG,
+        _W4A16_MXFP4_CFG,
         mtq.W4A8_MXFP4_FP8_CFG,
         mtq.W4A8_NVFP4_FP8_CFG,
     ],
@@ -324,3 +330,25 @@ def test_export_compressed_nvfp4_weight():
     stripped = postprocess_state_dict(compressed.state_dict(), 1.0, None)
     assert not any(key.endswith("weight_quantizer._double_scale") for key in stripped)
     assert not any(key.endswith("weight_quantizer._scale") for key in stripped)
+
+
+@pytest.mark.parametrize("both_constant", [False, True])
+@pytest.mark.parametrize("keep_amax", [False, True])
+def test_kv_capture_constant_scale_devices(both_constant, keep_amax):
+    attention = nn.Linear(4, 4, bias=False).cuda()
+    for axis in ("k", "v"):
+        constant = axis == "k" or both_constant
+        quantizer = TensorQuantizer(
+            QuantizerAttributeConfig(num_bits=(4, 3), use_constant_amax=constant)
+        ).cuda()
+        if not constant or keep_amax:
+            quantizer.amax = torch.tensor(224.0, device="cuda")
+        setattr(attention, f"{axis}_bmm_quantizer", quantizer)
+
+    state = capture_kv_cache_export_state(attention, clamp_fp8_scales=False, cpu=False)
+
+    expected_device = attention.weight.device
+    assert state.k_scale.device == state.v_scale.device == expected_device
+    values = torch.stack([state.k_scale.squeeze(), state.v_scale.squeeze()])
+    torch.testing.assert_close(values, values.new_tensor([1.0, 1.0 if both_constant else 0.5]))
+    assert hasattr(attention.k_bmm_quantizer, "_amax") == keep_amax

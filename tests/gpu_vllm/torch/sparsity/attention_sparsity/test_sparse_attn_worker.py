@@ -71,9 +71,7 @@ def test_shared_worker_import_does_not_resolve_quant_only_apis(monkeypatch):
         fromlist = kwargs.get("fromlist", args[2] if len(args) > 2 else ())
         requested = {name, *(f"{name}.{item}" for item in fromlist or ())}
         if blocked := requested & forbidden:
-            raise AssertionError(
-                f"quant-only import during sparse module load: {sorted(blocked)[0]}"
-            )
+            raise AssertionError(f"quant-only import during sparse module load: {min(blocked)}")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(vllm, "__version__", "0.9.0")

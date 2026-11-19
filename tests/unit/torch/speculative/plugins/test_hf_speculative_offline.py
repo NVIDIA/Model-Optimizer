@@ -31,6 +31,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_tokenizer
+from accelerate import Accelerator
+from transformers import TrainingArguments
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
@@ -635,6 +637,67 @@ def test_get_dummy_inputs_offline(eagle_model):
     hidden_size = eagle_model.config.hidden_size
     assert dummy["base_model_outputs"]["base_model_hidden_states"].shape[-1] == hidden_size
     assert dummy["base_model_outputs"]["base_model_input_embeds"].shape[-1] == hidden_size
+
+
+@pytest.mark.parametrize("accumulation_steps", [2, 3])
+@pytest.mark.parametrize("mode", ["eagle", "medusa", "external"])
+def test_speculative_trainer_accumulated_gradients(tmp_path, accumulation_steps, mode):
+    """Trainer averages native losses for full and partial accumulation groups."""
+    model = get_tiny_llama(num_hidden_layers=4, dtype=torch.float32)
+    configs = {
+        "eagle": {**TINY_EAGLE_MODE_CFG, "eagle_use_torch_compile": False},
+        "medusa": {"medusa_num_heads": 2, "medusa_num_layers": 1},
+        "external": {"external_loss": "soft_ce"},
+    }
+    mtsp.convert(model, mode=[(mode, configs[mode])])
+    if mode == "external":
+        model.attach_base_lm_head(model.get_output_embeddings())
+    trainer = _eagle_utils.EagleTrainerWithAccLog(
+        model=model,
+        args=TrainingArguments(
+            output_dir=str(tmp_path),
+            use_cpu=True,
+            report_to=[],
+            gradient_accumulation_steps=accumulation_steps,
+        ),
+    )
+    # Hyperparameter search recreates the accelerator between trials.
+    trainer.create_accelerator_and_postprocess()
+    other_accelerator = Accelerator(cpu=True, gradient_accumulation_steps=accumulation_steps)
+    batches = [
+        {"input_ids": torch.randint(0, 32, (1, 8)), "labels": torch.zeros(1, 8, dtype=torch.long)}
+        for _ in range(2)
+    ]
+    if mode == "external":
+        for batch in batches:
+            batch.pop("labels")
+            batch["base_model_outputs"] = {
+                "base_model_hidden_states": torch.randn(1, 8, model.config.hidden_size)
+            }
+    trainer.current_gradient_accumulation_steps = len(batches)
+    model.train()
+    expected_loss = torch.tensor(0.0)
+    for batch in batches:
+        loss = model(**batch).loss / len(batches)
+        expected_loss += loss.detach()
+        loss.backward()
+    expected = {
+        name: None if parameter.grad is None else parameter.grad.clone()
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    model.zero_grad(set_to_none=True)
+
+    reported_loss = torch.tensor(0.0)
+    for batch in batches:
+        reported_loss += trainer.training_step(model, batch, num_items_in_batch=torch.tensor(16))
+        assert trainer.accelerator.gradient_accumulation_steps == accumulation_steps
+        assert other_accelerator.gradient_accumulation_steps == accumulation_steps
+    torch.testing.assert_close(reported_loss, expected_loss)
+
+    for name, parameter in model.named_parameters():
+        if parameter.requires_grad:
+            torch.testing.assert_close(parameter.grad, expected[name])
 
 
 # ---------------------------------------------------------------------------

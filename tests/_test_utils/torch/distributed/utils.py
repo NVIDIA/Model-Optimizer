@@ -22,6 +22,10 @@ import signal
 import socket
 import time
 import traceback
+from contextlib import ExitStack, contextmanager
+from datetime import timedelta
+from functools import partial
+from unittest import mock
 
 import torch
 import torch.distributed as dist
@@ -150,6 +154,46 @@ def reseeding_worker_teardown(rank, world_size):
     torch.manual_seed(1234)
 
 
+def _on_group(collective, bound, /, *args, **kwargs):
+    """``collective`` on ``bound`` unless the caller named a group of its own: modelopt's
+    ``barrier()`` passes ``group=None`` explicitly, which would override a ``partial``'s keyword.
+
+    A job names its group as ``group=``: one passed by position, as ``dist.barrier(group)`` can, is
+    not seen here and fails as a duplicate argument."""
+    group = kwargs.get("group")
+    return collective(*args, **{**kwargs, "group": bound if group is None else group})
+
+
+# The real barrier: a job may have replaced dist.barrier by the time it enters bounded_collectives.
+_barrier = dist.barrier
+
+
+@contextmanager
+def bounded_collectives(seconds: float = 10):
+    """Run the object collectives on a new group that gives up after ``seconds``, within the block.
+
+    For a pooled job driving code that runs ``broadcast_object_list``, ``all_gather_object`` or
+    ``barrier`` on the default group: a rank left waiting in one its peer never joins then raises in
+    seconds instead of hanging for the default group's timeout, and the default group, which the
+    workers keep for the next job, stays in step. Every rank of the job must enter it.
+    """
+    group = dist.new_group(timeout=timedelta(seconds=seconds))
+    try:
+        # gloo's new_group can return on one rank while a peer is still connecting to the group, and
+        # destroying it then, as a job that runs no collective on it does at once, fails the peer's
+        # new_group ("Connection closed by peer"). Past this barrier, every rank has connected.
+        _barrier(group=group)
+        with ExitStack() as stack:
+            for name in ("broadcast_object_list", "all_gather_object", "barrier"):
+                collective = partial(_on_group, getattr(dist, name), group)
+                stack.enter_context(mock.patch.object(dist, name, collective))
+            yield
+    finally:
+        # The workers outlive the job, and would keep the group and its connections. Destroying it
+        # also fails a peer still waiting in it at once, instead of at the timeout.
+        dist.destroy_process_group(group)
+
+
 class DistributedWorkerPool:
     """Persistent worker pool that keeps distributed processes alive across multiple test dispatches.
 
@@ -225,7 +269,7 @@ class DistributedWorkerPool:
                 return self._result_queue.get(
                     timeout=max(0.01, min(1.0, deadline - time.monotonic()))
                 )
-            except queue.Empty:  # noqa: PERF203
+            except queue.Empty:
                 dead = [
                     (rank, p.exitcode) for rank, p in enumerate(self._processes) if not p.is_alive()
                 ]

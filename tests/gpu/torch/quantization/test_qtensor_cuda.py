@@ -29,6 +29,20 @@ from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 set_seed()
 
 
+def _peak_gpu_mem_increase(fn, *args):
+    """Return the peak bytes the CUDA caching allocator hands out while ``fn`` runs.
+
+    ``torch.cuda.mem_get_info`` reports device-wide usage, which on GPUs that share memory with
+    the CPU (e.g. Jetson Thor) moves with every other allocation on the system.
+    """
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    before = torch.cuda.memory_allocated()
+    fn(*args)
+    torch.cuda.synchronize()
+    return torch.cuda.max_memory_allocated() - before
+
+
 class TestQTensor:
     @pytest.mark.parametrize(
         ("num_bits", "block_sizes"),
@@ -448,25 +462,16 @@ class TestQTensor:
         [(1600, 1600)],
     )
     def test_cast_fp4_impl_gpu_mem(self, input_shape):
-        def _get_gpu_mem_used():
-            device = torch.device("cuda:0")
-            free, total = torch.cuda.mem_get_info(device)
-            mem_used = total - free
-            return mem_used
-
         # Do a warmup
         test_input = torch.rand((8, 8), dtype=torch.float32).to("cuda")
         NVFP4QTensor._cast_fp4(test_input)
 
         test_input = torch.rand((input_shape), dtype=torch.float32).to("cuda")
-        torch.cuda.empty_cache()
         # Define input and thresholds
         input_size = test_input.element_size() * test_input.numel()
-        before_quantize = _get_gpu_mem_used()
-        NVFP4QTensor._cast_fp4(test_input)
-        after_quantize = _get_gpu_mem_used()
+        mem_increase = _peak_gpu_mem_increase(NVFP4QTensor._cast_fp4, test_input)
 
-        assert (after_quantize - before_quantize) < input_size * 2.1
+        assert mem_increase < input_size * 2.1
 
     @pytest.mark.parametrize(
         ("num_bits", "block_sizes", "axis", "input_shape", "expected_output_shape"),
@@ -748,29 +753,19 @@ class TestQTensor:
     )
     def test_mxfp8_quantize_gpu_mem(self, input_shape):
         """Test MXFP8 GPU memory usage during quantization."""
-
-        def _get_gpu_mem_used():
-            device = torch.device("cuda:0")
-            free, total = torch.cuda.mem_get_info(device)
-            return total - free
-
         # Warmup
         test_input = torch.rand((32, 32), dtype=torch.float32, device="cuda")
         MXFP8QTensor.quantize(test_input)
 
         test_input = torch.rand(input_shape, dtype=torch.float32, device="cuda")
-        torch.cuda.empty_cache()
 
         input_size = test_input.element_size() * test_input.numel()
-        before_quantize = _get_gpu_mem_used()
-        MXFP8QTensor.quantize(test_input)
-        after_quantize = _get_gpu_mem_used()
+        mem_increase = _peak_gpu_mem_increase(MXFP8QTensor.quantize, test_input)
 
         # Memory increase should be reasonable (less than 3x input size)
         # MXFP8 stores FP8 data (1 byte) + uint8 scales, so should be efficient
-        assert (after_quantize - before_quantize) < input_size * 3, (
-            f"Memory increase too large: {after_quantize - before_quantize} bytes "
-            f"for input size {input_size} bytes"
+        assert mem_increase < input_size * 3, (
+            f"Memory increase too large: {mem_increase} bytes for input size {input_size} bytes"
         )
 
     @pytest.mark.parametrize("device", ["cuda"])

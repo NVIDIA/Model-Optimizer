@@ -27,6 +27,8 @@ from torch.utils.checkpoint import checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.lora import QuantLoRAInputRegistry
+from modelopt.torch.quantization.mode import QuantizeModeRegistry
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
 
@@ -61,7 +63,9 @@ def test_quant_lora_training_restore_and_merge():
     mtq.quantize(student, mtq.INT8_DEFAULT_CFG, lambda m: m(inputs))
     baseline = student(inputs).detach()
     backbone = {name: p.detach().clone() for name, p in student.named_parameters()}
+    assert not mtq.has_quant_lora(student)
     mtq.enable_quant_lora(student, {"rank": 4, "alpha": 8})
+    assert mtq.has_quant_lora(student)
     torch.testing.assert_close(student(inputs), baseline, rtol=0, atol=0)
     assert all(p.requires_grad == ("lora_" in name) for name, p in student.named_parameters())
     optimizer = _optimizer(student)
@@ -97,6 +101,7 @@ def test_quant_lora_training_restore_and_merge():
 
     output = restored(inputs).detach()
     mtq.merge_quant_lora(restored)
+    assert not mtq.has_quant_lora(restored)
     assert not any("lora_" in name for name, _ in restored.named_parameters())
     torch.testing.assert_close(restored(inputs), output, rtol=0, atol=0)
     checkpoint = io.BytesIO()
@@ -122,7 +127,16 @@ def test_quant_lora_targets(targets):
 
 
 @pytest.mark.parametrize(
-    "case", ["unquantized", "compressed", "unsupported", "unmatched", "shared_both", "shared_one"]
+    "case",
+    [
+        "unquantized",
+        "compressed",
+        "unsupported",
+        "unmatched",
+        "shared_both",
+        "shared_one",
+        "input_gradients",
+    ],
 )
 def test_quant_lora_rejection_preserves_model(case):
     """Reject invalid targets before modifying any parameters or trainability."""
@@ -136,6 +150,11 @@ def test_quant_lora_rejection_preserves_model(case):
         if case == "shared_one":
             config = {"target_modules": ["0", "1"]}
         error = "does not support shared weight"
+    elif case == "input_gradients":
+        student = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+        mtq.quantize(student, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.arange(8)))
+        mtq.enable_quant_input_gradients(student)
+        error = "quant_lora"
     elif case == "unsupported":
         student = nn.Sequential(nn.Linear(16, 32), nn.Conv2d(1, 2, 1))
         mtq.quantize(
@@ -152,13 +171,14 @@ def test_quant_lora_rejection_preserves_model(case):
             error = "requires uncompressed"
         else:
             config = {"target_modules": ["missing*"]}
-    student[0].bias.requires_grad_(False)
+    next(student.parameters()).requires_grad_(False)
     parameters = dict(student.named_parameters())
     values = {name: p.detach().clone() for name, p in parameters.items()}
     trainability = {name: p.requires_grad for name, p in parameters.items()}
     module_types = {name: type(m) for name, m in student.named_modules()}
 
-    with pytest.raises(ValueError, match=error):
+    error_type = AssertionError if case == "input_gradients" else ValueError
+    with pytest.raises(error_type, match=error):
         mtq.enable_quant_lora(student, config)
 
     after = dict(student.named_parameters())
@@ -246,3 +266,48 @@ def test_quant_lora_folding_requires_merge(temporary):
         if not temporary:
             mtq.fold_weight(student)
         torch.testing.assert_close(student(inputs), output, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "mode", ["quantize", "auto_quantize", "real_quantize", "quant_input_gradients"]
+)
+def test_input_gradient_mode_rejects_reconversion(mode):
+    """Reject conflicting mode chains before converting an installed activation wrapper."""
+    model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.arange(8)))
+    mtq.enable_quant_input_gradients(model)
+    state = copy.deepcopy(mto.modelopt_state(model))
+    types = {n: type(m) for n, m in model.named_modules()}
+    with pytest.raises(AssertionError):
+        mto.apply_mode(model, mode, registry=QuantizeModeRegistry)
+    assert state == mto.modelopt_state(model)
+    assert types == {n: type(m) for n, m in model.named_modules()}
+
+
+def test_input_gradient_restore_requires_registered_boundary(monkeypatch):
+    """Refuse restoration when the activation plugin recorded by the checkpoint is absent."""
+    model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.arange(8)))
+    mtq.enable_quant_input_gradients(model)
+    state = mto.modelopt_state(model)
+    # Simulate an unavailable optional activation plugin, retaining the real restore path.
+    monkeypatch.setattr(QuantLoRAInputRegistry, "_registry", {})
+    fresh = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+    with pytest.raises(ValueError):
+        mto.restore_from_modelopt_state(fresh, state)
+
+
+def test_input_gradient_setup_requires_quantizers():
+    """Reject unquantized models without preventing subsequent quantization."""
+    model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+    types = {name: type(module) for name, module in model.named_modules()}
+    trainability = {name: parameter.requires_grad for name, parameter in model.named_parameters()}
+    with pytest.raises(ValueError):
+        mtq.enable_quant_input_gradients(model)
+    assert not mto.ModeloptStateManager.is_converted(model)
+    assert types == {name: type(module) for name, module in model.named_modules()}
+    assert trainability == {
+        name: parameter.requires_grad for name, parameter in model.named_parameters()
+    }
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.arange(8)))
+    mtq.enable_quant_input_gradients(model)

@@ -37,6 +37,18 @@ class QTensorType(enum.Enum):
 __all__ = ["BaseQuantizedTensor", "QTensorWrapper", "pack_real_quantize_weight"]
 
 
+def _refuse_dtensor(tensor: torch.Tensor, packer: str) -> None:
+    """Refuse a DTensor shard in a packer that only packs a whole tensor.
+
+    DTensor refuses the plain tensors such a packer combines with its input, or the packer gathers
+    the input whole on every rank; of the 4-bit packers, only NVFP4's packs a shard.
+    """
+    if isinstance(tensor, DTensor):
+        raise NotImplementedError(
+            f"{packer} packs a whole tensor, not a DTensor shard; pack the unsharded tensor."
+        )
+
+
 class BaseQuantizedTensor:
     """Base class for quantized tensors, providing methods for quantization and dequantization.
 

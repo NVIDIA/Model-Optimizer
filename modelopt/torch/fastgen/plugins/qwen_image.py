@@ -45,18 +45,14 @@ verbatim to the transformer (Qwen-Image normalises timesteps to ``[0, 1]`` inter
 the diffusers ``[0, 1000]`` scale used for Wan / SD3 / Flux does NOT apply here).
 """
 
-from __future__ import annotations
-
 import contextlib
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from torch import nn
 
+from ..config import DMDConfig
 from ..methods.dmd import DMDPipeline
-
-if TYPE_CHECKING:
-    from ..config import DMDConfig
 
 __all__ = [
     "QwenImageDMDPipeline",

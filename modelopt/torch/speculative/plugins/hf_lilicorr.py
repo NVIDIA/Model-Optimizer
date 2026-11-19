@@ -77,7 +77,7 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import LiLiCorrDMRegistry
-from .hf_dflash import HFDFlashModel
+from .hf_dflash import HFDFlashModel, _block_positions, _block_targets
 from .modeling_lilicorr import LiLiCorrModule
 
 logger = logging.getLogger(__name__)
@@ -126,7 +126,7 @@ class HFLiLiCorrModel(HFDFlashModel):
             )
         super().modify(config)
 
-        weights = {name: float(getattr(config, name, -1.0)) for name in _TERM_WEIGHT_FIELDS}
+        weights = {name: float(getattr(config, name)) for name in _TERM_WEIGHT_FIELDS}
         unset = [name for name, value in weights.items() if value < 0.0]
         if unset:
             raise ValueError(
@@ -137,7 +137,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         self.dflash_lilicorr_w_ce = weights["dflash_lilicorr_w_ce"]
         self.dflash_lilicorr_w_margin = weights["dflash_lilicorr_w_margin"]
         self.dflash_lilicorr_w_pen = weights["dflash_lilicorr_w_pen"]
-        self.dflash_lilicorr_w_cal = float(getattr(config, "dflash_lilicorr_w_cal", 0.0))
+        self.dflash_lilicorr_w_cal = float(config.dflash_lilicorr_w_cal)
         if not any(weights.values()) and self.dflash_lilicorr_w_cal == 0.0:
             raise ValueError(
                 "All LiLiCorr objective weights are 0, so the reranker would never "
@@ -145,7 +145,7 @@ class HFLiLiCorrModel(HFDFlashModel):
                 "least one of dflash_lilicorr_w_ce / _w_margin / _w_pen / _w_cal above 0."
             )
 
-        self.dflash_lilicorr_margin = float(getattr(config, "dflash_lilicorr_margin", -1.0))
+        self.dflash_lilicorr_margin = float(config.dflash_lilicorr_margin)
         if self.dflash_lilicorr_w_margin > 0.0 and self.dflash_lilicorr_margin <= 0.0:
             raise ValueError(
                 "dflash_lilicorr_w_margin > 0 requires a positive dflash_lilicorr_margin "
@@ -190,46 +190,6 @@ class HFLiLiCorrModel(HFDFlashModel):
 
         return LiLiCorrExporter(self)
 
-    def _block_targets(self, input_ids, anchor_positions, block_keep_mask, loss_mask):
-        """Return ``(target_ids [B, N, bs], slot_mask [B, N, bs-1])`` for the lattice.
-
-        ``target_ids[b, n, j]`` is the ground-truth **vocabulary id** at absolute position
-        ``anchor[b, n] + j``, covering the whole block including position 0 (the anchor
-        token, which the caller slices off). Distinct from ``gt_indices`` in
-        :meth:`_compute_lilicorr_loss`, which is a position *within* a slot's k candidates.
-
-        ``slot_mask[b, n, s]`` says whether predicted slot ``s`` — block position
-        ``s + 1`` — is supervised: its block is kept, its position is in bounds, and
-        ``loss_mask`` allows it.
-
-        Recomputed rather than threaded out of :meth:`HFDFlashModel._compute_loss`: both
-        are exact functions of the anchors and the masks, so recomputing them keeps the
-        shared method's signature to the tensors a variant cannot derive on its own.
-        The slot mask is the parent's *pre-weighting* eval mask, so the two losses
-        supervise the same positions regardless of the block-position weighting.
-        """
-        bsz, seq_len = input_ids.shape
-        block_size = self.dflash_block_size
-        n_blocks = anchor_positions.shape[1]
-        device = input_ids.device
-
-        label_offsets = torch.arange(0, block_size, device=device).view(1, 1, -1)
-        label_indices = anchor_positions.unsqueeze(-1) + label_offsets
-        valid_label = label_indices < seq_len
-        safe_label_indices = label_indices.clamp(max=seq_len - 1)
-
-        target_ids = torch.gather(
-            input_ids.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
-        )
-        keep = block_keep_mask.unsqueeze(-1).expand(-1, -1, block_size).float()
-        keep = keep * valid_label.float()
-        keep = keep * torch.gather(
-            loss_mask.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
-        )
-        # Block position 0 is the anchor — the one row whose input embedding is a real
-        # verified token — so the lattice covers positions 1..bs-1.
-        return target_ids, keep[:, :, 1:] > 0.5
-
     def _compute_loss(
         self,
         logits,
@@ -268,13 +228,22 @@ class HFLiLiCorrModel(HFDFlashModel):
             loss_mask,
             base_outputs=base_outputs,
         )
-        target_ids, slot_mask = self._block_targets(
-            input_ids, anchor_positions, block_keep_mask, loss_mask
+        # The backbone's own supervision, before its position weighting, so both losses
+        # train the same positions.
+        targets = _block_targets(
+            input_ids,
+            anchor_positions,
+            block_keep_mask,
+            loss_mask,
+            self.dflash_block_size,
+            self._label_shift,
         )
         lilicorr_loss, accuracy, metrics = self._compute_lilicorr_loss(
             logits=logits,
-            target_ids=target_ids,
-            slot_mask=slot_mask,
+            target_ids=targets.token_ids,
+            # Block position 0 is the anchor -- the one row whose input embedding is a real
+            # verified token -- so the lattice covers positions 1..bs-1.
+            slot_mask=targets.mask[:, :, 1:] > 0.5,
             anchor_positions=anchor_positions,
             draft_hidden=draft_hidden,
             target_hidden=target_hidden,
@@ -545,14 +514,13 @@ class HFLiLiCorrModel(HFDFlashModel):
         batch_blocks, num_slots, topk = candidate_ids.shape
         bsz, n_blocks = anchor_positions.shape
         seq_len = base_outputs.target_hidden.shape[1]
-        # The target's next-token logits that predict the token at anchor+1+s sit at
-        # position anchor+s. Only the [blocks, slots, k] candidate logits are computed,
-        # never whole vocabulary rows.
-        slot_offsets = torch.arange(num_slots, device=candidate_ids.device)
-        positions = (anchor_positions.unsqueeze(-1) + slot_offsets).clamp(min=0, max=seq_len - 1)
+        # Slot s is block position s + 1, labelled like the backbone's. Only the
+        # [blocks, slots, k] candidate logits are computed, never whole vocabulary rows.
+        labels, _ = _block_positions(anchor_positions, num_slots + 1, self._label_shift, seq_len)
+        labels = labels[..., 1:]
         candidate_target_logits = self._teacher_logits(
             base_outputs,
-            positions,
+            label_positions=labels,
             token_ids=candidate_ids.reshape(bsz, n_blocks, num_slots, topk),
         )
         return candidate_target_logits.reshape(batch_blocks, num_slots, topk).float()

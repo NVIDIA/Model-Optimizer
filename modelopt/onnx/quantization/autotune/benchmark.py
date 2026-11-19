@@ -27,6 +27,7 @@ It provides comprehensive TensorRT utilities including:
 """
 
 import ctypes
+import functools
 import importlib.util
 import os
 import posixpath
@@ -57,6 +58,16 @@ TORCH_CUDA_AVAILABLE = torch.cuda.is_available()
 _SSH_OPTIONS = ("-oBatchMode=yes", "-oStrictHostKeyChecking=yes")
 
 
+@functools.cache
+def default_timing_cache_file() -> str:
+    """Return the default timing-cache path: a file in one private temporary directory per process.
+
+    A fixed path under the shared temp dir would let another local user pre-create the file or plant
+    a symlink there. Pass ``timing_cache_file`` to keep a cache across runs.
+    """
+    return str(Path(tempfile.mkdtemp(prefix="modelopt_autotune_")) / "trtexec_timing.cache")
+
+
 def _validate_shape_range(min_shape: list, opt_shape: list, max_shape: list) -> None:
     """Raise ValueError if shape lengths differ or if min <= opt <= max fails at any dimension."""
     if len(min_shape) != len(opt_shape) or len(opt_shape) != len(max_shape):
@@ -77,6 +88,21 @@ class _RemoteBenchmarkConfig:
     port: int
     trtexec_safe_path: str
     library_path: str
+
+
+def _validate_remote_model_path(remote_model_path: str | None) -> None:
+    """Reject paths that SCP protocols interpret differently."""
+    if remote_model_path is None:
+        return
+    if (
+        not re.fullmatch(r"[A-Za-z0-9._/-]+", remote_model_path)
+        or remote_model_path.startswith("-")
+        or remote_model_path.endswith("/")
+    ):
+        raise ValueError(
+            "Invalid remote_model_path: use only letters, digits, '.', '_', '/', and '-'; "
+            "the path must not start with '-' or end with '/', and '~' is not expanded"
+        )
 
 
 def _parse_remote_benchmark_config(
@@ -208,7 +234,8 @@ class Benchmark(ABC):
 
         Args:
             timing_cache_file: Path to timing cache file to accelerate engine builds.
-                             If None, uses '/tmp/trtexec_timing.cache' as default.
+                             If None, uses 'trtexec_timing.cache' in a private temporary directory
+                             that is created once per process.
             warmup_runs: Number of warmup iterations before timing measurements.
             timing_runs: Number of iterations for latency measurement. Results
                         are averaged across these runs.
@@ -216,7 +243,7 @@ class Benchmark(ABC):
                              These plugins will be loaded during engine building.
                              If None, no custom plugins are loaded.
         """
-        self.timing_cache_file = timing_cache_file or "/tmp/trtexec_timing.cache"  # nosec B108
+        self.timing_cache_file = timing_cache_file or default_timing_cache_file()
         self.warmup_runs = warmup_runs
         self.timing_runs = timing_runs
         self.plugin_libraries = plugin_libraries or []
@@ -275,6 +302,7 @@ class TrtExecBenchmark(Benchmark):
         timing_runs: int = 10,
         plugin_libraries: list[str] | None = None,
         trtexec_args: list[str] | None = None,
+        remote_model_path: str | None = None,
     ):
         """Initialize the trtexec benchmark.
 
@@ -286,7 +314,12 @@ class TrtExecBenchmark(Benchmark):
             trtexec_args: Additional command-line arguments to pass to trtexec.
                          These are appended after the standard arguments.
                          Example: ['--fp16', '--workspace=4096', '--verbose']
+            remote_model_path: Path for the engine on the remote device. By default, a unique
+                filename is created in the remote user's working directory. A custom path is
+                overwritten and removed after each benchmark; concurrent runs must use distinct
+                paths.
         """
+        _validate_remote_model_path(remote_model_path)
         super().__init__(timing_cache_file, warmup_runs, timing_runs, plugin_libraries)
         self.trtexec_args = trtexec_args if trtexec_args is not None else []
         self.temp_dir = tempfile.mkdtemp(prefix="trtexec_benchmark_")
@@ -298,6 +331,7 @@ class TrtExecBenchmark(Benchmark):
 
         self._remote_benchmark_config: _RemoteBenchmarkConfig | None = None
         self._remote_config_error: str | None = None
+        self.remote_model_path = remote_model_path
         self._base_cmd = [
             f"--avgRuns={self.timing_runs}",
             f"--iterations={self.timing_runs}",
@@ -352,6 +386,10 @@ class TrtExecBenchmark(Benchmark):
                             "Adding it to trtexec arguments."
                         )
                         self.trtexec_args.append("--skipInference")
+        if remote_model_path is not None and self._remote_benchmark_config is None:
+            self.logger.warning(
+                "remote_model_path is ignored because remote safety benchmarking is not enabled"
+            )
         self._base_cmd.extend(trtexec_args)
 
         self.logger.debug(f"Base command template: {' '.join(self._base_cmd)}")
@@ -372,7 +410,9 @@ class TrtExecBenchmark(Benchmark):
         local_log_content: str,
     ) -> subprocess.CompletedProcess | None:
         """Upload, benchmark, and clean up a generated engine on the remote target."""
-        remote_engine_path = f".modelopt_{Path(self.temp_dir).name}.engine.trt"
+        remote_engine_path = (
+            self.remote_model_path or f".modelopt_{Path(self.temp_dir).name}.engine.trt"
+        )
         remote_log = []
         try:
             upload_command = [
@@ -563,7 +603,8 @@ class TensorRTPyBenchmark(Benchmark):
 
         Args:
             timing_cache_file: Path to TensorRT timing cache file. If None,
-                              defaults to '/tmp/trtexec_timing.cache'.
+                              defaults to 'trtexec_timing.cache' in a private temporary directory
+                              that is created once per process.
             warmup_runs: Number of warmup iterations before timing measurements.
             timing_runs: Number of iterations for latency measurement.
             plugin_libraries: List of paths to TensorRT plugin shared libraries (.so files).
@@ -700,12 +741,14 @@ class TensorRTPyBenchmark(Benchmark):
             if isinstance(path_or_bytes, bytes):
                 self.logger.debug(f"Parsing ONNX model from bytes (size: {len(path_or_bytes)})")
                 model_data = path_or_bytes
+                model_path = None
             else:
                 self.logger.debug(f"Parsing ONNX model: {path_or_bytes}")
                 with open(path_or_bytes, "rb") as f:
                     model_data = f.read()
+                model_path = path_or_bytes
 
-            if not parser.parse(model_data):
+            if not parser.parse(model_data, path=model_path):
                 self.logger.error("Failed to parse ONNX model")
                 for error_idx in range(parser.num_errors):
                     self.logger.error(f"  {parser.get_error(error_idx)}")

@@ -165,6 +165,14 @@ python quantize.py \
 > (including quantized or distilled checkpoints) remain subject to the LTX Community License
 > Agreement and are **not** covered by Apache 2.0.
 
+> [!NOTE]
+> This example targets the LTX-2 packages at commit
+> [`28c3c73`](https://github.com/Lightricks/LTX-2/commit/28c3c73fe557666c3de176e1e50a5220152ccfca)
+> (`QuantizationPolicy.fp8_cast()` and `checkpoint_path`/`gemma_root` pipeline arguments), e.g.
+> `pip install "ltx-core @ git+https://github.com/Lightricks/LTX-2.git@28c3c73#subdirectory=packages/ltx-core" "ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git@28c3c73#subdirectory=packages/ltx-pipelines"`.
+> Newer LTX-2 releases removed `fp8_cast()` and changed the pipeline constructor, so this example does
+> not run on them yet.
+
 This example produces three outputs: a PyTorch checkpoint (`--quantized-torch-ckpt-save-path`), a Hugging Face checkpoint (`--hf-ckpt-dir`), and a ComfyUI-compatible merged safetensor (`--extra-param merged_base_safetensor_path`).
 
 ```sh
@@ -372,12 +380,12 @@ By following these steps, your PEFT LoRA model should be efficiently quantized u
 
 ## Sparse Attention (Skip-Softmax)
 
-Skip-softmax sparse attention skips KV tiles whose attention scores are negligible during the softmax computation, reducing FLOPs without retraining. An exponential model (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once, then the target sparsity can be adjusted at runtime without recalibration. Calibrated coefficients can be exported as a Hugging Face checkpoint (embedded in each component's `config.json` under `sparse_attention_config`) consumed directly by TRT-LLM's `SkipSoftmaxAttentionConfig.resolve_for_target_sparsity` — no extra conversion needed downstream.
+Skip-softmax sparse attention skips KV tiles whose attention scores are negligible during the softmax computation, reducing FLOPs without retraining. An exponential model (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once, then the target sparsity can be adjusted at runtime without recalibration. Calibrated coefficients can be exported as a Hugging Face checkpoint (embedded in each component's `config.json` under `sparse_attention_config`) in the schema TRT-LLM VisualGen loads (`threshold_scale_factor.coefficients` plus a scalar `target_sparsity`) — no extra conversion needed downstream.
 
 ### Getting Started
 
 ```python
-import modelopt.torch.sparsity.attention_sparsity as mtsa
+import modelopt.torch.sparsity as mts
 
 # 1. Define config with calibration
 config = {
@@ -402,7 +410,7 @@ def forward_loop(model):
     pipeline(prompt="a cat", num_frames=81, num_inference_steps=40, ...)
 
 # 3. Sparsify + calibrate
-mtsa.sparsify(transformer, config, forward_loop=forward_loop)
+mts.sparsify(transformer, config, forward_loop=forward_loop)
 
 # 4. Generate as usual — sparsity is applied automatically
 output = pipeline(prompt="a dog on the beach", ...)

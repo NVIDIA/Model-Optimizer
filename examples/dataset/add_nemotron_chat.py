@@ -21,8 +21,6 @@ Note: This dataset requires agreeing to the terms of use on Hugging Face.
       Make sure you are logged in with `huggingface-cli login` before running this script.
 """
 
-from __future__ import annotations
-
 import argparse
 import itertools
 from pathlib import Path

@@ -15,8 +15,6 @@
 
 """Single-GPU BF16 proof for the framework-neutral PDD core."""
 
-from __future__ import annotations
-
 from typing import Any
 
 import torch

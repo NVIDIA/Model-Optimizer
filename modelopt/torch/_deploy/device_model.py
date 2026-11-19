@@ -36,8 +36,8 @@ class DeviceModel:
         client: RuntimeClient,
         compiled_model: bytes,
         metadata: ModelMetadata,
-        compilation_args: dict[str, Any] = {},
-        io_shapes: dict[str, list] = {},
+        compilation_args: dict[str, Any] | None = None,
+        io_shapes: dict[str, list] | None = None,
         ignore_nesting: bool = False,
     ):
         """Initialize a device model with the corresponding model, onnx, and engine model.
@@ -58,8 +58,8 @@ class DeviceModel:
         self.compiled_model = compiled_model
         self.model_metadata = metadata
         self.config = self.model_metadata.get("config", {})
-        self.compilation_args = compilation_args
-        self.io_shapes = io_shapes
+        self.compilation_args = {} if compilation_args is None else compilation_args
+        self.io_shapes = {} if io_shapes is None else io_shapes
         self.ignore_nesting = ignore_nesting
 
     def __call__(self, *args, **kwargs):

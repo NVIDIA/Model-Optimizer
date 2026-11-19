@@ -26,6 +26,7 @@ from modelopt.onnx.quantization.graph_indexing import (
     get_tensor_consumer_nodes,
     match_fp8_mha_pattern,
 )
+from modelopt.onnx.utils import export_onnx
 
 __all__ = [
     "cast_custom_ops",
@@ -120,7 +121,7 @@ def cast_custom_ops(onnx_model: onnx.ModelProto, ops_to_cast: dict) -> onnx.Mode
 
     graph.cleanup().toposort()
 
-    onnx_model = gs.export_onnx(graph)
+    onnx_model = export_onnx(graph)
     # TODO: remove manual ir_version change once ORT supports ir_version 11
     onnx_model.ir_version = 10
 
@@ -192,7 +193,7 @@ def insert_fp8_mha_casts(onnx_model):
 
     graph.cleanup().toposort()
 
-    return gs.export_onnx(graph)
+    return export_onnx(graph)
 
 
 def convert_fp16_io(graph):
@@ -225,7 +226,9 @@ def remove_output_initializers(graph: gs.Graph, graph_initializers: list):
     """
     init_names = [init.name for init in graph_initializers]
     init_names_removed = []
-    for output_tensor in graph.outputs:
+    # Iterate over a copy: removing from graph.outputs while iterating it skips the
+    # element after each removal, so adjacent initializer outputs were left behind.
+    for output_tensor in list(graph.outputs):
         if output_tensor.name in init_names:
             graph.outputs.remove(output_tensor)
             init_names_removed.append(output_tensor.name)

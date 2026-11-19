@@ -44,13 +44,19 @@ from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Literal, get_args, get_type_hints
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
+
     import torch.nn as nn
 
 __all__ = [
+    "EPSpec",
     "ExportSpec",
     "MoESpec",
     "ModelSpec",
+    "PTQSpec",
     "SpecSection",
+    "get_ptq_spec",
     "get_spec",
     "get_specs",
     "hf_model_type",
@@ -156,6 +162,111 @@ class MoESpec(SpecSection):
 
 
 @dataclass(kw_only=True)
+class EPSpec(SpecSection):
+    """Subsystem section: per-model data of the expert-parallel (DP=EP) PTQ path.
+
+    Calibrating a large MoE data-parallel with its experts sharded needs three things from
+    the model, and all three are facts about the architecture rather than about any run:
+    which modules are the routed experts and how they shard, which transformers release
+    first ships that information, and -- for a VLM -- which nested config carries it.
+
+    Most models need only the data below. A checkpoint whose modeling code it ships itself
+    may need actual code run against it before it can be loaded expert-parallel (patching a
+    remote-code class, decompressing packed experts); that is what ``prepare`` is for, and it
+    is deliberately the exception rather than the interface.
+    """
+
+    base_model_ep_plan: dict[str, str] | None = None
+    """The ``base_model_ep_plan`` transformers needs to shard this model's experts, applied
+    to the config when it does not already carry one.
+
+    Stock transformers ships a plan for some MoE models and not others; where it does, leave
+    this ``None`` and let the model's own plan win. Entries map a parameter glob to a
+    parallel style, e.g. ``{"layers.*.mlp.experts.gate_up_proj": "grouped_gemm"}``.
+
+    A router entry is not always wanted. DeepSeek-V3's router is logits-only and its MoE
+    block computes global top-k ids, so the experts already receive unmasked global ids --
+    which is exactly what the all-to-all dispatch needs, and adding a gate entry would
+    mask them."""
+
+    requires_transformers: str | None = None
+    """Earliest transformers release that supports THIS model expert-parallel. The expert-parallel
+    load's own floor holds for every model with an EP section; the later of the two applies.
+
+    Distinct from ``ModelSpec.min_transformers_version``, which is about the modeling code
+    matching the spec. A model can be fully modelled and still not be shardable: qwen3_moe is
+    modelled from 5.5, but its own ``base_model_ep_plan`` lands in 5.7."""
+
+    plan_config_attr: str | tuple[str, ...] | None = None
+    """The nested config attribute carrying the expert-parallel plan, for a VLM whose MoE is
+    its text sub-model: ``"text_config"`` or ``"llm_config"``, the two the expert-parallel load
+    reads a plan from, or both for a model whose configs spell it either way, the first one a
+    config has taking the plan. ``None`` means the root config.
+
+    The plan has to sit on whichever config describes the module tree the globs are written
+    against, so a plan on the wrong config silently matches nothing."""
+
+    prepare: "Callable[..., Any] | None" = None
+    """Escape hatch for a model that cannot be made expert-parallel by data alone.
+
+    Called as ``prepare(hf_config, ckpt_path=..., trust_remote_code=...)`` and returns the
+    config to load. Reserved for checkpoints carrying their own modeling code, where the work is
+    patching classes or installing on-the-fly weight decompression. Runs after the declarative
+    fields above have been applied, so a ``prepare`` that returns another config than the one it
+    was handed must carry over the ``base_model_ep_plan`` they attached.
+
+    It runs only once a plan is decided expert-parallel: on every rank, in the plan decision's
+    collective "model spec prepared" step, on a copy of the config as read, so a refusal there
+    raises on every rank; or, for an expert-parallel plan handed in, in the load, after the load's
+    own checks, the GPU refusal included. It may patch the model's code, which is why nothing else
+    runs it. It may run more than once in a process."""
+
+    make_buildable: "Callable[..., Any] | None" = None
+    """For a checkpoint carrying its own modeling code: what that code needs to import and build on
+    the installed transformers, so the plan decision can build the model before ``prepare`` runs.
+
+    Called as ``make_buildable(hf_config, ckpt_path=..., trust_remote_code=...)``, on every rank,
+    before the plan is decided, for every decision that builds the model, an EP degree of 1
+    included, whatever plan comes out. Only a multi-rank decision runs it: a single process, or a
+    plan handed in, decides nothing, and its load builds the checkpoint's code as
+    ``from_pretrained`` does, without it. It must be idempotent and change nothing the model
+    computes or loads: it may shim names transformers dropped, wrap the remote-code staging to reach
+    the modules the code imports, and adapt a method to the arguments transformers now passes it,
+    but patches no MoE or expert class, config, weight converter or weight-loading hook."""
+
+    prepare_refusal: "Callable[..., str | None] | None" = None
+    """Why ``prepare`` would refuse this checkpoint, or ``None``, found without changing anything.
+
+    Called as ``prepare_refusal(hf_config, ckpt_path=..., trust_remote_code=...)`` by the plan
+    decision, which runs no ``prepare`` before the plan is decided. An EP degree left to ``auto``
+    then plans the model without expert parallelism, with the decision's warning, rather than decide
+    expert parallelism ``prepare`` then refuses on every rank; one asked for meets the refusal from
+    ``prepare``."""
+
+    decompressed_formats: tuple[str, ...] = ()
+    """The checkpoint formats (a ``quantization_config``'s ``quant_method``) whose experts
+    ``prepare`` has decompress as they load, which the expert-parallel load then takes beside
+    unquantized checkpoints. The plan decision runs before ``prepare``, and reads this to count such
+    a checkpoint one the expert-parallel load takes."""
+
+    prepared_ep_plan: dict[str, str] | None = None
+    """The ``base_model_ep_plan`` ``prepare`` attaches, for a model whose plan only ``prepare``
+    supplies.
+
+    Deciding the plan attaches it with no ``prepare`` run, so the decision counts the routed experts
+    in the model the checkpoint's own code builds. A run that rules expert parallelism out finds
+    them the same way, to tell an expert-parallel MoE it would hold whole on every rank from a dense
+    model. ``prepare`` replaces the experts in place, so the plan names their containers there too."""
+
+    unsupported: str | None = None
+    """Why this model cannot be quantized expert-parallel yet, when its config would route it there.
+
+    Stock transformers ships a ``base_model_ep_plan`` for some MoEs the expert-parallel path
+    cannot handle, and the plan alone makes a model expert-parallel capable. Naming the reason
+    here refuses the run before any weight is loaded instead of failing deep in quantization."""
+
+
+@dataclass(kw_only=True)
 class ExportSpec(SpecSection):
     """Subsystem section: per-model data of the unified HF export path.
 
@@ -192,6 +303,58 @@ class ExportSpec(SpecSection):
     must account for the +1 when folding scales into the norm weight (AWQ
     pre_quant_scale fusion). A structural fallback (``zero_centered_gamma``) stays
     in the engine."""
+
+
+@dataclass(kw_only=True)
+class PTQSpec(SpecSection):
+    """Subsystem section: per-model facts the Hugging Face PTQ flow needs to load and preview a model.
+
+    Each field stands in for a check on the model's name that the flow would otherwise carry.
+    A reason string says why the model is special and turns the behavior on, and the flow reports
+    it when it acts: ``None`` is the flow's generic behavior. The cause is always in the model's
+    own code or size, never in the flow, which is why it is stated here and not there.
+    """
+
+    no_auto_device_map: str | None = None
+    """Why ``device_map="auto"`` cannot be used for the model, so the flow loads it whole and moves
+    it to the target device, unless the run itself asks for a sequential map."""
+
+    no_device_map: str | None = None
+    """Why no device map can be used for the model: the flow loads it whole and moves it to the
+    target device, whatever the run asks for."""
+
+    dtype_kwarg: Literal["dtype", "torch_dtype"] = "dtype"
+    """The keyword the model's loading code takes its precision by: ``dtype`` for transformers'
+    own classes, ``torch_dtype`` for a checkpoint whose own code was written for the old name."""
+
+    sequential_device_map: str | None = None
+    """Why a load on several GPUs uses ``device_map="sequential"`` and not the balanced ``"auto"``.
+
+    A single GPU keeps ``"auto"``: it cannot split what is tied, and a sequential map would only
+    cap its memory."""
+
+    vlm_wrapper: bool = False
+    """Whether the flow treats the model as a VLM wrapper: it calibrates with image-text data by
+    default, previews through the wrapper's own chat path rather than ``generate`` on token ids,
+    and puts the quantized language model back into the wrapper."""
+
+    generation_unsupported: str | None = None
+    """Why the flow generates no sample, neither before nor after quantization (the preview).
+
+    The samples are a sanity check on top of calibration, so a model that cannot generate them
+    still quantizes and exports. ``post_ptq_generation_unsupported`` skips only the second one."""
+
+    post_ptq_generation_unsupported: str | None = None
+    """Why the quantized model cannot generate the after-quantization sample though the original
+    could, so the flow keeps the first sample and skips the second."""
+
+    generate_includes_prompt: str | None = None
+    """Why ``generate()`` returns the prompt with the answer though the model is encoder-decoder,
+    so the preview decodes it the way a decoder-only model's is, slicing the prompt off."""
+
+    fsdp2_unsupported: str | None = None
+    """What about the model ``--use_fsdp2`` cannot calibrate, as the refusal lists it before
+    anything loads."""
 
 
 @dataclass(kw_only=True)
@@ -233,6 +396,14 @@ class ModelSpec:
     """Per-model data of the unified HF export path, or ``None`` when export needs
     nothing model-specific."""
 
+    ep_spec: EPSpec | None = None
+    """Per-model data of the expert-parallel PTQ path, or ``None`` when the model is dense
+    or needs nothing beyond what stock transformers already ships."""
+
+    ptq_spec: PTQSpec | None = None
+    """Per-model facts of the Hugging Face PTQ flow, or ``None`` when the flow's generic
+    behavior fits the model. Read it through :func:`get_ptq_spec`."""
+
 
 _SPECS: dict[str, ModelSpec] = {}
 
@@ -253,6 +424,16 @@ def get_spec(model_type: str) -> ModelSpec | None:
 def get_specs() -> list[ModelSpec]:
     """Return all registered specs, in registration order."""
     return list(_SPECS.values())
+
+
+def get_ptq_spec(model_type: str | None) -> PTQSpec:
+    """Return ``model_type``'s PTQ section, or an all-default one when it has none.
+
+    The default section is the flow's generic behavior, so the flow reads one answer for every
+    model, registered or not, instead of handling an absent spec and an absent section apart.
+    """
+    spec = get_spec(model_type) if model_type else None
+    return spec.ptq_spec if spec is not None and spec.ptq_spec is not None else PTQSpec()
 
 
 @functools.cache

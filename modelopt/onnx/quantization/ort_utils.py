@@ -238,9 +238,7 @@ def _check_for_libcudnn():
         # Fallback: ORT >=1.20 ships a preload_dlls() helper that loads CUDA/cuDNN
         # DLLs bundled inside pip packages (e.g. nvidia-cudnn-cu12) so they don't
         # need to be on the system PATH / LD_LIBRARY_PATH.
-        # However, preload_dlls() is broken on Python 3.10 (missing os.add_dll_directory
-        # behaviour), so we skip it for that version.
-        if hasattr(ort, "preload_dlls") and sys.version_info[:2] != (3, 10):
+        if hasattr(ort, "preload_dlls"):
             logger.warning(
                 f"cuDNN not found in {env_variable}. "
                 "Attempting onnxruntime.preload_dlls() to load from site-packages..."
@@ -277,7 +275,7 @@ def _check_for_libcudnn():
             f"To fix this, either:\n"
             f"  1. Add the directory containing {lib_pattern} to your"
             f" {env_variable} env var, or\n"
-            f"  2. Install the cuDNN pip package (Python>=3.11 only):"
+            f"  2. Install the cuDNN pip package:"
             f" pip install nvidia-cudnn-cu12 (or nvidia-cudnn-cu13)\n"
             f"This is required for the CUDA / TensorRT execution provider.\n"
             f"Check version compatibility at"
@@ -435,16 +433,6 @@ def update_trt_ep_support(
                 logger.warning(
                     "This model contains DDS ops, which are only supported in ORT with TensorRT EP backend "
                     "for TRT versions 10.6+. Please update TRT to a supported version, disabling it for now. "
-                    "See https://onnxruntime.ai/docs/execution-providers/TensorRT-ExecutionProvider.html#data-dependant-shape-dds-ops"
-                )
-                calibration_eps.remove("trt")
-            try:
-                assert Version(ort.__version__) >= Version("1.21.0")
-            except AssertionError:
-                logger.warning(
-                    "This model contains DDS ops, please upgrade your ORT version to 1.21.0+ for full support with "
-                    "TRT EP backend. The reason for that is because DDS ops require TRT 10.6+, and earlier versions "
-                    "of ORT were compiled with TRT 10.4 or lower. Disabling it for now. "
                     "See https://onnxruntime.ai/docs/execution-providers/TensorRT-ExecutionProvider.html#data-dependant-shape-dds-ops"
                 )
                 calibration_eps.remove("trt")

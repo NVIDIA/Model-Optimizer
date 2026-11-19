@@ -20,7 +20,7 @@ import torch
 from conftest import make_varlen_meta
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-import modelopt.torch.sparsity.attention_sparsity as mtsa
+import modelopt.torch.sparsity as mts
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 from modelopt.torch.sparsity.attention_sparsity.methods.flash_skip_softmax import FlashSkipSoftmax
 
@@ -246,10 +246,10 @@ class TestSkipSoftmaxVsPytorchRef:
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
 class TestSkipSoftmaxHFIntegration:
-    """HF integration for skip-softmax via mtsa.sparsify()."""
+    """HF integration for skip-softmax via mts.sparsify()."""
 
     def test_skip_softmax_via_sparsify(self, tiny_llama_dir):
-        """mtsa.sparsify() with triton_skip_softmax produces finite logits."""
+        """mts.sparsify() with triton_skip_softmax produces finite logits."""
         tok = AutoTokenizer.from_pretrained(tiny_llama_dir)
         if tok.pad_token_id is None:
             tok.pad_token_id = tok.eos_token_id
@@ -267,13 +267,13 @@ class TestSkipSoftmaxHFIntegration:
             logits_dense = model_dense(input_ids=ids).logits
         del model_dense
 
-        # Skip-softmax via mtsa.sparsify()
+        # Skip-softmax via mts.sparsify()
         model_skip = AutoModelForCausalLM.from_pretrained(
             tiny_llama_dir,
             torch_dtype=torch.bfloat16,
             device_map="cuda",
         )
-        mtsa.sparsify(model_skip, mtsa.SKIP_SOFTMAX_TRITON_DEFAULT)
+        mts.sparsify(model_skip, mts.SKIP_SOFTMAX_TRITON_DEFAULT)
         model_skip.eval()
         with torch.no_grad():
             logits_skip = model_skip(input_ids=ids).logits

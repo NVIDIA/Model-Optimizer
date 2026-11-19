@@ -22,6 +22,7 @@ See `README.md` in this directory for example usage and data preparation instruc
 
 import argparse
 import contextlib
+import inspect
 import os
 from pathlib import Path
 
@@ -32,6 +33,8 @@ from megatron.bridge.models.distillation_provider import convert_to_distillation
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
+from megatron.bridge.training import gpt_step
+from megatron.bridge.training.callbacks import Callback
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
@@ -48,6 +51,7 @@ from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
+from trainable_params import configure_trainable_parameters
 
 try:
     from megatron.bridge.data.builders import DirectHFSFTDatasetConfig
@@ -76,6 +80,7 @@ from mlflow_utils import (
 from transformers import AutoTokenizer
 
 import modelopt.torch.distill as mtd
+import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import ensure_local_checkpoint
 from modelopt.torch.opt.conversion import ModeloptStateManager
@@ -176,6 +181,17 @@ def get_args():
             "If the checkpoint carries ModelOpt state (i.e. it is quantized), the quantizers are "
             "restored automatically, turning distillation into Quantization Aware Distillation (QAD)."
         ),
+    )
+    parser.add_argument(
+        "--trainable_params",
+        "--trainable_parameter_patterns",
+        nargs="+",
+        default=None,
+        help="Train only distilled student parameters matching these shell-style patterns. "
+        "For VLMs, names are relative to language_model; vision/projector settings are untouched. "
+        "Requires --student_megatron_path with ModelOpt state, including on native resume, "
+        "an adapter-free, uncompressed checkpoint, and a match for every pattern "
+        "on every local model chunk.",
     )
     # Parallelism arguments
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
@@ -299,8 +315,19 @@ def get_args():
     )
     parser.add_argument(
         "--freeze_mtp",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Freeze the student's MTP-specific parameters and disable its MTP loss "
+        "(--no-freeze_mtp keeps them training). Unset, they are frozen only when "
+        "--kd_loss_alpha is 1.0 and the student is quantized except for its MTP head.",
+    )
+    parser.add_argument(
+        "--skip_frozen_mtp",
         action="store_true",
-        help="Keep the student's MTP head at its input weights: skip its loss and freeze it.",
+        help="Skip the frozen MTP head (see --freeze_mtp) in the student's and teacher's training "
+        "forwards: its layers and its extra output-layer pass. Evaluation still runs it, and its "
+        "weights are saved unchanged. Supports GPTModel-based models (e.g. Qwen3.5 / Qwen3.6) "
+        "with --pp_size 1.",
     )
     parser.add_argument(
         "--moe_aux_loss_coeff",
@@ -308,6 +335,13 @@ def get_args():
         default=None,
         help="Override the MoE load-balancing loss weight (e.g. 0 to drop it). It is computed over every "
         "token, so with --sft padding it also sends gradient into the padded positions.",
+    )
+    parser.add_argument(
+        "--fake_quant_weight_cache",
+        action="store_true",
+        help="QAD: fake-quantize each student weight once per training step and reuse it for every "
+        "micro-batch and activation recomputation. Can speed up training at the cost of slightly "
+        "more GPU memory (one extra bf16 copy of the student's quantized weights per GPU).",
     )
     parser.add_argument(
         "--no_async_save",
@@ -462,6 +496,8 @@ def get_args():
         args.num_layers_in_first_pipeline_stage or args.num_layers_in_last_pipeline_stage
     ):
         raise ValueError("--num_layers_in_first/last_pipeline_stage require --pp_size > 1.")
+    if args.skip_frozen_mtp and args.pp_size > 1:
+        raise ValueError("--skip_frozen_mtp needs --pp_size 1.")
     if args.recompute_num_layers_per_stage is not None:
         if args.recompute_granularity != "full" or args.recompute_method != "block":
             raise ValueError(
@@ -520,8 +556,6 @@ def get_args():
         args.sft_add_bos = _tokenizer_prepends_bos(args)
 
     _check_shared_vocabulary(args)
-
-    print_args(masked_args(args))
 
     return args
 
@@ -592,7 +626,58 @@ def _add_document_boundaries() -> None:
     GPTDataset.__getitem__ = getitem_with_boundaries
 
 
+def _load_batch_on_every_pp_stage() -> None:
+    """Give every pipeline stage the first stage's ``tokens`` and ``position_ids``.
+
+    Megatron-Bridge's ``get_batch`` loads ``position_ids`` only on the first stage (and MTP
+    stages), but models that use mRoPE need them on every stage, so later stages
+    otherwise fail on ``position_ids=None``. Later stages also load these two fields, but not the
+    full batch.
+    """
+    if not hasattr(gpt_step, "_middle_pp_stage_needs_batch") or (
+        "include_full_batch_fields"
+        not in inspect.signature(gpt_step.get_batch_from_iterator).parameters
+    ):
+        raise ValueError(
+            "Pipeline-parallel distillation of an mRoPE model needs a newer Megatron-Bridge, "
+            "such as the one in nvcr.io/nvidia/nemo:26.10."
+        )
+    get_batch_from_iterator = gpt_step.get_batch_from_iterator
+
+    def _get_batch_from_iterator(*args, **kwargs):
+        kwargs["is_first_pp_stage"] = True
+        kwargs["include_full_batch_fields"] = False
+        return get_batch_from_iterator(*args, **kwargs)
+
+    # TODO: remove once Megatron-Bridge's gpt_step loads position_ids on every PP stage for mRoPE.
+    gpt_step._middle_pp_stage_needs_batch = lambda cfg: True
+    gpt_step.get_batch_from_iterator = _get_batch_from_iterator
+
+
+class FakeQuantWeightCache(Callback):
+    """Fake-quantize each student weight once per training step instead of once per micro-batch."""
+
+    def __init__(self):
+        self._scope = contextlib.ExitStack()
+
+    def on_train_start(self, context):
+        # An in-process restart after a failed step comes back here with that step's scope open.
+        self._scope.close()
+        num_cached = mtq.utils.enable_weight_cache(context.model)
+        print_rank_0(
+            f"Caching the fake-quantized weights of {num_cached} weight quantizers per step"
+        )
+
+    def on_train_step_start(self, context):
+        self._scope.enter_context(mtq.utils.weight_cache_scope(context.model))
+
+    def on_train_step_end(self, context):
+        # Before evaluation and the next step's forward, which see the optimizer's updated weights.
+        self._scope.close()
+
+
 def main(args: argparse.Namespace, owns_the_run: bool = True):
+    """Build the student and teacher providers, then run Megatron-Bridge distillation."""
     # --student_hf_path stays as given. The student is built and exported from the local copy of
     # the whole checkpoint in student_local_checkpoint_path, since the HF export reads the source's
     # files from local disk only; student_hub_model_id is the Hub ID, or None for a local path.
@@ -604,6 +689,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
         args.student_megatron_path
     )
+    if args.fake_quant_weight_cache and not student_has_modelopt_state:
+        raise ValueError("--fake_quant_weight_cache needs a quantized --student_megatron_path.")
+    if args.fake_quant_weight_cache and "callbacks" not in inspect.signature(distill).parameters:
+        raise ValueError("--fake_quant_weight_cache needs a newer Megatron-Bridge; see the README.")
     # A quantized student pins the layout: it must match what quantize.py wrote, so reuse the same
     # data-driven choice. An unquantized (e.g. pruned) student exports via Megatron-Bridge, which
     # reads either layout, so it keeps the faster grouped GEMM.
@@ -693,6 +782,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         logit_kl_top_p=args.logit_kl_top_p,
         logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,
         freeze_mtp=args.freeze_mtp,
+        skip_frozen_mtp=args.skip_frozen_mtp,
     )
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
@@ -706,12 +796,27 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             "VLM detected: distilling model.language_model only (vision tower / projector untouched). "
             "To export megatron non-quantized checkpoint, use export_distilled_megatron_to_hf.py"
         )
+    if args.pp_size > 1 and getattr(student_provider, "position_embedding_type", None) == "mrope":
+        _load_batch_on_every_pp_stage()
     distill_provider = convert_to_distillation_provider(
         student_provider,
         teacher_provider,
         kd_config,
         distill_submodule="language_model" if is_vlm else None,
     )
+
+    if args.trainable_params:
+        # Run after initial student restoration; native training resume happens later.
+        def _select_trainable_student_hook(model_chunks):
+            """Select parameters in the distilled student before the teacher is attached."""
+            for chunk in model_chunks:
+                student = unwrap_model(chunk)
+                if is_vlm:
+                    student = student.language_model
+                configure_trainable_parameters(student, args.trainable_params)
+            return model_chunks
+
+        distill_provider.register_pre_wrap_hook(_select_trainable_student_hook, prepend=True)
 
     if args.student_megatron_path:
         # QAD: restore the quantized student weights + ModelOpt state before the KD conversion (a no-op
@@ -909,8 +1014,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     # Before training: a resumed run starts with the previous run's checkpoint in place, so
     # only a move in this marker shows that this run saved one of its own.
     saved_before = checkpoint_marker(args, DISTILL)
+    # Only a newer Megatron-Bridge's distill() takes callbacks, so pass them only when needed.
+    distill_kwargs = {"callbacks": [FakeQuantWeightCache()]} if args.fake_quant_weight_cache else {}
     try:
-        distill(config)
+        distill(config, **distill_kwargs)
     finally:
         # In a finally: when --exit_interval or --exit_duration_in_mins fires -- which is how
         # a Slurm run usually ends -- Megatron-Bridge calls sys.exit() from inside train(),
@@ -960,9 +1067,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
 
 
 if __name__ == "__main__":
-    dist.setup()
     args = get_args()
+    dist.setup()
     try:
+        print_args(masked_args(args))
         # Entered inside the try: opening the run is fatal by design, and the peers of a rank
         # that exits without dist.abort() stay blocked on the first collective.
         with distill_run(args, DISTILL) as owns_the_run:

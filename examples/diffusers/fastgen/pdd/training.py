@@ -15,18 +15,14 @@
 
 """PDD objective adapter for AutoModel's diffusion training loop."""
 
-from __future__ import annotations
-
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from torch import nn
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from modelopt.torch.fastgen import PDDPipeline
+from modelopt.torch.fastgen import PDDPipeline
 
 
 @dataclass

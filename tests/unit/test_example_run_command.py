@@ -21,37 +21,28 @@ import time
 
 import pytest
 from _test_utils.examples import run_command
+from _test_utils.transient_errors import TransientError
 
 
 @pytest.mark.parametrize(
-    ("error", "attempts"),
+    ("error", "transient"),
     [
-        ("HfHubHTTPError: 503 Server Error: Service Unavailable", 2),
-        ("DistNetworkError: port: 38789, name: EADDRINUSE, message: address already in use", 2),
-        ("AssertionError: the quantized model diverged", 1),
+        ("HfHubHTTPError: 503 Server Error: Service Unavailable", True),
+        ("DistNetworkError: port: 38789, name: EADDRINUSE, message: address already in use", True),
+        ("AssertionError: the quantized model diverged", False),
     ],
 )
-def test_run_example_command_retries_only_transient_errors(monkeypatch, error, attempts):
-    calls = []
+def test_run_example_command_flags_only_transient_errors(monkeypatch, error, transient):
+    def failing_step(cmd_parts, example_path):
+        raise RuntimeError(error)  # a marker on a source line must not count: ConnectionError
 
-    def step_failing_once(cmd_parts, example_path):
-        calls.append(cmd_parts)
-        if len(calls) == 1:
-            raise RuntimeError(error)
-        return "output"
-
-    def run():
-        return run_command.run_example_command(
-            ["torchrun", "step.py"], "hf_ptq", hf_retry_delay_s=0
-        )
-
-    monkeypatch.setattr(run_command, "_in_process_runner", step_failing_once)
-    if attempts == 1:
-        with pytest.raises(RuntimeError, match="diverged"):
-            run()
-    else:
-        assert run() == "output"
-    assert len(calls) == attempts
+    monkeypatch.setattr(run_command, "_in_process_runner", failing_step)
+    with pytest.raises(RuntimeError) as excinfo:
+        run_command.run_example_command(["torchrun", "step.py"], "hf_ptq")
+    # TransientError is what the rerun marker in tests/conftest.py matches
+    assert isinstance(excinfo.value, TransientError) == transient
+    original = excinfo.value.__cause__ if transient else excinfo.value
+    assert str(original) == error
 
 
 def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(

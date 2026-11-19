@@ -12,13 +12,16 @@ Latest Model Optimizer (``nvidia-modelopt``) currently has the following system 
 +-------------------------+-----------------------------+
 | Architecture            |  x86_64, aarch64 (SBSA)     |
 +-------------------------+-----------------------------+
-| Python                  |  >=3.10,<3.15               |
+| Python                  |  >=3.11,<3.15               |
 +-------------------------+-----------------------------+
 | CUDA                    |  12.x, 13.x                 |
 +-------------------------+-----------------------------+
-| PyTorch                 |  >=2.8                      |
+| PyTorch                 |  >=2.10                     |
 +-------------------------+-----------------------------+
 | TensorRT-LLM (Optional) |  >=1.0                      |
++-------------------------+-----------------------------+
+| Transformer Engine      |  >=2.0                      |
+| (Optional)              |                             |
 +-------------------------+-----------------------------+
 | ONNX Runtime (Optional) | See CUDA notes below        |
 +-------------------------+-----------------------------+
@@ -133,14 +136,14 @@ Additionally, we support installing dependencies for following 3rd-party package
 
 **CUDA specific dependencies**
 
-* On Linux x86-64 with Python 3.11 and later, ``nvidia-modelopt[onnx]`` installs ``cupy-cuda13x`` and ONNX Runtime GPU 1.30.x for CUDA 13. Python 3.10 retains the CUDA 12 packages and ONNX Runtime 1.22.x. See the CUDA 12 alternative below if you need CUDA 12 on Python 3.11 or later.
+* On Linux x86-64, ``nvidia-modelopt[onnx]`` installs ``cupy-cuda13x`` and ONNX Runtime GPU 1.30.x for CUDA 13. See the CUDA 12 alternative below if you need CUDA 12.
 
-On Linux aarch64, Python 3.11 and later retains ONNX Runtime 1.24.x.
+On Linux aarch64, ModelOpt retains ONNX Runtime 1.24.x.
 
-**CUDA 12.8 alternative for Python 3.11+ on Linux x86-64**
+**CUDA 12.8 alternative on Linux x86-64**
 
 The stable CUDA 12.8 ONNX Runtime Python wheel is currently 1.29.0. Start from a
-Python 3.11+ environment with CUDA 12-compatible PyTorch, then install the base
+Python environment with CUDA 12-compatible PyTorch, then install the base
 ModelOpt package and its ONNX dependencies explicitly, because the default ``[onnx]``
 extra requires ``cupy-cuda13x``. Use the Microsoft CUDA 12 package feed for the ONNX
 Runtime wheel; the 1.29.0 wheel on PyPI uses CUDA 13.

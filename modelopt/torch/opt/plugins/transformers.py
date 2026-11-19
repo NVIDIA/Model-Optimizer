@@ -15,6 +15,7 @@
 
 """ModelOpt plugin for enabling automatic save/restore of ModelOpt state for HuggingFace models."""
 
+import argparse
 import dataclasses
 import fnmatch
 import gc
@@ -256,7 +257,9 @@ class ModelOptTrainerArguments(ModelOptHFArguments):
         metadata={
             "help": (
                 "Run `gc.collect()` before each training/prediction step to work around "
-                "GPU memory leaks during QAT/distillation."
+                "GPU memory leaks during QAT/distillation. After the first optimizer step, objects "
+                "that live until `train()` returns are frozen (`gc.freeze()`) so these "
+                "collections skip them."
             ),
         },
     )
@@ -279,12 +282,42 @@ def _translate_warmup_keys(config: dict, actions) -> None:
 
 
 class ModelOptArgParser(HfArgumentParser):
-    """HfArgumentParser with ``--config`` YAML support and ``--generate_docs`` for ARGUMENTS.md."""
+    """HfArgumentParser with YAML defaults and Markdown argument documentation.
+
+    ``--config`` and ``--generate_docs`` require ``parse_args_into_dataclasses``.
+    The inherited ``parse_args`` and ``parse_known_args`` retain argparse behavior.
+    """
 
     def __init__(self, *args, docs_header_extra: str | None = None, **kwargs):
         """Store an optional verbatim markdown block to inject into generated docs."""
         super().__init__(*args, **kwargs)
         self._docs_header_extra = docs_header_extra
+        self._parsing_dataclasses = False
+
+    def format_help(self):
+        """Include options consumed before HuggingFace's dataclass parsing."""
+        if not self._parsing_dataclasses:
+            return super().format_help()
+        options = argparse.ArgumentParser(add_help=False)
+        options.add_argument(
+            "--config",
+            type=str,
+            metavar="PATH",
+            help="Load YAML defaults; command-line arguments override them.",
+        )
+        options.add_argument(
+            "--generate_docs",
+            type=str,
+            nargs="?",
+            metavar="PATH",
+            default="ARGUMENTS.md",
+            help="Generate argument documentation and exit.",
+        )
+        formatter = self._get_formatter()
+        formatter.start_section("ModelOpt options")
+        formatter.add_arguments(options._actions)
+        formatter.end_section()
+        return super().format_help() + "\n" + formatter.format_help()
 
     def parse_args_into_dataclasses(self, args=None, **kwargs):
         """Parse args with optional YAML config defaults and doc generation."""
@@ -328,7 +361,11 @@ class ModelOptArgParser(HfArgumentParser):
                         )
                 self.set_defaults(**applicable)
 
-        return super().parse_args_into_dataclasses(args=args, **kwargs)
+        self._parsing_dataclasses = True
+        try:
+            return super().parse_args_into_dataclasses(args=args, **kwargs)
+        finally:
+            self._parsing_dataclasses = False
 
     @staticmethod
     def _all_modelopt_fields():
@@ -406,7 +443,7 @@ class ModelOptArgParser(HfArgumentParser):
                 default_str = self._format_default(f.default, f.default_factory)
                 help_text = dict(f.metadata).get("help", "")
                 # Collapse multi-line help into single line
-                help_text = " ".join(help_text.split())
+                help_text = " ".join(help_text.split()).replace("%%", "%")
                 lines.append(f"| {name} | {type_str} | {default_str} | {help_text} |")
 
             lines.append("")
@@ -521,13 +558,12 @@ class ModelOptHFTrainer(Trainer):
         """
         enable_huggingface_checkpointing()
         super().__init__(*args, **kwargs)
-        _raw_dtype = getattr(getattr(self.model, "config", None), "dtype", None) or getattr(
-            getattr(self.model, "config", None), "torch_dtype", None
-        )
+        _raw_dtype = getattr(getattr(self.model, "config", None), "dtype", None)
         self._original_dtype = None if _raw_dtype is None else str(_raw_dtype).rsplit(".", 1)[-1]
         if trainer_args is None and isinstance(self.args, ModelOptTrainerArguments):
             trainer_args = self.args
         self.trainer_args = trainer_args or ModelOptTrainerArguments()
+        self._gc_frozen = False
         self._lr_config = self._resolve_lr_config(lr_config, self.trainer_args)
         self._apply_gradient_checkpointing_defaults()
         self.add_callback(_MemoryReportCallback())
@@ -556,14 +592,37 @@ class ModelOptHFTrainer(Trainer):
     def training_step(self, *args, **kwargs):
         """Run gc.collect() before the training step if manual_gc is enabled."""
         if self.trainer_args.manual_gc:
-            gc.collect()
+            self._collect_garbage(freeze=True)
         return super().training_step(*args, **kwargs)
 
     def prediction_step(self, *args, **kwargs):
         """Run gc.collect() before the prediction step if manual_gc is enabled."""
         if self.trainer_args.manual_gc:
-            gc.collect()
+            self._collect_garbage()
         return super().prediction_step(*args, **kwargs)
+
+    def _collect_garbage(self, freeze=False):
+        """``gc.collect()``; with ``freeze``, also ``gc.freeze()`` once training is under way.
+
+        After the first optimizer step the models, quantizers and optimizer state exist and stay
+        alive until ``train()`` returns. Frozen, later collections skip them instead of rescanning
+        them every step, which took about 0.5 s per collection on a 30B MoE.
+        """
+        gc.collect()
+        if freeze and not self._gc_frozen and self.state.global_step >= 1:
+            gc.freeze()
+            self._gc_frozen = True
+
+    def train(self, *args, **kwargs):
+        """Train, then unfreeze what the per-step collections froze so it can be freed."""
+        try:
+            return super().train(*args, **kwargs)
+        finally:
+            if self._gc_frozen:
+                # Also unfreezes anything frozen before (Python itself starts with a few frozen
+                # objects); that only makes later collections scan them again.
+                gc.unfreeze()
+                self._gc_frozen = False
 
     def _load_best_model(self, *args, **kwargs):
         """Run gc.collect() before loading the best model if manual_gc is enabled."""

@@ -181,11 +181,8 @@ def _checkpoint_provenance(model_dir):
                 break
         index_sha256 = None
         if hash_target is not None:
-            h = hashlib.sha256()
             with open(hash_target, "rb") as f:
-                for chunk in iter(lambda: f.read(65536), b""):
-                    h.update(chunk)
-            index_sha256 = h.hexdigest()
+                index_sha256 = hashlib.file_digest(f, "sha256").hexdigest()
         # Size: shards listed in the safetensors index + the index/config file
         # itself. Avoids walking the entire model directory (which can be huge
         # for sharded multi-100B checkpoints).
@@ -311,7 +308,7 @@ def dump_env(args, save_dir, overrides=None):
     # Checkpoint fingerprint.
     config["checkpoint"] = _checkpoint_provenance(getattr(args, "model_dir", None))
     # UTC timestamp.
-    config["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    config["timestamp"] = datetime.datetime.now(datetime.UTC).isoformat()
 
     # Attestation fields used by the visualizer to distinguish JIRA-tracked
     # official runs (must be on HuggingFace Hub) from community-contributed

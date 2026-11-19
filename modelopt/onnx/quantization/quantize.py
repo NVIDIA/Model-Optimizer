@@ -339,6 +339,7 @@ def _find_nodes_to_quantize_autotune(
     warmup_runs: int = 50,
     timing_runs: int = 100,
     trtexec_args: str | None = None,
+    remote_model_path: str | None = None,
 ) -> _AutotuneContext:
     """Extracts quantization information from Autotune to provide ORT quantization."""
     logger.info("Running Auto Q/DQ with TensorRT")
@@ -361,6 +362,7 @@ def _find_nodes_to_quantize_autotune(
         warmup_runs=warmup_runs,
         timing_runs=timing_runs,
         trtexec_args=trtexec_args.split() if trtexec_args else None,
+        remote_model_path=remote_model_path,
     )
 
     if benchmark_instance is None:
@@ -513,6 +515,7 @@ def quantize(
     autotune_warmup_runs: int = 50,
     autotune_timing_runs: int = 100,
     autotune_trtexec_args: str | None = None,
+    autotune_remote_model_path: str | None = None,
     trt_rtx_backend: str = "legacy",
     **kwargs: Any,
 ) -> None:
@@ -686,9 +689,17 @@ def quantize(
         autotune_trtexec_args:
             Additional trtexec arguments as a single quoted string.
             Example: --autotune_trtexec_args '--fp16 --workspace=4096'
+        autotune_remote_model_path:
+            Path for the engine on the remote device. By default, a unique filename is created
+            in the remote user's working directory. A custom path is overwritten and removed after
+            each benchmark; concurrent runs must use distinct paths.
         kwargs:
             Additional keyword arguments for int4 quantization, including:
+
             - awqlite_alpha_step (float): Alpha step for lite, range [0, 1].
+            - awqlite_reuse_activations (bool): Default False. Share captured activations
+              across adjacent same-input weights in per-node AWQ Lite/Full when
+              enable_fast_path_using_high_sysram=False. Stochastic graphs share samples.
             - awqclip_alpha_step (float): Min alpha step for clip, range [awqclip_alpha_step, 1].
             - awqclip_alpha_min (float): Alpha step to find best alpha for clip.
             - awqclip_bsz_col (int): Batch size for processing the column dimension in clip.
@@ -708,6 +719,8 @@ def quantize(
             "Remove --trt_plugins or select the classic TensorRT EP."
         )
 
+    if autotune and autotune_verbose:
+        log_level = "DEBUG"
     configure_logging(log_level.upper(), log_file)
     logger.info(f"Starting quantization process for model: {onnx_path}")
     logger.info(f"Quantization mode: {quantize_mode}")
@@ -845,6 +858,7 @@ def quantize(
                 warmup_runs=autotune_warmup_runs,
                 timing_runs=autotune_timing_runs,
                 trtexec_args=autotune_trtexec_args,
+                remote_model_path=autotune_remote_model_path,
             )
             (
                 nodes_to_quantize_autotune,

@@ -360,10 +360,6 @@ def get_args() -> argparse.Namespace:
             args.prune_intermediate_ckpt = f"{args.output_megatron_path}/modelopt_pruning_scores"
         elif args.output_hf_path:
             args.prune_intermediate_ckpt = f"{args.output_hf_path}/modelopt_pruning_scores"
-        print_rank_0(
-            "No directory provided to cache per-rank intermediate pruning scores. "
-            f"Setting to: {args.prune_intermediate_ckpt}"
-        )
 
     if args.prune_export_config:
         try:
@@ -380,8 +376,6 @@ def get_args() -> argparse.Namespace:
         args.inference_batch_size = args.calib_batch_size
 
     resolve_mlflow_args(args, parser, PRUNE)
-
-    print_args(masked_args(args))
 
     # Flipped by main() once a checkpoint is on disk; a run that only scores candidates
     # writes none, and then there is nothing for a provenance pointer to claim.
@@ -428,6 +422,7 @@ def _log_vlm_param_breakdown(unwrapped_model, language_model, stage: str) -> Non
 
 def main(args: argparse.Namespace):
     assert dist.size() == args.pp_size, "Only Pipeline parallelism is supported for pruning."
+    print_rank_0(f"Pruning score cache directory: {args.prune_intermediate_ckpt}")
 
     if args.output_megatron_path and os.path.exists(
         f"{args.output_megatron_path}/latest_checkpointed_iteration.txt"
@@ -794,9 +789,10 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    dist.setup()
     args = get_args()
+    dist.setup()
     try:
+        print_args(masked_args(args))
         # Entered inside the try: opening the run is fatal by design, and the peers of a rank
         # that exits without dist.abort() stay blocked on the first collective.
         with mlflow_run(args, PRUNE):

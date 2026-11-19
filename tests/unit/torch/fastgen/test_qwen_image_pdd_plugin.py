@@ -15,8 +15,6 @@
 
 """Qwen-Image integration tests for PDD conversion, training, and execution."""
 
-from __future__ import annotations
-
 import copy
 from types import MethodType
 
@@ -81,7 +79,7 @@ def _mr210_rollout_oracle(
 
 
 def _tiny_diffusers_qwen():
-    diffusers = pytest.importorskip("diffusers")
+    diffusers = pytest.importorskip("diffusers", minversion="0.39")
     return diffusers.QwenImageTransformer2DModel(
         patch_size=2,
         in_channels=8,
@@ -306,6 +304,13 @@ def test_qwen_pdd_forward_binding_preserves_root_state_and_deepcopy() -> None:
     conflicting.forward = MethodType(lambda self, **_kwargs: self, conflicting)
     with pytest.raises(RuntimeError, match="instance-level forward override"):
         enable_qwen_image_pdd_forward(conflicting)
+
+
+def test_qwen_pdd_forward_binding_rejects_old_diffusers(monkeypatch) -> None:
+    model = _tiny_diffusers_qwen()
+    monkeypatch.setattr("diffusers.__version__", "0.38.0")
+    with pytest.raises(RuntimeError, match=r"diffusers>=0\.39"):
+        enable_qwen_image_pdd_forward(model)
 
 
 def test_mr210_qwen_conversion_preserves_every_initialized_head() -> None:

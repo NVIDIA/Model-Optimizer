@@ -4,6 +4,8 @@ This tutorial shows how to run QAT and QAD with Hugging Face Transformers: set u
 
 For background on QAT and QAD and help choosing between Hugging Face, Megatron Bridge, and Megatron-LM, start with the [QAT/QAD guide](https://nvidia.github.io/Model-Optimizer/guides/quantization_aware_training_and_distillation.html).
 
+For an experimental native NeMo AutoModel expert integration, see the [NVFP4 adapter](nemo_automodel/README.md).
+
 <div align="center">
 
 | **Section** | **Description** | **Link** |
@@ -25,12 +27,22 @@ For background on QAT and QAD and help choosing between Hugging Face, Megatron B
 
 Please refer to [hf_ptq/README.md](../hf_ptq/README.md#pre-requisites) for container
 recommendations and base ModelOpt installation guidance. For this QAT/QAD example,
-install the Hugging Face dependencies and the example-specific requirements:
+run the following commands from the Model-Optimizer repository root:
 
 ```bash
 pip install -U nvidia-modelopt[hf]
+pip install packaging psutil ninja wheel
+pip install --no-build-isolation "flash-attn>=2.6.0"
 pip install -r examples/llm_qat/requirements.txt
 ```
+
+FlashAttention is installed separately with `--no-build-isolation` so its build
+can use the installed PyTorch.
+
+FlashAttention must be compatible with the installed PyTorch/CUDA build. If these
+commands change PyTorch, reinstall a compatible FlashAttention build or rebuild
+it against the installed PyTorch. Verify that `python -c "import torch, flash_attn"`
+succeeds before running the example.
 
 The Qwen3-8B example below requires a minimum of **2 x 80GB GPUs**.
 
@@ -54,9 +66,11 @@ See [custom calibration](https://nvidia.github.io/Model-Optimizer/guides/_pytorc
 
 ### QAT
 
-Quantize, fine-tune on labeled data, and export:
+Quantize, fine-tune on labeled data, and export. Start from the repository root:
 
 ```sh
+cd examples/llm_qat
+
 # 1. Quantize
 python quantize.py \
   --model_name_or_path Qwen/Qwen3-8B \
@@ -218,15 +232,18 @@ trainer.train()
 trainer.save_model()
 ```
 
-`QADTrainer` extends `QATTrainer` with distillation. Pass the teacher model and a `DistillArguments` instance:
+`QADTrainer` extends `QATTrainer` with distillation. Load the teacher first and pass a `DistillArgsWithTeacherModel` instance:
 
 ```python
-from modelopt.torch.distill.plugins.huggingface import DistillArguments
+from transformers import AutoModelForCausalLM
+
+from modelopt.torch.distill.plugins.huggingface import DistillArgsWithTeacherModel
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer
 
-distill_args = DistillArguments(
+teacher = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B", dtype=model.dtype)
+distill_args = DistillArgsWithTeacherModel(
     distill=True,
-    teacher_model="Qwen/Qwen3-8B",
+    teacher_model=teacher,
     criterion="logits_loss",
 )
 
@@ -253,7 +270,8 @@ You can either:
    ```sh
    accelerate launch --config-file configs/accelerate/fsdp2.yaml \
      --fsdp_transformer_layer_cls_to_wrap LlamaDecoderLayer \
-     train.py --config configs/train/qat_nvfp4.yaml ...
+     train.py --config configs/train/qat_nvfp4.yaml \
+     --model_name_or_path llama-quantized --output_dir llama-qat
    ```
 
 2. **Create a custom config** (recommended for repeated use):
@@ -285,7 +303,8 @@ There are two types of configs:
 ```sh
 # YAML + CLI override
 accelerate launch --config-file configs/accelerate/fsdp2.yaml train.py \
-  --config configs/train/qat_nvfp4.yaml --learning_rate 5e-5
+  --config configs/train/qat_nvfp4.yaml --learning_rate 5e-5 \
+  --model_name_or_path qwen3-8b-quantized --output_dir qwen3-8b-qat-override
 ```
 
 See [Dataset Configuration](configs/dataset/README.md) for custom dataset blends and adding new datasets.

@@ -152,6 +152,8 @@ changes is how often it abstains instead of guessing:
      - **−27.5**
      - **61%**
 
+The ~0.7% of answers graded partially correct are not shown, so each row sums to about 99.3.
+
 QAD does most of this early (index −31.4 at iteration 50), the same shape as SciCode's runaway
 sub-steps. None of the six benchmarks above measures it, so evaluate abstention directly if your
 application needs a model that says "I don't know".

@@ -29,7 +29,11 @@ import onnx
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.autotune.autotuner import QDQAutotuner
-from modelopt.onnx.quantization.autotune.benchmark import TensorRTPyBenchmark, TrtExecBenchmark
+from modelopt.onnx.quantization.autotune.benchmark import (
+    TensorRTPyBenchmark,
+    TrtExecBenchmark,
+    default_timing_cache_file,
+)
 from modelopt.onnx.quantization.autotune.common import Config, PatternCache
 from modelopt.onnx.quantization.qdq_utils import get_quantized_tensors
 
@@ -88,6 +92,7 @@ def init_benchmark_instance(
     warmup_runs: int = 5,
     timing_runs: int = 20,
     trtexec_args: list[str] | None = None,
+    remote_model_path: str | None = None,
 ):
     """Initialize global TensorRT benchmark instance for model performance measurement.
 
@@ -97,13 +102,18 @@ def init_benchmark_instance(
                           These plugins will be loaded by trtexec or TensorRT Python API during engine building.
                           If None, no custom plugins are loaded.
         timing_cache_file: Path to TensorRT timing cache file for faster engine builds.
-                          If None, uses default "trtexec_timing.cache" (default: None)
+                          If None, uses "trtexec_timing.cache" in a private temporary directory
+                          (default: None)
         warmup_runs: Number of warmup inference iterations before measurement.
                     Allows GPU to reach stable performance state (default: 5)
         timing_runs: Number of timed inference iterations for latency measurement.
                     Higher values give more stable median (default: 20)
         trtexec_args: Additional command-line arguments to pass to trtexec as a string (only used if use_trtexec=True).
                      Example: '--fp16 --workspace=4096 --verbose'
+        remote_model_path: Path for the engine on the remote device. By default, a unique
+                           filename is created in the remote user's working directory. A custom
+                           path is overwritten and removed after each benchmark; concurrent runs
+                           must use distinct paths.
     """
     global _benchmark_instance
     try:
@@ -114,9 +124,12 @@ def init_benchmark_instance(
                 timing_runs=timing_runs,
                 plugin_libraries=plugin_libraries,
                 trtexec_args=trtexec_args,
+                remote_model_path=remote_model_path,
             )
             logger.info("Trtexec benchmark initialized")
         else:
+            if remote_model_path is not None:
+                logger.warning("remote_model_path is ignored when use_trtexec is False")
             _benchmark_instance = TensorRTPyBenchmark(
                 timing_cache_file=timing_cache_file,
                 warmup_runs=warmup_runs,
@@ -126,7 +139,8 @@ def init_benchmark_instance(
             logger.info("TensorRT Python API benchmark initialized")
         logger.debug(
             f"Settings: warmup={warmup_runs}, timing={timing_runs}, "
-            f"cache={timing_cache_file or 'trtexec_timing.cache'}, plugin_libraries={plugin_libraries}"
+            f"cache={timing_cache_file or default_timing_cache_file()}, "
+            f"plugin_libraries={plugin_libraries}"
         )
         return _benchmark_instance
     except Exception as e:

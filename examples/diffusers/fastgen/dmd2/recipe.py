@@ -35,8 +35,6 @@ See ``examples/diffusers/fastgen/dmd2/README.md`` for the three-phase
 alternation diagram + troubleshooting notes.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import os

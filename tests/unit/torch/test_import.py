@@ -37,5 +37,15 @@ _HF_EXTRA_MODULES = [
 
 def test_modelopt_torch_imports_without_hf_extra():
     # A None entry in sys.modules makes importing that module raise ModuleNotFoundError.
-    code = f"import sys; sys.modules.update(dict.fromkeys({_HF_EXTRA_MODULES!r})); import modelopt.torch"
+    # Quantizing must not need them either: in 0.47.0, max calibration imported huggingface_hub.
+    code = "\n".join(
+        [
+            f"import sys; sys.modules.update(dict.fromkeys({_HF_EXTRA_MODULES!r}))",
+            "import torch",
+            "import modelopt.torch",
+            "import modelopt.torch.quantization as mtq",
+            "model = torch.nn.Sequential(torch.nn.Linear(16, 16), torch.nn.ReLU())",
+            "mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))",
+        ]
+    )
     subprocess.run([sys.executable, "-c", code], check=True)
