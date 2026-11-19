@@ -38,6 +38,8 @@ Changelog
 
 *Quantization*
 
+- Fixed importing Torch quantization on PyTorch versions that no longer re-export ``torch.jit.script``.
+
 *ONNX*
 
 - ONNX AutoCast now keeps the variance of decomposed RMSNorm and unfused LayerNorm in FP32 for both FP16 and BF16 conversion, so FP16 models converted without calibration data no longer give wrong outputs on execution providers such as TensorRT-RTX. Reconvert affected models.
