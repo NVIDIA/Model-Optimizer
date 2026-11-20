@@ -209,6 +209,12 @@ model answers about 70% correctly, BF16 included, but at 2.25 bits (24.0 GB) the
 the budget in 15.9% of generations against BF16's 7.6%. A 512-token KL objective does not see that, so
 adding bytes moves AA-LCR less than it moves KL.
 
+The recipe's 22.4 GB model uses IQ1_M. Its search picks each expert format from IQ1_M, IQ2_XXS,
+IQ2_XS, IQ2_S, W4A16 NVFP4, W8A16 FP8 and BF16, and it keeps the routed experts of 8 of the 40 MoE
+layers at IQ1_M, 31 at IQ2_XXS and one at IQ2_XS: 2.01 bits on average. The bits that saves go to
+the shared experts, which hold under 3% of the expert weights; they average 3.9 bits, mostly W4A16
+NVFP4 and IQ2_S.
+
 These numbers come from a script with the recipe's search and finalize settings. The script loads
 the checkpoint with its own weight renaming and calls ``mtq.auto_quantize``. One setting differs
 from the recipe: the script's scoring context held the Mamba ``conv1d`` at FP8, while the recipe
