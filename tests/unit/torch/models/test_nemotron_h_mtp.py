@@ -17,6 +17,7 @@ import copy
 import fnmatch
 import json
 import shutil
+import threading
 import warnings
 from unittest.mock import Mock
 
@@ -183,6 +184,32 @@ def test_remote_consent_and_constructor_cleanup(tiny_checkpoint):
     assert cls.__init__ is original_init
     fresh = cls(source.config)
     assert not hasattr(getattr(fresh, "language_model", fresh), "mtp")
+
+
+def test_overlapping_loads_take_turns(tiny_checkpoint):
+    """A load in another thread waits, so it neither reads nor restores this load's patches."""
+    cls, source, checkpoint = tiny_checkpoint
+    original_init = cls.__init__
+    errors = []
+
+    def other_load():
+        try:
+            with adapter.prepare_for_loading(checkpoint, True):
+                cls(source.config)
+        except Exception as error:  # surfaced in the main thread
+            errors.append(error)
+
+    other = threading.Thread(target=other_load, daemon=True)
+    with adapter.prepare_for_loading(checkpoint, True):
+        other.start()
+        other.join(timeout=0.5)
+        assert other.is_alive(), "a load in another thread ran inside this one"
+        model = cls(source.config)
+    other.join(timeout=30)
+    assert not other.is_alive()
+    assert not errors
+    assert hasattr(getattr(model, "language_model", model), "mtp")
+    assert cls.__init__ is original_init
 
 
 def _hub_checkpoint(checkpoint, source, monkeypatch, sharded):

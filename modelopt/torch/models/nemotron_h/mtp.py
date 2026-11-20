@@ -19,6 +19,7 @@ import copy
 import inspect
 import json
 import re
+import threading
 import weakref
 from contextlib import contextmanager
 from functools import wraps
@@ -48,6 +49,9 @@ __all__ = [
 ]
 
 _MTP_FORWARD_MODELS = weakref.WeakSet()
+# A load patches process-wide state: a model class's constructor and transformers' rename cache.
+# A load in another thread waits, so it neither reads nor restores that state mid-load.
+_LOAD_LOCK = threading.RLock()
 
 
 def _resolve_checkpoint_path(checkpoint_path: str) -> Path:
@@ -250,6 +254,7 @@ def prepare_for_loading(checkpoint_path: str, trust_remote_code: bool, *, model_
     config_path = local_path / "config.json"
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
     with (
+        _LOAD_LOCK,
         _puzzle_renames(config),
         _mtp_construction(checkpoint_path, trust_remote_code, model_class, layout, config),
     ):
