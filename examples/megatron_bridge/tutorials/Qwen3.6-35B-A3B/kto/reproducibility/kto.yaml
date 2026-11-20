@@ -1,0 +1,97 @@
+# QAKTO overrides for NeMo RL examples/configs/dpo.yaml (revision 19244a094).
+# Unlisted settings come from that base; kto_train.py installs the KTO loss.
+# The base supplies KTO beta 0.05, summed response log probabilities and zero SFT loss.
+
+# Training length, validation schedule and seed.
+dpo:
+  max_num_steps: 13
+  stop_after_step:
+  val_period: 13
+  val_batches: 3
+  val_global_batch_size: 4
+  val_at_end: true
+  seed: 20261024
+
+# Checkpoint loading and saving.
+checkpointing:
+  checkpoint_dir: ${oc.env:KTO_OUTPUT_DIR}/checkpoints
+  keep_top_k: 1
+  save_period: 13
+  pretrained_checkpoint:
+    path: ${oc.env:PRETRAINED_CHECKPOINT}
+    format: megatron_lm
+
+# Model, tokenizer and training runtime.
+policy:
+  logprob_batch_size: 1
+  model_name: ${oc.env:HF_MODEL}
+  tokenizer:
+    name: ${oc.env:HF_MODEL}
+    chat_template_kwargs: {enable_thinking: true}
+
+  # Batch sizes and sequence limit.
+  train_global_batch_size: 8
+  train_micro_batch_size: 1
+  max_total_sequence_length: 32768
+
+  # Memory offloading and backend selection.
+  offload_policy_before_refit: false
+  offload_optimizer_for_refit: true
+  dtensor_cfg: {enabled: false}
+  automodel_cfg: {enabled: false, tensor_parallel_size: 1}
+  megatron_cfg:
+    enabled: true
+    checkpoint: {async_save: false, ckpt_assume_constant_structure: false}
+
+    # Memory use and kernel execution.
+    use_linear_ce_fusion_loss: true
+    linear_ce_fusion_chunk_size: 128
+    activation_checkpointing: true
+    cuda_graph_impl: none
+    cuda_graph_modules: []
+    cuda_graph_warmup_steps: 3
+    fine_grained_activation_offloading: false
+    offload_modules:
+
+    # Parallelism: four expert-parallel ranks, with tensor parallelism disabled.
+    tensor_model_parallel_size: 1
+    expert_model_parallel_size: 4
+    sequence_parallel: false
+
+    # Model and runtime compatibility settings.
+    moe_router_dtype: fp32
+    moe_router_load_balancing_type: none
+    apply_rope_fusion: false
+    flash_attention_version: 2
+    fp32_lm_head: false
+    use_gloo_process_groups: false
+    distributed_timeout_minutes:
+    peft: {restore_from: null}
+
+    # Optimization, learning-rate schedule and gradient communication.
+    optimizer: {lr: 1.0e-06, min_lr: 1.0e-06, weight_decay: 0.01, params_dtype: bfloat16, adam_beta2: 0.95, use_precision_aware_optimizer: false, overlap_cpu_optimizer_d2h_h2d: false}
+    scheduler: {lr_warmup_iters: 0, lr_warmup_init: 1.0e-06}
+    distributed_data_parallel_config: {overlap_grad_reduce: false, overlap_param_gather: false}
+    model_overrides: {moe_aux_loss_coeff: 0.0, attention_dropout: 0.0, hidden_dropout: 0.0}
+
+  # Quantization: simulate NVFP4 during training.
+  quant_cfg: NVFP4_DEFAULT_CFG
+  disable_modelopt_layer_spec: false
+
+# Training and validation input files.
+data:
+  num_workers: 0
+  train: {dataset_name: PreferenceDataset, data_path: '${oc.env:KTO_TRAIN_DATA}'}
+  validation: {dataset_name: PreferenceDataset, split: train, data_path: '${oc.env:KTO_VALIDATION_DATA}'}
+  default: {prompt_file: null, system_prompt_file: null}
+
+# Logging.
+logger:
+  log_dir: ${oc.env:KTO_OUTPUT_DIR}/logs
+  tensorboard_enabled: true
+  monitor_gpus: false
+  tensorboard: {log_dir: tb_logs-kto}
+
+# GPU resources and usage telemetry.
+cluster: {gpus_per_node: 4}
+telemetry: {enabled: false}
