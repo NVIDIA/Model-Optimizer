@@ -84,7 +84,8 @@ Three changes, all set in the recipe YAML:
 
 1. **Score in a low-bit context.** With ``auto_quantize_method: kl_div`` and
    ``method_options: {context_quant_level: k}``, each candidate is scored while the other searched
-   layers sit at their ``k``-th lowest format. The score then includes how a layer's error compounds
+   layers sit at the format ``k`` steps above their lowest-bit candidate (``0`` is the lowest). The
+   score then includes how a layer's error compounds
    with the others', so the scores add up closer to the model that ships. Bolt uses
    ``context_quant_level: 1`` (IQ2_XXS, the second-lowest candidate). Qwen3.6 uses ``lowest``, also
    IQ2_XXS. With a context, AutoQuantize picks formats with a linear program, as the gradient method
@@ -123,8 +124,8 @@ Results on Nemotron 3.5 Bolt
 ****************************
 
 Nemotron 3.5 Bolt is a 74B-parameter hybrid Mamba-Transformer MoE with 9B active parameters. The
-24GB release keeps its experts at IQ2_XXS and the other layers at the formats above, and was then
-trained with QAD.
+24GB release keeps its experts at IQ2_XXS, the Mamba ``in_proj`` and ``out_proj`` at W4A16 NVFP4,
+and attention, the MoE latent projections and ``lm_head`` at Q8_0, and was then trained with QAD.
 
 The search scored candidates on 128 of 512 calibration documents (up to 512 tokens each) from
 Nemotron post-training data. Held-out KL is measured against BF16 on 128 other documents (62.2k
@@ -204,8 +205,8 @@ At the release's size, PTQ with uniform IQ2_XXS experts loses 7 AA-LCR points to
 The recipe recovers them with the same bytes and is 3 points higher on GPQA. Most of the
 remaining AA-LCR gap to BF16 is runaway reasoning, not wrong answers: a generation that hits the
 token budget scores as wrong, and those are repetition loops. Among finished generations, every
-model answers about 70% correctly, BF16 included, but at 24.0 GB the quantized model hits the budget
-in 15.9% of generations against BF16's 7.6%. A 512-token KL objective does not see that, so
+model answers about 70% correctly, BF16 included, but at 2.25 bits (24.0 GB) the recipe's model hits
+the budget in 15.9% of generations against BF16's 7.6%. A 512-token KL objective does not see that, so
 adding bytes moves AA-LCR less than it moves KL.
 
 These numbers come from a script with the recipe's search and finalize settings. The script loads
@@ -270,8 +271,8 @@ recipe at 22.4 GB; a negative eval delta means lower accuracy than the recipe.
   layers at their final formats. Erring toward BF16 for the non-expert layers costs little; scoring
   them at 2 bits, below their final formats, costs 23% in KL and 5.6 AA-LCR points. Scoring with
   the other experts in BF16 is the costliest choice, even with the linear program.
-* **Calibration.** Without GPTQ, the same assignment loses about as much KL as going from 22.4 to
-  24.0 GB gains.
+* **Calibration.** Without GPTQ, the same assignment loses about as much KL as going from 2.0625 to
+  2.25 bits (22.4 to 24.0 GB) gains.
 * **Scope.** Searching the non-expert layers too lost at every size we tried, 6-17% in KL and 1-2
   GPQA points. A layer type with a well-tested format is better fixed than searched.
 
@@ -321,8 +322,8 @@ Run the command once to search, then run it again to finalize and export. Both r
 For Qwen3.6-35B-A3B, use ``--pyt_ckpt_path Qwen/Qwen3.6-35B-A3B`` and
 ``--recipe models/Qwen/Qwen3.6-35B-A3B/auto_quantize/iq2_gptq_nvfp4_fp8_experts_at_2p75bits``.
 
-* **Other budgets.** Change ``constraints.effective_bits`` in a copy of the recipe. The
-  2.25- to 2.75-bit rows above are the same search solved at those budgets.
+* **Other budgets.** Change ``constraints.effective_bits`` in a copy of the recipe. The Bolt
+  table's 2.25- to 2.75-bit rows are the same search solved at those budgets.
 * **One GPU or several.** ``hf_ptq.py`` holds Bolt on one GPU: on a GB200, a search with two expert
   candidates peaked at 184 GB and the finalize at 193 GB. To score the candidate formats in
   parallel, run one format shard per GPU and merge them, as described in `Scoring and finalizing
