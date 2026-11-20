@@ -19,6 +19,9 @@ Changelog
 
 *Quantization - QAT / QAD*
 
+- Add a `QAKTO tutorial <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/kto/>`_
+  for reducing doomed reasoning loops in NVFP4 Qwen3.6-35B-A3B, with benchmark results and NeMo RL training examples.
+
 *Quantization - Export & Deployment*
 
 - ``examples/hf_ptq/convert_ggml_to_int8.py`` now also converts GGML exports that hold other formats (FP8, NVFP4, KV cache quantization): their GGML layers become ModelOpt ``INT8_PB_WO`` layers beside the rest of the export, which vLLM newer than 0.34.0 serves. Exports with only GGML layers still become compressed-tensors, and fused MoE experts now convert in both.
