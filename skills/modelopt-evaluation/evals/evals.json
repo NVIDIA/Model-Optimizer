@@ -107,7 +107,7 @@
       "Asks all 5 base config questions (execution, deployment, auto-export, model type, benchmarks) before generating the config",
       "Runs 'nel skills build-config' with correct flags matching user answers, using NEL's current model_type terminology for the chat/reasoning template family",
       "Searches the web for the model card on HuggingFace and extracts model-specific settings",
-      "Sets correct HF handle: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "Identifies the model as nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 and serves it from a verified staged checkpoint_path (hf_model_handle unset) or a handle pinned to a reviewed commit, with the rendered command serving that source",
       "Sets reasoning sampling params from model card: temperature=1.0, top_p=1.0",
       "Configures reasoning toggle via params_to_add with chat_template_kwargs.enable_thinking (not via system prompt)",
       "Disables reasoning for IFEval task using enable_thinking: false with use_system_prompt: false",

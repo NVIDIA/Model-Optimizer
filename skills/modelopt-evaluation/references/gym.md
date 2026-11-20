@@ -114,8 +114,7 @@ Two editing rules for these blocks:
 
 Two launcher-level trust flags gate every gym submission:
 
-- `NEMO_EVALUATOR_TRUST_PRE_CMD=1` — the gym configs carry a `pre_cmd`; NEL refuses
-  the submission without it (see `launcher-workflow.md` Step 8).
+- `NEMO_EVALUATOR_TRUST_PRE_CMD`: review the Gym `pre_cmd` per `launcher-workflow.md` Step 8.
 - `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` (in `.env`) — `nemo_gym` is not in the FDF
   mapping, so submission is refused without it.
 
