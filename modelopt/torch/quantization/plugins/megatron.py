@@ -58,7 +58,7 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
-from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX, resize_pins
+from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX, pins_fit, resize_pins
 from ..nn import (
     GroupedQuantizer,
     QuantModule,
@@ -529,8 +529,18 @@ class _MegatronParallelLinear(_ParallelLinear):
 
     def modelopt_post_restore(self, prefix: str = ""):
         # GGML pins are restored at the saved shard's shape; the sharded load fills this rank's.
-        if self.weight is not None and isinstance(self.weight_quantizer, TensorQuantizer):
-            resize_pins(self.weight_quantizer, self.weight)
+        if isinstance(self.weight_quantizer, GroupedQuantizer):
+            if not all(
+                pins_fit(quantizer, weight)
+                for weight, quantizer in self.iter_weights_for_calibration()
+                if isinstance(quantizer, TensorQuantizer)
+            ):
+                raise NotImplementedError(
+                    "GGML pins of grouped experts can't be loaded at another expert "
+                    "tensor-parallel size. Load the checkpoint at the size it was saved at."
+                )
+        elif self.weight is not None and isinstance(self.weight_quantizer, TensorQuantizer):
+            resize_pins(self.weight_quantizer, self.weight, sharded_blocks=self._is_row_parallel)
         super().modelopt_post_restore(prefix=prefix)
 
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):

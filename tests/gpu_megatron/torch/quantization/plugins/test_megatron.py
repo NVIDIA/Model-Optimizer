@@ -1735,7 +1735,7 @@ def _iq2_xs_config(preparation):
     return config
 
 
-def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, size):
+def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, hidden_size, rank, size):
     initialize_for_megatron(
         tensor_model_parallel_size=size,
         expert_tensor_parallel_size=size if grouped else None,
@@ -1745,7 +1745,7 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
     def create_model(tp_size=size):
         return _gpt_model_provider(
             tp_size=tp_size,
-            hidden_size=512,
+            hidden_size=hidden_size,
             num_moe_experts=2 if grouped else None,
             moe_grouped_gemm=grouped,
             etp_size=tp_size if grouped else None,
@@ -1847,12 +1847,16 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
 
 
 @pytest.mark.parametrize(
-    ("preparation", "grouped"), [("gptq", False), ("ptq", False), ("ptq", True)]
+    ("preparation", "grouped", "hidden_size"),
+    # 352 pads each TP=2 rank's 704 linear_fc2 input columns to whole 256-value blocks.
+    [("gptq", False, 512), ("ptq", False, 512), ("ptq", True, 512), ("ptq", False, 352)],
 )
-def test_ggml_payload_sharded_state_dict(dist_workers_size_2, tmp_path, preparation, grouped):
+def test_ggml_payload_sharded_state_dict(
+    dist_workers_size_2, tmp_path, preparation, grouped, hidden_size
+):
     """Dense/grouped scale pins and effective weights survive rank-local updates and reload."""
     dist_workers_size_2.run(
-        partial(_test_ggml_payload_sharded_state_dict, tmp_path, preparation, grouped)
+        partial(_test_ggml_payload_sharded_state_dict, tmp_path, preparation, grouped, hidden_size)
     )
 
 
@@ -1900,6 +1904,49 @@ def test_ggml_payload_tp_reshard(dist_workers_size_2, tmp_path, preparation, act
     dist_workers_size_2.run(
         partial(_test_ggml_payload_tp_reshard, tmp_path, preparation, activation_func)
     )
+
+
+def _test_ggml_payload_tp_reshard_rejected(tmp_path, grouped, rank, size):
+    def create_model(tp_size):
+        # Dense: 352 pads linear_fc2's 704 input columns per TP=2 rank (1408 at TP=1) to blocks.
+        return _gpt_model_provider(
+            tp_size=tp_size,
+            hidden_size=512 if grouped else 352,
+            num_moe_experts=2 if grouped else None,
+            moe_grouped_gemm=grouped,
+            etp_size=tp_size if grouped else None,
+            transformer_impl="transformer_engine" if grouped else "local",
+        )
+
+    initialize_for_megatron(
+        tensor_model_parallel_size=size,
+        expert_tensor_parallel_size=size if grouped else None,
+        seed=SEED,
+    )
+    source = create_model(size)
+    for module in source.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+    mtq.quantize(source, _iq2_xs_config("ptq"), get_forward(source))
+    mtq.initialize_qdq_weights(source)
+    save_distributed_checkpoint(tmp_path, source)
+    save_sharded_modelopt_state([source], tmp_path)
+    torch.distributed.barrier()
+    del source
+    destroy_model_parallel()
+
+    initialize_for_megatron(
+        tensor_model_parallel_size=1, expert_tensor_parallel_size=1 if grouped else None, seed=SEED
+    )
+    error = NotImplementedError if grouped else ValueError
+    with pytest.raises(error, match=r"can't be loaded at another"):
+        restore_sharded_modelopt_state([create_model(1)], tmp_path)
+
+
+@pytest.mark.parametrize("grouped", [False, True], ids=["padded_row_parallel", "grouped_experts"])
+def test_ggml_payload_tp_reshard_rejected(dist_workers_size_2, tmp_path, grouped):
+    """GGML pins that can't be resharded fail at restore instead of loading misplaced blocks."""
+    dist_workers_size_2.run(partial(_test_ggml_payload_tp_reshard_rejected, tmp_path, grouped))
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])

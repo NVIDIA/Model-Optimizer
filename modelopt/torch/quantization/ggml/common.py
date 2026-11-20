@@ -227,30 +227,53 @@ def pin_packed_weight(
     quantizer._quantizer_cache = None
 
 
-def resize_pins(quantizer, weight: torch.Tensor) -> None:
-    """Shape ``quantizer``'s pins for ``weight``, this rank's shard at the current tensor parallelism.
-
-    Restoring a checkpoint saved at another tensor parallelism gives the pins the saved shard's
-    shape; the sharded checkpoint load that follows fills them with this shard.
-    """
+def _pin_shapes(quantizer, weight: torch.Tensor):
+    """Yield each pinned buffer of ``quantizer`` with its shape for ``weight``, and its block size."""
     # Local: the registry imports GGMLFormat from this module.
     from .registry import GGML_FORMAT_REGISTRY
 
     for name, buffer in list(quantizer.named_buffers(recurse=False)):
         if name.startswith(PINNED_IMPORTANCE_PREFIX):
-            shape = weight.shape[-1:]
+            yield name, buffer, weight.shape[-1:], None
         elif name.startswith(PINNED_PAYLOAD_PREFIX):
             format_name = name.removeprefix(PINNED_PAYLOAD_PREFIX)
             format_name = format_name.removesuffix("_search_scales").removesuffix("_source")
+            block_size = GGML_FORMAT_REGISTRY[format_name].block_size
             # Block quantization pads the last dimension to whole blocks.
-            blocks = -(-weight.shape[-1] // GGML_FORMAT_REGISTRY[format_name].block_size)
+            blocks = -(-weight.shape[-1] // block_size)
             # ``[*rows, blocks, ...]``, the payload's block bytes or the source's keys last.
-            shape = (*weight.shape[:-1], blocks, *buffer.shape[weight.dim() :])
-        else:
+            yield (
+                name,
+                buffer,
+                (*weight.shape[:-1], blocks, *buffer.shape[weight.dim() :]),
+                block_size,
+            )
+
+
+def pins_fit(quantizer, weight: torch.Tensor) -> bool:
+    """Whether ``quantizer``'s pins have the shape of ``weight``'s."""
+    return all(buffer.shape == shape for _, buffer, shape, _ in _pin_shapes(quantizer, weight))
+
+
+def resize_pins(quantizer, weight: torch.Tensor, *, sharded_blocks: bool = False) -> None:
+    """Shape ``quantizer``'s pins for ``weight``, this rank's shard at the current tensor parallelism.
+
+    Restoring a checkpoint saved at another tensor parallelism gives the pins the saved shard's
+    shape; the sharded checkpoint load that follows fills them with this shard. ``sharded_blocks``
+    says the shards split the blocks (row-parallel layers), which only works without padding.
+    """
+    for name, buffer, shape, block_size in _pin_shapes(quantizer, weight):
+        if buffer.shape == shape:
             continue
-        if buffer.shape != shape:
-            quantizer._set_buffer(name, buffer.new_zeros(shape))
-            quantizer._quantizer_cache = None
+        if sharded_blocks and block_size and weight.shape[-1] % block_size:
+            raise ValueError(
+                f"GGML pins can't be loaded at another tensor-parallel size: each rank's "
+                f"{weight.shape[-1]} input columns aren't a multiple of the {block_size}-value "
+                "block. Load the checkpoint at the tensor-parallel size it was saved at, or "
+                "quantize at this one."
+            )
+        quantizer._set_buffer(name, buffer.new_zeros(shape))
+        quantizer._quantizer_cache = None
 
 
 def pinned_packed_weight(quantizer, format_name: str) -> torch.Tensor | None:
