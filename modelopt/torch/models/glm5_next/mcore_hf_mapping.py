@@ -13,27 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Custom mappings from Megatron Core models to GLM-5.x Hugging Face models.
+"""Custom mapping from GLM-5.3-Flash (``glm5_next``) Hugging Face models to Megatron Core models.
 
-GLM-5 / GLM-5.2 (``glm_moe_dsa``) is DeepSeek-V3-style MLA with a DSA indexer.
-
-For GLM-5.3-Flash (``glm5_next``), Megatron-Bridge builds each HF decoder layer as two physical
-layers wrapped in mHC hyper-connections: attention (KDA or NoPE-MLA DSA) at ``2N`` and the dense MLP /
-MoE at ``2N+1``. The vision tower is copied from HF.
-
-Both keep the MTP layer at HF index ``num_hidden_layers`` under the decoder's names.
+Megatron-Bridge builds each HF decoder layer as two physical layers wrapped in mHC
+hyper-connections: attention (KDA or NoPE-MLA DSA) at ``2N`` and the dense MLP / MoE at
+``2N+1``. The MTP layer stays at HF index ``num_hidden_layers`` under the decoder's names. The
+vision tower is copied from HF.
 """
 
-from .mcore_custom import (
+from modelopt.torch.export.plugins.mcore_custom import (
     GatedMLPSlicing,
     GroupedGatedMLPSlicing,
     GroupedMLPSlicing,
     KimiDeltaAttentionSlicing,
     NameRemapping,
     SelfAttentionScaling,
+    register_mcore_hf_mapping,
     with_language_model_prefix,
 )
-from .mcore_deepseek import deepseek_causal_lm_export
+
+__all__: list[str] = []
 
 # Vision-tower weights copied straight from the HF checkpoint (never quantized).
 GLM5_NEXT_VISION_PREFIXES = ("model.visual.",)
@@ -104,18 +103,8 @@ _glm5_next_causal_lm_export: dict = {
 
 glm5_next_causal_lm_export = with_language_model_prefix(_glm5_next_causal_lm_export)
 
-glm_moe_dsa_causal_lm_export: dict = {
-    **deepseek_causal_lm_export,
-    "mtp_in_decoder_layers": True,
-    "core_attention": SelfAttentionScaling("model.layers.{}.self_attn."),
-    "indexer.linear_wq_b": NameRemapping("model.layers.{}.self_attn.indexer.wq_b."),
-    "indexer.linear_wk": NameRemapping("model.layers.{}.self_attn.indexer.wk."),
-    "indexer.k_norm": NameRemapping("model.layers.{}.self_attn.indexer.k_norm."),
-    "indexer.linear_weights_proj": NameRemapping("model.layers.{}.self_attn.indexer.weights_proj."),
-    "experts.linear_fc1": GroupedGatedMLPSlicing("model.layers.{}.mlp.experts.{{}}"),
-    "experts.linear_fc2": GroupedMLPSlicing("model.layers.{}.mlp.experts.{{}}.down_proj"),
-    "mtp.enorm": NameRemapping("model.layers.{}.enorm."),
-    "mtp.hnorm": NameRemapping("model.layers.{}.hnorm."),
-    "mtp.eh_proj": NameRemapping("model.layers.{}.eh_proj."),
-    "mtp.final_layernorm": NameRemapping("model.layers.{}.shared_head.norm."),
-}
+register_mcore_hf_mapping(
+    "Glm5NextForConditionalGeneration",
+    export_mapping=glm5_next_causal_lm_export,
+    vision_passthrough_prefixes=GLM5_NEXT_VISION_PREFIXES,
+)

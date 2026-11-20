@@ -13,26 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Custom mapping from Llama Hugging Face models to Megatron Core models.
 
-"""Custom mapping from Llama Hugging Face models to Megatron Core models."""
+Also holds the mappings of the EAGLE draft models exported from them.
+"""
 
-from .mcore_custom import (
+from modelopt.torch.export.plugins.mcore_custom import (
     COL_TP,
-    PACK_COL_ETP,
-    PACK_EP,
-    PACK_ROW_ETP,
     REPLICATE,
     ROW_TP,
     CustomModuleMapping,
     GatedMLPMerging,
     GatedMLPSlicing,
     NameRemapping,
-    PackNameRemapping,
     QKVMerging,
     QKVSlicing,
     SelfAttentionScaling,
-    UnpackNameRemapping,
+    register_mcore_hf_mapping,
 )
+
+__all__: list[str] = []
 
 llama_causal_lm_export: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("model.embed_tokens."),
@@ -48,37 +48,6 @@ llama_causal_lm_export: dict[str, CustomModuleMapping] = {
     "linear_fc2": NameRemapping("model.layers.{}.mlp.down_proj."),
     "final_layernorm": NameRemapping("model.norm."),
     "output_layer": NameRemapping("lm_head."),
-}
-
-llama4_causal_lm_export: dict[str, CustomModuleMapping | bool] = {
-    "word_embeddings": NameRemapping("language_model.model.embed_tokens."),
-    "input_layernorm": NameRemapping("language_model.model.layers.{}.input_layernorm."),
-    # MoE-only on MLP side, so fused_pre_mlp_layernorm path is unreachable.
-    "fused_input_layernorm": NameRemapping("language_model.model.layers.{}.input_layernorm.weight"),
-    # self_attn
-    "linear_qkv": QKVSlicing("language_model.model.layers.{}.self_attn."),
-    "linear_proj": NameRemapping("language_model.model.layers.{}.self_attn.o_proj."),
-    # mlp
-    "pre_mlp_layernorm": NameRemapping("language_model.model.layers.{}.post_attention_layernorm."),
-    "shared_experts.linear_fc1": GatedMLPSlicing(
-        "language_model.model.layers.{}.feed_forward.shared_expert.",
-    ),
-    "shared_experts.linear_fc2": NameRemapping(
-        "language_model.model.layers.{}.feed_forward.shared_expert.down_proj.",
-    ),
-    # moe_layer
-    "router": NameRemapping("language_model.model.layers.{}.feed_forward.router."),
-    "use_packed_local_experts": True,
-    "local_experts.linear_fc1": PackNameRemapping(
-        "language_model.model.layers.{}.feed_forward.experts.gate_up_proj",
-        {"layer_type": "linear_fc1"},
-    ),
-    "local_experts.linear_fc2": PackNameRemapping(
-        "language_model.model.layers.{}.feed_forward.experts.down_proj",
-        {"layer_type": "linear_fc2"},
-    ),
-    "final_layernorm": NameRemapping("language_model.model.norm."),
-    "output_layer": NameRemapping("language_model.lm_head."),
 }
 
 medusa_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
@@ -150,11 +119,10 @@ eagle3_deep_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
     "parallel_draft_heads.lm_head": NameRemapping("parallel_draft_heads.lm_head."),
 }
 
-
 llama_causal_lm_import: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("model.embed_tokens.", COL_TP),
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm.", REPLICATE),
-    # Fused TE spec (TELayerNormColumnParallelLinear) — see mcore_qwen.py for rationale.
+    # Fused TE spec (TELayerNormColumnParallelLinear) — see qwen3/mcore_hf_mapping.py for rationale.
     "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
     "linear_qkv": QKVMerging("model.layers.{}.self_attn.", COL_TP),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj.", ROW_TP),
@@ -166,42 +134,20 @@ llama_causal_lm_import: dict[str, CustomModuleMapping] = {
     "output_layer": NameRemapping("lm_head.", COL_TP),
 }
 
-llama4_causal_lm_import: dict[str, CustomModuleMapping | bool] = {
-    "word_embeddings": NameRemapping("language_model.model.embed_tokens.", COL_TP),
-    "input_layernorm": NameRemapping("language_model.model.layers.{}.input_layernorm.", REPLICATE),
-    # Fused TE spec (TELayerNormColumnParallelLinear) — see mcore_qwen.py for rationale.
-    # Llama4 is MoE-only on the MLP side (no layer.mlp.linear_fc1), so the importer's
-    # fused_pre_mlp_layernorm path is unreachable; only fused_input_layernorm is wired.
-    "fused_input_layernorm": NameRemapping("language_model.model.layers.{}.input_layernorm.weight"),
-    "linear_qkv": QKVMerging("language_model.model.layers.{}.self_attn.", COL_TP),
-    "linear_proj": NameRemapping("language_model.model.layers.{}.self_attn.o_proj.", ROW_TP),
-    "pre_mlp_layernorm": NameRemapping(
-        "language_model.model.layers.{}.post_attention_layernorm.", REPLICATE
-    ),
-    "shared_experts.linear_fc1": GatedMLPMerging(
-        "language_model.model.layers.{}.feed_forward.shared_expert.", COL_TP
-    ),
-    "shared_experts.linear_fc2": NameRemapping(
-        "language_model.model.layers.{}.feed_forward.shared_expert.down_proj.", ROW_TP
-    ),
-    "router": NameRemapping("language_model.model.layers.{}.feed_forward.router.", REPLICATE),
-    "use_packed_local_experts": True,
-    "local_experts.linear_fc1_etp": UnpackNameRemapping(
-        "language_model.model.layers.{}.feed_forward.experts.gate_up_proj",
-        PACK_COL_ETP | {"layer_type": "linear_fc1"},
-    ),
-    "local_experts.linear_fc2_etp": UnpackNameRemapping(
-        "language_model.model.layers.{}.feed_forward.experts.down_proj",
-        PACK_ROW_ETP | {"layer_type": "linear_fc2"},
-    ),
-    "local_experts.linear_fc1_ep": UnpackNameRemapping(
-        "language_model.model.layers.{}.feed_forward.experts.gate_up_proj",
-        PACK_EP | {"layer_type": "linear_fc1"},
-    ),
-    "local_experts.linear_fc2_ep": UnpackNameRemapping(
-        "language_model.model.layers.{}.feed_forward.experts.down_proj",
-        PACK_EP | {"layer_type": "linear_fc2"},
-    ),
-    "final_layernorm": NameRemapping("language_model.model.norm.", REPLICATE),
-    "output_layer": NameRemapping("language_model.lm_head.", COL_TP),
-}
+register_mcore_hf_mapping(
+    "LlamaForCausalLM",
+    export_mapping=llama_causal_lm_export,
+    import_mapping=llama_causal_lm_import,
+)
+register_mcore_hf_mapping(
+    "LlamaForCausalLMEagle",
+    export_mapping=eagle_llama_causal_lm_export,
+)
+register_mcore_hf_mapping(
+    "LlamaForCausalLMEagle3",
+    export_mapping=eagle3_llama_causal_lm_export,
+)
+register_mcore_hf_mapping(
+    "LlamaForCausalLMEagle3Deep",
+    export_mapping=eagle3_deep_llama_causal_lm_export,
+)

@@ -20,12 +20,24 @@ The new model nests the whole Nemotron-H language model, ``lm_head`` included, u
 and projector are copied verbatim from HF via ``NEMOTRON_H_OMNI_VISION_PREFIXES``, not mapped.
 """
 
-from .mcore_custom import with_language_model_prefix
-from .mcore_nemotron import nemotron_h_causal_lm_export
+from modelopt.torch.export.plugins.mcore_custom import (
+    register_mcore_hf_mapping,
+    with_language_model_prefix,
+)
+
+from ..nemotron_h.mcore_hf_mapping import nemotron_h_causal_lm_export
+
+__all__: list[str] = []
 
 # Weights copied straight from the HF checkpoint (never quantized).
 NEMOTRON_H_OMNI_VISION_PREFIXES = ("vision_model.", "vision_projector.", "mlp1.")
 
 nemotron_h_omni_causal_lm_export = with_language_model_prefix(
     nemotron_h_causal_lm_export, old_prefix="", new_prefix="language_model."
+)
+
+register_mcore_hf_mapping(
+    "NemotronH_Omni_Reasoning_V3",
+    export_mapping=nemotron_h_omni_causal_lm_export,
+    vision_passthrough_prefixes=NEMOTRON_H_OMNI_VISION_PREFIXES,
 )

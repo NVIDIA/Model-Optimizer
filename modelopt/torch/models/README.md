@@ -75,6 +75,20 @@ after the interface wrapper and before the AST-based fallback — and exports no
 type's PTQ code (`step3p7` uses `step3p5`'s) still gets a `modeling_ptq.py` that imports the
 shared one, so loading it by model type works.
 
+## Megatron-Core mapping
+
+How a model's Megatron-Core parameters map to and from its Hugging Face names lives in
+`<model_type>/mcore_hf_mapping.py`: the mapping tables, built from the classes in
+`modelopt/torch/export/plugins/mcore_custom.py`, and one `register_mcore_hf_mapping(<HF
+architecture>, export_mapping=..., ...)` call per architecture the model ships under
+(`import_mapping` and `vision_passthrough_prefixes` are optional). `mcore_common` imports every
+`mcore_hf_mapping` module from an explicit list, so add a new model type there; the Megatron
+exporter and importer read the registries it exposes. A model that reuses another type's tables
+imports them from that type's `mcore_hf_mapping` (`qwen3_moe` uses `qwen3`'s).
+
+A package whose model has nothing to put in a spec (`qwen2`, `glm5_next`) holds only `__init__.py`
+and `mcore_hf_mapping.py`, and is left out of `models/__init__.py`'s import list, like `kimi_k3`.
+
 ## Sections
 
 A `ModelSpec` holds one attribute per section, each `None` unless the model fills it:

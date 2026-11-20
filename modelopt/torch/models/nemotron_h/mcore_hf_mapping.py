@@ -13,10 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Custom mapping from Nemotron-H Hugging Face models to Megatron Core models."""
 
-"""Custom mapping from Nemotron Hugging Face models to Megatron Core models."""
-
-from .mcore_custom import (
+from modelopt.torch.export.plugins.mcore_custom import (
     COL_ETP,
     COL_TP,
     REPLICATE,
@@ -29,24 +28,10 @@ from .mcore_custom import (
     QKVMerging,
     QKVSlicing,
     SelfAttentionScaling,
+    register_mcore_hf_mapping,
 )
 
-# Example on adding a new CausalLM.
-nemotron_causal_lm_export: dict[str, CustomModuleMapping] = {
-    # NemotronForCausalLM is using square-relu where no gated handle is needed.
-    "word_embeddings": NameRemapping("model.embed_tokens."),
-    "input_layernorm": NameRemapping("model.layers.{}.input_layernorm."),
-    "linear_qkv": QKVSlicing("model.layers.{}.self_attn."),
-    "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj."),
-    "core_attention": SelfAttentionScaling("backbone.layers.{}.mixer."),
-    "pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm."),
-    # NemotronForCausalLM is using square-relu where no gated handle is needed.
-    "linear_fc1": NameRemapping("model.layers.{}.mlp.up_proj."),
-    "linear_fc2": NameRemapping("model.layers.{}.mlp.down_proj."),
-    "final_layernorm": NameRemapping("model.norm."),
-    "output_layer": NameRemapping("lm_head."),
-}
-
+__all__: list[str] = []
 
 nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("backbone.embeddings.", COL_TP),
@@ -165,3 +150,9 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj."),
     "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm."),
 }
+
+register_mcore_hf_mapping(
+    "NemotronHForCausalLM",
+    export_mapping=nemotron_h_causal_lm_export,
+    import_mapping=nemotron_h_causal_lm_import,
+)
