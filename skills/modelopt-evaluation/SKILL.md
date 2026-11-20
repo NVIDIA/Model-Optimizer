@@ -1,6 +1,6 @@
 ---
 name: modelopt-evaluation
-description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Always load when validating completed runs or reporting evaluation scores, including standalone modelopt-launching-evals analysis. Not for quantizing models (use modelopt-ptq), standalone serving (use modelopt-deployment), or comparing completed baseline-vs-quantized results (use modelopt-compare-results).
+description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Always load when validating completed runs or reporting evaluation scores, including standalone modelopt-launching-evals analysis, and before any NEL launch or rerun. Not for quantizing models (use modelopt-ptq), standalone serving (use modelopt-deployment), or comparing completed baseline-vs-quantized results (use modelopt-compare-results).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073).
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
@@ -36,6 +36,8 @@ If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-managemen
 - [ ] Step 9: Verify completed run
 ```
 
+Every NEL launch follows Step 8's **Hook trust** in [launcher-workflow.md](references/launcher-workflow.md), including existing configs, reruns, launches through `modelopt-launching-evals`, and resumes.
+
 ---
 
 ## nel-next path (Terminal-Bench 2.x, SWE-bench, …) — branch here FIRST
@@ -50,7 +52,7 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
    Read [model-card research](references/model-card-research.md) for generation settings; consult task-specific policy before selecting published budgets or fallbacks.
 2. Isolated nel-next venv: `"$SKILL_DIR/scripts/nel-next.sh" --setup-only` (keeps 0.2.6 `nel` untouched).
 3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`, `${HARBOR_ECS_REGION}`) into `.env`; always include the `output.export_config.mlflow` block.
-4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
+4. Dry-run → canary → full (`nel-next.sh eval run`); check code-loading settings before each `--submit` as in `references/nel-next.md`'s Run section. Then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
 5. Before reporting a full-run score, apply `references/run-validation.md`, including its benchmark-specific checks.
 
 Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
@@ -73,10 +75,10 @@ for an "AA" request. If the user asks for MRCR:
    sets the context cap, dataset *and* metric prefix; the three are not
    comparable; set it in **both** `data_prep_params` and `collect_rollout_params`.
    Take the largest variant within the checkpoint's trained context — see the recipe.
-3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) plus
-   `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the `pre_cmd` installs `tiktoken` +
-   `transformers`; prepare fails without it) and
+3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) and
    `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` (`nemo_gym` is not in the FDF map).
+   The config's `pre_cmd` needs hook trust: follow Step 8's **Hook trust** in
+   `references/launcher-workflow.md`.
 4. **MRCR needs a git-backed Gym image.** The pin is newer than any image's baked
    Gym and must apply, so the template's `container:` is `???` and the bootstrap
    exits 1 on a non-git `/opt/Gym` (the public `eval-factory/nemo-gym:*` images).

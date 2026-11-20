@@ -38,6 +38,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- The ``modelopt-evaluation`` agent skill no longer sets ``NEMO_EVALUATOR_TRUST_PRE_CMD=1`` in its ``.env`` template. It now enables hooks per launch: its own recipes' hooks run without asking, and you approve any others (or model-card-derived code) first; remove the setting from an older ``.env`` if you copied it.
+
 **Deprecations**
 
 **Bug Fixes**
