@@ -14,7 +14,7 @@ Use it to cross-check published settings. It does not replace reading the card.
 ## Lookup
 
 **The card is the source of truth; this table is a reference, not a constraint.**
-For `max_new_tokens`, follow [Model Card Research's token-budget rule](model-card-research.md#max_new_tokens--mandatory-model-card-lookup), including for caps in the notes.
+For `max_new_tokens`, follow [the output-budget rule](vendor-reference-and-sampling.md#output-budget), including for caps in the notes.
 The lookup steps below apply only to `temperature` / `top_p`:
 
 1. **Exact row, resolved per field.** `eval` → use it, cite the row. `rec` → use
@@ -37,9 +37,9 @@ tune sampling per benchmark, so **follow the card you are working from** and use
 these as the cross-check. Where the two disagree, **escalate to the user on a
 regime change, not a nudge** — greedy (`temperature ≤ 0.1` or `top_p ≤ 1e-4`)
 versus sampled flips the regime and materially moves both score and variance;
-`0.95` vs `1.0` does not. NEL accepts per-task `temperature` / `top_p` under
-`evaluation.tasks.*.nemo_evaluator_config`; only `max_new_tokens` is barred
-(see [launcher workflow](launcher-workflow.md#evaluation-params-template-top-level-params)).
+`0.95` vs `1.0` does not. Where per-task sampling goes is the evaluation tool's business (for NEL, per-task
+`nemo_evaluator_config`; see `modelopt-evaluation/references/launcher-workflow.md`); the output budget is the
+tool's, not this table's.
 
 > **Never take sampling from a card's quickstart snippet.**
 > `SamplingParams(temperature=0.8, top_p=0.95)` and `max_tokens=32` are
@@ -97,7 +97,7 @@ that tie. `max_num_tokens` is the max generation length, i.e.
 - **Per-task overrides are narrow** — SciCode (lower temperature), τ²-Bench
   Telecom (greedy or larger cap), GPQA Diamond (larger cap), Terminal-Bench
   (uncapped). Caps are observations, not selection rules; follow the
-  [token-budget rule](model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
+  [output-budget rule](vendor-reference-and-sampling.md#output-budget).
 
 ## Refreshing
 

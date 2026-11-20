@@ -16,7 +16,7 @@
 """Day-0 evaluation-run gate.
 
 Validates that a completed evaluation run is trustworthy before its scores are
-compared. Mirrors the checks in modelopt-evaluation/references/run-validation.md. Pure
+compared. Mirrors the checks in modelopt-eval-guidance/references/run-validity.md (NEL: modelopt-evaluation/references/run-validation.md). Pure
 decision logic in ``evaluate_run`` (unit-tested without a cluster); ``main``
 reads a run-summary JSON and prints the verdict.
 
@@ -33,7 +33,7 @@ The run summary is a dict with, per task:
         }
       }
     }
-Apply run-validation.md's bounded failure policy before constructing this
+Apply the tool's failure policy (NEL: run-validation.md's bounded failure policy) before constructing this
 summary; this gate does not verify failure rates or raw evidence. Preserve
 accepted failures in warnings and their original artifacts, never erase blockers.
 Only a terminal SUCCESS with complete, numeric scores passes. Non-terminal

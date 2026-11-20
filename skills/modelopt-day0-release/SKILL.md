@@ -277,8 +277,8 @@ the final path after any move.
 ## Triage (gate failure → decision)
 
 For completed evaluations, apply
-[evaluation run validation](../modelopt-evaluation/references/run-validation.md) before
-triage; its policy overrides retry actions below. Warn but do not retry solely
+[run validity](../modelopt-eval-guidance/references/run-validity.md) (NEL runs: also [NEL run validation](../modelopt-evaluation/references/run-validation.md)) before
+triage; the tool's failure policy (for NEL, the bounded policy in its run validation) overrides retry actions below. Warn but do not retry solely
 for failures below tolerance. For runs that fail tolerance or an independent
 validation check, return findings and a recommendation to the parent/user for
 review; do not automatically resubmit.

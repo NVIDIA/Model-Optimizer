@@ -10,6 +10,9 @@ license: Apache-2.0
 
 Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints. If the caller has not supplied a serving record, load `modelopt-deployment` first and derive one (step 5c); Step 3 uses it to cross-check the NEL deployment config, and NEL's own canary is the serving check.
 
+Tool-neutral duties (vendor reference check and sampling, quantization-aware benchmark choice, run validity, the
+external baseline check, doom loops) are in `modelopt-eval-guidance`; this skill keeps the NEL mechanics.
+
 ## Completed-run analysis
 
 For completed runs, skip launch/config; use launching-evals for artifacts/analysis
