@@ -3,6 +3,11 @@
 Use this after a run finishes and before any score is reported, for every tool. The tool's own health
 verdict is the primary signal; these are the checks and the reporting that do not depend on the tool.
 
+How much applies depends on the tool. NEL has no run verdict of its own, so every check below applies. NeMo Gym
+already decides state, health, coverage and recovery (its inspect step and health gate, in
+`run-and-babysit-eval`); take that verdict for "Verify a completed run" instead of repeating the log scan, and
+keep the accounting, the comparison rules and the reporting, which belong to the comparison.
+
 ## Verify a completed run
 
 Do not accept a run as complete because a result file or summary exists. For each completed baseline,
