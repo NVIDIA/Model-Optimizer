@@ -18,6 +18,7 @@ Changelog
 - GPTQ calibration is 25-35% faster in our MoE-expert and dense-MLP tests, with the GGML IQ formats and with NVFP4 under ``fused: true``. Results change only at round-off.
 - GPTQ now defaults to ``fused=True``, running the fused Triton update for static NVFP4 weights on SM89+ (4/6 scaling and other formats keep the unfused loop). Set ``fused: false`` to restore the previous behavior.
 - The fused NVFP4 GPTQ update runs its kernel 2-3x faster, with the same results.
+- GPTQ retries a Hessian that does not factor at 10x and then 100x the damping before falling back to plain rounding, so weights whose Hessian a few outlier input channels dominate are still calibrated by GPTQ.
 
 *Quantization - QAT / QAD*
 
@@ -52,6 +53,7 @@ Changelog
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 - Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
 - Calibration of a model spread over several GPUs no longer fails with an illegal memory access under ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``: clearing the CUDA cache now waits for every GPU's queued work first.
+- FP8 fake quantization of a tensor on a GPU other than the current one, such as a layer a ``device_map`` placed on another GPU, now runs on that tensor's GPU; it could fail with an illegal memory access.
 
 *ONNX*
 
