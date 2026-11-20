@@ -33,6 +33,9 @@ Highlights
   5 on GPQA and 6 on SciCode.
 * **GPTQ matters next.** Rounding the same format assignment with imatrix alone, without GPTQ,
   raises KL 17% and costs 3.8 ± 1.5 points on AA-LCR.
+* **Lowest KL on Qwen3.6-35B-A3B too, by a smaller margin.** At 2.75 effective bits, the recipe's
+  held-out KL is 0.100, against 0.105 for the default search and about 0.106 for uniform IQ2. These
+  margins are within one standard error.
 * **One command, two runs.** The same ``hf_ptq.py --recipe`` command searches, then finalizes and
   exports. Recipes are available for Nemotron 3.5 Bolt and Qwen3.6-35B-A3B.
 
