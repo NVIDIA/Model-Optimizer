@@ -29,10 +29,19 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from gate_compare import evaluate_comparison
+import gate_verbosity
+from gate_compare import evaluate_comparison, scores_from_run_summary
+from gate_compare import main as compare_main
 from gate_ptq import _recipe_bits, evaluate_checkpoint
 from gate_run import evaluate_run
-from gate_verbosity import _matches_exclude, _task_from_metadata, evaluate_verbosity, harvest
+from gate_verbosity import (
+    _matches_exclude,
+    _task_from_metadata,
+    evaluate_verbosity,
+    harvest,
+    harvest_mlflow,
+    tokens_from_mlflow_run,
+)
 from gate_verbosity import main as verbosity_main
 
 # ── gate_compare ──────────────────────────────────────────────────────
@@ -803,3 +812,198 @@ def test_collapse_guard_recognises_repeats_in_both_key_shapes(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(__import__("pytest").main([__file__, "-q"]))
+
+
+# ── tool-neutral inputs: run summary, UNVERIFIED, MLflow ───────────────────────
+
+_FIXTURES = json.loads((Path(__file__).parent / "fixtures" / "mlflow_runs.json").read_text())
+
+
+def _fx_run(name):
+    run = _FIXTURES["runs"][name]
+    return {"status": run["status"], "tags": run["tags"], "metrics": run["metrics"]}
+
+
+def _fx_get_run(run_id):
+    for run in _FIXTURES["runs"].values():
+        if run["run_id"] == run_id:
+            return {"status": run["status"], "tags": run["tags"], "metrics": run["metrics"]}
+    raise KeyError(run_id)
+
+
+def _fx_get_artifact(run_id, path):
+    for name, run in _FIXTURES["runs"].items():
+        if run["run_id"] == run_id:
+            return _FIXTURES["artifacts"][name][path]
+    raise KeyError(run_id)
+
+
+def test_run_unverified_does_not_pass_and_has_its_own_class():
+    """NeMo Gym reports UNVERIFIED when a run finished but some grading was not recorded."""
+    r = evaluate_run(
+        {
+            "tasks": {
+                "gpqa": {
+                    "status": "UNVERIFIED",
+                    "expected_samples": 10,
+                    "scored_samples": 10,
+                    "score": 90.0,
+                    "errors": [],
+                    "warnings": [],
+                }
+            }
+        }
+    )
+    assert not r["pass"] and r["failure_class"] == "EVAL_UNVERIFIED"
+    assert "not recorded" in r["detail"]
+
+
+def test_run_summary_scores_feed_the_compare_gate(tmp_path):
+    summary = lambda s: {  # noqa: E731
+        "tasks": {
+            "gpqa": {"status": "SUCCESS", "score": s, "errors": []},
+            "ifbench": {"status": "SUCCESS", "score": 75.0, "errors": []},
+            "scicode": {"status": "FAILED", "score": None, "errors": ["x"]},
+        }
+    }
+    assert scores_from_run_summary(summary(50.0)) == {"gpqa": 50.0, "ifbench": 75.0}
+    # a plain {task: score} mapping passes through unchanged
+    assert scores_from_run_summary({"gpqa": 1.0}) == {"gpqa": 1.0}
+    b, c = tmp_path / "b.json", tmp_path / "c.json"
+    b.write_text(json.dumps(summary(90.6)))
+    c.write_text(json.dumps(summary(90.4)))
+    assert compare_main(["--baseline", str(b), "--candidate", str(c)]) == 0
+
+
+def test_mlflow_nel_nemo_skills_run_uses_largest_repeat_count():
+    metrics = _FIXTURES["runs"]["nel_ifbench"]["metrics"]
+    got, why = tokens_from_mlflow_run(_fx_run("nel_ifbench"))
+    assert why is None
+    tokens, count = got
+    assert tokens == metrics["ifbench_pass_at_1_avg-of-5_answer_tokens_statistics_avg"]
+    assert count == int(metrics["ifbench_pass_at_1_avg-of-5_num_prompts"]) * 5 == 1500
+
+
+def test_mlflow_gym_run_reads_mean_output_tokens_and_scored_count():
+    metrics = _FIXTURES["runs"]["gym_ifbench_bf16"]["metrics"]
+    got, why = tokens_from_mlflow_run(_fx_run("gym_ifbench_bf16"))
+    assert why is None
+    assert got == (
+        metrics["ifbench_benchmark_simple_agent/mean/output_tokens"],
+        metrics["coverage/scored"],
+    )
+    # sibling keys such as .../mean_across_repeats/mean/output_tokens must not be picked up
+    assert any("across_repeats" in k for k in metrics)
+
+
+def test_mlflow_nel_simple_evals_falls_back_to_the_stored_artifact():
+    run = _fx_run("nel_gpqa_simple_evals")
+    assert not any("token" in k for k in run["metrics"])
+    rid = _FIXTURES["runs"]["nel_gpqa_simple_evals"]["run_id"]
+    got, why = tokens_from_mlflow_run(run, lambda path: _fx_get_artifact(rid, path))
+    stats = next(iter(_FIXTURES["artifacts"]["nel_gpqa_simple_evals"].values()))["response_stats"]
+    assert why is None and got == (stats["avg_completion_tokens"], stats["successful_count"])
+    # without an artifact loader there is nothing to read, and it says so
+    got, why = tokens_from_mlflow_run(run)
+    assert got is None and "no token metric" in why
+
+
+def test_mlflow_failed_run_is_not_used():
+    got, why = tokens_from_mlflow_run(_fx_run("nel_failed_terminalbench"))
+    assert got is None and "FAILED" in why
+
+
+def test_mlflow_ambiguous_agents_are_refused():
+    run = {
+        "status": "FINISHED",
+        "tags": {},
+        "metrics": {
+            "a/mean/output_tokens": 10.0,
+            "b/mean/output_tokens": 12.0,
+            "coverage/scored": 5,
+        },
+    }
+    got, why = tokens_from_mlflow_run(run)
+    assert got is None and "several agents" in why
+
+
+def test_mlflow_harvest_feeds_the_gate_and_reports_unused_runs():
+    ids = lambda *names: [_FIXTURES["runs"][n]["run_id"] for n in names]  # noqa: E731
+    diag_b, diag_c = {}, {}
+    baseline = harvest_mlflow(
+        {
+            "ns_ifbench": ids("gym_ifbench_bf16"),
+            "terminal-bench-2.1": ids("nel_failed_terminalbench"),
+        },
+        _fx_get_run,
+        _fx_get_artifact,
+        diag_b,
+    )
+    candidate = harvest_mlflow(
+        {"ns_ifbench": ids("gym_ifbench_nvfp4")}, _fx_get_run, _fx_get_artifact, diag_c
+    )
+    assert set(baseline) == {"ns_ifbench"} and set(candidate) == {"ns_ifbench"}
+    reasons = diag_b["runs_not_used"]
+    assert len(reasons) == 1 and reasons[0]["task"] == "terminal-bench-2.1"
+    assert "FAILED" in reasons[0]["reason"]
+    # the real runs differ by about 17% in output length, so the gate reports it
+    r = evaluate_verbosity(baseline, candidate, threshold=0.05)
+    assert not r["pass"] and r["failure_class"] == "VERBOSITY_EXCEEDED"
+    assert evaluate_verbosity(baseline, candidate, threshold=0.5)["pass"]
+
+
+def test_mlflow_unfetchable_run_is_reported_not_guessed():
+    def boom(run_id):
+        raise OSError("connection refused")
+
+    diag = {}
+    out = harvest_mlflow({"gpqa": ["abc"]}, boom, _fx_get_artifact, diag)
+    assert out == {} and "could not fetch" in diag["runs_not_used"][0]["reason"]
+    assert diag["found_metrics_files"] is False
+
+
+def test_verbosity_cli_mlflow_mode(tmp_path, monkeypatch, capsys):
+    base = {"ns_ifbench": [_FIXTURES["runs"]["gym_ifbench_bf16"]["run_id"]]}
+    cand = {"ns_ifbench": [_FIXTURES["runs"]["gym_ifbench_nvfp4"]["run_id"]]}
+    (tmp_path / "b.json").write_text(json.dumps(base))
+    (tmp_path / "c.json").write_text(json.dumps(cand))
+    monkeypatch.setattr(gate_verbosity, "_mlflow_http", lambda uri: (_fx_get_run, _fx_get_artifact))
+    argv = [
+        "--baseline-mlflow", str(tmp_path / "b.json"),
+        "--candidate-mlflow", str(tmp_path / "c.json"),
+        "--mlflow-uri", "http://mlflow.invalid",
+        "--threshold", "0.5",
+    ]  # fmt: skip
+    assert verbosity_main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["pass"] is True
+
+
+def test_verbosity_cli_rejects_mixed_or_missing_sources(tmp_path, capsys):
+    (tmp_path / "b.json").write_text("{}")
+    # directory mode and MLflow mode together
+    assert (
+        verbosity_main(
+            ["--baseline", str(tmp_path), "--candidate-mlflow", str(tmp_path / "b.json")]
+        )
+        == 2
+    )
+    # MLflow mode without a server
+    code = verbosity_main(
+        [
+            "--baseline-mlflow",
+            str(tmp_path / "b.json"),
+            "--candidate-mlflow",
+            str(tmp_path / "b.json"),
+        ]
+    )
+    assert code == 2
+    assert "no MLflow server" in capsys.readouterr().out
+
+
+def test_gate_run_classes_assigned_by_variable_have_triage_rows():
+    """gate_run picks its class with ``fc = "..."``, which the literal-key scan above does not see."""
+    scripts = Path(__file__).resolve().parent.parent
+    assigned = set(re.findall(r'fc = "([A-Z_]+)"', (scripts / "scripts/gate_run.py").read_text()))
+    rows = set(re.findall(r"^\| `([A-Z_]+)` \|", (scripts / "SKILL.md").read_text(), re.MULTILINE))
+    assert {"EVAL_UNVERIFIED", "INFRA_TRANSIENT", "EVAL_JUDGE_FAILED"} <= assigned
+    assert assigned <= rows, f"assigned but not in the triage table: {assigned - rows}"

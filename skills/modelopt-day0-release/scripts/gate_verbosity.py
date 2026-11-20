@@ -17,7 +17,8 @@
 
 Decides whether a candidate's average output length is within threshold of its
 baseline. Pure decision logic in ``evaluate_verbosity`` (unit-tested); ``main``
-harvests token counts from NEL eval artifacts.
+harvests token counts either from NEL eval artifacts on disk or, for any tool that
+exports to MLflow, from MLflow runs (``--baseline-mlflow`` / ``--candidate-mlflow``).
 
 Read ``response_stats.avg_completion_tokens``. The ``reasoning.*_tokens`` fields
 are always 0 (only the reasoning/content split is missing, not the total) and the
@@ -39,6 +40,8 @@ import os
 import re
 import statistics
 import sys
+import urllib.parse
+import urllib.request
 
 # Below this, a few tokens of difference is a large percentage. Flagged, not failed.
 _SHORT_OUTPUT_TOKENS = 1000
@@ -407,11 +410,147 @@ def harvest(side, glob="eval_*", exclude="", diagnostics=None):
     return out
 
 
+# ── MLflow source ─────────────────────────────────────────────────────────────
+# Both NEL and NeMo Gym export to MLflow, so token counts can be read from a run id
+# instead of a synced result tree. The metric names differ by tool:
+#   NEL:       <task>_pass_at_1_avg-of-<N>_answer_tokens_statistics_avg  (N = repeat count)
+#              sample count = <task>_pass_at_1_avg-of-<N>_num_prompts * N
+#              NEL ``simple_evals`` runs (GPQA) carry no token metrics; their stored
+#              artifact <harness>.<task>/artifacts/eval_factory_metrics.json has the same
+#              ``response_stats`` the on-disk harvest reads.
+#   NeMo Gym:  <agent>/mean/output_tokens ; sample count = coverage/scored
+_NEL_TOKENS = re.compile(
+    r"^(?P<prefix>.+)_pass_at_1_avg-of-(?P<n>\d+)_answer_tokens_statistics_avg$"
+)
+_GYM_TOKENS = re.compile(r"^(?P<agent>[^/]+)/mean/output_tokens$")
+
+
+def tokens_from_mlflow_run(run, load_artifact=None):
+    """Return ``((avg_completion_tokens, successful_count), None)`` or ``(None, reason)``.
+
+    ``run`` is ``{"status": str, "tags": {..}, "metrics": {..}}``. Only a ``FINISHED`` run
+    is used: failed and killed runs are exported too, with few metrics, and their partial
+    numbers must not enter a comparison. ``load_artifact(path)`` reads a JSON artifact of
+    this run (used only for the NEL ``simple_evals`` fallback).
+    """
+    status = run.get("status")
+    if status != "FINISHED":
+        return None, f"run status {status!r} is not FINISHED"
+    metrics, tags = run.get("metrics") or {}, run.get("tags") or {}
+
+    gym = {m.group("agent"): k for k in metrics if (m := _GYM_TOKENS.match(k))}
+    if len(gym) > 1:
+        return None, f"several agents report output tokens: {sorted(gym)}"
+    if gym:
+        key = next(iter(gym.values()))
+        count = metrics.get("coverage/scored")
+        if not metrics[key] or not count:
+            return None, f"{key}={metrics[key]!r} coverage/scored={count!r}"
+        return (metrics[key], count), None
+
+    nel = [
+        (int(m.group("n")), m.group("prefix"), k) for k in metrics if (m := _NEL_TOKENS.match(k))
+    ]
+    if nel:
+        n, prefix, key = max(nel)
+        prompts = metrics.get(f"{prefix}_pass_at_1_avg-of-{n}_num_prompts")
+        if not metrics[key] or not prompts:
+            return None, f"{key}={metrics[key]!r} num_prompts={prompts!r}"
+        return (metrics[key], round(prompts * n)), None
+
+    harness, task = tags.get("harness"), tags.get("task_name")
+    if load_artifact and harness and task:
+        path = f"{harness}.{task}/artifacts/eval_factory_metrics.json"
+        try:
+            stats = load_artifact(path).get("response_stats", {})
+        except (OSError, ValueError, KeyError) as e:
+            return None, f"no token metric and artifact {path} unreadable: {e}"
+        tokens, count = stats.get("avg_completion_tokens"), stats.get("successful_count")
+        if tokens and count:
+            return (tokens, count), None
+        return None, f"artifact {path}: avg_completion_tokens={tokens!r} successful_count={count!r}"
+    return None, "no token metric found for either tool"
+
+
+def harvest_mlflow(run_ids_by_task, get_run, get_artifact, diagnostics=None):
+    """Collect ``{task: [(avg_completion_tokens, successful_count), ...]}`` from MLflow runs.
+
+    ``run_ids_by_task`` is ``{task: [run_id, ...]}`` (one run is one benchmark of one
+    submission, so a task can have several). ``get_run(run_id)`` returns the run dict and
+    ``get_artifact(run_id, path)`` a parsed JSON artifact. Runs that cannot be used are
+    listed in ``diagnostics["runs_not_used"]`` with the reason, never dropped silently.
+    """
+    out, not_used, fetched = {}, [], False
+    for task, run_ids in sorted(run_ids_by_task.items()):
+        for rid in run_ids:
+            try:
+                run = get_run(rid)
+            except Exception as e:  # network or HTTP error: report, do not guess
+                not_used.append({"task": task, "run_id": rid, "reason": f"could not fetch: {e}"})
+                continue
+            fetched = True
+            result, reason = tokens_from_mlflow_run(
+                run, lambda path, rid=rid: get_artifact(rid, path)
+            )
+            if result is None:
+                not_used.append({"task": task, "run_id": rid, "reason": reason})
+            else:
+                out.setdefault(task, []).append(result)
+    if diagnostics is not None:
+        diagnostics["runs_not_used"] = not_used
+        diagnostics["found_metrics_files"] = fetched
+        diagnostics["excluded_tasks"] = []
+        diagnostics["metrics_without_tokens"] = [f"{n['task']}: {n['reason']}" for n in not_used]
+    return out
+
+
+def _mlflow_http(uri):
+    """Return ``(get_run, get_artifact)`` bound to an MLflow tracking server (read-only)."""
+    base = uri.rstrip("/")
+    headers = {}
+    token = os.environ.get("MLFLOW_TRACKING_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    def _get(path):
+        req = urllib.request.Request(base + path, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+
+    def get_run(run_id):
+        r = _get("/api/2.0/mlflow/runs/get?run_id=" + urllib.parse.quote(run_id))["run"]
+        return {
+            "status": r["info"]["status"],
+            "tags": {t["key"]: t["value"] for t in r["data"].get("tags", [])},
+            "metrics": {m["key"]: m["value"] for m in r["data"].get("metrics", [])},
+        }
+
+    def get_artifact(run_id, path):
+        return _get(
+            "/get-artifact?path="
+            + urllib.parse.quote(path)
+            + "&run_uuid="
+            + urllib.parse.quote(run_id)
+        )
+
+    return get_run, get_artifact
+
+
 def main(argv=None):
     """CLI entry point: harvest both sides from eval artifacts and print the verdict."""
     p = argparse.ArgumentParser(description="Day-0 verbosity gate")
-    p.add_argument("--baseline", required=True, help="baseline dir containing eval run dirs")
-    p.add_argument("--candidate", required=True, help="candidate dir containing eval run dirs")
+    p.add_argument("--baseline", help="baseline dir containing NEL eval run dirs")
+    p.add_argument("--candidate", help="candidate dir containing NEL eval run dirs")
+    p.add_argument(
+        "--baseline-mlflow",
+        help="JSON file {task: [mlflow_run_id, ...]} for the baseline (any tool that exports to MLflow)",
+    )
+    p.add_argument("--candidate-mlflow", help="same for the candidate")
+    p.add_argument(
+        "--mlflow-uri",
+        default=os.environ.get("MLFLOW_TRACKING_URI", ""),
+        help="MLflow tracking server (default: $MLFLOW_TRACKING_URI); read-only access",
+    )
     p.add_argument("--glob", default="eval_*", help="run-dir glob within each side")
     p.add_argument(
         "--exclude",
@@ -427,9 +566,55 @@ def main(argv=None):
     )
     args = p.parse_args(argv)
 
+    use_mlflow = bool(args.baseline_mlflow or args.candidate_mlflow)
+    use_dirs = bool(args.baseline or args.candidate)
+    sides_ok = (
+        (args.baseline_mlflow and args.candidate_mlflow)
+        if use_mlflow
+        else (args.baseline and args.candidate)
+    )
+    if use_mlflow == use_dirs or not sides_ok:
+        print(
+            json.dumps(
+                {
+                    "pass": False,
+                    "failure_class": "USER_CONFIG_ERROR",
+                    "detail": "give both --baseline and --candidate, or both "
+                    "--baseline-mlflow and --candidate-mlflow (not a mix)",
+                }
+            )
+        )
+        return 2
+
     diag = {"baseline": {}, "candidate": {}}
-    baseline = harvest(args.baseline, args.glob, args.exclude, diag["baseline"])
-    candidate = harvest(args.candidate, args.glob, args.exclude, diag["candidate"])
+    if use_mlflow:
+        try:
+            with open(args.baseline_mlflow) as f:
+                base_runs = json.load(f)
+            with open(args.candidate_mlflow) as f:
+                cand_runs = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                json.dumps({"pass": False, "failure_class": "USER_CONFIG_ERROR", "detail": str(e)})
+            )
+            return 2
+        if not args.mlflow_uri:
+            print(
+                json.dumps(
+                    {
+                        "pass": False,
+                        "failure_class": "USER_CONFIG_ERROR",
+                        "detail": "no MLflow server: pass --mlflow-uri or set MLFLOW_TRACKING_URI",
+                    }
+                )
+            )
+            return 2
+        get_run, get_artifact = _mlflow_http(args.mlflow_uri)
+        baseline = harvest_mlflow(base_runs, get_run, get_artifact, diag["baseline"])
+        candidate = harvest_mlflow(cand_runs, get_run, get_artifact, diag["candidate"])
+    else:
+        baseline = harvest(args.baseline, args.glob, args.exclude, diag["baseline"])
+        candidate = harvest(args.candidate, args.glob, args.exclude, diag["candidate"])
     # Tasks present on neither side because harvest dropped every run for them --
     # via --exclude, or because no run had a usable token count. (unreadable_metrics
     # is keyed by path, so a task name is not recoverable from it.)

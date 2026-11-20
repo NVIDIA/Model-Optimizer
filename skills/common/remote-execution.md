@@ -150,7 +150,7 @@ remote_sync_from <remote_output_subdir> /local/output/
 | `cd: /home/user/~/path: No such file or directory` | `~` not expanding on remote | Use absolute paths in `workspace` config, not `~/...` |
 | Login nodes resolve home dirs differently | Symlinked home dirs vary by node | Use absolute lustre/NFS paths (e.g., `/lustre/fs1/...`) in job scripts |
 | `SBATCH_DEPENDENCY` env var has no effect | Some SLURM installs ignore the env-var form | Use the **CLI flag**: `sbatch --dependency=afterok:<jobid> job.sh`. With the env var the job starts immediately with `Dependency=(null)`, running against a half-written input. Confirm with `squeue -o %R`. |
-| A wedged NEL job is `scancel`-ed to free the GPUs | NEL's `afternotok` continuation refuses a user-cancelled predecessor and discards the response cache | **Let it hit the wall clock** — one `scancel` cost ~59 GPU-h. Resume behaviour is specified in the evaluation skill; this row only records that a *user* cancel breaks it. |
+| A wedged evaluation job is `scancel`-ed to free the GPUs | A tool's resume chain can refuse a user-cancelled predecessor: NEL's `afternotok` continuation discards the response cache, and one `scancel` cost ~59 GPU-h | **Let it hit the wall clock**, or follow the evaluation tool's own stop and recovery rules (for NeMo Gym, its skill says which jobs you may cancel). NEL resume behaviour is specified in the evaluation skill's `references/run-validation.md`. |
 | `#!` becomes `#\!` in scripts | Shell environment mangles shebang | Fix with `sed -i 's\|^#\\\\!\|#!\|' script.sh` after writing |
 
 ## Reference Files

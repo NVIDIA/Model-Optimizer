@@ -5,7 +5,7 @@ description: Monitor submitted jobs (PTQ, evaluation, deployment) on SLURM clust
 
 # Job Monitor
 
-Monitor jobs submitted to SLURM clusters — PTQ quantization, NEL evaluation, model deployment, or raw SLURM jobs.
+Monitor jobs submitted to SLURM clusters — PTQ quantization, evaluation (NEL or NeMo Gym), model deployment, or raw SLURM jobs.
 
 ## When to use
 
@@ -54,7 +54,8 @@ Each session's `active_jobs.json` is a JSON array:
 ]
 ```
 
-`type` is one of: `nel`, `slurm`, `launcher`.
+`type` is one of: `nel`, `gym`, `slurm`, `launcher`. The registry, the durable monitor and the
+state-change reporting are the same for every type; only the check method differs.
 
 ---
 
@@ -91,7 +92,7 @@ Each check method has its **own** status vocabulary. A watcher that mixes them
 will silently never fire terminal transitions. Always match against the
 vocabulary of the source you're polling.
 
-### NEL jobs (`type: nel`)
+### NEL jobs (`type: nel`, only when the task names NEL)
 
 - **Check:** `nel status <id>`.
 
@@ -118,6 +119,16 @@ is_nel_terminal() {
 
 - **On completion:** `nel info <id>` to fetch results.
 - **On failure:** `nel info <id> --logs` then inspect server/client/SLURM logs via SSH.
+
+### NeMo Gym evaluation jobs (`type: gym`)
+
+- **Register** the Gym run id (the invocation id the Gym skill prints, `gym-job-<timestamp>-<hash>`)
+  as one `type: gym` entry, and each Slurm job id of its chain as a `type: slurm` entry so the
+  terminal check below applies.
+- **Run-level state** (health, coverage, recovery decisions) is owned by the Gym evaluation
+  skill (`run-and-babysit-eval`: its inspect and recovery steps). This skill does not re-derive
+  it; it keeps the registry and reports the Gym skill's verdict when it changes.
+- **Do not** poll a Gym run with `nel` commands, and do not cancel jobs of a run that is not yours.
 
 ### Launcher jobs (`type: launcher`)
 
@@ -156,7 +167,7 @@ is_slurm_terminal() {
 When the user asks about a job without specifying an ID, check in order:
 
 1. `.claude/agents/<current_session_id>/active_jobs.json` — current agent's jobs
-2. `nel ls runs --since 1d` — recent NEL runs
+2. NEL runs only: `nel ls runs --since 1d` — recent NEL runs
 3. `ssh <host> "squeue -u <user>"` — active SLURM jobs
 4. `ls -lt tools/launcher/experiments/cicd/ | head -10` — recent launcher experiments
 

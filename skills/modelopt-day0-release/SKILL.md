@@ -142,8 +142,11 @@ with `DEPLOYMENT_HEALTH_FAILED`. When that happens, **drop to the deployment
 skill** to reproduce and debug serving in isolation (serve the checkpoint
 standalone, confirm `/health` + one generation, iterate on flags / TP / image /
 env vars) rather than burning full eval cycles on a broken endpoint — then carry
-the working command back into NEL's `deployment.command` and resume the eval. If
-the checkpoint genuinely can't serve, `POINT_INFEASIBLE`.
+the working command back into NEL's `deployment.command` and resume the eval. With
+NeMo Gym there is no `deployment.command`: carry the working settings back into the
+serving record (`modelopt-deployment`, step 5c) and the model profile, and resume with
+the tool's recovery guidance; a broken deployment is never fixed by changing the
+evaluation's limits. If the checkpoint genuinely can't serve, `POINT_INFEASIBLE`.
 
 **Before submitting: assert baseline/candidate config parity.** The candidate
 config must differ from the baseline's in nothing but checkpoint path and served
@@ -154,11 +157,15 @@ diff <(grep -vE 'checkpoint_path|served_model_name' baseline.yaml) \
      <(grep -vE 'checkpoint_path|served_model_name' candidate.yaml)
 ```
 
-Any other difference biases the comparison and invalidates the gate: a mismatched
+For NeMo Gym, diff the resolved configs the two runs stored (the `global_config.json`
+artifact of each MLflow run) under the same rule. Any other difference biases the
+comparison and invalidates the gate: a mismatched
 `parallelism` between the two sides was worth ~2 pp, enough to invert the sign of
 the delta. If the model card splits sampling params per scenario, apply the same
-split to both sides. Never set an unbounded `request_timeout` (`1e9`) — it turns a
-transient stall into a job that holds its GPUs until the wall clock kills it.
+split to both sides. Under NEL, never set an unbounded `request_timeout` (`1e9`) — it turns a
+transient stall into a job that holds its GPUs until the wall clock kills it. (For
+NeMo Gym, do not change the evaluation's timeouts at all; its recovery guidance says
+what may be raised.)
 
 Gate:
 
@@ -188,7 +195,8 @@ confidence interval above the minimum acceptable margin.
 Apply Step 3's declared run/stopping plan.
 
 **Re-running does not guarantee fresh samples.** With a warm NEL response cache a "re-run" can
-replay cached responses — two runs came back bit-identical to 16 digits. But an equal score is a
+replay cached responses — two runs came back bit-identical to 16 digits (a NeMo Gym run is
+checked the same way by its run id and output directory). But an equal score is a
 signal to check provenance (invocation id, output dir, response artifacts), **not** proof of replay:
 discrete-scored tasks tie legitimately. Confirm replay before discarding a run as a duplicate.
 
@@ -234,6 +242,21 @@ python "$SKILL_DIR/scripts/gate_verbosity.py" \
     --baseline <baseline_eval_root> --candidate <candidate_eval_root> \
     --glob 'eval_*' --exclude _high --threshold 0.05
 ```
+
+To read from MLflow instead of synced result trees (works for NEL and NeMo Gym, since both
+export to the same server), give each side a JSON file `{task: [run_id, ...]}` taken from the
+handoff (one run is one benchmark of one submission, so a task can list several):
+
+```bash
+python "$SKILL_DIR/scripts/gate_verbosity.py" \
+    --baseline-mlflow baseline_runs.json --candidate-mlflow candidate_runs.json \
+    --mlflow-uri "$MLFLOW_TRACKING_URI" --threshold 0.05
+```
+
+The gate uses a run only when its status is `FINISHED` and a token count exists, and lists every
+run it did not use, with the reason, under `harvest_diagnostics.runs_not_used`. Metric names are
+per tool (see `modelopt-eval-guidance`, `references/run-validity.md`); NEL `simple_evals` runs
+(GPQA) have no token metric, so the gate reads their stored `eval_factory_metrics.json` artifact.
 
 Exit codes follow the other gates: `0` pass, `1` the gate failed, `2` it could not read its input.
 A `2` means fix the invocation, not the checkpoint — check `--baseline`/`--candidate`, `--glob`
@@ -293,9 +316,10 @@ Map a gate's `failure_class` to the next action:
 | `SIZE_NOT_REDUCED` | The output is not smaller than the source. If the recipe cannot shrink the source (e.g. mxfp4 under nvfp4, or fp8 under fp8), record `source_precision` in the validation summary and re-run the gate — that states *why* the growth is expected. Otherwise treat it as a real compression failure: check that the recipe matched the intended parameter mass and that the exporter did not retain the original tensors. `accept_size_growth: true` waives it unconditionally (no growth bound) and is a last resort, not the fix — it records no reason, so prefer `source_precision` where the claim is checkable. |
 | `CHECKPOINT_NOT_SERVABLE` | The Step 2b canary could not load/generate. Usually a tensor-naming or config-schema mismatch between the exporter and the serving stack, or missing/dangling auxiliary files (tokenizer). Fix the export; do not evaluate. |
 | `VERBOSITY_EXCEEDED` | Re-check run hygiene first (mixed reasoning effort, partial runs, unequal sample counts) — that has explained every false positive so far. If the delta survives matched, complete runs, it is a real behavioural change; do not publish on accuracy alone. |
-| `DEPLOYMENT_HEALTH_FAILED` | Drop to the **deployment** skill: reproduce serving standalone (`/health` + one generation), debug flags / image / TP / env, then carry the working command into NEL's `deployment.command` and retry the eval. If it can't serve, `POINT_INFEASIBLE`. |
+| `DEPLOYMENT_HEALTH_FAILED` | Drop to the **deployment** skill: reproduce serving standalone (`/health` + one generation), debug flags / image / TP / env, then carry the working command into NEL's `deployment.command` (NeMo Gym: the serving record and model profile) and retry the eval. If it can't serve, `POINT_INFEASIBLE`. |
 | `EVAL_JUDGE_FAILED` | For completed runs, apply evaluation run validation above; return tolerance failures to the parent/user without automatic retry. Otherwise investigate auth/rate limits before retrying. |
 | `SAMPLE_ACCOUNTING_FAILED` | Investigate dropped/failed samples before trusting scores. |
+| `EVAL_UNVERIFIED` | The run finished but some grading was not recorded (NeMo Gym `UNVERIFIED`). Report the score as unverified, do not compare it, and follow the evaluation tool's recovery guidance before re-gating. Never fabricate or regrade a score. |
 | `EXTERNAL_BASELINE_MISMATCH` | Investigate baseline configuration, correct it, rerun the baseline, and repeat external sanity before comparison. |
 | `USER_CONFIG_ERROR` | Correct it from the request, workspace, or model/config metadata and retry; if irrecoverable, return `ANOMALOUS` with evidence. |
 | `UNKNOWN` | Investigate with the owning domain skill; if unresolved, return `ANOMALOUS` with the evidence and next automated retry or patch action. |
