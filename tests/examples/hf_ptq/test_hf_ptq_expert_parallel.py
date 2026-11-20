@@ -45,6 +45,7 @@ from transformers import AutoConfig, DeepseekV3Config, LlamaConfig
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.models import get_spec
+from modelopt.torch.utils import dataset_utils
 from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
 from modelopt.torch.utils.moe import _EP_MIN_TRANSFORMERS, register_torch_a2a
 from modelopt.torch.utils.plugins import model_load_utils
@@ -608,6 +609,47 @@ def test_distributed_calibration_gives_each_rank_its_own_shard(hf_ptq, monkeypat
     assert len(shards[0]) == len(shards[1]) == 4
     assert sorted(shards[0] + shards[1]) == list(range(8))
     assert calib_loader(world_size=1) is loader
+
+
+def test_calibration_text_is_cached_for_the_next_run(hf_ptq, monkeypatch, tmp_path):
+    """With MODELOPT_CALIB_CACHE_DIR set, a second run reads the calibration text from the cache,
+    not from the dataset."""
+    monkeypatch.setenv("MODELOPT_CALIB_CACHE_DIR", str(tmp_path))
+    reads = []
+
+    def source(name, num_samples, **_kwargs):
+        reads.append(name)
+        return [f"{name} {i}" for i in range(num_samples)]
+
+    monkeypatch.setattr(dataset_utils, "get_dataset_samples", source)
+    args = SimpleNamespace(
+        specdec_offline_dataset=None,
+        calib_with_images=False,
+        dataset=["cnn_dailymail"],
+        batch_size=1,
+        calib_size=[2],
+        calib_seq=16,
+        dist_state=_dist_state(1),
+    )
+    model = torch.nn.Linear(2, 2)
+    set_distribution_plan(model, DistributionPlan(1))
+
+    for _ in range(2):
+        hf_ptq.make_calib_dataloader(
+            args, model, None, get_tiny_tokenizer(), torch.device("cpu"), "llama"
+        )
+
+    assert reads == ["cnn_dailymail"]
+
+
+@pytest.mark.parametrize("timeout", ["soon", "-1", "nan", "inf"])
+def test_a_calibration_read_timeout_that_is_not_a_number_of_seconds_is_refused(
+    hf_ptq, monkeypatch, timeout
+):
+    monkeypatch.setenv("MODELOPT_CALIB_DATA_PREPARE_TIMEOUT", timeout)
+
+    with pytest.raises(ValueError, match="MODELOPT_CALIB_DATA_PREPARE_TIMEOUT"):
+        hf_ptq._calib_sample_reader(2)
 
 
 @pytest.mark.parametrize(

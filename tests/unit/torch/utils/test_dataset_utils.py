@@ -13,7 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
+import itertools
 import json
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -35,6 +39,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_dataset_samples,
     get_max_batch_size,
     prepare_messages_for_chat_template,
+    shared_sample_reader,
 )
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
@@ -983,6 +988,167 @@ class TestDatasetCombosExpansion:
     def test_get_dataset_samples_rejects_combo_name(self):
         with pytest.raises(ValueError, match="DATASET_COMBOS"):
             get_dataset_samples("cnn_nemotron_v2_mix", num_samples=1)
+
+
+# ---------------------------------------------------------------------------
+# shared_sample_reader: one rank reads the calibration text for all of them.
+# ---------------------------------------------------------------------------
+
+
+def _shared_reader_job(rank, world_size, cache_dir):
+    reads = []
+
+    def source(name, num_samples, **_kwargs):
+        reads.append((name, num_samples))
+        return [f"{name} document {i}" + " more" * (i % 5) for i in range(num_samples)]
+
+    build = functools.partial(
+        get_dataset_dataloader,
+        dataset_name=["cnn_dailymail", "pile"],
+        tokenizer=get_tiny_tokenizer(),
+        num_samples=[2, 3],
+        max_sample_length=16,
+        pack=True,
+    )
+    with (
+        # A rank left waiting in a broadcast gives up in seconds.
+        bounded_collectives(),
+        patch.object(dataset_utils, "get_dataset_samples", source),
+        # A few samples per broadcast, so that each source takes several.
+        patch.object(dataset_utils, "_SHARED_SAMPLES_CHARS", 64),
+    ):
+        expected = build().dataset.encodings  # each rank reading for itself, as a single process
+        reads.clear()
+        for _ in range(2):  # the second time from the cache rank 0 wrote
+            reader = shared_sample_reader(cache_dir=cache_dir)
+            encodings = build(sample_reader=reader).dataset.encodings
+            assert encodings.keys() == expected.keys()
+            assert all(torch.equal(encodings[key], expected[key]) for key in expected)
+
+    assert reads == ([("cnn_dailymail", 32), ("pile", 48)] if rank == 0 else [])
+
+
+def test_one_rank_reads_the_calibration_text_for_all(cpu_dist_workers, tmp_path):
+    """Rank 0 alone reads each source, sent to the others in several broadcasts, and every rank
+    builds the rows a single process builds, uneven sources and the packing shuffle included. A
+    second run reads rank 0's cache instead of the sources."""
+    cpu_dist_workers.run(_shared_reader_job, cache_dir=str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("stall_at", "stalls"),
+    [(None, False), (2, True), (8, False)],
+    ids=["slow", "stalled", "stalled-after-the-last-sample-asked-for"],
+)
+def test_a_stall_timeout_fails_a_stalled_stream_but_not_a_slow_one(monkeypatch, stall_at, stalls):
+    """``stall_timeout`` bounds the wait for each sample asked for, not the whole read."""
+    datasets = pytest.importorskip("datasets")
+    stalled = threading.Event()
+
+    def load_dataset(**_kwargs):
+        for i in range(10):
+            if i == stall_at:
+                stalled.wait(10)  # resumes, failing the test, if nothing times the read out
+            time.sleep(0.05)
+            yield {"article": f"document {i}"}
+
+    monkeypatch.setattr(datasets, "load_dataset", load_dataset)
+    read = functools.partial(get_dataset_samples, "cnn_dailymail", 8, stall_timeout=0.3)
+    try:
+        if stalls:
+            with pytest.raises(TimeoutError):
+                read()
+        else:
+            assert len(read()) == 8  # 0.4 s in all
+    finally:
+        stalled.set()  # ends the abandoned read
+
+
+def test_a_stall_guarded_read_stays_close_to_its_consumer(monkeypatch):
+    """The read thread buffers a bounded number of samples ahead of a slower consumer, rather than
+    the stream."""
+    datasets = pytest.importorskip("datasets")
+    read = []
+
+    def load_dataset(**_kwargs):
+        for i in itertools.count():
+            read.append(i)
+            yield {"article": f"document {i}"}
+
+    def preprocess(sample):
+        time.sleep(0.005)
+        return sample["article"]
+
+    monkeypatch.setattr(datasets, "load_dataset", load_dataset)
+    monkeypatch.setitem(
+        dataset_utils.SUPPORTED_DATASET_CONFIG["cnn_dailymail"], "preprocess", preprocess
+    )
+
+    assert len(get_dataset_samples("cnn_dailymail", 10, stall_timeout=5)) == 10
+    assert len(read) <= 10 + dataset_utils._STALL_GUARD_READ_AHEAD + 2
+
+
+@pytest.mark.parametrize(
+    ("dataset_name", "kwargs", "cached"),
+    [
+        ("cnn_dailymail", {}, True),
+        ("cnn_dailymail", {"apply_chat_template": True}, False),
+        ("org/unregistered-dataset", {}, False),  # its text may come from a chat template
+        ("/data/calibration.jsonl", {}, False),
+    ],
+    ids=["registered", "chat-template", "unregistered", "local-file"],
+)
+def test_the_sample_cache_keeps_only_a_registered_datasets_plain_text(
+    monkeypatch, tmp_path, dataset_name, kwargs, cached
+):
+    """Text the tokenizer may have rendered is not served to another model's run."""
+    reads = []
+
+    def source(name, num_samples, **_kwargs):
+        reads.append(name)
+        return [f"{name} {i}" for i in range(num_samples)]
+
+    monkeypatch.setattr(dataset_utils, "get_dataset_samples", source)
+    read = shared_sample_reader(cache_dir=tmp_path)
+
+    first = read(dataset_name, 2, **kwargs)
+    second = read(dataset_name, 2, **kwargs)
+
+    assert first == second == [f"{dataset_name} 0", f"{dataset_name} 1"]
+    assert len(reads) == (1 if cached else 2)
+
+
+def test_a_damaged_cache_entry_is_read_from_the_source_again(monkeypatch, tmp_path):
+    reads = []
+
+    def source(name, num_samples, **_kwargs):
+        reads.append(name)
+        return [f"{name} {i}" for i in range(num_samples)]
+
+    monkeypatch.setattr(dataset_utils, "get_dataset_samples", source)
+    read = shared_sample_reader(cache_dir=tmp_path)
+    read("cnn_dailymail", 2)
+    (entry,) = tmp_path.glob("*.jsonl")
+    entry.write_text('{"text": null}\n{"text": "kept"}\n')
+
+    with pytest.warns(UserWarning):
+        assert read("cnn_dailymail", 2) == ["cnn_dailymail 0", "cnn_dailymail 1"]
+    assert len(reads) == 2
+
+
+def test_a_cache_that_cannot_be_written_only_warns(monkeypatch, tmp_path):
+    """A cache directory that cannot be created costs the run its cache, not the run itself."""
+    monkeypatch.setattr(
+        dataset_utils, "get_dataset_samples", lambda name, n, **_: [f"{name} {i}" for i in range(n)]
+    )
+    blocked = tmp_path / "a-file"
+    blocked.touch()
+
+    with pytest.warns(UserWarning):
+        assert shared_sample_reader(cache_dir=blocked)("cnn_dailymail", 2) == [
+            "cnn_dailymail 0",
+            "cnn_dailymail 1",
+        ]
 
 
 # ---------------------------------------------------------------------------
