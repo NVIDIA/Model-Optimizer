@@ -24,6 +24,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
 
 from modelopt import __version__
 from modelopt.torch.quantization.qtensor import (
@@ -51,6 +52,7 @@ from .quant_format import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_MXFP4,
     QUANTIZATION_W4A16_NVFP4,
+    STATIC_INPUT_SCALE_FORMATS,
 )
 from .quant_utils import (
     _get_quantization_from_quantizers,
@@ -91,12 +93,6 @@ _FUNCTIONAL_WEIGHT_EXPORT_FORMATS = (
     }
 )
 _KV_CACHE_EXPORT_FORMATS = {KV_CACHE_FP8, KV_CACHE_FP8_K_NVFP4_V, KV_CACHE_NVFP4}
-_STATIC_INPUT_SCALE_FORMATS = {
-    QUANTIZATION_FP8,
-    QUANTIZATION_NVFP4,
-    QUANTIZATION_W4A8_NVFP4_FP8,
-    QUANTIZATION_W4A8_MXFP4_FP8,
-}
 
 
 class _UnsupportedQuantizedWeightExportFormatError(NotImplementedError):
@@ -167,12 +163,19 @@ def _same_storage(left: object, right: object) -> bool:
         return True
     if not isinstance(left, torch.Tensor) or not isinstance(right, torch.Tensor):
         return False
+    if isinstance(left, DTensor) or isinstance(right, DTensor):
+        if not isinstance(left, DTensor) or not isinstance(right, DTensor):
+            return False
+        if left.device_mesh != right.device_mesh:
+            return False
+        return _same_storage(left.to_local(), right.to_local())
     if left.device.type == "meta" or right.device.type == "meta":
         return False
     return (
         left.device == right.device
         and left.numel() == right.numel()
-        and left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
+        # Distinct empty local shards all report data_ptr() == 0, so compare storage identity.
+        and torch._C._is_alias_of(left, right)
         and left.storage_offset() == right.storage_offset()
     )
 
@@ -396,7 +399,7 @@ def _resolve_quantized_weight_export_inputs(
         )
     # NVFP4 dynamic block scales still require a fixed global input scale.
     if (
-        quantization_format in _STATIC_INPUT_SCALE_FORMATS
+        quantization_format in STATIC_INPUT_SCALE_FORMATS
         and input_quantizer is not None
         and input_quantizer.is_enabled
         and (input_quantizer._dynamic or input_quantizer.is_mx_format)
@@ -492,7 +495,7 @@ def capture_quantized_weight_export_state(
 
     if input_quantizer is not None and input_quantizer.is_enabled:
         input_amax = input_quantizer.export_amax()
-        if input_amax is None and quantization_format in _STATIC_INPUT_SCALE_FORMATS:
+        if input_amax is None and quantization_format in STATIC_INPUT_SCALE_FORMATS:
             raise RuntimeError(f"Missing calibrated static input scale for {weight_name!r}")
         if input_amax is not None:
             input_scale = (

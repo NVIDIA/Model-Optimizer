@@ -1293,6 +1293,15 @@ class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
         (the GGML IQ1 and IQ2 formats) weight it by the square root of the Hessian diagonal,
         llama.cpp's imatrix statistic. Other formats ignore it.""",
     )
+    local_hessian_scales: bool = ModeloptField(
+        default=False,
+        title="Pick each block's local scales by the GPTQ-compensated block Hessian.",
+        description="""When True, formats with per-group choices (the GGML IQ1 and IQ2 local
+        scales) pick them, block by block, by the layer-output error GPTQ incurs for that block
+        once the later columns compensate -- as ``local_hessian`` does with the plain block
+        Hessian -- instead of by the (importance-weighted) squared error. Other formats ignore
+        it.""",
+    )
 
 
 class ImatrixCalibConfig(QuantizeAlgorithmConfig):
@@ -1551,7 +1560,11 @@ def normalize_quant_cfg_list(
     # Legacy flat-dict format: {"*": {...}, "*weight_quantizer": {...}} → list of single-key dicts.
     if isinstance(v, Mapping):
         _warn_legacy()
-        v = [{k: val} for k, val in v.items()]
+        # Legacy "default" was applied before every other key, wherever it appeared in the dict.
+        legacy_entries = [{k: val} for k, val in v.items() if k != "default"]
+        if "default" in v:
+            legacy_entries.insert(0, {"default": v["default"]})
+        v = legacy_entries
     elif not isinstance(v, Sequence) or isinstance(v, (str, bytes)):
         raise ValueError(
             f"quant_cfg must be a sequence of entries (or a legacy flat mapping), got "

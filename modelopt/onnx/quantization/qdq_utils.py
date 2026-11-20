@@ -60,6 +60,13 @@ onnx_dtype_map = {
 onnx_bit_dtype_signed_map = {4: "INT4", 8: "INT8"}
 onnx_bit_dtype_unsigned_map = {4: "UINT4", 8: "UINT8"}
 
+# Integer weight types qdq_to_dq can emit, keyed by the zero point's ONNX type. The
+# DequantizeLinear left in the graph keeps its zero point, so the weight must match it.
+qdq_weight_np_dtype_map = {
+    onnx.TensorProto.INT8: np.int8,
+    onnx.TensorProto.UINT8: np.uint8,
+}
+
 np_dtype_map = {
     "Float": np.float32,
     "Half": np.float16,
@@ -164,7 +171,10 @@ def make_gs_quantize_output(
 
 
 def make_gs_quantize_node(
-    name: str, inputs: Sequence[gs.Tensor], outputs: Sequence[gs.Tensor]
+    name: str,
+    inputs: Sequence[gs.Tensor],
+    outputs: Sequence[gs.Tensor],
+    attributes: dict[str, Any] | None = None,
 ) -> gs.Node:
     """Create a GraphSurgeon Quantize node.
 
@@ -175,6 +185,7 @@ def make_gs_quantize_node(
         name=_q_name(name),
         inputs=inputs,
         outputs=outputs,
+        attrs=attributes,
     )
 
 
@@ -425,6 +436,7 @@ def insert_qdq_nodes(
     scales: dict[str, np.ndarray],
     weight_map: dict[str, gs.Tensor],
     layer_info: dict[str, dict] | None = None,
+    attributes: dict[str, Any] | None = None,
 ):
     """Insert scales and QDQ nodes into graph.
 
@@ -434,6 +446,7 @@ def insert_qdq_nodes(
         weight_map: A map from ONNX initializer name to graphsurgeon tensor.
         layer_info: Optional dictionary mapping tensor names to precision (old format) or
             to layer configuration dict (new format with precision, block_size, axis).
+        attributes: Quantization axis and block size for the Q/DQ nodes.
     """
     logger.debug(f"Inserting QDQ nodes for {len(scales)} weights")
 
@@ -443,6 +456,7 @@ def insert_qdq_nodes(
         scale: np.ndarray,
         q_nodes: dict[str, gs.Node],
         dq_nodes: dict[str, gs.Node],
+        attrs: dict[str, Any] | None = None,
         num_bits: int = 4,
     ):
         tensor_dtype = get_tensor_dtype(num_bits)
@@ -451,24 +465,30 @@ def insert_qdq_nodes(
         zp_tensor = make_gs_zp(name, scale.shape, tensor_dtype)
         q_out = make_gs_quantize_output(name, weight_to_quantize.shape, tensor_dtype)
         q_node = make_gs_quantize_node(
-            name, inputs=[weight_to_quantize, scale_tensor, zp_tensor], outputs=[q_out]
+            name,
+            inputs=[weight_to_quantize, scale_tensor, zp_tensor],
+            outputs=[q_out],
+            attributes=attrs,
         )
         dq_out = make_gs_dequantize_output(name, shape=weight_to_quantize.shape, dtype=scale.dtype)
         dq_node = make_gs_dequantize_node(
-            name, inputs=[q_out, scale_tensor, zp_tensor], outputs=[dq_out]
+            name, inputs=[q_out, scale_tensor, zp_tensor], outputs=[dq_out], attributes=attrs
         )
         q_nodes[name] = q_node
         dq_nodes[name] = dq_node
 
     q_nodes, dq_nodes = {}, {}
     for name, scale in scales.items():
+        num_bits = get_num_bits(layer_info, name)
+        attrs = update_attributes_for_per_channel_nodes(attributes, num_bits)
         _insert_helper(
             name,
             weight_map[name],
             scale,
             q_nodes,
             dq_nodes,
-            num_bits=get_num_bits(layer_info, name),
+            attrs=attrs,
+            num_bits=num_bits,
         )
 
     _postprocess_qdq(
@@ -657,7 +677,7 @@ def _convert_weight(
         ValueError: If scale shape doesn't match weight shape for the operation
 
     Note:
-        - INT8 weights are clipped to [-128, 127]
+        - Integer weights are clipped to the range of the zero point's type
         - FP8 weights use float8e4m3fn format
     """
     weight_shape = weight_array.shape
@@ -690,14 +710,27 @@ def _convert_weight(
     scale_array = scale_array.reshape(*reshape_dims)
     zp_array = zp_array.reshape(*reshape_dims)
 
-    # Convert to INT8/FP8
+    # Convert to integer/FP8
     if zp.data_type == onnx_dtype_map["Float8"]:
         scaled = np.asarray(weight_array / scale_array) + zp_array
     else:
+        weight_dtype = _qdq_weight_dtype(zp)
+        bounds = np.iinfo(weight_dtype)
         scaled = np.asarray((weight_array / scale_array).round())
-        np.clip(scaled + zp_array, -128, 127, out=scaled)
+        np.clip(scaled + zp_array, bounds.min, bounds.max, out=scaled)
 
     return scaled
+
+
+def _qdq_weight_dtype(zp: onnx.TensorProto) -> type[np.signedinteger | np.unsignedinteger]:
+    """Returns the numpy type a converted weight must use for this zero point."""
+    weight_dtype = qdq_weight_np_dtype_map.get(zp.data_type)
+    if weight_dtype is None:
+        raise ValueError(
+            f"Unsupported zero point type for real weight quantization: "
+            f"{onnx.TensorProto.DataType.Name(zp.data_type)}"
+        )
+    return weight_dtype
 
 
 def _cast_fp8(array: np.ndarray) -> np.ndarray:
@@ -791,8 +824,9 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
                 new_weight = _create_fp8_tensor(scaled, weight_name)
                 logger.debug(f"Converted {weight_name} to FP8")
             else:
-                new_weight = onnx.numpy_helper.from_array(scaled.astype("int8"), weight_name)
-                logger.debug(f"Converted {weight_name} to INT8")
+                weight_dtype = _qdq_weight_dtype(zp)
+                new_weight = onnx.numpy_helper.from_array(scaled.astype(weight_dtype), weight_name)
+                logger.debug(f"Converted {weight_name} to {weight_dtype.__name__.upper()}")
             if len(tensor_consumers[weight_name]) > 1 or weight_name in graph_outputs:
                 # Keep the float value for other consumers and reuse the removed Q output name.
                 new_weight.name = node.output[0]

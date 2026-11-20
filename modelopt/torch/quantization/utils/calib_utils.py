@@ -134,7 +134,8 @@ def _update_room(helper, weight, block_size) -> int:
     scratch, about 35 MiB on a GPU's first update. Logging the error afterwards holds the original
     in its own dtype and up to five float32 weight-sized tensors: the result, the original, the
     error and two products. Through both, a GGML format that keeps its scales holds the unrounded
-    weight in its own dtype, counted for every format.
+    weight in its own dtype, counted for every format. On top comes the helper's own scratch
+    (:meth:`GPTQHelper.update_scratch`), such as a search over each block's local scales.
     """
     columns = weight.shape[-1]
     rows = weight.numel() // columns
@@ -143,7 +144,8 @@ def _update_room(helper, weight, block_size) -> int:
     if helper.log_mse:
         weights = max(weights, (5 * 4 + weight.element_size()) * weight.numel())
     unrounded = weight.element_size() * weight.numel()
-    return 2**26 + 32 * helper.hessian.numel() + weights + unrounded
+    scratch = helper.update_scratch(weight)
+    return 2**26 + 32 * helper.hessian.numel() + weights + unrounded + scratch
 
 
 def update_expert_weights(work, block_size, perc_damp):
@@ -324,22 +326,24 @@ def compute_hessian_inverse(hessian, weight, perc_damp):
         when the Hessian is not positive definite.
     """
     h = hessian.clone()
-    zero_cols = torch.nonzero(weight.eq(0).all(dim=0)).unsqueeze(-1)
+    # Masks rather than indices, and a factorization that reports failure rather than raises:
+    # neither stalls the host on the GPU, so the solve syncs once, to check the factorization.
+    dead = weight.eq(0).all(dim=0)
+    h.masked_fill_(dead[:, None], 0)
+    h.masked_fill_(dead[None, :], 0)
+    diagonal = h.diagonal()
+    diagonal.masked_fill_(dead, 1)
+    diagonal.add_(perc_damp * diagonal.mean())
 
-    h[zero_cols, :] = 0
-    h[:, zero_cols] = 0
-    h[zero_cols, zero_cols] = 1
-
-    damp = perc_damp * torch.mean(torch.diag(h))
-    diag_indices = torch.arange(h.shape[0], device=h.device)
-    h[diag_indices, diag_indices] += damp
-
-    try:
-        h = torch.cholesky_inverse(torch.linalg.cholesky(h))
-        return torch.linalg.cholesky(h, upper=True)
-    except (RuntimeError, torch.linalg.LinAlgError):
+    # One factorization rather than three: with P the reversal, P H P = L L^T makes R = P L P
+    # upper triangular with H = R R^T, so inv(R) is the upper Cholesky factor of inv(H).
+    factor, info = torch.linalg.cholesky_ex(h.flip(0, 1))
+    eye = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+    if bool(info != 0):
         print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
-        return torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+        return eye
+    factor = factor.flip(0, 1)
+    return torch.linalg.solve_triangular(factor, eye, upper=True)
 
 
 class GPTQHelper:
@@ -369,6 +373,7 @@ class GPTQHelper:
         weight=None,
         log_mse=True,
         hessian_input_dtype="float32",
+        local_hessian_scales=False,
     ):
         """Initialize GPTQHelper with module state and Hessian storage.
 
@@ -382,6 +387,7 @@ class GPTQHelper:
         self.name = name
         self.fused = fused
         self.importance_weighted = importance_weighted
+        self.local_hessian_scales = local_hessian_scales
         self.hessian_input_dtype = getattr(torch, hessian_input_dtype)
         self._weight_quantizer = weight_quantizer
         self.log_mse = log_mse
@@ -468,6 +474,10 @@ class GPTQHelper:
         device, and fits the room :func:`update_expert_weights` checks for.
         """
         return False
+
+    def update_scratch(self, weight) -> int:
+        """Bytes the update of ``weight`` holds beyond the GPTQ solve's, such as a format's search."""
+        return 0
 
     def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run GPTQ blockwise weight update on this helper's weight.

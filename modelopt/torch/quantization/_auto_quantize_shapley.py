@@ -399,6 +399,16 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
             "damage_link": self.config["damage_link"],
         }
 
+    def scoring_mismatch(self, state: dict) -> str | None:
+        """Also compare the path settings of a recorded ``scoring_signature``."""
+        restored, current = state.get("scoring_signature"), self._current_scoring_signature()
+        if restored not in (None, current):
+            return (
+                f"Checkpoint scoring signature {restored} does not match the current search "
+                f"config {current}."
+            )
+        return super().scoring_mismatch(state)
+
     def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
         """Sanitize the search config dict."""
         config = config or {}
@@ -436,6 +446,11 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
 
     def validate_search_input(self, constraints, config) -> None:
         """Reject ambiguous target combinations (runs before any model mutation)."""
+        self._check_targets(constraints, config)
+        super().validate_search_input(constraints, config)
+
+    @staticmethod
+    def _check_targets(constraints, config) -> None:
         if (
             config.get("max_predicted_damage") is not None
             and (constraints or {}).get("effective_bits") is not None
@@ -451,18 +466,14 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
         # Reject before ``super().before_search()`` calibrates every search recipe.
         self._raise_if_vocab_sharded()
         if self.config["max_predicted_damage"] is not None:
-            self.validate_search_input(self.constraints, self.config)
+            self._check_targets(self.constraints, self.config)
             self.constraints = {"effective_bits": 16.0, **(self.constraints or {})}
         # Stored scores are only reusable when their meaning is unchanged (see
         # _current_scoring_signature); damage-bound re-solves are allowed on resume.
-        current_signature = self._current_scoring_signature()
-        restored_signature = getattr(self, "scoring_signature", None)
-        if self.candidate_stats and restored_signature not in (None, current_signature):
-            raise ValueError(
-                f"Checkpoint scoring signature {restored_signature} does not match the "
-                f"current search config {current_signature}. Use a different checkpoint path."
-            )
-        self.scoring_signature = current_signature
+        mismatch = self.scoring_mismatch(self.state_dict()) if self.candidate_stats else None
+        if mismatch:
+            raise ValueError(f"{mismatch} Use a different checkpoint path.")
+        self.scoring_signature = self._current_scoring_signature()
         super().before_search()
 
     def _configurable_hparams(self) -> list[QuantRecipeHparam]:

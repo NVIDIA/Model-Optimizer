@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-from transformers import Cache
+from transformers import Cache, DynamicCache
 from transformers.models.llama.modeling_llama import LlamaRMSNorm, LlamaRotaryEmbedding
 
 __all__ = ["EagleBaseModelOutput", "EagleModule"]
@@ -32,6 +32,8 @@ class EagleModule(nn.Module):
         """Init function for EagleModule."""
         super().__init__()
         self.config = config
+        self._input_embeds = None
+        self._input_hidden_states = None
 
         self.layers = nn.ModuleList(
             [decoder_layer_cls(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
@@ -79,6 +81,10 @@ class EagleModule(nn.Module):
             )
             self.layers[0].hidden_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    def make_cache(self) -> Cache:
+        """Create a KV cache using the draft's attention configuration."""
+        return DynamicCache(config=self.config)
+
     def _maybe_init_rope(self, device=None):
         if self.config.eagle_decoder_type == "llama" and not hasattr(self, "rotary_emb"):
             self.rotary_emb = LlamaRotaryEmbedding(config=self.config, device=device)
@@ -115,16 +121,23 @@ class EagleModule(nn.Module):
         """Concat input_embeds and hidden_states for EAGLE-3's first attention layer."""
         if "hidden_states" not in kwargs:
             raise ValueError("hidden_states not found in kwargs")
-        if self._input_embeds is None:
-            raise ValueError("self._input_embeds is None")
+        if self._input_embeds is None or self._input_hidden_states is None:
+            raise ValueError("EAGLE-3 inputs are not available")
 
-        input_embeds = self.layers[0].input_layernorm(self._input_embeds)
-        self._input_embeds = None
+        input_embeds, input_hidden_states = self._input_embeds, self._input_hidden_states
+        self._input_embeds = self._input_hidden_states = None
+        input_embeds = self.layers[0].input_layernorm(input_embeds)
         kwargs["hidden_states"] = torch.cat(
-            (input_embeds, self.layers[0].hidden_norm(kwargs["hidden_states"])), dim=-1
+            (input_embeds, self.layers[0].hidden_norm(input_hidden_states)), dim=-1
         )
 
         return args, kwargs
+
+    def prepare_initial_hidden_states(self, base_outputs):
+        """Project auxiliary features for EAGLE3, or reuse the base output state."""
+        if self.config.use_aux_hidden_state:
+            return self.fc(base_outputs.aux_hiddens)
+        return base_outputs.out_hiddens
 
     def forward(
         self,
@@ -135,8 +148,12 @@ class EagleModule(nn.Module):
         past_key_values: Cache | None = None,
         use_cache: bool | None = None,
         output_attentions: bool | None = False,
+        input_ids: torch.LongTensor | None = None,
     ):
-        """Forward function for EagleModule."""
+        """Forward function for EagleModule.
+
+        ``input_ids`` is unused here; it supports the shared interface with native MTP.
+        """
         batch_size, seq_length, _ = hidden_states.shape
         seq_length_with_past = seq_length
         past_key_values_length = 0
@@ -157,14 +174,6 @@ class EagleModule(nn.Module):
             position_ids = position_ids.view(-1, seq_length).long()
 
         inputs_embeds = inputs_embeds.to(hidden_states.dtype).to(hidden_states.device)
-        # In EAGLE-3, we save input embeddings to attribute, and use it in first decoder layer by hook function
-        # Also, we normalize input embeddings and hidden states before concatenating them.
-        # The default input norm in first layer attn will be disabled.
-        # Stash raw embeds and normalize in the attention pre-hook instead: FSDP2 only
-        # unshards layers[0] weights inside its own forward. Nothing consumes them without
-        # the hook, so don't hold the reference past this forward.
-        self._input_embeds = inputs_embeds if self.config.use_aux_hidden_state else None
-
         if self.config.eagle_decoder_type == "llama":
             # rotary_emb must be pre-initialized by the caller (see HFEagleModel);
             # lazy init here would allocate inv_freq inside the torch.compile/CUDAGraph
@@ -173,21 +182,28 @@ class EagleModule(nn.Module):
         else:
             position_embeddings = None
 
-        for decoder_layer in self.layers:
-            layer_outputs = decoder_layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                position_embeddings=position_embeddings,
-            )
-            # For HF>= 4.54.0, the layer_outputs is a tensor, for older, it is a tuple.
-            if isinstance(layer_outputs, tuple):
-                hidden_states = layer_outputs[0]
-            else:
-                hidden_states = layer_outputs
+        # Keep both raw inputs until the FSDP-unsharded decoder runs its attention hook.
+        previous_inputs = self._input_embeds, self._input_hidden_states
+        self._input_embeds = inputs_embeds if self.config.use_aux_hidden_state else None
+        self._input_hidden_states = hidden_states if self.config.use_aux_hidden_state else None
+        try:
+            for decoder_layer in self.layers:
+                layer_outputs = decoder_layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    position_embeddings=position_embeddings,
+                )
+                # For HF>= 4.54.0, the layer_outputs is a tensor, for older, it is a tuple.
+                if isinstance(layer_outputs, tuple):
+                    hidden_states = layer_outputs[0]
+                else:
+                    hidden_states = layer_outputs
+        finally:
+            self._input_embeds, self._input_hidden_states = previous_inputs
 
         pre_norm_h = hidden_states
 
@@ -205,6 +221,7 @@ class EagleBaseModelOutput:
     logits: torch.Tensor | None = None
     input_embeds: torch.Tensor | None = None
     loss: torch.Tensor | None = None
+    draft_hiddens: torch.Tensor | None = None
 
     @classmethod
     def from_offline_dict(cls, d: dict):
@@ -215,4 +232,5 @@ class EagleBaseModelOutput:
             logits=d.get("base_model_logits"),
             input_embeds=d.get("base_model_input_embeds"),
             loss=None,
+            draft_hiddens=d.get("draft_hidden_states"),
         )

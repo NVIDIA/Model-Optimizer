@@ -12,8 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import contextlib
+import itertools
 from copy import deepcopy
 from functools import partial
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -21,12 +24,37 @@ from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from megatron.core.parallel_state import get_tensor_model_parallel_group
 
 import modelopt.torch.speculative as mtsp
+from modelopt.torch.speculative.config import EagleConfig
+from modelopt.torch.speculative.eagle.conversion import convert_to_eagle_model
 from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTModel
 
 ALGO_TO_CONFIG = {
     "eagle3": mtsp.config.EAGLE3_DEFAULT_CFG,
     "eagle-mtp": mtsp.config.EAGLE_MTP_DEFAULT_CFG,
 }
+
+
+@contextlib.contextmanager
+def _seeded_mixing_draws():
+    """Reseed before every random draw so SP and non-SP models mix with the same choices.
+
+    The forward consumes a backend-dependent amount of RNG before mixing (e.g. TE attention), so
+    replaying a saved RNG state does not align the two models.
+    """
+    calls = itertools.count()
+
+    def reseeded(fn):
+        def wrapper(*args, **kwargs):
+            torch.cuda.manual_seed(1234 + next(calls))
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    with (
+        patch.object(torch, "randperm", reseeded(torch.randperm)),
+        patch.object(torch, "randint", reseeded(torch.randint)),
+    ):
+        yield
 
 
 def _test_speculative_gpt_model(
@@ -59,6 +87,21 @@ def _test_speculative_gpt_model(
         attention_dropout=0.0,
     )
     model = create_model(initialize_megatron=True, sequence_parallel=sequence_parallel).cuda()
+
+    # Reject unsupported objectives before changing the model class or freezing parameters.
+    original_class = type(model)
+    original_parameters = {name: param.detach().clone() for name, param in model.named_parameters()}
+    original_grad_flags = {name: param.requires_grad for name, param in model.named_parameters()}
+    with pytest.raises(ValueError):
+        convert_to_eagle_model(model, EagleConfig(eagle_loss_type="lk_lambda"))
+    assert type(model) is original_class
+    assert dict(model.named_parameters()).keys() == original_parameters.keys()
+    for name, param in model.named_parameters():
+        torch.testing.assert_close(param, original_parameters[name], rtol=0, atol=0)
+    assert {
+        name: param.requires_grad for name, param in model.named_parameters()
+    } == original_grad_flags
+    del original_parameters
 
     if algo in ("eagle1", "eagle3"):
         mtsp_config = deepcopy(ALGO_TO_CONFIG["eagle3"])
@@ -146,9 +189,9 @@ def _test_speculative_gpt_model(
         if mix_hidden_states_mode == "uniform_layer_sample" and not sequence_parallel:
             handle = model.eagle_module.register_forward_pre_hook(check_tp_inputs)
             torch.cuda.manual_seed(1234 + rank)
-        mixing_rng_state = torch.cuda.get_rng_state()
         try:
-            eagle_loss = model(prompt_tokens, position_ids, attention_mask, labels=labels)
+            with _seeded_mixing_draws() if sequence_parallel else contextlib.nullcontext():
+                eagle_loss = model(prompt_tokens, position_ids, attention_mask, labels=labels)
         finally:
             if handle is not None:
                 handle.remove()
@@ -173,10 +216,10 @@ def _test_speculative_gpt_model(
                 reference = create_model(initialize_megatron=False, sequence_parallel=False).cuda()
                 reference = mtsp.convert(reference, deepcopy(mtsp_config)).to(torch.bfloat16)
                 reference.load_state_dict(model.state_dict())
-                torch.cuda.set_rng_state(mixing_rng_state)
-                reference_loss = reference(
-                    prompt_tokens, position_ids, attention_mask, labels=labels
-                )
+                with _seeded_mixing_draws():
+                    reference_loss = reference(
+                        prompt_tokens, position_ids, attention_mask, labels=labels
+                    )
                 reference_loss.mean().backward()
                 torch.testing.assert_close(eagle_loss, reference_loss, rtol=1e-2, atol=1e-3)
 

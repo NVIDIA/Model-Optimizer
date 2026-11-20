@@ -365,10 +365,15 @@ class NVFP4QTensor(BaseQuantizedTensor):
         original_shape = input.shape
         input = input.view((*tuple(input.shape[:-1]), -1, block_size))
 
-        # Scale weights
-        scaled_weight = input / (
-            (weights_scaling_factor.to(torch.float32) * weights_scaling_factor_2).unsqueeze(-1)
+        # Multiply by the correctly rounded reciprocal, as the NVFP4 fake quant kernels do: division
+        # can pick a different E2M1 code at a rounding boundary. The clamp keeps the reciprocal of a
+        # tiny scale finite, so zeros stay zero.
+        inv_scale = (
+            (weights_scaling_factor.to(torch.float32) * weights_scaling_factor_2)
+            .reciprocal_()
+            .clamp_(max=torch.finfo(torch.float32).max)
         )
+        scaled_weight = input * inv_scale.unsqueeze(-1)
 
         # Reshape weights to original
         scaled_weight = scaled_weight.view(original_shape)
