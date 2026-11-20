@@ -245,7 +245,8 @@ def _refuse_stale_costs(search_state: dict) -> None:
         ):
             raise ValueError(
                 "This AutoQuantize checkpoint predates counting non-gated experts' up_proj in "
-                "costs; resume the search with the model once to refresh them, or search again."
+                "costs; resume the search with the model once (without a finalize step) to "
+                "refresh them, or search again."
             )
 
 
@@ -860,10 +861,11 @@ class QuantRecipeHparam(Hparam):
             weight_size = (
                 _AutoQuantizeBaseSearcher._get_total_weight_size([quant_module]) * cost_weight
             )
+            compression = self._resolved_compression(recipe, quant_module)
             parallel_state = getattr(quant_module, "parallel_state", None)
 
             if parallel_state is None:
-                cost += weight_size * recipe.compression
+                cost += weight_size * compression
                 continue
 
             weight_size = DistributedProcessGroup.get_dist_syncd_obj(
@@ -881,9 +883,27 @@ class QuantRecipeHparam(Hparam):
                 [parallel_state.data_parallel_group],
                 lambda a: a[0],
             )
-            cost += weight_size * recipe.compression
+            cost += weight_size * compression
 
         return cost
+
+    def _resolved_compression(self, recipe: QuantRecipe, quant_module: nn.Module) -> float:
+        """The recipe's compression, or none if it leaves a per-weight module's weights BF16.
+
+        A pattern such as ``*.experts.*weight_quantizer`` names full paths, so it matches none of
+        the module-relative names its candidate is applied with. Such a module's weights share one
+        format (see ``_check_uniform_weight_format``), so they are quantized alike or not at all.
+        """
+        if not getattr(quant_module, "_auto_quantize_per_weight_quantizers", False):
+            return recipe.compression
+        quantizers = self._all_quantizer_choices[recipe][quant_module]
+        quantized = any(
+            quantizer.is_enabled
+            for attr, value in quantizers.items()
+            if "weight_quantizer" in attr
+            for quantizer in _iter_tensor_quantizers(value)
+        )
+        return recipe.compression if quantized else 1.0
 
     @property
     def attrs(self) -> list[str]:

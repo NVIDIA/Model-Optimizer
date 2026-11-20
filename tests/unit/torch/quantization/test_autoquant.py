@@ -44,6 +44,7 @@ from modelopt.torch.quantization.algorithms import (
     _get_log_prob,
     _get_quantizer_attrs,
     _module_search_space_signature,
+    _resolve_best_recipe,
     estimate_quant_compression,
     merge_auto_quantize_shards,
 )
@@ -1165,6 +1166,35 @@ def test_auto_quantize_refuses_mixed_weight_formats_and_hands_the_model_back(ent
         QuantModuleRegistry.unregister(_BmmExperts)
 
 
+def test_auto_quantize_prices_per_weight_modules_left_unquantized_as_bf16():
+    # As in nvfp4_experts_only: a full-path glob matches none of the module-relative names a
+    # candidate is applied with, so the experts stay BF16 and must not be charged at INT8.
+    experts_only = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*.experts.*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)
+    try:
+        model = _BmmExpertsModel()
+        _, search_state = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 16.0},
+            quantization_formats=[(experts_only, "experts_only")],
+            data_loader=[torch.randn(2, 4, 16) for _ in range(2)],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+        )
+    finally:
+        QuantModuleRegistry.unregister(_BmmExperts)
+    stats = search_state["candidate_stats"]["experts.quant_recipe"]
+    assert len(set(stats["costs"])) == 1 and stats["costs"][0] == stats["uncompressed_cost"]
+
+
 def test_uniform_sequential_weight_formats_are_one_format():
     # A W4A8-style weight quantizer is sequential; alike on every weight, it is one format.
     def w4a8():
@@ -1909,6 +1939,7 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     for stats in saved["candidate_stats"].values():
         stats["costs"] = [cost / 2 for cost in stats["costs"]]
         stats["uncompressed_cost"] /= 2
+    saved["cost_denominator"] = 1.0  # stale, as if solved with other costs
     safe_save(saved, checkpoint_path)
 
     # Second run: resume with same constraint should produce same results
@@ -1946,6 +1977,11 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     assert resaved_state["cost_version"] == 2
     # Cleared for the solve to recompute, or recomputed by a solve that saved again.
     assert resaved_state["cost_denominator"] in (None, state_dict_1["cost_denominator"])
+    # An offline re-solve of the re-saved checkpoint picks what the live search picked.
+    assert (
+        _resolve_best_recipe(resaved_state, {"effective_bits": 6.0})
+        == state_dict_2["best"]["recipe"]
+    )
     resaved = resaved_state["candidate_stats"]
     assert {name: stats["costs"] for name, stats in resaved.items()} == {
         name: stats["costs"] for name, stats in state_dict_1["candidate_stats"].items()

@@ -490,6 +490,13 @@ def _auto_quantize_finalize_config(
     search_state = _scored_auto_quantize_state(checkpoint)
     if search_state is None:
         return None
+    if search_state.get("cost_version") is None:
+        # Saved before AutoQuantize searched per-weight experts and counted non-gated up_proj.
+        raise ValueError(
+            f"{checkpoint} predates per-weight AutoQuantize. Rerun this command once without "
+            "auto_quantize.finalize_algorithm on the same checkpoint: it refreshes the costs, or "
+            "refuses if the search groups changed, in which case search again."
+        )
     if search_state.get("method") not in (None, primary.auto_quantize_method):
         # A resumed search refuses another method's scores; finalizing reads them as saved.
         raise ValueError(
