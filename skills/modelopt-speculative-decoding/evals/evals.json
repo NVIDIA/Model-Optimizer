@@ -1,0 +1,27 @@
+[
+  {
+    "id": "eagle3-training-validation-plan",
+    "question": "Plan an offline EAGLE3 draft-training workflow for Qwen3-8B with ModelOpt. Give a concise stage/artifact table, source references and the launcher dry-run command, then acceptance and throughput validation gates. Require MT-Bench acceptance length at least 2.1 and measured throughput above the same target without a draft on matched hardware, workload and decoding settings. Explain whether completed tasks alone prove success, and what evidence is missing before approval. Plan only: read available references but do not download models, execute the dry run, submit jobs, start services, train, benchmark or invent results.",
+    "expected_skill": "modelopt-speculative-decoding",
+    "expected_script": null,
+    "ground_truth": "Plan an offline Qwen3-8B EAGLE3 workflow: target-generated conversations, target hidden-state dumps, draft training and export, then benchmark the exported draft. Give a stage/artifact table, identify the configure-stage and EAGLE3 references and launcher example/recipe, and show launch.py --yaml examples/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --dryrun from tools/launcher without running it. Alternate documented synthesis/dump backends are valid; source paths unavailable in the sandbox may be marked unverified. Require verified nonempty artifacts and healthy training; manually compare measured MT-Bench acceptance length to 2.1 and require throughput strictly above the same target without a draft under matched hardware, workload and decoding settings. Completed tasks alone do not prove either metric or surviving artifacts. List the missing configuration, logs, artifact verification and matched benchmark evidence before approval. No model work, executed dry run or invented measurements.",
+    "expected_behavior": [
+      "Provides an offline EAGLE3 stage/artifact table covering target-generated data, hidden-state dumps, draft training/export and exported-draft benchmarking; alternative documented backends are acceptable.",
+      "Names relevant configure/EAGLE3 references and the launcher example or recipe, and shows the launcher --dryrun command without executing it; marks unavailable source checks as pending rather than claiming to have read them.",
+      "Requires measured MT-Bench acceptance length at least 2.1 and throughput strictly above the same target without a draft, matching hardware, workload and decoding settings.",
+      "Explains that completed tasks alone prove neither acceptance/throughput nor surviving usable artifacts, and identifies missing logs, artifact checks and matched benchmark evidence before approval.",
+      "Keeps the response a planning outline, with no model download, dry-run execution, job submission, service startup, training, benchmarking or invented results."
+    ]
+  },
+  {
+    "id": "serving-without-draft-training",
+    "question": "I already have a quantized checkpoint and only need a serving plan. Which ModelOpt workflow owns that task? Reply in two sentences; do not configure or train a speculative draft, execute commands or invent runtime details.",
+    "expected_skill": null,
+    "expected_script": null,
+    "ground_truth": "Route serving an existing quantized checkpoint to modelopt-deployment or an unambiguous deployment alias. Do not configure or train a draft or execute commands. Answer in two sentences without fabricated runtime details.",
+    "expected_behavior": [
+      "Identifies deployment as the workflow for serving the existing quantized checkpoint.",
+      "Does not configure or train a speculative draft, execute commands or invent runtime details; replies in two sentences."
+    ]
+  }
+]

@@ -1,0 +1,28 @@
+[
+  {
+    "id": "bridge-qad-recovery-plan",
+    "question": "Plan Megatron Bridge QAD for Qwen3-8B to recover a validated four-percentage-point BF16-to-NVFP4 PTQ gap on GPQA and IFBench. I authorize one QAD recipe loop capped at 8 GPU-hours; no execution. Give a concise outline of teacher/student setup, preserved PTQ settings, topology constraints, data and training plan, export checks and comparable recovery gates. Distinguish QAD from repeating PTQ, explain checkpoint selection and budget/quality stop rules, and list unresolved runtime inputs. Success requires each benchmark within one percentage point of BF16. Read available references, but do not download models, submit jobs, train, serve, evaluate or invent results; omit full command/config dumps.",
+    "expected_skill": "modelopt-qad",
+    "expected_script": null,
+    "ground_truth": "Plan Bridge QAD with frozen original BF16 Qwen3-8B teacher and its validated NVFP4 PTQ student, using teacher-guided student training through quantizers rather than repeating PTQ. Preserve the preceding PTQ recipe, layer selection and calibration settings; changes create a new PTQ candidate. Choose topology only after accounting for both models, training memory and available GPUs; dense EP=1, ETP=1 and static-block NVFP4 TP=1 are applicable constraints. Outline mixed prepared training data, a held-out validation split, loss monitoring and saved checkpoints. Export candidate checkpoints and validate quantization metadata, completeness/reload and serving compatibility before recovery evaluation. Compare the same checkpoint on matching GPQA/IFBench configurations to BF16 and PTQ; both benchmarks independently must be within one percentage point of BF16, respecting run noise and repeat requirements. Select by benchmark recovery rather than falling KD loss. Stop on success, instability, plateau/regression or the total 8-GPU-hour budget; if useful validated recovery cannot fit, report it as infeasible or unresolved. Identify missing hardware, paths, exact recipe/data/runtime and comparable baseline details. Source references absent locally may be stated as prerequisites. Give a concise plan, without execution or fabricated results.",
+    "expected_behavior": [
+      "Distinguishes teacher-guided QAD student training from PTQ calibration, using original BF16 Qwen3-8B as teacher and its validated NVFP4 PTQ checkpoint as student while preserving PTQ recipe and calibration settings.",
+      "Conditions topology on available GPU memory and both teacher/student training needs, outlines prepared training data with a holdout and loss/checkpoint monitoring, and identifies missing runtime inputs rather than claiming readiness.",
+      "Plans export and checkpoint/quantization integrity and serving compatibility checks before evaluating recovery; unavailable reference checks remain pending.",
+      "Uses comparable BF16/PTQ/QAD GPQA and IFBench evaluations, requiring both benchmarks independently within one percentage point of BF16 with noise/repeat considerations; selects checkpoints by benchmark recovery rather than training loss alone.",
+      "Honors the one-loop, aggregate 8-GPU-hour cap and stops for success, instability or benchmark plateau/regression; reports infeasibility or unvalidated recovery if the budget cannot support the required checks.",
+      "Provides a planning outline without full implementation dumps, model downloads, job submission, training, service startup, evaluation execution or invented results."
+    ]
+  },
+  {
+    "id": "ptq-without-qad-authorization",
+    "question": "My Day-0 PTQ result has an accuracy gap. Suggest the next ModelOpt workflow to investigate the quantization recipe. I have not authorized QAD or training. Reply in two sentences without commands, job submission or invented results.",
+    "expected_skill": null,
+    "expected_script": null,
+    "ground_truth": "Recommend ModelOpt quant-recipe-search, PTQ sensitivity/calibration investigation or an equivalent controlled PTQ recipe workflow. The Day-0 gap alone does not authorize QAD. Do not start training, run commands or invent results; answer in two sentences.",
+    "expected_behavior": [
+      "Recommends quantization recipe search or an equivalent PTQ calibration/sensitivity investigation for the accuracy gap.",
+      "Does not infer QAD authorization or start training, execute commands or invent results; replies in two sentences."
+    ]
+  }
+]
