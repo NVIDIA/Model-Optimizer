@@ -36,7 +36,7 @@ If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-managemen
 - [ ] Step 9: Verify completed run
 ```
 
-Every NEL launch follows Step 8's **Approvals** in [launcher-workflow.md](references/launcher-workflow.md), including existing configs, reruns, launches through `modelopt-launching-evals` (`nemo-evaluator-launcher run`), and manual `sbatch run.sub` resumes; stop if the user declines.
+Every NEL launch follows Step 8's **Approvals** in [launcher-workflow.md](references/launcher-workflow.md), including existing configs, reruns, launches through `modelopt-launching-evals` (`nemo-evaluator-launcher run`), and resumes (`nel resume`, `nemo-evaluator-launcher resume`, manual `sbatch run.sub`); stop if the user declines.
 
 ---
 

@@ -26,7 +26,20 @@ execution:
 deployment:
     tensor_parallel_size: 8
     pipeline_parallel_size: 2
+    # NEL's built-in base_command passes --trust-remote-code; override it without
+    # that flag unless the user approved the checkpoint's code (Step 8 Approvals).
+    base_command: >-
+      vllm serve /checkpoint
+      --tensor-parallel-size=${deployment.tensor_parallel_size}
+      --pipeline-parallel-size=${deployment.pipeline_parallel_size}
+      --data-parallel-size=${deployment.data_parallel_size}
+      --port ${deployment.port}
+      --served-model-name ${deployment.served_model_name}
+      --gpu-memory-utilization ${deployment.gpu_memory_utilization}
+      ${deployment.extra_args}
 ```
+
+Pattern A+B below needs the same `base_command` override.
 
 ## Pattern A+B combined: Multi-instance with multi-node instances
 

@@ -10,7 +10,7 @@ Use WebSearch to find the model card (HuggingFace, build.nvidia.com). Read it ca
     verbatim across unrelated models — **never** read eval settings out of it.
   - **Then cross-check `nvfp4-modelcard-sampling.md`** — required for any NVFP4
     checkpoint or same-family sibling; see [Sampling reference](#sampling-reference).
-- Context length (`deployment.extra_args: "--max-model-len <value>"`)
+- Context length (`--max-model-len <value>` in your own `deployment.command`)
 - **Output length (`max_new_tokens`) — mandatory extraction.** Record any budget
   explicitly tied to the applicable evaluation, with its source. Follow the
   [token-budget rule below](#max_new_tokens--mandatory-model-card-lookup)

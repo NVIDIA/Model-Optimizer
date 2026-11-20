@@ -115,7 +115,7 @@
       "Shows the pre_cmd and the parser source to the user, and sets NEMO_EVALUATOR_TRUST_PRE_CMD=1 only on the approved nel run command (never exported or in .env)",
       "Runs the later dry-run of the other config with NEMO_EVALUATOR_TRUST_PRE_CMD=0 in the same shell, submits nothing for it, and has no shell-wide opt-in",
       "Asks the user to approve running the checkpoint's custom code before adding --trust-remote-code",
-      "Adds vLLM extra_args including --reasoning-parser-plugin, --reasoning-parser nano_v3, --max-num-seqs 8, plus --trust-remote-code once approved",
+      "Writes its own deployment.command (NEL's built-in vllm command already passes --trust-remote-code) with --reasoning-parser-plugin, --reasoning-parser nano_v3, --max-num-seqs 8, plus --trust-remote-code once approved",
       "Pins vLLM image to v0.12.0 or later as required by model card",
       "Adds target.api_endpoint.api_key_name: DUMMY_API_KEY for nemo_skills tasks with self-deployment",
       "Fills in all ??? placeholders after asking the user for SLURM hostname, account, output_dir, MLflow tracking_uri, and experiment_name",
