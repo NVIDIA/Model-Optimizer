@@ -29,9 +29,6 @@ metadata:
 quantize:
   algorithm:
     method: gptq
-    # Collect the Hessians from bfloat16 inputs with a tensor-core GEMM, accumulating in float32:
-    # the calibration forward dominates fused GPTQ, and this cut Qwen3.8-27B's GPTQ 2.6x.
-    hessian_input_dtype: bfloat16
     layerwise:
       enable: true
       # Resume checkpointing is opt-in: _CheckpointState rejects multi-process jobs, so a
