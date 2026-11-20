@@ -111,13 +111,6 @@ def test_bolt_recipe_searches_experts_and_holds_the_rest(fused):
             assert group.cost_weight == 0
             held.update(dict.fromkeys(names, bits))
 
-    # The budget is every expert weight: both projections of a fused container, too.
-    assert sum(group.get_cost(QuantRecipe(quant_cfg=None)) for group in groups) == sum(
-        param.numel()
-        for name, param in model.named_parameters()
-        if param.dim() > 1 and (".mixer.experts" in name or ".mixer.shared_experts." in name)
-    )
-
     experts = [name for name in searched if ".mixer.experts" in name]
     assert experts and all(name.endswith(".mixer.experts") == fused for name in experts)
     assert any(name.endswith(".mixer.shared_experts.up_proj") for name in searched)

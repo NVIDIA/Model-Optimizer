@@ -28,7 +28,13 @@ pytest.importorskip("transformers")
 
 from huggingface_hub import constants as hub_constants
 from safetensors.torch import load_file, save_file
-from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, conversion_mapping
+from transformers import (
+    AutoModelForCausalLM,
+    PretrainedConfig,
+    PreTrainedModel,
+    conversion_mapping,
+    modeling_utils,
+)
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_activation_scaling_factor, postprocess_state_dict
@@ -667,21 +673,46 @@ def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch)
     assert not any(name.startswith("language_model.model.") for name in without_hook)
     # transformers 5.18 adds renames for its port of the Omni class, which the load must bypass.
     port_renames = conversion_mapping.get_checkpoint_conversion_mapping(omni_class.__name__)
-    port_conversions = repr(conversion_mapping.get_model_conversion_mapping(source))
-    in_other_thread = []
-    with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
-        # A load in another thread, of transformers' port for instance, keeps transformers' renames.
-        other = threading.Thread(
-            target=lambda: in_other_thread.append(
-                repr(conversion_mapping.get_model_conversion_mapping(source))
-            )
-        )
-        other.start()
-        other.join()
+
+    class PortOmni(PreTrainedModel):
+        config_class = OmniConfig
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.multi_modal_projector = torch.nn.ModuleDict({"layer_norm": torch.nn.LayerNorm(32)})
+            self.post_init()
+
+    # A model of the port's class name, with no puzzle language model, under the port's names.
+    port_class = type(omni_class.__name__, (PortOmni,), {})
+    port = port_class(OmniConfig())
+    with torch.no_grad():
+        for parameter in port.parameters():
+            parameter.uniform_(-0.1, 0.1)
+    port.config.save_pretrained(tmp_path / "port")
+    save_file(
+        {
+            name.replace("multi_modal_projector.layer_norm.", "mlp1.0."): tensor.clone()
+            for name, tensor in port.state_dict().items()
+        },
+        tmp_path / "port" / "model.safetensors",
+    )
+    stock = (
+        conversion_mapping.get_checkpoint_conversion_mapping,
+        modeling_utils.get_model_conversion_mapping,
+    )
+    with (
+        hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True),
+        # A nested load, and a load of another model in the same context, keep their own renames.
+        hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True),
+    ):
         loaded = omni_class.from_pretrained(tmp_path, config=config)
-    assert in_other_thread == [port_conversions]
+        port_loaded = port_class.from_pretrained(tmp_path / "port").state_dict()
+    assert all(torch.equal(port_loaded[name], tensor) for name, tensor in port.state_dict().items())
     # Nothing the load changed outlives it.
-    assert conversion_mapping.get_checkpoint_conversion_mapping("nemotron_h_puzzle") is None
+    assert (
+        conversion_mapping.get_checkpoint_conversion_mapping,
+        modeling_utils.get_model_conversion_mapping,
+    ) == stock
     assert "nemotron_h_puzzle" not in conversion_mapping.USER_REGISTERED_MAPPINGS
     assert loaded_source_tensors(loaded) == set(source.state_dict())
     # A recipe quantizes the whole VLM, layer by layer for sequential GPTQ.

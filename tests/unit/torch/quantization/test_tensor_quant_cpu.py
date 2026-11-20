@@ -717,19 +717,23 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(monkeypatch):
     mtq.set_quantizer_by_cfg(named, quant_cfg)
     monkeypatch.undo()
     assert states(named) == states(walked)
-    # The "*" entry, the index, and its rebuilds after each replacement: not one per entry.
-    assert walks <= 4 < len(quant_cfg)
+    # Only the "*" entry walks the model, also after a replacement.
+    assert walks == 1
+
+
+def _sequential_weight_quantizer(model):
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {"quantizer_name": "1.weight_quantizer", "cfg": [{"num_bits": 4}] * 2},
+            {"quantizer_name": "1.weight_quantizer.1", "enable": False},
+        ],
+    )
 
 
 def _sequential_weight_quantizer_in_context(model):
     with mtq.preserve_quantizer_attributes_context(model):
-        mtq.set_quantizer_by_cfg(
-            model,
-            [
-                {"quantizer_name": "1.weight_quantizer", "cfg": [{"num_bits": 4}] * 2},
-                {"quantizer_name": "1.weight_quantizer.1", "enable": False},
-            ],
-        )
+        _sequential_weight_quantizer(model)
 
 
 def _sequential_weight_quantizer_in_submodule(model):
@@ -738,8 +742,21 @@ def _sequential_weight_quantizer_in_submodule(model):
     )
 
 
+def _sequential_weight_quantizer_flattened(model):
+    _sequential_weight_quantizer(model)
+    with SequentialQuantizer.convert_to_single_quantizer(model):
+        mtq.set_quantizer_by_cfg(
+            model, [{"quantizer_name": "1.weight_quantizer.1", "enable": True}]
+        )
+
+
 @pytest.mark.parametrize(
-    "replace", [_sequential_weight_quantizer_in_context, _sequential_weight_quantizer_in_submodule]
+    "replace",
+    [
+        _sequential_weight_quantizer_in_context,
+        _sequential_weight_quantizer_in_submodule,
+        _sequential_weight_quantizer_flattened,
+    ],
 )
 def test_set_quantizer_by_cfg_finds_named_quantizers_after_nested_replacement(replace):
     """Named entries act as wildcards do after a calibrator built mid-call replaces a quantizer."""
