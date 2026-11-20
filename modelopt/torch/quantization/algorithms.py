@@ -225,22 +225,46 @@ def _iter_tensor_quantizers(module: nn.Module):
             yield from _iter_tensor_quantizers(child)
 
 
-def _check_uniform_weight_format(recipe: "QuantRecipe", quantizers: dict[str, nn.Module]) -> None:
-    """Refuse a candidate that quantizes only some weights of an opted-in per-weight module.
+# Costs count every quantized named weight, e.g. the ``up_proj`` of non-gated fused experts.
+_COST_VERSION = 2
 
-    Such a module is costed at its candidate's compression over all of its weights, so a
-    candidate leaving one of them unquantized would under-report its cost.
+
+def _refuse_stale_costs(search_state: dict) -> None:
+    """Refuse saved costs that omit the ``up_proj`` of non-gated fused experts.
+
+    Only a live search can recompute costs, so a checkpoint saved before they counted ``up_proj``
+    must be resumed once, with the model, before it is re-solved or merged offline.
     """
-    enabled = {
-        quantizer.is_enabled
+    if (search_state.get("cost_version") or 1) >= _COST_VERSION:
+        return
+    for stats in search_state.get("candidate_stats", {}).values():
+        recorded = stats.get("quantizer_attrs") or {}
+        names = [attr for attrs in recorded.values() for attr in attrs]
+        if any(attr.startswith("up_proj_") for attr in names) or any(
+            name.endswith(".mixer.experts") for name in stats.get("module_names", ())
+        ):
+            raise ValueError(
+                "This AutoQuantize checkpoint predates counting non-gated experts' up_proj in "
+                "costs; resume the search with the model once to refresh them, or search again."
+            )
+
+
+def _check_uniform_weight_format(recipe: "QuantRecipe", quantizers: dict[str, nn.Module]) -> None:
+    """Refuse a candidate whose weight formats differ within an opted-in per-weight module.
+
+    Such a module is costed at its candidate's compression over all of its weights, so the
+    weights must share one format, all quantized alike or all left unquantized.
+    """
+    # One format per weight: a sequential quantizer (e.g. W4A8) is the tuple of its stages.
+    formats = {
+        tuple(_tensor_quantizer_format_signature(q) for q in _iter_tensor_quantizers(value))
         for attr, value in quantizers.items()
         if "weight_quantizer" in attr
-        for quantizer in _iter_tensor_quantizers(value)
     }
-    if len(enabled) > 1:
+    if len(formats) > 1:
         raise ValueError(
-            f"AutoQuantize candidate {recipe} quantizes only some weights of one module; "
-            "match all of its weight quantizers or none."
+            f"AutoQuantize candidate {recipe} gives the weights of one module different formats; "
+            "configure all of its weight quantizers alike."
         )
 
 
@@ -966,6 +990,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost": {},
             "active_moe_expert_ratio": None,
             "cost_denominator": None,
+            "cost_version": None,
             "quantization_formats_signature": None,
             "fixed_quantization_config_signature": None,
             "fixed_quantization_config": None,
@@ -1478,6 +1503,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             # Keep the no-quant cost as denominator metadata even when no-quant is not
             # solver-selectable for this hparam. Fixed formats must remain in the cost model.
             stats["uncompressed_cost"] = hparam.get_cost(no_quant_recipe)
+        # The solve recomputes the denominator from these costs; a restored one may be stale.
+        self.cost_denominator = None
+        self.cost_version = _COST_VERSION
 
     def _run_func(self, func, num_iters=1, desc=""):
         for i, data in tqdm(
@@ -2027,6 +2055,8 @@ _SHARD_INVARIANT_STATE = (
 
 def merge_auto_quantize_shards(shard_states: Sequence[dict]) -> dict:
     """Combine the states of every format shard of one search into an unsharded search state."""
+    for state in shard_states:
+        _refuse_stale_costs(state)
     ids = [tuple(state.get("format_shard") or ()) for state in shard_states]
     if sorted(ids) != [(index, len(ids)) for index in range(len(ids))]:
         raise ValueError(
@@ -2876,6 +2906,7 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
     effective_bits = constraints["effective_bits"]
     compression = effective_bits / 16.0
     candidate_stats = search_state["candidate_stats"]
+    _refuse_stale_costs(search_state)
     total_weight_size = search_state.get("cost_denominator") or sum(
         s.get("uncompressed_cost", max(s["costs"])) for s in candidate_stats.values()
     )
@@ -2921,11 +2952,19 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
     return best_recipe
 
 
+def _scopes_attr(pattern: str, quantizer_attr: str) -> bool:
+    """Whether a path-scoped pattern such as ``*mlp*weight_quantizer`` names ``quantizer_attr``.
+
+    As in live matching, the bare name must start a new path segment or follow a wildcard, so
+    ``*w1_weight_quantizer`` does not name ``weight_quantizer``.
+    """
+    prefix = pattern.removesuffix(quantizer_attr)
+    return prefix != pattern and (not prefix or prefix[-1] in ".*")
+
+
 def _match_quantizer_cfg(quant_cfg, quantizer_attr):
-    # Last-match-wins to mirror set_quantizer_by_cfg behavior.
-    # Patterns may be path-scoped (e.g. "*mlp*weight_quantizer") while quantizer_attr
-    # is a bare name like "weight_quantizer".  We match if the bare name matches directly
-    # OR if the pattern ends with the bare quantizer_attr (path-scoped match).
+    # Last-match-wins to mirror set_quantizer_by_cfg behavior. Patterns may be path-scoped
+    # (e.g. "*mlp*weight_quantizer") while quantizer_attr is a bare name like "weight_quantizer".
     matched = None
     matched_enable = None
     for entry in quant_cfg:
@@ -2935,8 +2974,7 @@ def _match_quantizer_cfg(quant_cfg, quantizer_attr):
         pattern = entry["quantizer_name"]
         cfg = entry.get("cfg")
         enable = entry.get("enable", True)
-        # Direct match: the bare quantizer_attr matches the whole pattern (e.g. "*weight_quantizer")
-        if fnmatch.fnmatch(quantizer_attr, pattern) or pattern.endswith(quantizer_attr):
+        if fnmatch.fnmatch(quantizer_attr, pattern) or _scopes_attr(pattern, quantizer_attr):
             matched = cfg
             matched_enable = enable
 
