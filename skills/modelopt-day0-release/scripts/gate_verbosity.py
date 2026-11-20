@@ -36,6 +36,7 @@ when that shared count is below a run one side has, ``truncated_comparison`` say
 import argparse
 import glob as globmod
 import json
+import math
 import os
 import re
 import statistics
@@ -425,13 +426,19 @@ _NEL_TOKENS = re.compile(
 _GYM_TOKENS = re.compile(r"^(?P<agent>[^/]+)/mean/output_tokens$")
 
 
+def _positive(x):
+    """True for a finite number above zero (NaN, infinity, None, strings and booleans are not)."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0
+
+
 def tokens_from_mlflow_run(run, load_artifact=None):
     """Return ``((avg_completion_tokens, successful_count), None)`` or ``(None, reason)``.
 
     ``run`` is ``{"status": str, "tags": {..}, "metrics": {..}}``. Only a ``FINISHED`` run
     is used: failed and killed runs are exported too, with few metrics, and their partial
     numbers must not enter a comparison. ``load_artifact(path)`` reads a JSON artifact of
-    this run (used only for the NEL ``simple_evals`` fallback).
+    this run (used only for the NEL ``simple_evals`` fallback). Ambiguous or non-finite
+    values are refused with a reason, never guessed.
     """
     status = run.get("status")
     if status != "FINISHED":
@@ -444,7 +451,7 @@ def tokens_from_mlflow_run(run, load_artifact=None):
     if gym:
         key = next(iter(gym.values()))
         count = metrics.get("coverage/scored")
-        if not metrics[key] or not count:
+        if not _positive(metrics[key]) or not _positive(count):
             return None, f"{key}={metrics[key]!r} coverage/scored={count!r}"
         return (metrics[key], count), None
 
@@ -452,9 +459,12 @@ def tokens_from_mlflow_run(run, load_artifact=None):
         (int(m.group("n")), m.group("prefix"), k) for k in metrics if (m := _NEL_TOKENS.match(k))
     ]
     if nel:
-        n, prefix, key = max(nel)
+        prefixes = sorted({prefix for _, prefix, _ in nel})
+        if len(prefixes) > 1:
+            return None, f"several task prefixes report answer tokens: {prefixes}"
+        n, prefix, key = max(nel)  # the largest N is the full repeat count
         prompts = metrics.get(f"{prefix}_pass_at_1_avg-of-{n}_num_prompts")
-        if not metrics[key] or not prompts:
+        if not _positive(metrics[key]) or not _positive(prompts):
             return None, f"{key}={metrics[key]!r} num_prompts={prompts!r}"
         return (metrics[key], round(prompts * n)), None
 
@@ -462,11 +472,11 @@ def tokens_from_mlflow_run(run, load_artifact=None):
     if load_artifact and harness and task:
         path = f"{harness}.{task}/artifacts/eval_factory_metrics.json"
         try:
-            stats = load_artifact(path).get("response_stats", {})
-        except (OSError, ValueError, KeyError) as e:
-            return None, f"no token metric and artifact {path} unreadable: {e}"
-        tokens, count = stats.get("avg_completion_tokens"), stats.get("successful_count")
-        if tokens and count:
+            stats = load_artifact(path)["response_stats"]
+            tokens, count = stats.get("avg_completion_tokens"), stats.get("successful_count")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            return None, f"no token metric and artifact {path} unreadable: {e!r}"
+        if _positive(tokens) and _positive(count):
             return (tokens, count), None
         return None, f"artifact {path}: avg_completion_tokens={tokens!r} successful_count={count!r}"
     return None, "no token metric found for either tool"
@@ -478,7 +488,9 @@ def harvest_mlflow(run_ids_by_task, get_run, get_artifact, diagnostics=None):
     ``run_ids_by_task`` is ``{task: [run_id, ...]}`` (one run is one benchmark of one
     submission, so a task can have several). ``get_run(run_id)`` returns the run dict and
     ``get_artifact(run_id, path)`` a parsed JSON artifact. Runs that cannot be used are
-    listed in ``diagnostics["runs_not_used"]`` with the reason, never dropped silently.
+    listed in ``diagnostics["runs_not_used"]`` with the reason, never dropped silently, and a
+    task that kept some runs but lost others is named in ``partially_excluded_tasks`` so the
+    verdict says its comparison is incomplete.
     """
     out, not_used, fetched = {}, [], False
     for task, run_ids in sorted(run_ids_by_task.items()):
@@ -489,9 +501,12 @@ def harvest_mlflow(run_ids_by_task, get_run, get_artifact, diagnostics=None):
                 not_used.append({"task": task, "run_id": rid, "reason": f"could not fetch: {e}"})
                 continue
             fetched = True
-            result, reason = tokens_from_mlflow_run(
-                run, lambda path, rid=rid: get_artifact(rid, path)
-            )
+            try:
+                result, reason = tokens_from_mlflow_run(
+                    run, lambda path, rid=rid: get_artifact(rid, path)
+                )
+            except Exception as e:  # a malformed run is reported, it must not crash the gate
+                result, reason = None, f"could not read the run: {e!r}"
             if result is None:
                 not_used.append({"task": task, "run_id": rid, "reason": reason})
             else:
@@ -500,6 +515,7 @@ def harvest_mlflow(run_ids_by_task, get_run, get_artifact, diagnostics=None):
         diagnostics["runs_not_used"] = not_used
         diagnostics["found_metrics_files"] = fetched
         diagnostics["excluded_tasks"] = []
+        diagnostics["partially_excluded_tasks"] = sorted({n["task"] for n in not_used} & set(out))
         diagnostics["metrics_without_tokens"] = [f"{n['task']}: {n['reason']}" for n in not_used]
     return out
 
@@ -598,6 +614,21 @@ def main(argv=None):
                 json.dumps({"pass": False, "failure_class": "USER_CONFIG_ERROR", "detail": str(e)})
             )
             return 2
+        for name, runs in (("--baseline-mlflow", base_runs), ("--candidate-mlflow", cand_runs)):
+            if not isinstance(runs, dict) or not all(
+                isinstance(v, list) and v and all(isinstance(r, str) and r for r in v)
+                for v in runs.values()
+            ):
+                print(
+                    json.dumps(
+                        {
+                            "pass": False,
+                            "failure_class": "USER_CONFIG_ERROR",
+                            "detail": f"{name} must be a JSON object {{task: [run_id, ...]}}",
+                        }
+                    )
+                )
+                return 2
         if not args.mlflow_uri:
             print(
                 json.dumps(
