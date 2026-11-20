@@ -17,6 +17,7 @@ Changelog
 - Add ``context_quant_level`` to KL-divergence AutoQuantize (``method={"method": "kl_div", "context_quant_level": "lowest"}``, or ``method_options: {context_quant_level: lowest}`` in a recipe): each candidate is scored with every other searched layer at its lowest-bit format (an int picks the format by its 0-based index from the lowest), so low-bit budgets go to the layers whose error compounds most once the whole model is quantized. ``"lowest"`` is a good default; a context nearer the target budget measured the same in our tests.
 - GPTQ calibration is 25-35% faster in our MoE-expert and dense-MLP tests, with the GGML IQ formats and with NVFP4 under ``fused: true``. Results change only at round-off.
 - GPTQ now defaults to ``fused=True``, running the fused Triton update for static NVFP4 weights on SM89+ (4/6 scaling and other formats keep the unfused loop). Set ``fused: false`` to restore the previous behavior.
+- The fused NVFP4 GPTQ update runs its kernel 2-3x faster, with the same results.
 
 *Quantization - QAT / QAD*
 
@@ -28,7 +29,6 @@ Changelog
 
 - Add a sub-4-bit AutoQuantize recipe for Qwen3.6-35B-A3B at 2.75 bits, which searches the routed experts over GGML IQ2 formats with GPTQ and imatrix, weight-only NVFP4 and FP8, and BF16. Select it under ``models/Qwen/Qwen3.6-35B-A3B/auto_quantize/``.
 - The streaming Kimi-K3 converter (``examples/kimi/kimi_k3/quantize_to_nvfp4.py``) now resolves each module's format from the recipe's ``quant_cfg`` and rejects layouts it cannot write. Add the checkpoint-mirror recipe for ``nvidia/Kimi-K3.1-Pro-NVFP4`` under ``models/moonshotai/Kimi-K3.1-Pro/ptq/``.
-- ``general/ptq/nvfp4_default-kv_none-gptq`` now collects GPTQ's Hessians from bfloat16 inputs, with the same or lower per-weight error, and the fused NVFP4 GPTQ update (``fused: true``) runs its kernel 2-3x faster. With the fused update, GPTQ on Qwen3.8-27B took 4.3 instead of 11.2 minutes and on Qwen3-8B 20% less time; MoEs with narrow experts change little. Set ``hessian_input_dtype: float32`` for the previous Hessians.
 
 *Speculative Decoding*
 
