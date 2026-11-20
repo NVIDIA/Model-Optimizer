@@ -86,6 +86,7 @@ from torch import nn
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as _NORM_CLS  # noqa: N814
 
 from .modeling_dflash import DFlashModule
+from .modeling_draft_checkpoint_compat import remap_lilicorr_serving_keys
 
 __all__ = ["LiLiCorrHead", "LiLiCorrLayer", "LiLiCorrModule"]
 
@@ -508,6 +509,10 @@ class LiLiCorrModule(DFlashModule):
         # three would leave the bilinear product at a dead saddle.
         self._init_head_weights(config)
         self.lilicorr.reset_factor_heads()
+
+        # An exported drafter carries the SERVING names (up_proj/down_proj plus a
+        # sibling feature_norm), so warm-starting from one has to translate back.
+        self._register_load_state_dict_pre_hook(remap_lilicorr_serving_keys, with_module=False)
 
         # Optional: wrap every draft sublayer in DFlash2's grouped dynamic convolution,
         # installed only when the recipe asks for it, so this module still builds the
