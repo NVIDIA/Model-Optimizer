@@ -722,6 +722,27 @@ def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch)
     assert repr(restored) == repr(port_renames)
     loaded.save_pretrained(tmp_path / "saved")
     assert set(load_file(tmp_path / "saved" / "model.safetensors")) == set(checkpoint)
+    # A hook installed mid-load, as `_onfly_decompress` does, keeps that load's patch in its chain,
+    # and the next load still finishes. A load stuck on a lock holds only this test's locks.
+    monkeypatch.setattr(adapter, "_LOAD_LOCK", threading.RLock())
+    monkeypatch.setattr(adapter, "_MODEL_MAPPINGS_LOCK", threading.Lock())
+    monkeypatch.setattr(modeling_utils, "get_model_conversion_mapping", stock[1])
+    with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
+        patched = modeling_utils.get_model_conversion_mapping
+        monkeypatch.setattr(
+            modeling_utils, "get_model_conversion_mapping", lambda *a, **k: patched(*a, **k)
+        )
+    reloaded = []
+
+    def reload():
+        with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
+            reloaded.append(omni_class.from_pretrained(tmp_path, config=config))
+
+    other = threading.Thread(target=reload, daemon=True)
+    other.start()
+    other.join(timeout=60)
+    assert reloaded, "the load after a hook wrapped the previous load's patch did not finish"
+    assert loaded_source_tensors(reloaded[0]) == set(source.state_dict())
     # The checkpoint's code, not transformers' port of its Omni class, can hold a puzzle model.
     remote = type("Config", (PretrainedConfig,), {"__module__": "transformers_modules.bolt.cfg"})
     assert hf.prefers_bundled_code("nemotron_h_omni", remote(llm_config=llm_config), tmp_path, {})

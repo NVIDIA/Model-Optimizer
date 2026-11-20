@@ -239,7 +239,13 @@ def _puzzle_model_mappings(get_model_conversion_mapping, lookup):
 
     @wraps(get_model_conversion_mapping)
     def collect(model, *args, **kwargs):
-        if not _has_puzzle_language_model(getattr(model, "config", None)):
+        # A hook installed mid-load (``_onfly_decompress``'s) can keep this patch in its chain,
+        # under a later load's patch, which has set the mappings, or past the last load.
+        if (
+            not _puzzle_loads
+            or _MODEL_MAPPINGS.get() is not None
+            or not _has_puzzle_language_model(getattr(model, "config", None))
+        ):
             # Any other model, a native Omni among them, keeps transformers' renames.
             return get_model_conversion_mapping(model, *args, **kwargs)
         # Without its class name, which selects transformers' renames for its port, the lookup
@@ -306,6 +312,7 @@ def _puzzle_renames(config: dict):
         _puzzle_loads -= 1
         if not _puzzle_loads:
             for module, name, original, patch in reversed(_PUZZLE_PATCHES):
+                # A patch another hook wrapped stays in that hook's chain, passing through.
                 if getattr(module, name) is patch:
                     setattr(module, name, original)
             _PUZZLE_PATCHES.clear()

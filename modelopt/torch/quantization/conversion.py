@@ -21,6 +21,8 @@ import re
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 from typing import Any, cast
 
 import torch.nn as nn
@@ -281,6 +283,42 @@ _WILDCARD_RE = re.compile(r"[*?[]")
 # fnmatch compares names after os.path.normcase, which ignores case on Windows.
 _CASE_SENSITIVE_NAMES = os.path.normcase("A") == "A"
 _SINGULAR_QUANTIZER_ATOM_RE = re.compile(r"(?:weight|input)_quantizer$")
+# The models a set_quantizer_by_cfg call in progress found to register each module only once.
+_UNSHARED_MODELS: ContextVar[tuple[nn.Module, ...]] = ContextVar("_UNSHARED_MODELS", default=())
+
+
+def _registers_each_module_once(model: nn.Module) -> bool:
+    seen = set()
+    for _, module in model.named_modules(remove_duplicate=False):
+        if id(module) in seen:
+            return False
+        seen.add(id(module))
+    return True
+
+
+def _with_subtree_walks(func):
+    """Let a call's wildcard-free entries walk only the subtree that can hold their matches.
+
+    ``named_modules`` names a module registered twice by its first path only, which a subtree walk
+    cannot tell, so in a model that shares a module every entry walks the whole model.
+    """
+
+    @wraps(func)
+    def wrapper(quant_model, *args, **kwargs):
+        unshared = _UNSHARED_MODELS.get()
+        if (
+            not _CASE_SENSITIVE_NAMES
+            or any(model is quant_model for model in unshared)
+            or not _registers_each_module_once(quant_model)
+        ):
+            return func(quant_model, *args, **kwargs)
+        token = _UNSHARED_MODELS.set((*unshared, quant_model))
+        try:
+            return func(quant_model, *args, **kwargs)
+        finally:
+            _UNSHARED_MODELS.reset(token)
+
+    return wrapper
 
 
 def _modules_under_quantizer_name(quant_model: nn.Module, name: str):
@@ -315,10 +353,10 @@ def _matching_quantizers(
 ):
     """Yield the ``(name, quantizer)`` pairs ``wildcard_or_filter_func`` selects, in module order."""
     if (
-        _CASE_SENSITIVE_NAMES
-        and isinstance(wildcard_or_filter_func, str)
+        isinstance(wildcard_or_filter_func, str)
         and wildcard_or_filter_func
         and not _WILDCARD_RE.search(wildcard_or_filter_func)
+        and any(model is quant_model for model in _UNSHARED_MODELS.get())
     ):
         candidates = _modules_under_quantizer_name(quant_model, wildcard_or_filter_func)
     else:
@@ -328,6 +366,7 @@ def _matching_quantizers(
             yield name, module
 
 
+@_with_subtree_walks
 def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgType):
     """Apply a quantization config list to the quantizers in ``quant_model``.
 
