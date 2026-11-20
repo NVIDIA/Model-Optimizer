@@ -37,7 +37,7 @@ step at 4096) and cut more escaped-loop answers.
 **nemo-skills tasks (`ns_*`) need the hit reported as `length`.** Their litellm client
 rejects `"repetition"` (pydantic `literal_error`) and retries the request, resampling
 the loop away and inflating the score. Remap it in the serving container (append to
-any existing `deployment.pre_cmd`) and submit with `NEMO_EVALUATOR_TRUST_PRE_CMD=1`:
+any existing `deployment.pre_cmd`) and, once the user approves it, submit with `NEMO_EVALUATOR_TRUST_PRE_CMD=1` on that command:
 
 ```yaml
 deployment:

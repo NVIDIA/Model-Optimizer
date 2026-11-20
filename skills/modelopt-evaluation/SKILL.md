@@ -1,6 +1,6 @@
 ---
 name: modelopt-evaluation
-description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Always load when validating completed runs or reporting evaluation scores, including standalone modelopt-launching-evals analysis. Not for quantizing models (use modelopt-ptq), standalone serving (use modelopt-deployment), or comparing completed baseline-vs-quantized results (use modelopt-compare-results).
+description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Always load when validating completed runs or reporting evaluation scores, including standalone modelopt-launching-evals analysis, and before any NEL launch or rerun. Not for quantizing models (use modelopt-ptq), standalone serving (use modelopt-deployment), or comparing completed baseline-vs-quantized results (use modelopt-compare-results).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073).
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
@@ -36,7 +36,7 @@ If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-managemen
 - [ ] Step 9: Verify completed run
 ```
 
-Every `nel run` of a config with `pre_cmd`/`post_cmd`, including existing configs and reruns, follows Step 8's **Hook trust** in [launcher-workflow.md](references/launcher-workflow.md); stop if the user declines.
+Every NEL launch follows Step 8's **Hook trust** in [launcher-workflow.md](references/launcher-workflow.md), including existing configs, reruns, launches through `modelopt-launching-evals` (`nemo-evaluator-launcher run`), and manual `sbatch run.sub` resumes; stop if the user declines.
 
 ---
 

@@ -325,7 +325,7 @@ Evals that exceed 4h of wall-clock time are handled by **NEL's built-in dependen
 ssh <host> "cd <output_dir>/<timestamp>-<invocation>/<task>/ && sbatch run.sub"
 ```
 
-Re-submit again if it's preempted again — each resume re-deploys, then skips already-generated samples, so progress is **cumulative** across attempts until it completes. Always confirm via `sacct -j <id>` that the prior job was `CANCELLED` (not a real failure) before resuming.
+Resubmitting `run.sub` re-runs the hooks saved in it without NEL's trust gate, so resume only runs whose hooks the user approved. Re-submit again if it's preempted again — each resume re-deploys, then skips already-generated samples, so progress is **cumulative** across attempts until it completes. Always confirm via `sacct -j <id>` that the prior job was `CANCELLED` (not a real failure) before resuming.
 
 Implications for the agent:
 
@@ -417,6 +417,7 @@ Run directly when the user asked to launch; otherwise ask before submitting.
 # .env lives at the workspace root (where you run nel); the template ships under the skill dir
 [ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env   # create only if Step 1 didn't
 set -a && source .env && set +a
+export NEMO_EVALUATOR_TRUST_PRE_CMD=0   # a legacy .env may set 1; hooks need an approved per-command 1 (Hook trust)
 
 # If nemo_skills.* + self-deployment, for LOCAL/Docker runs only:
 export DUMMY_API_KEY=dummy
@@ -424,12 +425,12 @@ export DUMMY_API_KEY=dummy
 # `DUMMY_API_KEY: lit:dummy` under evaluation.env_vars (see Step 5).
 ```
 
-**Hook trust** (also for existing configs and reruns): `pre_cmd`/`post_cmd` (deployment, evaluation or task level) run arbitrary commands. Show the user the effective ones and get an explicit OK; a request to launch is not one, and ask again if they change after dry-run or canary. If they decline, do not submit. Give every `nel run` an explicit value: `NEMO_EVALUATOR_TRUST_PRE_CMD=1` on an approved launch (canary, full run, single-task reruns), `NEMO_EVALUATOR_TRUST_PRE_CMD=0` otherwise. A value on the command overrides the shell and `nel`'s own `./.env` loading, including an opt-in left there by an older template.
+**Hook trust** (also for existing configs and reruns): `pre_cmd`/`post_cmd` (deployment, evaluation or task level) run arbitrary commands. Show the user the effective ones and get an explicit OK; a request to launch is not one, and ask again if they change after dry-run or canary. If they decline, do not submit. Give every `nel run` an explicit value, written `NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1>` below: `1` only on a launch the user approved, `0` for dry-runs and everything else. A value on the command overrides the shell and `nel`'s own `./.env` loading, including an opt-in left there by an older template.
 
 **Step 8.1 — Dry-run** (config validation):
 
 ```bash
-nel run --config <path> --dry-run
+NEMO_EVALUATOR_TRUST_PRE_CMD=0 nel run --config <path> --dry-run
 ```
 
 Fix unresolved `???`, bad Hydra overrides, missing env vars, invalid mounts, image issues, sbatch errors, obvious deployment errors before proceeding.
@@ -441,7 +442,7 @@ Fix unresolved `???`, bad Hydra overrides, missing env vars, invalid mounts, ima
 **Step 8.2 — Canary** (limited-samples, validates everything dry-run can't):
 
 ```bash
-nel run --config <path> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10
+NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1> nel run --config <path> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10
 ```
 
 Catches judge auth/rate-limits, container failures, sandbox issues, OOM, bad request formatting, low evaluated counts. Always inspect logs:
@@ -454,12 +455,12 @@ ssh <user>@<host> "grep -i 'traceback\|exception\|error\|failed\|oom\|killed\|ti
 
 Canary each risky task class separately (judge-scored, code-execution, model-only). Start `parallelism` conservatively; raise only after judge/sandbox logs are clean — they bottleneck before the model. For capacity-bound runs, tune `parallelism`/`--max-num-seqs` here against vLLM's reported max concurrency + preemption — see `references/parallelism.md`.
 
-Single-task rerun: `nel run --config <path> -t <task_name>` (combine with `-o ++...limit_samples=10` for canary).
+Single-task rerun: `NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1> nel run --config <path> -t <task_name>` (combine with `-o ++...limit_samples=10` for canary).
 
 **Step 8.3 — Full run** (after canary passes):
 
 ```bash
-nel run --config <path>
+NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1> nel run --config <path>
 ```
 
 Remove `limit_samples` overrides; keep canary-validated parallelism. If the canary fails, fix and rerun the canary — don't skip to full.

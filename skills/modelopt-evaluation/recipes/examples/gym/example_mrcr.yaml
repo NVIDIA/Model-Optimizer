@@ -129,7 +129,7 @@ evaluation:
     UV_CACHE_DIR: lit:/cache/uv
     NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID
   # The pinned Gym commit's MRCR prepare needs tiktoken + transformers, neither
-  # declared in its venv. Needs NEMO_EVALUATOR_TRUST_PRE_CMD=1 in the shell.
+  # declared in its venv. Needs NEMO_EVALUATOR_TRUST_PRE_CMD=1 on the approved launch.
   pre_cmd: |-
     set -ex
     command -v uv >/dev/null 2>&1 || { curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="/root/.local/bin:$PATH"; }

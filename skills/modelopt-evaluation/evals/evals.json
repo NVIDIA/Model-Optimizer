@@ -100,7 +100,7 @@
   {
     "name": "nemotron3-nano-bf16-reasoning",
     "skills": ["modelopt-evaluation"],
-    "query": "Help me evaluate Nemotron 3 Nano BF16 from NVIDIA",
+    "query": "Help me evaluate Nemotron 3 Nano BF16 from NVIDIA. After the run is submitted, dry-run my other config, which also has a pre_cmd.",
     "files": [],
     "expected_behavior": [
       "Verifies nel is installed by running 'nel --version'",
@@ -113,6 +113,7 @@
       "Disables reasoning for IFEval task using enable_thinking: false with use_system_prompt: false",
       "Adds deployment.pre_cmd that downloads nano_v3_reasoning_parser.py with curl (not wget) from the model's HF repo at a fixed commit, into a private temp dir, exports its path only if its sha256 matches (|| exit 1), and points --reasoning-parser-plugin at that path",
       "Shows the pre_cmd and the parser source to the user, and sets NEMO_EVALUATOR_TRUST_PRE_CMD=1 only on the approved nel run command (never exported or in .env)",
+      "Runs the later dry-run of the other config with NEMO_EVALUATOR_TRUST_PRE_CMD=0 in the same shell, submits nothing for it, and has no shell-wide opt-in",
       "Adds vLLM extra_args including --trust-remote-code, --reasoning-parser-plugin, --reasoning-parser nano_v3, --max-num-seqs 8",
       "Pins vLLM image to v0.12.0 or later as required by model card",
       "Adds target.api_endpoint.api_key_name: DUMMY_API_KEY for nemo_skills tasks with self-deployment",

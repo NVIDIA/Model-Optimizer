@@ -15,8 +15,8 @@ PATH:
 
 ```bash
 "$SKILL_DIR/scripts/nel-gym.sh" --version  # must report nemo_evaluator_launcher: 0.2.6
-"$SKILL_DIR/scripts/nel-gym.sh" run --config <gym-config.yaml> --dry-run
-"$SKILL_DIR/scripts/nel-gym.sh" run --config <gym-config.yaml>
+NEMO_EVALUATOR_TRUST_PRE_CMD=0 "$SKILL_DIR/scripts/nel-gym.sh" run --config <gym-config.yaml> --dry-run
+NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1> "$SKILL_DIR/scripts/nel-gym.sh" run --config <gym-config.yaml>  # 1 only after hook approval
 ```
 
 Using the wrapper with a validated pin is a correctness and reproducibility
@@ -181,5 +181,5 @@ report `pass@1`. **Do not change repeat counts when aligning to a golden.**
   auto-resumes from the response cache (`resume_from_cache=true`); `CANCELLED by
   <uid>` (preemption) does not, and its chained job exits in ~20s
   (`…finished with 'CANCELLED…' state. EXIT!`), which is expected, not a bug. Resume
-  by hand: `cd <run>/nemo_gym.0 && sbatch run.sub`. Progress is cumulative — check the
+  by hand, only if the user approved its hooks: `cd <run>/nemo_gym.0 && sbatch run.sub`. Progress is cumulative — check the
   rollout count before assuming loss.

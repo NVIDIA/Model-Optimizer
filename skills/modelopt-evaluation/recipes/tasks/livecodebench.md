@@ -28,7 +28,7 @@ Use this inside the top-level `evaluation.tasks` list:
 Judge pin:
 
 - Keep the `pre_cmd` until the image ships the fix (`26.05.1` still has `fddc0ea`). It needs
-  `NEMO_EVALUATOR_TRUST_PRE_CMD=1` and GitHub/PyPI access from the eval node.
+  `NEMO_EVALUATOR_TRUST_PRE_CMD=1` on the approved launch (Step 8 **Hook trust**) and GitHub/PyPI access from the eval node.
 - A task-level `pre_cmd` **replaces** `evaluation.pre_cmd`; merge any commands from that one into this one.
 - Stock-judge scores are not comparable: that judge fails correct binary-stdio solutions, and the
   pinned one also adds float/JSON output tolerance. Grade baseline and candidate with the same
