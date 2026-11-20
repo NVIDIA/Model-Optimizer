@@ -317,9 +317,9 @@ def _with_quantizer_name_index(func):
 
     @wraps(func)
     def wrapper(quant_model, *args, **kwargs):
-        active = _QUANTIZER_NAME_INDEX.get()
-        if active is not None and active.model is quant_model:
-            # A nested call shares the index, so the outer call sees its replacements too.
+        if _QUANTIZER_NAME_INDEX.get() is not None:
+            # A nested call shares the index, so the outer call sees its replacements too; one on
+            # a submodule walks that submodule, since the index holds the outer model's names.
             return func(quant_model, *args, **kwargs)
         token = _QUANTIZER_NAME_INDEX.set(_QuantizerNameIndex(quant_model))
         try:
@@ -679,6 +679,8 @@ def preserve_quantizer_attributes_context(quant_model: nn.Module):
                 saved = original_attributes[name]
                 for tq, sub_state in zip(module, saved["sub_states"]):
                     tq.set_from_modelopt_state(sub_state, properties_only=True)
+        # Restoring a type renames quantizers, so an enclosing call's name index is stale.
+        _invalidate_quantizer_name_index()
 
 
 @contextmanager

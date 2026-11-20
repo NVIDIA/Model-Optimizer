@@ -25,6 +25,7 @@ from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTe
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.quantization import QuantModuleRegistry, tensor_quant
+from modelopt.torch.quantization.calib import MaxCalibrator
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, RotateConfig
 from modelopt.torch.quantization.conversion import create_and_replace_svdquant_linear_on_the_fly
 from modelopt.torch.quantization.nn import (
@@ -718,6 +719,55 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(monkeypatch):
     assert states(named) == states(walked)
     # The "*" entry, the index, and its rebuilds after each replacement: not one per entry.
     assert walks <= 4 < len(quant_cfg)
+
+
+def _sequential_weight_quantizer_in_context(model):
+    with mtq.preserve_quantizer_attributes_context(model):
+        mtq.set_quantizer_by_cfg(
+            model,
+            [
+                {"quantizer_name": "1.weight_quantizer", "cfg": [{"num_bits": 4}] * 2},
+                {"quantizer_name": "1.weight_quantizer.1", "enable": False},
+            ],
+        )
+
+
+def _sequential_weight_quantizer_in_submodule(model):
+    mtq.set_quantizer_by_cfg(
+        model[1], [{"quantizer_name": "weight_quantizer", "cfg": [{"num_bits": 4}] * 2}]
+    )
+
+
+@pytest.mark.parametrize(
+    "replace", [_sequential_weight_quantizer_in_context, _sequential_weight_quantizer_in_submodule]
+)
+def test_set_quantizer_by_cfg_finds_named_quantizers_after_nested_replacement(replace):
+    """Named entries act as wildcards do after a calibrator built mid-call replaces a quantizer."""
+
+    def configured(weight_quantizer, sub_quantizer):
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
+        model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+
+        class ReplacingCalibrator(MaxCalibrator):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                replace(model)
+
+        mtq.set_quantizer_by_cfg(
+            model,
+            [
+                {"quantizer_name": weight_quantizer, "cfg": {"calibrator": ReplacingCalibrator}},
+                {"quantizer_name": sub_quantizer, "enable": False},
+            ],
+        )
+        return {
+            name: module.get_modelopt_state(properties_only=True)
+            for name, module in model.named_modules()
+            if isinstance(module, TensorQuantizer)
+        }
+
+    walked = configured("[0].weight_quantizer", "[1].weight_quantizer.1")
+    assert configured("0.weight_quantizer", "1.weight_quantizer.1") == walked
 
 
 @pytest.mark.parametrize(

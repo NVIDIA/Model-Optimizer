@@ -667,8 +667,22 @@ def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch)
     assert not any(name.startswith("language_model.model.") for name in without_hook)
     # transformers 5.18 adds renames for its port of the Omni class, which the load must bypass.
     port_renames = conversion_mapping.get_checkpoint_conversion_mapping(omni_class.__name__)
+    port_conversions = repr(conversion_mapping.get_model_conversion_mapping(source))
+    in_other_thread = []
     with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
+        # A load in another thread, of transformers' port for instance, keeps transformers' renames.
+        other = threading.Thread(
+            target=lambda: in_other_thread.append(
+                repr(conversion_mapping.get_model_conversion_mapping(source))
+            )
+        )
+        other.start()
+        other.join()
         loaded = omni_class.from_pretrained(tmp_path, config=config)
+    assert in_other_thread == [port_conversions]
+    # Nothing the load changed outlives it.
+    assert conversion_mapping.get_checkpoint_conversion_mapping("nemotron_h_puzzle") is None
+    assert "nemotron_h_puzzle" not in conversion_mapping.USER_REGISTERED_MAPPINGS
     assert loaded_source_tensors(loaded) == set(source.state_dict())
     # A recipe quantizes the whole VLM, layer by layer for sequential GPTQ.
     layers = LayerActivationCollector.get_decoder_layers(loaded)

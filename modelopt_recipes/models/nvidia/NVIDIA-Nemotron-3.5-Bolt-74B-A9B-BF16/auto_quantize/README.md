@@ -22,9 +22,13 @@ python examples/hf_ptq/hf_ptq.py \
   --pyt_ckpt_path nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 \
   --trust_remote_code \
   --recipe models/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16/auto_quantize/iq1_iq2_gptq_nvfp4_fp8_experts_at_2p0625bits \
-  --auto_quantize_checkpoint <search.pth> \
-  --export_path <output-path>
+  --auto_quantize_checkpoint bolt-search.pth \
+  --export_path bolt-out
 ```
+
+The recipe sets no `kv_cache`, so the finalizing run also quantizes the attention layers' KV cache
+with `hf_ptq.py`'s `--kv_cache_qformat`, FP8 (`fp8_cast`) by default; the search scores without
+it. Pass `--kv_cache_qformat none` to keep it BF16, as in the results below.
 
 The language model loads only through the checkpoint's own code, hence `--trust_remote_code`;
 tested with transformers 5.18. `hf_ptq.py` holds this model on one GPU: on a GB200, a search with

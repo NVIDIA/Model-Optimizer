@@ -22,13 +22,15 @@ import re
 import threading
 import weakref
 from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
 
 import torch
+import transformers
 from huggingface_hub import snapshot_download
 from safetensors import SafetensorError
-from transformers import AutoConfig
+from transformers import AutoConfig, conversion_mapping
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.masking_utils import create_causal_mask
 from transformers.models.nemotron_h import modeling_nemotron_h
@@ -49,9 +51,11 @@ __all__ = [
 ]
 
 _MTP_FORWARD_MODELS = weakref.WeakSet()
-# A load patches process-wide state: a model class's constructor and transformers' rename cache.
-# A load in another thread waits, so it neither reads nor restores that state mid-load.
+# A load patches a model class's constructor, which every thread sees. A load in another thread
+# waits, so it neither reads nor restores that constructor mid-load.
 _LOAD_LOCK = threading.RLock()
+# Weight conversion mappings that replace transformers' own for the loads in this context only.
+_LOAD_MAPPINGS: ContextVar[dict | None] = ContextVar("_LOAD_MAPPINGS", default=None)
 
 
 def _resolve_checkpoint_path(checkpoint_path: str) -> Path:
@@ -211,6 +215,24 @@ class _NemotronHMTP(torch.nn.Module):
         return self.layers[-1].final_layernorm(mtp_hidden)
 
 
+def _install_load_mappings():
+    """Make transformers' mapping lookup consult ``_LOAD_MAPPINGS``; without one it is unchanged."""
+    lookup = conversion_mapping.get_checkpoint_conversion_mapping
+    if getattr(lookup, "_modelopt_load_mappings", False):
+        return
+
+    @wraps(lookup)
+    def scoped_lookup(name):
+        mappings = _LOAD_MAPPINGS.get()
+        if mappings is not None and name in mappings:
+            # A copy, as transformers returns: the caller scopes the transforms it gets.
+            return copy.deepcopy(mappings[name])
+        return lookup(name)
+
+    setattr(scoped_lookup, "_modelopt_load_mappings", True)
+    conversion_mapping.get_checkpoint_conversion_mapping = scoped_lookup
+
+
 @contextmanager
 def _puzzle_renames(config: dict):
     """Load a puzzle Omni checkpoint (Nemotron 3.5 Bolt) with its own code's weight renames.
@@ -218,15 +240,13 @@ def _puzzle_renames(config: dict):
     Its code registers them under names transformers 5.18 does not use: none reaches its
     ``nemotron_h_puzzle`` language model, which so loads none of its ``backbone.*`` weights, and
     its Omni class's name selects transformers' renames for transformers' own port of that class,
-    which send the projector's weights elsewhere. ``from_pretrained`` records the renames it ran,
-    and the export reverts them.
+    which send the projector's weights elsewhere. The fix applies to this context's loads only, so
+    a load in another thread, of that port for instance, keeps transformers' renames.
+    ``from_pretrained`` records the renames it ran, and the export reverts them.
     """
     if not _has_puzzle_language_model(config):
         yield
         return
-    import transformers
-    from transformers import conversion_mapping
-
     rename = conversion_mapping.WeightRenaming("backbone.", "model.")
     if not hasattr(rename, "scope_prefix"):
         # Unscoped, the export's reverse rename would also rewrite the `model.` of `language_model.`.
@@ -235,15 +255,23 @@ def _puzzle_renames(config: dict):
             "sub-model's weight renames to that sub-model (5.9 or later); found "
             f"{transformers.__version__}."
         )
+    _install_load_mappings()
+    # Without the class names, the lookup falls back to the model type the checkpoint's code uses.
+    mappings = dict.fromkeys(config.get("architectures") or ())
     if conversion_mapping.get_checkpoint_conversion_mapping("nemotron_h_puzzle") is None:
-        conversion_mapping.register_checkpoint_conversion_mapping("nemotron_h_puzzle", [rename])
-    # Built by the lookup above. Hidden for this load only: a load of the port still needs them.
-    cache = conversion_mapping._checkpoint_conversion_mapping_cache
-    hidden = {name: cache.pop(name) for name in config.get("architectures") or () if name in cache}
+        mappings["nemotron_h_puzzle"] = [rename]
+    # transformers skips a remote-code sub-model whose mapping was not registered; for a load
+    # outside this context the lookup finds none either way.
+    registered = getattr(conversion_mapping, "USER_REGISTERED_MAPPINGS", set())
+    added = "nemotron_h_puzzle" not in registered
+    registered.add("nemotron_h_puzzle")
+    token = _LOAD_MAPPINGS.set(mappings)
     try:
         yield
     finally:
-        cache.update(hidden)
+        _LOAD_MAPPINGS.reset(token)
+        if added:
+            registered.discard("nemotron_h_puzzle")
 
 
 @contextmanager
