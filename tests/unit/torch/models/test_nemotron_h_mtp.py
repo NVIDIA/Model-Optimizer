@@ -186,24 +186,43 @@ def test_remote_consent_and_constructor_cleanup(tiny_checkpoint):
     assert not hasattr(getattr(fresh, "language_model", fresh), "mtp")
 
 
-def test_overlapping_loads_take_turns(tiny_checkpoint):
+def test_overlapping_loads_take_turns(tiny_checkpoint, monkeypatch):
     """A load in another thread waits, so it neither reads nor restores this load's patches."""
     cls, source, checkpoint = tiny_checkpoint
     original_init = cls.__init__
+    lock = adapter._LOAD_LOCK
+    at_lock, entered = threading.Event(), threading.Event()
     errors = []
+
+    class SignalingLock:
+        # Marks the other load reaching the lock, so its wait is contention and not slow setup.
+        def __enter__(self):
+            if threading.current_thread() is other:
+                at_lock.set()
+            return lock.__enter__()
+
+        def __exit__(self, *exc_info):
+            return lock.__exit__(*exc_info)
+
+    monkeypatch.setattr(adapter, "_LOAD_LOCK", SignalingLock())
 
     def other_load():
         try:
             with adapter.prepare_for_loading(checkpoint, True):
+                entered.set()
                 cls(source.config)
         except Exception as error:  # surfaced in the main thread
             errors.append(error)
+        finally:
+            at_lock.set()  # a load that skips the lock fails the check below, not a timeout
 
     other = threading.Thread(target=other_load, daemon=True)
     with adapter.prepare_for_loading(checkpoint, True):
         other.start()
+        assert at_lock.wait(timeout=30)
         other.join(timeout=0.5)
         assert other.is_alive(), "a load in another thread ran inside this one"
+        assert not entered.is_set()
         model = cls(source.config)
     other.join(timeout=30)
     assert not other.is_alive()
