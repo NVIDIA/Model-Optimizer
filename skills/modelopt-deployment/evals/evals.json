@@ -1,58 +1,42 @@
 [
   {
-    "name": "vllm-fp8-local",
-    "skills": ["modelopt-deployment"],
-    "query": "deploy my quantized model at ./qwen3-0.6b-fp8 with vLLM",
-    "files": [],
+    "id": "vllm-fp8-local",
+    "question": "Plan serving ./qwen3-0.6b-fp8 as an OpenAI-compatible API using vLLM on one NVIDIA H100 80GB. Supplied checkpoint metadata: architecture Qwen3ForCausalLM, 0.6B parameters, HF export, hf_quant_config.json quantization.quant_algo=FP8. Assume vLLM 0.10.1 is installed. Use port 8000 and served model name qwen-fp8. Give a launch command, rough weight-memory estimate with overhead caveat, and readiness/model-list/generation checks with success criteria. Keep it brief. Plan only: do not install, download, start a server, inspect GPUs, or run the checks; do not claim measured results.",
+    "expected_skill": "modelopt-deployment",
+    "expected_script": null,
+    "ground_truth": "A planning-only vLLM command serves ./qwen3-0.6b-fp8 using --quantization modelopt, TP=1 (explicit or default), port 8000, served name qwen-fp8. FP8 weights are roughly 0.6 GB before scales, unquantized tensors, KV cache and runtime overhead; this is an estimate, not a measurement. Future checks require HTTP 200 health, the expected model ID at /v1/models, and successful nonempty coherent generation using that ID. Nothing is installed, downloaded, probed, launched or claimed successful.",
     "expected_behavior": [
-      "Identifies ./qwen3-0.6b-fp8 as a local quantized checkpoint",
-      "Reads hf_quant_config.json and detects FP8 quantization format",
-      "Confirms vLLM is the chosen framework",
-      "Checks vLLM is installed and version >= 0.10.1",
-      "Detects local GPU via nvidia-smi or torch.cuda",
-      "Estimates GPU memory: 0.6B params x 1 byte (FP8) = ~0.6 GB, fits single GPU",
-      "Reads references/vllm.md for deployment instructions",
-      "Uses deploy.sh or runs: python -m vllm.entrypoints.openai.api_server --model ./qwen3-0.6b-fp8 --quantization modelopt --host 0.0.0.0 --port 8000",
-      "Passes --quantization modelopt (not modelopt_fp4) since checkpoint is FP8",
-      "Waits for server health check at /health endpoint",
-      "Verifies /v1/models lists the model",
-      "Sends test generation request to /v1/completions and confirms coherent output",
-      "Reports server URL (http://localhost:8000) and port to user"
+      "Proposes a vLLM launch command for ./qwen3-0.6b-fp8 with FP8 quantization modelopt, one GPU (explicit TP=1 or default), port 8000, and served name qwen-fp8.",
+      "Estimates approximately 0.6 GB of raw FP8 weights and distinguishes KV cache, metadata/scales or runtime overhead from that estimate.",
+      "Plans health readiness with HTTP success, /v1/models containing qwen-fp8, and a generation request using that model ID that must succeed with coherent nonempty output before reporting success.",
+      "Only plans deployment: no model download, installation, GPU probing, service launch, API-check execution, or fabricated success/measurements."
     ]
   },
   {
-    "name": "remote-slurm-deployment",
-    "skills": ["modelopt-deployment"],
-    "query": "deploy my quantized model on the SLURM cluster",
-    "files": [],
+    "id": "remote-slurm-deployment",
+    "question": "Plan serving an HF-exported Qwen3-8B NVFP4 checkpoint already at /models/qwen3-8b-nvfp4 on a remote SLURM node with one x86 B300 GPU. Choose a compatible backend and quantization flag, specify image compatibility checks and a launch outline, then state how to verify readiness and generation and report the endpoint. Registry authentication, account/partition, image tag/digest, and allocated hostname are not supplied: leave them as preflight requirements, not invented values. Address whether checkpoint transfer is needed. Keep it brief. Plan only: no SSH, image pull, GPU probes, submission, server launch, downloads, or claims of successful deployment.",
+    "expected_skill": "modelopt-deployment",
+    "expected_script": null,
+    "ground_truth": "Plan a backend supporting ModelOpt HF NVFP4 on x86 B300, such as vLLM with modelopt_fp4 and TP=1. Verify sm_103 kernels, x86 image architecture and CUDA >=13 rather than guessing a tag. Keep registry authentication, account/partition, image tag/digest and allocated hostname as unresolved preflight inputs. Check the remote checkpoint in place; do not transfer it merely because its path is absolute. Outline srun with container image/mounts and serving command, or an equivalent SLURM container launch. Plan health, model discovery and coherent generation checks on the allocated node, then report its hostname/port and cluster-network reachability. No execution or success claims.",
     "expected_behavior": [
-      "Checks for cluster config at ~/.config/modelopt/clusters.yaml, .agents/clusters.yaml, or .claude/clusters.yaml",
-      "Sources remote_exec.sh from the loaded common skill root",
-      "Calls remote_load_cluster, remote_check_ssh, remote_detect_env",
-      "Checks if checkpoint is already on remote (e.g., from prior PTQ run) before syncing; only syncs if local",
-      "For SLURM: writes a job script with srun --container-image and --container-mounts on srun line (not #SBATCH)",
-      "Starts vLLM/SGLang server inside the container via srun",
-      "Gets allocated node hostname from squeue -j $JOBID -o %N",
-      "Verifies remotely: remote_run 'curl -s http://localhost:8000/health'",
-      "Reports the remote endpoint (http://<node_hostname>:8000) and notes SLURM network restrictions",
-      "Reads framework-specific reference (references/vllm.md or references/sglang.md) for deployment flags"
+      "Chooses a backend supporting HF NVFP4 on B300 and outlines its launch with the existing /models/qwen3-8b-nvfp4 path and appropriate quantization selection (e.g. modelopt_fp4 for vLLM/SGLang).",
+      "Requires an x86/amd64 B300 sm_103-compatible serving image with CUDA >=13, and leaves its unspecified tag/digest as a preflight choice rather than asserting an unverified image works.",
+      "Keeps unknown registry authentication, SLURM account/partition and allocated hostname as preflight inputs; checks the existing remote checkpoint in place instead of resyncing it.",
+      "Outlines SLURM container launch with an image and checkpoint mount, then remote health, model-list and coherent generation checks before reporting an endpoint using the allocated hostname/port and cluster-network access constraints.",
+      "Only plans: no SSH, image pull, GPU probe, transfer, job submission, service launch, downloads, or fabricated deployment success."
     ]
   },
   {
-    "name": "unquantized-hf-model",
-    "skills": ["modelopt-deployment"],
-    "query": "deploy Qwen/Qwen3-0.6B with vLLM",
-    "files": [],
+    "id": "unquantized-hf-model",
+    "question": "Plan an OpenAI-compatible vLLM deployment of Qwen/Qwen3-0.6B on one H100 80GB. For this exercise its supplied config is BF16 with no quantization_config or hf_quant_config.json; assume vLLM 0.10.1 is installed. Use port 8000 and served name qwen-bf16. Give a launch command, approximate weight-memory estimate with runtime overhead caveat, and health/model-list/generation success checks. Brief plan only: do not download, install, probe GPUs, start a server, or execute checks. Do not claim that deployment has succeeded.",
+    "expected_skill": "modelopt-deployment",
+    "expected_script": null,
+    "ground_truth": "Plan vLLM for Qwen/Qwen3-0.6B in the supplied unquantized BF16 configuration, TP=1 (explicit/default), port 8000 and served name qwen-bf16, without a ModelOpt quantization override. Raw weights are about 1.2 GB plus runtime/KV overhead. Future verification requires healthy HTTP status, the expected /v1/models ID and successful coherent nonempty generation using it. Do not download, install, probe, launch, execute checks or claim success.",
     "expected_behavior": [
-      "Identifies Qwen/Qwen3-0.6B as a HuggingFace model ID (not a local path)",
-      "Detects no quantization format in the model name — treats as unquantized (BF16)",
-      "Does not pass --quantization flag to vLLM",
-      "Checks vLLM is installed and GPU is available",
-      "Estimates memory: 0.6B params x 2 bytes = ~1.2 GB, fits single GPU",
-      "Starts vLLM server: python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-0.6B --host 0.0.0.0 --port 8000",
-      "Waits for health check at /health endpoint",
-      "Tests generation via /v1/completions and confirms coherent output",
-      "Reports server URL to user"
+      "Proposes a vLLM launch command using Qwen/Qwen3-0.6B, one GPU (explicit TP=1 or default), port 8000 and served name qwen-bf16; does not force ModelOpt/FP8/FP4 quantization onto the supplied BF16 checkpoint.",
+      "Estimates approximately 1.2 GB of raw BF16 weights and adds a runtime/KV-cache overhead caveat.",
+      "Plans HTTP health success, /v1/models containing qwen-bf16, and a successful generation request using that ID with coherent nonempty output before reporting success.",
+      "Only plans: no download, installation, GPU probe, server launch, check execution, or claimed deployment success."
     ]
   }
 ]

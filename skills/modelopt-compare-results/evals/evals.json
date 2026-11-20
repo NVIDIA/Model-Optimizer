@@ -1,45 +1,42 @@
 [
   {
-    "name": "baseline-vs-quantized-delta",
-    "skills": ["modelopt-compare-results"],
-    "query": "Compare the baseline and quantized NEL runs and tell me the accuracy drop",
-    "files": [],
+    "id": "baseline-vs-quantized-delta",
+    "question": "Compare supplied synthetic evaluation evidence for source-BF16 (baseline) and export-NVFP4 (candidate). Scores are percentages, metric accuracy.mean, higher is better. Both runs passed log/server/judge/reasoning validation. Prompt/template, benchmark version/split/harness/container, generation/reasoning settings, sample/repeat counts, judge setup, metric, timeout/output limits and failure scoring match. Complete telemetry shows zero timeouts, output-limit hits or exclusions on both sides (1000/1000 scored per run/task). Each task has eight independent full runs per side. No credible external baseline reference is supplied; do not browse or invent one. Gate: each task's two-sided 95% CI for candidate-minus-baseline must lie strictly above -1 percentage point. Task A baseline=75, candidate=74.6, delta CI=[-0.8,0.0]; task B baseline=60, candidate=58.5, delta CI=[-1.9,-1.1]. SEs are not supplied. Give a compact per-task delta/assessment table, comparability and external-sanity status, and overall feasibility. Arithmetic in a small script is allowed; do not run evaluations or claim publication.",
+    "expected_skill": "modelopt-compare-results",
+    "expected_script": null,
+    "ground_truth": "Use source-BF16 as baseline and export-NVFP4 as candidate with accuracy.mean percentages. Candidate-minus-baseline is -0.4 pp for A and -1.5 pp for B. Supplied 95% delta intervals make A Within margin and B Substantial regression against -1 pp, so overall quantization feasibility is not acceptable. The supplied validation, matched settings, eight runs/side and complete zero-failure telemetry establish comparability. External baseline sanity is externally unverified, not failed or verified; missing corroboration alone does not invalidate the measured baseline. SEs are unavailable. No evaluation or publication is performed.",
     "expected_behavior": [
-      "Establishes the baseline and candidate before computing deltas",
-      "Identifies baseline and candidate run artifacts before computing deltas",
-      "Checks that both runs were validated before accepting scores",
-      "Uses task recipe Score Extraction sections for canonical score fields",
-      "Verifies prompt/template, generation settings, reasoning handling, sample counts, judge/simulator setup, and score field comparability",
-      "Computes exact per-task deltas outside the chat context when there are multiple tasks or repeated runs",
-      "Labels the result as not apples-to-apples if comparability checks fail",
-      "Reports quantization feasibility as inconclusive when no acceptance threshold is provided"
+      "Identifies source-BF16 and export-NVFP4 with metric accuracy.mean, computes candidate-minus-baseline A=-0.4 pp and B=-1.5 pp, and does not confuse percentage points with relative percent.",
+      "Uses the supplied delta CIs against the strict -1 pp gate: A Within margin, B Substantial regression, overall feasibility not acceptable.",
+      "Reports the runs comparable from the supplied validation and matched settings, including eight independent runs per side, complete scored samples and zero timeout/output-limit/exclusion telemetry.",
+      "Labels external baseline sanity externally unverified because no credible reference is supplied; does not invent references or SEs, or treat missing external corroboration alone as a failed baseline.",
+      "Uses only supplied evidence (arithmetic scripts allowed); does not fetch runs, execute evaluations, claim publication or fabricate measurements."
     ]
   },
   {
-    "name": "missing-baseline",
-    "skills": ["modelopt-compare-results", "modelopt-evaluation"],
-    "query": "Is this quantized eval good enough if I only have the quantized run?",
-    "files": [],
+    "id": "missing-baseline",
+    "question": "I only have a quantized candidate's accuracy.mean=72.4% on 1000 samples. Its source-checkpoint metadata and baseline run are absent, as are validation logs and timeout/output-limit accounting. Is it good enough? Give a brief comparison-readiness response: identify missing baseline/source/precision, matching evaluation settings, validation/accounting, acceptance threshold and external-reference evidence; state feasibility and the future skill handoff for missing evaluations. Do not invent data or a threshold, fetch runs, launch jobs, or execute evaluations.",
+    "expected_skill": "modelopt-compare-results",
+    "expected_script": null,
+    "ground_truth": "Feasibility is inconclusive: a standalone 72.4% candidate score is not a validated baseline delta. Request source checkpoint and precision or a matching baseline run, the acceptance threshold, validation artifacts, failure/timeout/output-limit accounting and external-reference evidence. A future modelopt-evaluation handoff should obtain and validate missing runs with matched prompt/template, task/dataset/version, generation/reasoning, judge, metric and sample settings, changing only checkpoint-specific settings. Do not invent the baseline, threshold or missing telemetry or start evaluation.",
     "expected_behavior": [
-      "Does not treat a standalone quantized score as a release-ready delta",
-      "Establishes the matching baseline from the PTQ source model/checkpoint or asks the user for one",
-      "Delegates missing baseline or candidate evaluations to the evaluation skill",
-      "Explains that the baseline config must match task versions, serving args, dataset setup, credentials, cluster, and container except for the checkpoint/model"
+      "Reports quantization feasibility inconclusive and does not treat 72.4% alone as evidence of an acceptable quantization delta.",
+      "Requests or identifies the missing source checkpoint/baseline and precision, acceptance threshold, run-validation artifacts, timeout/output-limit accounting and external-reference evidence without inventing them.",
+      "Names the future modelopt-evaluation handoff (or unambiguous evaluation skill alias) for missing validated baseline/candidate runs, with matching task/dataset/version, prompt/template, generation/reasoning, judge, metric and sample settings.",
+      "Does not fetch runs, launch jobs, execute evaluations or claim publication."
     ]
   },
   {
-    "name": "interval-based-assessments",
-    "skills": ["modelopt-compare-results"],
-    "query": "Compare seven validated, comparable accuracy tasks using signed loss Candidate - Baseline in pp and margin M=-1 pp. The supplied CIs are valid two-sided 95% intervals from independent planned runs: A mean=-0.5, CI=[-1.5,0.5]; B mean=-3, CI=[-8,2]; C mean=-0.3, CI=[-0.8,0.2]; D mean=-3, CI=[-4,-2]; E has one full run per side and no task-specific uncertainty method; F mean=-0.5, CI=[-1,0]; G has independent baseline runs [60,60] and candidate runs [59.5,59.5]. What are their assessments?",
-    "files": [],
+    "id": "interval-based-assessments",
+    "question": "Assess seven supplied synthetic accuracy comparisons using signed loss Candidate - Baseline in percentage points and margin M=-1 pp. Assume validated comparable runs and valid two-sided 95% signed-loss CIs from independent planned runs unless noted: A mean=-0.5 CI=[-1.5,0.5]; B mean=-3 CI=[-8,2]; C mean=-0.3 CI=[-0.8,0.2]; D mean=-3 CI=[-4,-2]; E has one full run per side and no uncertainty method; F mean=-0.5 CI=[-1,0]; G has independent baseline runs [60,60] and candidate runs [59.5,59.5]. Give a compact assessment table and explain the margin boundary and unavailable uncertainty. Do not infer missing CIs, recommend a stopping plan, run evaluations, or claim publication.",
+    "expected_skill": "modelopt-compare-results",
+    "expected_script": null,
+    "ground_truth": "A and B are Inconclusive because their signed-loss CIs span the -1 pp margin and zero. C is Within margin; D is Substantial regression. E has unavailable uncertainty from a single run/side without an uncertainty method. F is unresolved/Inconclusive: its lower bound equals -1 pp, whereas Within margin requires a strictly higher lower bound. G has a -0.5 pp point delta but unavailable uncertainty because its run variances are degenerate; no zero-width confidence interval or confidence-based acceptance. Do not infer significance from overlapping separate score CIs or a test against zero, or prescribe a stopping plan.",
     "expected_behavior": [
-      "Classifies A and B as Inconclusive despite their means falling on opposite sides of the margin",
-      "Classifies C as Within margin and D as Substantial regression",
-      "Reports E uncertainty unavailable due to insufficient samples, without treating in-run repeats as independent full runs",
-      "Leaves F unresolved because equality at the margin is not Within margin",
-      "Reports G uncertainty unavailable as a degenerate case, not a zero-width confidence interval or confidence-based acceptance",
-      "Does not infer significance from overlapping individual score intervals or substitute a p-value against zero for the margin assessment",
-      "Explains how the evidence compares without prescribing reruns or a stopping plan"
+      "Classifies both A and B as Inconclusive despite their means lying on opposite sides of the margin; C Within margin and D Substantial regression.",
+      "Leaves F unresolved/Inconclusive because equality at the margin does not satisfy the strict Within margin criterion.",
+      "Marks E uncertainty unavailable from insufficient independent runs and G uncertainty unavailable from degenerate variance; does not manufacture CIs or accept either with confidence.",
+      "Uses supplied signed-loss CIs against M=-1 pp, without substituting individual score-interval overlap or a p-value against zero; gives no stopping plan, evaluation execution or publication claim."
     ]
   }
 ]
