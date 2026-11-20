@@ -30,7 +30,7 @@ to the evaluation skill root, and step numbers match `SKILL.md`.
 
 Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 
-**Set up `.env` now (not Step 8).** The working `.env` lives at the **workspace root** — the directory you run `nel` from — matching `modelopttools:eval-config`'s convention; do **not** create it under the skill dir. (NEL does not discover `.env` by path: it reads secrets from the shell env via the `host:` prefix after you `source`, so the location is purely *which file you source* before `nel run`. Keeping the single `.env` at the workspace root avoids a stale duplicate under the symlinked, shared `.agents/` skill tree.) For judge-scored / user-sim tasks (HLE, AA-LCR, Tau2), seed it from the template if absent — the template ships under the skill dir, the working `.env` does not: `[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env`. Then try `modelopttools:eval-config` (if available) to fill the judge `model_id`/`url` rows (user adds the secret key). Needed before Step 5, which substitutes those values into task `<VAR>` placeholders.
+**Set up `.env` now (not Step 8).** The working `.env` lives at the **workspace root** — the directory you run `nel` from — matching `modelopttools:eval-config`'s convention; do **not** create it under the skill dir. (`nel run` also loads `./.env` from the directory it runs in, without overriding variables already set in the shell. Keeping the single `.env` at the workspace root avoids a stale duplicate under the symlinked, shared `.agents/` skill tree.) For judge-scored / user-sim tasks (HLE, AA-LCR, Tau2), seed it from the template if absent — the template ships under the skill dir, the working `.env` does not: `[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env`. Then try `modelopttools:eval-config` (if available) to fill the judge `model_id`/`url` rows (user adds the secret key). Needed before Step 5, which substitutes those values into task `<VAR>` placeholders.
 
 **Secret safety — never open `.env` with Read/Write/Edit.** The harness mirrors later edits of any agent-opened file into the transcript, so touching `.env` leaks the keys the user adds afterward. Use shell only (`cp` to create, `source` to load — neither echoes); edit `env.example`, never `.env`; leave value entry to the user / `modelopttools:eval-config`.
 
@@ -416,8 +416,10 @@ Run directly when the user asked to launch; otherwise ask before submitting.
 ```bash
 # .env lives at the workspace root (where you run nel); the template ships under the skill dir
 [ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env   # create only if Step 1 didn't
-# nel also loads ./.env itself, and older templates opted in to pre_cmd trust there
-sed -i '/^NEMO_EVALUATOR_TRUST_PRE_CMD=/d' .env
+# nel also loads ./.env itself, and older templates opted in to pre_cmd trust there.
+# Remove it (prints nothing) and stop if it is still there.
+TRUST_RE='^[[:space:]]*(export[[:space:]]+)?NEMO_EVALUATOR_TRUST_PRE_CMD[[:space:]]*='
+sed -i -E "/$TRUST_RE/d" .env && ! grep -qE "$TRUST_RE" .env || exit 1
 set -a && source .env && set +a
 unset NEMO_EVALUATOR_TRUST_PRE_CMD
 
@@ -427,7 +429,7 @@ export DUMMY_API_KEY=dummy
 # `DUMMY_API_KEY: lit:dummy` under evaluation.env_vars (see Step 5).
 ```
 
-**Hook trust:** `pre_cmd`/`post_cmd` (deployment, evaluation or task level) run arbitrary commands. Show the user the effective ones and get an explicit OK; a request to launch is not one, and ask again if they change after dry-run or canary. Then opt in on that command only: `NEMO_EVALUATOR_TRUST_PRE_CMD=1 nel run ...` (dry-run doesn't need it).
+**Hook trust:** `pre_cmd`/`post_cmd` (deployment, evaluation or task level) run arbitrary commands. Show the user the effective ones and get an explicit OK; a request to launch is not one, and ask again if they change after dry-run or canary. Then prefix each approved launch below (canary, full run, single-task reruns) with `NEMO_EVALUATOR_TRUST_PRE_CMD=1`; dry-run doesn't need it.
 
 **Step 8.1 — Dry-run** (config validation):
 
