@@ -75,8 +75,8 @@ for an "AA" request. If the user asks for MRCR:
    Take the largest variant within the checkpoint's trained context — see the recipe.
 3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) and
    `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` (`nemo_gym` is not in the FDF map).
-   After the user reviews the `pre_cmd` (it installs `tiktoken` + `transformers`;
-   prepare fails without it), export `NEMO_EVALUATOR_TRUST_PRE_CMD=1` for the run.
+   The config's `pre_cmd` needs hook trust: follow Step 8's **Hook trust** in
+   `references/launcher-workflow.md`.
 4. **MRCR needs a git-backed Gym image.** The pin is newer than any image's baked
    Gym and must apply, so the template's `container:` is `???` and the bootstrap
    exits 1 on a non-git `/opt/Gym` (the public `eval-factory/nemo-gym:*` images).

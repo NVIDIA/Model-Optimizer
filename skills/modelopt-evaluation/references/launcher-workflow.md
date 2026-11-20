@@ -416,16 +416,18 @@ Run directly when the user asked to launch; otherwise ask before submitting.
 ```bash
 # .env lives at the workspace root (where you run nel); the template ships under the skill dir
 [ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env   # create only if Step 1 didn't
+# nel also loads ./.env itself, and older templates opted in to pre_cmd trust there
+sed -i '/^NEMO_EVALUATOR_TRUST_PRE_CMD=/d' .env
 set -a && source .env && set +a
+unset NEMO_EVALUATOR_TRUST_PRE_CMD
 
-# If the config has pre_cmd/post_cmd, show them to the user and get an explicit OK
-# first (they run arbitrary commands). Export for this run only, never in .env:
-export NEMO_EVALUATOR_TRUST_PRE_CMD=1
 # If nemo_skills.* + self-deployment, for LOCAL/Docker runs only:
 export DUMMY_API_KEY=dummy
 # On SLURM this shell export does NOT reach the container — instead declare
 # `DUMMY_API_KEY: lit:dummy` under evaluation.env_vars (see Step 5).
 ```
+
+**Hook trust:** `pre_cmd`/`post_cmd` (deployment, evaluation or task level) run arbitrary commands. Show the user the effective ones and get an explicit OK; a request to launch is not one, and ask again if they change after dry-run or canary. Then opt in on that command only: `NEMO_EVALUATOR_TRUST_PRE_CMD=1 nel run ...` (dry-run doesn't need it).
 
 **Step 8.1 — Dry-run** (config validation):
 
