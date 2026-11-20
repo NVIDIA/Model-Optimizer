@@ -224,6 +224,8 @@ with its own `run_id`, copying the shared `services:` block.
 
 ## Run (dry-run → canary → full) → push to MLflow
 
+Before each `--submit`, read the rendered service config from `--dry-run` (after defaults and `-O` overrides): `extra_args`, `image`, and `extra_env` names (not values). Get the user's explicit OK for any executable serving setting (`launcher-workflow.md` Step 3 allowlist), and again if one changes between canary and full run; stop if declined.
+
 ```bash
 set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"
 "$NEL" eval run <cfg>.yaml --dry-run                                  # validate/render (no SSH)

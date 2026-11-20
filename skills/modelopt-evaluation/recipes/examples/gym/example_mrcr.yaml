@@ -25,7 +25,7 @@
 #
 # `.env` needs HF_TOKEN and NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1 (nemo_gym is not
 # in the FDF map). This config has a pre_cmd; scope its trust per launch
-# (launcher-workflow.md Step 8, "Hook trust"), e.g. after the user approves it:
+# (launcher-workflow.md Step 8, "Approvals"), e.g. after the user approves it:
 #   NEMO_EVALUATOR_TRUST_PRE_CMD=1 "$SKILL_DIR/scripts/nel-gym.sh" run --config example_mrcr.yaml
 #
 # =============================================================================

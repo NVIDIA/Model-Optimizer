@@ -35,7 +35,7 @@ when you have them, never fewer.
   more if any fail validation; at least 8 on each side of a comparison (8-vs-1
   is not apples-to-apples). In a multi-task AA config, run the suite once, then
   SciCode alone for the rest:
-  `for _ in $(seq 7); do NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1> nel run --config <cfg> -t ns_scicode; done` (Step 8 **Hook trust**).
+  `for _ in $(seq 7); do NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1> nel run --config <cfg> -t ns_scicode; done` (Step 8 **Approvals**).
 - **Each must be a fresh `nel run`.** Re-submitting a run's `run.sub` resumes
   from its response cache and replays generations. Equal scores are a **signal
   to check, not proof** — SciCode's score is discrete, so independent runs tie

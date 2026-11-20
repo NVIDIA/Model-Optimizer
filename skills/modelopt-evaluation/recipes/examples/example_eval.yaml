@@ -10,7 +10,7 @@
 # Add more AA tasks per recipes/tasks/aa/ and the AA suite rule in SKILL.md.
 #
 # Usage (NEMO_EVALUATOR_TRUST_PRE_CMD: 1 only on a launch whose hooks the user approved; see
-# references/launcher-workflow.md Step 8, "Hook trust"):
+# references/launcher-workflow.md Step 8, "Approvals"):
 #   NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1> nel run --config recipes/examples/example_eval.yaml \
 #     -o deployment.checkpoint_path=/path/to/quantized/checkpoint \
 #     -o deployment.served_model_name=my-model-nvfp4 \
