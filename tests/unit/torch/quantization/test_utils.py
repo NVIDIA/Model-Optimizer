@@ -22,8 +22,10 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.repair import IQRepairPolicy
 from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
     core_utils,
@@ -35,6 +37,7 @@ from modelopt.torch.quantization.utils.core_utils import (
     _fsdp2_owned_params,
     _fsdp2_owns,
     _fsdp2_param_groups,
+    _fsdp2_persistent_parameters,
     enable_fake_quant,
     fsdp2_weight_access_and_writeback_context,
     persistent_materialization,
@@ -414,16 +417,22 @@ def test_disable_fsdp_unshard_reshard_shared_group_and_nesting(cpu_dist_workers)
     cpu_dist_workers.run(_shared_group_override_restores_prior_attributes)
 
 
-def _fsdp2_owns_its_params_in_every_state_job(rank, size):
+def _fsdp2_owns_its_params_in_every_state_job(rank, size, repair):
     mesh = init_device_mesh("cpu", (size,))
     model = torch.nn.Module()
     model.dense = torch.nn.Linear(8, 8)
     model.layer = torch.nn.Linear(8, 8)
+    model.shared = torch.nn.Module()
+    model.shared.weight = model.dense.weight
     fully_shard(model.layer, mesh=mesh)  # a unit of its own, inside the model's
     fully_shard(model, mesh=mesh)
     layer = model.layer
     sharded = layer.weight
     owned = _fsdp2_owned_params(model)
+    persistent = _fsdp2_persistent_parameters(model)
+    dense_weight = model.dense.weight
+    assert persistent[model.dense, "weight"] is persistent[model.shared, "weight"] is dense_weight
+    assert persistent[layer, "weight"] is sharded
     assert _fsdp2_owns(owned, model.dense.weight) and _fsdp2_owns(owned, sharded)
     # An id kept for a parameter does not make another object at that address FSDP2's.
     assert not _fsdp2_owns({id(sharded): weakref.ref(model.dense.weight)}, sharded)
@@ -432,8 +441,12 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size):
     try:
         assert unsharded is not sharded, "FSDP2 registered the same parameter when unsharded"
         assert _fsdp2_owns(_fsdp2_owned_params(model, refresh=True), unsharded)
+        assert _fsdp2_persistent_parameters(model)[layer, "weight"] is sharded
     finally:
         layer.reshard()
+    with fsdp2_weight_access_and_writeback_context(model.dense, model):
+        assert not isinstance(model.dense.weight, DTensor)
+        assert _fsdp2_persistent_parameters(model)[model.dense, "weight"] is dense_weight
     # The set is kept for the unit: opening the window again costs the module's parameters only.
     with mock.patch.object(core_utils, "_fsdp2_param_groups", wraps=_fsdp2_param_groups) as scans:
         for _ in range(3):
@@ -441,16 +454,59 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size):
                 pass
     assert scans.call_count == 0
 
+    if repair:
+        boundary = torch.nn.Sequential(torch.nn.Linear(256, 4), torch.nn.Linear(4, 4))
+        mtq.quantize(
+            boundary,
+            {
+                "quant_cfg": [
+                    {"quantizer_name": "*", "enable": False},
+                    {
+                        "quantizer_name": "0.weight_quantizer",
+                        "cfg": {"num_bits": "iq1_m", "backend": "ggml"},
+                    },
+                ],
+                "algorithm": None,
+            },
+        )
+        inputs = torch.randn(2, 256, requires_grad=True)
+        expected = boundary(inputs).detach()
+        fully_shard(boundary, mesh=mesh, reshard_after_forward=True)
+        policy = IQRepairPolicy()
+        try:
+            with fsdp2_weight_access_and_writeback_context(boundary, boundary, writeback=False):
+                fields = policy.prepare(boundary)
+            with fsdp2_weight_access_and_writeback_context(boundary, boundary, writeback=False):
+                boundary(inputs).square().mean().backward()
+                assert all(parameter.grad is None for parameter in boundary.parameters())
+                assert any(
+                    field.grad is not None and field.grad.count_nonzero() for field in fields
+                )
+            assert all(not parameter.requires_grad for parameter in boundary.parameters())
+            policy.close()
+            assert all(parameter.requires_grad for parameter in boundary.parameters())
+            boundary.zero_grad(set_to_none=True)
+            ordinary = boundary(inputs)
+            torch.testing.assert_close(ordinary, expected, rtol=0, atol=0)
+            ordinary.square().mean().backward()
+            assert all(
+                parameter.grad is not None and parameter.grad.to_local().count_nonzero()
+                for parameter in boundary.parameters()
+            )
+        finally:
+            policy.close()
 
-def test_fsdp2_owns_its_parameters_in_every_shard_state(cpu_dist_workers):
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_fsdp2_owns_its_parameters_in_every_shard_state(cpu_dist_workers, repair):
     """FSDP2 registers another parameter object once a unit is unsharded (or resharded after the
     forward, under HSDP), and the weight-access window gathers by ownership: each counts as FSDP2's,
     or a weight it does own would be left sharded in the window. So do the parameters of a unit
     nested in it. The window keeps the set per unit rather than scanning it on every entry."""
-    cpu_dist_workers.run(_fsdp2_owns_its_params_in_every_state_job)
+    cpu_dist_workers.run(_fsdp2_owns_its_params_in_every_state_job, repair)
 
 
-def _window_leaves_what_fsdp2_does_not_own_job(rank, size):
+def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage):
     ep_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("ep",))
     dp_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("dp",))
     layer = torch.nn.Module()
@@ -474,10 +530,52 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size):
     assert scans.call_count == 1
     assert all(weight.to_local().shape[0] == 2 for weight in layer.experts.parameters())
 
+    if failure_stage == "none":
+        return
+    originals = dict(layer.named_parameters())
+    before = {name: parameter.to_local().detach().clone() for name, parameter in originals.items()}
+    failure = RuntimeError("FSDP weight access " + failure_stage)
+    body_failure = RuntimeError("original context body failure")
+    redistribute = DTensor.redistribute
+    armed = True
 
-def test_fsdp2_weight_access_leaves_parameters_fsdp2_does_not_own(cpu_dist_workers):
+    def fail_once(tensor, *args, **kwargs):
+        nonlocal armed
+        if failure_stage == "entry" and tensor is originals["dense.bias"] and armed:
+            armed = False
+            with torch.no_grad():
+                layer.dense.weight.add_(7)
+            raise failure
+        result = redistribute(tensor, *args, **kwargs)
+        if failure_stage != "entry" and tensor.placements[0].is_replicate() and armed:
+            # Both ranks finish this collective before the injected failure.
+            armed = False
+            raise failure
+        return result
+
+    with (
+        mock.patch.object(DTensor, "redistribute", fail_once),
+        pytest.raises(RuntimeError) as error,
+        fsdp2_weight_access_and_writeback_context(layer, layer),
+        torch.no_grad(),
+    ):
+        layer.dense.weight.add_(1)
+        layer.dense.bias.add_(2)
+        if failure_stage == "body_writeback":
+            raise body_failure
+    assert error.value is (body_failure if failure_stage == "body_writeback" else failure)
+    assert all(layer.get_parameter(name) is parameter for name, parameter in originals.items())
+    if failure_stage == "entry":
+        for name, parameter in originals.items():
+            torch.testing.assert_close(parameter.to_local(), before[name], rtol=0, atol=0)
+    with fsdp2_weight_access_and_writeback_context(layer, layer):
+        assert not isinstance(layer.dense.weight, DTensor)
+
+
+@pytest.mark.parametrize("failure_stage", ["none", "entry", "writeback", "body_writeback"])
+def test_fsdp2_weight_access_leaves_parameters_fsdp2_does_not_own(cpu_dist_workers, failure_stage):
     """An expert-parallel weight is a DTensor sharded over the experts that fully_shard was told to
     ignore. The weight-access window gathers FSDP2's parameters only, so it stays sharded: gathering
     it would hand every rank every expert. Each such weight misses the window's kept set, which it
     scans again once, not once per weight."""
-    cpu_dist_workers.run(_window_leaves_what_fsdp2_does_not_own_job)
+    cpu_dist_workers.run(_window_leaves_what_fsdp2_does_not_own_job, failure_stage)
