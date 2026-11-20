@@ -147,6 +147,22 @@ def test_hessian_inverse_is_the_upper_cholesky_factor_of_the_damped_inverse():
     torch.testing.assert_close(upper.T @ upper, torch.linalg.inv(damped))
 
 
+def test_a_hessian_that_does_not_factor_is_retried_with_more_damping():
+    # One eigenvalue at -0.05 against a mean diagonal near 1.4: 1% damping leaves the Hessian
+    # indefinite, 10% factors it, where the identity would leave the weight to plain rounding.
+    generator = torch.Generator().manual_seed(0)
+    basis, _ = torch.linalg.qr(torch.randn(16, 16, dtype=torch.float64, generator=generator))
+    eigenvalues = torch.linspace(1.0, 2.0, 16, dtype=torch.float64)
+    eigenvalues[0] = -0.05
+    hessian = basis @ torch.diag(eigenvalues) @ basis.T
+
+    upper = compute_hessian_inverse(hessian, torch.ones(4, 16, dtype=torch.float64), 0.01)
+
+    damped = hessian + 0.1 * hessian.diagonal().mean() * torch.eye(16, dtype=torch.float64)
+    assert torch.equal(upper, upper.triu())
+    torch.testing.assert_close(upper.T @ upper, torch.linalg.inv(damped))
+
+
 @pytest.mark.parametrize(("input_quantized", "forwards"), [(False, 1), (True, 2)])
 def test_gptq_runs_a_max_calibration_forward_only_for_activation_amax(input_quantized, forwards):
     """Weight amax comes from the weights; only an input quantizer needs a forward before GPTQ's."""
