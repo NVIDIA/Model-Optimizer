@@ -580,6 +580,15 @@ def get_args():
         )
     if args.lsq_scale_only and args.student_megatron_path is None:
         raise ValueError("--lsq_scale_only requires an LSQ-quantized --student_megatron_path.")
+    if (args.lsq_scale_lr is not None or args.lsq_scale_only) and args.tp_size > 1:
+        # TE syncs only the wgrad flag for frozen weights, not the sequence-parallel input gather.
+        raise ValueError("LSQ scale learning needs --tp_size 1, like static-block NVFP4.")
+    if args.lsq_scale_lr is not None and args.lsq_scale_lr < args.min_lr:
+        # The scale group decays to --min_lr, so its schedule would rise instead of decay.
+        raise ValueError(
+            f"--lsq_scale_lr ({args.lsq_scale_lr}) is below --min_lr ({args.min_lr}); "
+            "lower --min_lr to at most --lsq_scale_lr."
+        )
     if args.sft and args.sft_dataset_root:
         # Fail on a mistyped root here rather than after both checkpoints have loaded onto GPUs.
         required = ["training.jsonl"] + (["validation.jsonl"] if args.eval_iters > 0 else [])
@@ -905,8 +914,19 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         distill_provider.register_pre_wrap_hook(_per_stage_recompute_hook)
 
     if args.lsq_scale_only:
-        # Appended, so it runs after the KD conversion; the teacher is already frozen.
-        distill_provider.register_pre_wrap_hook(freeze_all_but_lsq_scales)
+        # Appended, so it runs after the KD conversion. Bridge's hook makes every scale trainable;
+        # keep the ones already frozen (a frozen MTP head, the teacher) frozen, since they get no
+        # gradient and DDP's overlapped grad reduce asserts on that.
+        def _freeze_all_but_lsq_scales_hook(model_chunks):
+            frozen = [
+                p for chunk in model_chunks for p in chunk.parameters() if not p.requires_grad
+            ]
+            model_chunks = freeze_all_but_lsq_scales(model_chunks)
+            for param in frozen:
+                param.requires_grad_(False)
+            return model_chunks
+
+        distill_provider.register_pre_wrap_hook(_freeze_all_but_lsq_scales_hook)
 
     # Build optimizer and scheduler
     optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
