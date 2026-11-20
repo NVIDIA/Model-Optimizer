@@ -453,6 +453,13 @@ def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
         assert torch.allclose(model.weight.data, q_dq_weight), "Weight should be equal"
 
 
+def test_a_hessian_that_is_not_positive_definite_gets_the_identity_inverse():
+    # On the GPU the factorizations report failure rather than raise it.
+    weight = torch.randn(8, 64, device="cuda")
+    h_inv = compute_hessian_inverse(torch.zeros(64, 64, device="cuda"), weight, perc_damp=0.01)
+    assert torch.equal(h_inv, torch.eye(64, device="cuda"))
+
+
 def test_gptq_export_roundtrip():
     """Test that GPTQ export + dequantize produces weights matching in-memory QDQ."""
     torch.manual_seed(RAND_SEED)

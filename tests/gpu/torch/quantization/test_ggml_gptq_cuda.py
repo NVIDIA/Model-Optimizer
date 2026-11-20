@@ -92,6 +92,36 @@ def test_gptq_on_a_ggml_format_rejects_blocks_smaller_than_a_ggml_block():
         )
 
 
+def _host_syncs_in_gptq(width, local_hessian_scales):
+    model = torch.nn.Linear(width, 64, bias=False).cuda()
+    inputs = _correlated_inputs(width)
+    algorithm = {
+        "method": "gptq",
+        "block_size": 256,
+        "importance_weighted": True,
+        "local_hessian_scales": local_hessian_scales,
+    }
+    config = _iq1_s_config(algorithm)
+    config["quant_cfg"][1]["cfg"]["num_bits"] = "iq2_s"
+    # The profiler records every CUDA runtime call, the CUDA extensions' too, which sync debug mode
+    # does not report.
+    activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    with torch.profiler.profile(activities=activities) as profile:
+        mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+    return sum(event.count for event in profile.key_averages() if "Synchronize" in event.key)
+
+
+@pytest.mark.parametrize("local_hessian_scales", [False, True])
+def test_gptq_on_a_ggml_format_syncs_with_the_host_as_often_at_any_width(local_hessian_scales):
+    # Each sync stalls the host until the GPU drains; one per 256-column group added up on MoE
+    # experts.
+    get_cuda_ext_ggml(raise_if_failed=True)
+    _host_syncs_in_gptq(512, local_hessian_scales)  # IQ2_S builds its grid once
+    assert _host_syncs_in_gptq(2048, local_hessian_scales) == _host_syncs_in_gptq(
+        512, local_hessian_scales
+    )
+
+
 def test_auto_quantize_refuses_gptq_on_native_fp8_weights_and_hands_back_the_model():
     # An FP8 checkpoint's forward dequantizes the stored weight with its block scales, but GPTQ
     # would encode the stored FP8 values, and the selected codes cannot decode into FP8.

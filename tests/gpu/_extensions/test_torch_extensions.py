@@ -139,18 +139,6 @@ def test_cuda_ext_iq_rejects_row_straddling_input(fmt):
 
 
 @pytest.mark.parametrize("fmt", _IQ_EXTENSIONS)
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -1.0, -1e-4])
-def test_cuda_ext_iq_rejects_invalid_scales(fmt, bad):
-    """A non-finite scale decodes to garbage; a negative one inverts every decoded element."""
-    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
-    weight = torch.ones((1, 256), device="cuda", dtype=torch.bfloat16)
-    scales = torch.full((1,), bad, device="cuda", dtype=torch.float16)
-
-    with pytest.raises(RuntimeError, match="scales must be finite and non-negative"):
-        _pack(fmt, extension, weight, _grid(fmt), scales=scales)
-
-
-@pytest.mark.parametrize("fmt", _IQ_EXTENSIONS)
 def test_cuda_ext_iq_negative_zero_scale_packs_as_zero(fmt):
     """Negative zero is a zero scale: it must take the zero-payload branch, not search."""
     extension = ext.get_cuda_ext_ggml(raise_if_failed=True)

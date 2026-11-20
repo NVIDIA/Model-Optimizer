@@ -588,12 +588,14 @@ def test_initialize_qdq_weights_hf_roundtrip(tmp_path, num_bits, gptq):
         for name, weight in expected.items()
     )
     before = model(inputs).logits.detach()
+    # After initialize_qdq_weights, which drops the scales GPTQ searched at with the weight it
+    # searched them for.
+    mtq.initialize_qdq_weights(model)
     buffers = {
         name: tensor.clone()
         for name, tensor in model.named_buffers()
         if ".weight_quantizer." in name
     }
-    mtq.initialize_qdq_weights(model)
     output = tmp_path / "qdq"
     model.save_pretrained(output)
     assert (output / "modelopt_state.pth").is_file()

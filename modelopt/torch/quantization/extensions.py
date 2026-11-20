@@ -90,6 +90,10 @@ def get_cuda_ext_ggml(raise_if_failed: bool = False):
     ``search_choices(errors, hessian, groups, sweeps)`` runs the local-Hessian choice search, and
     ``fit_scales(input, importance, group, top, levels, magnitudes)`` derives the IQ super-block
     scales.
+
+    The packers are the building blocks of the Python encoders (``quantize_iq1_s`` and the like),
+    which are the entry points. They check shapes, dtypes and devices; the encoders check that
+    ``scales`` and ``importance`` are finite and non-negative, so a direct caller must too.
     """
     if not hasattr(get_cuda_ext_ggml, "extension") or (
         raise_if_failed and get_cuda_ext_ggml.extension is None
