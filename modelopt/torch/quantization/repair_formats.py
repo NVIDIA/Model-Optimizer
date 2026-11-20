@@ -17,12 +17,18 @@
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor
+
+from modelopt.torch.utils import same_device_as
 
 from .ggml.common import pin_packed_weight, pinned_importance
 from .ggml.registry import IQ_FORMAT_REGISTRY
 from .ggml.scale_fields import decode_scale_fields, replace_scale_fields
+from .nn.modules.tensor_quantizer import TensorQuantizer
 
 __all__: list[str] = []
+
+_PACKED_EXPERTS = 4  # Grouped dispatch is qualified only for the measured four-expert bank.
 
 
 def _ste(value, projected):
@@ -36,6 +42,16 @@ def _relative_scale(base, delta):
     scale = base * delta.exp() + floor * delta.expm1()
     # Preserve the recovery derivative at zero across PyTorch clamp conventions.
     return torch.where(scale < 0, 0, scale)
+
+
+def _project_scale_fields(global_base, global_delta, global_sign, local_base, local_delta, spec):
+    magnitude = _relative_scale(global_base, global_delta)
+    global_scale = _ste(magnitude, magnitude.clamp_max(65504).half().float()) * global_sign
+    if local_delta is None:
+        return global_scale, None
+    basis = local_base * local_delta.clamp(-20, 20).exp()
+    shadow = (basis - spec.local_bias) / spec.local_multiplier
+    return global_scale, _ste(shadow, shadow.round().clamp(spec.local_min, spec.local_max))
 
 
 class _ReplayScales(torch.autograd.Function):
@@ -74,6 +90,182 @@ def _native_scale_kernels(tensor):
             raise
         return None
     return repair
+
+
+def _packed_projection_qualified(inputs, name, shape):
+    # GB300 forward/backward qualification: packed IQ is ~1.5x faster and
+    # saves 31-36 MiB here. At 32K tokens, materialized GEMM is 15-80x faster.
+    return (
+        inputs.is_cuda
+        and inputs.dtype == torch.bfloat16
+        and name in ("iq1_m", "iq2_xxs")
+        and tuple(shape) == (2048, 4096)
+        and 0 < inputs.numel() // shape[-1] <= 8
+        and torch.cuda.get_device_capability(inputs.device) == (10, 3)
+    )
+
+
+def _plain_repair_quantizer(quantizer):
+    # As in _is_plain_fake_quant: pre-scales/rotation are captured in IQScaleState,
+    # but live enablement, calibration, post-transforms and hooks must still run.
+    return (
+        quantizer.is_enabled
+        and quantizer._if_quant
+        and quantizer.fake_quant
+        and not quantizer._if_calib
+        and not quantizer._use_constant_amax
+        and quantizer.bias is None
+        and not quantizer.rotate_back_is_enabled
+        and not (
+            quantizer._forward_hooks
+            or quantizer._forward_pre_hooks
+            or quantizer._backward_hooks
+            or quantizer._backward_pre_hooks
+        )
+    )
+
+
+def repair_linear(quantizer, inputs, bias=None):
+    """Try the prepared representation without bypassing quantizer post-transforms."""
+    state = getattr(quantizer, "_local_repair_state", None)
+    if not isinstance(state, IQScaleState) or not _plain_repair_quantizer(quantizer):
+        return None
+    if bias is not None and (
+        bias.shape != (state.weight_shape[0],)
+        or bias.device != inputs.device
+        or bias.dtype != inputs.dtype
+    ):
+        return None
+    return state.linear(inputs, bias)
+
+
+def repair_grouped_weight(weight, quantizers):
+    """Materialize a homogeneous native IQ bank without per-expert scale graphs."""
+    if (
+        not weight.is_cuda
+        or isinstance(weight, DTensor)
+        or weight.ndim != 3
+        or not quantizers
+        or len(quantizers) != weight.shape[0]
+    ):
+        return None
+    states = []
+    for quantizer in quantizers:
+        state = getattr(quantizer, "_local_repair_state", None)
+        if (
+            type(quantizer) is not TensorQuantizer
+            or type(state) is not IQScaleState
+            or not getattr(quantizer, "_local_repair_active", False)
+            or not _plain_repair_quantizer(quantizer)
+            or quantizer.pre_quant_scale is not None
+            or quantizer.rotate_is_enabled
+            or state.weight_shape != tuple(weight.shape[1:])
+            or state.codec_shape != state.weight_shape
+        ):
+            return None
+        values = [state.packed, state.global_base, state.global_sign, state.global_delta]
+        if state.local_delta is not None:
+            values.extend([state.local_base, state.local_delta])
+        if any(isinstance(value, DTensor) or value.device != weight.device for value in values):
+            return None
+        states.append(state)
+    first = states[0]
+    if any(state.name != first.name for state in states):
+        return None
+    spec = first.format.scale_spec
+    assert spec is not None
+    kernels = _native_scale_kernels(weight)
+    if kernels is None or first.name not in kernels.SUPPORTED_FORMATS:
+        return None
+
+    def combine(name):
+        return torch.cat([getattr(state, name) for state in states])
+
+    with same_device_as(weight):
+        # Keep only per-forward tensors: offloaded owners must not retain a decoded expert bank.
+        with torch.no_grad():
+            levels = kernels.decode_iq_levels(combine("packed"), first.name, weight.shape)
+        global_scale, local = _project_scale_fields(
+            combine("global_base"),
+            combine("global_delta"),
+            combine("global_sign"),
+            None if first.local_base is None else combine("local_base"),
+            None if first.local_delta is None else combine("local_delta"),
+            spec,
+        )
+        steps = global_scale[:, None]
+        if local is not None:
+            steps = steps * (spec.local_multiplier * local + spec.local_bias) / spec.divisor
+        first.projection_counts["materialized_grouped"] = (
+            first.projection_counts.get("materialized_grouped", 0) + 1
+        )
+        return kernels.apply_block_scales(levels, steps, weight.dtype).reshape(weight.shape)
+
+
+def repair_grouped_linear(quantizers, inputs, offsets, bias=None, *, is_transposed=False):
+    """Try compatible native expert banks; heterogeneous/frozen banks keep their forward."""
+    from torch.distributed.tensor import DTensor
+
+    states: list[IQScaleState] = []
+    for quantizer in quantizers:
+        state = getattr(quantizer, "_local_repair_state", None)
+        if not isinstance(state, IQScaleState) or not _plain_repair_quantizer(quantizer):
+            return None
+        states.append(state)
+    if is_transposed or isinstance(inputs, DTensor) or len(states) != _PACKED_EXPERTS:
+        return None
+    first = states[0]
+    if not _packed_projection_qualified(inputs, first.name, first.weight_shape) or any(
+        state.codec_shape != state.weight_shape
+        or state.name != first.name
+        or state.weight_shape != first.weight_shape
+        for state in states
+    ):
+        return None
+    if (
+        inputs.ndim != 2
+        or offsets.shape != (len(states),)
+        or offsets.device != inputs.device
+        or offsets.dtype not in (torch.int32, torch.int64)
+        or not offsets.is_contiguous()
+        or (
+            bias is not None
+            and (
+                bias.shape != (len(states), first.weight_shape[0])
+                or bias.device != inputs.device
+                or bias.dtype != inputs.dtype
+            )
+        )
+    ):
+        return None
+    packed = [state.packed for state in states]
+    if any(
+        p.device != inputs.device or p.dtype != torch.uint8 or not p.is_contiguous() for p in packed
+    ):
+        return None
+    from modelopt.torch.kernels.quantization.iq_grouped_gemm import iq_grouped_linear
+
+    key = tuple((p.data_ptr(), p._version) for p in packed)
+    cached = getattr(first, "_grouped_pointers", None)
+    if cached is None or cached[0] != key:
+        pointers = torch.tensor(
+            [p.data_ptr() for p in packed], device=inputs.device, dtype=torch.int64
+        )
+        # One immutable pointer table per owning representation, never projected fields/weights.
+        first._grouped_pointers = key, pointers
+    else:
+        pointers = cached[1]
+    first.projection_counts["packed_grouped"] = first.projection_counts.get("packed_grouped", 0) + 1
+    return iq_grouped_linear(
+        inputs,
+        packed,
+        torch.stack([state.projected_steps() for state in states]),
+        offsets,
+        first.name,
+        first.weight_shape,
+        bias,
+        packed_pointers=pointers,
+    )
 
 
 class IQScaleState(nn.Module):
@@ -123,13 +315,14 @@ class IQScaleState(nn.Module):
 
     def scales(self):
         """Project global and local fields with straight-through native rounding."""
-        magnitude = _relative_scale(self.global_base, self.global_delta)
-        global_scale = _ste(magnitude, magnitude.clamp_max(65504).half().float()) * self.global_sign
-        if self.local_delta is None:
-            return global_scale, None
-        basis = self.local_base * self.local_delta.clamp(-20, 20).exp()
-        shadow = (basis - self.local_bias) / self.local_multiplier
-        return global_scale, _ste(shadow, shadow.round().clamp(self.local_min, self.local_max))
+        return _project_scale_fields(
+            self.global_base,
+            self.global_delta,
+            self.global_sign,
+            self.local_base,
+            self.local_delta,
+            self.format.scale_spec,
+        )
 
     def projected_steps(self):
         """Compose the codec's native hierarchical scale geometry."""
@@ -143,6 +336,7 @@ class IQScaleState(nn.Module):
 
     def forward(self, inputs):
         """Replay native fields; inputs supplies only metadata such as shape and dtype."""
+        self.projection_counts["materialized"] = self.projection_counts.get("materialized", 0) + 1
         kernels = _native_scale_kernels(inputs)
         if kernels is not None and self.name not in kernels.SUPPORTED_FORMATS:
             kernels = None
@@ -156,6 +350,23 @@ class IQScaleState(nn.Module):
             return kernels.apply_block_scales(levels, steps, inputs.dtype).reshape(inputs.shape)
         levels = levels.reshape(-1, steps.shape[-1], self.format.int8_group_size)
         return _ReplayScales.apply(levels, steps, inputs.dtype).reshape(inputs.shape)
+
+    def linear(self, inputs, bias=None):
+        """Use packed GEMM only in a numerically and empirically qualified regime."""
+        from torch.distributed.tensor import DTensor
+
+        if (
+            self.codec_shape != self.weight_shape
+            or isinstance(inputs, DTensor)
+            or not _packed_projection_qualified(inputs, self.name, self.weight_shape)
+        ):
+            return None
+        from modelopt.torch.kernels.quantization.iq_gemm import iq_linear
+
+        self.projection_counts["packed_dense"] = self.projection_counts.get("packed_dense", 0) + 1
+        return iq_linear(
+            inputs, self.packed, self.projected_steps(), self.name, self.weight_shape, bias
+        )
 
     @torch.no_grad()
     def project_(self):
