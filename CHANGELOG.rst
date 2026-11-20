@@ -46,7 +46,7 @@ Changelog
 *Quantization*
 
 - NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
-- AutoQuantize now counts the ``up_proj`` weights of non-gated fused MoE experts (for example Nemotron-H) in the effective-bits budget; they were previously costed as zero. Resumed searches recompute costs, so earlier checkpoints stay usable.
+- AutoQuantize now counts the ``up_proj`` weights of non-gated fused MoE experts (for example Nemotron-H) in the effective-bits budget; they were previously costed as zero. A resumed search recomputes and saves the costs; resume a checkpoint saved before this change once before re-solving it offline.
 - GPT-OSS experts now apply a list-config (e.g. W4A8) weight quantizer; they kept using the quantizer present at conversion.
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 

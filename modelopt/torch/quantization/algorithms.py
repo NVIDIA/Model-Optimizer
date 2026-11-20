@@ -225,6 +225,25 @@ def _iter_tensor_quantizers(module: nn.Module):
             yield from _iter_tensor_quantizers(child)
 
 
+def _check_uniform_weight_format(recipe: "QuantRecipe", quantizers: dict[str, nn.Module]) -> None:
+    """Refuse a candidate that quantizes only some weights of an opted-in per-weight module.
+
+    Such a module is costed at its candidate's compression over all of its weights, so a
+    candidate leaving one of them unquantized would under-report its cost.
+    """
+    enabled = {
+        quantizer.is_enabled
+        for attr, value in quantizers.items()
+        if "weight_quantizer" in attr
+        for quantizer in _iter_tensor_quantizers(value)
+    }
+    if len(enabled) > 1:
+        raise ValueError(
+            f"AutoQuantize candidate {recipe} quantizes only some weights of one module; "
+            "match all of its weight quantizers or none."
+        )
+
+
 def _rewritten_weight(recipe: "QuantRecipe", name: str, module: nn.Module, attr: str, quantizer):
     """The parameter ``recipe``'s calibration rewrites through ``module.<attr>``, or None.
 
@@ -665,9 +684,12 @@ class QuantRecipeHparam(Hparam):
                     )
 
                 set_quantizer_by_cfg(quant_module, quant_recipe.config.quant_cfg)
-                self._all_quantizer_choices[quant_recipe][quant_module] = {
+                quantizers = {
                     attr_name: getattr(quant_module, attr_name) for attr_name in attr_names
                 }
+                if getattr(quant_module, "_auto_quantize_per_weight_quantizers", False):
+                    _check_uniform_weight_format(quant_recipe, quantizers)
+                self._all_quantizer_choices[quant_recipe][quant_module] = quantizers
 
         self.active = self.original
 
@@ -1806,6 +1828,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if self.config["verbose"]:
                 print_rank_0("AutoQuantize: Restored from checkpoint, skipping scoring")
             self.refresh_candidate_costs()
+            # Saved too, so offline re-solves of this checkpoint read the refreshed costs.
+            self.save_search_checkpoint(verbose=self.config["verbose"])
             return
 
         self.estimate_sensitivity_scores()
@@ -2782,10 +2806,18 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False, algo
         for pattern in _as_list(search_state.get("disabled_layers"))
     )
     per_module_entries: list[dict] = []
+    # Patterns matching any searched module's quantizer are replayed per module below.
+    recorded_attrs = {
+        attr
+        for stat in search_state["candidate_stats"].values()
+        for attrs in (stat.get("quantizer_attrs") or {}).values()
+        for attr in attrs
+    }
     _per_module_attrs = (
         *_STD_QUANTIZER_ATTRS,
         *_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS,
         *_NON_GATED_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS,
+        *sorted(recorded_attrs),
     )
     # Track global (non per-module) recipe entries.  Last recipe wins for each pattern.
     global_entries: dict[str, dict] = {}

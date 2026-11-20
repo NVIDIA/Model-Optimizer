@@ -46,6 +46,7 @@ from modelopt.torch.quantization.algorithms import (
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
+from modelopt.torch.quantization.conversion import replace_quant_module, set_quantizer_by_cfg
 from modelopt.torch.quantization.nn import (
     QuantModule,
     QuantModuleRegistry,
@@ -1122,6 +1123,78 @@ def test_auto_quantize_searches_per_weight_quantizers():
     assert {"experts.w1_weight_quantizer", "experts.w2_input_quantizer"} <= quantizer_names
 
 
+def test_auto_quantize_refuses_a_candidate_quantizing_some_weights_of_a_module():
+    w1_only = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*w1_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)
+    try:
+        model = _BmmExpertsModel()
+        with pytest.raises(ValueError, match="only some weights"):
+            mtq.auto_quantize(
+                model,
+                constraints={"effective_bits": 12.0},
+                quantization_formats=[(w1_only, "w1_only")],
+                data_loader=[torch.randn(2, 4, 16) for _ in range(2)],
+                forward_step=lambda model, batch: model(batch),
+                loss_func=lambda output, data: output.sum(),
+                num_calib_steps=2,
+                num_score_steps=2,
+            )
+    finally:
+        QuantModuleRegistry.unregister(_BmmExperts)
+
+
+def test_get_auto_quantize_config_keeps_named_weight_patterns_per_module():
+    named = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*w[12]_*_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    recipe = QuantRecipe(named, name="named_int8")
+    attrs = [
+        "w1_input_quantizer",
+        "w1_weight_quantizer",
+        "w2_input_quantizer",
+        "w2_weight_quantizer",
+    ]
+    search_state = {
+        "best": {
+            "recipe": {
+                "a.quant_recipe": recipe,
+                "b.quant_recipe": QuantRecipe(quant_cfg=None),
+            }
+        },
+        "candidate_stats": {
+            f"{name}.quant_recipe": {"module_names": [name], "quantizer_attrs": {name: attrs}}
+            for name in ("a", "b")
+        },
+        "disabled_layers": [],
+    }
+    config = mtq.get_auto_quantize_config(search_state)
+
+    QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)
+    try:
+        model = torch.nn.ModuleDict({"a": _BmmExperts(), "b": _BmmExperts()})
+        replace_quant_module(model)
+    finally:
+        QuantModuleRegistry.unregister(_BmmExperts)
+    set_quantizer_by_cfg(model, config["quant_cfg"])
+    assert model["a"].w1_weight_quantizer.is_enabled
+    # A recipe pattern is not replayed as a global rule that would re-enable the unselected peer.
+    assert not any(
+        quantizer.is_enabled
+        for quantizer in model["b"].modules()
+        if isinstance(quantizer, TensorQuantizer)
+    )
+
+
 def test_per_weight_quantizer_attrs_cover_every_quantized_weight():
     QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)
     try:
@@ -1783,6 +1856,11 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
 
     # Results should be identical when using same constraint
     assert state_dict_1["candidate_stats"] == state_dict_2["candidate_stats"]
+    # The resume saved the refreshed costs, so offline re-solves read them too.
+    resaved = safe_load(checkpoint_path)["candidate_stats"]
+    assert {name: stats["costs"] for name, stats in resaved.items()} == {
+        name: stats["costs"] for name, stats in state_dict_1["candidate_stats"].items()
+    }
     assert state_dict_1["best"]["recipe"] == state_dict_2["best"]["recipe"]
     assert (
         pytest.approx(state_dict_1["best"]["constraints"]["effective_bits"])
