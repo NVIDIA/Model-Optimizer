@@ -7,7 +7,7 @@ description: >-
   choose compute-vs-memory success metrics, select ModelOpt recipe baselines,
   design AutoQuant/manual recipe deltas, interpret sensitivity, and decide next
   candidates. Do NOT use for a single known PTQ recipe run (use modelopt-ptq), serving
-  (use modelopt-deployment), creating/running evals (use the evaluation skills of the tool you use: modelopt-evaluation and modelopt-launching-evals for NEL, the Gym evaluation skills for NeMo Gym),
+  (use modelopt-deployment), creating/running evals (use the evaluation skills of the tool you use, listed in modelopt-eval-guidance/references/tools/index.md),
   monitoring jobs (use modelopt-monitor), MLflow browsing (use modelopt-accessing-mlflow), or
   comparing completed baseline-vs-candidate scores only (use modelopt-compare-results).
 ---
@@ -28,9 +28,8 @@ then ask only for missing decisions that change the search.
 
 - Use `modelopt-ptq` to produce and validate checkpoints.
 - Use `modelopt-deployment` to serve checkpoints and debug serving-specific flags.
-- Use `modelopt-evaluation` to create NEL configs and submit evals (NEL).
-- Use `modelopt-launching-evals` to run, resume, debug, and analyze NEL runs (NEL).
-- For NeMo Gym, use its evaluation skills to compose, run and recover runs.
+- Use the evaluation skills of the tool you use to compose, run, resume, debug and recover evals; the tool
+  index is `modelopt-eval-guidance/references/tools/index.md`.
 - Use `modelopt-eval-guidance` for the evaluation duties that do not depend on the tool.
 - Use `modelopt-monitor` for active job tracking.
 - Use `modelopt-accessing-mlflow` for MLflow artifact lookup.
@@ -88,7 +87,7 @@ Do not collapse the search to one dimension such as numeric format only. Read
 1. **Recover state**
    - Read result tables, recipe logs, AutoQuant states, sensitivity reports, and
      experiment notes before proposing new work.
-   - Ask `modelopt-monitor`, `modelopt-launching-evals` (NEL) or the Gym evaluation skills, or `modelopt-compare-results` to recover active
+   - Ask `modelopt-monitor`, the evaluation tool's skills, or `modelopt-compare-results` to recover active
      job state and completed metrics when needed.
 
 2. **Define the target**

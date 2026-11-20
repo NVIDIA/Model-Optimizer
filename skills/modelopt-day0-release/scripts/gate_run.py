@@ -17,7 +17,7 @@
 
 Validates that a completed evaluation run is trustworthy before its scores are
 compared. Mirrors the checks in modelopt-eval-guidance/references/run-validity.md
-(NEL: modelopt-evaluation/references/run-validation.md). Pure
+(the tool's own policy is in its reference under references/tools/). Pure
 decision logic in ``evaluate_run`` (unit-tested without a cluster); ``main``
 reads a run-summary JSON and prints the verdict.
 
@@ -34,20 +34,20 @@ The run summary is a dict with, per task:
         }
       }
     }
-Apply the tool's failure policy (NEL: run-validation.md's bounded failure policy) before constructing this
+Apply the tool's failure policy (its reference under references/tools/) before constructing this
 summary; this gate does not verify failure rates or raw evidence. Preserve
 accepted failures in warnings and their original artifacts, never erase blockers.
 Only a terminal SUCCESS with complete, numeric scores passes. Non-terminal
 statuses (RUNNING/PENDING/TIMEOUT/RESUMING) do NOT pass — the run hasn't
 finished — but they classify as INFRA_TRANSIENT (wait for the tool to resume/finish;
 not a real regression), distinct from a terminal FAILED. UNVERIFIED (the run
-finished but some grading was not recorded, as NeMo Gym reports it) does not pass
+finished but some grading was not recorded, as a tool may report it) does not pass
 either and classifies as EVAL_UNVERIFIED: report the score as unverified, never as
 verified.
 
-The same summary comes from either tool. NeMo Gym's run summary uses exactly these
-fields (status, expected_samples, scored_samples, score, errors, warnings); for NEL
-the evaluator builds it from the validated run.
+The same summary comes from any tool: a tool whose own run summary uses exactly these fields
+(status, expected_samples, scored_samples, score, errors, warnings) passes it through; otherwise
+the evaluator builds it from the validated run (the tool's reference says which).
 """
 
 import argparse

@@ -41,16 +41,15 @@ external corroboration was available. Only a `failed` external check blocks the
 comparison.
 
 If any task fails, do not report the quantized evaluation as successful and do
-not apply the candidate-delta gate to that baseline. For a NeMo Gym run, use its `nemo-gym-score-triage` skill
-for the investigation; this check only decides whether the baseline is credible. Investigate disabled
+not apply the candidate-delta gate to that baseline. If the tool has a score-triage skill (its reference names
+it), use it for the investigation; this check only decides whether the baseline is credible. Investigate disabled
 reasoning/thinking, reasoning parser or adapter handling, prompt/chat-template
 differences, sampling or token-budget differences, benchmark version or metric,
 incomplete samples, and serving failures. Rerun a corrected baseline, validate
 it, and repeat this check before comparing the candidate.
 
-For score harvesting, use the score field the evaluation tool defines for the benchmark: for NEL, the `Score
-Extraction` section of the task recipe in `modelopt-evaluation/recipes/tasks/` (do not rely on ad hoc
-`results.yml` greps); for NeMo Gym, the headline score of the run summary, which is also the run's MLflow
-`<agent>/mean/reward` metric on a 0 to 1 scale (see [run-validity.md](run-validity.md#reading-results-from-mlflow)).
+For score harvesting, use the score field the evaluation tool defines for the benchmark (its reference says where;
+do not rely on ad hoc greps of result files). The same score is in the run's MLflow metrics (see
+[run-validity.md](run-validity.md#reading-results-from-mlflow)).
 
 For baseline-versus-candidate deltas, use the `modelopt-compare-results` skill after each run passes validation.

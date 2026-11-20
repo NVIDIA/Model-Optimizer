@@ -1,11 +1,11 @@
 ---
 name: modelopt-monitor
-description: Monitor submitted jobs (PTQ, evaluation, deployment) on SLURM clusters. Use when the user asks "check job status", "is my job done", "what's the status of the PTQ", "check on job" followed by a SLURM job ID, or after any skill submits a long-running job. Also triggers on "squeue" or any request to check progress of a previously submitted job. `nel status` applies to NEL runs only; for evaluation jobs submitted by another tool use that tool's own status commands.
+description: Monitor submitted jobs (PTQ, evaluation, deployment) on SLURM clusters. Use when the user asks "check job status", "is my job done", "what's the status of the PTQ", "check on job" followed by a SLURM job ID, or after any skill submits a long-running job. Also triggers on "squeue" or any request to check progress of a previously submitted job. For an evaluation job, use the status commands of the tool that submitted it (see references/tools/).
 ---
 
 # Job Monitor
 
-Monitor jobs submitted to SLURM clusters — PTQ quantization, evaluation (NEL or NeMo Gym), model deployment, or raw SLURM jobs.
+Monitor jobs submitted to SLURM clusters — PTQ quantization, evaluation, model deployment, or raw SLURM jobs.
 
 ## When to use
 
@@ -39,7 +39,7 @@ Each session's `active_jobs.json` is a JSON array:
 ```json
 [
   {
-    "type": "nel",
+    "type": "<kind>",
     "id": "<invocation_id or slurm_job_id>",
     "host": "<cluster_hostname>",
     "user": "<ssh_user>",
@@ -54,7 +54,7 @@ Each session's `active_jobs.json` is a JSON array:
 ]
 ```
 
-`type` is one of: `nel`, `gym`, `slurm`, `launcher`. The registry, the durable monitor and the
+`type` is `slurm`, `launcher`, or the name of an evaluation tool (the reference for it is in `references/tools/`). The registry, the durable monitor and the
 state-change reporting are the same for every type; only the check method differs.
 
 ---
@@ -88,47 +88,15 @@ Whether triggered by monitor output or by the user asking "check status":
 ## How to Check Each Job Type
 
 Each check method has its **own** status vocabulary. A watcher that mixes them
-(e.g. uses SLURM's `COMPLETED` terminal-state regex against a tool's own status output such as `nel status`)
+(e.g. uses SLURM's `COMPLETED` terminal-state regex against a tool's own status output)
 will silently never fire terminal transitions. Always match against the
 vocabulary of the source you're polling.
 
-### NEL jobs (`type: nel`, only when the task names NEL)
+### Evaluation jobs (`type` is the tool's name)
 
-- **Check:** `nel status <id>`.
-
-```bash
-extract_nel_state() {
-  local jid="$1" nel_bin="${NEL:-nel}" output state_col
-  output=$("$nel_bin" status "$jid" 2>&1)
-  state_col=$(echo "$output" \
-    | awk -F'|' -v prefix="$jid." 'index($1, prefix) == 1 { print $2; exit }')
-  [ -z "$state_col" ] && state_col="$output"
-  echo "$state_col" \
-    | LC_ALL=C tr '[:lower:]' '[:upper:]' \
-    | awk 'match($0, /(PENDING|RUNNING|SUCCESS|FAILED|KILLED|ERROR|NOT[[:space:]]+FOUND)/) { print substr($0, RSTART, RLENGTH); exit }' \
-    | sed 's/[[:space:]][[:space:]]*/ /g'
-}
-
-is_nel_terminal() {
-  case "$(extract_nel_state "$1")" in
-    SUCCESS|FAILED|KILLED|ERROR|"NOT FOUND") return 0 ;;
-    *) return 1 ;;
-  esac
-}
-```
-
-- **On completion:** `nel info <id>` to fetch results.
-- **On failure:** `nel info <id> --logs` then inspect server/client/SLURM logs via SSH.
-
-### NeMo Gym evaluation jobs (`type: gym`)
-
-- **Register** the Gym run id (the invocation id the Gym skill prints, `gym-job-<timestamp>-<hash>`)
-  as one `type: gym` entry, and each Slurm job id of its chain as a `type: slurm` entry so the
-  terminal check below applies.
-- **Run-level state** (health, coverage, recovery decisions) is owned by the Gym evaluation
-  skill (`run-and-babysit-eval`: its inspect and recovery steps). This skill does not re-derive
-  it; it keeps the registry and reports the Gym skill's verdict when it changes.
-- **Do not** poll a Gym run with `nel` commands, and do not cancel jobs of a run that is not yours.
+An evaluation tool's job is checked with that tool's own commands and vocabulary, in its reference under
+[references/tools/](references/tools/), one file per tool.
+Do not poll one tool's job with another tool's commands, and do not cancel jobs of a run that is not yours.
 
 ### Launcher jobs (`type: launcher`)
 
@@ -167,7 +135,7 @@ is_slurm_terminal() {
 When the user asks about a job without specifying an ID, check in order:
 
 1. `.claude/agents/<current_session_id>/active_jobs.json` — current agent's jobs
-2. NEL runs only: `nel ls runs --since 1d` — recent NEL runs
+2. The evaluation tool's own list of recent runs (its reference in `references/tools/`)
 3. `ssh <host> "squeue -u <user>"` — active SLURM jobs
 4. `ls -lt tools/launcher/experiments/cicd/ | head -10` — recent launcher experiments
 

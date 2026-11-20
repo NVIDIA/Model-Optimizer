@@ -17,8 +17,9 @@
 
 Decides whether a candidate's average output length is within threshold of its
 baseline. Pure decision logic in ``evaluate_verbosity`` (unit-tested); ``main``
-harvests token counts either from NEL eval artifacts on disk or, for any tool that
-exports to MLflow, from MLflow runs (``--baseline-mlflow`` / ``--candidate-mlflow``).
+harvests token counts either from a tool's result directories on disk (``nel_adapter``) or,
+for any tool that exports to MLflow, from MLflow runs (``--baseline-mlflow`` /
+``--candidate-mlflow``; metric names are in each tool's adapter module).
 
 Read ``response_stats.avg_completion_tokens``. The ``reasoning.*_tokens`` fields
 are always 0 (only the reasoning/content split is missing, not the total) and the
@@ -34,15 +35,16 @@ when that shared count is below a run one side has, ``truncated_comparison`` say
 """
 
 import argparse
-import glob as globmod
 import json
-import math
 import os
-import re
 import statistics
 import sys
 import urllib.parse
 import urllib.request
+
+import gym_adapter
+import nel_adapter
+from nel_adapter import _matches_exclude, _task_from_metadata, harvest  # noqa: F401
 
 # Below this, a few tokens of difference is a large percentage. Flagged, not failed.
 _SHORT_OUTPUT_TOKENS = 1000
@@ -244,191 +246,11 @@ def evaluate_verbosity(
     }
 
 
-def _matches_exclude(run_dir, exclude):
-    """True if ``run_dir`` contains ``exclude`` as a run of whole ``_``-delimited tokens.
-
-    Substring matching would drop unrelated dirs by default (``eval_highctx`` contains
-    ``_high``), but a single-token check would make any multi-token value such as
-    ``high_effort`` match nothing at all -- and "matches nothing" fails *open* here.
-    """
-    want = [t for t in exclude.strip("_").split("_") if t]
-    if not want:
-        return False
-    toks = run_dir.split("_")
-    return any(toks[i : i + len(want)] == want for i in range(len(toks) - len(want) + 1))
-
-
-def _task_from_metadata(artifacts_dir):
-    """Task name declared next to the artifacts, or None if it is not unambiguous.
-
-    Reads ``metadata.yaml`` then ``config.yml``. Both matter: the documented rsync
-    (``modelopt-launching-evals``/``analyze-results``) copies ``config.yml`` but not
-    ``metadata.yaml``, so keying off metadata alone leaves the documented layout with
-    no declared name at all.
-
-    Returns None when the ``tasks:`` block lists more than one entry. Such a file is
-    invocation-scoped, so ``tasks[0].name`` is not this directory's task -- taking it
-    would pool every job in the invocation, and a metadata-derived key is exempt from
-    the collapse guard, so the pooling would be silent. Falling back to the directory
-    name re-arms that guard.
-
-    Read with a regex rather than a YAML parser to keep these gates stdlib-only.
-    """
-    for fname in ("metadata.yaml", "config.yml"):
-        try:
-            with open(os.path.join(artifacts_dir, fname)) as f:
-                text = f.read()
-        except OSError:
-            continue
-        anchor = re.search(r"^(?P<indent>\s*)tasks:\s*$", text, re.MULTILINE)
-        if not anchor:
-            continue
-        # Bound the block by indentation so a later top-level "name:" cannot leak in.
-        depth = len(anchor.group("indent"))
-        block = []
-        for line in text[anchor.end() :].splitlines():
-            stripped = line.lstrip()
-            indent = len(line) - len(stripped)
-            # A YAML block sequence puts its "- " items at the SAME indent as the key,
-            # so only a non-item at that indent (or anything shallower) ends the block.
-            if stripped and (indent < depth or (indent == depth and not stripped.startswith("-"))):
-                break
-            block.append(line)
-        names = re.findall(r"^\s*-?\s*name:\s*(\S+)\s*$", "\n".join(block), re.MULTILINE)
-        if len(names) == 1:
-            return names[0].strip("\"'")
-        if len(names) > 1:
-            # Invocation-scoped file. Keep the verdict local to it: a later per-task
-            # file (config.yml lives under <harness>.<task>/artifacts/) can still
-            # answer unambiguously.
-            continue
-    return None
-
-
-def harvest(side, glob="eval_*", exclude="", diagnostics=None):
-    """Collect ``{task: [(avg_completion_tokens, successful_count), ...]}`` from NEL artifacts."""
-    out, unreadable, excluded, no_metric = {}, [], [], []
-    parsed_any = [False]
-    source_dirs, excluded_tasks, metadata_keys = {}, set(), set()
-    # Depth-agnostic: repo-documented trees put <harness>.<task>/artifacts/ directly under the
-    # run dir, while NEL invocations add an invocation level. Hard-coding either one silently
-    # harvests nothing (or, worse, only the subset at the matching depth).
-    pattern = os.path.join(side, glob, "**", "artifacts", "eval_factory_metrics.json")
-    matches = globmod.glob(pattern, recursive=True)
-    for path in matches:
-        rel = os.path.relpath(path, side).split(os.sep)
-        run_dir = rel[0]
-        if exclude and _matches_exclude(run_dir, exclude):
-            excluded.append(run_dir)
-            # Name the task too: a task whose runs are ALL excluded never reaches
-            # per_task, so without this it is invisible to the verdict's detail line.
-            t = _task_from_metadata(os.path.dirname(path))
-            if t is None:
-                n = path.split(os.sep)[-3]
-                h, _, tl = n.rpartition(".")
-                t = h if h and re.fullmatch(r"\d+", tl) else n
-            excluded_tasks.add(t)
-            continue
-        parts = path.split(os.sep)
-        # Prefer the task name NEL records next to the artifacts. The directory name
-        # alone is not sufficient: some layouts are "<invocation_id>.<job_index>" where
-        # the trailing number enumerates TASKS, not repeats, so stripping it collapses
-        # every task in an invocation onto one key and pools unrelated means.
-        task = _task_from_metadata(os.path.dirname(path))
-        from_metadata = task is not None
-        if task is None:
-            # Fall back to "<harness>.<task>[.<run_index>]": strip the run index only
-            # when the trailing segment is numeric, and KEEP the harness, since two
-            # harnesses can expose the same task name.
-            name = parts[-3]
-            head, _, tail = name.rpartition(".")
-            task = head if head and re.fullmatch(r"\d+", tail) else name
-        try:
-            with open(path) as f:
-                stats = json.load(f).get("response_stats", {})
-        except (OSError, json.JSONDecodeError) as e:
-            unreadable.append(f"{path}: {e}")
-            continue
-        # Registered only after a successful parse: a truncated artifact contributes no
-        # data, so counting it toward collapse would block the gate on a partial write.
-        if from_metadata:
-            metadata_keys.add(task)
-        else:
-            source_dirs.setdefault(task, set()).add(parts[-3])
-        tokens, count = stats.get("avg_completion_tokens"), stats.get("successful_count")
-        if tokens and count:
-            parsed_any[0] = True
-            out.setdefault(task, []).append((tokens, count))
-        else:
-            # No usable token count: usually a run that produced no successful samples,
-            # otherwise a schema rename. Record it either way -- a silently vanished run
-            # makes the remaining pass look more complete than it is.
-            no_metric.append(f"{task}: avg_completion_tokens={tokens!r} successful_count={count!r}")
-    # Only the directory fallback can be ambiguous, and only when the key does not look
-    # like "<harness>.<task>": "h.task.1" + "h.task.2" are repeats of one task, whereas
-    # "inv.0" + "inv.1" are distinct tasks of one invocation collapsing onto the
-    # invocation id. Flagging repeats would make this mandatory gate unpassable.
-    # A key is a collapse only if the dirs behind it cannot be explained as repeats:
-    #   - a declared name is authoritative                       -> metadata_keys
-    #   - "<harness>.<task>" keys come from "<...>.<run_index>"   -> "." in k
-    #   - a dir equal to the key sits next to its own indexed
-    #     siblings ("ifbench" beside "ifbench.1"), which an
-    #     invocation id never does                                -> k in v
-    # What remains -- a dotless key with only indexed dirs -- is genuinely ambiguous
-    # from the names alone, so it blocks rather than risking a pooled mean.
-    collapsed = {
-        k: sorted(v)
-        for k, v in source_dirs.items()
-        if len(v) > 1 and k not in metadata_keys and "." not in k and k not in v
-    }
-    if diagnostics is not None:
-        if collapsed:
-            diagnostics["collapsed_keys"] = collapsed
-        if not matches:
-            diagnostics["no_files_matched"] = pattern
-        diagnostics["excluded_run_dirs"] = sorted(set(excluded))
-        diagnostics["excluded_tasks"] = sorted(excluded_tasks)
-        diagnostics["partially_excluded_tasks"] = sorted(excluded_tasks & set(out))
-        diagnostics["unreadable_metrics"] = unreadable
-        diagnostics["metrics_without_tokens"] = no_metric
-        diagnostics["found_metrics_files"] = bool(matches)
-    if collapsed:
-        print(
-            f"warning: {len(collapsed)} task key(s) came from multiple artifact dirs, so "
-            f"unrelated tasks may be pooled: {collapsed}",
-            file=sys.stderr,
-        )
-    if excluded:
-        print(
-            f"note: excluded {len(excluded)} run dir(s) matching {exclude!r}: "
-            f"{sorted(set(excluded))}",
-            file=sys.stderr,
-        )
-    if unreadable:
-        print(f"warning: skipped {len(unreadable)} unreadable metrics file(s)", file=sys.stderr)
-        for u in unreadable:
-            print(f"  {u}", file=sys.stderr)
-    return out
-
-
 # ── MLflow source ─────────────────────────────────────────────────────────────
-# Both NEL and NeMo Gym export to MLflow, so token counts can be read from a run id
-# instead of a synced result tree. The metric names differ by tool:
-#   NEL:       <task>_pass_at_1_avg-of-<N>_answer_tokens_statistics_avg  (N = repeat count)
-#              sample count = <task>_pass_at_1_avg-of-<N>_num_prompts * N
-#              NEL ``simple_evals`` runs (GPQA) carry no token metrics; their stored
-#              artifact <harness>.<task>/artifacts/eval_factory_metrics.json has the same
-#              ``response_stats`` the on-disk harvest reads.
-#   NeMo Gym:  <agent>/mean/output_tokens ; sample count = coverage/scored
-_NEL_TOKENS = re.compile(
-    r"^(?P<prefix>.+)_pass_at_1_avg-of-(?P<n>\d+)_answer_tokens_statistics_avg$"
-)
-_GYM_TOKENS = re.compile(r"^(?P<agent>[^/]+)/mean/output_tokens$")
-
-
-def _positive(x):
-    """True for a finite number above zero (NaN, infinity, None, strings and booleans are not)."""
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0
+# Every supported tool exports to MLflow, so token counts can be read from a run id instead of
+# a synced result tree. Each tool's metric names are in its adapter module; the first adapter
+# that recognizes the run answers.
+_ADAPTERS = (gym_adapter, nel_adapter)
 
 
 def tokens_from_mlflow_run(run, load_artifact=None):
@@ -437,49 +259,18 @@ def tokens_from_mlflow_run(run, load_artifact=None):
     ``run`` is ``{"status": str, "tags": {..}, "metrics": {..}}``. Only a ``FINISHED`` run
     is used: failed and killed runs are exported too, with few metrics, and their partial
     numbers must not enter a comparison. ``load_artifact(path)`` reads a JSON artifact of
-    this run (used only for the NEL ``simple_evals`` fallback). Ambiguous or non-finite
+    this run (used by an adapter whose runs carry no token metric). Ambiguous or non-finite
     values are refused with a reason, never guessed.
     """
     status = run.get("status")
     if status != "FINISHED":
         return None, f"run status {status!r} is not FINISHED"
     metrics, tags = run.get("metrics") or {}, run.get("tags") or {}
-
-    gym = {m.group("agent"): k for k in metrics if (m := _GYM_TOKENS.match(k))}
-    if len(gym) > 1:
-        return None, f"several agents report output tokens: {sorted(gym)}"
-    if gym:
-        key = next(iter(gym.values()))
-        count = metrics.get("coverage/scored")
-        if not _positive(metrics[key]) or not _positive(count):
-            return None, f"{key}={metrics[key]!r} coverage/scored={count!r}"
-        return (metrics[key], count), None
-
-    nel = [
-        (int(m.group("n")), m.group("prefix"), k) for k in metrics if (m := _NEL_TOKENS.match(k))
-    ]
-    if nel:
-        prefixes = sorted({prefix for _, prefix, _ in nel})
-        if len(prefixes) > 1:
-            return None, f"several task prefixes report answer tokens: {prefixes}"
-        n, prefix, key = max(nel)  # the largest N is the full repeat count
-        prompts = metrics.get(f"{prefix}_pass_at_1_avg-of-{n}_num_prompts")
-        if not _positive(metrics[key]) or not _positive(prompts):
-            return None, f"{key}={metrics[key]!r} num_prompts={prompts!r}"
-        return (metrics[key], round(prompts * n)), None
-
-    harness, task = tags.get("harness"), tags.get("task_name")
-    if load_artifact and harness and task:
-        path = f"{harness}.{task}/artifacts/eval_factory_metrics.json"
-        try:
-            stats = load_artifact(path)["response_stats"]
-            tokens, count = stats.get("avg_completion_tokens"), stats.get("successful_count")
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
-            return None, f"no token metric and artifact {path} unreadable: {e!r}"
-        if _positive(tokens) and _positive(count):
-            return (tokens, count), None
-        return None, f"artifact {path}: avg_completion_tokens={tokens!r} successful_count={count!r}"
-    return None, "no token metric found for either tool"
+    for adapter in _ADAPTERS:
+        answer = adapter.tokens_from_run(metrics, tags, load_artifact)
+        if answer is not None:
+            return answer
+    return None, "no token metric found"
 
 
 def harvest_mlflow(run_ids_by_task, get_run, get_artifact, diagnostics=None):
@@ -555,8 +346,8 @@ def _mlflow_http(uri):
 def main(argv=None):
     """CLI entry point: harvest both sides from eval artifacts and print the verdict."""
     p = argparse.ArgumentParser(description="Day-0 verbosity gate")
-    p.add_argument("--baseline", help="baseline dir containing NEL eval run dirs")
-    p.add_argument("--candidate", help="candidate dir containing NEL eval run dirs")
+    p.add_argument("--baseline", help="baseline dir containing eval run dirs (directory mode)")
+    p.add_argument("--candidate", help="candidate dir containing eval run dirs (directory mode)")
     p.add_argument(
         "--baseline-mlflow",
         help="JSON file {task: [mlflow_run_id, ...]} for the baseline (any tool that exports to MLflow)",

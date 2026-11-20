@@ -48,7 +48,7 @@ the full suite.
   context length (a maximum model length of 131072).
 - **Do not lower repeat or sample counts** for quantization comparisons: they are set for low variance, and fewer
   repeats let noise mask real regressions. The count's field name and the exact values belong to the tool's
-  benchmark configuration; under NEL, SciCode is run as several separate submissions of one repeat each, averaged.
+  benchmark configuration (the tool's reference notes any benchmark that is run as several submissions).
 - **Judge and user-simulator endpoints** (AA-LCR, HLE, AA-Omniscience, Tau2-Bench Telecom) must stay fixed
   across the baseline and quantized runs.
 - **MRCR traps:** the three variants use different datasets and are not comparable to each other; the KV-cache
@@ -61,5 +61,5 @@ the full suite.
 
 Present the recommended set and ask which benchmarks to include. If the user already named a list, keep it but
 flag any AA-suite benchmarks they missed that are commonly used for quantization validation. Then read the
-evaluation tool's own benchmark configuration for the selected ones before composing a run. The per-benchmark
-recipes for NEL are in `modelopt-evaluation/recipes/tasks/`.
+evaluation tool's own benchmark configuration for the selected ones before composing a run; the tool's reference
+says where its benchmark recipes are.

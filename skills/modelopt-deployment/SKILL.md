@@ -216,7 +216,7 @@ Before an accuracy evaluation of a checkpoint, derive the serving deployment exp
 3. Write the record: checkpoint path and revision, serving image, framework version, tensor/data parallel sizes, the full serve flags, parser and chat template, and the source of each value. When a quantizer's checkpoint validation (step 5) already served the checkpoint, write the deployment it used in this format and give it to the evaluation of that checkpoint; otherwise write the record next to the evaluation artifacts.
 4. Give the record to the evaluation tool. For a baseline and its quantized candidate, change only what the quantization requires and list each difference.
 
-A tool that composes its own deployment (as NEL does) keeps doing so. The record is then the cross-check of its resolved settings, not a second deployment.
+A tool that composes its own deployment keeps doing so. The record is then the cross-check of its resolved settings, not a second deployment.
 
 ### 6. Remote deployment (SSH/SLURM)
 
