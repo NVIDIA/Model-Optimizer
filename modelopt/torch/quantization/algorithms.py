@@ -1418,32 +1418,44 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     def initialize_candidate_stats(self):
         """Initialize the candidate stats for the model."""
-        no_quant_recipe = QuantRecipe(quant_cfg=None)
         for name, hparam in named_hparams(self.model, unique=True):
             if not isinstance(hparam, QuantRecipeHparam):
                 continue
 
-            formats, raw_scores, scores, costs = [], [], [], []
+            formats, raw_scores, scores = [], [], []
             for recipe in hparam.solver_choices:
                 formats.append(recipe)
                 # A format shard leaves other shards' formats unscored; their merge fills them.
                 scored = self._scores_recipe(hparam, recipe)
                 raw_scores.append(hparam.get_score(recipe) if scored else None)
-                costs.append(hparam.get_cost(recipe))
             scores = _monotone_scores(raw_scores)
 
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
             self.candidate_stats[name]["raw_scores"] = raw_scores
-            self.candidate_stats[name]["costs"] = costs
             self.candidate_stats[name]["module_names"] = hparam.quant_module_names
             self.candidate_stats[name]["quantizer_attrs"] = hparam.quant_module_replay_attrs
             self.candidate_stats[name]["cost_weight"] = hparam.cost_weight
             self.candidate_stats[name]["allow_no_quant"] = hparam.allow_no_quant
             self.candidate_stats[name]["is_fixed"] = hparam.is_fixed
+        self.refresh_candidate_costs()
+
+    def refresh_candidate_costs(self):
+        """Compute candidate costs from the model, also over costs a checkpoint restored.
+
+        Costs follow from weight sizes, so they are recomputed rather than trusted: a checkpoint
+        saved before a cost-model fix keeps its scores but not its stale costs.
+        """
+        no_quant_recipe = QuantRecipe(quant_cfg=None)
+        for name, hparam in named_hparams(self.model, unique=True):
+            if not isinstance(hparam, QuantRecipeHparam):
+                continue
+            stats = self.candidate_stats[name]
+            # Per stored format: a searcher may have pruned them since initialization.
+            stats["costs"] = [hparam.get_cost(recipe) for recipe in stats["formats"]]
             # Keep the no-quant cost as denominator metadata even when no-quant is not
             # solver-selectable for this hparam. Fixed formats must remain in the cost model.
-            self.candidate_stats[name]["uncompressed_cost"] = hparam.get_cost(no_quant_recipe)
+            stats["uncompressed_cost"] = hparam.get_cost(no_quant_recipe)
 
     def _run_func(self, func, num_iters=1, desc=""):
         for i, data in tqdm(
@@ -1793,6 +1805,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         if self.candidate_stats:
             if self.config["verbose"]:
                 print_rank_0("AutoQuantize: Restored from checkpoint, skipping scoring")
+            self.refresh_candidate_costs()
             return
 
         self.estimate_sensitivity_scores()

@@ -1746,6 +1746,13 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     # Clear captured output from first run
     capsys.readouterr()
 
+    # Costs come from the model, not the checkpoint, so one saved before a cost fix resumes right.
+    saved = safe_load(checkpoint_path)
+    for stats in saved["candidate_stats"].values():
+        stats["costs"] = [cost / 2 for cost in stats["costs"]]
+        stats["uncompressed_cost"] /= 2
+    safe_save(saved, checkpoint_path)
+
     # Second run: resume with same constraint should produce same results
     model_2 = SimpleLinear()
     model_2, state_dict_2 = mtq.auto_quantize(
