@@ -17,7 +17,10 @@
 
 import copy
 import fnmatch
+import hashlib
+import json
 
+import huggingface_hub.constants
 import pytest
 import torch
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
@@ -196,6 +199,44 @@ def test_compress_config(model_cls, quant_config, compress_config):
     assert output.shape[0] == input_tensor.shape[0], "Model forward pass failed"
 
 
+_REMOTE_LLAMA = """from transformers import LlamaConfig, LlamaForCausalLM
+
+
+class RemoteLlamaConfig(LlamaConfig):
+    model_type = "remote_llama"
+
+
+class RemoteLlamaForCausalLM(LlamaForCausalLM):
+    config_class = RemoteLlamaConfig
+"""
+
+
+# Stand in for a Hub repo of the code and two of its commits. The Hub cache and the imported module
+# are keyed by repo and commit, so a load of one commit registers no class for the other.
+_REMOTE_LLAMA_REPO = "nvidia/modelopt-test-remote-llama"
+_REMOTE_LLAMA_COMMITS = {
+    hashlib.sha1(code.encode(), usedforsecurity=False).hexdigest(): code
+    for code in (_REMOTE_LLAMA, _REMOTE_LLAMA + "# Another commit.\n")
+}
+_REMOTE_LLAMA_COMMIT, _REMOTE_LLAMA_COMMIT_ASKED = _REMOTE_LLAMA_COMMITS
+
+
+def _use_remote_code(checkpoint_dir, code_dir=None, code_repo="", code=_REMOTE_LLAMA):
+    """Make the checkpoint's config and model classes its own code, through ``auto_map``.
+
+    With ``code_dir`` the code is written there, and ``auto_map`` names it in ``code_repo``.
+    """
+    (code_dir or checkpoint_dir).joinpath("modeling_remote_llama.py").write_text(code)
+    config_file = checkpoint_dir / "config.json"
+    config = json.loads(config_file.read_text())
+    config["model_type"] = "remote_llama"
+    config["auto_map"] = {
+        "AutoConfig": f"{code_repo}modeling_remote_llama.RemoteLlamaConfig",
+        "AutoModelForCausalLM": f"{code_repo}modeling_remote_llama.RemoteLlamaForCausalLM",
+    }
+    config_file.write_text(json.dumps(config))
+
+
 @pytest.mark.parametrize("quant_config", [mtq.FP8_DEFAULT_CFG])
 @pytest.mark.parametrize("tie_word_embeddings", [False, True])
 @pytest.mark.parametrize(
@@ -217,12 +258,50 @@ def test_compress_config(model_cls, quant_config, compress_config):
         pytest.param({"local_files_only": True}, False, torch.bfloat16, id="hub_kwargs"),
         # The checkpoint sits in a subfolder of the path passed.
         pytest.param({"subfolder": "tiny_llama"}, False, torch.bfloat16, id="subfolder"),
+        # As in from_pretrained(), "auto" is the checkpoint's dtype.
+        pytest.param({"dtype": "auto"}, False, torch.bfloat16, id="dtype_auto"),
+        # The checkpoint ships its model class as code, which from_config() runs only if trusted.
+        pytest.param({"trust_remote_code": True}, False, torch.bfloat16, id="remote_code"),
+        # The code is in another repo, and is fetched at the pinned commit, as in from_pretrained().
+        pytest.param(
+            {"trust_remote_code": True, "code_revision": _REMOTE_LLAMA_COMMIT},
+            False,
+            torch.bfloat16,
+            id="remote_code_revision",
+        ),
+        # Not trusted in the call: transformers asks on a terminal, and the answer here is yes.
+        pytest.param(
+            {"trust_remote_code": None, "code_revision": _REMOTE_LLAMA_COMMIT_ASKED},
+            False,
+            torch.bfloat16,
+            id="remote_code_revision_asked",
+        ),
     ],
 )
 def test_real_quantize_linear(
-    quant_config, tie_word_embeddings, load_kwargs, clear_config_dtype, expected_dtype, tmp_path
+    quant_config,
+    tie_word_embeddings,
+    load_kwargs,
+    clear_config_dtype,
+    expected_dtype,
+    tmp_path,
+    monkeypatch,
 ):
+    """Load a tiny Llama under init_quantized_weights() and check the model it builds."""
     tiny_llama_dir = create_tiny_llama_dir(tmp_path, tie_word_embeddings=tie_word_embeddings)
+    if "code_revision" in load_kwargs:
+        # No Hub: its cache holds the code repo, at the pinned commit only.
+        monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+        monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path))
+        repo_dir = tmp_path / ("models--" + _REMOTE_LLAMA_REPO.replace("/", "--"))
+        code_dir = repo_dir / "snapshots" / load_kwargs["code_revision"]
+        code_dir.mkdir(parents=True)
+        code = _REMOTE_LLAMA_COMMITS[load_kwargs["code_revision"]]
+        _use_remote_code(tiny_llama_dir, code_dir, f"{_REMOTE_LLAMA_REPO}--", code)
+        if load_kwargs["trust_remote_code"] is None:
+            monkeypatch.setattr("builtins.input", lambda _: "y")
+    elif load_kwargs.get("trust_remote_code"):
+        _use_remote_code(tiny_llama_dir)
     if clear_config_dtype:
         config = AutoConfig.from_pretrained(tiny_llama_dir)
         config.dtype = None
@@ -234,6 +313,8 @@ def test_real_quantize_linear(
     assert model.model.norm.weight.dtype == expected_dtype
     if "attn_implementation" in load_kwargs:
         assert model.config._attn_implementation == load_kwargs["attn_implementation"]
+    if "trust_remote_code" in load_kwargs:
+        assert type(model).__name__ == "RemoteLlamaForCausalLM"
 
     for _, module in model.named_modules():
         if (
@@ -243,6 +324,12 @@ def test_real_quantize_linear(
             and not module.weight_quantizer.fake_quant
         ):
             assert isinstance(module.weight, QTensorWrapper)
+
+
+def test_init_quantized_weights_refuses_non_local_path(tmp_path):
+    # A path that is not there, as a Hub ID is not: it is refused before anything is fetched.
+    with init_quantized_weights(mtq.FP8_DEFAULT_CFG), pytest.raises(ValueError):
+        AutoModelForCausalLM.from_pretrained(str(tmp_path / "hub_model"))
 
 
 def _test_mtq_compress_fsdp_module(

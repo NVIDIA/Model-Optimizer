@@ -226,7 +226,7 @@ def init_quantized_weights(
 
         # Load quantized and compressed model in one step
         with init_quantized_weights(mtq.NVFP4_DEFAULT_CFG):
-            model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-2-70b-hf")
+            model = AutoModelForCausalLM.from_pretrained("/path/to/Llama-2-70b-hf")
 
 
         # The model is already quantized, compressed, and loaded to appropriate devices
@@ -315,12 +315,25 @@ def init_quantized_weights(
         subfolder = kwargs.pop("subfolder", None)
         if subfolder:
             pretrained_model_name_or_path = os.path.join(pretrained_model_name_or_path, subfolder)
+        # load_checkpoint_and_dispatch() reads the weights from a local path only. Refuse a Hub ID
+        # here, before its config and any code it ships are fetched.
+        if not os.path.exists(pretrained_model_name_or_path):
+            raise ValueError(
+                f"init_quantized_weights() loads a local checkpoint, and "
+                f"{pretrained_model_name_or_path!r} is not a local path; download it first, as "
+                "load_pretrained() does."
+            )
         # Initialize with empty config first to avoid loading weights twice
         config = kwargs.pop("config", None)
         trust_remote_code = kwargs.pop("trust_remote_code", False)
+        # Popped before the config load, which would consume it: it pins the model's code too.
+        code_revision = kwargs.pop("code_revision", None)
         legacy_dtype = kwargs.pop("torch_dtype", None)
         if kwargs.get("dtype") is None and legacy_dtype is not None:
             kwargs["dtype"] = legacy_dtype
+        # "auto" asks for the checkpoint's dtype, which the fallback below reads from its config.
+        if kwargs.get("dtype") == "auto":
+            del kwargs["dtype"]
         # load_checkpoint_and_dispatch() gets only the kwargs it takes; the rest build the model.
         dispatch_params = inspect.signature(load_checkpoint_and_dispatch).parameters
         dispatch_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in dispatch_params}
@@ -333,15 +346,33 @@ def init_quantized_weights(
             config, kwargs = AutoConfig.from_pretrained(
                 pretrained_model_name_or_path,
                 trust_remote_code=trust_remote_code,
+                code_revision=code_revision,
                 return_unused_kwargs=True,
                 **kwargs,
             )
+
+        # from_config() takes code_revision only where it fetches the class auto_map names. With no
+        # class mapped for the config it fetches or refuses, also when trust_remote_code is None and
+        # it asks on a terminal. It replaces a library class only if trusted, and builds a class an
+        # earlier load registered with every kwarg it is given.
+        class_ref = (getattr(config, "auto_map", None) or {}).get(cls.__name__)
+        if code_revision is not None and class_ref:
+            from transformers.models.auto.auto_factory import _get_model_class
+
+            mapping = cls._model_mapping
+            if type(config) not in mapping or (
+                trust_remote_code
+                and _get_model_class(config, mapping).__module__.startswith("transformers.")
+            ):
+                kwargs["code_revision"] = code_revision
 
         with init_empty_weights():
             # config.dtype is None, not absent, when unset, so a getattr default never applies.
             dtype = dispatch_kwargs.get("dtype") or getattr(config, "dtype", None) or torch.float16
             # from_config() raises on any kwarg the model doesn't take.
-            model = cls.from_config(config, dtype=dtype, **kwargs)
+            model = cls.from_config(
+                config, dtype=dtype, trust_remote_code=trust_remote_code, **kwargs
+            )
         # init_empty_weights re-wraps every registered parameter, so the tie made inside
         # from_config is lost; without it the absent tied checkpoint key (e.g. lm_head) stays meta.
         model.tie_weights()
