@@ -189,14 +189,17 @@ def scores_from_run_summary(obj):
     """Return ``{task: score}`` from a run summary (``{"tasks": {task: {"score": ...}}}``).
 
     A plain ``{task: score}`` mapping passes through unchanged, so either tool's output can
-    be given to the gate. Tasks without a numeric score are left out; the task-set check in
-    ``evaluate_comparison`` then reports them as a mismatch instead of comparing a gap.
+    be given to the gate. Only tasks whose status is ``SUCCESS`` and whose score is numeric are
+    kept: an ``UNVERIFIED`` or failed task is not compared even if it carries a score. The
+    task-set check in ``evaluate_comparison`` then reports the missing task as a mismatch
+    instead of comparing a gap.
     """
-    if isinstance(obj, dict) and isinstance(obj.get("tasks"), dict):
+    tasks = obj.get("tasks") if isinstance(obj, dict) else None
+    if isinstance(tasks, dict) and tasks and all(isinstance(t, dict) for t in tasks.values()):
         return {
             name: t["score"]
-            for name, t in obj["tasks"].items()
-            if isinstance(t, dict)
+            for name, t in tasks.items()
+            if t.get("status") == "SUCCESS"
             and isinstance(t.get("score"), (int, float))
             and not isinstance(t.get("score"), bool)
         }

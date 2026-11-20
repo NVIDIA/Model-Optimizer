@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 import gate_verbosity
@@ -810,10 +812,6 @@ def test_collapse_guard_recognises_repeats_in_both_key_shapes(tmp_path):
         assert "collapsed_keys" not in diag, leaves
 
 
-if __name__ == "__main__":
-    sys.exit(__import__("pytest").main([__file__, "-q"]))
-
-
 # ── tool-neutral inputs: run summary, UNVERIFIED, MLflow ───────────────────────
 
 _FIXTURES = json.loads((Path(__file__).parent / "fixtures" / "mlflow_runs.json").read_text())
@@ -858,21 +856,31 @@ def test_run_unverified_does_not_pass_and_has_its_own_class():
     assert "not recorded" in r["detail"]
 
 
-def test_run_summary_scores_feed_the_compare_gate(tmp_path):
-    summary = lambda s: {  # noqa: E731
-        "tasks": {
-            "gpqa": {"status": "SUCCESS", "score": s, "errors": []},
-            "ifbench": {"status": "SUCCESS", "score": 75.0, "errors": []},
-            "scicode": {"status": "FAILED", "score": None, "errors": ["x"]},
+def test_run_summary_scores_feed_the_compare_gate(tmp_path, capsys):
+    def summary(gpqa_score, gpqa_status="SUCCESS"):
+        return {
+            "tasks": {
+                "gpqa": {"status": gpqa_status, "score": gpqa_score, "errors": []},
+                "ifbench": {"status": "SUCCESS", "score": 75.0, "errors": []},
+                "scicode": {"status": "FAILED", "score": None, "errors": ["x"]},
+            }
         }
-    }
+
     assert scores_from_run_summary(summary(50.0)) == {"gpqa": 50.0, "ifbench": 75.0}
+    # an UNVERIFIED task keeps its score in the file but is not compared
+    assert scores_from_run_summary(summary(50.0, "UNVERIFIED")) == {"ifbench": 75.0}
     # a plain {task: score} mapping passes through unchanged
     assert scores_from_run_summary({"gpqa": 1.0}) == {"gpqa": 1.0}
-    b, c = tmp_path / "b.json", tmp_path / "c.json"
+    b, c, u = tmp_path / "b.json", tmp_path / "c.json", tmp_path / "u.json"
     b.write_text(json.dumps(summary(90.6)))
     c.write_text(json.dumps(summary(90.4)))
+    u.write_text(json.dumps(summary(90.4, "UNVERIFIED")))
     assert compare_main(["--baseline", str(b), "--candidate", str(c)]) == 0
+    # the unverified candidate is not silently compared: the task sets no longer match
+    assert compare_main(["--baseline", str(b), "--candidate", str(u)]) == 1
+    assert json.loads(capsys.readouterr().out.split("\n}\n")[-2] + "\n}")["failure_class"] == (
+        "SAMPLE_ACCOUNTING_FAILED"
+    )
 
 
 def test_mlflow_nel_nemo_skills_run_uses_largest_repeat_count():
@@ -1007,3 +1015,169 @@ def test_gate_run_classes_assigned_by_variable_have_triage_rows():
     rows = set(re.findall(r"^\| `([A-Z_]+)` \|", (scripts / "SKILL.md").read_text(), re.MULTILINE))
     assert {"EVAL_UNVERIFIED", "INFRA_TRANSIENT", "EVAL_JUDGE_FAILED"} <= assigned
     assert assigned <= rows, f"assigned but not in the triage table: {assigned - rows}"
+
+
+def test_run_unverified_precedence_with_other_states():
+    def one(status, errors=()):
+        return {
+            "tasks": {
+                "a": {
+                    "status": status,
+                    "expected_samples": 4,
+                    "scored_samples": 4,
+                    "score": 1.0,
+                    "errors": list(errors),
+                }
+            }
+        }
+
+    unverified_and_running = {
+        "tasks": {
+            "a": {"status": "UNVERIFIED", "score": 1.0, "errors": []},
+            "b": {"status": "RUNNING", "score": None, "errors": []},
+        }
+    }
+    assert evaluate_run(unverified_and_running)["failure_class"] == "INFRA_TRANSIENT"
+    assert (
+        evaluate_run(one("UNVERIFIED", ["judge 429 rate limit"]))["failure_class"]
+        == "EVAL_JUDGE_FAILED"
+    )
+    assert evaluate_run(one("UNVERIFIED"))["failure_class"] == "EVAL_UNVERIFIED"
+
+
+def test_mlflow_several_nel_prefixes_are_refused():
+    run = {
+        "status": "FINISHED",
+        "tags": {},
+        "metrics": {
+            "a_pass_at_1_avg-of-2_answer_tokens_statistics_avg": 10.0,
+            "a_pass_at_1_avg-of-2_num_prompts": 5,
+            "b_pass_at_1_avg-of-3_answer_tokens_statistics_avg": 12.0,
+            "b_pass_at_1_avg-of-3_num_prompts": 5,
+        },
+    }
+    got, why = tokens_from_mlflow_run(run)
+    assert got is None and "several task prefixes" in why
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), 0, None, "12", True])
+def test_mlflow_non_finite_or_non_numeric_counts_are_refused(bad):
+    nel = {
+        "status": "FINISHED",
+        "tags": {},
+        "metrics": {
+            "t_pass_at_1_avg-of-2_answer_tokens_statistics_avg": bad,
+            "t_pass_at_1_avg-of-2_num_prompts": 5,
+        },
+    }
+    gym = {
+        "status": "FINISHED",
+        "tags": {},
+        "metrics": {"agent/mean/output_tokens": 100.0, "coverage/scored": bad},
+    }
+    assert tokens_from_mlflow_run(nel)[0] is None
+    assert tokens_from_mlflow_run(gym)[0] is None
+
+
+@pytest.mark.parametrize(
+    "artifact", [[], None, {"response_stats": None}, {"response_stats": []}, {}]
+)
+def test_mlflow_malformed_artifact_is_reported_not_raised(artifact):
+    run = {"status": "FINISHED", "tags": {"harness": "h", "task_name": "t"}, "metrics": {}}
+    got, why = tokens_from_mlflow_run(run, lambda path: artifact)
+    assert got is None and why
+    diag = {}
+    out = harvest_mlflow({"t": ["r1"]}, lambda rid: run, lambda rid, path: artifact, diag)
+    assert out == {} and diag["runs_not_used"][0]["task"] == "t"
+
+
+@pytest.mark.parametrize("status", ["RUNNING", "KILLED", "SCHEDULED", None])
+def test_mlflow_any_non_finished_status_is_not_used(status):
+    run = _fx_run("gym_ifbench_bf16") | {"status": status}
+    got, why = tokens_from_mlflow_run(run)
+    assert got is None and "not FINISHED" in why
+
+
+def test_mlflow_partly_usable_task_is_flagged_in_the_verdict(tmp_path, monkeypatch, capsys):
+    ok, bad = (
+        _FIXTURES["runs"]["gym_ifbench_bf16"]["run_id"],
+        _FIXTURES["runs"]["nel_failed_terminalbench"]["run_id"],
+    )
+    cand = _FIXTURES["runs"]["gym_ifbench_nvfp4"]["run_id"]
+    (tmp_path / "b.json").write_text(json.dumps({"ns_ifbench": [ok, bad]}))
+    (tmp_path / "c.json").write_text(json.dumps({"ns_ifbench": [cand]}))
+    monkeypatch.setattr(gate_verbosity, "_mlflow_http", lambda uri: (_fx_get_run, _fx_get_artifact))
+    code = verbosity_main(
+        ["--baseline-mlflow", str(tmp_path / "b.json"), "--candidate-mlflow", str(tmp_path / "c.json"),
+         "--mlflow-uri", "http://mlflow.invalid", "--threshold", "0.5"]
+    )  # fmt: skip
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["pass"]
+    assert out["partially_excluded_tasks"] == ["ns_ifbench"]
+    assert "SOME runs excluded" in out["detail"]
+
+
+def test_mlflow_every_run_rejected_is_a_failed_eval_not_a_bad_invocation():
+    diag_b, diag_c = {}, {}
+    failed = _FIXTURES["runs"]["nel_failed_terminalbench"]["run_id"]
+    baseline = harvest_mlflow({"t": [failed]}, _fx_get_run, _fx_get_artifact, diag_b)
+    candidate = harvest_mlflow({"t": [failed]}, _fx_get_run, _fx_get_artifact, diag_c)
+    r = evaluate_verbosity(baseline, candidate, found_artifacts=diag_b["found_metrics_files"])
+    assert not r["pass"] and r["failure_class"] == "SAMPLE_ACCOUNTING_FAILED"
+
+
+@pytest.mark.parametrize("payload", ["[]", '{"t": "run1"}', '{"t": []}', '{"t": [1]}', "{"])
+def test_verbosity_cli_rejects_malformed_run_id_files(tmp_path, capsys, payload):
+    (tmp_path / "b.json").write_text(payload)
+    code = verbosity_main(
+        ["--baseline-mlflow", str(tmp_path / "b.json"), "--candidate-mlflow", str(tmp_path / "b.json"),
+         "--mlflow-uri", "http://mlflow.invalid"]
+    )  # fmt: skip
+    assert code == 2
+    assert (
+        json.loads(capsys.readouterr().out.strip().splitlines()[-1])["failure_class"]
+        == "USER_CONFIG_ERROR"
+    )
+
+
+def test_mlflow_http_builds_encoded_urls_and_sends_the_token(monkeypatch):
+    seen = []
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a):
+            return self._body
+
+    def fake_urlopen(req, timeout=None):
+        seen.append((req.full_url, dict(req.header_items())))
+        if "runs/get" in req.full_url:
+            body = {"run": {"info": {"status": "FINISHED"}, "data": {"tags": [], "metrics": []}}}
+        else:
+            body = {"response_stats": {"avg_completion_tokens": 1.0, "successful_count": 1}}
+        return _Resp(json.dumps(body).encode())
+
+    monkeypatch.setattr(gate_verbosity.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("MLFLOW_TRACKING_TOKEN", "secret-token")
+    get_run, get_artifact = gate_verbosity._mlflow_http("http://mlflow.invalid/")
+    assert get_run("abc 123")["status"] == "FINISHED"
+    get_artifact("abc", "simple_evals.gpqa/artifacts/eval_factory_metrics.json")
+    run_url, run_headers = seen[0]
+    art_url, _ = seen[1]
+    assert run_url == "http://mlflow.invalid/api/2.0/mlflow/runs/get?run_id=abc%20123"
+    assert (
+        "/get-artifact?path=simple_evals.gpqa/artifacts/eval_factory_metrics.json&run_uuid=abc"
+        in art_url
+    )
+    assert run_headers["Authorization"] == "Bearer secret-token"
+
+
+if __name__ == "__main__":
+    sys.exit(__import__("pytest").main([__file__, "-q"]))

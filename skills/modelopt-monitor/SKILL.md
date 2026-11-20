@@ -88,7 +88,7 @@ Whether triggered by monitor output or by the user asking "check status":
 ## How to Check Each Job Type
 
 Each check method has its **own** status vocabulary. A watcher that mixes them
-(e.g. uses SLURM's `COMPLETED` terminal-state regex against `nel status` output)
+(e.g. uses SLURM's `COMPLETED` terminal-state regex against a tool's own status output such as `nel status`)
 will silently never fire terminal transitions. Always match against the
 vocabulary of the source you're polling.
 

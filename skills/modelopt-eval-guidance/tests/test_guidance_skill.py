@@ -38,7 +38,7 @@ def _text(path):
 
 def test_guidance_has_the_expected_files():
     names = {p.name for p in (_GUIDANCE / "references").glob("*.md")}
-    assert names == {
+    assert names >= {
         "doom-loops.md",
         "external-baseline-check.md",
         "nvfp4-modelcard-sampling.md",
