@@ -11,6 +11,10 @@ on:
       - "noxfile.py"
       - "pyproject.toml"
       - "tests/unit/**"
+      - "tests/_test_utils/**"
+      - "tests/examples/**/test_*_readme.py"
+      - "examples/**/README*.md"
+      - "examples/**/readme*.md"
       - "tools/launcher/**"
       - "tools/mcp/**"
       - "tools/resource_monitor.py"
@@ -52,6 +56,9 @@ jobs:
             pyproject.toml
             tests/unit/**
             tests/_test_utils/**
+            tests/examples/**/test_*_readme.py
+            examples/**/README*.md
+            examples/**/readme*.md
             tools/launcher/**
             tools/mcp/**
             tools/resource_monitor.py

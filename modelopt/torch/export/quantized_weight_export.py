@@ -24,6 +24,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
 
 from modelopt import __version__
 from modelopt.torch.quantization.qtensor import (
@@ -162,12 +163,19 @@ def _same_storage(left: object, right: object) -> bool:
         return True
     if not isinstance(left, torch.Tensor) or not isinstance(right, torch.Tensor):
         return False
+    if isinstance(left, DTensor) or isinstance(right, DTensor):
+        if not isinstance(left, DTensor) or not isinstance(right, DTensor):
+            return False
+        if left.device_mesh != right.device_mesh:
+            return False
+        return _same_storage(left.to_local(), right.to_local())
     if left.device.type == "meta" or right.device.type == "meta":
         return False
     return (
         left.device == right.device
         and left.numel() == right.numel()
-        and left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
+        # Distinct empty local shards all report data_ptr() == 0, so compare storage identity.
+        and torch._C._is_alias_of(left, right)
         and left.storage_offset() == right.storage_offset()
     )
 
