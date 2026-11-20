@@ -317,6 +317,29 @@ def test_quantize_twice():
     assert torch.allclose(out1, out2), "Re-quantization with same config should be idempotent"
 
 
+@pytest.mark.parametrize(("algorithm", "calibrated"), [("missing", True), (None, False)])
+def test_quantize_algorithm_key(algorithm, calibrated):
+    """A config without "algorithm" calibrates with the default "max"; an explicit None skips it."""
+    model = SimpleLinear()
+    inputs = model.get_input()
+    config = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    config.pop("algorithm", None)
+    if algorithm != "missing":
+        config["algorithm"] = algorithm
+    calls = []
+
+    def forward_loop(model):
+        calls.append(1)
+        return model(inputs)
+
+    model = mtq.quantize(model, config, forward_loop=forward_loop)
+
+    assert bool(calls) is calibrated
+    for module in model.modules():
+        if hasattr(module, "weight_quantizer"):
+            assert (module.weight_quantizer.amax is not None) is calibrated
+
+
 class TestSetQuantizerAttributesFull:
     """Tests for set_quantizer_attributes_full and its atomicity semantics."""
 
