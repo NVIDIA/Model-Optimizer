@@ -15,7 +15,6 @@ Daniel Korzekwa · November 19, 2026
 - [Related work](#related-work)
 - [KTO method](#kto-method)
 - [Experiments and results](#experiments-and-results)
-- [Reproducibility](#reproducibility)
 - [Conclusions and Future work](#conclusions-and-future-work)
 - [Acknowledgements](#acknowledgements)
 
@@ -43,6 +42,7 @@ This tutorial focuses on preserving accuracy while reducing cap hits, using QAKT
 
 - **Quantization-aware preference training:** [Lee et al. (ACL 2024)](https://aclanthology.org/2024.acl-long.612/) introduced QDPO to recover conversational quality after quantization. It keeps quantization active during DPO training and pairs full-precision outputs as preferred responses with quantized-model outputs as rejected responses. QAKTO fine-tunes the QAD baseline with quantization active, using independently labeled correct and looping responses without full-precision teacher outputs.
 - **Decoding penalties:** [Lotfi et al.](https://arxiv.org/abs/2606.00206) penalize selected hesitation markers to reduce quantization-related overthinking. [RATIO](https://arxiv.org/abs/2609.39801) compares the quantized model with its original, unquantized version to identify tokens associated with overthinking and set a decoding penalty for each.
+- **Targeted anti-loop training:** [AntiDoom](https://www.liquid.ai/blog/antidoom) uses Final Token Preference Optimization (FTPO), usually with LoRA, to prefer alternative tokens where repetition starts. It needs to locate that boundary; QAKTO uses labels for whole responses and, in this experiment, full-parameter fine-tuning with quantization active. Its [automated loop-mining pipeline](https://github.com/Liquid4All/antidoom) could help collect QAKTO training data. Other ideas to test include LoRA to reduce training memory and limiting negative supervision to the repeating part of a response.
 - **Learning self-correction:** [RISE](https://arxiv.org/abs/2407.18219) trains models to revise unsuccessful answers across turns. [SCoRe](https://arxiv.org/abs/2409.12917) uses reinforcement learning on model-generated correction traces. Both motivate training a model to recover after a loop has begun.
 - **Training against repetition:** [Unlikelihood training](https://arxiv.org/abs/1908.04319) lowers the probability of unwanted tokens and sequences; [DPO](https://arxiv.org/abs/2305.18290) learns from preferred and rejected response pairs. These provide related ways to train on completed versus looping continuations.
 
@@ -76,11 +76,13 @@ $$
 
 Here $(x_i, y_i)$ is a question and response; $s_i=+1$ for correct responses and $s_i=-1$ for looping prefixes. $\pi_\theta$ is the model being fine-tuned, $\pi_{\mathrm{ref}}$ the frozen QAD baseline, $\sigma$ the sigmoid, and $\beta=0.05$. Log probabilities sum over response tokens.
 
-The shared reference level *z* estimates the model’s overall likelihood shift from the frozen baseline, so each response is judged relative to that shift. See the [KTO paper](https://arxiv.org/html/2402.01306v5#S4.SS1.SSS0.Px1) for details.
+The shared reference level *z* is a batch KL estimate of the model’s overall likelihood shift from the frozen baseline. Each response is judged relative to that shift. During each update, *z* is treated as constant when computing gradients. See the [KTO paper](https://arxiv.org/html/2402.01306v5#S4.SS1.SSS0.Px1) for details.
 
 ## Experiments and results
 
 We evaluated two NVFP4 Qwen3.6-35B-A3B checkpoints: the QAD baseline and QAKTO. We compared accuracy, cap-hit rates, missing final answers, abstention, and completion token use.
+
+See [Reproducibility](reproducibility/README.md) for data collection, training, export and evaluation instructions.
 
 ### Evaluation data
 
@@ -190,46 +192,6 @@ The abstention rate among non-correct responses rose by 1.88 pp with QAKTO (p=0.
 | tau2-bench Telecom | 5,218 / 4,736 | 4,044 / 3,725 | −1174 [−1344, −1004] | <0.001 | 1.000 |
 
 Mean completion tokens fell on seven of eight benchmarks, most on SciCode (53%) and tau2-bench Telecom (22.5%). GPQA increased by 14.1%.
-
-## Reproducibility
-
-### Training
-
-The run used a custom KTO loss and data adapters in NeMo RL’s Megatron preference-training loop. KTO uses a different loss function from DPO. The code and frozen 208-sequence corpus still need packaging. The checkpoint handoff must preserve the distributed layout and active quantization during training and reload. Export the reloaded QAKTO policy using the parent’s [NVFP4 export procedure](../README.md#4-export).
-
-#### Collect KTO training responses
-
-The experiment reused saved QAD-generated responses. To collect a new training set:
-
-1. Use the [44/11 subtask split](data/subtask_split.yaml). Collect responses only for the 44 training subtasks and reserve the other 11 for evaluation.
-2. Generate repeated responses with the QAD model and run the SciCode tests. Keep responses that pass as correct examples.
-3. Inspect unfinished responses and keep those that repeat without making progress as looping examples. A token-cap hit alone does not confirm a loop.
-4. Preserve each response’s original prompt, remove duplicates and keep examples within the 32,768-token training limit. Select 104 correct and 104 looping responses.
-
-#### Software used
-
-| Component | Recorded version |
-| --- | --- |
-| NeMo training container | `nvcr.io/nvidia/nemo:26.08.00` |
-| ModelOpt | `0.46.0rc1` |
-| Megatron Bridge | `0.6.0+c93251151` |
-| Megatron Core | `0.19.0+16ad357ee` |
-| NeMo RL | External source checkout; exact release or commit not recorded |
-
-The container was supplemented with external NeMo RL and ModelOpt sources. The exact NeMo RL revision still needs to be recovered for replay.
-
-### Evaluation
-
-We run benchmarks and collect results using the [QAD tutorial’s evaluation setup and configs](../evaluation/README.md), with presence penalty zero for both models. We compare the models using the paired analysis described in [Evaluating Models Efficiently During Optimization Experiments](https://github.com/NVIDIA/Model-Optimizer/blob/c8559d2b4e547960db1713640d3d54bb9b7c8280/docs/source/announcements/evaluating_models_efficiently_during_optimization_experiments/index.rst).
-
-Evaluation used NEL `0.2.6`, NeMo Evaluator `0.2.8` and the `vllm/vllm-openai:v0.28.0` serving container.
-
-- For tau2-bench Telecom, override `agent_args.presence_penalty` from 1.5 to 0 for both models.
-
-### What still needs packaging
-
-- **Checkpoints:** public download locations and content manifests for the evaluated iteration-500 QAD baseline and step-13 QAKTO export.
-- **Exact evaluation replay:** the frozen MMLU-Pro inputs and preparation adapter, serving and evaluator image pins, and immutable judge and simulator revisions. AA-LCR used a Qwen-235B judge and tau2-bench Telecom a Qwen-235B user simulator; AA-Omniscience used a different judge from the parent tutorial.
 
 ## Conclusions and Future work
 

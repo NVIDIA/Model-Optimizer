@@ -44,7 +44,11 @@ def main():
         required=True,
         help="Path to NeMo RL's examples/configs/dpo.yaml",
     )
-    parser.add_argument("--kto-config", type=Path, default=Path(__file__).with_name("kto.yaml"))
+    parser.add_argument(
+        "--kto-config",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "config" / "kto.yaml",
+    )
     args = parser.parse_args()
 
     # KTO: load the objective settings alongside the model and runtime configuration.

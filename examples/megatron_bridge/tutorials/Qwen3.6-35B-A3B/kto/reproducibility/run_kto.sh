@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # Run KTO using NeMo RL's preference-training loop.
-# Fill in the variables below before launching with the bundled kto.yaml.
+# Fill in the variables below; the runner uses kto/config/kto.yaml by default.
 # The bundled quantized recipe needs a checkpoint containing ModelOpt quantization state.
 #
 # Example, from the parent tutorial directory after filling in the variables:
@@ -39,4 +39,4 @@ export KTO_VALIDATION_DATA=/path/to/validation.jsonl
 export KTO_OUTPUT_DIR=/path/to/new-kto-output
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec python "$SCRIPT_DIR/kto_train.py" --dpo-config "$NEMO_RL_SOURCE/examples/configs/dpo.yaml" "$@"
+exec python "$SCRIPT_DIR/../src/kto_train.py" --dpo-config "$NEMO_RL_SOURCE/examples/configs/dpo.yaml" "$@"
