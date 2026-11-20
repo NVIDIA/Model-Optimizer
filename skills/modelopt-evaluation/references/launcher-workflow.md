@@ -132,13 +132,6 @@ Some models need extra vLLM backend env vars (model-card research) — e.g. `VLL
 
 **NEL's built-in `vllm`/`vllm_ray` `base_command` and `trtllm` `command` already pass `--trust-remote-code`.** Always write your own `command:` (for `vllm_ray`, your own `base_command:`) and add the flag only once approved.
 
-**Auto-detect from `config.json`:**
-
-| Field | Flag |
-| --- | --- |
-| `max_position_embeddings` | `--max-model-len <value>` |
-| `auto_map` exists | `--trust-remote-code`: executable serving setting (Step 8) |
-
 #### Cross-check both sources for vLLM (mandatory, neither replaces the other)
 
 **Source 1 — `recipes.vllm.ai/<org>/<model>`** (curated vLLM recipes; authoritative for parallelism, family-specific flags like `--reasoning-parser` / `--tool-call-parser` / `--mm-encoder-tp-mode`, vLLM version, spec-decoding, GPU count). **Fetch the page for the EXACT model id, not a base/sibling** — variant minimums differ (e.g. MiniMax-M2 ≥0.11.0 vs M2.7 ≥0.20.0). Pin variants via query params (e.g. `?variant=fp8&strategy=single_node_tep`).
@@ -329,7 +322,7 @@ Evals that exceed 4h of wall-clock time are handled by **NEL's built-in dependen
 ssh <host> "cd <output_dir>/<timestamp>-<invocation>/<task>/ && sbatch run.sub"
 ```
 
-Resubmitting `run.sub` (or `nel resume` / `nemo-evaluator-launcher resume`) re-runs the hooks saved in it without NEL's trust gate, and the env prefix has no effect there, so resume only runs whose hooks the user approved. Re-submit again if it's preempted again — each resume re-deploys, then skips already-generated samples, so progress is **cumulative** across attempts until it completes. Always confirm via `sacct -j <id>` that the prior job was `CANCELLED` (not a real failure) before resuming.
+Resubmitting `run.sub` (or `nel resume` / `nemo-evaluator-launcher resume`) re-runs the hooks saved in it without NEL's trust gate, and the env prefix has no effect there, so before resubmitting, inspect the saved `run.sub` and any file it sources: its hooks and executable serving settings must match what the user approved. Ask again if they differ; do not resubmit if they can't be inspected. Re-submit again if it's preempted again — each resume re-deploys, then skips already-generated samples, so progress is **cumulative** across attempts until it completes. Always confirm via `sacct -j <id>` that the prior job was `CANCELLED` (not a real failure) before resuming.
 
 Implications for the agent:
 
@@ -431,8 +424,8 @@ export DUMMY_API_KEY=dummy
 
 **Approvals** (every launch, including existing configs and reruns; if the user declines either, do not submit; ask again if anything changes after dry-run or canary; a request to launch is not approval):
 
-- **Hook trust:** show the user the resolved `pre_cmd`/`post_cmd` (deployment, `auxiliary_deployments`, evaluation and task level) and get an explicit OK for those hooks.
-- **Serving code:** separately get an explicit OK for each executable serving setting (Step 3) in the resolved config, inherited ones included: e.g. `--trust-remote-code` (also when it comes from NEL's built-in command), a parser or plugin path, an image outside the `vllm/vllm-openai:`, `lmsysorg/sglang:` and `nvcr.io/nvidia/` repos. NEL's hook flag does not control these.
+- **Hook trust:** show the user the resolved `pre_cmd`/`post_cmd` (deployment, `auxiliary_deployments`, evaluation and task level), with commands and variable references visible but credential values redacted, and get an explicit OK for those hooks.
+- **Serving code:** separately get an explicit OK for each executable serving setting (Step 3) in the resolved config, inherited ones included: e.g. `--trust-remote-code` (also when it comes from NEL's built-in command), a parser or plugin path, a mount that supplies or replaces code the server loads, an image outside the `vllm/vllm-openai:`, `lmsysorg/sglang:` and `nvcr.io/nvidia/` repos. NEL's hook flag does not control these.
 - **Prefix:** give every `nel run` an explicit `NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1>`: `1` only when the user approved that config's hooks, `0` otherwise (dry-runs, configs without hooks). A value on the command overrides the shell and `nel`'s own `./.env` loading, including an opt-in left there by an older template.
 
 **Step 8.1 — Dry-run** (config validation):
