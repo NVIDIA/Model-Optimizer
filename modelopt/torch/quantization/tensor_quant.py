@@ -59,7 +59,7 @@ def _fp8_eager(x, amax=None):
         # Like the CUDA extension, only an amax whose FP8 scale overflows is treated as zero.
         zero_amax_mask = amax <= 448.0 / torch.finfo(torch.float32).max
         safe_amax = torch.where(zero_amax_mask, torch.ones_like(amax), amax)
-        scale = 448.0 / safe_amax
+        scale = scale = torch.full_like(safe_amax, 448.0) / safe_amax
         scale_inv = 1 / scale
         x = (x.to(torch.float32) * scale).clamp(min=-448.0, max=448.0)
     x = x.to(torch.float8_e4m3fn)
