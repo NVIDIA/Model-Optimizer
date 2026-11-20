@@ -39,7 +39,7 @@ class IQCandidates:
     _local: torch.Tensor
 
     def pack(self, choice: torch.Tensor, native_d: torch.Tensor) -> torch.Tensor:
-        """Pack selected complete bundles and round their common scale to FP16."""
+        """Pack bundles with FP16 scales, canonicalizing zero-scale blocks to all-zero bytes."""
         if choice.shape != self.coefficients.shape[:3] or native_d.shape != self.base_scale.shape:
             raise ValueError("IQ candidate choices or shared scales have an invalid shape")
         index = choice.long().unsqueeze(-1).unsqueeze(-1)
@@ -68,7 +68,8 @@ def build_candidates(
 
     ``coefficients`` has shape ``[rows, blocks, bundles, candidates, bundle_width]``
     and assumes ``d=1``. Candidate zero retains the supplied codes; ``valid_mask`` marks
-    unique alternatives. ``pack(choice, d)`` rounds the common scale and preserves those codes.
+    unique alternatives. ``pack(choice, d)`` rounds the common scale and preserves those codes,
+    except that zero-scale blocks are canonicalized to all-zero bytes.
     """
     if format_name not in IQ_FORMAT_REGISTRY:
         raise ValueError(f"Unsupported IQ format: {format_name}")
