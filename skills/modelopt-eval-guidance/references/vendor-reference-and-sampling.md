@@ -18,7 +18,9 @@ What this guidance adds is specific to quantized checkpoints:
   evaluation settings out of a quickstart snippet (`SamplingParams(temperature=0.8, top_p=0.95)` is boilerplate
   copied across unrelated models).
 - **A quantized checkpoint is served like its baseline.** Change only what the quantization requires, and list
-  every difference (the serving record in `modelopt-deployment`, step 5c, is where it is written).
+  every difference (the serving record in `modelopt-deployment`, step 5c, is where it is written). For NeMo Gym,
+  `add-model-eval-config` (section 9, "A quantized variant") states the same rule and also accepts a deployment
+  derived elsewhere, so follow it there.
 - **Hardware images.** The default serving image supports common GPU architectures only. For ARM64 or GPUs with
   a non-standard compute capability (for example sm_121), use an NGC vLLM image, and ask the user for the
   architecture if the card does not say. Gym's model skill does not cover this.
