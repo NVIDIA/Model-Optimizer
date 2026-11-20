@@ -18,6 +18,9 @@ Changelog
 
 *Quantization - QAT / QAD*
 
+- Add a `QAKTO tutorial <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/kto/>`_
+  for reducing doomed reasoning loops in NVFP4 Qwen3.6-35B-A3B, with benchmark results and NeMo RL training examples.
+
 *Quantization - Export & Deployment*
 
 *Quantization - Recipes*
