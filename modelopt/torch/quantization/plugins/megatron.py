@@ -58,7 +58,7 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
-from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
+from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX, resize_pins
 from ..nn import (
     GroupedQuantizer,
     QuantModule,
@@ -527,6 +527,12 @@ class _MegatronParallelLinear(_ParallelLinear):
 
         super()._setup()
 
+    def modelopt_post_restore(self, prefix: str = ""):
+        # GGML pins are restored at the saved shard's shape; the sharded load fills this rank's.
+        if self.weight is not None and isinstance(self.weight_quantizer, TensorQuantizer):
+            resize_pins(self.weight_quantizer, self.weight)
+        super().modelopt_post_restore(prefix=prefix)
+
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):
         if v.ndim == 4:
             quantizer_state_dict[k] = v.squeeze(1).squeeze(-1)
@@ -685,6 +691,8 @@ class _QuantMegatronMLP(_MegatronMLP):
     _modelopt_state_keys = [
         r"weight_quantizer\.(\d+\.)*_amax$",
         r"weight_quantizer\.(\d+\.)*_scale$",
+        # GGML pins have the weight's rows, so a gated linear_fc1's split into gate and up rows too.
+        rf".*weight_quantizer\.{PINNED_PAYLOAD_PREFIX}\w+$",
     ]
 
 

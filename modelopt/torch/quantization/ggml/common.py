@@ -233,6 +233,7 @@ def resize_pins(quantizer, weight: torch.Tensor) -> None:
     Restoring a checkpoint saved at another tensor parallelism gives the pins the saved shard's
     shape; the sharded checkpoint load that follows fills them with this shard.
     """
+    # Local: the registry imports GGMLFormat from this module.
     from .registry import GGML_FORMAT_REGISTRY
 
     for name, buffer in list(quantizer.named_buffers(recurse=False)):
@@ -241,7 +242,8 @@ def resize_pins(quantizer, weight: torch.Tensor) -> None:
         elif name.startswith(PINNED_PAYLOAD_PREFIX):
             format_name = name.removeprefix(PINNED_PAYLOAD_PREFIX)
             format_name = format_name.removesuffix("_search_scales").removesuffix("_source")
-            blocks = weight.shape[-1] // GGML_FORMAT_REGISTRY[format_name].block_size
+            # Block quantization pads the last dimension to whole blocks.
+            blocks = -(-weight.shape[-1] // GGML_FORMAT_REGISTRY[format_name].block_size)
             # ``[*rows, blocks, ...]``, the payload's block bytes or the source's keys last.
             shape = (*weight.shape[:-1], blocks, *buffer.shape[weight.dim() :])
         else:

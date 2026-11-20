@@ -300,6 +300,7 @@ def _gpt_model_provider(
     ep_size=1,
     etp_size=None,
     transformer_impl="local",
+    activation_func="squared_relu",
     # Hybrid mamba MOE parameters
     is_hybrid=False,
     hybrid_layer_pattern=None,
@@ -335,7 +336,7 @@ def _gpt_model_provider(
                 num_layers=4,
                 ffn_hidden_size=None,
                 num_attention_heads=8,
-                activation_func="squared_relu",
+                activation_func=activation_func,
                 transformer_impl=transformer_impl,
                 hidden_size=hidden_size,
                 vocab_size=vocab_size,
@@ -1855,9 +1856,9 @@ def test_ggml_payload_sharded_state_dict(dist_workers_size_2, tmp_path, preparat
     )
 
 
-def _test_ggml_payload_tp_reshard(tmp_path, preparation, rank, size):
+def _test_ggml_payload_tp_reshard(tmp_path, preparation, activation_func, rank, size):
     initialize_for_megatron(tensor_model_parallel_size=size, seed=SEED)
-    source = _gpt_model_provider(tp_size=size, hidden_size=512)
+    source = _gpt_model_provider(tp_size=size, hidden_size=512, activation_func=activation_func)
     mtq.quantize(source, _iq2_xs_config(preparation), get_forward(source))
     if preparation == "ptq":
         mtq.initialize_qdq_weights(source)
@@ -1871,6 +1872,9 @@ def _test_ggml_payload_tp_reshard(tmp_path, preparation, rank, size):
                 torch.distributed.all_gather(
                     shards, quantizer(weight), group=get_tensor_model_parallel_group()
                 )
+                if activation_func == "swiglu" and name.endswith("linear_fc1"):
+                    # Megatron restores a gated linear_fc1 as all gate rows, then all up rows.
+                    shards = [shard.chunk(2)[i] for i in range(2) for shard in shards]
                 expected[name] = torch.cat(shards, dim=weight.partition_dim)
     assert expected
     save_distributed_checkpoint(tmp_path, source)
@@ -1880,7 +1884,7 @@ def _test_ggml_payload_tp_reshard(tmp_path, preparation, rank, size):
     destroy_model_parallel()
 
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
-    target = _gpt_model_provider(tp_size=1, hidden_size=512)
+    target = _gpt_model_provider(tp_size=1, hidden_size=512, activation_func=activation_func)
     restore_sharded_modelopt_state([target], tmp_path)
     target = load_distributed_checkpoint(tmp_path, target)
     for name, module in target.named_modules():
@@ -1889,10 +1893,13 @@ def _test_ggml_payload_tp_reshard(tmp_path, preparation, rank, size):
             assert torch.equal(quantizer(weight), expected[name]), name
 
 
+@pytest.mark.parametrize("activation_func", ["squared_relu", "swiglu"])
 @pytest.mark.parametrize("preparation", ["gptq", "ptq"])
-def test_ggml_payload_tp_reshard(dist_workers_size_2, tmp_path, preparation):
+def test_ggml_payload_tp_reshard(dist_workers_size_2, tmp_path, preparation, activation_func):
     """GGML pins and effective weights quantized at TP=2 reload at TP=1."""
-    dist_workers_size_2.run(partial(_test_ggml_payload_tp_reshard, tmp_path, preparation))
+    dist_workers_size_2.run(
+        partial(_test_ggml_payload_tp_reshard, tmp_path, preparation, activation_func)
+    )
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
