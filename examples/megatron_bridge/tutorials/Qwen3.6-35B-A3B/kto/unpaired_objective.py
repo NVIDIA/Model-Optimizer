@@ -44,9 +44,9 @@ class KTOLossFn(DPOLossFn):
     correct responses (desirable, s_i = +1) and looping responses (undesirable, s_i = -1).
     Here w_i is the sample mask, N is global_valid_seqs clamped to at least one,
     and beta is NeMo RL's reference_policy_kl_penalty.
-    pi_theta is the model being fine-tuned; pi_ref is the frozen QAD baseline.
+    pi_theta is the model being fine-tuned; pi_ref is the frozen reference model.
     The batch KL estimate z supplies a shared reference level for the model's
-    overall likelihood shift from the frozen QAD baseline. It is treated as
+    overall likelihood shift from the frozen reference model. It is treated as
     constant when computing gradients. For an unpadded batch of B responses,
     w_i = 1 and N = B.
 
@@ -121,7 +121,7 @@ def install(pad_id, *, max_length=32768):
     """Install KTO loss and estimate the shared reference level z.
 
     The batch KL estimate z measures the model's overall likelihood shift from
-    the frozen QAD baseline and is treated as constant when computing gradients.
+    the frozen reference model and is treated as constant when computing gradients.
     Call before nemo_rl.algorithms.dpo.setup(), which creates the loss object.
     kto_train.py already calls install() before that setup function.
     Batches must alternate correct and looping responses.
