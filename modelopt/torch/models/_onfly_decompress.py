@@ -21,17 +21,12 @@ PTQ runs on the original checkpoint. Needs transformers 5.8, whose ``Concatenate
 
 import functools
 import os
-import threading
 
 import torch
 from safetensors import safe_open
 
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.moe import config_levels, require_transformers
-
-# Held while a hook on transformers' ``get_model_conversion_mapping`` is read and published or
-# restored, here and by the Nemotron-H puzzle loader, so neither drops the other's hook.
-CONVERSION_HOOK_LOCK = threading.Lock()
 
 
 def to_native_backbone_config(
@@ -394,6 +389,7 @@ def install_onfly_decompress(hf_config):
         return
     compressor, scheme, param_names, fmt = compression
     _install_keep_int_native()
+    orig = mu.get_model_conversion_mapping
 
     def patched(*args, **kwargs):
         convs = orig(*args, **kwargs)
@@ -428,9 +424,7 @@ def install_onfly_decompress(hf_config):
         return out
 
     setattr(patched, "_onfly_compression", compression)
-    with CONVERSION_HOOK_LOCK:
-        orig = mu.get_model_conversion_mapping
-        mu.get_model_conversion_mapping = patched
+    mu.get_model_conversion_mapping = patched
     _mark(hf_config, param_names)
     print_rank_0(
         f"[onfly_decompress] installed: compressed_tensors '{fmt}' fused-MoE experts decompress "

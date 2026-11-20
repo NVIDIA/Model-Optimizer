@@ -19,10 +19,8 @@ import copy
 import inspect
 import json
 import re
-import threading
 import weakref
 from contextlib import contextmanager
-from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
 
@@ -35,7 +33,6 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.masking_utils import create_causal_mask
 from transformers.models.nemotron_h import modeling_nemotron_h
 
-from modelopt.torch.models._onfly_decompress import CONVERSION_HOOK_LOCK
 from modelopt.torch.quantization.model_calib import (
     _needs_activation_forward_for_max_calib,
     _WeightInputHook,
@@ -52,16 +49,6 @@ __all__ = [
 ]
 
 _MTP_FORWARD_MODELS = weakref.WeakSet()
-# A load patches process-wide functions: a model class's constructor and, for a puzzle checkpoint,
-# transformers' mapping lookups. A load in another thread waits, so it neither reads nor restores
-# them mid-load.
-_LOAD_LOCK = threading.RLock()
-# transformers' functions the puzzle loads in progress patch, as (module, name, original, patch).
-_PUZZLE_PATCHES: list[tuple] = []
-_puzzle_loads = 0
-# The mappings that replace transformers' own while one puzzle model's are collected.
-_MODEL_MAPPINGS: ContextVar[dict | None] = ContextVar("_MODEL_MAPPINGS", default=None)
-_MODEL_MAPPINGS_LOCK = threading.Lock()
 
 
 def _resolve_checkpoint_path(checkpoint_path: str) -> Path:
@@ -221,52 +208,43 @@ class _NemotronHMTP(torch.nn.Module):
         return self.layers[-1].final_layernorm(mtp_hidden)
 
 
-def _scoped_lookup(lookup):
-    """Transformers' mapping lookup, answered from ``_MODEL_MAPPINGS`` for the names it holds."""
+@contextmanager
+def _puzzle_mapping_registry(class_name: str):
+    """For one collection of a puzzle Omni model's conversions, register its own code's renames.
 
-    @wraps(lookup)
-    def scoped_lookup(name):
-        mappings = _MODEL_MAPPINGS.get()
-        if mappings is not None and name in mappings:
-            # A copy, as transformers returns: the caller scopes the transforms it gets.
-            return copy.deepcopy(mappings[name])
-        return lookup(name)
+    transformers' renames for its port of the Omni class, whose class name the checkpoint's class
+    shares, are hidden, so the lookup falls back to the model type the checkpoint's code registers;
+    the puzzle language model gets the ``backbone.`` -> ``model.`` rename. Both are undone after.
+    """
+    conversion_mapping.get_checkpoint_conversion_mapping(class_name)  # builds the registry
+    cache = conversion_mapping._checkpoint_conversion_mapping_cache
+    # transformers skips a remote-code sub-model whose mapping was not registered.
+    registered = getattr(conversion_mapping, "USER_REGISTERED_MAPPINGS", set())
+    hidden = cache.pop(class_name, None)
+    added = "nemotron_h_puzzle" not in cache
+    if added:
+        cache["nemotron_h_puzzle"] = [conversion_mapping.WeightRenaming("backbone.", "model.")]
+        registered.add("nemotron_h_puzzle")
+    try:
+        yield
+    finally:
+        if hidden is not None:
+            cache[class_name] = hidden
+        if added:
+            del cache["nemotron_h_puzzle"]
+            registered.discard("nemotron_h_puzzle")
 
-    return scoped_lookup
 
-
-def _puzzle_model_mappings(get_model_conversion_mapping, lookup):
-    """Transformers' mapping collection, giving a puzzle Omni model its own code's renames."""
+def _puzzle_model_mappings(get_model_conversion_mapping):
+    """Transformers' conversion collection, giving a puzzle Omni model its own code's renames."""
 
     @wraps(get_model_conversion_mapping)
     def collect(model, *args, **kwargs):
-        # A hook installed mid-load (``_onfly_decompress``'s) can keep this patch in its chain,
-        # under a later load's patch, which has set the mappings, or past the last load.
-        if (
-            not _puzzle_loads
-            or _MODEL_MAPPINGS.get() is not None
-            or not _has_puzzle_language_model(getattr(model, "config", None))
-        ):
+        if not _has_puzzle_language_model(getattr(model, "config", None)):
             # Any other model, a native Omni among them, keeps transformers' renames.
             return get_model_conversion_mapping(model, *args, **kwargs)
-        # Without its class name, which selects transformers' renames for its port, the lookup
-        # falls back to the model type the checkpoint's code registers.
-        mappings = {type(model).__name__: None}
-        if lookup("nemotron_h_puzzle") is None:
-            rename = conversion_mapping.WeightRenaming("backbone.", "model.")
-            mappings["nemotron_h_puzzle"] = [rename]
-        # transformers skips a remote-code sub-model whose mapping was not registered.
-        registered = getattr(conversion_mapping, "USER_REGISTERED_MAPPINGS", set())
-        with _MODEL_MAPPINGS_LOCK:
-            added = "nemotron_h_puzzle" not in registered
-            registered.add("nemotron_h_puzzle")
-            token = _MODEL_MAPPINGS.set(mappings)
-            try:
-                return get_model_conversion_mapping(model, *args, **kwargs)
-            finally:
-                _MODEL_MAPPINGS.reset(token)
-                if added:
-                    registered.discard("nemotron_h_puzzle")
+        with _puzzle_mapping_registry(type(model).__name__):
+            return get_model_conversion_mapping(model, *args, **kwargs)
 
     return collect
 
@@ -278,8 +256,8 @@ def _puzzle_renames(config: dict):
     Its code registers them under names transformers 5.18 does not use: none reaches its
     ``nemotron_h_puzzle`` language model, which so loads none of its ``backbone.*`` weights, and
     its Omni class's name selects transformers' renames for transformers' own port of that class,
-    which send the projector's weights elsewhere. While such loads are in progress, transformers'
-    mapping collection gives a model with a puzzle language model its renames and any other model
+    which send the projector's weights elsewhere. During the load, transformers' conversion
+    collection gives a model with a puzzle language model its renames and any other model
     transformers' own. ``from_pretrained`` records the renames it ran, and the export reverts them.
     """
     if not _has_puzzle_language_model(config):
@@ -292,33 +270,15 @@ def _puzzle_renames(config: dict):
             "sub-model's weight renames to that sub-model (5.9 or later); found "
             f"{transformers.__version__}."
         )
-    global _puzzle_loads
-    if not _puzzle_loads:
-        with CONVERSION_HOOK_LOCK:
-            lookup = conversion_mapping.get_checkpoint_conversion_mapping
-            collect = modeling_utils.get_model_conversion_mapping
-            for module, name, patch in (
-                (conversion_mapping, "get_checkpoint_conversion_mapping", _scoped_lookup(lookup)),
-                (
-                    modeling_utils,
-                    "get_model_conversion_mapping",
-                    _puzzle_model_mappings(collect, lookup),
-                ),
-            ):
-                _PUZZLE_PATCHES.append((module, name, getattr(module, name), patch))
-                setattr(module, name, patch)
-    _puzzle_loads += 1
+    original = modeling_utils.get_model_conversion_mapping
+    patch = _puzzle_model_mappings(original)
+    modeling_utils.get_model_conversion_mapping = patch
     try:
         yield
     finally:
-        _puzzle_loads -= 1
-        if not _puzzle_loads:
-            with CONVERSION_HOOK_LOCK:
-                for module, name, original, patch in reversed(_PUZZLE_PATCHES):
-                    # A patch another hook wrapped stays in that hook's chain, passing through.
-                    if getattr(module, name) is patch:
-                        setattr(module, name, original)
-                _PUZZLE_PATCHES.clear()
+        # A hook installed over the patch keeps it, and it changes only puzzle models.
+        if modeling_utils.get_model_conversion_mapping is patch:
+            modeling_utils.get_model_conversion_mapping = original
 
 
 @contextmanager
@@ -329,7 +289,6 @@ def prepare_for_loading(checkpoint_path: str, trust_remote_code: bool, *, model_
     config_path = local_path / "config.json"
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
     with (
-        _LOAD_LOCK,
         _puzzle_renames(config),
         _mtp_construction(checkpoint_path, trust_remote_code, model_class, layout, config),
     ):

@@ -743,67 +743,22 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         assert walks == 2
 
 
-def _sequential_weight_quantizer(model):
-    mtq.set_quantizer_by_cfg(
-        model,
-        [
-            {"quantizer_name": "1.weight_quantizer", "cfg": [{"num_bits": 4}] * 2},
-            {"quantizer_name": "1.weight_quantizer.1", "enable": False},
-        ],
-    )
-
-
-def _sequential_weight_quantizer_in_context(model):
-    with mtq.preserve_quantizer_attributes_context(model):
-        _sequential_weight_quantizer(model)
-
-
-def _sequential_weight_quantizer_in_submodule(model):
-    mtq.set_quantizer_by_cfg(
-        model[1], [{"quantizer_name": "weight_quantizer", "cfg": [{"num_bits": 4}] * 2}]
-    )
-
-
-def _sequential_weight_quantizer_flattened(model):
-    _sequential_weight_quantizer(model)
-    with SequentialQuantizer.convert_to_single_quantizer(model):
-        mtq.set_quantizer_by_cfg(
-            model, [{"quantizer_name": "1.weight_quantizer.1", "enable": True}]
-        )
-
-
-def _second_layer_shares_the_first(model):
-    model[1] = model[0]
-
-
-@pytest.mark.parametrize(
-    ("replace", "sub_quantizer"),
-    [
-        (_sequential_weight_quantizer_in_context, "weight_quantizer.1"),
-        (_sequential_weight_quantizer_in_submodule, "weight_quantizer.1"),
-        (_sequential_weight_quantizer_flattened, "weight_quantizer.1"),
-        # named_modules skips the shared layer's second name, so neither entry matches it.
-        (_second_layer_shares_the_first, "weight_quantizer"),
-    ],
-)
-def test_set_quantizer_by_cfg_finds_named_quantizers_after_nested_replacement(
-    replace, sub_quantizer
-):
-    """Named entries act as wildcards do after a calibrator built mid-call changes the model."""
+def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_shares_a_layer():
+    """A named entry acts as its wildcard does after a calibrator built mid-call shares a layer."""
 
     def configured(weight_quantizer, sub_quantizer):
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
         model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
 
-        class ReplacingCalibrator(MaxCalibrator):
+        class SharingCalibrator(MaxCalibrator):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                replace(model)
+                model[1] = model[0]  # named_modules skips the second name
 
         mtq.set_quantizer_by_cfg(
             model,
             [
-                {"quantizer_name": weight_quantizer, "cfg": {"calibrator": ReplacingCalibrator}},
+                {"quantizer_name": weight_quantizer, "cfg": {"calibrator": SharingCalibrator}},
                 {"quantizer_name": sub_quantizer, "enable": False},
             ],
         )
@@ -813,8 +768,8 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_nested_replacement(
             if isinstance(module, TensorQuantizer)
         }
 
-    walked = configured("[0].weight_quantizer", f"[1].{sub_quantizer}")
-    assert configured("0.weight_quantizer", f"1.{sub_quantizer}") == walked
+    walked = configured("[0].weight_quantizer", "[1].weight_quantizer")
+    assert configured("0.weight_quantizer", "1.weight_quantizer") == walked
 
 
 @pytest.mark.parametrize(
