@@ -24,7 +24,7 @@ import torch
 
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
+from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX, resize_pins
 from ..nn import (
     GroupedQuantizer,
     NVFP4StaticQuantizer,
@@ -178,6 +178,9 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
             _check_unsupported_states(
                 quantizer if isinstance(quantizer, TensorQuantizer) else quantizer[0]
             )
+        for weight, quantizer in self.iter_weights_for_calibration():
+            if isinstance(quantizer, TensorQuantizer):
+                resize_pins(quantizer, weight)
         # Grouped linears validate each expert against its corresponding weight in their
         # override. Resetting the container here would clear every expert amax before this
         # single-weight compatibility path recalibrates only the representative quantizer.

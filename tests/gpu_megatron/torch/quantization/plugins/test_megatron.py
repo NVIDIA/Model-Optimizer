@@ -1724,6 +1724,16 @@ def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wr
     dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))
 
 
+def _iq2_xs_config(preparation):
+    config = load_recipe("general/ptq/iq2_xs").quantize.model_dump()
+    if preparation == "gptq":
+        gptq = next(algo for algo in config["algorithm"] if algo["method"] == "gptq")
+        config["algorithm"] = {**gptq, "layerwise": {"enable": False}}
+    else:
+        config["algorithm"] = "max"
+    return config
+
+
 def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, size):
     initialize_for_megatron(
         tensor_model_parallel_size=size,
@@ -1742,12 +1752,7 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
         )
 
     model_ref = create_model()
-    config = load_recipe("general/ptq/iq2_xs").quantize.model_dump()
-    if preparation == "gptq":
-        gptq = next(algo for algo in config["algorithm"] if algo["method"] == "gptq")
-        config["algorithm"] = {**gptq, "layerwise": {"enable": False}}
-    else:
-        config["algorithm"] = "max"
+    config = _iq2_xs_config(preparation)
     if grouped:
         for module in model_ref.modules():
             if isinstance(module, TopKRouter):
@@ -1848,6 +1853,46 @@ def test_ggml_payload_sharded_state_dict(dist_workers_size_2, tmp_path, preparat
     dist_workers_size_2.run(
         partial(_test_ggml_payload_sharded_state_dict, tmp_path, preparation, grouped)
     )
+
+
+def _test_ggml_payload_tp_reshard(tmp_path, preparation, rank, size):
+    initialize_for_megatron(tensor_model_parallel_size=size, seed=SEED)
+    source = _gpt_model_provider(tp_size=size, hidden_size=512)
+    mtq.quantize(source, _iq2_xs_config(preparation), get_forward(source))
+    if preparation == "ptq":
+        mtq.initialize_qdq_weights(source)
+    expected = {}
+    for name, module in source.named_modules():
+        if not hasattr(module, "iter_weights_for_calibration"):
+            continue
+        for weight, quantizer in module.iter_weights_for_calibration():
+            if any(n.startswith(PINNED_PAYLOAD_PREFIX) for n, _ in quantizer.named_buffers()):
+                shards = [torch.empty_like(weight) for _ in range(size)]
+                torch.distributed.all_gather(
+                    shards, quantizer(weight), group=get_tensor_model_parallel_group()
+                )
+                expected[name] = torch.cat(shards, dim=weight.partition_dim)
+    assert expected
+    save_distributed_checkpoint(tmp_path, source)
+    save_sharded_modelopt_state([source], tmp_path)
+    torch.distributed.barrier()
+    del source
+    destroy_model_parallel()
+
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    target = _gpt_model_provider(tp_size=1, hidden_size=512)
+    restore_sharded_modelopt_state([target], tmp_path)
+    target = load_distributed_checkpoint(tmp_path, target)
+    for name, module in target.named_modules():
+        if name in expected:
+            ((weight, quantizer),) = module.iter_weights_for_calibration()
+            assert torch.equal(quantizer(weight), expected[name]), name
+
+
+@pytest.mark.parametrize("preparation", ["gptq", "ptq"])
+def test_ggml_payload_tp_reshard(dist_workers_size_2, tmp_path, preparation):
+    """GGML pins and effective weights quantized at TP=2 reload at TP=1."""
+    dist_workers_size_2.run(partial(_test_ggml_payload_tp_reshard, tmp_path, preparation))
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])

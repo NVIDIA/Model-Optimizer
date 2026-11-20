@@ -227,6 +227,30 @@ def pin_packed_weight(
     quantizer._quantizer_cache = None
 
 
+def resize_pins(quantizer, weight: torch.Tensor) -> None:
+    """Shape ``quantizer``'s pins for ``weight``, this rank's shard at the current tensor parallelism.
+
+    Restoring a checkpoint saved at another tensor parallelism gives the pins the saved shard's
+    shape; the sharded checkpoint load that follows fills them with this shard.
+    """
+    from .registry import GGML_FORMAT_REGISTRY
+
+    for name, buffer in list(quantizer.named_buffers(recurse=False)):
+        if name.startswith(PINNED_IMPORTANCE_PREFIX):
+            shape = weight.shape[-1:]
+        elif name.startswith(PINNED_PAYLOAD_PREFIX):
+            format_name = name.removeprefix(PINNED_PAYLOAD_PREFIX)
+            format_name = format_name.removesuffix("_search_scales").removesuffix("_source")
+            blocks = weight.shape[-1] // GGML_FORMAT_REGISTRY[format_name].block_size
+            # ``[*rows, blocks, ...]``, the payload's block bytes or the source's keys last.
+            shape = (*weight.shape[:-1], blocks, *buffer.shape[weight.dim() :])
+        else:
+            continue
+        if buffer.shape != shape:
+            quantizer._set_buffer(name, buffer.new_zeros(shape))
+            quantizer._quantizer_cache = None
+
+
 def pinned_packed_weight(quantizer, format_name: str) -> torch.Tensor | None:
     """The ``format_name`` payload pinned to ``quantizer``, if any."""
     return getattr(quantizer, _pin_name(format_name), None)
