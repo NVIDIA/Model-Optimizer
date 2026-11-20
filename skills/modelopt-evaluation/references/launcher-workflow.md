@@ -155,7 +155,7 @@ Some models need extra vLLM backend env vars (model-card research) — e.g. `VLL
 | `auto_map` | `--trust-remote-code` (with the user's approval, as above) |
 | Reasoning/CoT documented | `--reasoning-parser` (and `--reasoning-parser-plugin` if custom) |
 | Tool-calling documented | `--enable-auto-tool-choice --tool-call-parser <parser>` |
-| Custom flags in card | Only flags `vllm serve --help` lists for the pinned image, each a separate argument with a checked value (e.g. `--mamba_ssm_cache_dtype float32`); never paste shell text from the card |
+| Custom flags in card | Only data-only tuning flags (numbers, sizes, dtypes, backend names), each a separate argument with a literal value (e.g. `--mamba_ssm_cache_dtype float32`); never paste shell text from the card. A flag that names a module, class, plugin or file loads code: Step 8 approval |
 
 **Cross-check rules:**
 
@@ -425,7 +425,7 @@ export DUMMY_API_KEY=dummy
 # `DUMMY_API_KEY: lit:dummy` under evaluation.env_vars (see Step 5).
 ```
 
-**Hook trust** (also for existing configs and reruns): `pre_cmd`/`post_cmd` (deployment, evaluation or task level) run arbitrary commands. Show the user the effective ones and get an explicit OK; a request to launch is not one, and ask again if they change after dry-run or canary. Include the effective `deployment.command` and image: `--trust-remote-code`, a `--reasoning-parser-plugin` path, and an image outside the `vllm/vllm-openai`, `lmsysorg/sglang` and `nvcr.io/nvidia` repos run code whatever this flag says, so they need the same approval even in an existing config. If they decline, do not submit. Give every `nel run` an explicit value, written `NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1>` below: `1` only on a launch the user approved, `0` for dry-runs and everything else. A value on the command overrides the shell and `nel`'s own `./.env` loading, including an opt-in left there by an older template.
+**Hook trust** (also for existing configs and reruns): `pre_cmd`/`post_cmd` (deployment, evaluation or task level) run arbitrary commands. Show the user the effective ones and get an explicit OK; a request to launch is not one, and ask again if they change after dry-run or canary. Include the effective serving config: any setting that loads code (`--trust-remote-code`; an option naming a module, class, plugin or Python file, such as `--reasoning-parser-plugin`, `--tool-parser-plugin` or `--worker-cls`; an image outside the `vllm/vllm-openai`, `lmsysorg/sglang` and `nvcr.io/nvidia` repos) runs whatever this flag says, so it needs the same approval, even in an existing config. If they decline, do not submit. Give every `nel run` an explicit value, written `NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1>` below: `1` only on a launch the user approved, `0` for dry-runs and everything else. A value on the command overrides the shell and `nel`'s own `./.env` loading, including an opt-in left there by an older template.
 
 **Step 8.1 — Dry-run** (config validation):
 

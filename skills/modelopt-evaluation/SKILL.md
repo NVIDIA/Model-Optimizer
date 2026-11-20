@@ -52,7 +52,7 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
    Read [model-card research](references/model-card-research.md) for generation settings; consult task-specific policy before selecting published budgets or fallbacks.
 2. Isolated nel-next venv: `"$SKILL_DIR/scripts/nel-next.sh" --setup-only` (keeps 0.2.6 `nel` untouched).
 3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`, `${HARBOR_ECS_REGION}`) into `.env`; always include the `output.export_config.mlflow` block.
-4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
+4. Dry-run → canary → full (`nel-next.sh eval run`); before the first `--submit`, show the user the rendered service args and image and get approval for any code-loading setting, as in Step 8's **Hook trust** (stop if declined). Then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
 5. Before reporting a full-run score, apply `references/run-validation.md`, including its benchmark-specific checks.
 
 Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
