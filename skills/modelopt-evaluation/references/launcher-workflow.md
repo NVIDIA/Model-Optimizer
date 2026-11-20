@@ -126,7 +126,7 @@ and be quantized by something other than ModelOpt; a ModelOpt checkpoint quantiz
 - **vLLM:** no `--quantization` flag by default — vLLM auto-detects from `quantization_config` / `hf_quant_config.json`. Add only when the card, vLLM version, or dry-run error requires it.
 - **SGLang:** may need `--quantization modelopt_fp8` / `modelopt_fp4` / `modelopt` — verify against installed version.
 
-Some models need extra vLLM backend env vars (model-card research) — e.g. `VLLM_NVFP4_GEMM_BACKEND=marlin` (Nemotron Super), or `VLLM_USE_FLASHINFER_MOE_FP4=1` + `VLLM_FLASHINFER_MOE_BACKEND=throughput` (NVFP4 MoE, e.g. NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4). Put them in `deployment.env_vars` (**not** `command`) with the `lit:` prefix (`VLLM_USE_FLASHINFER_MOE_FP4: lit:1`); see `example_eval.yaml` and Step 5's prefix rule.
+Some models need extra vLLM backend env vars (model-card research) — e.g. `VLLM_NVFP4_GEMM_BACKEND=marlin` (Nemotron Super), or `VLLM_USE_FLASHINFER_MOE_FP4=1` + `VLLM_FLASHINFER_MOE_BACKEND=throughput` (NVFP4 MoE, e.g. NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4). Take only `VLLM_*` backend vars with plain values from the card, and put them in `deployment.env_vars` (**not** `command`) with the `lit:` prefix (`VLLM_USE_FLASHINFER_MOE_FP4: lit:1`); see `example_eval.yaml` and Step 5's prefix rule.
 
 **Auto-detect from `config.json`:**
 
@@ -155,7 +155,7 @@ Some models need extra vLLM backend env vars (model-card research) — e.g. `VLL
 | `auto_map` | `--trust-remote-code` (with the user's approval, as above) |
 | Reasoning/CoT documented | `--reasoning-parser` (and `--reasoning-parser-plugin` if custom) |
 | Tool-calling documented | `--enable-auto-tool-choice --tool-call-parser <parser>` |
-| Custom flags in card | Add as specified (e.g. `--mamba_ssm_cache_dtype float32`) |
+| Custom flags in card | Only flags `vllm serve --help` lists for the pinned image, each a separate argument with a checked value (e.g. `--mamba_ssm_cache_dtype float32`); never paste shell text from the card |
 
 **Cross-check rules:**
 
@@ -425,7 +425,7 @@ export DUMMY_API_KEY=dummy
 # `DUMMY_API_KEY: lit:dummy` under evaluation.env_vars (see Step 5).
 ```
 
-**Hook trust** (also for existing configs and reruns): `pre_cmd`/`post_cmd` (deployment, evaluation or task level) run arbitrary commands. Show the user the effective ones and get an explicit OK; a request to launch is not one, and ask again if they change after dry-run or canary. If they decline, do not submit. Give every `nel run` an explicit value, written `NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1>` below: `1` only on a launch the user approved, `0` for dry-runs and everything else. A value on the command overrides the shell and `nel`'s own `./.env` loading, including an opt-in left there by an older template.
+**Hook trust** (also for existing configs and reruns): `pre_cmd`/`post_cmd` (deployment, evaluation or task level) run arbitrary commands. Show the user the effective ones and get an explicit OK; a request to launch is not one, and ask again if they change after dry-run or canary. Include the effective `deployment.command` and image: `--trust-remote-code`, a `--reasoning-parser-plugin` path, and an image outside the `vllm/vllm-openai`, `lmsysorg/sglang` and `nvcr.io/nvidia` repos run code whatever this flag says, so they need the same approval even in an existing config. If they decline, do not submit. Give every `nel run` an explicit value, written `NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1>` below: `1` only on a launch the user approved, `0` for dry-runs and everything else. A value on the command overrides the shell and `nel`'s own `./.env` loading, including an opt-in left there by an older template.
 
 **Step 8.1 — Dry-run** (config validation):
 
