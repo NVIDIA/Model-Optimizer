@@ -139,6 +139,7 @@ Changelog
 - The Megatron unified HF export (``export_mcore_gpt_to_hf``) now copies the source checkpoint's non-model files (tokenizer, processor, remote code, chat templates, ...) into the export unchanged, from local disk only. The ``examples/megatron_bridge`` scripts make a Hugging Face Hub model local first with ``modelopt.torch.export.ensure_local_checkpoint``.
 - Add an end-to-end W4A4 NVFP4 PTQ and QAD tutorial for NVIDIA Nemotron 3.5 Super VL, covering chat-data blend preparation, assistant-only distillation, Hugging Face export and vLLM serving. See `examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/>`_ for details.
 - Add GLM-5.3-Flash (``glm5_next``) support to ``examples/megatron_bridge`` PTQ and unified HF export with the ``models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`` recipe, matching ``nvidia/GLM-5.3-Flash-NVFP4``, and two GGML IQ2_S recipes for its routed experts: ``models/zai-org/GLM-5.3-Flash-BF16/ptq/iq2_s_experts-q8_0_shared_dense-gptq`` and, with weight-only NVFP4 on the experts' down projections, ``iq2_s_experts-nvfp4_down-q8_0_shared_dense-gptq``. Requires a Megatron-Bridge newer than the ``nemo:26.10`` container; see ``examples/megatron_bridge/README.md``.
+- Add ``--lsq_scale_lr`` and ``--lsq_scale_only`` to ``examples/megatron_bridge/distill.py`` for LSQ scale learning: train the learnable NVFP4 weight scales at their own learning rate alongside the weights, or train only the scales, without gradients or optimizer state for the weights. Requires Megatron-Bridge ``5ecd85806`` or later; see ``examples/megatron_bridge/README.md``.
 
 *Sparsity*
 
@@ -278,6 +279,7 @@ Changelog
 - Require Pydantic 2.5.0 or newer to prevent configuration-schema errors when importing ``modelopt.torch`` with older releases.
 - Require Wonderwords 2.2.0 or newer in the ``hf`` extra to prevent RULER calibration failures during random-word generation with older releases.
 - A legacy dict-format ``quant_cfg`` now applies its ``"default"`` key before the other keys wherever it appears, as before 0.44.
+- Fix learnable LSQ weight scales getting no gradient on Transformer Engine ``LayerNormLinear`` layers (Megatron ``TELayerNormColumnParallelLinear``), and a zero gradient on Megatron-Core and Transformer Engine ``Linear`` layers whose weight is frozen, so scale learning left those scales at their PTQ values. The weight gradient of a quantized ``LayerNormLinear`` now also goes through the weight quantizer's backward, as for other linear layers, which changes it for weight quantizers whose backward is not a pass-through (e.g. ``pass_through_bwd=False``).
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^

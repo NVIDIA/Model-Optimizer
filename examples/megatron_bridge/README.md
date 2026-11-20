@@ -422,6 +422,35 @@ It supports GPTModel-based models such as Qwen3.5 / Qwen3.6 with `--pp_size 1`.
 
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `${OUTPUT_ROOT:-/output}/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 
+#### Scale Learning (LSQ)
+
+QAD can also train the NVFP4 per-block weight scales of a student quantized with a learnable-scale recipe such as `general/qad/nvfp4_lsq-mse_init-fp8_kv`. This needs [NVIDIA-NeMo/Megatron-Bridge#6699](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/6699) (scale learning) and [NVIDIA-NeMo/Megatron-Bridge#6698](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/6698) (per-group learning rates on resume), which are in Megatron-Bridge `5ecd85806fd14ea57b827d90397ce18b00fb334d` and later but not in `nemo:26.10` or the commit [above](#pre-requisites). Install Megatron-Bridge from source as described there, checking out `5ecd85806` or a later commit instead; `distill.py` raises if either change is missing. Static-block NVFP4 needs `--tp_size 1` in both `quantize.py` and `distill.py`:
+
+```bash
+torchrun --nproc_per_node 8 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --recipe general/qad/nvfp4_lsq-mse_init-fp8_kv \
+    --tp_size 1 \
+    --export_megatron_path /tmp/Qwen3-8B-NVFP4-LSQ-megatron
+
+torchrun --nproc_per_node 8 distill.py \
+    --tp_size 1 \
+    --teacher_hf_path Qwen/Qwen3-8B \
+    --student_hf_path Qwen/Qwen3-8B \
+    --student_megatron_path /tmp/Qwen3-8B-NVFP4-LSQ-megatron \
+    --data_paths 1.0 tokenized_qwen3/data1_text_document 1.0 tokenized_qwen3/data2_text_document \
+    --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
+    --seq_length 8192 \
+    --gbs 768 \
+    --train_iters 1000 \
+    --lsq_scale_only \
+    --lr 3e-5 \
+    --min_lr 0 \
+    --output_dir /output/qwen3_8b_nvfp4_lsq_qad
+```
+
+`--lsq_scale_only` trains only the scales: the weights are frozen and take no gradient or optimizer state, so `--lr` and `--min_lr` apply to the scales. To train the scales alongside the weights instead, drop it and give the scales their own peak learning rate with `--lsq_scale_lr` (e.g. `--lr 1e-5 --min_lr 5e-6 --lsq_scale_lr 1e-4`).
+
 #### Evaluating a QAD checkpoint in vLLM with fake quantization
 
 To evaluate a format vLLM has no kernels for (e.g. NVFP4 on Hopper, GGML IQ2, or a custom research format), export with `--vllm_fakequant_export`. The weight quantizers are folded into BF16 weights and Megatron-Bridge saves the model at any TP / EP / PP, VLMs included. The enabled activation and KV-cache quantizers go to `quantizer_state.pth` (ranges) and `quant_recipe.yaml` (settings), both under HF names:
