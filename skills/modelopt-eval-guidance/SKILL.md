@@ -29,6 +29,21 @@ Use the skills of the tool the task names. Do not load another tool's skills.
 5. **Before accepting a baseline for a baseline-versus-candidate comparison:**
    [external-baseline-check.md](references/external-baseline-check.md), then `modelopt-compare-results`.
 
+## Rules for every evaluation, whatever the tool
+
+- **Serving deployment.** Before evaluating a checkpoint, check whether the tool's skills need a serving
+  deployment from the caller (image, parallelism, serve flags). If they do, load `modelopt-deployment`, write the
+  serving record (step 5c) and hand it to the tool. A tool that composes its own deployment keeps doing so.
+- **Tool-managed deployments.** Evaluate through the tool's own managed deployments. Evaluate an external or
+  retained model-under-test endpoint only when the user explicitly asks; a retained PTQ smoke server is not
+  authorization to evaluate it.
+- **Complete the tool's own steps** (dry run, canary, full run, validation) before reporting anything.
+- **Never report scores from an incomplete or invalid run.** Label the result incomplete or invalid and return
+  the findings (see [run-validity.md](references/run-validity.md)).
+- **MLflow.** Configure the tool's export of the results to MLflow, verify that the run arrived, and say in the
+  handoff whether it did.
+- **Report timeout and output-limit counts** for both sides of a comparison, as `modelopt-compare-results` asks.
+
 ## Rules that belong to the tool, not to this skill
 
 - **The output-token budget, the repeat count and the score definition** are set by the tool's benchmark
@@ -45,4 +60,5 @@ Read results from MLflow when the run was exported there, with the run id from t
 export to the same experiment; the metric names differ by tool, so confirm the name in the run before using
 it. Take scores and token counts from a run only when its status is `FINISHED` and the metric exists, and take
 the task status from the tool's own verdict (a benchmark's run can be `FINISHED` while its submission failed
-overall). Details and examples are in [run-validity.md](references/run-validity.md#reading-results-from-mlflow).
+overall). Details and examples are in [run-validity.md](references/run-validity.md#reading-results-from-mlflow); NEL's
+conventions for looking runs up are in `modelopt-accessing-mlflow`.
