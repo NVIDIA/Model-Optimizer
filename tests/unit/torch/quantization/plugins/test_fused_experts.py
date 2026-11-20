@@ -300,6 +300,7 @@ class _SyntheticGroupedExperts(nn.Module):
         self.intermediate_dim = INTERMEDIATE_DIM
         self.has_gate = True
         self.has_bias = False
+        self.has_post_expert_norm = False
         self.is_transposed = False
         self.is_concatenated = True
         # What transformers' @use_experts_implementation sets (5.18+ reads it in grouped_mm).

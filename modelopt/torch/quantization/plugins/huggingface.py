@@ -977,6 +977,13 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                     if collects:
                         q(w)  # collects this expert's statistics
             return weight
+        if any(getattr(q, "_local_repair_active", False) for q in quantizers):
+            # Deferred because native repair depends on the quantizer modules.
+            from ..repair_formats import repair_grouped_weight
+
+            repaired = repair_grouped_weight(weight, quantizers)
+            if repaired is not None:
+                return repaired
         # One kernel launch for every expert where the format has one. Unlike the eager path, which
         # without autograd quantizes only the routed experts, this one quantizes every expert either
         # way, and the kernel's one output is the buffer the slice-by-slice path below fills.
