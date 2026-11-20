@@ -225,8 +225,8 @@ precision, after its producers have been emitted.
 ## Scope and validation
 
 Only top-level graphs are processed; nested graphs and model-local functions are
-rejected. Standard input opsets are 17, 18, 20 and 21. FP16 standard QDQ can require
-migration to opset 19 at entry; this does not expand the accepted input versions.
+rejected. Standard input opsets are 17 through 21. For FP16, models at opset 17
+or 18 with standard QDQ are upgraded to opset 19 at entry.
 
 Where lowering assumes finite FP32 values and may change signed zero. Optional
 FP16 L2 decomposition uses a denominator floor of `2**-14`, with possible overflow

@@ -97,7 +97,7 @@ def dla_make_dla_compatible(
 ) -> onnx.ModelProto:
     """Apply DLA graph surgeries and save an ONNX model with native public shapes.
 
-    Supports top-level graphs with standard opset 17, 18, 20 or 21. Always runs
+    Supports top-level graphs with standard opsets 17 through 21. Always runs
     preprocessing, connected-pattern rewrites, individual-operator rewrites and
     cleanup in that order, followed by optional FP16 preparation.
 

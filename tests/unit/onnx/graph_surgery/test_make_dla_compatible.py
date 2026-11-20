@@ -469,18 +469,18 @@ def test_shared_multi_branch_pipeline(fp16):
         )
 
 
-@pytest.mark.parametrize("opset", [17, 18])
+@pytest.mark.parametrize("opset", [17, 18, 19])
 @pytest.mark.parametrize("fp16", [False, True])
 @pytest.mark.parametrize("remove_qdq", [False, True])
-def test_fp16_qdq_schema_migration_keeps_reduce_and_split_valid(opset, fp16, remove_qdq):
-    reduce_inputs = ["dq", "axes"] if opset == 18 else ["dq"]
-    attributes = {} if opset == 18 else {"axes": [1]}
+def test_qdq_pipeline_keeps_reduce_and_split_valid(opset, fp16, remove_qdq):
+    reduce_inputs = ["dq", "axes"] if opset >= 18 else ["dq"]
+    attributes = {} if opset >= 18 else {"axes": [1]}
     nodes = [
         h.make_node("QuantizeLinear", ["x", "scale", "zero"], ["quantized"]),
         h.make_node("DequantizeLinear", ["quantized", "scale", "zero"], ["dq"]),
         h.make_node("ReduceMean", reduce_inputs, ["reduced"], keepdims=1, **attributes),
         h.make_node(
-            "Split", ["dq"], ["a", "b"], axis=1, **({"num_outputs": 2} if opset == 18 else {})
+            "Split", ["dq"], ["a", "b"], axis=1, **({"num_outputs": 2} if opset >= 18 else {})
         ),
         h.make_node("Split", ["dq", "lengths"], ["c", "d"], axis=1),
     ]
@@ -489,7 +489,7 @@ def test_fp16_qdq_schema_migration_keeps_reduce_and_split_valid(opset, fp16, rem
         nh.from_array(np.asarray(0, np.uint8), "zero"),
         nh.from_array(np.asarray([1, 1], np.int64), "lengths"),
     ]
-    if opset == 18:
+    if opset >= 18:
         initializers.append(nh.from_array(np.asarray([1], np.int64), "axes"))
     model = h.make_model(
         h.make_graph(
@@ -518,7 +518,7 @@ def test_fp16_qdq_schema_migration_keeps_reduce_and_split_valid(opset, fp16, rem
     )
     assert model.SerializeToString() == saved
     assert {item.domain: item.version for item in result.opset_import} == {
-        "": 19 if fp16 else opset,
+        "": 19 if fp16 and opset < 19 else opset,
         "com.microsoft": 1,
     }
     reduction = next(node for node in result.graph.node if node.op_type == "ReduceMean")
