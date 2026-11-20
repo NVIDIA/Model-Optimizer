@@ -102,12 +102,10 @@ def _get_module_weight_numel(module: nn.Module) -> int:
     several named weights, such as fused MoE experts, count each of them.
     """
     weight = getattr(module, "weight", None)
-    if weight is not None:
-        return weight.numel()
-    return sum(
+    return (0 if weight is None else weight.numel()) + sum(
         param.numel()
         for name in weight_attr_names(module)
-        if (param := getattr(module, name, None)) is not None
+        if name != "weight" and (param := getattr(module, name, None)) is not None
     )
 
 

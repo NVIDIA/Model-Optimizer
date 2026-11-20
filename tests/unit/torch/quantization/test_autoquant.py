@@ -1121,7 +1121,22 @@ def test_auto_quantize_searches_per_weight_quantizers():
     }
     assert {"experts.w1_weight_quantizer", "experts.w2_input_quantizer"} <= quantizer_names
 
-    # A list-config candidate turns a weight quantizer sequential; later candidates swap it still.
+
+def test_per_weight_quantizer_attrs_cover_every_quantized_weight():
+    QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)
+    try:
+        experts = QuantModuleRegistry.convert(_BmmExperts())
+    finally:
+        QuantModuleRegistry.unregister(_BmmExperts)
+    # A plain ``weight`` beside named weights is searched and costed with them.
+    experts.weight = torch.nn.Parameter(torch.empty(16, 16))
+    experts.weight_quantizer = TensorQuantizer()
+    experts.input_quantizer = TensorQuantizer()
+    assert {"weight_quantizer", "input_quantizer", "w1_weight_quantizer"} <= set(
+        _get_quantizer_attrs(experts)
+    )
+    assert _get_module_weight_numel(experts) == 16 * 16 + experts.w1.numel() + experts.w2.numel()
+    # A list-config candidate makes a weight quantizer sequential; the search still swaps it.
     experts.w1_weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
     assert "w1_weight_quantizer" in _get_quantizer_attrs(experts)
 

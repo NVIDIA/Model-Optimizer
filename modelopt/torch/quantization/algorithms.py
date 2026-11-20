@@ -119,19 +119,18 @@ def _get_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
 
 
 def _per_weight_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
-    """Return the quantizers of weights named other than ``weight``, e.g. ``w1_weight_quantizer``.
+    """Return the quantizers of every quantized weight, e.g. ``w1_weight_quantizer``.
 
     Such modules (BMM-style or grouped MoE experts) quantize several named weights, each with its
-    own ``<name>_input_quantizer`` and ``<name>_weight_quantizer``; one search choice sets them all.
-    A module opts in with ``_auto_quantize_per_weight_quantizers = True``: the search swaps these
-    quantizers by attribute, so the module must look them up by attribute whenever it runs.
+    own ``<name>_input_quantizer`` and ``<name>_weight_quantizer``; one search choice sets them all,
+    including a plain ``weight``'s quantizers if the module also has one. A module opts in with
+    ``_auto_quantize_per_weight_quantizers = True``: the search swaps these quantizers by
+    attribute, so the module must look them up by attribute whenever it runs.
     """
     if not getattr(module, "_auto_quantize_per_weight_quantizers", False):
         return ()
     attrs = []
     for name in weight_attr_names(module):
-        if name == "weight":
-            continue
         names = quantizer_attr_names(name)
         attrs.extend(
             attr
