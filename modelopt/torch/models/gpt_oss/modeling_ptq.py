@@ -107,8 +107,9 @@ class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
         try:
             yield
         finally:
+            # The cache sits on whichever quantizer is current, a SequentialQuantizer included.
             for module in self.modules():
-                if isinstance(module, TensorQuantizer) and hasattr(module, "_cached_quant_val"):
+                if hasattr(module, "_cached_quant_val"):
                     delattr(module, "_cached_quant_val")
         self._enable_weight_quantization = False
 
