@@ -260,15 +260,15 @@ def test_fold_and_compress_rejected_without_mutation():
 
 @pytest.mark.parametrize("fmt", ["NVFP4", "MXFP4"])
 @pytest.mark.parametrize("exporter", [export_hf_checkpoint, _export_transformers_checkpoint])
-def test_residue_deployment_export_rejected_without_mutation(tmp_path, fmt, exporter):
+def test_unaligned_deployment_export_rejected_without_mutation(tmp_path, fmt, exporter):
     model = mtq.quantize(
-        nn.Sequential(nn.Linear(128, 32)), _config(fmt), lambda m: m(torch.ones(2, 128))
+        nn.Sequential(nn.Linear(64, 8)), _config(fmt), lambda m: m(torch.ones(2, 64))
     )
     before = deepcopy(model.state_dict())
     attributes = set(model.__dict__)
     parameter = model[0].weight
     export_dir = tmp_path / "export"
-    with pytest.raises(NotImplementedError, match="Residue deployment export"):
+    with pytest.raises(ValueError, match="input width divisible by 128"):
         exporter(model, dtype=torch.float32, export_dir=export_dir)
     assert not export_dir.exists()
     assert set(model.__dict__) == attributes

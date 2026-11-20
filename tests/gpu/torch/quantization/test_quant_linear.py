@@ -25,6 +25,7 @@ import torch.nn.functional as F
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.residue_export import collect_residue_export_metadata
 from modelopt.torch.quantization.residue import get_salient_indices
 from modelopt.torch.quantization.tensor_quant import dynamic_block_quant
 
@@ -151,7 +152,7 @@ def test_mxfp4_native_weight_qdq(dtype):
 )
 @pytest.mark.parametrize("patterns", [None, [r"(?:q_proj|k_proj|v_proj)"], []])
 @torch.no_grad()
-def test_residue_shared_channels_restore(tmp_path, fmt, metric, patterns):
+def test_residue_shared_channels_restore_and_export(tmp_path, fmt, metric, patterns):
     torch.manual_seed(71)
 
     def make_model():
@@ -188,3 +189,13 @@ def test_residue_shared_channels_restore(tmp_path, fmt, metric, patterns):
     for actual, expected_output in zip(restored.values(), before):
         torch.testing.assert_close(actual(inputs), expected_output, atol=0, rtol=0)
         assert bool(actual._residue_group) == (patterns != [])
+    collect_residue_export_metadata(restored)
+    indices = restored["v_proj"].input_quantizer._salient_indices
+    restored["v_proj"].input_quantizer._salient_indices = (
+        (indices // 8 * 8 + (indices % 8 + 1) % 8).sort().values
+    )
+    if patterns != []:
+        with pytest.raises(ValueError, match="declared residue input group"):
+            collect_residue_export_metadata(restored)
+    else:
+        collect_residue_export_metadata(restored)

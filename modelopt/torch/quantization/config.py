@@ -1235,7 +1235,13 @@ class ResidueMaxCalibConfig(QuantizeAlgorithmConfig):
         default=0.25,
         ge=0.0,
         le=1.0,
-        description="Select int(residue_ratio * block_size) channels per block, excluding padding.",
+        description=(
+            "Select int(residue_ratio * block_size) channels per block, excluding padding. "
+            "Calibration and QDQ support selections beyond the current HF export layout. "
+            "For HF export, every consecutive group of 8 input channels must contain "
+            "the same number of selected channels: 1, 2, or 4, unless all or none "
+            "of the input channels are selected."
+        ),
     )
     salience_metric: Literal["activation_max", "nvfp4_error_weighted"] = ModeloptField(
         default="activation_max",
