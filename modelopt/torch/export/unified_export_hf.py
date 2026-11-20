@@ -84,7 +84,7 @@ from modelopt.torch.quantization.algorithms import (
     _linear_attn_qkvz_group_key,
 )
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import ResidueQuantLinear, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
@@ -1031,12 +1031,30 @@ def _process_quantized_modules(
             _dispatch_export_handler(name, sub_module, ctx)
 
 
+def _reject_residue_export(model, components=None):
+    modules = (
+        get_diffusion_components(model, components).values()
+        if HAS_DIFFUSERS and is_diffusers_object(model)
+        else (model,)
+    )
+    if any(
+        isinstance(module, nn.Module)
+        and any(isinstance(child, ResidueQuantLinear) for child in module.modules())
+        for module in modules
+    ):
+        raise NotImplementedError(
+            "Residue deployment export is unsupported. Use modelopt.torch.opt.save() "
+            "to save a restorable ModelOpt checkpoint."
+        )
+
+
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
     """Run the shared export setup. Packing the weights is a separate step.
 
     Both export paths call this so they cannot drift. Returns the dtype, the tied-weight map and
     the quant config.
     """
+    _reject_residue_export(model)
     dtype = _resolve_export_dtype(model, dtype)
     # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
     # Sourced from HF's name-based all_tied_weights_keys, so it is correct even under FSDP/offload.
@@ -2102,7 +2120,8 @@ def export_hf_checkpoint(
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
 
     This function automatically detects whether the model is from transformers
-    or diffusers and applies the appropriate export logic.
+    or diffusers and applies the appropriate export logic. For residue-quantized
+    models, use a ModelOpt checkpoint to save and restore the QDQ model.
 
     Under ``torch.distributed`` (e.g. FSDP2), all ranks participate in the
     collective state-dict gather inside ``_export_transformers_checkpoint``;
@@ -2129,6 +2148,7 @@ def export_hf_checkpoint(
             runtime compatibility; other diffusion components omit them.
             Transformers components always retain them for KV-cache scales.
     """
+    _reject_residue_export(model, components)
     # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
     # source so the exported checkpoint is the complete model. Merged here, ahead of the path
     # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict
