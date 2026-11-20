@@ -133,7 +133,7 @@ Some models need extra vLLM backend env vars (model-card research) — e.g. `VLL
 | Field | Flag |
 | --- | --- |
 | `max_position_embeddings` | `--max-model-len <value>` |
-| `auto_map` exists | `--trust-remote-code` |
+| `auto_map` exists | `--trust-remote-code`, only after the user approves running the checkpoint's code |
 
 #### Cross-check both sources for vLLM (mandatory, neither replaces the other)
 
@@ -152,7 +152,7 @@ Some models need extra vLLM backend env vars (model-card research) — e.g. `VLL
 | Signal | Flag |
 | --- | --- |
 | `max_position_embeddings` | `--max-model-len <value>` |
-| `auto_map` | `--trust-remote-code` |
+| `auto_map` | `--trust-remote-code` (with the user's approval, as above) |
 | Reasoning/CoT documented | `--reasoning-parser` (and `--reasoning-parser-plugin` if custom) |
 | Tool-calling documented | `--enable-auto-tool-choice --tool-call-parser <parser>` |
 | Custom flags in card | Add as specified (e.g. `--mamba_ssm_cache_dtype float32`) |

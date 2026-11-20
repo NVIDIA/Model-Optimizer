@@ -99,7 +99,8 @@ deployment:
   # `--served-model-name` (in command below) is REQUIRED — else vLLM serves the
   # model as `/checkpoint` and eval requests 404 ("model does not exist").
   # For MoE models, add `--enable-expert-parallel` to the command.
-  # For models with custom code, add `--trust-remote-code` to the command.
+  # For models with custom code, add `--trust-remote-code` only after the user
+  # approves running the checkpoint's code.
   # `--model-loader-extra-config` enables multithreaded checkpoint loading (on by
   # default below) — cuts large-checkpoint load from tens of minutes to a few;
   # tune num_threads to the checkpoint size / shared-FS read bandwidth.

@@ -26,7 +26,7 @@ services:
     image: vllm/vllm-openai:v0.26.0  # vLLM SERVING image (≠ eval_image); bump to the model's recipes.vllm.ai min
     startup_timeout: 3600.0
     extra_args:                      # raw vllm flags (cross-check model card + recipes.vllm.ai)
-      - "--trust-remote-code"
+      # - "--trust-remote-code"     # only if the checkpoint has custom code and the user approves running it
       - "--enable-auto-tool-choice"  # agentic = tool-calling
       - "--tool-call-parser=???"     # REQUIRED — model-specific (e.g. minimax_m2, glm47); pick per the chat template
       # - "--reasoning-parser=???"   # reasoning models only (e.g. minimax_m2_append_think, glm45)
