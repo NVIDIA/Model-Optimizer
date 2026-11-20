@@ -43,7 +43,7 @@ dependencies = [
     "PyYAML>=6.0",
     "omegaconf>=2.3.0",
     "pulp<4.0",         # breaking changes in upcoming 4.0 release
-    "pydantic>=2.0",
+    "pydantic>=2.5.0",
     "regex",
     "rich",
     "safetensors",
@@ -60,7 +60,7 @@ onnx = [
     "onnx~=1.23.2; platform_system == 'Windows'",
     "onnxconverter-common~=1.16.0",
     "onnxscript",
-    "onnxslim>=0.1.76",
+    "onnxslim>=0.1.78",
     "polygraphy>=0.53.4",
     # Linux x86-64: CUDA 13. For CUDA 12, see docs/source/getting_started/_installation_for_Linux.rst.
     "cupy-cuda13x; platform_system == 'Linux' and platform_machine == 'x86_64'",
@@ -88,7 +88,7 @@ hf = [
     "tiktoken",
     # TensorRT-LLM 1.3.0 ships transformers 5.5; keep in sync with modelopt/torch/__init__.py and noxfile.py
     "transformers>=5.5,<5.19",
-    "wonderwords",
+    "wonderwords>=2.2.0",
 ]
 
 puzzletron = [ # Dependedencies for modelopt.torch.puzzletron subpackage
@@ -128,6 +128,7 @@ dev-test = [
     "pytest-rerunfailures~=16.7", # transient-failure reruns (tests/conftest.py); 16.7 matches the exception chain
     "pytest-timeout~=2.4.0",
     "pytest-xdist~=3.8.0",
+    "sybil~=10.1.0",
     "uv",
     # test-specific dependencies
     "psutil", # tools/resource_monitor.py sidecar (tests/unit/tools)

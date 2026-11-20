@@ -100,8 +100,8 @@ inline void check_scaled_pack_inputs(const char *format, const at::Tensor &input
   TORCH_CHECK(scales.scalar_type() == at::kHalf && scales.dim() == 1 &&
                   scales.numel() == input.numel() / kBlockSize,
               "scales must be float16 [numel / 256]");
-  TORCH_CHECK((scales.isfinite() & (scales >= 0)).all().item<bool>(),
-              "scales must be finite and non-negative");
+  // The Python encoders check the values are finite and non-negative; repeating it here would
+  // add a host sync to every encode.
   TORCH_CHECK(input.get_device() == scales.get_device(), "input and scales must share a device");
 }
 
