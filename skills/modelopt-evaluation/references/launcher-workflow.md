@@ -418,7 +418,8 @@ Run directly when the user asked to launch; otherwise ask before submitting.
 [ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env   # create only if Step 1 didn't
 set -a && source .env && set +a
 
-# If pre_cmd/post_cmd in config (review pre_cmd first — runs arbitrary commands):
+# If the config has pre_cmd/post_cmd, show them to the user and get an explicit OK
+# first (they run arbitrary commands). Export for this run only, never in .env:
 export NEMO_EVALUATOR_TRUST_PRE_CMD=1
 # If nemo_skills.* + self-deployment, for LOCAL/Docker runs only:
 export DUMMY_API_KEY=dummy

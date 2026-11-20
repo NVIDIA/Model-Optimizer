@@ -111,7 +111,7 @@
       "Sets reasoning sampling params from model card: temperature=1.0, top_p=1.0",
       "Configures reasoning toggle via params_to_add with chat_template_kwargs.enable_thinking (not via system prompt)",
       "Disables reasoning for IFEval task using enable_thinking: false with use_system_prompt: false",
-      "Adds deployment.pre_cmd using curl (not wget) to download nano_v3_reasoning_parser.py from HuggingFace",
+      "Adds deployment.pre_cmd that downloads nano_v3_reasoning_parser.py with curl (not wget) from the model's HF repo at a fixed commit, and checks its sha256",
       "Adds vLLM extra_args including --trust-remote-code, --reasoning-parser-plugin, --reasoning-parser nano_v3, --max-num-seqs 8",
       "Pins vLLM image to v0.12.0 or later as required by model card",
       "Adds target.api_endpoint.api_key_name: DUMMY_API_KEY for nemo_skills tasks with self-deployment",

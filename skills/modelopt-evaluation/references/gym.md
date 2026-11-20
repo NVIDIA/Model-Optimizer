@@ -112,12 +112,12 @@ Two editing rules for these blocks:
 | `DUMMY_API_KEY` | lit:dummy | self-deployed vLLM policy key |
 | `NEL_INVOCATION_ID` | runtime | stable run id assigned by the validated launcher; do not use `SLURM_JOB_ID` |
 
-Two launcher-level trust flags gate every gym submission, both set in `.env`:
+Two launcher-level trust flags gate every gym submission:
 
 - `NEMO_EVALUATOR_TRUST_PRE_CMD=1` — the gym configs carry a `pre_cmd`; prepare fails
-  without it.
-- `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` — `nemo_gym` is not in the FDF mapping, so
-  submission is refused without it.
+  without it. Export it for the run after the user reviews the `pre_cmd`, not in `.env`.
+- `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` (in `.env`) — `nemo_gym` is not in the FDF
+  mapping, so submission is refused without it.
 
 No currently supported gym task is judge-scored, so `INFERENCE_API_KEY` /
 `INFERENCE_JUDGE_URL` are not part of this path. If you add one that is, follow the
