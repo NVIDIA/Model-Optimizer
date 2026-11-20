@@ -537,9 +537,11 @@ class GPTQHelper:
         # The fused kernel stands in for the quantizer's forward with a plain static QDQ over
         # last-dim groups, so anything else that forward does (pre-quant scale, rotation, LSQ,
         # 2-D blocks) takes the unfused loop. It also needs FP8 Triton casts (SM89+) and the
-        # default FP8 scale range (no 4/6).
+        # default FP8 scale range (no 4/6). The promotion marker outlives a later config that changes
+        # the format, so the current format is checked too.
         return (
             getattr(quantizer, "_is_nvfp4_static_quantizer", False)
+            and quantizer.is_nvfp4_static
             and {k for k in quantizer.block_sizes if isinstance(k, int)} in ({-1}, {1})
             and quantizer.pre_quant_scale is None
             and not quantizer.rotate_is_enabled

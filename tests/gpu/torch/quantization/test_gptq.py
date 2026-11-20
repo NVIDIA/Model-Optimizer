@@ -25,7 +25,6 @@ from conftest import requires_triton
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
-from modelopt.torch.kernels.quantization.gemm import compute_fp4_scales
 from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.gptq import GGMLGPTQHelper
@@ -500,9 +499,9 @@ def _make_nvfp4_test_data(quant_block_size, out_features, dim):
     model.weight.data = weight.clone()
 
     weight_quantizer = model.weight_quantizer
-    block_scale = compute_fp4_scales(weight_quantizer.amax, weight_quantizer.global_amax).reshape(
-        out_features, -1
-    )
+    block_scale = calib_utils.triton_kernel.compute_fp4_scales(
+        weight_quantizer.amax, weight_quantizer.global_amax
+    ).reshape(out_features, -1)
 
     # Compute Hessian
     hessian = torch.zeros(dim, dim, dtype=torch.float32)
@@ -676,6 +675,46 @@ def test_gptq_fused_matches_unfused(in_features, block_size, cfg_update, takes_f
         weights.append(qmodel.weight.data)
     assert len(fused_calls) == int(takes_fused)
     torch.testing.assert_close(weights[0], weights[1], atol=1e-4, rtol=1e-4)
+
+
+@requires_triton
+def test_gptq_on_a_model_requantized_from_nvfp4_to_int4_takes_the_int4_update(monkeypatch):
+    # A quantizer once promoted to static NVFP4 keeps its promotion marker when a later config
+    # makes it INT4; the fused NVFP4 update must not stand in for the INT4 quantizer then.
+    fused_calls = []
+    fused_update = calib_utils.gptq_blockwise_update_fused_scalar
+    monkeypatch.setattr(
+        calib_utils,
+        "gptq_blockwise_update_fused_scalar",
+        lambda *args: fused_calls.append(1) or fused_update(*args),
+    )
+    torch.manual_seed(0)
+    inp = torch.randn(4, 16, 64, device="cuda")
+
+    def config(weight_cfg, algorithm):
+        return {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": weight_cfg},
+            ],
+            "algorithm": algorithm,
+        }
+
+    nvfp4 = {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)}}
+    model = torch.nn.Linear(64, 32, bias=False, device="cuda")
+    mtq.quantize(model, config(nvfp4, "max"), forward_loop=lambda m: m(inp))
+    assert model.weight_quantizer._is_nvfp4_static_quantizer
+    # The INT4 groups calibrate an amax of their own shape; the promotion marker stays.
+    model.weight_quantizer.reset_amax()
+
+    int4 = {"num_bits": 4, "block_sizes": {-1: 16, "type": "static"}}
+    weights = []
+    for fused in (True, False):
+        gptq_cfg = config(int4, {"method": "gptq", "block_size": 64, "fused": fused})
+        qmodel = mtq.quantize(copy.deepcopy(model), gptq_cfg, forward_loop=lambda m: m(inp))
+        weights.append(qmodel.weight.data)
+    assert not fused_calls
+    torch.testing.assert_close(weights[0], weights[1], rtol=0, atol=0)
 
 
 _NVFP4_BENCH_CONFIGS = [
