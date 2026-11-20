@@ -41,7 +41,8 @@ external corroboration was available. Only a `failed` external check blocks the
 comparison.
 
 If any task fails, do not report the quantized evaluation as successful and do
-not apply the candidate-delta gate to that baseline. Investigate disabled
+not apply the candidate-delta gate to that baseline. For a NeMo Gym run, use its `nemo-gym-score-triage` skill
+for the investigation; this check only decides whether the baseline is credible. Investigate disabled
 reasoning/thinking, reasoning parser or adapter handling, prompt/chat-template
 differences, sampling or token-budget differences, benchmark version or metric,
 incomplete samples, and serving failures. Rerun a corrected baseline, validate

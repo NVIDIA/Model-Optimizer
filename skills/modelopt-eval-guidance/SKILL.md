@@ -20,8 +20,9 @@ Use the skills of the tool the task names. Do not load another tool's skills.
 ## What to read, in order
 
 1. **Before choosing settings:** [vendor-reference-and-sampling.md](references/vendor-reference-and-sampling.md)
-   - what to take from the model card (sampling, thinking switch, context, output length), and the
-   published NVFP4 sampling table [nvfp4-modelcard-sampling.md](references/nvfp4-modelcard-sampling.md).
+   - the quantization-specific part of reading the model card (the tool's own skill does the extraction), the
+   output-budget rule, and the published NVFP4 sampling table
+   [nvfp4-modelcard-sampling.md](references/nvfp4-modelcard-sampling.md).
 2. **When choosing benchmarks for a quantized checkpoint:**
    [quantization-benchmarks.md](references/quantization-benchmarks.md).
 3. **When a model repeats itself until the token limit:** [doom-loops.md](references/doom-loops.md).

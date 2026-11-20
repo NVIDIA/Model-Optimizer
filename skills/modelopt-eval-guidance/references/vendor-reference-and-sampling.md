@@ -4,33 +4,25 @@ Find the model card (Hugging Face, build.nvidia.com) and read the full text. Ext
 evaluation depends on, and say where each came from. The card is the source of truth; the tables here are
 references, not constraints.
 
-## What to extract
+## What to take from the model card
 
-- **Sampling (`temperature`, `top_p`).** Trust only a sentence that ties the values to the benchmarks
-  ("Benchmarked with...", "...were evaluated with...", "We evaluate the model using...") or a "Recommended
-  Sampling" row. The `SamplingParams(temperature=0.8, top_p=0.95)` in a quickstart snippet is boilerplate
-  copied across unrelated models; never read evaluation settings out of it. Then cross-check
-  [nvfp4-modelcard-sampling.md](nvfp4-modelcard-sampling.md), required for any NVFP4 checkpoint or a
-  same-family sibling: it is a dated snapshot of published settings, so for anything newer trust the card.
-- **Context length.** The maximum model length the card or recipe requires.
-- **Output length.** Record any output budget the card ties to the applicable evaluation, with its source.
-  Apply the rules in the next section.
-- **Reasoning switch.** Whether reasoning is on or off by default and how it is toggled (a system prompt such as
-  `/think`, or a chat-template keyword). The keyword drifts across model generations: read the card or
-  `chat_template.jinja`, do not extrapolate, and set only the one key the model uses. Known examples:
-  `enable_thinking` (Qwen3.5 and 3.6, GLM 5.1), `thinking` (Kimi K2.6, DeepSeek V3.2 and V4; the DeepSeek
-  encoder is Python, so an unused keyword can error instead of being ignored). Reasoning effort, if
-  configurable (for example DeepSeek V4 `reasoning_effort`): use the highest effort the card documents unless the
-  user signals a cost or latency preference, and honor any tied requirement (V4 Think Max needs a maximum model
-  length of at least 393216).
-- **Serving settings.** Tensor and data parallelism, the serving framework and its minimum version (a newer
-  vLLM dropped `rope-scaling`, which some Qwen models use), the container for ARM64 or non-standard GPU
-  architectures (for example sm_121), and any preparation the card requires before serving (downloading a
-  reasoning parser or plugin; use `curl` rather than `wget`, and `pip install --no-cache-dir` inside
-  containers to avoid cross-device link errors). The serving record in `modelopt-deployment` (step 5c) is where
-  these are written down for the evaluation tool.
-- **Anything else model-specific.** Present the findings, explain each setting, and ask the user to confirm or
-  adjust. If there is no model card, ask the user directly.
+Reading the card for the settings a run needs is the evaluation tool's job, so use its skill for it: for NeMo
+Gym, `add-model-eval-config` (sampling, the reasoning switch, parsers, context length, parallelism, the serving
+image); for NEL, `modelopt-evaluation/references/model-card-research.md`. Do not re-derive those settings here.
+What this guidance adds is specific to quantized checkpoints:
+
+- **Cross-check sampling against the NVFP4 table.** Required for any NVFP4 checkpoint or a same-family sibling:
+  [nvfp4-modelcard-sampling.md](nvfp4-modelcard-sampling.md) is a dated snapshot of published settings, and for
+  anything newer the card is the source of truth. Trust a card sentence only when it ties the values to the
+  benchmarks ("Benchmarked with...", "...were evaluated with...") or a "Recommended Sampling" row; never read
+  evaluation settings out of a quickstart snippet (`SamplingParams(temperature=0.8, top_p=0.95)` is boilerplate
+  copied across unrelated models).
+- **A quantized checkpoint is served like its baseline.** Change only what the quantization requires, and list
+  every difference (the serving record in `modelopt-deployment`, step 5c, is where it is written).
+- **Hardware images.** The default serving image supports common GPU architectures only. For ARM64 or GPUs with
+  a non-standard compute capability (for example sm_121), use an NGC vLLM image, and ask the user for the
+  architecture if the card does not say. Gym's model skill does not cover this.
+- **Ask the user to confirm** the settings you propose, and ask directly if no model card exists.
 
 ## Output budget
 
