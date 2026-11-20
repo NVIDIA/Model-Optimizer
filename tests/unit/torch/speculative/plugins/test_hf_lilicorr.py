@@ -428,6 +428,31 @@ class TestLiLiCorrForward:
                 online_out.lilicorr_metrics[term], abs=1e-5
             )
 
+    def test_fused_loss_matches_the_materialized_logits(self):
+        """The candidates, their logits and the normalizer come out of the fused pass unchanged."""
+        results = []
+        for fused in (False, True):
+            torch.manual_seed(0)
+            # Half the vocabulary per slot: the lattice covers about half the blocks.
+            model = _converted(
+                variant="margin", topk=16, dflash_lilicorr_w_cal=0.5, dflash_fused_loss=fused
+            )
+            model.float().train()  # fp32, so the two paths differ only by rounding
+            batch = _make_batch(model.dflash_config.vocab_size)
+            torch.manual_seed(1)
+            out = model(**batch)
+            out.loss.backward()
+            params = model.dflash_module.named_parameters()
+            results.append((out, {name: p.grad for name, p in params if p.grad is not None}))
+        (eager, eager_grads), (fused, fused_grads) = results
+        torch.testing.assert_close(fused.loss, eager.loss)
+        assert fused.lilicorr_metrics == pytest.approx(eager.lilicorr_metrics, rel=1e-5, abs=1e-6)
+        assert fused_grads.keys() == eager_grads.keys()
+        for name, grad in eager_grads.items():
+            # Scaled to each gradient: the normalizer's share of it is below a fixed atol.
+            atol = 1e-5 * grad.abs().max().item()
+            torch.testing.assert_close(fused_grads[name], grad, rtol=0, atol=atol, msg=name)
+
     @pytest.mark.parametrize(
         ("kwargs", "degenerate"),
         [

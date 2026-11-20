@@ -162,6 +162,18 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_fused_loss: bool = ModeloptField(
+        default=False,
+        description=(
+            "Compute the training loss from the draft's hidden states in row chunks, without "
+            "materializing its [rows, vocab] logits: each chunk is projected through lm_head "
+            "and reduced to the per-row statistics the loss reads, together with their "
+            "gradients. Supported by the dflash, dflash2 and lilicorr projector types with a "
+            "frozen, bias-free nn.Linear lm_head. On CUDA the per-chunk statistics run through "
+            "torch.compile."
+        ),
+    )
+
     dflash_swa_window_size: int | None = ModeloptField(
         default=None,
         description=(
