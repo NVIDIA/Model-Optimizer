@@ -242,9 +242,12 @@ def test_reference_rescores_candidates_and_refuses_overwrite(kl_eval, cached_eva
 
 
 @pytest.mark.parametrize(
-    "corruption", ["positions", "float_positions", "missing", "truncated", "replaced"]
+    "corruption",
+    ["positions", "float_positions", "top_k", "missing", "truncated", "oversized", "replaced"],
 )
-def test_reference_rejects_corrupted_records_and_shards(kl_eval, cached_evaluation, corruption):
+def test_reference_rejects_corrupted_records_and_shards(
+    kl_eval, cached_evaluation, monkeypatch, corruption
+):
     case = cached_evaluation
     path = case.directory / "manifest.json"
     manifest = json.loads(path.read_text())
@@ -254,10 +257,15 @@ def test_reference_rejects_corrupted_records_and_shards(kl_eval, cached_evaluati
         manifest["records"][0]["positions"] = [999] * len(positions)
     elif corruption == "float_positions":
         manifest["records"][0]["positions"] = [float(p) for p in positions]
+    elif corruption == "top_k":
+        manifest["top_k"] = 8
     elif corruption == "missing":
         (case.directory / "1.safetensors").unlink()
     elif corruption == "truncated":
         shard.write_bytes(shard.read_bytes()[:-8])
+    elif corruption == "oversized":  # E.g. a model weight shard copied by mistake.
+        shard.write_bytes(shard.read_bytes() + bytes(kl_eval.SHARD_HEADER_BYTES))
+        monkeypatch.setattr(Path, "read_bytes", lambda _path: pytest.fail("read before size check"))
     else:  # A valid shard belonging to another record.
         shard.write_bytes((case.directory / "1.safetensors").read_bytes())
     path.write_text(json.dumps(manifest))
@@ -266,21 +274,14 @@ def test_reference_rejects_corrupted_records_and_shards(kl_eval, cached_evaluati
 
 
 @pytest.mark.parametrize(
-    ("model", "backend", "layerwise", "error"),
-    [
-        ("other", None, [], "--model differs"),
-        ("base", "eager", [], "Attention backend differs"),
-        ("base", None, [{"export_dir": "out"}], "Layerwise"),
-        ("base", None, [{"checkpoint_dir": "resume"}], "Layerwise"),
-    ],
+    ("model", "backend", "error"),
+    [("other", None, "--model differs"), ("base", "eager", "Attention backend differs")],
 )
-def test_evaluation_refuses_inputs_that_differ_from_the_reference(
-    kl_eval, model, backend, layerwise, error
-):
+def test_evaluation_refuses_inputs_that_differ_from_the_reference(kl_eval, model, backend, error):
     manifest = {"metadata": {"model": "base", "attn_implementation": "sdpa"}}
     args = SimpleNamespace(model=model, attn_implementation=backend)
     with pytest.raises(ValueError, match=error):
-        kl_eval._check_reference_match(args, manifest, layerwise)
+        kl_eval._check_reference_match(args, manifest)
     assert args.attn_implementation == backend
 
 
@@ -301,6 +302,20 @@ def test_checkpoint_identity_tracks_hub_revision_config_and_weight_files(kl_eval
         assert kl_eval._checkpoint_identity(None, tmp_path) != local
         local = kl_eval._checkpoint_identity(None, tmp_path)
     assert kl_eval._checkpoint_identity("org/model", tmp_path / "commit") == "commit"
+
+
+def test_checkpoint_identity_follows_index_to_nested_shards(kl_eval, tmp_path):
+    shard = tmp_path / "weights" / "model-00001-of-00001.safetensors"
+    shard.parent.mkdir()
+    shard.write_bytes(b"weights")
+    index = {"weight_map": {"lm_head.weight": "weights/model-00001-of-00001.safetensors"}}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+    local = kl_eval._checkpoint_identity(None, tmp_path)
+    (tmp_path / "kl-reference").mkdir()  # Not named by the index.
+    (tmp_path / "kl-reference" / "0.safetensors").write_bytes(b"reference shard")
+    assert kl_eval._checkpoint_identity(None, tmp_path) == local
+    shard.write_bytes(b"new weights")
+    assert kl_eval._checkpoint_identity(None, tmp_path) != local
 
 
 def test_config_guard_reads_quantization_metadata_on_nested_text_config(kl_eval):
@@ -372,10 +387,12 @@ def cli(kl_eval, blended_fixture, tmp_path, monkeypatch):
         "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n"
         + json.dumps({"metadata": {}, "quantize": hf_ptq.mtq.INT8_DEFAULT_CFG})
     )
-    loads, generation_batches = [], []
+    loads, generation_batches, during_load = [], [], []
 
     def load(path, *_args, **kwargs):
         loads.append(kwargs.get("attn_implementation"))
+        for hook in during_load:
+            hook()
         return GPT2LMHeadModel.from_pretrained(
             path, dtype=torch.bfloat16, attn_implementation=kwargs.get("attn_implementation")
         )
@@ -421,6 +438,8 @@ def cli(kl_eval, blended_fixture, tmp_path, monkeypatch):
         hf_ptq=hf_ptq,
         checkpoint=checkpoint,
         reference=tmp_path / "reference",
+        recipe=recipe,
+        during_load=during_load,
         loads=loads,
         generation_batches=generation_batches,
         run=run,
@@ -439,13 +458,21 @@ def test_cli_prepares_once_and_scores_repeated_candidates_identically(cli, kl_ev
 
     monkeypatch.setattr(GPT2LMHeadModel, "generate", unexpected_generation)
     monkeypatch.setattr(kl_eval, "_blended_prompts", unexpected_generation)
-    first, second = cli.run(*cli.evaluate), cli.run(*cli.evaluate)
+    # Editing the recipe file while the model loads must not change what is calibrated.
+    original_recipe = cli.recipe.read_text()
+    cli.during_load.append(lambda: cli.recipe.write_text("not a recipe: ["))
+    first = cli.run(*cli.evaluate)
+    cli.during_load.clear()
+    cli.recipe.write_text(original_recipe)
+    second = cli.run(*cli.evaluate)
     assert cli.loads == ["eager"] * 3  # Evaluation inherits the reference's attention backend.
     assert math.isfinite(first) and first > 0
     assert first == pytest.approx(second, abs=1e-7)
 
 
-def test_cli_refuses_unusable_checkpoints_recipes_and_launches(cli, tmp_path, monkeypatch):
+def test_cli_refuses_unusable_checkpoints_recipes_and_launches(
+    cli, kl_eval, tmp_path, monkeypatch
+):
     config_path = cli.checkpoint / "config.json"
     original_config = config_path.read_text()
     config_path.write_text(
@@ -481,6 +508,23 @@ def test_cli_refuses_unusable_checkpoints_recipes_and_launches(cli, tmp_path, mo
     use_checkpoint(tmp_path / "newer-revision")
     with pytest.raises(ValueError, match="Checkpoint differs"):
         cli.run(*cli.evaluate)
+    use_checkpoint(cli.checkpoint)
+    layerwise = json.loads(json.dumps(cli.hf_ptq.mtq.INT8_DEFAULT_CFG))
+    layerwise["algorithm"] = {"method": "max", "layerwise": {"enable": True, "checkpoint_dir": "x"}}
+    resume = tmp_path / "resume.yaml"
+    resume.write_text(
+        "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n"
+        + json.dumps({"metadata": {}, "quantize": layerwise})
+    )
+    with pytest.raises(ValueError, match="checkpoint_dir"):
+        cli.run(*cli.evaluate_without_recipe, "--recipe", str(resume))
+    last = sorted(cli.reference.glob("*.safetensors"), key=lambda p: int(p.stem))[-1]
+    original_shard = last.read_bytes()
+    for corrupt in (original_shard[:-8], original_shard + bytes(kl_eval.SHARD_HEADER_BYTES)):
+        last.write_bytes(corrupt)
+        with pytest.raises(ValueError, match="Invalid reference"):
+            cli.run(*cli.evaluate)
+    last.write_bytes(original_shard)
     auto_quantize = "general/auto_quantize/nvfp4_fp8_at_5p4bits"
     with pytest.raises(ValueError, match="fixed PTQ recipe"):
         cli.run(*cli.evaluate_without_recipe, "--recipe", auto_quantize)

@@ -41,6 +41,7 @@ DEFAULT_MAX_NEW_TOKENS = 1024
 DEFAULT_TOP_K = 2048
 DEFAULT_SCORE_TOKENS = 512
 DEFAULT_GENERATION_BATCH_SIZE = 64
+SHARD_HEADER_BYTES = 64 * 1024  # Safetensors length prefix plus a generous JSON header.
 
 
 def spaced_positions(length, count):
@@ -189,18 +190,31 @@ def _load_reference(directory):
             length, manifest["score_tokens"] or length
         ):
             raise ValueError("Invalid reference positions.")
-        if not (Path(directory) / f"{index}.safetensors").is_file():
-            raise ValueError(f"Invalid reference: missing shard {index}.")
+        _read_shard(directory, index, manifest)  # Check every shard before any model loads.
     return manifest
 
 
-def _load_statistics(directory, index, manifest):
-    # Hash and decode the same bytes, binding each shard to its own record.
-    data = (Path(directory) / f"{index}.safetensors").read_bytes()
-    if hashlib.sha256(data).hexdigest() != manifest["records"][index]["sha256"]:
+def _read_shard(directory, index, manifest):
+    """Bytes of one shard, bounded by its record's size and checked against its digest."""
+    record, path = manifest["records"][index], Path(directory) / f"{index}.safetensors"
+    # int32 IDs plus float32 log-probabilities for each selected position.
+    limit = len(record["positions"]) * manifest["top_k"] * 8 + SHARD_HEADER_BYTES
+    if not path.is_file() or path.stat().st_size > limit:
+        raise ValueError(f"Invalid reference: shard {index} is missing or too large.")
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != record["sha256"]:
         raise ValueError(f"Invalid reference: shard {index} does not match its record.")
-    statistics = load(data)
-    return statistics["ids"], statistics["log_p"]
+    return data
+
+
+def _load_statistics(directory, index, manifest):
+    # Decode the same bytes that were hashed, binding each shard to its own record.
+    statistics = load(_read_shard(directory, index, manifest))
+    ids, log_p = statistics["ids"], statistics["log_p"]
+    expected = (len(manifest["records"][index]["positions"]), manifest["top_k"])
+    if ids.shape != expected or log_p.shape != expected:
+        raise ValueError("Invalid reference statistics shape.")
+    return ids, log_p
 
 
 def _cached_kl(log_p, ids, rows):
@@ -274,20 +288,13 @@ def _blended_prompts(tokenizer, num_examples, revision, context_limit, max_new_t
     return prompts
 
 
-def _check_reference_match(args, manifest, layerwise_cfgs):
+def _check_reference_match(args, manifest):
     """Refuse evaluation inputs that cannot reproduce the reference, before any model loads."""
     if args.model != manifest["metadata"]["model"]:
         raise ValueError("--model differs from the prepared reference.")
     backend = manifest["metadata"]["attn_implementation"]
     if args.attn_implementation not in (None, backend):
         raise ValueError("Attention backend differs from the prepared reference.")
-    # Resume would reuse stale layer outputs; layerwise export cannot keep a live model.
-    if any(
-        cfg.get(f) is not None for cfg in layerwise_cfgs for f in ("export_dir", "checkpoint_dir")
-    ):
-        raise ValueError(
-            "Layerwise export and checkpoint resume are unsupported by this evaluator."
-        )
     args.attn_implementation = backend
 
 
@@ -296,17 +303,23 @@ def _checkpoint_identity(hub_model_id, checkpoint):
     if hub_model_id:
         # A Hub ID resolves to its latest snapshot, whose directory is named by the commit.
         return checkpoint.name
-    metadata = {
-        name: hashlib.sha256(resolve_checkpoint_file(checkpoint, name).read_bytes()).hexdigest()
-        for name in ("config.json", "model.safetensors.index.json")
-        if (checkpoint / name).exists()
-    }
-    # Weights sit at the top level, so a reference stored inside the checkpoint is not counted.
-    weights = {
-        path.name: [path.stat().st_size, path.stat().st_mtime_ns]
-        for path in sorted(checkpoint.iterdir())
+    metadata, names = {}, set()
+    for name in ("config.json", "model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        if (checkpoint / name).exists():
+            data = resolve_checkpoint_file(checkpoint, name).read_bytes()
+            metadata[name] = hashlib.sha256(data).hexdigest()
+            if name.endswith(".index.json"):
+                names.update(json.loads(data)["weight_map"].values())
+    # Without an index, weights sit at the top level; a reference inside the checkpoint is skipped.
+    names = names or {
+        path.name
+        for path in checkpoint.iterdir()
         if path.is_file() and path.suffix in {".safetensors", ".bin"}
     }
+    weights = {}
+    for name in sorted(names):
+        stat = resolve_checkpoint_file(checkpoint, name, max_bytes=None).stat()
+        weights[name] = [stat.st_size, stat.st_mtime_ns]
     return {"metadata": metadata, "weights": weights}
 
 
@@ -378,13 +391,14 @@ def main():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hf_ptq"))
     import hf_ptq
 
-    manifest = None
+    manifest = recipe = None
     if args.command == "evaluate":
         manifest = _load_reference(directory)
         recipe = hf_ptq.load_recipe(args.recipe)
         if not isinstance(recipe, hf_ptq.ModelOptPTQRecipe):
             raise ValueError("--recipe must be a fixed PTQ recipe, not AutoQuantize.")
-        _check_reference_match(args, manifest, hf_ptq.recipe_layerwise_blocks(recipe))
+        hf_ptq.require_live_calibration(recipe)  # Before loading, not after.
+        _check_reference_match(args, manifest)
     ptq_argv = ["--model", args.model, "--skip_generate"]
     for name in (
         "recipe",
@@ -444,7 +458,8 @@ def main():
         )
     with hf_ptq.distributed_run(device=ptq_args.device) as dist_state:
         ptq_args.dist_state = dist_state
-        loaded = hf_ptq.load_model(ptq_args)
+        # Pass the checked recipe on, so an edit to its file while loading cannot change it.
+        loaded = hf_ptq.load_model(ptq_args, resolved_recipe=recipe)
         model, language_model, calibration_only = loaded[0], loaded[1], loaded[3]
         _require_bf16_base(model)
         # hf_ptq skips calibration for a target restored with ModelOpt state.
@@ -468,7 +483,7 @@ def main():
                 args.score_tokens,
                 args.generation_batch_size,
             )
-        model = hf_ptq.quantize_main(ptq_args, *loaded, export=False)
+        model = hf_ptq.quantize_main(ptq_args, *loaded, export=False, resolved_recipe=recipe)
         _require_fake_quant(model)
         return _score(model, directory, manifest)
 
