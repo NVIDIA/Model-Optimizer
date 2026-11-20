@@ -224,7 +224,7 @@ with its own `run_id`, copying the shared `services:` block.
 
 ## Run (dry-run → canary → full) → push to MLflow
 
-Before each `--submit`, read the rendered service config from `--dry-run` (after defaults and `-O` overrides): `extra_args`, `image`, `extra_env` (names, plus literal values of non-allowlisted vars; never print secret values), and `container_mounts` that supply or replace code the server loads. Get the user's explicit OK for any executable serving setting (`launcher-workflow.md` Step 3), and again if one changes between canary and full run; stop if declined.
+Before each `--submit`, read the rendered service config from `--dry-run` (after defaults and `-O` overrides): `extra_args`, `image` (Step 3's image pattern), `extra_env` (names, plus literal values of non-allowlisted vars; never print secret values), and `container_mounts` that supply or replace code the server loads. Get the user's explicit OK for any executable serving setting (`launcher-workflow.md` Step 3), and again if one changes between canary and full run; stop if declined.
 
 ```bash
 set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"

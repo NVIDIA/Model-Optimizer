@@ -181,5 +181,5 @@ report `pass@1`. **Do not change repeat counts when aligning to a golden.**
   auto-resumes from the response cache (`resume_from_cache=true`); `CANCELLED by
   <uid>` (preemption) does not, and its chained job exits in ~20s
   (`…finished with 'CANCELLED…' state. EXIT!`), which is expected, not a bug. Resume
-  by hand, only if the user approved its hooks: `cd <run>/nemo_gym.0 && sbatch run.sub`. Progress is cumulative — check the
+  by hand, after the **Resumes** check in `launcher-workflow.md` Step 8: `cd <run>/nemo_gym.0 && sbatch run.sub`. Progress is cumulative — check the
   rollout count before assuming loss.
