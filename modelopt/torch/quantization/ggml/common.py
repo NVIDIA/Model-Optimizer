@@ -269,8 +269,7 @@ def resize_pins(quantizer, weight: torch.Tensor, *, sharded_blocks: bool = False
             raise ValueError(
                 f"GGML pins can't be loaded at another tensor-parallel size: each rank's "
                 f"{weight.shape[-1]} input columns aren't a multiple of the {block_size}-value "
-                "block. Load the checkpoint at the tensor-parallel size it was saved at, or "
-                "quantize at this one."
+                "block. Load the checkpoint at the tensor-parallel size it was saved at."
             )
         quantizer._set_buffer(name, buffer.new_zeros(shape))
         quantizer._quantizer_cache = None

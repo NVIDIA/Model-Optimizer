@@ -28,6 +28,7 @@ import megatron.core.parallel_state as mcore_parallel
 import megatron.core.tensor_parallel.layers as megatron_parallel
 import megatron.core.transformer.mlp as megatron_mlp
 import megatron.core.transformer.moe.experts as megatron_moe
+import megatron.core.transformer.moe.shared_experts as megatron_shared_experts
 import torch
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.extensions.transformer_engine import (
@@ -211,6 +212,8 @@ def quant_module_get_extra_state(self) -> dict:
             quantizer_state[name] = module.get_modelopt_state()
 
     extra_state["modelopt_quantizer_state"] = quantizer_state
+    # A gated linear_fc1's GGML pins are saved in Megatron's SwiGLU layout (not 0.49.0rc0's).
+    extra_state["modelopt_swiglu_ggml_pins"] = True
 
     # Handle real_quantizer_state and q_tensor_state
     extra_state.update(real_quant_module_get_extra_state(self))
@@ -309,6 +312,19 @@ def quant_module_set_extra_state(self, state: Any):
                     continue
                 maybe_promote_nvfp4_static_quantizer(module, quantizer_substate)
                 module.set_from_modelopt_state(quantizer_substate, properties_only=False)
+        if (
+            getattr(self, "_modelopt_gated_fc1", False)
+            and "modelopt_swiglu_ggml_pins" not in state
+            and any(
+                name.startswith(PINNED_PAYLOAD_PREFIX)
+                for name, _ in self.weight_quantizer.named_buffers()
+            )
+        ):
+            raise ValueError(
+                "This checkpoint stores the GGML pins of a gated MLP in the layout of ModelOpt "
+                "0.49.0rc0, which later versions can't load. Re-run quantization (and any QAD) "
+                "with this version."
+            )
         self.modelopt_post_restore()
 
     # Handle real_quantizer_state and q_tensor_state
@@ -694,7 +710,13 @@ class _MegatronRowParallelLinear(_MegatronParallelLinear):
         return shard_axis_dict
 
 
-@QuantModuleRegistry.register({megatron_mlp.MLP: "megatron_MegatronMLP"})
+@QuantModuleRegistry.register(
+    {
+        megatron_mlp.MLP: "megatron_MegatronMLP",
+        # Its own forward keeps it from matching the MLP registration; its linear_fc1 is gated too.
+        megatron_shared_experts.SharedExpertMLP: "megatron_SharedExpertMLP",
+    }
+)
 class _QuantMegatronMLP(_MegatronMLP):
     """Module to support special handling of `linear_fc1` in `sharded_state_dict()` of MCore `MLP`."""
 
@@ -704,6 +726,11 @@ class _QuantMegatronMLP(_MegatronMLP):
         # GGML pins have the weight's rows, so a gated linear_fc1's split into gate and up rows too.
         rf".*weight_quantizer\.{PINNED_PAYLOAD_PREFIX}\w+$",
     ]
+
+    def _setup(self):
+        super()._setup()
+        # Lets linear_fc1 reject GGML pins saved in 0.49.0rc0's layout.
+        self.linear_fc1._modelopt_gated_fc1 = self.config.gated_linear_unit
 
 
 class _RealQuantMegatronParallelLinear(RealQuantLinear):
