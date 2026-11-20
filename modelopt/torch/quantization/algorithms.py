@@ -674,6 +674,12 @@ class QuantRecipeHparam(Hparam):
             name: tuple(_get_replay_quantizer_attr(attr) for attr in _get_quantizer_attrs(module))
             for module, name in zip(quant_modules or [], self.quant_module_names)
         }
+        # Replayed with live matching: their candidates were validated and scored that way.
+        self.per_weight_module_names = [
+            name
+            for module, name in zip(quant_modules or [], self.quant_module_names)
+            if getattr(module, "_auto_quantize_per_weight_quantizers", False)
+        ]
         assert cost_weight >= 0.0, "cost_weight must be non-negative."
         self.cost_weight = cost_weight
         self.allow_no_quant = allow_no_quant
@@ -809,7 +815,10 @@ class QuantRecipeHparam(Hparam):
         """
         if self._ladder is None:
             choices = [recipe for recipe in self.choices if isinstance(recipe, QuantRecipe)]
-            self._ladder = sorted(choices, key=self.get_cost)
+            # Unweighted, so a group excluded from the budget keeps its real lowest format.
+            self._ladder = sorted(
+                choices, key=lambda recipe: self.get_cost(recipe, cost_weight=1.0)
+            )
         return self._ladder
 
     @property
@@ -1550,6 +1559,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if not isinstance(hparam, QuantRecipeHparam):
                 continue
             stats = self.candidate_stats[name]
+            stats["per_weight_modules"] = hparam.per_weight_module_names
             # Per stored format: a searcher may have pruned them since initialization.
             stats["costs"] = [hparam.get_cost(recipe) for recipe in stats["formats"]]
             # Keep the no-quant cost as denominator metadata even when no-quant is not
@@ -2911,10 +2921,13 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False, algo
         if recipe == QuantRecipe(quant_cfg=None):
             continue
         module_names = candidate_stat["module_names"]
+        per_weight_modules = set(candidate_stat.get("per_weight_modules", ()))
         for module_name in module_names:
             for quantizer_attr in _get_replay_quantizer_attrs(candidate_stat, module_name):
                 matched_cfg, matched_enable = _match_quantizer_cfg(
-                    recipe.config.quant_cfg, quantizer_attr
+                    recipe.config.quant_cfg,
+                    quantizer_attr,
+                    path_scoped=module_name not in per_weight_modules,
                 )
                 if matched_enable is not None:
                     entry: dict[str, Any] = {
@@ -3014,9 +3027,10 @@ def _scopes_attr(pattern: str, quantizer_attr: str) -> bool:
     return prefix != pattern and (not prefix or prefix[-1] in ".*")
 
 
-def _match_quantizer_cfg(quant_cfg, quantizer_attr):
+def _match_quantizer_cfg(quant_cfg, quantizer_attr, path_scoped=True):
     # Last-match-wins to mirror set_quantizer_by_cfg behavior. Patterns may be path-scoped
-    # (e.g. "*mlp*weight_quantizer") while quantizer_attr is a bare name like "weight_quantizer".
+    # (e.g. "*mlp*weight_quantizer") while quantizer_attr is a bare name like "weight_quantizer";
+    # without ``path_scoped``, only the bare name is matched, as the search applied candidates.
     matched = None
     matched_enable = None
     for entry in quant_cfg:
@@ -3026,7 +3040,9 @@ def _match_quantizer_cfg(quant_cfg, quantizer_attr):
         pattern = entry["quantizer_name"]
         cfg = entry.get("cfg")
         enable = entry.get("enable", True)
-        if fnmatch.fnmatch(quantizer_attr, pattern) or _scopes_attr(pattern, quantizer_attr):
+        if fnmatch.fnmatch(quantizer_attr, pattern) or (
+            path_scoped and _scopes_attr(pattern, quantizer_attr)
+        ):
             matched = cfg
             matched_enable = enable
 

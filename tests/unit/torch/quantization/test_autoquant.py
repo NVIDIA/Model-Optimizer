@@ -1128,6 +1128,9 @@ def test_auto_quantize_searches_per_weight_quantizers():
         entry["quantizer_name"] for entry in mtq.get_auto_quantize_config(search_state)["quant_cfg"]
     }
     assert {"experts.w1_weight_quantizer", "experts.w2_input_quantizer"} <= quantizer_names
+    assert search_state["candidate_stats"]["experts.quant_recipe"]["per_weight_modules"] == [
+        "experts"
+    ]
 
 
 _W1_ONLY = [{"quantizer_name": "*w1_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}}]
@@ -1224,6 +1227,84 @@ def test_kl_search_prefers_a_real_format_over_a_nominally_cheaper_no_op():
         QuantModuleRegistry.unregister(_BmmExperts)
     assert str(search_state["best"]["recipe"]["experts.quant_recipe"]).startswith("INT8")
     assert search_state["best"]["is_satisfied"]
+
+
+def test_get_auto_quantize_config_replays_per_weight_modules_as_scored():
+    # The search matched this full-path rule against bare names, so both weights were scored BF16.
+    recipe = QuantRecipe(
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "experts.w1_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        },
+        name="w1_path",
+    )
+    attrs = [
+        "w1_input_quantizer",
+        "w1_weight_quantizer",
+        "w2_input_quantizer",
+        "w2_weight_quantizer",
+    ]
+    search_state = {
+        "best": {"recipe": {"experts.quant_recipe": recipe}},
+        "candidate_stats": {
+            "experts.quant_recipe": {
+                "module_names": ["experts"],
+                "quantizer_attrs": {"experts": attrs},
+                "per_weight_modules": ["experts"],
+            }
+        },
+        "disabled_layers": [],
+    }
+    config = mtq.get_auto_quantize_config(search_state)
+    QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)
+    try:
+        model = torch.nn.ModuleDict({"experts": _BmmExperts()})
+        replace_quant_module(model)
+    finally:
+        QuantModuleRegistry.unregister(_BmmExperts)
+    set_quantizer_by_cfg(model, config["quant_cfg"])
+    assert not model["experts"].w1_weight_quantizer.is_enabled
+    assert not model["experts"].w2_weight_quantizer.is_enabled
+
+
+def test_ladder_of_a_cost_excluded_group_leads_with_its_real_low_bit_format():
+    experts_int4 = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*.experts.*weight_quantizer",
+                "cfg": {"num_bits": 4, "block_sizes": {-1: 16}},
+            },
+        ],
+        "algorithm": "max",
+    }
+    QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)
+    try:
+        model, _ = mtq.auto_quantize(
+            _BmmExpertsModel(),
+            constraints={
+                "effective_bits": 16.0,
+                "cost": {"excluded_module_name_patterns": ["*experts*"]},
+            },
+            quantization_formats=[(experts_int4, "experts_int4"), mtq.INT8_DEFAULT_CFG],
+            data_loader=[torch.randn(2, 4, 16) for _ in range(2)],
+            forward_step=lambda model, batch: model(batch),
+            num_calib_steps=2,
+            num_score_steps=2,
+            method={"method": "kl_div", "context_quant_level": "lowest"},
+        )
+    finally:
+        QuantModuleRegistry.unregister(_BmmExperts)
+    # KL's "lowest" context and the Shapley corner take the ladder's first format.
+    [hparam] = model.experts._hparams_for_scoring
+    assert hparam.cost_weight == 0
+    assert str(hparam.ladder[0]).startswith("INT8")
 
 
 def test_uniform_sequential_weight_formats_are_one_format():
