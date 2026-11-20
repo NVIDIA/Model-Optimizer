@@ -1,6 +1,6 @@
 # Quantization-Aware KTO (QAKTO): Reducing Doomed Reasoning Loops While Preserving Accuracy
 
-Daniel Korzekwa · November 19, 2026
+Daniel Korzekwa, Keval Morabia, Sepher Sameni · November 19, 2026
 
 ## Key takeaways
 
@@ -16,7 +16,6 @@ Daniel Korzekwa · November 19, 2026
 - [KTO method](#kto-method)
 - [Experiments and results](#experiments-and-results)
 - [Conclusions and Future work](#conclusions-and-future-work)
-- [Acknowledgements](#acknowledgements)
 
 ## Introduction
 
@@ -198,7 +197,3 @@ Mean completion tokens fell on seven of eight benchmarks, most on SciCode (53%) 
 QAKTO reduced doomed reasoning loops in the QAD checkpoint without a statistically detected accuracy regression. The gains extended to fewer missing answers and lower token use on most benchmarks. Because KTO accepts independently labeled responses, it can use correct answers and looping failures from different questions.
 
 Next steps are to automate collecting correct responses and incorrect responses stuck in doomed reasoning loops for KTO training, reduce IFBench’s remaining loops and test more models.
-
-## Acknowledgements
-
-We thank Keval Morabia for his prior work on the [Qwen3.6-35B-A3B PTQ/QAD tutorial](../README.md) and [analysis of reasoning loops and decoding remedies](../ABLATIONS.md#scicode-non-termination-diagnosis-and-decode-time-fix), which provided the foundation for this work.
