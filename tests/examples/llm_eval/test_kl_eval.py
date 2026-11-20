@@ -240,17 +240,20 @@ def test_reference_rescores_candidates_and_refuses_overwrite(kl_eval, cached_eva
     assert (case.directory / "manifest.json").read_bytes() == original
 
 
-@pytest.mark.parametrize("corruption", ["positions", "statistics"])
+@pytest.mark.parametrize("corruption", ["positions", "float_positions", "missing", "statistics"])
 def test_reference_rejects_mismatched_positions_and_statistics(
     kl_eval, cached_evaluation, corruption
 ):
     case = cached_evaluation
-    if corruption == "positions":
+    if corruption.endswith("positions"):
         path = case.directory / "manifest.json"
         manifest = json.loads(path.read_text())
         positions = manifest["records"][0]["positions"]
-        manifest["records"][0]["positions"] = [999] * len(positions)
+        changed = [float(p) for p in positions] if corruption == "float_positions" else [999]
+        manifest["records"][0]["positions"] = changed * (1 if changed[0] != 999 else len(positions))
         path.write_text(json.dumps(manifest))
+    elif corruption == "missing":
+        (case.directory / "1.safetensors").unlink()
     else:
         shard = case.directory / "0.safetensors"
         save_file({name: t[:1] for name, t in load_file(str(shard)).items()}, str(shard))
@@ -275,6 +278,16 @@ def test_evaluation_refuses_inputs_that_differ_from_the_reference(
     with pytest.raises(ValueError, match=error):
         kl_eval._check_reference_match(args, manifest, layerwise)
     assert args.attn_implementation == backend
+
+
+def test_checkpoint_identity_tracks_hub_revision_and_local_weight_files(kl_eval, tmp_path):
+    weights = tmp_path / "model.safetensors"
+    weights.write_bytes(b"weights")
+    local = kl_eval._checkpoint_identity(None, tmp_path)
+    assert kl_eval._checkpoint_identity(None, tmp_path) == local
+    weights.write_bytes(b"new weights")
+    assert kl_eval._checkpoint_identity(None, tmp_path) != local
+    assert kl_eval._checkpoint_identity("org/model", tmp_path / "commit") == "commit"
 
 
 def test_model_guards_require_bf16_base_and_fake_quant_candidate(kl_eval):
@@ -342,10 +355,10 @@ def test_cli_prepares_once_and_scores_repeated_candidates_identically(
     )
     loads, generation_batches = [], []
 
-    def load(*_args, **kwargs):
+    def load(path, *_args, **kwargs):
         loads.append(kwargs.get("attn_implementation"))
         return GPT2LMHeadModel.from_pretrained(
-            checkpoint, dtype=torch.bfloat16, attn_implementation=kwargs.get("attn_implementation")
+            path, dtype=torch.bfloat16, attn_implementation=kwargs.get("attn_implementation")
         )
 
     generate = GPT2LMHeadModel.generate
@@ -403,8 +416,25 @@ def test_cli_prepares_once_and_scores_repeated_candidates_identically(
     assert loads == ["eager"] * 3  # Evaluation inherits the reference's attention backend.
     assert math.isfinite(first) and first > 0
     assert first == pytest.approx(second, abs=1e-7)
+    # Refuse a checkpoint restored with ModelOpt state, which hf_ptq would not calibrate.
+    restored = tmp_path / "restored" / checkpoint.name  # Same snapshot commit.
+    model = _tiny_model().to(torch.bfloat16)
+    mtq.quantize(model, {"quant_cfg": [{"quantizer_name": "*", "enable": False}]})
+    model.save_pretrained(restored)
+    assert (restored / "modelopt_state.pth").is_file()
+    monkeypatch.setattr(hf_ptq, "ensure_local_checkpoint", lambda _path: ("org/model", restored))
+    with pytest.raises(ValueError, match="already carries ModelOpt quantizers"):
+        kl_eval.main()
+    assert len(loads) == 4
+    # The remaining refusals happen before any model loads.
     moved = tmp_path / "newer-revision"
     monkeypatch.setattr(hf_ptq, "ensure_local_checkpoint", lambda _path: ("org/model", moved))
-    with pytest.raises(ValueError, match="Hub model revision differs"):
+    with pytest.raises(ValueError, match="Checkpoint differs"):
         kl_eval.main()
-    assert len(loads) == 3
+    monkeypatch.setattr(hf_ptq, "load_recipe", lambda _path: object())
+    with pytest.raises(ValueError, match="fixed PTQ recipe"):
+        kl_eval.main()
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    with pytest.raises(ValueError, match="one process"):
+        kl_eval.main()
+    assert len(loads) == 4

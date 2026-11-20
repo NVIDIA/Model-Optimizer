@@ -18,6 +18,7 @@
 import argparse
 import inspect
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, GenerationConfig, set_seed
 
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.utils import is_quantized
 
 __all__ = ["evaluate", "spaced_positions"]
 
@@ -170,10 +172,15 @@ def _load_reference(directory):
     manifest = json.loads((Path(directory) / "manifest.json").read_text())
     if manifest.get("schema") != SCHEMA:
         raise ValueError("Unsupported reference schema; prepare a new reference.")
-    for record in manifest["records"]:
-        length = len(record["continuation"])
-        if record["positions"] != spaced_positions(length, manifest["score_tokens"] or length):
+    for index, record in enumerate(manifest["records"]):
+        positions, length = record["positions"], len(record["continuation"])
+        # JSON floats compare equal to ints but cannot index logits.
+        if any(type(p) is not int for p in positions) or positions != spaced_positions(
+            length, manifest["score_tokens"] or length
+        ):
             raise ValueError("Invalid reference positions.")
+        if not (Path(directory) / f"{index}.safetensors").is_file():
+            raise ValueError(f"Invalid reference: missing shard {index}.")
     return manifest
 
 
@@ -204,11 +211,13 @@ def _cached_kl(log_p, ids, rows):
     return score.item()
 
 
-@torch.inference_mode()
 def evaluate(candidate, reference_dir):
     """Return mean conditional KL over every prompt in a prepared reference."""
-    directory = Path(reference_dir)
-    manifest = _load_reference(directory)
+    return _score(candidate, Path(reference_dir), _load_reference(reference_dir))
+
+
+@torch.inference_mode()
+def _score(candidate, directory, manifest):
     text_config = getattr(candidate.config, "text_config", candidate.config)
     if text_config.vocab_size != manifest["vocab_size"]:
         raise ValueError("Candidate vocabulary differs from the reference.")
@@ -272,6 +281,18 @@ def _check_reference_match(args, manifest, layerwise_cfgs):
     args.attn_implementation = backend
 
 
+def _checkpoint_identity(hub_model_id, checkpoint):
+    """Hub snapshot commit, or each local weight file's size and mtime; contents are not hashed."""
+    if hub_model_id:
+        # A Hub ID resolves to its latest snapshot, whose directory is named by the commit.
+        return checkpoint.name
+    return {
+        str(path.relative_to(checkpoint)): [path.stat().st_size, path.stat().st_mtime_ns]
+        for path in sorted(checkpoint.rglob("*"))
+        if path.suffix in {".safetensors", ".bin"}
+    }
+
+
 def _require_bf16_base(model):
     # Plain VLM loading attaches disabled quantizers outside the language model.
     if model.dtype != torch.bfloat16 or _enabled_quantizers(model):
@@ -279,7 +300,6 @@ def _require_bf16_base(model):
 
 
 def _require_fake_quant(model):
-    # hf_ptq skips the recipe for a checkpoint restored with ModelOpt state, leaving none enabled.
     quantizers = _enabled_quantizers(model)
     if not quantizers or any(not quantizer.fake_quant for quantizer in quantizers):
         raise ValueError("The recipe must apply fake quantization; none or packed was found.")
@@ -324,6 +344,8 @@ def _parse_args():
 def main():
     """Prepare a reference, or calibrate a candidate and return its scalar KL."""
     args = _parse_args()
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+        raise ValueError("Run kl_eval.py in one process; device-map sharding uses every GPU.")
     directory = args.reference.expanduser().resolve()
     if args.command == "prepare-reference" and directory.exists():
         raise FileExistsError(f"Reference directory already exists: {directory}")
@@ -334,8 +356,10 @@ def main():
     manifest = None
     if args.command == "evaluate":
         manifest = _load_reference(directory)
-        layerwise = hf_ptq.recipe_layerwise_blocks(hf_ptq.load_recipe(args.recipe))
-        _check_reference_match(args, manifest, layerwise)
+        recipe = hf_ptq.load_recipe(args.recipe)
+        if not isinstance(recipe, hf_ptq.ModelOptPTQRecipe):
+            raise ValueError("--recipe must be a fixed PTQ recipe, not AutoQuantize.")
+        _check_reference_match(args, manifest, hf_ptq.recipe_layerwise_blocks(recipe))
     ptq_argv = ["--model", args.model, "--skip_generate"]
     for name in (
         "recipe",
@@ -359,10 +383,9 @@ def main():
         ptq_args.pyt_ckpt_path
     )
     checkpoint = Path(ptq_args.local_checkpoint_path).resolve()
-    # A Hub ID resolves to its latest snapshot, whose directory is named by the commit.
-    model_revision = checkpoint.name if ptq_args.hub_model_id else None
-    if manifest is not None and model_revision != manifest["metadata"]["model_revision"]:
-        raise ValueError("Hub model revision differs from the prepared reference.")
+    identity = _checkpoint_identity(ptq_args.hub_model_id, checkpoint)
+    if manifest is not None and identity != manifest["metadata"]["checkpoint"]:
+        raise ValueError("Checkpoint differs from the prepared reference.")
     config = AutoConfig.from_pretrained(
         checkpoint, trust_remote_code=args.trust_remote_code, local_files_only=True
     )
@@ -411,7 +434,7 @@ def main():
                 directory,
                 {
                     "model": args.model,
-                    "model_revision": model_revision,
+                    "checkpoint": identity,
                     "dataset": EVALUATION_DATASET,
                     "revision": args.eval_revision,
                     "seed": args.seed,
@@ -420,9 +443,12 @@ def main():
                 args.score_tokens,
                 args.generation_batch_size,
             )
+        # hf_ptq skips calibration for a target restored with ModelOpt state.
+        if is_quantized(loaded[1]) and not loaded[3]:
+            raise ValueError("The checkpoint already carries ModelOpt quantizers.")
         model = hf_ptq.quantize_main(ptq_args, *loaded, export=False)
         _require_fake_quant(model)
-        return evaluate(model, directory)
+        return _score(model, directory, manifest)
 
 
 if __name__ == "__main__":
