@@ -38,6 +38,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- The ``modelopt-evaluation`` agent skill no longer sets ``NEMO_EVALUATOR_TRUST_PRE_CMD=1`` in its ``.env`` template. It now asks you to approve a config's ``pre_cmd`` hooks and enables them only on that launch; remove the setting from an older ``.env`` if you copied it.
+
 **Deprecations**
 
 **Bug Fixes**

@@ -416,12 +416,7 @@ Run directly when the user asked to launch; otherwise ask before submitting.
 ```bash
 # .env lives at the workspace root (where you run nel); the template ships under the skill dir
 [ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env   # create only if Step 1 didn't
-# nel also loads ./.env itself, and older templates opted in to pre_cmd trust there.
-# Remove it (prints nothing) and stop if it is still there.
-TRUST_RE='^[[:space:]]*(export[[:space:]]+)?NEMO_EVALUATOR_TRUST_PRE_CMD[[:space:]]*='
-sed -i -E "/$TRUST_RE/d" .env && ! grep -qE "$TRUST_RE" .env || exit 1
 set -a && source .env && set +a
-unset NEMO_EVALUATOR_TRUST_PRE_CMD
 
 # If nemo_skills.* + self-deployment, for LOCAL/Docker runs only:
 export DUMMY_API_KEY=dummy
@@ -429,7 +424,7 @@ export DUMMY_API_KEY=dummy
 # `DUMMY_API_KEY: lit:dummy` under evaluation.env_vars (see Step 5).
 ```
 
-**Hook trust:** `pre_cmd`/`post_cmd` (deployment, evaluation or task level) run arbitrary commands. Show the user the effective ones and get an explicit OK; a request to launch is not one, and ask again if they change after dry-run or canary. Then prefix each approved launch below (canary, full run, single-task reruns) with `NEMO_EVALUATOR_TRUST_PRE_CMD=1`; dry-run doesn't need it.
+**Hook trust** (also for existing configs and reruns): `pre_cmd`/`post_cmd` (deployment, evaluation or task level) run arbitrary commands. Show the user the effective ones and get an explicit OK; a request to launch is not one, and ask again if they change after dry-run or canary. If they decline, do not submit. Give every `nel run` an explicit value: `NEMO_EVALUATOR_TRUST_PRE_CMD=1` on an approved launch (canary, full run, single-task reruns), `NEMO_EVALUATOR_TRUST_PRE_CMD=0` otherwise. A value on the command overrides the shell and `nel`'s own `./.env` loading, including an opt-in left there by an older template.
 
 **Step 8.1 — Dry-run** (config validation):
 

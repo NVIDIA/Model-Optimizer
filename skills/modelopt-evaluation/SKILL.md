@@ -36,6 +36,8 @@ If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-managemen
 - [ ] Step 9: Verify completed run
 ```
 
+Every `nel run` of a config with `pre_cmd`/`post_cmd`, including existing configs and reruns, follows Step 8's **Hook trust** in [launcher-workflow.md](references/launcher-workflow.md); stop if the user declines.
+
 ---
 
 ## nel-next path (Terminal-Bench 2.x, SWE-bench, …) — branch here FIRST
