@@ -224,7 +224,7 @@ with its own `run_id`, copying the shared `services:` block.
 
 ## Run (dry-run → canary → full) → push to MLflow
 
-Before each `--submit`, read the rendered service config from `--dry-run` (after defaults and `-O` overrides): `extra_args`, `image` (Step 3's official image pattern), `extra_env` (names, plus literal values of non-allowlisted vars; never print secret values), and `container_mounts` that supply or replace code the server loads, plus the evaluator's `cluster.eval_image`, code-supplying mounts and `cluster.container_env` (non-credential values such as `PYTHONPATH` shown and re-approved if they change; credential values redacted). For `--trust-remote-code`, apply `launcher-workflow.md` Step 8's fixed-identity rule. For a manual `eval resume`, first compare the saved run's resolved config (service and evaluator settings, environment names and non-credential values, mounts, images) with the approval, and stop if it differs or can't be inspected. Get the user's explicit OK for any executable serving setting (`launcher-workflow.md` Step 3), and again if one changes between canary and full run; stop if declined.
+Before each `--submit` or `eval resume`, apply `launcher-workflow.md` Step 8's **Hook trust** to the config rendered by `--dry-run`: code-loading settings not from this skill's template (`extra_args` such as `--trust-remote-code`, `image`/`cluster.eval_image`, code-supplying mounts, `PYTHONPATH`-style env values) need the user's OK; show env names, not credential values.
 
 ```bash
 set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"

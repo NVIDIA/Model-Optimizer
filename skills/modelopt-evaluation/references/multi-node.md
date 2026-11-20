@@ -27,7 +27,7 @@ deployment:
     tensor_parallel_size: 8
     pipeline_parallel_size: 2
     # NEL's built-in base_command passes --trust-remote-code; override it without
-    # that flag unless the user approved the checkpoint's code (Step 8 Approvals).
+    # that flag unless the user approved the checkpoint's code (Step 8 Hook trust).
     base_command: >-
       vllm serve /checkpoint
       --tensor-parallel-size=${deployment.tensor_parallel_size}

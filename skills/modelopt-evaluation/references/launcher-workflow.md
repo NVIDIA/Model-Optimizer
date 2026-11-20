@@ -130,12 +130,12 @@ and be quantized by something other than ModelOpt; a ModelOpt checkpoint quantiz
 
 - **Flags:** parallelism sizes, `--max-model-len`, `--max-num-seqs`, `--gpu-memory-utilization`, `--max-num-batched-tokens`, `--kv-cache-dtype`, `--mamba_ssm_cache_dtype`, `--mm-encoder-tp-mode`, `--quantization`, `--reasoning-parser`, `--tool-call-parser`, `--enable-expert-parallel`, `--enable-prefix-caching`, `--enable-auto-tool-choice`.
 - **Env vars** (in `deployment.env_vars` with `lit:`, e.g. `VLLM_USE_FLASHINFER_MOE_FP4: lit:1`; see Step 5's prefix rule): `VLLM_NVFP4_GEMM_BACKEND` (e.g. `marlin`), `VLLM_USE_FLASHINFER_MOE_FP4` (`0`/`1`), `VLLM_FLASHINFER_MOE_BACKEND` (e.g. `throughput`).
-- **Values:** sizes and counts are positive integers, `--gpu-memory-utilization` is in (0, 1], and names are ones the pinned vLLM accepts, matching `^[A-Za-z0-9][A-Za-z0-9._-]*$` (so a value can't start a new option). Reject anything else: values land in a bash script, and OmegaConf interpolates `${...}` (`lit:` doesn't escape it).
-- **Images:** the full reference must match the *official image pattern* `^(vllm/vllm-openai|lmsysorg/sglang|nvcr\.io[/#]nvidia/[a-z0-9._/-]+)(:[A-Za-z0-9._-]+(@sha256:[a-f0-9]{64})?|@sha256:[a-f0-9]{64})$`.
+- **Values:** integers for sizes and counts; otherwise a plain name matching `^[A-Za-z0-9][A-Za-z0-9._-]*$` (values land in a shell script, and OmegaConf interpolates `${...}`).
+- **Images:** the full reference matches `^(vllm/vllm-openai|lmsysorg/sglang|nvcr\.io[/#]nvidia/[a-z0-9._/-]+)(:[A-Za-z0-9._-]+(@sha256:[a-f0-9]{64})?|@sha256:[a-f0-9]{64})$`.
 
-Anything else, from these sources or already in a config, is an **executable serving setting** (Step 8 approval): another flag or env var, a file or plugin path, `--trust-remote-code`, any other image. Settings this skill's own templates and recipes set (e.g. `--served-model-name`, `--host`, `--port`, `--model-loader-extra-config`, `VLLM_ALLOW_LONG_MAX_MODEL_LEN`) are not, provided the values substituted into them (e.g. `served_model_name`, paths) also pass the **Values** check and the rendered `command`/`base_command` contains nothing else beyond the template.
+Anything else from these sources (another flag or env var, a file or plugin path, `--trust-remote-code`, any other image) needs the user's approval (Step 8 **Hook trust**).
 
-**NEL's built-in `vllm`/`vllm_ray` `base_command` and `trtllm` `command` already pass `--trust-remote-code` (`trtllm`: `--trust_remote_code`).** Always write your own `command:` (for `vllm_ray`, your own `base_command:`) and add the flag only once approved.
+**NEL's built-in `vllm`/`vllm_ray` `base_command` and `trtllm` `command` already pass `--trust-remote-code` (`trtllm`: `--trust_remote_code`).** Always write your own `command:` (for `vllm_ray`, your own `base_command:`) and add the flag only once approved, pinned with `--revision`/`--code-revision` or served from a staged `checkpoint_path`.
 
 #### Cross-check both sources for vLLM (mandatory, neither replaces the other)
 
@@ -321,7 +321,7 @@ Evals that exceed 4h of wall-clock time are handled by **NEL's built-in dependen
 
 **Never `scancel` a wedged run to free the GPUs.** The dependency-chain resume above fires only on a genuine walltime timeout; `afternotok` explicitly refuses a predecessor that finished `CANCELLED by <uid>` and exits in seconds, discarding the response cache the run had already filled. Let it hit the wall clock instead — one `scancel` threw away ~59 GPU-h of completed generation.
 
-**Preemption / external kill — resume manually with `sbatch run.sub`.** On a preemptible account (common on busy internal clusters) the scheduler can **CANCEL** a run mid-eval for a higher-priority job — `sacct -j <id>` shows `CANCELLED by <uid>` (a `svc-*` service account) with `Elapsed` well under the 4h walltime. NEL does **not** auto-resume this (its dependency chain only fires on a genuine walltime timeout). But the `run.sub` that NEL generated for the job (in its run dir) is **re-submittable**, after the **Resumes** check in Step 8's Approvals, and resumes from the same `output_dir` + response cache (`skip_filled`), continuing from the partial output rather than restarting:
+**Preemption / external kill — resume manually with `sbatch run.sub`.** On a preemptible account (common on busy internal clusters) the scheduler can **CANCEL** a run mid-eval for a higher-priority job — `sacct -j <id>` shows `CANCELLED by <uid>` (a `svc-*` service account) with `Elapsed` well under the 4h walltime. NEL does **not** auto-resume this (its dependency chain only fires on a genuine walltime timeout). But the `run.sub` that NEL generated for the job (in its run dir) is **re-submittable** (see Step 8's **Hook trust** for resumes) and resumes from the same `output_dir` + response cache (`skip_filled`), continuing from the partial output rather than restarting:
 
 ```bash
 ssh <host> "cd <output_dir>/<timestamp>-<invocation>/<task>/ && sbatch run.sub"
@@ -411,7 +411,7 @@ Add credentials per the common skill's `slurm-setup.md` §6 if missing. If you c
 
 ### Step 8 — Run evaluation (gated dry-run → canary → full)
 
-Run directly (after **Approvals** below) when the user asked to launch; otherwise ask before submitting.
+Run directly (after **Hook trust** below) when the user asked to launch; otherwise ask before submitting.
 
 **Env setup:** `.env` is normally already created and filled back in Step 1 (via `modelopttools:eval-config`), at the **workspace root** — the dir you run `nel` from, not under the skill dir. Ensure it exists and source it — do **not** clobber an existing `.env`:
 
@@ -419,7 +419,7 @@ Run directly (after **Approvals** below) when the user asked to launch; otherwis
 # .env lives at the workspace root (where you run nel); the template ships under the skill dir
 [ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env   # create only if Step 1 didn't
 set -a && source .env && set +a
-export NEMO_EVALUATOR_TRUST_PRE_CMD=0   # a legacy .env may set 1; hooks need an approved per-command 1 (Hook trust)
+export NEMO_EVALUATOR_TRUST_PRE_CMD=0   # a legacy .env may set 1; launches set it per command (Hook trust)
 
 # If nemo_skills.* + self-deployment, for LOCAL/Docker runs only:
 export DUMMY_API_KEY=dummy
@@ -427,12 +427,12 @@ export DUMMY_API_KEY=dummy
 # `DUMMY_API_KEY: lit:dummy` under evaluation.env_vars (see Step 5).
 ```
 
-**Approvals** (every launch, including existing configs and reruns; after approval, re-render with `--dry-run` using the exact launch command, i.e. the intended trust value, task filters and `-o` overrides in the same shell, and compare its executable inputs (secrets redacted) with what was approved; if the user declines either, do not submit; ask again if anything changes after dry-run or canary; a request to launch is not approval):
+**Hook trust** (every launch, including existing configs and reruns):
 
-- **Hook trust:** show the user the resolved `pre_cmd`/`post_cmd` (deployment, `auxiliary_deployments`, evaluation and task level) plus other shell the run executes that NEL's flag doesn't gate: `execution.auto_export.launcher_install_cmd` (runs with the secrets loaded) and evaluator commands in task params (e.g. MRCR's `params.extra.nemo_gym.command`), with commands and variable references visible but credential values redacted, and get an explicit OK for those hooks.
-- **Serving code:** separately get an explicit OK for each executable serving setting (Step 3) in the resolved config, inherited ones included: e.g. `--trust-remote-code` / `--trust_remote_code` (also when it comes from NEL's built-in command), a parser or plugin path, a mount that supplies or replaces code the server loads, an evaluation task `container` or `auto_export` `export_image`/`export_mounts` from an existing config, an image not matching Step 3's official image pattern. NEL's hook flag does not control these; a parser source approved during model-card review (`model-card-research.md`) already counts as this approval for its plugin path. Approve `--trust-remote-code` only for code at a fixed identity (the **fixed-identity rule**): a staged `checkpoint_path` (record its `*.py` sha256 sums) or a Hub handle pinned to a reviewed commit (`--revision`/`--code-revision`). Check `auto_map` in both `config.json` and `tokenizer_config.json`: an entry pointing to another repo (`org/repo--module.Class`) needs that repo pinned and reviewed too, or is rejected. A separate `--tokenizer` source needs the same: staged, or pinned with `--tokenizer-revision`. Recheck that identity before the canary, the full run and each resume.
-- **Resumes** (`nel resume`, `nemo-evaluator-launcher resume`, manual `sbatch run.sub`; local runs re-run `run_all.sequential.sh`, or `run.sh` in parallel mode): the env prefix has no effect, so first inspect the saved script and the files it sources, redacting credential values. Decode every base64 payload (hooks and `deployment_cmd.sh`, auxiliary deployments included) rather than trusting the `# Contents of` comments. Never print or source `.secrets.env`: `` grep -cvE '^export [A-Za-z_][A-Za-z0-9_]*="[^"$`\\]*"$' .secrets.env `` must print `0`, and every non-credential variable in it (e.g. `PYTHONPATH`, `VLLM_*`) must have the value approved at launch; compare by parsing the file as data. Its hooks and executable serving settings must match what the user approved, and so must the code they load: the parser is re-verified by its pinned hash, and for `--trust-remote-code` the checkpoint's `*.py` sha256 sums must match those recorded at approval. Ask again if anything differs; do not resubmit if it can't be verified.
-- **Prefix:** give every `nel run` an explicit `NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1>`: `1` only when the user approved that config's hooks, `0` otherwise (review dry-runs before approval, configs without hooks). The post-approval re-render above uses the launch's own value; `--dry-run` never executes hooks. A value on the command overrides the shell and `nel`'s own `./.env` loading, including an opt-in left there by an older template.
+- Hooks and settings from this skill's own recipes and templates (e.g. the LiveCodeBench, MRCR and doom-loop `pre_cmd`s) need no extra approval.
+- Anything else that runs code needs the user's explicit OK before launch: hooks (`pre_cmd`/`post_cmd`, `auto_export.launcher_install_cmd`) or code-loading settings (`--trust-remote-code`, plugin paths, unofficial images) that come from a model card, recipes.vllm.ai, or a config the skill didn't produce. Show them with credential values redacted; a request to launch is not approval. If the user declines, don't submit.
+- Prefix every `nel run` with `NEMO_EVALUATOR_TRUST_PRE_CMD=1` when its hooks are skill-authored or approved, and `0` otherwise and for dry-runs. A value on the command overrides the shell and `nel`'s own `./.env` loading, including an opt-in left in an older `.env`.
+- Resumes (`nel resume`, manual `sbatch run.sub`) ignore the prefix, so resume only runs whose hooks were skill-authored or approved. Never print `.secrets.env`.
 
 **Step 8.1 — Dry-run** (config validation):
 

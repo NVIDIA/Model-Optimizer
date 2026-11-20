@@ -36,7 +36,7 @@ If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-managemen
 - [ ] Step 9: Verify completed run
 ```
 
-Every NEL launch follows Step 8's **Approvals** in [launcher-workflow.md](references/launcher-workflow.md), including existing configs, reruns, launches through `modelopt-launching-evals` (`nemo-evaluator-launcher run`), and resumes (Approvals' **Resumes** check); stop if the user declines.
+Every NEL launch follows Step 8's **Hook trust** in [launcher-workflow.md](references/launcher-workflow.md), including existing configs, reruns, launches through `modelopt-launching-evals`, and resumes.
 
 ---
 
@@ -52,7 +52,7 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
    Read [model-card research](references/model-card-research.md) for generation settings; consult task-specific policy before selecting published budgets or fallbacks.
 2. Isolated nel-next venv: `"$SKILL_DIR/scripts/nel-next.sh" --setup-only` (keeps 0.2.6 `nel` untouched).
 3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`, `${HARBOR_ECS_REGION}`) into `.env`; always include the `output.export_config.mlflow` block.
-4. Dry-run → canary → full (`nel-next.sh eval run`); approve executable serving settings before each `--submit` as in `references/nel-next.md`'s Run section. Then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
+4. Dry-run → canary → full (`nel-next.sh eval run`); check code-loading settings before each `--submit` as in `references/nel-next.md`'s Run section. Then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
 5. Before reporting a full-run score, apply `references/run-validation.md`, including its benchmark-specific checks.
 
 Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
@@ -77,7 +77,7 @@ for an "AA" request. If the user asks for MRCR:
    Take the largest variant within the checkpoint's trained context — see the recipe.
 3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) and
    `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` (`nemo_gym` is not in the FDF map).
-   The config's `pre_cmd` needs hook trust: follow Step 8's **Approvals** in
+   The config's `pre_cmd` needs hook trust: follow Step 8's **Hook trust** in
    `references/launcher-workflow.md`.
 4. **MRCR needs a git-backed Gym image.** The pin is newer than any image's baked
    Gym and must apply, so the template's `container:` is `???` and the bootstrap
