@@ -293,7 +293,16 @@ class ReferenceRunner:
         return stats
 
     def _fold_tensor_stats(self, stats: OrderedDict, batch_data: OrderedDict) -> None:
-        """Folds one batch into the running statistics in place."""
+        """Folds one batch into the running statistics in place.
+
+        A tensor that is NaN in every element of a single batch reports
+        absmax=-inf, min_val=inf, max_val=-inf rather than NaN: max(-inf, nan) and
+        min(inf, nan) both keep the sentinel, since Python's max/min never replace
+        their first argument with a comparand that loses a NaN comparison. This is
+        intended, the same sentinel behavior that lets a later finite batch clear a
+        NaN-poisoned first batch (see test_multi_batch_nan_first_batch_does_not_poison_stats),
+        it is just visible on its own when there is only one batch and it is all NaN.
+        """
         for name, tensor_stats in stats.items():
             if name not in batch_data:
                 continue

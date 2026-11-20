@@ -29,6 +29,7 @@ import polygraphy.backend.onnxrt as polygraphy_onnxrt
 import pytest
 from _test_utils.onnx.lib_test_models import build_if_outer_scope_model
 from onnx import TensorProto, helper, numpy_helper
+from polygraphy.comparator import Comparator
 
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast.referencerunner import ReferenceRunner, TensorStats
@@ -50,24 +51,6 @@ def create_multi_io_model():
 
     graph = helper.make_graph([add_node, mul_node], "model_multi_io", [x1, x2], [y1, y2])
     model = helper.make_model(graph, producer_name="model_multi_io")
-    model.opset_import[0].version = 20
-    model.ir_version = 10
-    onnx.checker.check_model(model)
-    model = onnx_utils.infer_shapes(model)
-    return model
-
-
-def create_string_cast_model():
-    # A plain numeric input Cast to a STRING output, so the non-numeric tensor
-    # that reaches the running statistics is produced by ONNX Runtime itself
-    # rather than passed in, sidestepping unrelated numpy/polygraphy input-dtype
-    # plumbing for STRING inputs while still exercising the same code path: a
-    # non-numeric entry anywhere in a batch's tensor mapping.
-    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3])
-    y = helper.make_tensor_value_info("Y", TensorProto.STRING, [1, 3])
-    cast_node = helper.make_node("Cast", ["X"], ["Y"], to=TensorProto.STRING, name="cast")
-    graph = helper.make_graph([cast_node], "model_string_cast", [x], [y])
-    model = helper.make_model(graph, producer_name="model_string_cast")
     model.opset_import[0].version = 20
     model.ir_version = 10
     onnx.checker.check_model(model)
@@ -718,26 +701,37 @@ def test_single_batch_backward_compatibility(reference_runner):
         os.remove(input_path)
 
 
-def test_single_batch_with_string_input_is_not_reduced(reference_runner):
+def test_single_batch_with_string_output_is_not_reduced(reference_runner, monkeypatch):
     """A single batch of non-numeric data must not require numeric reduction.
 
     Regression test: streaming now folds every batch into the running
     statistics immediately, even when there turns out to be only one, so a
-    valid string input feeding a Cast node reached np.abs on a STRING array
-    and raised TypeError before the raw-array return path -- something the
-    old, non-streaming aggregation never hit, since it checked the batch
-    count before doing any numeric reduction at all.
+    STRING-typed output reached np.abs on a STRING array and raised TypeError
+    before the raw-array return path -- something the old, non-streaming
+    aggregation never hit, since it checked the batch count before doing any
+    numeric reduction at all.
+
+    Comparator.run is patched to a single STRING-output batch instead of
+    running the model end to end: a real run reaches polygraphy's tensorrt
+    importer to format output metadata, which reads trt.float32 unguarded, so
+    the test would otherwise depend on the environment's tensorrt module
+    having that attribute (#2553 CI review).
     """
-    model = create_string_cast_model()
-    runner = ReferenceRunner(model)
-    inputs = {"X": np.array([[1.0, 2.0, 3.0]], dtype=np.float32)}
+    out = np.array([["1", "2", "3"]])
+    monkeypatch.setattr(
+        Comparator, "run", staticmethod(lambda *a, **k: iter([[("onnxrt", [{"Y": out}])]]))
+    )
+    runner = reference_runner
+    inputs = {
+        "X1": np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+        "X2": np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+    }
 
     results = runner.run(inputs)
 
     assert isinstance(results, OrderedDict)
-    assert isinstance(results["Y"], np.ndarray)
+    assert results["Y"] is out
     assert not isinstance(results["Y"], TensorStats)
-    assert list(results["Y"].flatten()) == ["1", "2", "3"]
 
 
 def test_multi_batch_aggregation_statistics(reference_runner):
