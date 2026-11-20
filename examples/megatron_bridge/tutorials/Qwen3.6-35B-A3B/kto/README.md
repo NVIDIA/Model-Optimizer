@@ -4,9 +4,9 @@ Daniel Korzekwa · November 19, 2026
 
 ## Key takeaways
 
-- **Cap-hit rates fell on seven of eight benchmarks across the reported evaluations:** SciCode (10.23% → 0% observed on held-out error-prone subtasks; −1.53 pp in broader evaluation), AA-Omniscience (−0.30 pp), GPQA (−0.06 pp), IFBench (−1.42 pp), MMMU-Pro (−0.25 pp), MMLU-Pro (−0.029 pp), and Telecom (−4.09 pp). AA-LCR stayed at zero.
+- **Cap-hit rates fell on seven of eight benchmarks across the reported evaluations:** SciCode (10.23% → 0% observed on held-out error-prone subtasks; −1.53 pp in broader evaluation), AA-Omniscience (−0.30 pp), GPQA (−0.06 pp), IFBench (−1.42 pp), MMMU-Pro (−0.25 pp), MMLU-Pro (−0.029 pp), and tau2-bench Telecom (−4.09 pp). AA-LCR stayed at zero.
 - **Mean benchmark scores increased on seven of eight benchmarks** and were unchanged on AA-LCR. The increases were not statistically significant.
-- **Mean completion tokens fell on seven of eight benchmarks:** SciCode (−53.0%), AA-Omniscience (−15.6%), IFBench (−13.5%), AA-LCR (−1.6%), MMMU-Pro (−7.2%), Telecom (−22.5%), and MMLU-Pro (−2.1%). GPQA increased 14.1%.
+- **Mean completion tokens fell on seven of eight benchmarks:** SciCode (−53.0%), AA-Omniscience (−15.6%), IFBench (−13.5%), AA-LCR (−1.6%), MMMU-Pro (−7.2%), tau2-bench Telecom (−22.5%), and MMLU-Pro (−2.1%). GPQA increased 14.1%.
 - **Missing-final-answer counts fell on all seven single-response benchmarks:** SciCode, AA-Omniscience, GPQA Diamond, IFBench, AA-LCR, MMMU-Pro, and MMLU-Pro.
 
 ## Contents
@@ -23,7 +23,7 @@ Daniel Korzekwa · November 19, 2026
 
 In a doomed reasoning loop, the model repeats itself without progressing toward a final answer. The NVFP4 Qwen3.6-35B-A3B checkpoint can enter these loops after quantization-aware distillation (QAD), notably on SciCode and IFBench. The [parent tutorial’s output-length analysis](../README.md#output-length) describes the SciCode behavior. We use this checkpoint as our QAD baseline and fine-tune it with quantization-aware [Kahneman–Tversky Optimization](https://arxiv.org/abs/2402.01306) (QAKTO). Training encourages correct responses and discourages incorrect responses stuck in reasoning loops, aiming to reduce looping while preserving accuracy.
 
-Across the reported evaluations, cap-hit rates fell on seven of eight benchmarks, including 10.23% → 0% on the held-out error-prone SciCode subtasks. Mean benchmark scores increased on seven of eight benchmarks, without statistically significant gains or detected accuracy regressions. Mean completion tokens fell on seven of eight benchmarks, including SciCode (−53%) and Telecom (−22.5%), and missing-final-answer counts fell on all seven single-response benchmarks. See the [results](#experiments-and-results) for benchmark-level changes.
+Across the reported evaluations, cap-hit rates fell on seven of eight benchmarks, including 10.23% → 0% on the held-out error-prone SciCode subtasks. Mean benchmark scores increased on seven of eight benchmarks, without statistically significant gains or detected accuracy regressions. Mean completion tokens fell on seven of eight benchmarks, including SciCode (−53%) and tau2-bench Telecom (−22.5%), and missing-final-answer counts fell on all seven single-response benchmarks. See the [results](#experiments-and-results) for benchmark-level changes.
 
 ## Related work
 
@@ -82,8 +82,6 @@ The shared reference level *z* estimates the model’s overall likelihood shift 
 
 We evaluated two NVFP4 Qwen3.6-35B-A3B checkpoints: the QAD baseline and QAKTO. We compared accuracy, cap-hit rates, missing final answers, abstention, and completion token use.
 
-We run benchmarks and collect results using the [QAD tutorial’s evaluation setup and configs](../evaluation/README.md), with presence penalty zero for both models. We compare the models using the paired analysis described in [Evaluating Models Efficiently During Optimization Experiments](https://github.com/NVIDIA/Model-Optimizer/blob/c8559d2b4e547960db1713640d3d54bb9b7c8280/docs/source/announcements/evaluating_models_efficiently_during_optimization_experiments/index.rst).
-
 ### Evaluation data
 
 | Benchmark | Questions, subtasks, or tasks × repetitions | Responses or conversations per model |
@@ -95,7 +93,7 @@ We run benchmarks and collect results using the [QAD tutorial’s evaluation set
 | AA-LCR | 100 × 8 | 800 |
 | MMMU-Pro | 1,730 × 16 | 27,680 |
 | MMLU-Pro | 12,032 × 2 | 24,064 |
-| Telecom task success | 114 × 9 | 1,026 |
+| tau2-bench Telecom | 114 × 9 | 1,026 |
 
 ### Benchmark accuracy
 
@@ -110,7 +108,7 @@ We compare benchmark scores below; changes are QAKTO − QAD baseline, in percen
 | AA-LCR | 68.50% | 68.50% | 0.00 [−3.73, +3.73] | 0.500 | 0.500 |
 | MMMU-Pro | 73.76% | 73.87% | +0.12 [−0.28, +0.51] | 0.283 | 0.717 |
 | MMLU-Pro | 84.67% | 84.74% | +0.07 [−0.25, +0.38] | 0.339 | 0.661 |
-| Telecom task success | 94.83% | 95.42% | +0.58 [−1.12, +2.29] | 0.250 | 0.750 |
+| tau2-bench Telecom | 94.83% | 95.42% | +0.58 [−1.12, +2.29] | 0.250 | 0.750 |
 
 QAKTO’s mean scores were higher on seven benchmarks and unchanged on AA-LCR. The increases were not statistically significant.
 
@@ -127,7 +125,7 @@ The table reports one-sided non-inferiority p-values.
 | AA-LCR | 0.145 | 0.298 | 0.395 | 0.479 |
 | MMMU-Pro | <0.001 | <0.001 | 0.001 | 0.142 |
 | MMLU-Pro | <0.001 | <0.001 | <0.001 | 0.149 |
-| Telecom task success | 0.002 | 0.034 | 0.106 | 0.215 |
+| tau2-bench Telecom | 0.002 | 0.034 | 0.106 | 0.215 |
 
 At p < 0.05 per comparison, these exploratory tests rule out a 1 pp accuracy loss on seven of eight benchmarks. AA-LCR remains inconclusive at every tested margin.
 
@@ -135,7 +133,7 @@ At p < 0.05 per comparison, these exploratory tests rule out a 1 pp accuracy los
 
 #### Cap-hit rates
 
-A cap hit reaches the output-token limit; it screens for potential loops without confirming repetition. Rates count responses, except Telecom counts conversations with a capped agent turn.
+A cap hit reaches the output-token limit; it screens for potential loops without confirming repetition. Rates count responses, except tau2-bench Telecom counts conversations with a capped agent turn.
 
 | Benchmark | QAD baseline | QAKTO | Difference [95% CI], pp | QAKTO lower, p | QAKTO higher, p (context) |
 | --- | --- | --- | --- | --- | --- |
@@ -147,12 +145,12 @@ A cap hit reaches the output-token limit; it screens for potential loops without
 | AA-LCR | 0.00% (0/800) | 0.00% (0/800) | No observed events | 1.000 | 1.000 |
 | MMMU-Pro | 0.35% (98/27,680) | 0.10% (28/27,680) | −0.25 [−0.35, −0.16] | <0.001 | 1.000 |
 | MMLU-Pro | 0.058% (14/24,064) | 0.029% (7/24,064) | −0.029 [−0.066, +0.004] | 0.084 | 0.968 |
-| Telecom, NEL (Qwen-235B simulator) | 0.00% (0/1,026) | 0.00% (0/1,026) | No observed events | 1.000 | 1.000 |
-| Telecom, earlier evaluation (separate cohort) | 5.17% (53/1,026) | 1.07% (11/1,026) | −4.09 [−5.85, −2.44] | <0.001 | 1.000 |
+| tau2-bench Telecom, NEL (retries may hide cap hits) | 0.00% (0/1,026) | 0.00% (0/1,026) | No observed events | 1.000 | 1.000 |
+| tau2-bench Telecom, custom runner | 5.17% (53/1,026) | 1.07% (11/1,026) | −4.09 [−5.85, −2.44] | <0.001 | 1.000 |
 
 QAKTO had lower observed cap-hit rates on seven of eight benchmarks across the reported evaluations, with zero observed caps on SciCode.
 
-NEL can retry capped responses that lack a final answer or tool call and retain only the successful retry. The reported NEL Telecom cohort also had zero caps in raw request logs, so the difference from the earlier evaluation remains unresolved.
+For tau2-bench Telecom, NEL can retry capped responses that contain only reasoning and save only the successful retry, so saved conversations may omit capped attempts. The table also shows results from an earlier custom-runner evaluation that counts capped attempts instead of replacing them with successful retries.
 
 #### Missing final answers
 
@@ -189,24 +187,49 @@ The abstention rate among non-correct responses rose by 1.88 pp with QAKTO (p=0.
 | AA-LCR | 2,769 / 2,454 | 2,724 / 2,410 | −45 [−134, +44] | 0.158 | 0.842 |
 | MMMU-Pro | 8,903 / 5,358 | 8,259 / 4,897 | −643 [−770, −517] | <0.001 | 1.000 |
 | MMLU-Pro | 2,808 / 2,167 | 2,750 / 2,146 | −58 [−104, −11] | 0.008 | 0.992 |
-| Telecom task success | 5,218 / 4,736 | 4,044 / 3,725 | −1174 [−1344, −1004] | <0.001 | 1.000 |
+| tau2-bench Telecom | 5,218 / 4,736 | 4,044 / 3,725 | −1174 [−1344, −1004] | <0.001 | 1.000 |
 
-Mean completion tokens fell on seven of eight benchmarks, most on SciCode (53%) and Telecom (22.5%). GPQA increased by 14.1%.
+Mean completion tokens fell on seven of eight benchmarks, most on SciCode (53%) and tau2-bench Telecom (22.5%). GPQA increased by 14.1%.
 
 ## Reproducibility
 
-### Run evaluations with the existing configs
+### Training
 
-- Set presence penalty to zero for both models. Leave the optional SciCode penalty commented out and override Telecom’s `agent_args.presence_penalty` from 1.5 to 0.
-- Save all per-target scores, finish reasons, final-answer fields and token counts. The configs’ two-response log previews are insufficient for this analysis. Keep fresh generations separate from caches and exclude smokes.
+The run used a custom KTO loss and data adapters in NeMo RL’s Megatron preference-training loop. KTO uses a different loss function from DPO. The code and frozen 208-sequence corpus still need packaging. The checkpoint handoff must preserve the distributed layout and active quantization during training and reload. Export the reloaded QAKTO policy using the parent’s [NVFP4 export procedure](../README.md#4-export).
 
-The added [MMLU-Pro config](../evaluation/mmlu_pro.yaml) uses standard NEL data preparation and default prompting with two repetitions. The reported results used the experiment’s frozen five-shot prompts: the first five validation examples per subject, formatted as one user message requesting “the answer is (X)”. Runs using the standard config form a new evaluation cohort.
+#### Collect KTO training responses
+
+The experiment reused saved QAD-generated responses. To collect a new training set:
+
+1. Use the [44/11 subtask split](data/subtask_split.yaml). Collect responses only for the 44 training subtasks and reserve the other 11 for evaluation.
+2. Generate repeated responses with the QAD model and run the SciCode tests. Keep responses that pass as correct examples.
+3. Inspect unfinished responses and keep those that repeat without making progress as looping examples. A token-cap hit alone does not confirm a loop.
+4. Preserve each response’s original prompt, remove duplicates and keep examples within the 32,768-token training limit. Select 104 correct and 104 looping responses.
+
+#### Software used
+
+| Component | Recorded version |
+| --- | --- |
+| NeMo training container | `nvcr.io/nvidia/nemo:26.08.00` |
+| ModelOpt | `0.46.0rc1` |
+| Megatron Bridge | `0.6.0+c93251151` |
+| Megatron Core | `0.19.0+16ad357ee` |
+| NeMo RL | External source checkout; exact release or commit not recorded |
+
+The container was supplemented with external NeMo RL and ModelOpt sources. The exact NeMo RL revision still needs to be recovered for replay.
+
+### Evaluation
+
+We run benchmarks and collect results using the [QAD tutorial’s evaluation setup and configs](../evaluation/README.md), with presence penalty zero for both models. We compare the models using the paired analysis described in [Evaluating Models Efficiently During Optimization Experiments](https://github.com/NVIDIA/Model-Optimizer/blob/c8559d2b4e547960db1713640d3d54bb9b7c8280/docs/source/announcements/evaluating_models_efficiently_during_optimization_experiments/index.rst).
+
+Evaluation used NEL `0.2.6`, NeMo Evaluator `0.2.8` and the `vllm/vllm-openai:v0.28.0` serving container.
+
+- For tau2-bench Telecom, override `agent_args.presence_penalty` from 1.5 to 0 for both models.
 
 ### What still needs packaging
 
-- **Training:** the custom KTO loss and data adapters for NeMo RL’s Megatron preference-training loop, the 208-sequence training corpus and the 44/11 subtask split. Stock DPO does not implement this objective. Compatible framework revisions and a validated checkpoint handoff must preserve the distributed layout and active quantization during training and reload. Export the reloaded QAKTO policy using the parent’s [NVFP4 export procedure](../README.md#4-export).
 - **Checkpoints:** public download locations and content manifests for the evaluated iteration-500 QAD baseline and step-13 QAKTO export.
-- **Exact evaluation replay:** the frozen MMLU-Pro inputs and preparation adapter, serving and evaluator image pins, and immutable judge and simulator revisions. AA-LCR used a Qwen-235B judge and Telecom a Qwen-235B user simulator; AA-Omniscience used a different judge from the parent tutorial.
+- **Exact evaluation replay:** the frozen MMLU-Pro inputs and preparation adapter, serving and evaluator image pins, and immutable judge and simulator revisions. AA-LCR used a Qwen-235B judge and tau2-bench Telecom a Qwen-235B user simulator; AA-Omniscience used a different judge from the parent tutorial.
 
 ## Conclusions and Future work
 
