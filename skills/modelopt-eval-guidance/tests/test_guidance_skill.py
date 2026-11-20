@@ -139,10 +139,30 @@ def test_monitor_knows_both_tools():
     assert "run-and-babysit-eval" in monitor
 
 
-def test_recipe_search_no_longer_names_the_nel_skills_as_the_only_path():
+def test_recipe_search_names_both_tools_evaluation_skills():
     text = _text(_SKILLS / "modelopt-quant-recipe-search/SKILL.md")
-    assert "Use `modelopt-evaluation` to create NEL configs and submit evals." not in text
-    assert "evaluator role" in text
+    assert "Use `modelopt-evaluation` to create NEL configs and submit evals (NEL)." in text
+    assert "For NeMo Gym, use its evaluation skills" in text
+    assert "modelopt-eval-guidance" in text
+
+
+# General skills are used outside the Day 0 program, so they must reach the evaluation skills
+# directly and must not depend on the Day 0 subagent definitions.
+@pytest.mark.parametrize(
+    "name",
+    [
+        "modelopt-quant-recipe-search",
+        "modelopt-compare-results",
+        "modelopt-monitor",
+        "modelopt-eval-guidance",
+        "modelopt-day0-release",
+    ],
+)
+def test_general_skills_do_not_depend_on_the_day0_evaluator_role(name):
+    for path in sorted((_SKILLS / name).rglob("*.md")) + sorted((_SKILLS / name).rglob("*.json")):
+        if "tests" in path.parts:
+            continue
+        assert "evaluator role" not in _text(path).lower(), str(path.relative_to(_SKILLS))
 
 
 @pytest.mark.parametrize(
