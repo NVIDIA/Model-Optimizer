@@ -1,0 +1,15 @@
+# Recorded KTO experiment versions; this file does not install or configure the environment.
+training:
+  container: nvcr.io/nvidia/nemo:26.08.00
+  modelopt: 0.46.0rc1
+  megatron_bridge: 0.6.0+c93251151
+  megatron_core: 0.19.0+16ad357ee
+  nemo_rl:
+    source_image: nvcr.io/nvidia/nemo-rl:v0.7.0
+    package_version: 0.6.0+19244a094
+    # Source was extracted into the training container, preserving its Bridge/Core stack.
+    # Custom KTO loss, response processor and checkpoint/runtime compatibility helpers were added.
+evaluation:
+  nel: 0.2.6
+  nemo_evaluator: 0.2.8
+  serving_container: vllm/vllm-openai:v0.28.0
