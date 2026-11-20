@@ -3,7 +3,10 @@
 Evaluating Models Efficiently During Optimization Experiments
 #############################################################
 
-:Author: Daniel Korzekwa
+:Author: `Daniel Korzekwa <https://github.com/danielkorzekwa>`__,
+         `Rohan Joshi <https://github.com/rohansjoshi>`__,
+         `Chad Voegele <https://github.com/chadvoegele>`__,
+         `Chenjie Luo <https://github.com/cjluo-nv>`__
 :Date: November 18, 2026
 :Tags: evaluation, docs, quantization, qad, fast-experimentation
 

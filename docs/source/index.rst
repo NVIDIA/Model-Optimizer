@@ -34,7 +34,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
 
    <div class="announcement-grid" id="announcement-grid">
      <article class="announcement-card" data-date="2026-11-18" data-title="Evaluating Models Efficiently During Optimization Experiments" data-summary="Compare checkpoints during optimization experiments: choose metrics, check regressions and reliability, and balance question coverage with repeated runs." data-tags="evaluation docs quantization qad fast-experimentation">
-       <div class="announcement-card-meta">November 18, 2026 &middot; Daniel Korzekwa</div>
+       <div class="announcement-card-meta">November 18, 2026 &middot;
+         <a href="https://github.com/danielkorzekwa">Daniel Korzekwa</a>,
+         <a href="https://github.com/rohansjoshi">Rohan Joshi</a>,
+         <a href="https://github.com/chadvoegele">Chad Voegele</a>,
+         <a href="https://github.com/cjluo-nv">Chenjie Luo</a>
+       </div>
        <h2><a href="announcements/evaluating_models_efficiently_during_optimization_experiments/index.html">Evaluating Models Efficiently During Optimization Experiments</a></h2>
        <p>Compare checkpoints during optimization experiments: choose metrics, check regressions and reliability, and balance question coverage with repeated runs.</p>
        <div class="announcement-card-tags"><span>evaluation</span><span>docs</span><span>quantization</span><span>qad</span><span>fast-experimentation</span></div>
