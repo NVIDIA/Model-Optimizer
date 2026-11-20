@@ -93,11 +93,14 @@ def scaled_e4m3_impl(
     if cuda_ext_fp8 is None:
         return fp8_eager(inputs, amax)
 
-    if amax.numel() == 1:
-        outputs = cuda_ext_fp8.fake_e4m3fy(inputs, amax)
-    elif amax.squeeze().ndim == 1:
-        axis = amax.shape.index(amax.numel())
-        outputs = cuda_ext_fp8.fake_e4m3fy_with_axis(inputs, amax.squeeze(), axis)
+    # The extension launches on the current GPU, which need not hold ``inputs``: a layer a device_map
+    # placed on another GPU is calibrated from the caller's thread.
+    with torch.cuda.device(inputs.device):
+        if amax.numel() == 1:
+            outputs = cuda_ext_fp8.fake_e4m3fy(inputs, amax)
+        elif amax.squeeze().ndim == 1:
+            axis = amax.shape.index(amax.numel())
+            outputs = cuda_ext_fp8.fake_e4m3fy_with_axis(inputs, amax.squeeze(), axis)
     return outputs
 
 
