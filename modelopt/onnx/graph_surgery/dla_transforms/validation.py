@@ -28,10 +28,8 @@ def validate(model: onnx.ModelProto) -> None:
     if len(versions) != 1:
         raise ValueError("Require one unambiguous standard ONNX opset version")
     opset = versions.pop()
-    if opset not in (17, 18, 20, 21):
-        raise ValueError(
-            f"Unsupported ONNX opset {opset}; implement support beyond 17, 18, 20 and 21"
-        )
+    if not 17 <= opset <= 21:
+        raise ValueError(f"Unsupported ONNX opset {opset}; supported versions are 17 through 21")
     if model.functions or model.training_info or model.graph.sparse_initializer:
         raise ValueError("TODO: support local functions, training graphs and sparse initializers")
     if any(
