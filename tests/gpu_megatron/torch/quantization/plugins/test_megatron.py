@@ -18,7 +18,7 @@ import math
 import re
 import sys
 import types
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,6 +84,7 @@ from modelopt.torch.quantization.plugins.megatron import (
     _initialize_grouped_weight_quantizer_state,
     _output_layer_extra_state_has_data,
     _output_layer_untied,
+    _QuantMegatronMLP,
     _QuantMegatronTEGroupedLinear,
     _QuantTEMCoreRowParallelLinear,
     _resolve_output_layer_untied,
@@ -1727,30 +1728,52 @@ def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wr
     dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))
 
 
+FP8_PC = mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG
+
+
 def _swiglu_fc1_row_state(model):
-    """Each gated linear_fc1's per-row weight quantizer buffers, as ``[rows, -1]``."""
+    """Each gated linear_fc1's per-row weight quantizer buffers and LoRA B, as ``[rows, -1]``."""
     states = {}
     for name, module in model.named_modules():
         if name.endswith("mlp.linear_fc1"):
             rows = module.weight.shape[0]
-            for buffer_name, buffer in module.weight_quantizer.named_buffers():
-                if buffer.numel() > 1 and buffer.numel() % rows == 0:
-                    states[f"{name}.{buffer_name}"] = buffer.reshape(rows, -1)
+            tensors = dict(module.weight_quantizer.named_buffers(prefix="weight_quantizer"))
+            if hasattr(module, "lora_B"):
+                tensors["lora_B"] = module.lora_B
+            for tensor_name, tensor in tensors.items():
+                if tensor.numel() > 1 and tensor.numel() % rows == 0:
+                    states[f"{name}.{tensor_name}"] = tensor.detach().reshape(rows, -1)
     return states
 
 
+@contextmanager
+def _saving_like_modelopt_0_48(model):
+    """Save as ModelOpt 0.48 did: no layout mark, and only LoRA's B in Megatron's SwiGLU layout."""
+    for module in model.modules():
+        module._legacy_swiglu_quantizer_state = True
+    with patch.object(
+        _QuantMegatronMLP,
+        "_is_swiglu_state",
+        lambda self, key, sharded_tensor: re.match(r".*linear_fc1\.lora_B$", key) is not None,
+    ):
+        yield
+
+
 def _test_swiglu_weight_quantizer_tp_reshard(
-    tmp_path, config, legacy, compress, save_tp, load_tp, rank, size
+    tmp_path, config, legacy, compress, lora, save_tp, load_tp, rank, size
 ):
     initialize_for_megatron(tensor_model_parallel_size=save_tp, seed=SEED)
     source = _gpt_model_provider(tp_size=save_tp, hidden_size=512, activation_func="swiglu")
     mtq.quantize(source, copy.deepcopy(config), get_forward(source))
     if compress:
-        mtq.compress(source)
-    if legacy:
-        # Save as ModelOpt < 0.49 did: per-row state sharded like any column-parallel state.
-        for module in source.modules():
-            module._legacy_swiglu_quantizer_state = True
+        # Only linear_fc1: compressed linear_proj scales can't change TP size.
+        mtq.compress(source, {"compress": {"*": False, "*linear_fc1*": True}})
+    if lora:
+        mtq.enable_quant_lora(source, {"rank": 4})
+        with torch.no_grad():
+            for module in source.modules():
+                if hasattr(module, "lora_B"):
+                    module.lora_B.normal_()
     # Each per-row state of the whole linear_fc1, as all gate rows, then all up rows.
     expected = {}
     for name, state in _swiglu_fc1_row_state(source).items():
@@ -1760,8 +1783,9 @@ def _test_swiglu_weight_quantizer_tp_reshard(
     # FP8 per-tensor amax and scale have no rows; that case checks that saving keeps them replicated.
     per_row = config != mtq.FP8_DEFAULT_CFG
     assert expected or not per_row
-    save_distributed_checkpoint(tmp_path, source)
-    save_sharded_modelopt_state([source], tmp_path)
+    with _saving_like_modelopt_0_48(source) if legacy else nullcontext():
+        save_distributed_checkpoint(tmp_path, source)
+        save_sharded_modelopt_state([source], tmp_path)
     torch.distributed.barrier()
     del source
     destroy_model_parallel()
@@ -1790,26 +1814,21 @@ def _test_swiglu_weight_quantizer_tp_reshard(
 
 
 @pytest.mark.parametrize(
-    ("config", "legacy", "compress", "save_tp", "load_tp"),
+    ("config", "legacy", "compress", "lora", "save_tp", "load_tp"),
     [
-        pytest.param(mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG, False, False, 2, 1, id="fp8_per_channel"),
-        pytest.param(
-            mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG, True, False, 2, 1, id="fp8_per_channel-legacy"
-        ),
-        pytest.param(
-            mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG, True, False, 1, 2, id="fp8_per_channel-legacy-tp1to2"
-        ),
-        # Compressed checkpoints can't change TP size (linear_proj's scale), so these keep it.
-        pytest.param(
-            mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG, False, True, 2, 2, id="fp8_per_channel-compressed"
-        ),
-        pytest.param(mtq.FP8_DEFAULT_CFG, False, True, 2, 2, id="fp8_per_tensor-compressed"),
-        pytest.param(mtq.INT4_AWQ_CFG, False, False, 2, 1, id="int4_awq"),
-        pytest.param(mtq.W4A8_AWQ_BETA_CFG, True, False, 2, 1, id="w4a8_awq-legacy"),
+        pytest.param(FP8_PC, False, False, False, 2, 1, id="fp8_per_channel"),
+        pytest.param(FP8_PC, True, False, False, 2, 1, id="fp8_per_channel-legacy"),
+        pytest.param(FP8_PC, True, False, False, 1, 2, id="fp8_per_channel-legacy-tp1to2"),
+        pytest.param(FP8_PC, False, True, False, 2, 1, id="fp8_per_channel-compressed"),
+        pytest.param(FP8_PC, True, True, False, 2, 1, id="fp8_per_channel-compressed-legacy"),
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, True, False, 2, 1, id="fp8_per_tensor-compressed"),
+        pytest.param(mtq.INT4_AWQ_CFG, False, False, False, 2, 1, id="int4_awq"),
+        pytest.param(mtq.W4A8_AWQ_BETA_CFG, True, False, False, 2, 1, id="w4a8_awq-legacy"),
+        pytest.param(FP8_PC, True, False, True, 2, 2, id="fp8_per_channel-lora-legacy"),
     ],
 )
 def test_swiglu_weight_quantizer_tp_reshard(
-    dist_workers_size_2, tmp_path, config, legacy, compress, save_tp, load_tp
+    dist_workers_size_2, tmp_path, config, legacy, compress, lora, save_tp, load_tp
 ):
     """A gated linear_fc1's per-row weight quantizer state reloads at another TP size."""
     dist_workers_size_2.run(
@@ -1819,6 +1838,7 @@ def test_swiglu_weight_quantizer_tp_reshard(
             config,
             legacy,
             compress,
+            lora,
             save_tp,
             load_tp,
         )

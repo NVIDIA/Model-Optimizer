@@ -316,12 +316,16 @@ def quant_module_set_extra_state(self, state: Any):
                     continue
                 maybe_promote_nvfp4_static_quantizer(module, quantizer_substate)
                 module.set_from_modelopt_state(quantizer_substate, properties_only=False)
-        saved_numel = _weight_amax_numel(self)
+        saved_numels = _weight_quantizer_numels(self)
         self.modelopt_post_restore()
-        numel = _weight_amax_numel(self)
-        if self._legacy_swiglu_quantizer_state and saved_numel and numel and numel != saved_numel:
-            # Saved at another TP size: tp_size * numel // saved_numel ranks.
-            self._legacy_swiglu_tp_ratio = (numel, saved_numel)
+        if self._legacy_swiglu_quantizer_state:
+            # State saved at another TP size, by key: tp_size * numel // saved_numel ranks saved it.
+            numels = _weight_quantizer_numels(self)
+            self._legacy_swiglu_tp_ratios = {
+                name: (numels[name], saved)
+                for name, saved in saved_numels.items()
+                if numels.get(name, saved) != saved
+            }
 
     # Handle real_quantizer_state and q_tensor_state
     real_quant_module_set_extra_state(self, state)
@@ -608,10 +612,11 @@ class _MegatronParallelLinear(_ParallelLinear):
             name = k.split(prefix)[-1] if prefix else k
             state_dict[k] = state_dict[k].view_as(self.state_dict()[name])
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
-        if f"{prefix}weight" in state_dict:
-            # Loaded in this rank's layout, so the next save writes the current one.
+        # The restore's first load has only the extra state; once the tensors load they are in this
+        # rank's layout, so the next save writes the current one.
+        if any(k.startswith(prefix) and not k.endswith("_extra_state") for k in state_dict):
             self._legacy_swiglu_quantizer_state = False
-            self.__dict__.pop("_legacy_swiglu_tp_ratio", None)
+            self.__dict__.pop("_legacy_swiglu_tp_ratios", None)
 
 
 @QuantModuleRegistry.register(
@@ -704,8 +709,10 @@ class _QuantMegatronMLP(_MegatronMLP):
     ]
 
     def _is_swiglu_state(self, key, sharded_tensor) -> bool:
-        return self._is_swiglu_row_state(key, sharded_tensor) and not getattr(
-            self.linear_fc1, "_legacy_swiglu_quantizer_state", False
+        # Legacy checkpoints have only the quantizer state in the old layout (e.g. not LoRA's B).
+        return self._is_swiglu_row_state(key, sharded_tensor) and not (
+            "_quantizer." in key
+            and getattr(self.linear_fc1, "_legacy_swiglu_quantizer_state", False)
         )
 
     def _is_swiglu_row_state(self, key, sharded_tensor) -> bool:
@@ -720,21 +727,21 @@ class _QuantMegatronMLP(_MegatronMLP):
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
         # A legacy checkpoint saved at another TP size (see the TODO in quant_module_set_extra_state).
-        tp_ratio = getattr(self.linear_fc1, "_legacy_swiglu_tp_ratio", None)
-        if self.config.gated_linear_unit and tp_ratio is not None:
+        tp_ratios = getattr(self.linear_fc1, "_legacy_swiglu_tp_ratios", None)
+        if self.config.gated_linear_unit and tp_ratios:
             for k, v in sharded_state_dict.items():
-                if "linear_fc1" in k and self._is_swiglu_row_state(k, v):
-                    sharded_state_dict[k] = _legacy_swiglu_load_factory(v, *tp_ratio)
+                name = k.rpartition("linear_fc1.")[2]
+                if name in tp_ratios and self._is_swiglu_row_state(k, v):
+                    sharded_state_dict[k] = _legacy_swiglu_load_factory(v, *tp_ratios[name])
         return sharded_state_dict
 
 
-def _weight_amax_numel(module) -> int | None:
-    """Size of the first weight quantizer amax of ``module``, which scales with its TP shard."""
-    for quantizer in getattr(module, "weight_quantizer", torch.nn.Module()).modules():
-        amax = getattr(quantizer, "_amax", None) if isinstance(quantizer, TensorQuantizer) else None
-        if amax is not None:
-            return amax.numel()
-    return None
+def _weight_quantizer_numels(module) -> dict[str, int]:
+    """Size of each weight quantizer buffer of ``module``, by state-dict name."""
+    quantizer = getattr(module, "weight_quantizer", None)
+    if quantizer is None:
+        return {}
+    return {name: b.numel() for name, b in quantizer.named_buffers(prefix="weight_quantizer")}
 
 
 def _legacy_swiglu_load_factory(sharded_tensor, numel, saved_numel):
