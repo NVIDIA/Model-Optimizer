@@ -35,6 +35,7 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.masking_utils import create_causal_mask
 from transformers.models.nemotron_h import modeling_nemotron_h
 
+from modelopt.torch.models._onfly_decompress import CONVERSION_HOOK_LOCK
 from modelopt.torch.quantization.model_calib import (
     _needs_activation_forward_for_max_calib,
     _WeightInputHook,
@@ -293,29 +294,31 @@ def _puzzle_renames(config: dict):
         )
     global _puzzle_loads
     if not _puzzle_loads:
-        lookup = conversion_mapping.get_checkpoint_conversion_mapping
-        collect = modeling_utils.get_model_conversion_mapping
-        for module, name, patch in (
-            (conversion_mapping, "get_checkpoint_conversion_mapping", _scoped_lookup(lookup)),
-            (
-                modeling_utils,
-                "get_model_conversion_mapping",
-                _puzzle_model_mappings(collect, lookup),
-            ),
-        ):
-            _PUZZLE_PATCHES.append((module, name, getattr(module, name), patch))
-            setattr(module, name, patch)
+        with CONVERSION_HOOK_LOCK:
+            lookup = conversion_mapping.get_checkpoint_conversion_mapping
+            collect = modeling_utils.get_model_conversion_mapping
+            for module, name, patch in (
+                (conversion_mapping, "get_checkpoint_conversion_mapping", _scoped_lookup(lookup)),
+                (
+                    modeling_utils,
+                    "get_model_conversion_mapping",
+                    _puzzle_model_mappings(collect, lookup),
+                ),
+            ):
+                _PUZZLE_PATCHES.append((module, name, getattr(module, name), patch))
+                setattr(module, name, patch)
     _puzzle_loads += 1
     try:
         yield
     finally:
         _puzzle_loads -= 1
         if not _puzzle_loads:
-            for module, name, original, patch in reversed(_PUZZLE_PATCHES):
-                # A patch another hook wrapped stays in that hook's chain, passing through.
-                if getattr(module, name) is patch:
-                    setattr(module, name, original)
-            _PUZZLE_PATCHES.clear()
+            with CONVERSION_HOOK_LOCK:
+                for module, name, original, patch in reversed(_PUZZLE_PATCHES):
+                    # A patch another hook wrapped stays in that hook's chain, passing through.
+                    if getattr(module, name) is patch:
+                        setattr(module, name, original)
+                _PUZZLE_PATCHES.clear()
 
 
 @contextmanager

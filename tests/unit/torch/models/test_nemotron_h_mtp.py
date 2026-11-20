@@ -39,6 +39,7 @@ from transformers import (
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_activation_scaling_factor, postprocess_state_dict
 from modelopt.torch.export.unified_export_hf import _process_quantized_modules
+from modelopt.torch.models import _onfly_decompress as onfly
 from modelopt.torch.models import hf
 from modelopt.torch.models.nemotron_h import mtp as adapter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -743,6 +744,44 @@ def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch)
     other.join(timeout=60)
     assert reloaded, "the load after a hook wrapped the previous load's patch did not finish"
     assert loaded_source_tensors(reloaded[0]) == set(source.state_dict())
+
+    # A hook another installer publishes while the last load restores its patch stays and runs.
+    monkeypatch.setattr(modeling_utils, "get_model_conversion_mapping", stock[1])
+    calls, installers = [], []
+
+    def install_hook():
+        with onfly.CONVERSION_HOOK_LOCK:
+            inner = modeling_utils.get_model_conversion_mapping
+
+            def hook(*args, **kwargs):
+                calls.append(1)
+                return inner(*args, **kwargs)
+
+            modeling_utils.get_model_conversion_mapping = hook
+
+    class RacingModule:
+        """``modeling_utils``, where reading the patch back starts another installer."""
+
+        armed = False
+
+        def __getattr__(self, name):
+            value = getattr(modeling_utils, name)
+            if self.armed and name == "get_model_conversion_mapping":
+                type(self).armed = False
+                installers.append(threading.Thread(target=install_hook))
+                installers[-1].start()
+                installers[-1].join(timeout=1)  # until it publishes, or blocks on the lock
+            return value
+
+        def __setattr__(self, name, value):
+            setattr(modeling_utils, name, value)
+
+    monkeypatch.setattr(adapter, "modeling_utils", RacingModule())
+    with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
+        RacingModule.armed = True
+    installers[0].join(timeout=30)
+    omni_class.from_pretrained(tmp_path, config=config)
+    assert calls, "the restore dropped a hook published during it"
     # The checkpoint's code, not transformers' port of its Omni class, can hold a puzzle model.
     remote = type("Config", (PretrainedConfig,), {"__module__": "transformers_modules.bolt.cfg"})
     assert hf.prefers_bundled_code("nemotron_h_omni", remote(llm_config=llm_config), tmp_path, {})

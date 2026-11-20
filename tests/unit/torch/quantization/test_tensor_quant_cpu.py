@@ -772,16 +772,24 @@ def _sequential_weight_quantizer_flattened(model):
         )
 
 
+def _second_layer_shares_the_first(model):
+    model[1] = model[0]
+
+
 @pytest.mark.parametrize(
-    "replace",
+    ("replace", "sub_quantizer"),
     [
-        _sequential_weight_quantizer_in_context,
-        _sequential_weight_quantizer_in_submodule,
-        _sequential_weight_quantizer_flattened,
+        (_sequential_weight_quantizer_in_context, "weight_quantizer.1"),
+        (_sequential_weight_quantizer_in_submodule, "weight_quantizer.1"),
+        (_sequential_weight_quantizer_flattened, "weight_quantizer.1"),
+        # named_modules skips the shared layer's second name, so neither entry matches it.
+        (_second_layer_shares_the_first, "weight_quantizer"),
     ],
 )
-def test_set_quantizer_by_cfg_finds_named_quantizers_after_nested_replacement(replace):
-    """Named entries act as wildcards do after a calibrator built mid-call replaces a quantizer."""
+def test_set_quantizer_by_cfg_finds_named_quantizers_after_nested_replacement(
+    replace, sub_quantizer
+):
+    """Named entries act as wildcards do after a calibrator built mid-call changes the model."""
 
     def configured(weight_quantizer, sub_quantizer):
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
@@ -805,8 +813,8 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_nested_replacement(re
             if isinstance(module, TensorQuantizer)
         }
 
-    walked = configured("[0].weight_quantizer", "[1].weight_quantizer.1")
-    assert configured("0.weight_quantizer", "1.weight_quantizer.1") == walked
+    walked = configured("[0].weight_quantizer", f"[1].{sub_quantizer}")
+    assert configured("0.weight_quantizer", f"1.{sub_quantizer}") == walked
 
 
 @pytest.mark.parametrize(

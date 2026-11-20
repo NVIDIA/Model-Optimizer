@@ -296,6 +296,13 @@ def _registers_each_module_once(model: nn.Module) -> bool:
     return True
 
 
+def _check_still_unshared(model: nn.Module) -> None:
+    """Walk the whole model for the rest of the call if it now registers a module twice."""
+    unshared = _UNSHARED_MODELS.get()
+    if any(m is model for m in unshared) and not _registers_each_module_once(model):
+        _UNSHARED_MODELS.set(tuple(m for m in unshared if m is not model))
+
+
 def _with_subtree_walks(func):
     """Let a call's wildcard-free entries walk only the subtree that can hold their matches.
 
@@ -437,6 +444,12 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                     for c in cfg
                 ]
             set_quantizer_attributes_full(quant_model, quantizer_name, attributes, parent_class)
+            if any(
+                not isinstance(a.calibrator, str)
+                for a in (attributes if isinstance(attributes, list) else [attributes])
+            ):
+                # The caller's calibrator class ran for each match and may have shared a module.
+                _check_still_unshared(quant_model)
 
 
 _FUSED_EXPERTS_QUANTIZER_LIST_RE = re.compile(
