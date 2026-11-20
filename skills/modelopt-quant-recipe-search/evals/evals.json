@@ -15,15 +15,15 @@
     ]
   },
   {
-    "id": "recipe-search-delegates-evaluation-to-the-evaluator-role",
+    "id": "recipe-search-routes-evaluation-to-the-tool-in-use",
     "question": "Search quantization recipes for this model; evaluation is done with NeMo Gym. Plan the next candidate.",
     "expected_skill": "modelopt-quant-recipe-search",
     "expected_script": null,
-    "ground_truth": "Delegates evaluation to the evaluator role with the tool the task names, not to the NEL evaluation skills. Uses modelopt-monitor for active jobs and modelopt-compare-results for deltas. Does not tell the evaluator to create NEL configs when the task names NeMo Gym.",
+    "ground_truth": "Uses the Gym evaluation skills for the evaluation and does not send the evaluation through the NEL evaluation skills. Uses modelopt-monitor for active jobs and modelopt-compare-results for deltas. Does not create NEL configs when the evaluation is run with NeMo Gym, and uses modelopt-eval-guidance for the tool-neutral duties.",
     "expected_behavior": [
-      "Delegates evaluation to the evaluator role with the tool the task names, not to the NEL evaluation skills",
+      "Uses the Gym evaluation skills for the evaluation and does not send the evaluation through the NEL evaluation skills",
       "Uses modelopt-monitor for active jobs and modelopt-compare-results for deltas",
-      "Does not tell the evaluator to create NEL configs when the task names NeMo Gym"
+      "Does not create NEL configs when the evaluation is run with NeMo Gym, and uses modelopt-eval-guidance for the tool-neutral duties"
     ]
   }
 ]
