@@ -1,6 +1,6 @@
 # Using the ModelOpt Launcher for PTQ
 
-Read the common skill's `launcher.md` first: how to run the launcher on SLURM or local Docker, size the job, and find its outputs. This page adds the PTQ config.
+Read the `modelopt-launcher` skill first: how to run the launcher on SLURM or local Docker, size the job, and find its outputs. This page adds the PTQ config.
 
 ## HF Transformers PTQ Config
 
@@ -23,7 +23,7 @@ pipeline:
       gpus_per_node: <num_gpus>
 ```
 
-Set `gpus_per_node` as the common `launcher.md` describes: many clusters accept only full nodes.
+Set `gpus_per_node` as the `modelopt-launcher` skill describes: many clusters accept only full nodes.
 
 > **`EXTRA_PIP_DEPS` must avoid shell metacharacters.** It is written into an
 > unquoted `export` in the generated sbatch script, so a value like
@@ -51,7 +51,7 @@ Extra `hf_ptq.py` flags can be passed via `args`:
 find tools/launcher/local_experiments -name "config.json" -path "*/exported_model/*" 2>/dev/null
 ```
 
-**Remote SLURM** — the checkpoint is on the remote machine, under the experiment's folder (see the common `launcher.md`).
+**Remote SLURM** — the checkpoint is on the remote machine, under the experiment's folder (see the `modelopt-launcher` skill).
 
 ## Known Issues
 

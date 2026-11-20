@@ -202,7 +202,7 @@ Report the gate result before moving on. Follow the canonical report format and 
 | --- | --- |
 | common skill: `environment-setup.md` | Step 1: always |
 | common skill: `workspace-management.md` | Step 1: always |
-| common skill: `launcher.md` | Step 4B only (launcher path) |
+| `modelopt-launcher` skill | Step 4B only (launcher path) |
 | `references/launcher-guide.md` | Step 4B only (launcher path) |
 | `tools/launcher/CLAUDE.md` | Step 4B only, if you need more launcher detail |
 | `references/unsupported-models.md` | Step 4C only (unlisted model) |

@@ -1,6 +1,11 @@
-# Running Jobs with the ModelOpt Launcher
+---
+name: modelopt-launcher
+description: Run a ModelOpt launcher pipeline YAML (tools/launcher/launch.py) on SLURM or local Docker. Covers preview, the SLURM_* env vars, mapping clusters.yaml to launcher args, sizing the job, and finding its outputs. Use when submitting or previewing a launcher job, or when another ModelOpt skill sends you here. Do NOT use to write a workflow's task config (use that workflow's skill, e.g. modelopt-ptq) or to monitor a submitted job (use modelopt-monitor).
+---
 
-The launcher (`tools/launcher/`) runs a pipeline YAML on SLURM or in local Docker. Read `tools/launcher/CLAUDE.md` for the YAML format and full docs; the calling skill covers its own task config.
+# ModelOpt Launcher
+
+The launcher (`tools/launcher/`) runs a pipeline YAML on SLURM or in local Docker. Read `tools/launcher/CLAUDE.md` for the YAML format and full docs; the workflow skill that sent you here covers its own task config.
 
 ## Quick Start
 
@@ -57,7 +62,7 @@ A task's `/scratchspace` is its experiment's folder on the host, `<job_dir>/cicd
 
 **Local Docker** — `<job_dir>` is `tools/launcher/local_experiments` on the local host.
 
-**Remote SLURM** — `<job_dir>` is `SLURM_JOB_DIR` (default `~/experiments`) on the remote host. Use `remote_run "find ..."` (see `remote-execution.md`) or check the job log for the path.
+**Remote SLURM** — `<job_dir>` is `SLURM_JOB_DIR` (default `~/experiments`) on the remote host. Use `remote_run "find ..."` (see the common skill's `remote-execution.md`) or check the job log for the path.
 
 ## Known Issues
 
