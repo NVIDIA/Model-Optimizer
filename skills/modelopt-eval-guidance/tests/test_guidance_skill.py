@@ -127,9 +127,55 @@ def test_nel_files_keep_the_rules_nel_runs_rely_on():
         assert (nel / "references" / name).is_file()
 
 
-def test_evaluator_role_still_routes_nel_to_its_own_steps():
+def test_evaluator_role_defaults_to_nel_and_points_at_the_skills():
     role = _text(_ROOT / ".claude/agents/modelopt-model-evaluator.md")
-    assert "for NEL, follow those steps" in role
+    assert "NEL, the default" in role
+    for pointer in (
+        "modelopt-eval-guidance/SKILL.md",
+        "modelopt-compare-results/SKILL.md",
+        "common/workspace-management.md",
+    ):
+        assert pointer in role
+
+
+# Logic belongs in the skills, so any user of the skills gets it; the subagent files carry only the
+# scope, the pointers and the handoff contract. These phrases moved from the evaluator role into the guidance.
+_MOVED_FROM_THE_ROLE = [
+    "retained PTQ smoke server",
+    "Never report scores from an incomplete or invalid run",
+    "export of the results to MLflow",
+    "serving record",
+    "tool-managed deployments",
+]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        _ROOT / ".claude/agents/modelopt-model-evaluator.md",
+        _ROOT / ".codex/agents/modelopt_model_evaluator.toml",
+    ],
+    ids=lambda p: p.name,
+)
+def test_evaluator_role_holds_no_evaluation_logic(path):
+    role = _text(path).lower()
+    for phrase in _MOVED_FROM_THE_ROLE:
+        assert phrase.lower() not in role, f"{path.name} still carries: {phrase}"
+    assert len(role.split()) < 220, "the evaluator role is growing again; put the logic in a skill"
+
+
+def test_the_moved_rules_are_in_the_guidance():
+    guidance = _text(_GUIDANCE / "SKILL.md").lower()
+    for phrase in _MOVED_FROM_THE_ROLE:
+        assert phrase.lower() in guidance, phrase
+
+
+@pytest.mark.parametrize(
+    "path", sorted((_ROOT / ".claude/agents").glob("*.md")), ids=lambda p: p.name
+)
+def test_no_subagent_file_is_a_workflow(path):
+    body = _text(path).split("---", 2)[2]
+    assert len(body.split()) < 260, f"{path.name}: move workflow text into a skill"
 
 
 def test_monitor_knows_both_tools():

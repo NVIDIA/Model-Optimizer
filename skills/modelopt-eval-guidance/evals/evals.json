@@ -69,5 +69,31 @@
       "Uses identical values for baseline and candidate and reports scores as detector-on",
       "Says how the field reaches the server depends on the tool and does not claim a Gym placement it has not verified"
     ]
+  },
+  {
+    "name": "retained-smoke-server-is-not-an-evaluation-endpoint",
+    "skills": [
+      "modelopt-eval-guidance"
+    ],
+    "query": "My PTQ smoke server from the last step is still up. Just evaluate the checkpoint against it with the evaluation tool.",
+    "files": [],
+    "expected_behavior": [
+      "Evaluates through the tool's own managed deployment and does not use the retained smoke server",
+      "Says a retained PTQ smoke server is not authorization to evaluate, and uses an external endpoint only if the user explicitly asks",
+      "Writes the serving record (modelopt-deployment step 5c) when the tool needs a deployment from the caller"
+    ]
+  },
+  {
+    "name": "no-scores-from-an-incomplete-run-and-mlflow-export-is-verified",
+    "skills": [
+      "modelopt-eval-guidance"
+    ],
+    "query": "The evaluation job finished but two of the eight repeats never scored. Report the accuracy.",
+    "files": [],
+    "expected_behavior": [
+      "Does not report a score from the incomplete run and labels it incomplete with the findings",
+      "Does not resubmit the completed run on its own, and returns a recommendation to the parent or user",
+      "Configures the tool's MLflow export, verifies the run arrived, and says in the handoff whether it did"
+    ]
   }
 ]
