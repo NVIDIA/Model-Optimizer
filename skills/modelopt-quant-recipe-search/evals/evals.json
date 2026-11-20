@@ -13,5 +13,17 @@
       "Names future PTQ, evaluation, and comparison skill handoffs, using modelopt-ptq, modelopt-evaluation, and modelopt-compare-results or unambiguous aliases, without executing those workflows.",
       "Returns an outline rather than an implementation protocol, omitting size calculations and fabricated measurements; performs no model download, checkpoint generation, job submission, evaluation execution, or QAD."
     ]
+  },
+  {
+    "id": "recipe-search-delegates-evaluation-to-the-evaluator-role",
+    "question": "Search quantization recipes for this model; evaluation is done with NeMo Gym. Plan the next candidate.",
+    "expected_skill": "modelopt-quant-recipe-search",
+    "expected_script": null,
+    "ground_truth": "Delegates evaluation to the evaluator role with the tool the task names, not to the NEL evaluation skills. Uses modelopt-monitor for active jobs and modelopt-compare-results for deltas. Does not tell the evaluator to create NEL configs when the task names NeMo Gym.",
+    "expected_behavior": [
+      "Delegates evaluation to the evaluator role with the tool the task names, not to the NEL evaluation skills",
+      "Uses modelopt-monitor for active jobs and modelopt-compare-results for deltas",
+      "Does not tell the evaluator to create NEL configs when the task names NeMo Gym"
+    ]
   }
 ]

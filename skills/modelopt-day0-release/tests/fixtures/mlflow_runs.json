@@ -1,0 +1,121 @@
+{
+ "_note": "Trimmed copies of real runs in the shared MLflow experiment, read on 2026-11-20: tags, status and only the token and sample-count metrics.",
+ "artifacts": {
+  "nel_gpqa_simple_evals": {
+   "simple_evals.gpqa_diamond_aa_v3/artifacts/eval_factory_metrics.json": {
+    "response_stats": {
+     "avg_completion_tokens": 11740.0,
+     "successful_count": 10
+    }
+   }
+  }
+ },
+ "runs": {
+  "gym_gpqa_bf16": {
+   "metrics": {
+    "coverage/expected": 1584.0,
+    "coverage/scored": 1584.0,
+    "gpqa_mcqa_simple_agent/ci_high_95_across_repeats/mean/output_tokens": 15918.333438108031,
+    "gpqa_mcqa_simple_agent/ci_low_95_across_repeats/mean/output_tokens": 14780.113531588937,
+    "gpqa_mcqa_simple_agent/max_across_repeats/mean/output_tokens": 16109.126262626263,
+    "gpqa_mcqa_simple_agent/mean/output_tokens": 15349.223484848484,
+    "gpqa_mcqa_simple_agent/mean_across_repeats/mean/output_tokens": 15349.223484848484,
+    "gpqa_mcqa_simple_agent/median_across_repeats/mean/output_tokens": 15500.527777777777,
+    "gpqa_mcqa_simple_agent/min_across_repeats/mean/output_tokens": 14306.070707070707,
+    "gpqa_mcqa_simple_agent/se_across_repeats/mean/output_tokens": 240.67669646718787,
+    "gpqa_mcqa_simple_agent/std_across_repeats/mean/output_tokens": 680.7364965820998
+   },
+   "run_id": "0e4e432caf6e48a38f763986aca1880e",
+   "status": "FINISHED",
+   "tags": {
+    "precision": "bf16",
+    "requested_task": "gpqa_diamond_aa_v3",
+    "stage": "gate"
+   }
+  },
+  "gym_ifbench_bf16": {
+   "metrics": {
+    "coverage/expected": 2400.0,
+    "coverage/scored": 2400.0,
+    "ifbench_benchmark_simple_agent/ci_high_95_across_repeats/mean/output_tokens": 8396.319272609891,
+    "ifbench_benchmark_simple_agent/ci_low_95_across_repeats/mean/output_tokens": 7890.379894056774,
+    "ifbench_benchmark_simple_agent/max_across_repeats/mean/output_tokens": 8599.383333333333,
+    "ifbench_benchmark_simple_agent/mean/output_tokens": 8143.349583333334,
+    "ifbench_benchmark_simple_agent/mean_across_repeats/mean/output_tokens": 8143.349583333333,
+    "ifbench_benchmark_simple_agent/median_across_repeats/mean/output_tokens": 8082.9366666666665,
+    "ifbench_benchmark_simple_agent/min_across_repeats/mean/output_tokens": 7811.263333333333,
+    "ifbench_benchmark_simple_agent/se_across_repeats/mean/output_tokens": 106.98092481550131,
+    "ifbench_benchmark_simple_agent/std_across_repeats/mean/output_tokens": 302.58774957859674,
+    "key_metrics/ifbench_benchmark_simple_agent/mean/output_tokens": 8143.349583333334
+   },
+   "run_id": "9404f8c96fea431981fcb3c11871bf5f",
+   "status": "FINISHED",
+   "tags": {
+    "precision": "bf16",
+    "requested_task": "ns_ifbench",
+    "stage": "gate"
+   }
+  },
+  "gym_ifbench_nvfp4": {
+   "metrics": {
+    "coverage/expected": 2400.0,
+    "coverage/scored": 2400.0,
+    "ifbench_benchmark_simple_agent/ci_high_95_across_repeats/mean/output_tokens": 9541.882661434165,
+    "ifbench_benchmark_simple_agent/ci_low_95_across_repeats/mean/output_tokens": 8606.183171899169,
+    "ifbench_benchmark_simple_agent/max_across_repeats/mean/output_tokens": 9917.973333333333,
+    "ifbench_benchmark_simple_agent/mean/output_tokens": 9074.032916666667,
+    "ifbench_benchmark_simple_agent/mean_across_repeats/mean/output_tokens": 9074.032916666667,
+    "ifbench_benchmark_simple_agent/median_across_repeats/mean/output_tokens": 8911.45,
+    "ifbench_benchmark_simple_agent/min_across_repeats/mean/output_tokens": 8385.433333333332,
+    "ifbench_benchmark_simple_agent/se_across_repeats/mean/output_tokens": 197.85373699536413,
+    "ifbench_benchmark_simple_agent/std_across_repeats/mean/output_tokens": 559.6148764500867,
+    "key_metrics/ifbench_benchmark_simple_agent/mean/output_tokens": 9074.032916666667
+   },
+   "run_id": "4dbc1401704c4b6a95c1d8d80c57dc71",
+   "status": "FINISHED",
+   "tags": {
+    "precision": "nvfp4",
+    "requested_task": "ns_ifbench",
+    "stage": "gate"
+   }
+  },
+  "nel_failed_terminalbench": {
+   "metrics": {},
+   "run_id": "84f739038c2f4d45955ec276ff9205d9",
+   "status": "FAILED",
+   "tags": {
+    "task_name": "terminal-bench-2.1"
+   }
+  },
+  "nel_gpqa_simple_evals": {
+   "metrics": {},
+   "run_id": "1ff9c399a96046fea0b15dd53b778520",
+   "status": "FINISHED",
+   "tags": {
+    "benchmark": "gpqa_diamond_aa_v3",
+    "harness": "simple_evals",
+    "task_name": "gpqa_diamond_aa_v3"
+   }
+  },
+  "nel_ifbench": {
+   "metrics": {
+    "ifbench_pass_at_1_avg-of-2_answer_tokens_statistics_avg": 8839.728333333333,
+    "ifbench_pass_at_1_avg-of-2_num_prompts": 300.0,
+    "ifbench_pass_at_1_avg-of-3_answer_tokens_statistics_avg": 8692.933333333332,
+    "ifbench_pass_at_1_avg-of-3_num_prompts": 300.0,
+    "ifbench_pass_at_1_avg-of-4_answer_tokens_statistics_avg": 8741.085,
+    "ifbench_pass_at_1_avg-of-4_num_prompts": 300.0,
+    "ifbench_pass_at_1_avg-of-5_answer_tokens_statistics_avg": 8765.178,
+    "ifbench_pass_at_1_avg-of-5_num_prompts": 300.0
+   },
+   "run_id": "670a2c2d67364a9fa58e83f8907a26b0",
+   "status": "FINISHED",
+   "tags": {
+    "benchmark": "ns_ifbench",
+    "harness": "nemo_skills",
+    "precision": "NVFP4-W4A4-gate-up-only",
+    "task_name": "ns_ifbench"
+   }
+  }
+ }
+}

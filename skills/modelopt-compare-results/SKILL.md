@@ -24,7 +24,9 @@ change is being measured, typically a further quantized version of the baseline.
    quantization flags.
 3. Fetch the baseline and candidate task list, configs, score artifacts, and
    logs. If the user provides MLflow runs or invocation IDs, use the
-   accessing-mlflow skill to fetch configs and artifacts.
+   accessing-mlflow skill to fetch configs and artifacts (NEL conventions); for runs
+   of either tool, `modelopt-eval-guidance` (`references/run-validity.md`, "Reading
+   results from MLflow") lists the metrics and tags to use.
 4. Confirm each run passed the run-validity checks in `modelopt-eval-guidance`
    (`references/run-validity.md`). For NEL runs also apply evaluation Step 9, "Verify
    completed evaluation run", and the NEL policy in `modelopt-evaluation/references/run-validation.md`,

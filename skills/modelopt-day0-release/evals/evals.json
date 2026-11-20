@@ -114,5 +114,29 @@
       "Requires independent confirmation under a fresh declared plan or a justified sequential/selection-aware method before confidence-based ACCEPT",
       "Keeps the release INDETERMINATE and do-not-publish without that evidence"
     ]
+  },
+  {
+    "id": "verbosity-gate-from-mlflow-run-ids",
+    "question": "The baseline and quantized evaluations ran with NeMo Gym and exported to MLflow. Run the verbosity gate.",
+    "expected_skill": "modelopt-day0-release",
+    "expected_script": null,
+    "ground_truth": "Runs gate_verbosity.py with --baseline-mlflow and --candidate-mlflow run-id files and a tracking URI instead of pointing it at NEL result directories. Treats the gate as mandatory and independent of accuracy. Reports the runs the gate did not use and the reasons (non-FINISHED status, no token metric) from harvest_diagnostics.runs_not_used.",
+    "expected_behavior": [
+      "Runs gate_verbosity.py with --baseline-mlflow and --candidate-mlflow run-id files and a tracking URI instead of pointing it at NEL result directories",
+      "Treats the gate as mandatory and independent of accuracy",
+      "Reports the runs the gate did not use and the reasons (non-FINISHED status, no token metric) from harvest_diagnostics.runs_not_used"
+    ]
+  },
+  {
+    "id": "unverified-run-is-not-a-pass",
+    "question": "gate_run reports EVAL_UNVERIFIED for the baseline. Can I proceed to the comparison?",
+    "expected_skill": "modelopt-day0-release",
+    "expected_script": null,
+    "ground_truth": "Does not proceed: the score is unverified and is not compared. Follows the evaluation tool's recovery guidance before re-gating. Never fabricates or regrades a score to clear the gate.",
+    "expected_behavior": [
+      "Does not proceed: the score is unverified and is not compared",
+      "Follows the evaluation tool's recovery guidance before re-gating",
+      "Never fabricates or regrades a score to clear the gate"
+    ]
   }
 ]
