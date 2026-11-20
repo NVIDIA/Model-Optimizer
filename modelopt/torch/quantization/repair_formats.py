@@ -17,10 +17,14 @@
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor
+
+from modelopt.torch.utils import same_device_as
 
 from .ggml.common import pin_packed_weight, pinned_importance
 from .ggml.registry import IQ_FORMAT_REGISTRY
 from .ggml.scale_fields import decode_scale_fields, replace_scale_fields
+from .nn.modules.tensor_quantizer import TensorQuantizer
 
 __all__: list[str] = []
 
@@ -38,6 +42,16 @@ def _relative_scale(base, delta):
     scale = base * delta.exp() + floor * delta.expm1()
     # Preserve the recovery derivative at zero across PyTorch clamp conventions.
     return torch.where(scale < 0, 0, scale)
+
+
+def _project_scale_fields(global_base, global_delta, global_sign, local_base, local_delta, spec):
+    magnitude = _relative_scale(global_base, global_delta)
+    global_scale = _ste(magnitude, magnitude.clamp_max(65504).half().float()) * global_sign
+    if local_delta is None:
+        return global_scale, None
+    basis = local_base * local_delta.clamp(-20, 20).exp()
+    shadow = (basis - spec.local_bias) / spec.local_multiplier
+    return global_scale, _ste(shadow, shadow.round().clamp(spec.local_min, spec.local_max))
 
 
 class _ReplayScales(torch.autograd.Function):
@@ -123,6 +137,69 @@ def repair_linear(quantizer, inputs, bias=None):
     ):
         return None
     return state.linear(inputs, bias)
+
+
+def repair_grouped_weight(weight, quantizers):
+    """Materialize a homogeneous native IQ bank without per-expert scale graphs."""
+    if (
+        not weight.is_cuda
+        or isinstance(weight, DTensor)
+        or weight.ndim != 3
+        or not quantizers
+        or len(quantizers) != weight.shape[0]
+    ):
+        return None
+    states = []
+    for quantizer in quantizers:
+        state = getattr(quantizer, "_local_repair_state", None)
+        if (
+            type(quantizer) is not TensorQuantizer
+            or type(state) is not IQScaleState
+            or not getattr(quantizer, "_local_repair_active", False)
+            or not _plain_repair_quantizer(quantizer)
+            or quantizer.pre_quant_scale is not None
+            or quantizer.rotate_is_enabled
+            or state.weight_shape != tuple(weight.shape[1:])
+            or state.codec_shape != state.weight_shape
+        ):
+            return None
+        values = [state.packed, state.global_base, state.global_sign, state.global_delta]
+        if state.local_delta is not None:
+            values.extend([state.local_base, state.local_delta])
+        if any(isinstance(value, DTensor) or value.device != weight.device for value in values):
+            return None
+        states.append(state)
+    first = states[0]
+    if any(state.name != first.name for state in states):
+        return None
+    spec = first.format.scale_spec
+    assert spec is not None
+    kernels = _native_scale_kernels(weight)
+    if kernels is None or first.name not in kernels.SUPPORTED_FORMATS:
+        return None
+
+    def combine(name):
+        return torch.cat([getattr(state, name) for state in states])
+
+    with same_device_as(weight):
+        # Keep only per-forward tensors: offloaded owners must not retain a decoded expert bank.
+        with torch.no_grad():
+            levels = kernels.decode_iq_levels(combine("packed"), first.name, weight.shape)
+        global_scale, local = _project_scale_fields(
+            combine("global_base"),
+            combine("global_delta"),
+            combine("global_sign"),
+            None if first.local_base is None else combine("local_base"),
+            None if first.local_delta is None else combine("local_delta"),
+            spec,
+        )
+        steps = global_scale[:, None]
+        if local is not None:
+            steps = steps * (spec.local_multiplier * local + spec.local_bias) / spec.divisor
+        first.projection_counts["materialized_grouped"] = (
+            first.projection_counts.get("materialized_grouped", 0) + 1
+        )
+        return kernels.apply_block_scales(levels, steps, weight.dtype).reshape(weight.shape)
 
 
 def repair_grouped_linear(quantizers, inputs, offsets, bias=None, *, is_transposed=False):
@@ -238,13 +315,14 @@ class IQScaleState(nn.Module):
 
     def scales(self):
         """Project global and local fields with straight-through native rounding."""
-        magnitude = _relative_scale(self.global_base, self.global_delta)
-        global_scale = _ste(magnitude, magnitude.clamp_max(65504).half().float()) * self.global_sign
-        if self.local_delta is None:
-            return global_scale, None
-        basis = self.local_base * self.local_delta.clamp(-20, 20).exp()
-        shadow = (basis - self.local_bias) / self.local_multiplier
-        return global_scale, _ste(shadow, shadow.round().clamp(self.local_min, self.local_max))
+        return _project_scale_fields(
+            self.global_base,
+            self.global_delta,
+            self.global_sign,
+            self.local_base,
+            self.local_delta,
+            self.format.scale_spec,
+        )
 
     def projected_steps(self):
         """Compose the codec's native hierarchical scale geometry."""
