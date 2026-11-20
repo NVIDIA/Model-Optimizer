@@ -1195,6 +1195,37 @@ def test_auto_quantize_prices_per_weight_modules_left_unquantized_as_bf16():
     assert len(set(stats["costs"])) == 1 and stats["costs"][0] == stats["uncompressed_cost"]
 
 
+def test_kl_search_prefers_a_real_format_over_a_nominally_cheaper_no_op():
+    # Nominally 4-bit, but its full-path glob leaves the experts BF16: it costs as much as none.
+    experts_int4 = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*.experts.*weight_quantizer",
+                "cfg": {"num_bits": 4, "block_sizes": {-1: 16}},
+            },
+        ],
+        "algorithm": "max",
+    }
+    QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)
+    try:
+        model = _BmmExpertsModel()
+        _, search_state = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=[(experts_int4, "experts_int4"), mtq.INT8_DEFAULT_CFG],
+            data_loader=[torch.randn(2, 4, 16) for _ in range(2)],
+            forward_step=lambda model, batch: model(batch),
+            num_calib_steps=2,
+            num_score_steps=2,
+            method="kl_div",
+        )
+    finally:
+        QuantModuleRegistry.unregister(_BmmExperts)
+    assert str(search_state["best"]["recipe"]["experts.quant_recipe"]).startswith("INT8")
+    assert search_state["best"]["is_satisfied"]
+
+
 def test_uniform_sequential_weight_formats_are_one_format():
     # A W4A8-style weight quantizer is sequential; alike on every weight, it is one format.
     def w4a8():

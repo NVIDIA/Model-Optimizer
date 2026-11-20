@@ -209,7 +209,7 @@ class _AumannShapleyScoringSession(_AutoQuantizeCandidateReplayScoringSession):
             self.score_tokens += int(ref_logprob.numel() // ref_logprob.shape[-1])
             del ref_logits
 
-            self._set_all_hparams(lambda hparam: hparam.choices[0])
+            self._set_all_hparams(lambda hparam: hparam.ladder[0])
             try:
                 corner_logits = self.forward_step(model, data)
                 corner_loss = _get_kl_div_loss(ref_logprob, corner_logits, self.lm_head).detach()

@@ -29,7 +29,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.opt.searcher import is_directory_checkpoint
-from modelopt.torch.quantization.algorithms import AUTO_QUANTIZE_SEARCHERS
+from modelopt.torch.quantization.algorithms import AUTO_QUANTIZE_SEARCHERS, _has_per_weight_modules
 from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
 from modelopt.torch.quantization.model_quant import _process_search_space
 from modelopt.torch.utils import distributed as dist
@@ -447,7 +447,7 @@ def _check_auto_quantize_shard_args(
 
 
 def _auto_quantize_finalize_config(
-    recipe: ModelOptAutoQuantizeRecipe, args: argparse.Namespace
+    recipe: ModelOptAutoQuantizeRecipe, args: argparse.Namespace, model: torch.nn.Module
 ) -> dict | None:
     """The frozen quantize config to calibrate the source weights with, once the scores are saved.
 
@@ -490,8 +490,9 @@ def _auto_quantize_finalize_config(
     search_state = _scored_auto_quantize_state(checkpoint)
     if search_state is None:
         return None
-    if search_state.get("cost_version") is None:
-        # Saved before AutoQuantize searched per-weight experts and counted non-gated up_proj.
+    if search_state.get("cost_version") is None and _has_per_weight_modules(model):
+        # Saved before AutoQuantize searched this model's per-weight experts, so its search
+        # groups omit them; stale non-gated expert costs are refused when re-solving.
         raise ValueError(
             f"{checkpoint} predates per-weight AutoQuantize. Rerun this command once without "
             "auto_quantize.finalize_algorithm on the same checkpoint: it refreshes the costs, or "

@@ -56,7 +56,13 @@ from .config import LayerwiseConfig, QuantizeConfig, QuantizerAttributeConfig, Q
 from .conversion import set_quantizer_by_cfg
 from .ggml import GGML_FORMAT_REGISTRY
 from .ggml.common import PIN_OVERRIDES_WEIGHT, drop_search_scales
-from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn import (
+    QuantLinearConvBase,
+    QuantModule,
+    QuantModuleRegistry,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from .utils import is_quantized_linear, quantizer_attr_names, weight_attr_names
 
 
@@ -248,6 +254,17 @@ def _refuse_stale_costs(search_state: dict) -> None:
                 "costs; resume the search with the model once (without a finalize step) to "
                 "refresh them, or search again."
             )
+
+
+def _has_per_weight_modules(model: nn.Module) -> bool:
+    """Whether a module of ``model`` converts to one opted into per-weight AutoQuantize search."""
+    return any(
+        getattr(
+            QuantModuleRegistry.get(type(module)), "_auto_quantize_per_weight_quantizers", False
+        )
+        or getattr(module, "_auto_quantize_per_weight_quantizers", False)
+        for module in model.modules()
+    )
 
 
 def _check_uniform_weight_format(recipe: "QuantRecipe", quantizers: dict[str, nn.Module]) -> None:
@@ -663,6 +680,7 @@ class QuantRecipeHparam(Hparam):
         self.is_fixed = fixed_recipe is not None
         # A format shard scores only its own formats; None scores every choice.
         self._scored_recipes: set | None = None
+        self._ladder: list[QuantRecipe] | None = None
 
         # Module hashes depend on object identity, so sets can produce different orders per rank.
         self.quant_modules = list(dict.fromkeys(quant_modules or []))
@@ -780,6 +798,19 @@ class QuantRecipeHparam(Hparam):
             if self._scored_recipes is None or recipe in self._scored_recipes:
                 recipes.append(recipe)
         return recipes
+
+    @property
+    def ladder(self) -> list[QuantRecipe]:
+        """Choices from the lowest to the highest resolved cost, stable over nominal order.
+
+        A candidate that leaves a per-weight module BF16 costs as much as no quantization, whatever
+        its nominal compression. Computed once, at the same point on every rank, since the cost
+        reduces over the module's process groups.
+        """
+        if self._ladder is None:
+            choices = [recipe for recipe in self.choices if isinstance(recipe, QuantRecipe)]
+            self._ladder = sorted(choices, key=self.get_cost)
+        return self._ladder
 
     @property
     def solver_choices(self) -> list[QuantRecipe]:
@@ -1490,7 +1521,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 continue
 
             formats, raw_scores, scores = [], [], []
-            for recipe in hparam.solver_choices:
+            solver_choices = hparam.solver_choices
+            for recipe in (recipe for recipe in hparam.ladder if recipe in solver_choices):
                 formats.append(recipe)
                 # A format shard leaves other shards' formats unscored; their merge fills them.
                 scored = self._scores_recipe(hparam, recipe)
@@ -2606,8 +2638,8 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
         level = self.config["context_quant_level"]
         if level is None:
             return QuantRecipe(quant_cfg=None)
-        # choices are sorted by compression, so they run from lowest bits up to no-quant.
-        quantized = [recipe for recipe in hparam.choices if not recipe.is_no_quant]
+        # The ladder runs from the lowest resolved cost up to no-quant.
+        quantized = [recipe for recipe in hparam.ladder if not recipe.is_no_quant]
         return quantized[min(0 if level == "lowest" else level, len(quantized) - 1)]
 
     def _shared_calibration_recipes(self, quant_recipe_hparams) -> set:

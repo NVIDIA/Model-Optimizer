@@ -51,6 +51,7 @@ from .algorithms import (
     AUTO_QUANTIZE_SEARCHERS,
     QuantRecipe,
     _algorithm_methods,
+    _has_per_weight_modules,
     _refuse_layerwise_dirs,
     _rewrites_weights,
     merge_auto_quantize_shards,
@@ -66,7 +67,7 @@ from .kv_cache_auto_quant import (
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
 from .lora import has_quant_lora
 from .mode import QuantizeModeRegistry, _rank_local_calibrations, get_modelike_from_algo_cfg
-from .nn import AnyQuantizer, QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
+from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .qtensor import QTensorWrapper
 from .utils import is_quantized, weight_attr_names
 from .utils.core_utils import _get_fsdp2_mesh
@@ -1321,13 +1322,7 @@ def auto_quantize(
     # weight conversion replaces (HF Conv1D's), so other searches save none and the searcher drops
     # them once those checks pass.
     # A per-weight module's candidate may be refused after conversion; hand the model back then.
-    per_weight = any(
-        getattr(
-            QuantModuleRegistry.get(type(module)), "_auto_quantize_per_weight_quantizers", False
-        )
-        for module in model.modules()
-    )
-    if rewrites_weights or format_shard is not None or per_weight:
+    if rewrites_weights or format_shard is not None or _has_per_weight_modules(model):
         searcher.restore_unconverted = _save_module_attributes(model)
     # Calibration turns pre-quant-scale folding off for the whole process. Hand back the policy
     # found here on every exit, also after a failure while scoring, so later calibrations fold.
