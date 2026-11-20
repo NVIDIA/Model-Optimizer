@@ -21,6 +21,7 @@ from ..utils.calib_utils import LocalHessianEncoder, register_local_hessian_enco
 from .choice_search import search_choices
 from .common import (
     GGML_BLOCK_SIZE,
+    checked_encode_inputs,
     derive_scales,
     floored_second_moments,
     match_hessian_energy,
@@ -90,15 +91,18 @@ class GGMLLocalHessianEncoder(LocalHessianEncoder):
                 if ggml_format.scale_fit is not None:
                     fit_moments = moments.to(weight.device) if ggml_format.weighted else None
                     scales = derive_scales(ggml_format, weight, fit_moments)
-                kwargs["choices"] = search_choices(
-                    ggml_format,
-                    weight,
-                    hessian,
-                    kwargs.get("importance"),
-                    block_chunk_size,
-                    decode_chunk_size,
-                    scales,
-                )
+                # The search encodes every choice of every block, each with a slice of one
+                # importance vector, checked here once.
+                with checked_encode_inputs(kwargs.get("importance")):
+                    kwargs["choices"] = search_choices(
+                        ggml_format,
+                        weight,
+                        hessian,
+                        kwargs.get("importance"),
+                        block_chunk_size,
+                        decode_chunk_size,
+                        scales,
+                    )
         searched = None
         if "choices" in kwargs:
             packed, shape = ggml_format.quantize(

@@ -18,6 +18,8 @@ import copy
 import pytest
 import torch
 import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor, Shard
 
 import modelopt.torch.export.quantized_weight_export as weight_export
 import modelopt.torch.quantization as mtq
@@ -903,3 +905,40 @@ def test_hf_config_carries_the_kv_cache_format(weight_spec):
     assert config["kv_cache_quant_algo"] == "FP8_K_NVFP4_V"
     with pytest.raises(NotImplementedError, match="mixed KV-cache formats"):
         build_hf_quantization_config(named_specs, kv_cache_formats=["FP8", "NVFP4"])
+
+
+class _ShardedTransposedExperts(nn.Module):
+    def __init__(self, mesh, width):
+        super().__init__()
+        for name, shape, amax in (("w1", (1, 16, width), 2.0), ("w3", (1, width, 16), 8.0)):
+            weight = torch.arange(torch.Size(shape).numel(), dtype=torch.float32).reshape(shape)
+            local = weight if mesh.get_local_rank() == 0 else weight[:0].clone()
+            sharded = DTensor.from_local(
+                local, mesh, (Shard(0),), shape=weight.shape, stride=weight.stride()
+            )
+            setattr(self, name, nn.Parameter(sharded))
+            for kind, maximum in (("weight", amax), ("input", 1.0)):
+                quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3)))
+                quantizer.amax = maximum
+                setattr(self, f"{name}_{kind}_quantizer", quantizer)
+
+    def iter_weights_for_calibration(self):
+        for name in ("w1", "w3"):
+            yield getattr(self, name).mT, getattr(self, f"{name}_weight_quantizer")
+
+
+def _empty_local_experts_keep_their_own_quantizers(rank, size):
+    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("shard",))
+    for width in (16, 32):
+        module = _ShardedTransposedExperts(mesh, width)
+        if rank > 0:
+            assert module.w1.to_local().numel() == module.w3.to_local().numel() == 0
+        weights = {name: getattr(module, name).full_tensor() for name in ("w1", "w3")}
+        for name, amax in (("w1", 2.0), ("w3", 8.0)):
+            state = capture_quantized_weight_export_state(module, name)
+            tensors = export_quantized_weight_tensors(weights[name], state, torch.float32)
+            torch.testing.assert_close(tensors["weight_scale"], torch.tensor(amax / 448.0))
+
+
+def test_empty_local_experts_keep_their_own_quantizers(cpu_dist_workers):
+    cpu_dist_workers.run(_empty_local_experts_keep_their_own_quantizers)
