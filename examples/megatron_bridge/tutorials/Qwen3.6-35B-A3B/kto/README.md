@@ -33,7 +33,7 @@ The [QAD ablations](../ABLATIONS.md#scicode-non-termination-diagnosis-and-decode
 
 ### Earlier attempts related to KTO
 
-An initial QAD fine-tuning pilot used completed responses generated with anti-repetition instructions. On held-out, failure-prone SciCode subtasks, cap-hit rates fell from **10.91% to 6.36%**. Using teacher-generated data reduced the rate to **5.45%**. A follow-up combined QAD fine-tuning with quantization-aware DPO (QADPO), reducing observed SciCode cap hits to zero while accuracy fell from **43.20% to 39.64%**.
+An initial QAD fine-tuning pilot used completed responses generated with anti-repetition instructions. On held-out, failure-prone SciCode subtasks, cap-hit rates fell from 10.91% to 6.36%. Using teacher-generated data reduced the rate to 5.45%. A follow-up combined QAD fine-tuning with quantization-aware DPO (QADPO), reducing observed SciCode cap hits to zero while accuracy fell from 43.20% to 39.64%.
 
 This tutorial focuses on preserving accuracy while reducing cap hits, using QAKTO directly from the QAD baseline.
 
