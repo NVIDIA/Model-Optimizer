@@ -621,7 +621,8 @@ def qwen_attention_shapes(qwen_config_dir):
     heads = cfg.num_attention_heads
     kv = getattr(cfg, "num_key_value_heads", heads)
     hd = hidden // heads
-    theta = getattr(cfg, "rope_theta", 10000.0)
+    # transformers 5 moves rope_theta into rope_parameters.
+    theta = cfg.rope_parameters["rope_theta"] if hasattr(cfg, "rope_parameters") else cfg.rope_theta
     inv_freq = 1.0 / (theta ** (torch.arange(0, hd, 2, dtype=torch.int64).float() / hd))
     return hidden, heads, kv, hd, inv_freq.numpy()
 
