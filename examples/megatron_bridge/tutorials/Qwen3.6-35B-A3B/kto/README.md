@@ -1,6 +1,6 @@
 # Quantization-Aware KTO (QAKTO): Reducing Doomed Reasoning Loops While Preserving Accuracy
 
-Daniel Korzekwa, Keval Morabia, Sepher Sameni · November 19, 2026
+[Daniel Korzekwa](https://github.com/danielkorzekwa), [Keval Morabia](https://github.com/kevalmorabia97), [Sepehr Sameni](https://github.com/Separius) · November 19, 2026
 
 ## Key takeaways
 
