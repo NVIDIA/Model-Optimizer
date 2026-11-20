@@ -31,6 +31,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-11-19" data-title="Sub-4-Bit AutoQuantize with GGML Formats: Matching a QAD Release Without Training" data-summary="AutoQuantize recipes with GGML IQ formats: on Nemotron 3.5 Bolt, PTQ at 2.0625 bits per expert weight matches the QAD-trained 24GB release without training." data-tags="autoquantize quantization ggml mixed-precision gptq">
+       <div class="announcement-card-meta">November 19, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/20261119-ggml-autoquantize.html">Sub-4-Bit AutoQuantize with GGML Formats: Matching a QAD Release Without Training</a></h2>
+       <p>Scoring each layer in a low-bit context and finalizing with GPTQ lets AutoQuantize beat uniform IQ2 below 4 bits. On Nemotron 3.5 Bolt, PTQ matches the QAD-trained 24GB release at the same size.</p>
+       <div class="announcement-card-tags"><span>autoquantize</span><span>quantization</span><span>ggml</span><span>mixed-precision</span><span>gptq</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-11-17" data-title="Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX" data-summary="Three ModelOpt-trained standalone drafts for Qwen3.8-27B, intended for Groq 3 LPX deployment. At unbounded draft length, offline scoring gives the 4B and 0.8B drafts 59% and 6% higher acceptance lengths than the live MTP baseline." data-tags="speculative-decoding external-draft groq-lpx qwen3.8 distillation">
        <div class="announcement-card-meta">November 17, 2026 &middot; Peter Hicks et al.</div>
        <h2><a href="announcements/20261117-qwen38-27b-external-drafts-lpx.html">Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX</a></h2>
