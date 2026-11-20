@@ -450,6 +450,9 @@ class _Llama4ExpertsModel(nn.Module):
         )
         self.proj = nn.Linear(32, 32)
         self.experts = Llama4TextExperts(config)
+        # The experts allocate their weights uninitialized; PreTrainedModel would initialize them.
+        for weight in self.experts.parameters():
+            nn.init.normal_(weight, std=0.1)
 
     def forward(self, input_ids):
         return self.experts(self.proj(torch.nn.functional.one_hot(input_ids, 32).float()))
