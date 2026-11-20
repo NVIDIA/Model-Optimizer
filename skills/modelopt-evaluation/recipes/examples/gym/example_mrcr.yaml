@@ -24,9 +24,9 @@
 # coupling, score extraction, failure modes).
 #
 # `.env` needs HF_TOKEN and NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1 (nemo_gym is not
-# in the FDF map). This config has a pre_cmd; scope its trust per launch
-# (launcher-workflow.md Step 8, "Approvals"), e.g. after the user approves it:
-#   NEMO_EVALUATOR_TRUST_PRE_CMD=1 "$SKILL_DIR/scripts/nel-gym.sh" run --config example_mrcr.yaml
+# in the FDF map). This config has a pre_cmd (NEMO_EVALUATOR_TRUST_PRE_CMD: see
+# launcher-workflow.md Step 8):
+#   NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1> "$SKILL_DIR/scripts/nel-gym.sh" run --config example_mrcr.yaml
 #
 # =============================================================================
 defaults:
@@ -129,7 +129,7 @@ evaluation:
     UV_CACHE_DIR: lit:/cache/uv
     NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID
   # The pinned Gym commit's MRCR prepare needs tiktoken + transformers, neither
-  # declared in its venv. Needs NEMO_EVALUATOR_TRUST_PRE_CMD=1 on the approved launch.
+  # declared in its venv (hook trust: launcher-workflow.md Step 8).
   pre_cmd: |-
     set -ex
     command -v uv >/dev/null 2>&1 || { curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="/root/.local/bin:$PATH"; }

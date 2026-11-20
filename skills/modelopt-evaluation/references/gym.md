@@ -16,7 +16,7 @@ PATH:
 ```bash
 "$SKILL_DIR/scripts/nel-gym.sh" --version  # must report nemo_evaluator_launcher: 0.2.6
 NEMO_EVALUATOR_TRUST_PRE_CMD=0 "$SKILL_DIR/scripts/nel-gym.sh" run --config <gym-config.yaml> --dry-run
-NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1> "$SKILL_DIR/scripts/nel-gym.sh" run --config <gym-config.yaml>  # 1 only after hook approval
+NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1> "$SKILL_DIR/scripts/nel-gym.sh" run --config <gym-config.yaml>  # see launcher-workflow.md Step 8
 ```
 
 Using the wrapper with a validated pin is a correctness and reproducibility
@@ -115,7 +115,7 @@ Two editing rules for these blocks:
 Two launcher-level trust flags gate every gym submission:
 
 - `NEMO_EVALUATOR_TRUST_PRE_CMD=1` — the gym configs carry a `pre_cmd`; NEL refuses
-  the submission without it. Scope it per launch as in `launcher-workflow.md` Step 8 (**Approvals**).
+  the submission without it (see `launcher-workflow.md` Step 8).
 - `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` (in `.env`) — `nemo_gym` is not in the FDF
   mapping, so submission is refused without it.
 

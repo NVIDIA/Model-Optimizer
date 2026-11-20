@@ -31,7 +31,7 @@ path.
 
 Light as gym tasks go: `simple_agent`, **no judge** — `HF_TOKEN` is the only
 secret, and the cost is context length rather than agent turns. It needs
-`NEMO_EVALUATOR_TRUST_PRE_CMD=1` on the approved launch (the config has a `pre_cmd`), plus
+hook trust (Step 8; the config has a `pre_cmd`), plus
 `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` — `nemo_gym` is not in the FDF mapping, so
 submission is refused without it.
 
