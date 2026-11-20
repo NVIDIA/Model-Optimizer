@@ -300,6 +300,7 @@ def _gpt_model_provider(
     ep_size=1,
     etp_size=None,
     transformer_impl="local",
+    activation_func="squared_relu",
     # Hybrid mamba MOE parameters
     is_hybrid=False,
     hybrid_layer_pattern=None,
@@ -335,7 +336,7 @@ def _gpt_model_provider(
                 num_layers=4,
                 ffn_hidden_size=None,
                 num_attention_heads=8,
-                activation_func="squared_relu",
+                activation_func=activation_func,
                 transformer_impl=transformer_impl,
                 hidden_size=hidden_size,
                 vocab_size=vocab_size,
@@ -1722,6 +1723,58 @@ def _test_layerwise_calibrate_vlm_text_forward_loop(drive_wrapper, rank, size):
 @pytest.mark.parametrize("drive_wrapper", [False, True])
 def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wrapper):
     dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))
+
+
+def _test_swiglu_weight_quantizer_tp_reshard(tmp_path, config, legacy, rank, size):
+    initialize_for_megatron(tensor_model_parallel_size=size, seed=SEED)
+    source = _gpt_model_provider(tp_size=size, hidden_size=512, activation_func="swiglu")
+    mtq.quantize(source, copy.deepcopy(config), get_forward(source))
+    if legacy:
+        # Save as ModelOpt < 0.50 did: per-row state sharded like any column-parallel state.
+        for module in source.modules():
+            module._legacy_swiglu_quantizer_state = True
+    expected = {}
+    for name, module in source.named_modules():
+        if name.endswith("mlp.linear_fc1"):
+            ((weight, quantizer),) = module.iter_weights_for_calibration()
+            shards = [torch.empty_like(weight) for _ in range(size)]
+            torch.distributed.all_gather(
+                shards, quantizer(weight), group=get_tensor_model_parallel_group()
+            )
+            # Megatron restores a gated linear_fc1 as all gate rows, then all up rows.
+            expected[name] = torch.cat([shard.chunk(2)[i] for i in range(2) for shard in shards])
+    assert expected
+    save_distributed_checkpoint(tmp_path, source)
+    save_sharded_modelopt_state([source], tmp_path)
+    torch.distributed.barrier()
+    del source
+    destroy_model_parallel()
+
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    target = _gpt_model_provider(tp_size=1, hidden_size=512, activation_func="swiglu")
+    restore_sharded_modelopt_state([target], tmp_path)
+    target = load_distributed_checkpoint(tmp_path, target)
+    for name, module in target.named_modules():
+        if name in expected:
+            ((weight, quantizer),) = module.iter_weights_for_calibration()
+            assert torch.equal(quantizer(weight), expected[name]), name
+
+
+@pytest.mark.parametrize(
+    ("config", "legacy"),
+    [
+        pytest.param(mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG, False, id="fp8_per_channel"),
+        pytest.param(mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG, True, id="fp8_per_channel-legacy"),
+        pytest.param(mtq.INT4_AWQ_CFG, False, id="int4_awq"),
+        pytest.param(mtq.INT4_AWQ_CFG, True, id="int4_awq-legacy"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, id="nvfp4_per_tensor"),
+    ],
+)
+def test_swiglu_weight_quantizer_tp_reshard(dist_workers_size_2, tmp_path, config, legacy):
+    """A gated linear_fc1's weight quantizer state saved at TP=2 reloads at TP=1."""
+    dist_workers_size_2.run(
+        partial(_test_swiglu_weight_quantizer_tp_reshard, tmp_path, config, legacy)
+    )
 
 
 def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, size):

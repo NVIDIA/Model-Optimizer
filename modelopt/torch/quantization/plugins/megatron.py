@@ -16,6 +16,7 @@
 """Support quantization for megatron linear layers."""
 
 import ast
+import dataclasses
 import inspect
 import re
 import textwrap
@@ -211,6 +212,9 @@ def quant_module_get_extra_state(self) -> dict:
             quantizer_state[name] = module.get_modelopt_state()
 
     extra_state["modelopt_quantizer_state"] = quantizer_state
+    if not getattr(self, "_legacy_swiglu_quantizer_state", False):
+        # A gated linear_fc1's per-row weight quantizer state is saved in Megatron's SwiGLU layout.
+        extra_state["modelopt_swiglu_quantizer_state"] = True
 
     # Handle real_quantizer_state and q_tensor_state
     extra_state.update(real_quant_module_get_extra_state(self))
@@ -289,6 +293,8 @@ def quant_module_set_extra_state(self, state: Any):
     if state is None or not self.allow_post_restore:
         return
 
+    # TODO: Drop the legacy layout (checkpoints saved before ModelOpt 0.50) in a future release.
+    self._legacy_swiglu_quantizer_state = "modelopt_swiglu_quantizer_state" not in state
     quantizer_state = state.get("modelopt_quantizer_state", None)
 
     if quantizer_state is not None:
@@ -309,7 +315,20 @@ def quant_module_set_extra_state(self, state: Any):
                     continue
                 maybe_promote_nvfp4_static_quantizer(module, quantizer_substate)
                 module.set_from_modelopt_state(quantizer_substate, properties_only=False)
+        weight_quantizer = getattr(self, "weight_quantizer", None)
+        amax = getattr(weight_quantizer, "_amax", None)
+        saved_numel = None if amax is None else amax.numel()
         self.modelopt_post_restore()
+        amax = getattr(weight_quantizer, "_amax", None)
+        if (
+            self._legacy_swiglu_quantizer_state
+            and isinstance(weight_quantizer, TensorQuantizer)
+            and saved_numel is not None
+            and amax is not None
+            and amax.numel() != saved_numel
+        ):
+            # Saved at another TP size; a gated linear_fc1's amax rows are reordered as they load.
+            self._legacy_swiglu_saved_amax_numel = saved_numel
 
     # Handle real_quantizer_state and q_tensor_state
     real_quant_module_set_extra_state(self, state)
@@ -590,10 +609,14 @@ class _MegatronParallelLinear(_ParallelLinear):
         return sharded_state_dict
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        reorder = getattr(self, "_legacy_swiglu_reorder", None)
         for k in list(state_dict.keys()):
             if not any(qt + "_quantizer" in k for qt in ["weight", "input", "output"]):
                 continue
             name = k.split(prefix)[-1] if prefix else k
+            if reorder is not None and name == "weight_quantizer._amax":
+                state_dict[k] = _legacy_swiglu_rows(state_dict[k], *reorder)
+                del self._legacy_swiglu_reorder, self._legacy_swiglu_saved_amax_numel
             state_dict[k] = state_dict[k].view_as(self.state_dict()[name])
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
@@ -683,9 +706,66 @@ class _QuantMegatronMLP(_MegatronMLP):
     """Module to support special handling of `linear_fc1` in `sharded_state_dict()` of MCore `MLP`."""
 
     _modelopt_state_keys = [
-        r"weight_quantizer\.(\d+\.)*_amax$",
-        r"weight_quantizer\.(\d+\.)*_scale$",
+        r".*weight_quantizer\.(\d+\.)*_amax$",
+        r".*weight_quantizer\.(\d+\.)*_scale$",
     ]
+
+    def _is_swiglu_state(self, key, sharded_tensor) -> bool:
+        if not super()._is_swiglu_state(key, sharded_tensor):
+            return False
+        if "_quantizer." not in key:
+            return True
+        # Only per-row quantizer state has gate and up rows; per-tensor state is replicated.
+        return (
+            not getattr(self.linear_fc1, "_legacy_swiglu_quantizer_state", False)
+            and sharded_tensor.local_shape[0] == self.linear_fc1.weight.shape[0]
+        )
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
+        # A legacy checkpoint saved at another TP size (see the TODO in quant_module_set_extra_state).
+        saved_numel = getattr(self.linear_fc1, "_legacy_swiglu_saved_amax_numel", None)
+        if self.config.gated_linear_unit and saved_numel is not None:
+            key = f"{prefix}linear_fc1.weight_quantizer._amax"
+            if key in sharded_state_dict:
+                sharded_state_dict[key] = _legacy_swiglu_amax_to_load(
+                    self.linear_fc1, sharded_state_dict[key], saved_numel
+                )
+        return sharded_state_dict
+
+
+def _legacy_swiglu_amax_to_load(linear, sharded_tensor, saved_numel):
+    """Load all rows of a legacy gated linear_fc1 amax saved at another TP size.
+
+    Legacy checkpoints shard it like any column-parallel state, as each saving rank's
+    ``[gate, up]`` rows; ``_load_from_state_dict`` then takes this rank's rows from them.
+    """
+    axis = sharded_tensor.prepend_axis_num
+    tp_size = sharded_tensor.axis_fragmentations[axis]
+    tp_rank = sharded_tensor.global_offset[axis] // sharded_tensor.local_shape[0]
+    saved_tp_size = tp_size * linear.weight_quantizer._amax.numel() // saved_numel
+    linear._legacy_swiglu_reorder = (saved_tp_size, tp_rank, tp_size)
+    data = sharded_tensor.data.new_empty(
+        (sharded_tensor.global_shape[axis], *sharded_tensor.local_shape[1:])
+    )
+    global_offset = list(sharded_tensor.global_offset)
+    global_offset[axis] = 0
+    axis_fragmentations = list(sharded_tensor.axis_fragmentations)
+    axis_fragmentations[axis] = 1
+    return dataclasses.replace(
+        sharded_tensor,
+        data=data,
+        local_shape=tuple(data.shape),
+        global_offset=tuple(global_offset),
+        axis_fragmentations=tuple(axis_fragmentations),
+    )
+
+
+def _legacy_swiglu_rows(amax, saved_tp_size, tp_rank, tp_size):
+    """This rank's rows of a gated amax saved as ``[gate_0, up_0, gate_1, up_1, ...]``."""
+    halves = [shard.chunk(2) for shard in amax.chunk(saved_tp_size)]
+    gate, up = (torch.cat([pair[i] for pair in halves]) for i in range(2))
+    return torch.cat([gate.chunk(tp_size)[tp_rank], up.chunk(tp_size)[tp_rank]])
 
 
 class _RealQuantMegatronParallelLinear(RealQuantLinear):

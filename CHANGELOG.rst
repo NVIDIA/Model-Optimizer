@@ -38,6 +38,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Megatron checkpoints now save the per-row weight quantizer state (e.g. FP8 per-channel, INT4 AWQ) of a gated (SwiGLU) MLP's ``linear_fc1`` in Megatron's SwiGLU layout, which earlier ModelOpt versions cannot load. Checkpoints saved by earlier versions still load.
+
 **Deprecations**
 
 **Bug Fixes**
@@ -58,6 +60,7 @@ Changelog
 *Megatron Framework (M-LM / M-Bridge)*
 
 - Preserve model-specific hybrid stacks when selecting MoE expert layouts in Megatron-Bridge, and reject grouped GEMM when a custom factory returns sequential experts. Custom built stack ``ModuleSpec`` values are now rejected; assign a named factory function instead.
+- Fix loading a Megatron checkpoint at another tensor parallelism when a gated (SwiGLU) MLP's ``linear_fc1`` has per-row weight quantizer state (e.g. FP8 per-channel, INT4 AWQ): the state was applied to the wrong rows.
 
 *Misc*
 
