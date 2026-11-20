@@ -1078,8 +1078,13 @@ def quantize_main(
         aq_config = None
 
     layerwise_cfgs = recipe_layerwise_blocks(recipe)
-    if not export and any(cfg.get("export_dir") is not None for cfg in layerwise_cfgs):
-        raise ValueError("Layerwise export cannot retain a live fake-quant model.")
+    # A live model must be calibrated now: no layerwise export or resume from saved layers.
+    if not export and any(
+        cfg.get(field) is not None
+        for cfg in layerwise_cfgs
+        for field in ("export_dir", "checkpoint_dir")
+    ):
+        raise ValueError("export=False does not support layerwise export_dir or checkpoint_dir.")
     is_layerwise = any(cfg.get("enable", False) for cfg in layerwise_cfgs)
     if aq_config is not None and _auto_quantize_finalizes(recipe, args):
         # This run only calibrates the frozen formats with finalize_algorithm, so its batch is

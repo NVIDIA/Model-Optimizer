@@ -1384,3 +1384,27 @@ def test_calibration_retains_live_model_without_export(monkeypatch, tmp_path):
     assert logits.shape == (*batch["input_ids"].shape, model.config.vocab_size)
     assert torch.isfinite(logits).all()
     assert not export_path.exists()
+
+
+@pytest.mark.parametrize("field", ["export_dir", "checkpoint_dir"])
+def test_calibration_without_export_refuses_layerwise_export_and_resume(
+    monkeypatch, tmp_path, field
+):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    config = json.loads(json.dumps(hf_ptq.mtq.INT8_DEFAULT_CFG))
+    config["algorithm"] = {
+        "method": "max",
+        "layerwise": {"enable": True, field: str(tmp_path / field)},
+    }
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n"
+        + json.dumps({"metadata": {}, "quantize": config})
+    )
+    args = hf_ptq.parse_args(["--model", "local-model", "--recipe", str(recipe), "--skip_generate"])
+    model = get_tiny_qwen3(num_hidden_layers=1)
+    with pytest.raises(ValueError, match="export=False"):
+        hf_ptq.quantize_main(
+            args, model, model, "qwen3", False, None, None, torch.device("cpu"), export=False
+        )
+    assert not (tmp_path / field).exists()

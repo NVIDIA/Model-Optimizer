@@ -16,6 +16,7 @@
 """Prepare a BF16 reference, then evaluate a calibrated fake-quant candidate's conditional KL."""
 
 import argparse
+import hashlib
 import inspect
 import json
 import os
@@ -24,17 +25,18 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load, save
 from transformers import AutoConfig, GenerationConfig, set_seed
 
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import is_quantized
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import resolve_checkpoint_file
 
 __all__ = ["evaluate", "spaced_positions"]
 
 EVALUATION_DATASET = "nvidia/balanced-benchmark-prompts-short-1000"
 EVALUATION_REVISION = "c592347fa6645b5e663e128e464850f6ccad4fcc"
-SCHEMA = 3
+SCHEMA = 4
 DEFAULT_MAX_NEW_TOKENS = 1024
 DEFAULT_TOP_K = 2048
 DEFAULT_SCORE_TOKENS = 512
@@ -151,8 +153,16 @@ def _prepare_reference(
             tensors = {"ids": torch.cat(ids), "log_p": torch.cat(log_p)}
             if not torch.isfinite(tensors["log_p"]).all():
                 raise ValueError("Non-finite reference log-probabilities.")
-            save_file(tensors, str(directory / f"{len(records)}.safetensors"))
-            records.append({"prompt": prompt, "continuation": tokens, "positions": positions})
+            data = save(tensors)
+            (directory / f"{len(records)}.safetensors").write_bytes(data)
+            records.append(
+                {
+                    "prompt": prompt,
+                    "continuation": tokens,
+                    "positions": positions,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+            )
             del logits
     manifest = {
         "schema": SCHEMA,
@@ -185,12 +195,12 @@ def _load_reference(directory):
 
 
 def _load_statistics(directory, index, manifest):
-    statistics = load_file(str(Path(directory) / f"{index}.safetensors"))
-    ids, log_p = statistics["ids"], statistics["log_p"]
-    expected = (len(manifest["records"][index]["positions"]), manifest["top_k"])
-    if ids.shape != expected or log_p.shape != expected:
-        raise ValueError("Invalid reference statistics shape.")
-    return ids, log_p
+    # Hash and decode the same bytes, binding each shard to its own record.
+    data = (Path(directory) / f"{index}.safetensors").read_bytes()
+    if hashlib.sha256(data).hexdigest() != manifest["records"][index]["sha256"]:
+        raise ValueError(f"Invalid reference: shard {index} does not match its record.")
+    statistics = load(data)
+    return statistics["ids"], statistics["log_p"]
 
 
 def _cached_kl(log_p, ids, rows):
@@ -282,15 +292,30 @@ def _check_reference_match(args, manifest, layerwise_cfgs):
 
 
 def _checkpoint_identity(hub_model_id, checkpoint):
-    """Hub snapshot commit, or each local weight file's size and mtime; contents are not hashed."""
+    """Hub snapshot commit, or a local checkpoint's config hashes and weight sizes and mtimes."""
     if hub_model_id:
         # A Hub ID resolves to its latest snapshot, whose directory is named by the commit.
         return checkpoint.name
-    return {
-        str(path.relative_to(checkpoint)): [path.stat().st_size, path.stat().st_mtime_ns]
-        for path in sorted(checkpoint.rglob("*"))
-        if path.suffix in {".safetensors", ".bin"}
+    metadata = {
+        name: hashlib.sha256(resolve_checkpoint_file(checkpoint, name).read_bytes()).hexdigest()
+        for name in ("config.json", "model.safetensors.index.json")
+        if (checkpoint / name).exists()
     }
+    # Weights sit at the top level, so a reference stored inside the checkpoint is not counted.
+    weights = {
+        path.name: [path.stat().st_size, path.stat().st_mtime_ns]
+        for path in sorted(checkpoint.iterdir())
+        if path.is_file() and path.suffix in {".safetensors", ".bin"}
+    }
+    return {"metadata": metadata, "weights": weights}
+
+
+def _require_unquantized_config(config):
+    text_config = getattr(config, "text_config", config)
+    if config.is_encoder_decoder or any(
+        getattr(cfg, "quantization_config", None) for cfg in (config, text_config)
+    ):
+        raise ValueError("Supply an unquantized BF16 causal checkpoint.")
 
 
 def _require_bf16_base(model):
@@ -389,11 +414,8 @@ def main():
     config = AutoConfig.from_pretrained(
         checkpoint, trust_remote_code=args.trust_remote_code, local_files_only=True
     )
+    _require_unquantized_config(config)
     text_config = getattr(config, "text_config", config)
-    if config.is_encoder_decoder or any(
-        getattr(cfg, "quantization_config", None) for cfg in (config, text_config)
-    ):
-        raise ValueError("Supply an unquantized BF16 causal checkpoint.")
     if args.command == "prepare-reference":
         tokenizer = hf_ptq.get_tokenizer(
             checkpoint, trust_remote_code=args.trust_remote_code, local_files_only=True
@@ -423,8 +445,11 @@ def main():
     with hf_ptq.distributed_run(device=ptq_args.device) as dist_state:
         ptq_args.dist_state = dist_state
         loaded = hf_ptq.load_model(ptq_args)
-        model = loaded[0]
+        model, language_model, calibration_only = loaded[0], loaded[1], loaded[3]
         _require_bf16_base(model)
+        # hf_ptq skips calibration for a target restored with ModelOpt state.
+        if is_quantized(language_model) and not calibration_only:
+            raise ValueError("The checkpoint already carries ModelOpt quantizers.")
         if args.command == "prepare-reference":
             set_seed(args.seed)
             return _prepare_reference(
@@ -443,9 +468,6 @@ def main():
                 args.score_tokens,
                 args.generation_batch_size,
             )
-        # hf_ptq skips calibration for a target restored with ModelOpt state.
-        if is_quantized(loaded[1]) and not loaded[3]:
-            raise ValueError("The checkpoint already carries ModelOpt quantizers.")
         model = hf_ptq.quantize_main(ptq_args, *loaded, export=False)
         _require_fake_quant(model)
         return _score(model, directory, manifest)

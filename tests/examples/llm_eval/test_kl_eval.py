@@ -19,6 +19,7 @@ import copy
 import importlib
 import json
 import math
+import os
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -27,7 +28,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 from datasets import Dataset
-from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -38,6 +38,7 @@ from transformers import (
     GenerationConfig,
     GPT2Config,
     GPT2LMHeadModel,
+    LlavaConfig,
     PreTrainedTokenizerFast,
 )
 
@@ -240,23 +241,26 @@ def test_reference_rescores_candidates_and_refuses_overwrite(kl_eval, cached_eva
     assert (case.directory / "manifest.json").read_bytes() == original
 
 
-@pytest.mark.parametrize("corruption", ["positions", "float_positions", "missing", "statistics"])
-def test_reference_rejects_mismatched_positions_and_statistics(
-    kl_eval, cached_evaluation, corruption
-):
+@pytest.mark.parametrize(
+    "corruption", ["positions", "float_positions", "missing", "truncated", "replaced"]
+)
+def test_reference_rejects_corrupted_records_and_shards(kl_eval, cached_evaluation, corruption):
     case = cached_evaluation
-    if corruption.endswith("positions"):
-        path = case.directory / "manifest.json"
-        manifest = json.loads(path.read_text())
-        positions = manifest["records"][0]["positions"]
-        changed = [float(p) for p in positions] if corruption == "float_positions" else [999]
-        manifest["records"][0]["positions"] = changed * (1 if changed[0] != 999 else len(positions))
-        path.write_text(json.dumps(manifest))
+    path = case.directory / "manifest.json"
+    manifest = json.loads(path.read_text())
+    positions = manifest["records"][0]["positions"]
+    shard = case.directory / "0.safetensors"
+    if corruption == "positions":
+        manifest["records"][0]["positions"] = [999] * len(positions)
+    elif corruption == "float_positions":
+        manifest["records"][0]["positions"] = [float(p) for p in positions]
     elif corruption == "missing":
         (case.directory / "1.safetensors").unlink()
-    else:
-        shard = case.directory / "0.safetensors"
-        save_file({name: t[:1] for name, t in load_file(str(shard)).items()}, str(shard))
+    elif corruption == "truncated":
+        shard.write_bytes(shard.read_bytes()[:-8])
+    else:  # A valid shard belonging to another record.
+        shard.write_bytes((case.directory / "1.safetensors").read_bytes())
+    path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="Invalid reference"):
         kl_eval.evaluate(case.candidate, case.directory)
 
@@ -280,14 +284,30 @@ def test_evaluation_refuses_inputs_that_differ_from_the_reference(
     assert args.attn_implementation == backend
 
 
-def test_checkpoint_identity_tracks_hub_revision_and_local_weight_files(kl_eval, tmp_path):
-    weights = tmp_path / "model.safetensors"
+def test_checkpoint_identity_tracks_hub_revision_config_and_weight_files(kl_eval, tmp_path):
+    config, weights = tmp_path / "config.json", tmp_path / "model.safetensors"
+    config.write_text("{}")
     weights.write_bytes(b"weights")
     local = kl_eval._checkpoint_identity(None, tmp_path)
+    (tmp_path / "kl-reference").mkdir()  # A reference stored inside the checkpoint.
+    (tmp_path / "kl-reference" / "0.safetensors").write_bytes(b"reference shard")
     assert kl_eval._checkpoint_identity(None, tmp_path) == local
-    weights.write_bytes(b"new weights")
-    assert kl_eval._checkpoint_identity(None, tmp_path) != local
+    for change in (
+        lambda: config.write_text('{"activation_function": "relu"}'),
+        lambda: os.utime(weights, ns=(1, 1)),
+        lambda: weights.write_bytes(b"new weights"),
+    ):
+        change()
+        assert kl_eval._checkpoint_identity(None, tmp_path) != local
+        local = kl_eval._checkpoint_identity(None, tmp_path)
     assert kl_eval._checkpoint_identity("org/model", tmp_path / "commit") == "commit"
+
+
+def test_config_guard_reads_quantization_metadata_on_nested_text_config(kl_eval):
+    kl_eval._require_unquantized_config(LlavaConfig())
+    packed = {"model_type": "llama", "quantization_config": {"format": "packed"}}
+    with pytest.raises(ValueError, match="unquantized BF16"):
+        kl_eval._require_unquantized_config(LlavaConfig(text_config=packed))
 
 
 def test_model_guards_require_bf16_base_and_fake_quant_candidate(kl_eval):
@@ -338,9 +358,8 @@ def test_blended_prompts_keep_order_and_refuse_truncation(kl_eval, blended_fixtu
         kl_eval._blended_prompts(blended_fixture, 4, "revision", 133, 4)
 
 
-def test_cli_prepares_once_and_scores_repeated_candidates_identically(
-    kl_eval, blended_fixture, tmp_path, monkeypatch
-):
+@pytest.fixture
+def cli(kl_eval, blended_fixture, tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(Path(kl_eval.__file__).parents[1] / "hf_ptq"))
     hf_ptq = importlib.import_module("hf_ptq")
     checkpoint = tmp_path / "base"
@@ -367,6 +386,10 @@ def test_cli_prepares_once_and_scores_repeated_candidates_identically(
         generation_batches.append(kwargs["input_ids"].shape[0])
         return generate(model, *args, **kwargs)
 
+    def run(*argv):
+        monkeypatch.setattr(sys, "argv", ["kl_eval.py", *argv])
+        return kl_eval.main()
+
     # Exercise the real loader and calibration-argument handling; replace only placement and data.
     monkeypatch.setattr(hf_ptq, "get_model", load)
     monkeypatch.setattr(hf_ptq, "get_tokenizer", lambda *_a, **_kw: tokenizer)
@@ -392,49 +415,76 @@ def test_cli_prepares_once_and_scores_repeated_candidates_identically(
     common = ["--model", str(checkpoint), "--reference", str(tmp_path / "reference")]
     prepare = ["prepare-reference", *common, "--num_examples", "3", "--max_new_tokens", "4"]
     prepare += ["--generation_batch_size", "2", "--top_k", "4", "--score_tokens", "2"]
-    monkeypatch.setattr(sys, "argv", ["kl_eval.py", *prepare, "--attn_implementation", "eager"])
-    config_path = checkpoint / "config.json"
-    original_config = config_path.read_text()
-    config_path.write_text(
-        json.dumps({**json.loads(original_config), "quantization_config": {"format": "packed"}})
+    prepare += ["--attn_implementation", "eager"]
+    evaluate = ["evaluate", *common, "--batch_size", "1", "--calib_size", "1"]
+    return SimpleNamespace(
+        hf_ptq=hf_ptq,
+        checkpoint=checkpoint,
+        reference=tmp_path / "reference",
+        loads=loads,
+        generation_batches=generation_batches,
+        run=run,
+        prepare=prepare,
+        evaluate=[*evaluate, "--recipe", str(recipe)],
+        evaluate_without_recipe=evaluate,
     )
-    with pytest.raises(ValueError, match="unquantized BF16"):
-        kl_eval.main()
-    assert not loads
-    config_path.write_text(original_config)
-    assert kl_eval.main() is None
-    assert generation_batches == [2, 1]
+
+
+def test_cli_prepares_once_and_scores_repeated_candidates_identically(cli, kl_eval, monkeypatch):
+    assert cli.run(*cli.prepare) is None
+    assert cli.generation_batches == [2, 1]
 
     def unexpected_generation(*_args, **_kwargs):
         pytest.fail("Candidate evaluation must not generate or load the dataset")
 
     monkeypatch.setattr(GPT2LMHeadModel, "generate", unexpected_generation)
     monkeypatch.setattr(kl_eval, "_blended_prompts", unexpected_generation)
-    evaluate = ["evaluate", *common, "--recipe", str(recipe), "--batch_size", "1"]
-    monkeypatch.setattr(sys, "argv", ["kl_eval.py", *evaluate, "--calib_size", "1"])
-    first, second = kl_eval.main(), kl_eval.main()
-    assert loads == ["eager"] * 3  # Evaluation inherits the reference's attention backend.
+    first, second = cli.run(*cli.evaluate), cli.run(*cli.evaluate)
+    assert cli.loads == ["eager"] * 3  # Evaluation inherits the reference's attention backend.
     assert math.isfinite(first) and first > 0
     assert first == pytest.approx(second, abs=1e-7)
-    # Refuse a checkpoint restored with ModelOpt state, which hf_ptq would not calibrate.
-    restored = tmp_path / "restored" / checkpoint.name  # Same snapshot commit.
+
+
+def test_cli_refuses_unusable_checkpoints_recipes_and_launches(cli, tmp_path, monkeypatch):
+    config_path = cli.checkpoint / "config.json"
+    original_config = config_path.read_text()
+    config_path.write_text(
+        json.dumps({**json.loads(original_config), "quantization_config": {"format": "packed"}})
+    )
+    with pytest.raises(ValueError, match="unquantized BF16"):
+        cli.run(*cli.prepare)
+    assert not cli.loads
+    config_path.write_text(original_config)
+    # A checkpoint restored with ModelOpt state, which hf_ptq would not calibrate.
+    restored = tmp_path / "restored" / cli.checkpoint.name  # Same snapshot commit.
     model = _tiny_model().to(torch.bfloat16)
     mtq.quantize(model, {"quant_cfg": [{"quantizer_name": "*", "enable": False}]})
     model.save_pretrained(restored)
     assert (restored / "modelopt_state.pth").is_file()
-    monkeypatch.setattr(hf_ptq, "ensure_local_checkpoint", lambda _path: ("org/model", restored))
+
+    def use_checkpoint(path):
+        monkeypatch.setattr(
+            cli.hf_ptq, "ensure_local_checkpoint", lambda _path: ("org/model", path)
+        )
+
+    use_checkpoint(restored)
     with pytest.raises(ValueError, match="already carries ModelOpt quantizers"):
-        kl_eval.main()
-    assert len(loads) == 4
+        cli.run(*cli.prepare)
+    assert not cli.reference.exists()
+    use_checkpoint(cli.checkpoint)
+    cli.run(*cli.prepare)
+    use_checkpoint(restored)
+    with pytest.raises(ValueError, match="already carries ModelOpt quantizers"):
+        cli.run(*cli.evaluate)
+    assert len(cli.loads) == 3
     # The remaining refusals happen before any model loads.
-    moved = tmp_path / "newer-revision"
-    monkeypatch.setattr(hf_ptq, "ensure_local_checkpoint", lambda _path: ("org/model", moved))
+    use_checkpoint(tmp_path / "newer-revision")
     with pytest.raises(ValueError, match="Checkpoint differs"):
-        kl_eval.main()
-    monkeypatch.setattr(hf_ptq, "load_recipe", lambda _path: object())
+        cli.run(*cli.evaluate)
+    auto_quantize = "general/auto_quantize/nvfp4_fp8_at_5p4bits"
     with pytest.raises(ValueError, match="fixed PTQ recipe"):
-        kl_eval.main()
+        cli.run(*cli.evaluate_without_recipe, "--recipe", auto_quantize)
     monkeypatch.setenv("WORLD_SIZE", "2")
     with pytest.raises(ValueError, match="one process"):
-        kl_eval.main()
-    assert len(loads) == 4
+        cli.run(*cli.evaluate)
+    assert len(cli.loads) == 3
