@@ -41,8 +41,13 @@ def test_iq_gsq_captures_every_dense_layer_across_gpus():
 
     config = load_recipe("general/ptq/iq2_s").quantize.model_dump(exclude_unset=True)
     config["algorithm"] = {"method": "gptq", "block_size": 256, "perc_damp": 0.3}
+    cpu_rng = torch.get_rng_state()
+    cuda_rng = [torch.cuda.get_rng_state(i) for i in range(torch.cuda.device_count())]
     result = quantize_iq_gsq(model, config, calibrate, num_steps=(2,))
 
+    assert torch.equal(torch.get_rng_state(), cpu_rng)
+    for i, state in enumerate(cuda_rng):
+        assert torch.equal(torch.cuda.get_rng_state(i), state)
     assert set(result.payloads) == {f"mlp.{i}" for i in range(4)}
     for i, layer in enumerate(model.mlp):
         assert torch.equal(
@@ -50,4 +55,9 @@ def test_iq_gsq_captures_every_dense_layer_across_gpus():
             pinned_packed_weight(layer.weight_quantizer, "iq2_s").cpu(),
         )
     result.activate(model, 2)
+    for i, layer in enumerate(model.mlp):
+        assert torch.equal(
+            pinned_packed_weight(layer.weight_quantizer, "iq2_s").cpu(),
+            result.payloads[f"mlp.{i}"][2],
+        )
     assert torch.isfinite(calibrate(model)).all()

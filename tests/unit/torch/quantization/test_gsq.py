@@ -16,12 +16,15 @@
 """The GPTQ-initialized IQ refinement entrypoint and native checkpoints."""
 
 import copy
+import hashlib
 
 import pytest
 import torch
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.ggml import gsq
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.ggml.gptq import GGMLGPTQHelper
 from modelopt.torch.quantization.ggml.gsq import IQGSQResult, quantize_iq_gsq
 from modelopt.torch.quantization.ggml.registry import IQ_FORMAT_REGISTRY
 
@@ -87,7 +90,11 @@ def test_iq_gsq_preserves_the_paired_gptq_baseline_and_selects_a_legal_checkpoin
     assert torch.isfinite(model(inputs)).all()
 
     checkpoint = tmp_path / "iq_gsq.pt"
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("untouched")
+    checkpoint.with_suffix(".pt.tmp").symlink_to(sentinel)
     result.save(checkpoint)
+    assert sentinel.read_text() == "untouched"
     restored = IQGSQResult.load(checkpoint)
     refined_output = model(inputs).detach()
     restored.activate(model, 0)
@@ -126,3 +133,107 @@ def test_iq_gsq_rejects_expert_weights_before_conversion_or_calibration(layout, 
     assert model.state_dict().keys() == original.keys()
     for name, weight in model.state_dict().items():
         assert torch.equal(weight, original[name])
+
+
+@pytest.mark.parametrize("algorithm_list", [False, True])
+def test_iq_gsq_refuses_layerwise_resume_before_mutating_model(
+    tmp_path, iq_gsq_config, algorithm_list
+):
+    model = torch.nn.Linear(256, 1, bias=False)
+    original = copy.deepcopy(model.state_dict())
+    iq_gsq_config["algorithm"]["layerwise"] = {"enable": True, "checkpoint_dir": str(tmp_path)}
+    if algorithm_list:
+        iq_gsq_config["algorithm"] = [iq_gsq_config["algorithm"], {"method": "imatrix"}]
+    with pytest.raises(ValueError, match=r"layerwise\.checkpoint_dir"):
+        quantize_iq_gsq(
+            model, iq_gsq_config, lambda _: pytest.fail("calibration ran"), num_steps=(2,)
+        )
+    assert type(model) is torch.nn.Linear
+    for name, weight in model.state_dict().items():
+        assert torch.equal(weight, original[name])
+
+
+def test_iq_gsq_resume_reuses_cache_and_frees_helpers_on_input_mismatch(
+    tmp_path, iq_gsq_config, monkeypatch
+):
+    original = torch.nn.Linear(256, 1, bias=False)
+    inputs = torch.randn(8, 256)
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("untouched")
+    (tmp_path / f"{hashlib.sha256(b'').hexdigest()}.tmp").symlink_to(sentinel)
+
+    def run(model):
+        return quantize_iq_gsq(
+            model, iq_gsq_config, lambda m: m(inputs), num_steps=(2,), checkpoint_dir=tmp_path
+        )
+
+    first = run(copy.deepcopy(original))
+    assert sentinel.read_text() == "untouched"
+
+    def unexpected_refinement(*args):
+        pytest.fail("a matching checkpoint should skip refinement")
+
+    monkeypatch.setattr(gsq, "_refine_linear", unexpected_refinement)
+    repeated = run(copy.deepcopy(original))
+    assert repeated.metrics == first.metrics
+    for budget, payload in first.payloads[""].items():
+        assert torch.equal(repeated.payloads[""][budget], payload)
+
+    freed = []
+    free = GGMLGPTQHelper.free
+
+    def record_free(helper):
+        free(helper)
+        freed.append(helper)
+
+    monkeypatch.setattr(GGMLGPTQHelper, "free", record_free)
+    with pytest.raises(ValueError, match="resume inputs changed"):
+        run(torch.nn.Linear(256, 1, bias=False))
+    assert len(freed) == 1
+    helper = freed[0]
+    assert all(
+        getattr(helper, name) is None
+        for name in (
+            "hessian",
+            "weight",
+            "h_inv",
+            "_packed",
+            "_unrounded",
+            "_importance",
+            "_searched",
+            "_search_scales",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "case", ["width0", "width255", "width257", "alias_conflict", "alias_match"]
+)
+def test_iq_gsq_activation_preflights_all_targets(case, iq_gsq_config):
+    model = torch.nn.ModuleList(torch.nn.Linear(256, 1, bias=False) for _ in range(3))
+    inputs = torch.randn(8, 256)
+    result = quantize_iq_gsq(
+        model, iq_gsq_config, lambda m: [layer(inputs) for layer in m], num_steps=(2,)
+    )
+    result.payloads["0"][2] = torch.zeros_like(result.payloads["0"][2])
+    if case.startswith("width"):
+        model[2].weight = torch.nn.Parameter(torch.randn(1, int(case[5:])))
+    else:
+        model[2].weight = model[1].weight
+        if case == "alias_match":
+            result.payloads["2"][2] = result.payloads["1"][2].clone()
+    before = copy.deepcopy(model.state_dict())
+    if case != "alias_match":
+        with pytest.raises(ValueError):
+            result.activate(model, 2)
+        for name, tensor in model.state_dict().items():
+            assert torch.equal(tensor, before[name])
+    else:
+        result.activate(model, 2)
+        for i, layer in enumerate(model):
+            payload = result.payloads[str(i)][2]
+            assert torch.equal(pinned_packed_weight(layer.weight_quantizer, "iq2_s"), payload)
+            decoded = IQ_FORMAT_REGISTRY["iq2_s"].dequantize(
+                payload, torch.tensor(layer.weight.shape), dtype=layer.weight.dtype
+            )
+            assert torch.equal(layer.weight_quantizer(layer.weight), decoded)

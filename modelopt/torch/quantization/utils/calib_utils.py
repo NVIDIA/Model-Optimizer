@@ -163,8 +163,10 @@ def update_expert_weights(work, block_size, perc_damp):
 
     def update(item, device):
         helper, weight = item
-        helper.update_weights(block_size, perc_damp, weight, device=device)
-        helper.free()
+        try:
+            helper.update_weights(block_size, perc_damp, weight, device=device)
+        finally:
+            helper.free()
 
     moved = {id(helper) for helper, _ in movable}
     for item in work:

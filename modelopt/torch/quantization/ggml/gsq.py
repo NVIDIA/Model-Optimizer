@@ -17,6 +17,7 @@
 
 import hashlib
 import math
+import tempfile
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -60,8 +61,13 @@ class IQGSQResult:
 
     @torch.no_grad()
     def activate(self, model: torch.nn.Module, num_steps: int) -> None:
-        """Activate an evaluated budget, or the exact GPTQ baseline with ``num_steps=0``."""
+        """Activate a budget, or the paired GPTQ payload and inference weights with ``num_steps=0``.
+
+        This does not restore GPTQ's unrounded training weights, importance or search scales.
+        Shared storage requires identical weight views and payloads.
+        """
         targets = []
+        shared = {}
         for name, states in self.payloads.items():
             module = model.get_submodule(name)
             quantizer = module.weight_quantizer
@@ -72,27 +78,48 @@ class IQGSQResult:
                 raise ValueError(f"No IQ GSQ checkpoint for {num_steps} updates at {name!r}.")
             payload = states[num_steps]
             fmt = IQ_FORMAT_REGISTRY[format_name]
-            expected = (*module.weight.shape[:-1], module.weight.shape[-1] // 256, fmt.block_bytes)
+            weight = module.weight
+            if weight.ndim != 2 or weight.shape[-1] <= 0 or weight.shape[-1] % fmt.block_size:
+                raise ValueError(
+                    f"IQ GSQ requires complete {fmt.block_size}-weight blocks at {name!r}."
+                )
+            expected = (*weight.shape[:-1], weight.shape[-1] // fmt.block_size, fmt.block_bytes)
             if payload.dtype != torch.uint8 or tuple(payload.shape) != expected:
                 raise ValueError(f"IQ GSQ payload shape does not match module {name!r}.")
+            storage = (weight.device, weight.untyped_storage().data_ptr())
+            if storage in shared:
+                prior, prior_format, prior_payload = shared[storage]
+                if (
+                    weight.shape != prior.shape
+                    or weight.stride() != prior.stride()
+                    or weight.storage_offset() != prior.storage_offset()
+                    or format_name != prior_format
+                    or not torch.equal(payload.cpu(), prior_payload.cpu())
+                ):
+                    raise ValueError(
+                        "IQ GSQ shared weights require identical views and checkpoints."
+                    )
+            shared[storage] = (weight, format_name, payload)
             targets.append((module, quantizer, fmt, payload))
+        pins = []
         for module, quantizer, fmt, payload in targets:
             payload = payload.to(module.weight.device)
             decoded = fmt.dequantize(
                 payload, torch.tensor(module.weight.shape), dtype=module.weight.dtype
             )
             module.weight.copy_(decoded)
+            pins.append((module, quantizer, fmt, payload))
+        # Shared parameters must receive all writes before either quantizer records its source.
+        for module, quantizer, fmt, payload in pins:
             pin_packed_weight(quantizer, fmt.name, payload, source=module.weight)
 
     def save(self, path: str | Path) -> None:
-        """Save only native payloads and experiment metrics."""
+        """Save native payloads and metrics atomically, with owner-only file permissions."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        torch.save(
-            {"payloads": self.payloads, "formats": self.formats, "metrics": self.metrics}, temporary
+        _save_checkpoint(
+            {"payloads": self.payloads, "formats": self.formats, "metrics": self.metrics}, path
         )
-        temporary.replace(path)
 
     @classmethod
     def load(cls, path: str | Path) -> "IQGSQResult":
@@ -123,10 +150,16 @@ def quantize_iq_gsq(
     algorithms = quant_cfg.get("algorithm")
     algorithms = algorithms if isinstance(algorithms, list) else [algorithms]
     methods = [a.get("method") if isinstance(a, dict) else a for a in algorithms]
-    if methods.count("gptq") != 1 or any(m not in ("gptq", "imatrix") for m in methods):
+    if methods not in (["gptq"], ["gptq", "imatrix"]):
         raise ValueError(
             "IQ GSQ supports only GPTQ initialization, optionally followed by imatrix."
         )
+    for algorithm in algorithms:
+        layerwise = algorithm.get("layerwise") if isinstance(algorithm, dict) else None
+        if isinstance(layerwise, dict) and layerwise.get("checkpoint_dir") is not None:
+            raise ValueError(
+                "IQ GSQ does not support layerwise.checkpoint_dir; use its checkpoint_dir argument."
+            )
     for rule in quant_cfg.get("quant_cfg", []):
         cfg = rule.get("cfg", rule)
         if rule.get("enable", True) and "num_bits" in cfg:
@@ -187,11 +220,9 @@ def quantize_iq_gsq(
             )
             metrics["seconds"] = time.monotonic() - started
             if path is not None:
-                temporary = path.with_suffix(".tmp")
-                torch.save(
-                    {"signature": signature, "states": states, "metrics": metrics}, temporary
+                _save_checkpoint(
+                    {"signature": signature, "states": states, "metrics": metrics}, path
                 )
-                temporary.replace(path)
         result.payloads[name] = states
         result.formats[name] = format_name
         result.metrics[name] = metrics
@@ -204,6 +235,18 @@ def quantize_iq_gsq(
     if not result.payloads:
         raise ValueError("IQ GSQ calibration did not reach an eligible IQ linear layer.")
     return result
+
+
+def _save_checkpoint(state, path):
+    # Exclusive creation prevents collisions and symlink following in shared directories.
+    with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".pt", delete=False) as temporary:
+        temporary_path = Path(temporary.name)
+        try:
+            torch.save(state, temporary)
+            temporary.close()
+            temporary_path.replace(path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _fingerprint(tensor: torch.Tensor) -> str:
@@ -225,7 +268,7 @@ def _refine_linear(teacher, hessian, payload, format_name, budgets, seed):
     changed = dict.fromkeys(budgets, 0)
     devices = [teacher.device.index] if teacher.is_cuda else []
     with torch.inference_mode(False), torch.enable_grad(), torch.random.fork_rng(devices=devices):
-        covariance = hessian.detach().to(teacher.device).clone() / 2
+        covariance = hessian.detach().to(teacher.device, copy=True).div_(2)
         if not torch.isfinite(covariance).all():
             raise ValueError("IQ GSQ requires finite calibration covariance.")
         importance = covariance.diagonal().clamp_min(0).sqrt()
@@ -236,7 +279,9 @@ def _refine_linear(teacher, hessian, payload, format_name, budgets, seed):
             native = payload[start : start + rows].detach().clone()
             candidates = build_candidates(format_name, reference, native, importance=importance)
             for n in budgets:
-                torch.manual_seed(seed + start)
+                torch.random.default_generator.manual_seed(seed + start)
+                if teacher.is_cuda:
+                    torch.cuda.default_generators[teacher.device.index].manual_seed(seed + start)
                 packed, before, after, changed_bundles = _optimize(
                     reference, covariance, candidates, native, format_name, n
                 )
@@ -256,7 +301,7 @@ def _refine_linear(teacher, hessian, payload, format_name, budgets, seed):
 
 def _optimize(teacher, covariance, candidates, native, format_name, num_steps):
     fmt = IQ_FORMAT_REGISTRY[format_name]
-    coefficients = candidates.coefficients.detach().clone()
+    coefficients = candidates.coefficients.detach()
     valid = candidates.valid_mask
     base_scale = candidates.base_scale.detach().float().clone()
     shape = torch.tensor(teacher.shape)

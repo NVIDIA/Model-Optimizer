@@ -87,15 +87,19 @@ def test_common_scale_uses_native_rounding_and_preserves_selected_fields(name):
 
 
 @pytest.mark.parametrize("name", ["iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s"])
-def test_zero_scale_keeps_one_candidate_and_canonical_zero_payload(name):
+@pytest.mark.parametrize("nonzero_codes", [False, True])
+def test_zero_scale_keeps_one_candidate_and_canonical_zero_payload(name, nonzero_codes):
     packed = torch.zeros((1, 1, IQ_FORMAT_REGISTRY[name].block_bytes), dtype=torch.uint8)
+    if nonzero_codes:
+        packed[..., 2:32] = 1  # Grid indices do not overlap any format's scale bits.
     candidates = build_candidates(name, torch.zeros(1, 256), packed)
     selected = torch.zeros(candidates.coefficients.shape[:3], dtype=torch.int64)
 
     assert candidates.valid_mask[..., 0].all()
     assert not candidates.valid_mask[..., 1:].any()
     assert torch.isfinite(candidates.coefficients).all()
-    assert torch.equal(candidates.pack(selected, torch.full((1, 1), 1e-12)), packed)
+    assert not candidates.pack(selected, candidates.base_scale).any()
+    assert not candidates.pack(selected, torch.full((1, 1), 1e-12)).any()
 
 
 @pytest.mark.parametrize("missing_helper", ["pack_fields", "unpack_fields"])
