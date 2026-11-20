@@ -3,10 +3,10 @@
 Use this after a run finishes and before any score is reported, for every tool. The tool's own health
 verdict is the primary signal; these are the checks and the reporting that do not depend on the tool.
 
-How much applies depends on the tool. NEL has no run verdict of its own, so every check below applies. NeMo Gym
-already decides state, health, coverage and recovery (its inspect step and health gate, in
-`run-and-babysit-eval`); take that verdict for "Verify a completed run" instead of repeating the log scan, and
-keep the accounting, the comparison rules and the reporting, which belong to the comparison.
+How much applies depends on the tool. A tool with no run verdict of its own needs every check below. A tool that
+already decides state, health, coverage and recovery (its reference says whether it does) gives a verdict to take
+for "Verify a completed run" instead of repeating the log scan; keep the accounting, the comparison rules and the
+reporting, which belong to the comparison.
 
 ## Verify a completed run
 
@@ -69,28 +69,16 @@ make full-run rates **unknown**, not zero: say what evidence is missing and do n
 
 ## What counts as an evaluation fault is the tool's rule
 
-- **NEL:** apply the bounded-failure policy in `modelopt-evaluation/references/run-validation.md` (its response
-  and trial gates, both at 2%).
-- **NeMo Gym:** take the tool's own health verdict (`SUCCESS` with health `PASS`; its 2% limit counts
-  evaluation-side faults). A wrong, truncated or empty answer, or a clean agent timeout, is the model's
-  result and counts as zero; do not add a response-level invalidation of your own. Still report the
-  per-side truncation and output-limit counts above, because a rising rate on the quantized side is a quality
-  signal for the comparison.
+Apply the tool's own rule (its reference says where it is and which health verdict to take), and only to that
+tool's runs. Do not add a response-level invalidation of your own: a wrong, truncated or empty answer, or a clean
+agent timeout, is the model's result where the tool says so. Still report the per-side truncation and output-limit
+counts above, because a rising rate on the quantized side is a quality signal for the comparison.
 
 ## Reading results from MLflow
 
-Both tools export to the same MLflow experiment, so prefer a run id from the handoff and read the run there.
-Checked on finished runs of both tools (read-only):
+Every supported tool exports to the same MLflow experiment, so prefer a run id from the handoff and read the run
+there. The tags and metric names each tool writes are in its reference (checked on finished runs, read-only).
 
-- **NEL runs** carry the tags `invocation_id`, `task_name`, `benchmark`, `harness`. Token averages are metrics such as
-  `<task>_pass_at_1_avg-of-N_answer_tokens_statistics_avg`; use the one whose N equals the repeat count (on a
-  checked IFBench run it equalled `response_stats.avg_completion_tokens` in `eval_factory_metrics.json`). NEL
-  `simple_evals` runs (GPQA) carry no token metrics, only the stored artifact
-  `<harness>.<task>/artifacts/eval_factory_metrics.json`. Sample count is `*_num_prompts` times the repeat count.
-- **NeMo Gym runs** carry the tags `precision`, `pair_id`, `stage`, `requested_task`. The headline score is the
-  metric `<agent>/mean/reward` on a 0 to 1 scale (multiply by 100; on every checked run it equalled the run
-  summary score). Token averages are `<agent>/mean/output_tokens`; sample counts are `coverage/expected` and
-  `coverage/scored`; evaluation health is under `health/*` and `coverage/*`.
 - **Use a run only when its status is `FINISHED` and the metric exists.** Failed and killed runs are exported
   too, with few metrics. One run is one benchmark of one submission: combine equal-repeat runs by averaging
   (two 16-repeat runs make a 32-repeat score), and take the task status from the tool's own verdict, because a

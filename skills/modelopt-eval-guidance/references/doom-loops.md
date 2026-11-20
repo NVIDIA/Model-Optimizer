@@ -25,10 +25,8 @@ more escaped-loop answers. AA-LCR loops restate paragraphs up to about 4K tokens
 inside the reasoning leaves no final answer.
 
 **How the field reaches the server depends on the tool.** It goes into the request body the tool sends to the
-serving endpoint. For NEL, where it goes in the config and the `finish_reason` remap that the nemo-skills client
-needs are in `modelopt-evaluation/references/doom_loops.md`. For NeMo Gym, put it in whatever per-request
-extra-body setting the benchmark configuration supports; that placement has not been verified, and if the tool
-cannot pass it, say so instead of editing the evaluation.
+serving endpoint. The tool's reference says where it goes in that tool's config and what else the tool's client
+needs; if the tool cannot pass the field, say so instead of editing the evaluation.
 
 ## Guards
 

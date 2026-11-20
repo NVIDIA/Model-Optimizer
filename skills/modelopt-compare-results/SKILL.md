@@ -1,6 +1,6 @@
 ---
 name: modelopt-compare-results
-description: Establish baseline-vs-candidate evaluation plans, delegate missing evaluations, compare validated results, and decide quantization feasibility. Use when the user asks to compare baseline vs quantized runs, explain an accuracy drop/regression, verify whether a quantized checkpoint is acceptable, or compare evaluation outputs (NEL or NeMo Gym, from result files or MLflow). Do NOT use for generic single-model evaluation without comparison intent (use modelopt-evaluation), live NEL status/debugging (use modelopt-launching-evals; for NeMo Gym runs, the Gym evaluation skills), or generic MLflow browsing without a comparison goal (use modelopt-accessing-mlflow).
+description: Establish baseline-vs-candidate evaluation plans, delegate missing evaluations, compare validated results, and decide quantization feasibility. Use when the user asks to compare baseline vs quantized runs, explain an accuracy drop/regression, verify whether a quantized checkpoint is acceptable, or compare evaluation outputs (from result files or MLflow). Do NOT use for generic single-model evaluation without comparison intent (use modelopt-evaluation), live evaluation status/debugging (use the tool's own skills, listed in `modelopt-eval-guidance/references/tools/index.md`), or generic MLflow browsing without a comparison goal (use modelopt-accessing-mlflow).
 license: Apache-2.0
 ---
 
@@ -23,20 +23,17 @@ change is being measured, typically a further quantized version of the baseline.
    possible; change only the model/checkpoint and checkpoint-specific serving or
    quantization flags.
 3. Fetch the baseline and candidate task list, configs, score artifacts, and
-   logs. If the user provides MLflow runs or invocation IDs, use the
-   accessing-mlflow skill to fetch configs and artifacts (NEL conventions); for runs
-   of either tool, `modelopt-eval-guidance` (`references/run-validity.md`, "Reading
+   logs. If the user provides MLflow runs or invocation IDs, fetch
+   configs and artifacts as the tool's reference in `references/tools/` says; for runs
+   of any tool, `modelopt-eval-guidance` (`references/run-validity.md`, "Reading
    results from MLflow") lists the metrics and tags to use.
 4. Confirm each run passed the run-validity checks in `modelopt-eval-guidance`
-   (`references/run-validity.md`). For NEL runs also apply evaluation Step 9, "Verify
-   completed evaluation run", and the NEL policy in `modelopt-evaluation/references/run-validation.md`,
-   before comparing scores. If not, validate logs, server health,
+   (`references/run-validity.md`) and the tool's own validity step in its reference
+   under `references/tools/` before comparing scores. If not, validate logs, server health,
    judge/code-execution status, sample accounting, and reasoning parsing before
    computing deltas.
 5. For each task, use the score field the evaluation tool defines for the benchmark:
-   for NEL, the matching task recipe's **Score Extraction** section
-   (`modelopt-evaluation/recipes/tasks/<task>.md`); for NeMo Gym, the run summary
-   score (the run's MLflow `<agent>/mean/reward`, on a 0 to 1 scale).
+   the tool's reference under `references/tools/` says where it is.
 6. Use `modelopt-eval-guidance` (`references/external-baseline-check.md`) to perform the
    **External Baseline Sanity Check**. Record each source URL, protocol
    difference, and task status before applying the candidate-delta gate. A
@@ -83,8 +80,8 @@ the validated runs are comparable:
    report that gate as inconclusive; do not reinterpret it as an FP8/INT4 gate.
 
 For SciCode, keep `num_repeats: 1` and require **at least 8 runs per side**, comparing
-the two means — see the NEL recipe `modelopt-evaluation/recipes/tasks/aa/scicode.md`
-(in the NeMo Gym runs checked so far, the eight repeats ran inside one submission, so confirm what a run contains before counting runs per side). Fewer
+the two means; the tool's reference under `references/tools/` says how a run maps to repeats (confirm what a run
+contains before counting runs per side). Fewer
 than 8 valid runs on a side is `INDETERMINATE`, not a delta.
 
 If any item differs, either rerun with matched settings or label the result as

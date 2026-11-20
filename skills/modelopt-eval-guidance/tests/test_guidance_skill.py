@@ -30,6 +30,8 @@ _SKILLS = Path(__file__).resolve().parents[2]
 _ROOT = _SKILLS.parent
 _GUIDANCE = _SKILLS / "modelopt-eval-guidance"
 _GUIDANCE_FILES = sorted(p for p in _GUIDANCE.rglob("*.md") if "tests" not in p.parts)
+_GENERIC_FILES = [p for p in _GUIDANCE_FILES if "tools" not in p.relative_to(_GUIDANCE).parts]
+_TOOL_FILES = [p for p in _GUIDANCE_FILES if p not in _GENERIC_FILES]
 
 
 def _text(path):
@@ -79,18 +81,113 @@ def test_guidance_is_tool_neutral(path):
         assert not re.search(pattern, text, re.IGNORECASE), f"{path.name}: matches {pattern}"
 
 
+# Generic guidance names no tool at all: every tool-specific fact is in references/tools/<tool>.md, so
+# retiring a tool is deleting its file (and its adapter), not editing the generic text.
+_NAMED_TOOLS = [
+    r"\bNEL\b",
+    r"\bnemo[- ]?gym\b",
+    r"nemo[-_]evaluator",
+    r"nemo-skills",
+    r"nemo_evaluator_config",
+]
+
+
+@pytest.mark.parametrize("path", _GENERIC_FILES, ids=lambda p: str(p.relative_to(_GUIDANCE)))
+def test_generic_guidance_names_no_tool(path):
+    text = _text(path)
+    for pattern in _NAMED_TOOLS:
+        assert not re.search(pattern, text, re.IGNORECASE), f"{path.name}: names a tool ({pattern})"
+
+
+# The skills that carry tool-specific facts keep them under references/tools/ (and the gate adapters).
+_GENERIC_SKILLS = (
+    "modelopt-eval-guidance",
+    "modelopt-compare-results",
+    "modelopt-monitor",
+    "modelopt-day0-release",
+    "modelopt-quant-recipe-search",
+)
+
+
+def _generic_skill_files(name):
+    root = _SKILLS / name
+    files = [
+        p
+        for p in list(root.rglob("*.md")) + list(root.glob("scripts/*.py"))
+        if "tests" not in p.parts
+        and "tools" not in p.relative_to(root).parts
+        and not p.name.endswith("_adapter.py")
+    ]
+    return sorted(files)
+
+
+@pytest.mark.parametrize("name", _GENERIC_SKILLS)
+def test_generic_skill_files_name_no_tool(name):
+    for path in _generic_skill_files(name):
+        text = _text(path)
+        for pattern in _NAMED_TOOLS:
+            assert not re.search(pattern, text, re.IGNORECASE), f"{path}: names a tool ({pattern})"
+
+
+@pytest.mark.parametrize(
+    "name", ["modelopt-compare-results", "modelopt-monitor", "modelopt-day0-release"]
+)
+def test_skills_with_tool_facts_keep_one_file_per_tool(name):
+    names = {p.name for p in (_SKILLS / name / "references/tools").glob("*.md")}
+    assert {"nel.md", "gym.md"} <= names
+
+
+def test_nel_deletion_is_removing_files():
+    """The files NEL retirement removes are exactly the tool references and the adapter."""
+    adapters = {p.name for p in (_SKILLS / "modelopt-day0-release/scripts").glob("*_adapter.py")}
+    assert adapters == {"nel_adapter.py", "gym_adapter.py"}
+
+
+def test_each_tool_has_a_reference_and_the_index_lists_it():
+    names = {p.name for p in _TOOL_FILES}
+    assert names >= {"index.md", "nel.md", "gym.md"}
+    index = _text(_GUIDANCE / "references/tools/index.md")
+    assert "nel.md" in index and "gym.md" in index
+    assert "default tool" in index.lower() and "NEL" in index
+
+
+def test_nel_reference_keeps_the_nel_rules():
+    nel = _text(_GUIDANCE / "references/tools/nel.md")
+    for needle in (
+        "65536",  # numeric output-budget fallback
+        "modelopt-evaluation/references/run-validation.md",  # bounded-failure policy
+        "scancel",  # never cancel a wedged job
+        "nemo_evaluator_config",
+        "answer_tokens_statistics_avg",
+    ):
+        assert needle in nel
+
+
+def test_gym_reference_keeps_the_gym_rules():
+    gym = _text(_GUIDANCE / "references/tools/gym.md")
+    for needle in (
+        "add-model-eval-config",
+        "run-and-babysit-eval",
+        "nemo-gym-score-triage",
+        "<agent>/mean/reward",
+        "UNVERIFIED",
+    ):
+        assert needle in gym
+
+
 def test_guidance_does_not_override_the_tools_output_budget():
     text = _text(_GUIDANCE / "references/vendor-reference-and-sampling.md")
     assert "Record, do not override" in text
-    # the NEL numeric fallback lives with NEL, not in the neutral text as an instruction
-    assert "modelopt-evaluation/references/model-card-research.md" in text
+    assert "never invent one" in text
 
 
 def test_run_validity_leaves_the_fault_rule_to_the_tool():
     text = _text(_GUIDANCE / "references/run-validity.md")
     assert "What counts as an evaluation fault is the tool's rule" in text
-    assert "do not add a response-level invalidation of your own" in text
-    assert "modelopt-evaluation/references/run-validation.md" in text  # NEL still gets its policy
+    assert "Do not add a response-level invalidation of your own" in text
+    assert "modelopt-evaluation/references/run-validation.md" in _text(
+        _GUIDANCE / "references/tools/nel.md"
+    )
 
 
 # Skills that must reach the guidance, so a later edit cannot silently cut the link.
@@ -178,18 +275,29 @@ def test_no_subagent_file_is_a_workflow(path):
     assert len(body.split()) < 260, f"{path.name}: move workflow text into a skill"
 
 
-def test_monitor_knows_both_tools():
+def test_monitor_keeps_each_tools_check_in_its_reference():
     monitor = _text(_SKILLS / "modelopt-monitor/SKILL.md")
-    assert "`type: gym`" in monitor and "type: nel" in monitor
-    assert "only when the task names NEL" in monitor
-    assert "run-and-babysit-eval" in monitor
+    assert "references/tools/" in monitor
+    nel = _text(_SKILLS / "modelopt-monitor/references/tools/nel.md")
+    assert (
+        "type: nel" in nel
+        and "nel status" in nel
+        and "Use this only when the task names NEL" in nel
+    )
+    gym = _text(_SKILLS / "modelopt-monitor/references/tools/gym.md")
+    assert "type: gym" in gym and "run-and-babysit-eval" in gym
 
 
-def test_recipe_search_names_both_tools_evaluation_skills():
+def test_compare_results_keeps_each_tools_rules_in_its_reference():
+    nel = _text(_SKILLS / "modelopt-compare-results/references/tools/nel.md")
+    assert "Score Extraction" in nel and "run-validation.md" in nel
+    gym = _text(_SKILLS / "modelopt-compare-results/references/tools/gym.md")
+    assert "<agent>/mean/reward" in gym and "nemo-gym-score-triage" in gym
+
+
+def test_recipe_search_points_at_the_tool_index():
     text = _text(_SKILLS / "modelopt-quant-recipe-search/SKILL.md")
-    assert "Use `modelopt-evaluation` to create NEL configs and submit evals (NEL)." in text
-    assert "For NeMo Gym, use its evaluation skills" in text
-    assert "modelopt-eval-guidance" in text
+    assert "modelopt-eval-guidance/references/tools/index.md" in text
 
 
 # General skills are used outside the Day 0 program, so they must reach the evaluation skills

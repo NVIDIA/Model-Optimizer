@@ -1,6 +1,6 @@
 ---
 name: modelopt-eval-guidance
-description: Tool-neutral guidance for the accuracy evaluation of a quantized checkpoint, whatever evaluation tool runs it - read the vendor model card, pick quantization-sensitive benchmarks, validate a finished run, check the baseline against the published score, and handle doom loops. Use it next to the evaluation tool's own skills (NEL, NeMo Gym) whenever a baseline or candidate is evaluated; it holds the duties that do not depend on the tool.
+description: Tool-neutral guidance for the accuracy evaluation of a quantized checkpoint, whatever evaluation tool runs it - read the vendor model card, pick quantization-sensitive benchmarks, validate a finished run, check the baseline against the published score, and handle doom loops. Use it next to the evaluation tool's own skills whenever a baseline or candidate is evaluated; it holds the duties that do not depend on the tool.
 license: Apache-2.0
 ---
 
@@ -10,12 +10,9 @@ The evaluation tool runs the evaluation: it composes the config, submits, resume
 health verdict. This skill holds what a quantization workflow needs on top of that, and it applies to
 every tool.
 
-| Tool | Where the tool mechanics live |
-|---|---|
-| NEL (NeMo Evaluator Launcher) | `modelopt-evaluation`, `modelopt-launching-evals`, `modelopt-monitor` |
-| NeMo Gym | the Gym evaluation skills named by the task (for example `run-and-babysit-eval`, `add-model-eval-config`) |
-
-Use the skills of the tool the task names. Do not load another tool's skills.
+Tool-specific details live in [references/tools/](references/tools/index.md), one file per tool: the skills that
+run it, where its health verdict and settings are, and its MLflow names. Use the skills and the reference of the
+tool the task names (the default is named in the index), and do not load another tool's skills.
 
 ## What to read, in order
 
@@ -50,8 +47,8 @@ Use the skills of the tool the task names. Do not load another tool's skills.
 - **The output-token budget, the repeat count and the score definition** are set by the tool's benchmark
   configuration. Record the model card's value next to the tool's value; do not replace the tool's value.
 - **The health verdict** (what counts as an evaluation fault, the fault limit, what counts as the model's
-  own result such as a truncated answer) is the tool's. NEL's bounded-failure policy is in
-  `modelopt-evaluation/references/run-validation.md`; apply it only to NEL runs.
+  own result such as a truncated answer) is the tool's. Its reference says where that rule is; apply a tool's
+  policy only to that tool's runs.
 - **Never change the evaluation to make a run fit:** no extra row limits beyond a smoke run, fewer repeats,
   smaller token budgets, or shorter timeouts.
 
@@ -61,5 +58,5 @@ Read results from MLflow when the run was exported there, with the run id from t
 export to the same experiment; the metric names differ by tool, so confirm the name in the run before using
 it. Take scores and token counts from a run only when its status is `FINISHED` and the metric exists, and take
 the task status from the tool's own verdict (a benchmark's run can be `FINISHED` while its submission failed
-overall). Details and examples are in [run-validity.md](references/run-validity.md#reading-results-from-mlflow); NEL's
-conventions for looking runs up are in `modelopt-accessing-mlflow`.
+overall). Details are in [run-validity.md](references/run-validity.md#reading-results-from-mlflow) and the tool's
+reference.
