@@ -132,6 +132,6 @@ class FakeTensorQuantTester(TensorQuantCommon):
     def test_overflow_fp16(self):
         x = torch.randn(31).to(self.device).half()
         quant_x_test = tensor_quant.fake_tensor_quant(
-            x, torch.tensor(1e-4).to(self.device).half(), 8, False
+            x, torch.tensor(1e-4).to(self.device).half(), None, 8, False
         )
         assert not (torch.isinf(quant_x_test).any() or torch.isnan(quant_x_test).any())

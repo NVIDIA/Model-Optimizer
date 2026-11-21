@@ -202,6 +202,7 @@ Changelog
 - ``export_mcore_gpt_to_hf`` and ``capture_kv_cache_export_state`` now write NVFP4 KV-cache ``k_scale`` / ``v_scale`` as amax / 448, like the HF exporter and as vLLM and TensorRT-LLM expect. They wrote amax / (6 * 448), which overflows in the attention kernels. Re-export Megatron checkpoints with an NVFP4 KV cache.
 - Loading a quantized Megatron-Core checkpoint into a model whose weights are not initialized yet, as Megatron-Bridge's ``load_megatron_model`` does, no longer fails with ``detected nan values in amax``. It failed whenever that memory held NaNs, e.g. on CPU or with pipeline parallelism.
 - Preserve accumulated histogram counts when computing an entropy calibration threshold with NumPy histograms.
+- Fix MSE histogram calibration (``compute_amax("mse")``, ``calibrate_weights(method="mse")``) picking the smallest candidate amax for INT formats and raising ``TypeError`` for FP8 E4M3. Re-calibrate affected models.
 - ``mtq.quantize`` and ``mtq.calibrate`` now give every module back the training mode it had. They used to leave every module in the mode of the model passed in, so a module in eval mode inside a model in training mode came back in training mode.
 - Diffusers ``export_hf_checkpoint`` now honors ``save_modelopt_state=False`` (the default) when HuggingFace checkpointing is enabled. Pass ``save_modelopt_state=True`` to retain the ModelOpt state file.
 - Layerwise-calibration resume (``checkpoint_dir``) no longer runs code from a modified checkpoint directory; an unusable file now fails with an error instead.

@@ -305,9 +305,9 @@ def _compute_amax_mse(calib_hist, calib_bin_edges, num_bits, unsigned, stride=1,
     for i in range(start_bin, len(centers), stride):
         amax = centers[i]
         if isinstance(num_bits, int) and num_bits >= 0:
-            quant_centers = fake_tensor_quant(centers, amax, num_bits, unsigned)
+            quant_centers = fake_tensor_quant(centers, amax, None, num_bits, unsigned)
         elif num_bits == (4, 3):
-            quant_centers = scaled_e4m3(centers, amax, num_bits[0], num_bits[1])
+            quant_centers = scaled_e4m3(centers, amax, None, num_bits[0], num_bits[1])
         else:
             raise TypeError("Invalid num_bits. num_bits must be a positive integer or tuple (4,3).")
 
