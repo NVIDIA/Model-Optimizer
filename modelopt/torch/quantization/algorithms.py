@@ -19,6 +19,7 @@ import copy
 import fnmatch
 import functools
 import gc
+import os
 import types
 import warnings
 from abc import ABC, abstractmethod
@@ -267,23 +268,39 @@ def _has_per_weight_modules(model: nn.Module) -> bool:
     )
 
 
-def _check_uniform_weight_format(recipe: "QuantRecipe", quantizers: dict[str, nn.Module]) -> None:
-    """Refuse a candidate whose weight formats differ within an opted-in per-weight module.
+def _quantizer_compression(quantizer: TensorQuantizer) -> float:
+    """The compression one enabled weight quantizer's format stores its weight at."""
+    effective_bits = getattr(quantizer, "_effective_bits", None)
+    num_bits = quantizer.num_bits
+    if effective_bits is not None:
+        return effective_bits / 16
+    if isinstance(num_bits, tuple):
+        return (sum(num_bits) + 1) / 16
+    if isinstance(num_bits, int):
+        return num_bits / 16
+    raise ValueError(f"Cannot infer AutoQuantize cost from num_bits={num_bits!r}.")
 
-    Such a module is costed at its candidate's compression over all of its weights, so the
-    weights must share one format, all quantized alike or all left unquantized.
+
+def _per_weight_compression(recipe: "QuantRecipe", quantizers: dict[str, nn.Module]) -> float:
+    """The compression a candidate resolves an opted-in per-weight module's weights to.
+
+    Each weight takes its quantizer's format, the narrowest stage of a sequential one (e.g.
+    W4A8), as recipes are costed. A module is one search group at one cost, so its weights must
+    resolve alike: all quantized at one compression, or all unquantized (1.0).
     """
-    # One format per weight: a sequential quantizer (e.g. W4A8) is the tuple of its stages.
-    formats = {
-        tuple(_tensor_quantizer_format_signature(q) for q in _iter_tensor_quantizers(value))
-        for attr, value in quantizers.items()
-        if "weight_quantizer" in attr
-    }
-    if len(formats) > 1:
+    compressions = set()
+    for attr, value in quantizers.items():
+        if "weight_quantizer" in attr:
+            enabled = [q for q in _iter_tensor_quantizers(value) if q.is_enabled]
+            compressions.add(min(map(_quantizer_compression, enabled)) if enabled else 1.0)
+    if len(compressions) > 1:
         raise ValueError(
             f"AutoQuantize candidate {recipe} gives the weights of one module different formats; "
             "configure all of its weight quantizers alike."
         )
+    compression = compressions.pop() if compressions else 1.0
+    effective_bits = recipe.config.effective_bits
+    return effective_bits / 16 if effective_bits is not None and compression < 1.0 else compression
 
 
 def _rewritten_weight(recipe: "QuantRecipe", name: str, module: nn.Module, attr: str, quantizer):
@@ -434,18 +451,7 @@ def _fixed_module_weight_compression(
     if effective_bits_override is not None:
         return effective_bits_override / 16
 
-    compressions = []
-    for quantizer in weight_quantizers:
-        effective_bits = getattr(quantizer, "_effective_bits", None)
-        num_bits = quantizer.num_bits
-        if effective_bits is not None:
-            compressions.append(effective_bits / 16)
-        elif isinstance(num_bits, tuple):
-            compressions.append((sum(num_bits) + 1) / 16)
-        elif isinstance(num_bits, int):
-            compressions.append(num_bits / 16)
-        else:
-            raise ValueError(f"Cannot infer AutoQuantize cost from num_bits={num_bits!r}.")
+    compressions = [_quantizer_compression(quantizer) for quantizer in weight_quantizers]
 
     if any(abs(value - compressions[0]) > 1e-12 for value in compressions[1:]):
         raise ValueError(
@@ -736,8 +742,16 @@ class QuantRecipeHparam(Hparam):
                 quantizers = {
                     attr_name: getattr(quant_module, attr_name) for attr_name in attr_names
                 }
-                if getattr(quant_module, "_auto_quantize_per_weight_quantizers", False):
-                    _check_uniform_weight_format(quant_recipe, quantizers)
+                if getattr(quant_module, "_auto_quantize_per_weight_quantizers", False) and (
+                    _per_weight_compression(quant_recipe, quantizers) == 1.0
+                    and not quant_recipe.is_no_quant
+                ):
+                    warnings.warn(
+                        f"AutoQuantize candidate {quant_recipe} leaves the weights of "
+                        f"{type(quant_module).__name__} unquantized: its rules match none of the "
+                        "module's quantizer names. Rules are matched against module-relative "
+                        "names, e.g. w1_weight_quantizer, not full paths."
+                    )
                 self._all_quantizer_choices[quant_recipe][quant_module] = quantizers
 
         self.active = self.original
@@ -928,22 +942,11 @@ class QuantRecipeHparam(Hparam):
         return cost
 
     def _resolved_compression(self, recipe: QuantRecipe, quant_module: nn.Module) -> float:
-        """The recipe's compression, or none if it leaves a per-weight module's weights BF16.
-
-        A pattern such as ``*.experts.*weight_quantizer`` names full paths, so it matches none of
-        the module-relative names its candidate is applied with. Such a module's weights share one
-        format (see ``_check_uniform_weight_format``), so they are quantized alike or not at all.
-        """
+        """The recipe's compression, or what it resolves a per-weight module's weights to."""
         if not getattr(quant_module, "_auto_quantize_per_weight_quantizers", False):
             return recipe.compression
         quantizers = self._all_quantizer_choices[recipe][quant_module]
-        quantized = any(
-            quantizer.is_enabled
-            for attr, value in quantizers.items()
-            if "weight_quantizer" in attr
-            for quantizer in _iter_tensor_quantizers(value)
-        )
-        return recipe.compression if quantized else 1.0
+        return _per_weight_compression(recipe, quantizers)
 
     @property
     def attrs(self) -> list[str]:
@@ -1548,6 +1551,20 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.candidate_stats[name]["is_fixed"] = hparam.is_fixed
         self.refresh_candidate_costs()
 
+    def _cost_state(self) -> tuple:
+        return (
+            self.cost_version,
+            self.cost_denominator,
+            {
+                name: (
+                    stats.get("costs"),
+                    stats.get("uncompressed_cost"),
+                    stats.get("per_weight_modules"),
+                )
+                for name, stats in self.candidate_stats.items()
+            },
+        )
+
     def refresh_candidate_costs(self):
         """Compute candidate costs from the model, also over costs a checkpoint restored.
 
@@ -1917,9 +1934,21 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         if self.candidate_stats:
             if self.config["verbose"]:
                 print_rank_0("AutoQuantize: Restored from checkpoint, skipping scoring")
+            before = self._cost_state()
             self.refresh_candidate_costs()
-            # Saved too, so offline re-solves of this checkpoint read the refreshed costs.
-            self.save_search_checkpoint(verbose=self.config["verbose"])
+            if self._cost_state() != before:
+                # Saved, so offline re-solves of this checkpoint read the refreshed costs; a
+                # read-only checkpoint is still resumed, with the costs refreshed in memory.
+                path = self._get_checkpoint_path()
+                if path is not None and os.access(
+                    path if os.path.exists(path) else os.path.dirname(path) or ".", os.W_OK
+                ):
+                    self.save_search_checkpoint(verbose=self.config["verbose"])
+                else:
+                    warnings.warn(
+                        f"AutoQuantize refreshed the costs of read-only checkpoint {path}; "
+                        "resume it from a writable copy to keep them for offline use."
+                    )
             return
 
         self.estimate_sensitivity_scores()

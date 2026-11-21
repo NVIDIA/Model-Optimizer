@@ -39,11 +39,11 @@ from modelopt.torch.quantization.algorithms import (
     QuantRecipeHparam,
     _AutoQuantizeBaseSearcher,
     _AutoQuantizeGradientScoringSession,
-    _check_uniform_weight_format,
     _get_kl_div_loss,
     _get_log_prob,
     _get_quantizer_attrs,
     _module_search_space_signature,
+    _per_weight_compression,
     _resolve_best_recipe,
     estimate_quant_compression,
     merge_auto_quantize_shards,
@@ -1315,10 +1315,11 @@ def test_uniform_sequential_weight_formats_are_one_format():
             TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=0)),
         )
 
-    _check_uniform_weight_format(
+    compression = _per_weight_compression(
         QuantRecipe(quant_cfg=None),
         {"w1_weight_quantizer": w4a8(), "w2_weight_quantizer": w4a8()},
     )
+    assert compression == 4 / 16
 
 
 def test_get_auto_quantize_config_keeps_named_weight_patterns_per_module():
