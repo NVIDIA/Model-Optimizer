@@ -1027,6 +1027,7 @@ class _DynamicEagleGPTModel(EagleModel):
         packed_seq_params: PackedSeqParams = None,
         extra_block_kwargs: dict | None = None,
         return_eagle_inputs: bool = False,
+        base_hidden_prenorm: bool = False,
         **kwargs,
     ) -> torch.Tensor:
         if position_ids is None or attention_mask is None:
@@ -1039,6 +1040,13 @@ class _DynamicEagleGPTModel(EagleModel):
                 raise ValueError("return_eagle_inputs is unsupported in EAGLE offline mode.")
             aux_hidden_states = kwargs.get("aux_hidden_states")
             hidden_states = kwargs.get("hidden_states")
+            # vLLM's final capture is the residual before the target's final norm.
+            if base_hidden_prenorm:
+                if self.decoder.final_layernorm is None:
+                    raise ValueError(
+                        "Pre-norm EAGLE teacher features require the target's final norm."
+                    )
+                hidden_states = self.decoder.final_layernorm(hidden_states)
         else:
             # When return_eagle_inputs is True, return decoder_input_for_eagle.
             # For LLM, decoder_input_for_eagle is just the text embeddings. However, for VLM

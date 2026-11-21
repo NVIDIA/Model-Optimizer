@@ -163,6 +163,58 @@ Include the source conversation's template inputs so training uses the same toke
 Malformed rows and template rendering failures are resampled, with one warning per
 reason per dataset worker. Missing templates, template syntax errors and loss-mask errors still raise.
 
+### Megatron EAGLE3 teacher features
+
+The Megatron adapter takes a capture shaped `[T, K+1, H]`, with `T` prompt tokens, `K`
+auxiliary layers and teacher width `H`. Captures follow the checkpoint's auxiliary layer
+order. Convert each zero-based auxiliary layer ID to a vLLM completed-layer count by adding
+one, then append the teacher's layer count as a distinct final plane. For Qwen3-0.6B, the
+checkpoint's `[1, 13, 24]` maps to captures `[2, 14, 25, 28]`. Both processes use the same
+teacher weights and tokenizer.
+
+For trainer sequence length `S`, the adapter right-pads IDs and the unshifted supervision
+mask to `S+1` and emits `S` BF16 rows in `aux_hidden_states` (width `K*H`) and
+`hidden_states` (width `H`). Padded features and mask entries are zero. Megatron shifts the
+IDs and mask once to form labels. The final plane is pre-norm, so the Megatron trainer passes
+`base_hidden_prenorm=True` and ModelOpt applies the checkpoint's final norm before the teacher
+LM head. Disk-backed post-norm inputs keep the default behavior.
+
+The connector handles per-layer cache views in `[blocks, tokens, planes, hidden]` or
+`[blocks, planes, tokens, hidden]` order. Use a cache block size different from the capture
+count so the connector can identify the plane axis. The connector expects one identifiable
+capture cache group. Disable chunked prefill and prefix caching so it can capture the entire
+prompt in one scheduler step. Set the capture slot capacity and scheduler token budget to at
+least `S` and the server context to at least `S+1` for the client's one-token completion.
+The transfer descriptor carries the token IDs and tensor shape. Configure capture-layer
+identity and order on both sides.
+
+#### Test against a live Qwen3 server
+
+From the ModelOpt repository root, set `TEACHER_MODEL` to a local Qwen3-0.6B checkout. Run this
+vLLM server on one GPU and the boundary test on a different GPU. The example uses same-host UCX.
+
+```bash
+export NIXL_BACKENDS=UCX UCX_TLS=tcp,sm,self,cuda_copy
+CUDA_VISIBLE_DEVICES=0 VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve "$TEACHER_MODEL" \
+    --served-model-name qwen3-teacher --host 127.0.0.1 --port 18876 --dtype bfloat16 \
+    --max-model-len 257 --max-num-batched-tokens 512 --max-num-seqs 2 \
+    --kv-cache-memory-bytes 268435456 --gpu-memory-utilization 0.065 --enforce-eager \
+    --no-enable-chunked-prefill --no-enable-prefix-caching --no-enable-flashinfer-autotune \
+    --speculative-config '{"method":"extract_hidden_states","num_speculative_tokens":1,"draft_model_config":{"hf_config":{"eagle_aux_hidden_state_layer_ids":[2,14,25,28]}}}' \
+    --kv-transfer-config '{"kv_connector":"RdmaHiddenStatesConnector","kv_connector_module_path":"modelopt.torch.speculative.plugins.rdma_hidden_states_connector","kv_role":"kv_producer","kv_connector_extra_config":{"sidecar_port":"18877","pool_slots":"4","max_tokens":"256"}}'
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=1 NIXL_BACKENDS=UCX UCX_TLS=tcp,sm,self,cuda_copy \
+    EAGLE_STREAMING_TEST_URL=http://127.0.0.1:18876 EAGLE_STREAMING_TEST_TEACHER="$TEACHER_MODEL" \
+    pytest -q tests/gpu_vllm/torch/speculative/plugins/test_rdma_hidden_states_connector.py \
+        -k live_megatron_stream
+```
+
+This exercises the real HTTP and NIXL path for a padded prompt and a prompt truncated to
+256 tokens, compares the captured planes with Transformers, and checks that a 257-token
+trainer cap is rejected against the server's advertised 256-token capture slot.
+
 ## Training a Standalone (External) Draft Model
 
 The modes above graft a draft head onto the target. The `external` mode instead

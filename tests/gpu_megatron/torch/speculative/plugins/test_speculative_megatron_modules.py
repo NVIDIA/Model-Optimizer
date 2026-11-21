@@ -276,3 +276,57 @@ def test_speculative_gpt_model(
             sequence_parallel,
         ),
     )
+
+
+def _test_eagle_offline_prenorm(rank, size):
+    seq_length = 16
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=0,
+        output_layer_init_method=partial(torch.nn.init.normal_, std=0.02),
+        normalization="RMSNorm",
+        max_sequence_length=seq_length,
+    ).cuda()
+    model.config.original_num_layers = 8
+    config = deepcopy(ALGO_TO_CONFIG["eagle3"])
+    config["config"].update(eagle_offline=True, eagle_ttt_steps=1, eagle_report_acc=False)
+    config["config"]["eagle_architecture_config"].update(
+        hidden_size=model.config.hidden_size, vocab_size=model.vocab_size, draft_vocab_size=64
+    )
+    model = mtsp.convert(model, config).bfloat16().eval()
+    torch.nn.init.normal_(model.eagle_module.fc.weight, std=0.02)
+    generator = torch.Generator(device="cuda").manual_seed(3349)
+    tokens = torch.randint(0, model.vocab_size, (1, seq_length), device="cuda", generator=generator)
+    hidden = (
+        torch.randn(
+            seq_length, 1, model.config.hidden_size, device="cuda", generator=generator
+        ).bfloat16()
+        * 3
+    )
+    aux = torch.cat((hidden, hidden * 2, hidden * 3), dim=-1)
+    labels = tokens.roll(-1, dims=-1)
+
+    with torch.no_grad():
+        postnorm = model.decoder.final_layernorm(hidden)
+        expected = model(tokens, aux_hidden_states=aux, hidden_states=postnorm)
+        actual = model(
+            tokens, aux_hidden_states=aux, hidden_states=hidden, base_hidden_prenorm=True
+        )
+        raw = model(tokens, aux_hidden_states=aux, hidden_states=hidden)
+        expected_loss = model(tokens, labels=labels, aux_hidden_states=aux, hidden_states=postnorm)
+        actual_loss = model(
+            tokens,
+            labels=labels,
+            aux_hidden_states=aux,
+            hidden_states=hidden,
+            base_hidden_prenorm=True,
+        )
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert not torch.equal(actual, raw)
+    torch.testing.assert_close(actual_loss, expected_loss, rtol=0, atol=0)
+
+
+def test_eagle_offline_prenorm(dist_workers_size_1):
+    dist_workers_size_1.run(_test_eagle_offline_prenorm)
