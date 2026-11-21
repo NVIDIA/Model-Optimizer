@@ -17,6 +17,7 @@
 
 import functools
 import gc
+import importlib
 import io
 import itertools
 import os
@@ -896,13 +897,19 @@ def reinstall_a2a_forwards(model, ep_mesh) -> int:
 
 def _hf_parameter_plan_lookup():
     """Transformers' ``(name, plan, is_weight) -> style`` lookup in a tensor- or expert-parallel plan."""
-    try:  # transformers 5.19+
-        from transformers.distributed.parallel_utils import _get_parameter_plan as lookup
-    except ImportError:
+    for module, name in (
+        ("transformers.distributed.parallel_utils", "_get_parameter_plan"),  # 5.23+
+        ("transformers.distributed.tensor_parallel", "_get_parameter_plan"),  # 5.19-5.22
+        ("transformers.distributed.tensor_parallel", "_get_parameter_tp_plan"),
+        ("transformers.integrations.tensor_parallel", "_get_parameter_tp_plan"),
+    ):
         try:
-            from transformers.distributed.tensor_parallel import _get_parameter_tp_plan as lookup
-        except ImportError:
-            from transformers.integrations.tensor_parallel import _get_parameter_tp_plan as lookup
+            lookup = getattr(importlib.import_module(module), name)
+            break
+        except (ImportError, AttributeError):
+            continue
+    else:
+        raise ImportError("transformers has no tensor-parallel plan lookup")
     return lambda name, plan, is_weight=True: lookup(name, plan, is_weight=is_weight)
 
 

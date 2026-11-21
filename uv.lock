@@ -2718,7 +2718,7 @@ requires-dist = [
     { name = "torchprofile", marker = "extra == 'dev-test'", specifier = "==0.0.4" },
     { name = "torchvision", marker = "extra == 'dev-test'" },
     { name = "tqdm" },
-    { name = "transformers", marker = "extra == 'hf'", specifier = ">=5.5,<5.24" },
+    { name = "transformers", marker = "extra == 'hf'", specifier = ">=5.5,<5.19" },
     { name = "typeguard", marker = "extra == 'puzzletron'" },
     { name = "uv", marker = "extra == 'dev-test'" },
     { name = "wonderwords", marker = "extra == 'hf'" },
