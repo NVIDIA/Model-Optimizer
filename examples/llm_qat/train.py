@@ -49,6 +49,10 @@ from transformers.trainer_utils import get_last_checkpoint
 from utils import get_lora_config, get_metrics_with_perplexity, make_supervised_data_module
 
 import modelopt.torch.opt as mto
+from modelopt.torch.distill.plugins.offline_teacher import (
+    OfflineTeacherCollator,
+    OfflineTeacherDataset,
+)
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer, QATTrainer
 from modelopt.torch.utils import print_rank_0
 
@@ -88,7 +92,23 @@ def train():
     model.config.use_cache = False
 
     print_rank_0("Loading dataset...")
-    data_module = make_supervised_data_module(data_args, tokenizer)
+    offline_dir = distill_args.offline_teacher_dir if distill_args.distill else None
+    if offline_dir is None:
+        data_module = make_supervised_data_module(data_args, tokenizer)
+    else:
+        # The corpus holds each row's inputs next to its teacher targets, so it replaces the
+        # dataset. An eval-only run needs no train source.
+        data_module = {"data_collator": OfflineTeacherCollator(transformers.default_data_collator)}
+        for split, key in (("train", "train_dataset"), ("eval", "eval_dataset")):
+            if os.path.isdir(os.path.join(offline_dir, split)) and (
+                split != "train" or training_args.do_train
+            ):
+                data_module[key] = OfflineTeacherDataset(
+                    os.path.join(offline_dir, split),
+                    tokenizer,
+                    model_args.model_max_length,
+                    top_k=distill_args.offline_teacher_top_k if split == "train" else None,
+                )
 
     # Training
     checkpoint = None
@@ -105,17 +125,23 @@ def train():
 
     distill_config = None
     if distill_args.distill:
-        assert distill_args.teacher_model is not None, "Teacher model is required for distillation."
-        teacher = transformers.AutoModelForCausalLM.from_pretrained(
-            distill_args.teacher_model,
-            dtype=torch.bfloat16,
-            **model_kwargs,
-        )
+        teacher = None
+        if offline_dir is None:
+            assert distill_args.teacher_model is not None, (
+                "Teacher model is required for distillation."
+            )
+            teacher = transformers.AutoModelForCausalLM.from_pretrained(
+                distill_args.teacher_model,
+                dtype=torch.bfloat16,
+                **model_kwargs,
+            )
         distill_config = {
             "teacher_model": teacher,
+            "offline_teacher_dir": distill_args.offline_teacher_dir,
             "temperature": distill_args.temperature,
             "criterion": distill_args.criterion,
             "liger_jsd_beta": distill_args.liger_jsd_beta,
+            "kd_loss_alpha": distill_args.kd_loss_alpha,
         }
 
     if distill_config is None:

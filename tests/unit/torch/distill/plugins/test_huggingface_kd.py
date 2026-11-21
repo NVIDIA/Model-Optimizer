@@ -30,6 +30,12 @@ from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.distill.losses import LogitsDistillationLoss
 from modelopt.torch.distill.plugins.huggingface import IGNORE_INDEX, KDTrainer
+from modelopt.torch.distill.plugins.offline_teacher import (
+    OfflineTeacherCollator,
+    OfflineTeacherDataset,
+    fused_linear_topk_kl,
+    topk_kl,
+)
 
 
 class _TinyCausalLM(nn.Module):
@@ -53,6 +59,23 @@ class _TinyCausalLM(nn.Module):
                 ignore_index=IGNORE_INDEX,
             )
         return CausalLMOutputWithPast(loss=loss, logits=logits)
+
+
+def _v3():
+    return pytest.importorskip("modelopt.torch.distill.plugins.offline_kd_v3")
+
+
+class _Tokenizer:
+    pad_token_id = 0
+
+    def __init__(self, vocab_size=8):
+        self.vocab_size = vocab_size
+
+    def get_vocab(self):
+        return {f"t{i}": i for i in range(self.vocab_size)}
+
+    def __len__(self):
+        return self.vocab_size
 
 
 class _ToyDataset(Dataset):
@@ -88,7 +111,15 @@ def _make_batch():
     return default_data_collator([_ToyDataset()[0], _ToyDataset()[1]])
 
 
-def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False, kd_loss_alpha=1.0, **kwargs):
+def _make_trainer(
+    tmp_path,
+    student,
+    teacher,
+    use_liger_kernel=False,
+    kd_loss_alpha=1.0,
+    offline_teacher_dir=None,
+    **kwargs,
+):
     use_cpu = kwargs.pop("use_cpu", True)
     training_args = TrainingArguments(
         output_dir=str(tmp_path),
@@ -103,7 +134,12 @@ def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False, kd_loss_al
         args=training_args,
         eval_dataset=_ToyDataset(),
         data_collator=default_data_collator,
-        distill_args={"teacher_model": teacher, "kd_loss_alpha": kd_loss_alpha},
+        processing_class=_Tokenizer() if offline_teacher_dir else None,
+        distill_args={
+            "teacher_model": teacher,
+            "kd_loss_alpha": kd_loss_alpha,
+            "offline_teacher_dir": offline_teacher_dir,
+        },
     )
 
 
@@ -264,3 +300,86 @@ def test_kd_loss_ddp_scaling(tmp_path):
     # the KD loss by (num_items * 2) and multiplying by world_size (2) should
     # perfectly match the single-rank calculation.
     assert loss_ddp.item() == pytest.approx(loss_single.item())
+
+
+def test_offline_topk_teacher_matches_online_kd(tmp_path):
+    """Full-vocabulary teacher targets reproduce the online KD loss without a teacher."""
+    v3 = _v3()
+    student, teacher = _make_models()
+    expected_kd_loss = _manual_kd_loss(student, teacher, _make_batch())
+    features = [dict(_ToyDataset()[i]) for i in range(len(_ToyDataset()))]
+    with torch.no_grad():
+        teacher_logits = teacher(input_ids=_make_batch()["input_ids"]).logits
+    for b, feature in enumerate(features):
+        positions = (feature["labels"][1:] != IGNORE_INDEX).nonzero().flatten()
+        values, indices, tail = v3.topk_targets(teacher_logits[b, positions], 8, 8)
+        feature["teacher_topk_positions"] = positions
+        feature["teacher_topk_ids"] = indices
+        feature["teacher_topk_logprobs"] = values
+        feature["teacher_topk_tail"] = tail
+    batch = OfflineTeacherCollator(default_data_collator)(features)
+    trainer = _make_trainer(tmp_path, student, None, offline_teacher_dir=str(tmp_path))
+
+    trainer.model.train()
+    loss = trainer.compute_loss(trainer.model, batch.copy())
+
+    assert loss.item() == pytest.approx(expected_kd_loss.item(), rel=1e-5)
+
+
+def test_offline_teacher_dataset_and_collator(tmp_path):
+    """V3 samples come back as the rows they were written from, cut to top_k and padded per batch."""
+    v3 = _v3()
+    rows = [
+        ([1, 2, 3, 4, 5], [IGNORE_INDEX, 2, 3, IGNORE_INDEX, IGNORE_INDEX]),
+        ([2, 3, 4], [IGNORE_INDEX] * 3),  # No loss: a fully padded row.
+        ([4, 5, 6, 7], [IGNORE_INDEX, IGNORE_INDEX, 6, 7]),
+    ]
+    samples = []
+    for ids, labels in rows:
+        sample = v3.strip_row(torch.tensor(ids), torch.tensor(labels))
+        values, indices, tail = v3.topk_targets(torch.randn(len(sample["positions"]), 8), 4, 8)
+        samples.append({**sample, "values": values.half(), "indices": indices, "tail": tail})
+    settings = v3.corpus_settings(_Tokenizer(), SimpleNamespace(), 3, recorded={}, provenance={})
+    v3.publish_chunk(str(tmp_path), samples[:2], settings, start=0, vocab_size=8)
+    last = v3.publish_chunk(str(tmp_path), samples[2:], settings, start=2, vocab_size=8)
+    ds = OfflineTeacherDataset(str(tmp_path), _Tokenizer(), max_length=6, top_k=2)
+
+    pad = [IGNORE_INDEX] * 6
+    assert ds[0]["input_ids"].tolist() == [1, 2, 3, 0, 0, 0]
+    assert ds[0]["labels"].tolist() == [IGNORE_INDEX, 2, 3, *pad[:3]]
+    assert ds[0]["attention_mask"].tolist() == [1, 1, 1, 0, 0, 0]
+    assert ds[1]["attention_mask"].sum() == 0 and ds[1]["labels"].tolist() == pad
+    assert ds[2]["labels"].tolist() == [IGNORE_INDEX, IGNORE_INDEX, 6, 7, *pad[:2]]
+    # The dropped targets join the tail, so the kept distribution still sums to one.
+    kept = ds[2]["teacher_topk_logprobs"].float().exp().sum(-1) + ds[2]["teacher_topk_tail"].exp()
+    torch.testing.assert_close(kept, torch.ones(2), atol=2e-3, rtol=0)
+
+    batch = OfflineTeacherCollator(default_data_collator)([ds[0], ds[1], ds[2]])
+
+    assert batch["teacher_topk_positions"].tolist() == [[0, 1], [-1, -1], [1, 2]]
+    assert torch.equal(batch["teacher_topk_ids"][2], samples[2]["indices"][:, :2])
+    with pytest.raises(ValueError, match="another tokenizer"):
+        OfflineTeacherDataset(str(tmp_path), _Tokenizer(9), max_length=6)
+    (tmp_path / last.split("/")[-1] / "index.json").unlink()
+    with pytest.raises(ValueError, match="finish writing"):
+        OfflineTeacherDataset(str(tmp_path), _Tokenizer(), max_length=6)
+
+
+@pytest.mark.parametrize("top_k", [3, 8])
+def test_fused_linear_topk_kl_matches_autograd(top_k):
+    """The chunked loss and its forward-computed gradients equal autograd on the vocabulary logits."""
+    v3 = _v3()
+    torch.manual_seed(0)
+    hidden = torch.randn(7, 6, dtype=torch.float64, requires_grad=True)
+    weight = torch.randn(10, 6, dtype=torch.float64, requires_grad=True)  # 2 rows of padding
+    values, ids, tail = v3.topk_targets(torch.randn(7, 10), top_k, vocab_size=8)
+    tail = tail + 0.1  # A stored tail need not make the targets sum to exactly one.
+
+    expected = topk_kl((hidden @ weight.t())[:, :8], ids, values, tail)
+    expected_grads = torch.autograd.grad(expected, (hidden, weight))
+    loss = fused_linear_topk_kl(hidden, weight, ids.int(), values, tail, vocab_size=8, chunk_size=3)
+    grads = torch.autograd.grad(loss, (hidden, weight))
+
+    assert loss.item() == pytest.approx(expected.item(), rel=1e-6)
+    for grad, expected_grad in zip(grads, expected_grads):
+        torch.testing.assert_close(grad.double(), expected_grad, rtol=1e-5, atol=1e-6)
