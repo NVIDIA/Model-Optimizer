@@ -40,9 +40,9 @@
 template <typename T>
 __global__ void fake_e4m3fy_kernel(const T *inputs, size_t n, const float *scale,
                                    const float *inv_scale, T *outputs) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
 
-  for (int idx = 4 * tid; idx < 4 * (tid + 1) && idx < n; ++idx) {
+  for (size_t idx = 4 * tid; idx < 4 * (tid + 1) && idx < n; ++idx) {
     outputs[idx] = static_cast<T>(
         static_cast<float>(static_cast<__nv_fp8_e4m3>(static_cast<float>(inputs[idx]) * scale[0])) *
         inv_scale[0]);
@@ -53,9 +53,9 @@ template <typename T>
 __global__ void fake_e4m3fy_with_axis_cuda_kernel(const T *inputs, size_t n, const float *scale,
                                                   const float *inv_scale, int axis_size,
                                                   int outer_size, T *outputs) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
 
-  for (int idx = 4 * tid; idx < 4 * (tid + 1) && idx < n; ++idx) {
+  for (size_t idx = 4 * tid; idx < 4 * (tid + 1) && idx < n; ++idx) {
     float x = static_cast<float>(inputs[idx]);
 
     int axis_id = (idx / outer_size) % axis_size;
