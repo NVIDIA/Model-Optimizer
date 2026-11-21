@@ -72,6 +72,7 @@ def _run_trtllm_deploy(
     attn_backend: str,
     base_model: str,
     eagle3_one_model: bool,
+    engine_kwargs: dict | None = None,
 ) -> None:
     """Top-level entry for subprocess: run TensorRT-LLM deploy in a child process."""
     try:
@@ -83,6 +84,7 @@ def _run_trtllm_deploy(
             attn_backend=attn_backend,
             base_model=base_model,
             eagle3_one_model=eagle3_one_model,
+            engine_kwargs=engine_kwargs,
         )
         deployer._deploy_trtllm_impl()
     except Exception:
@@ -97,6 +99,7 @@ def _run_vllm_deploy(
     attn_backend: str,
     base_model: str,
     eagle3_one_model: bool,
+    engine_kwargs: dict | None = None,
 ) -> None:
     """Top-level entry for subprocess: run vLLM deploy in a child process."""
     try:
@@ -108,6 +111,7 @@ def _run_vllm_deploy(
             attn_backend=attn_backend,
             base_model=base_model,
             eagle3_one_model=eagle3_one_model,
+            engine_kwargs=engine_kwargs,
         )
         deployer._deploy_vllm_impl()
     except Exception:
@@ -122,6 +126,7 @@ def _run_sglang_deploy(
     attn_backend: str,
     base_model: str,
     eagle3_one_model: bool,
+    engine_kwargs: dict | None = None,
 ) -> None:
     """Top-level entry for subprocess: run SGLang deploy in a child process."""
     try:
@@ -133,6 +138,7 @@ def _run_sglang_deploy(
             attn_backend=attn_backend,
             base_model=base_model,
             eagle3_one_model=eagle3_one_model,
+            engine_kwargs=engine_kwargs,
         )
         deployer._deploy_sglang_impl()
     except Exception:
@@ -148,6 +154,7 @@ def _run_deploy_via_subprocess(
     attn_backend: str,
     base_model: str,
     eagle3_one_model: bool,
+    engine_kwargs: dict,
 ) -> None:
     """Run deploy in a subprocess and print its stdout/stderr so pytest capture=tee-sys captures to DB."""
     tests_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -161,7 +168,8 @@ sys.path.insert(0, {tests_dir!r})
 if __name__ == '__main__':
     from _test_utils.deploy_utils import _run_{backend}_deploy
     _run_{backend}_deploy(
-        {model_id!r}, {tensor_parallel_size}, {mini_sm}, {attn_backend!r}, {base_model!r}, {eagle3_one_model}
+        {model_id!r}, {tensor_parallel_size}, {mini_sm}, {attn_backend!r}, {base_model!r},
+        {eagle3_one_model}, {engine_kwargs!r}
     )
 """
     if backend == "trtllm":
@@ -225,6 +233,8 @@ class ModelDeployer:
         attn_backend: str = "TRTLLM",
         base_model: str = "",
         eagle3_one_model: bool = True,
+        engine_kwargs: dict | None = None,
+        sm_family: int | None = None,
     ):
         """
         Initialize the ModelDeployer.
@@ -235,6 +245,10 @@ class ModelDeployer:
             tensor_parallel_size: Tensor parallel size for distributed inference
             mini_sm: Minimum SM (Streaming Multiprocessor) requirement for the model
             attn_backend: is for TRT LLM deployment
+            engine_kwargs: engine constructor overrides on the ordinary vLLM and SGLang paths.
+                Other paths refuse them; set TP through tensor_parallel_size only.
+            sm_family: if set, skip unless the GPU belongs to this SM family (100 for SM100 to
+                SM103), for a backend path that checks the family rather than a minimum SM
         """
         self.backend = backend
         self.model_id = model_id
@@ -243,6 +257,23 @@ class ModelDeployer:
         self.attn_backend = attn_backend
         self.base_model = base_model
         self.eagle3_one_model = eagle3_one_model
+        self.engine_kwargs = dict(engine_kwargs or {})
+        self.sm_family = sm_family
+        if self.engine_kwargs and backend not in ("vllm", "sglang"):
+            raise ValueError(f"engine_kwargs is applied only by vllm and sglang, not {backend!r}")
+        tp_keys = sorted({"tensor_parallel_size", "tp_size"} & self.engine_kwargs.keys())
+        if tp_keys:
+            raise ValueError(
+                f"Set tensor_parallel_size instead of {tp_keys} in engine_kwargs: "
+                "run() checks the GPU count against tensor_parallel_size."
+            )
+
+    def _refuse_engine_kwargs(self, path: str) -> None:
+        """Fail rather than deploy without the settings a caller asked for."""
+        if self.engine_kwargs:
+            raise ValueError(
+                f"engine_kwargs is not applied on {path}: {sorted(self.engine_kwargs)}"
+            )
 
     def run(self):
         """Run the deployment based on the specified backend."""
@@ -254,6 +285,11 @@ class ModelDeployer:
             self.mini_sm % 10,
         ):
             pytest.skip(reason=f"Requires sm{self.mini_sm} or higher")
+            return
+        if self.sm_family is not None and (
+            torch.cuda.get_device_capability()[0] != self.sm_family // 10
+        ):
+            pytest.skip(reason=f"Requires an sm{self.sm_family // 10}x GPU")
             return
 
         if torch.cuda.device_count() < self.tensor_parallel_size:
@@ -272,6 +308,7 @@ class ModelDeployer:
                 attn_backend=self.attn_backend,
                 base_model=self.base_model,
                 eagle3_one_model=self.eagle3_one_model,
+                engine_kwargs=self.engine_kwargs,
             )
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
@@ -362,6 +399,7 @@ class ModelDeployer:
         from vllm import LLM, SamplingParams
 
         if "eagle" in self.model_id.lower():
+            self._refuse_engine_kwargs("the vLLM EAGLE path")
             llm = LLM(
                 model=self.base_model,
                 speculative_config={
@@ -379,14 +417,16 @@ class ModelDeployer:
                 quantization_method = "modelopt_fp4"
             # DeepSeek-V4 FlashMLA requires fp8 kv-cache explicitly
             kv_cache_dtype = "fp8" if "deepseek-v4" in self.model_id.lower() else "auto"
-            llm = LLM(
-                model=self.model_id,
-                quantization=quantization_method,
-                tensor_parallel_size=self.tensor_parallel_size,
-                trust_remote_code=True,
-                max_model_len=4096,
-                kv_cache_dtype=kv_cache_dtype,
-            )
+            llm_kwargs = {
+                "model": self.model_id,
+                "quantization": quantization_method,
+                "tensor_parallel_size": self.tensor_parallel_size,
+                "trust_remote_code": True,
+                "max_model_len": 4096,
+                "kv_cache_dtype": kv_cache_dtype,
+                **self.engine_kwargs,
+            }
+            llm = LLM(**llm_kwargs)
         sampling_params = SamplingParams(temperature=0.8, top_p=0.9)
         conversations = [[{"role": "user", "content": p}] for p in COMMON_PROMPTS]
         outputs = llm.chat(conversations, sampling_params)
@@ -418,6 +458,7 @@ class ModelDeployer:
         if "fp4" in self.model_id.lower():
             quantization_method = "modelopt_fp4"
         if "eagle" in self.model_id.lower():
+            self._refuse_engine_kwargs("the SGLang EAGLE path")
             eagle_kwargs = {
                 "model_path": self.base_model,
                 "speculative_algorithm": "EAGLE3",
@@ -443,6 +484,7 @@ class ModelDeployer:
             "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
             "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
         ):
+            self._refuse_engine_kwargs("the SGLang Nemotron path")
             llm = sgl.Engine(
                 model_path=self.model_id,
                 quantization=quantization_method,
@@ -451,13 +493,15 @@ class ModelDeployer:
                 attention_backend="flashinfer",
             )
         else:
-            llm = sgl.Engine(
-                model_path=self.model_id,
-                quantization=quantization_method,
-                tp_size=self.tensor_parallel_size,
-                trust_remote_code=True,
-                context_length=4096,
-            )
+            sgl_kwargs = {
+                "model_path": self.model_id,
+                "quantization": quantization_method,
+                "tp_size": self.tensor_parallel_size,
+                "trust_remote_code": True,
+                "context_length": 4096,
+                **self.engine_kwargs,
+            }
+            llm = sgl.Engine(**sgl_kwargs)
         # Deferred import: transformers is a heavy optional dependency not always present.
         from transformers import AutoTokenizer
 

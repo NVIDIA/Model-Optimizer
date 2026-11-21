@@ -113,6 +113,49 @@ def cleanup_after_test():
             tensor_parallel_size=8,
             mini_sm=100,
         ),
+        # Model card settings; needs vllm-project/vllm#61530 or sgl-project/sglang#47935.
+        # quantization=None lets each engine detect the mixed FP8 + NVFP4 quantization_config.
+        *ModelDeployerList(
+            model_id="nvidia/DeepSeek-V4.1-Flash-1017-NVFP4",
+            backend=("vllm",),
+            tensor_parallel_size=4,
+            mini_sm=100,
+            # vLLM runs the forced indexer_sparse_logits path only on the SM100 family.
+            sm_family=100,
+            engine_kwargs={
+                "quantization": None,
+                "tokenizer_mode": "deepseek_v41",
+                "attention_config": {
+                    "backend": "FLASHINFER_MLA_SPARSE_DSV41",
+                    "indexer_kv_dtype": "mxfp4",
+                    "indexer_sparse_logits": True,
+                },
+                # The Engram tables are about 97 GiB; the card keeps them in host memory.
+                "engram_config": {"cpu_offload": True},
+            },
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/DeepSeek-V4.1-Flash-1017-NVFP4",
+            backend=("sglang",),
+            tensor_parallel_size=4,
+            mini_sm=100,
+            engine_kwargs={
+                "quantization": None,
+                "kv_cache_dtype": "fp8_e4m3",
+                "dsv4_attn_backend": "flashmla",
+                "mem_fraction_static": 0.9,
+                "engram_config": {"placement": "cpu", "replication": "none", "lookup": "auto"},
+            },
+        ),
+        # DeepSeek-V4-Pro-0813 has the same mixed FP8 + NVFP4 quantization_config, and its card's
+        # commands name no quantization method either, so only quantization is reset.
+        *ModelDeployerList(
+            model_id="nvidia/DeepSeek-V4-Pro-0813-NVFP4",
+            backend=("vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+            engine_kwargs={"quantization": None},
+        ),
     ],
     ids=idfn,
 )
