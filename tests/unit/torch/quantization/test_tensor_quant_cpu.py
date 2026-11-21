@@ -23,8 +23,10 @@ from _test_utils.torch.quantization.models import SimpleLinear
 from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTester
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.conversion as quant_conversion
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.quantization import QuantModuleRegistry, tensor_quant
+from modelopt.torch.quantization.calib import MaxCalibrator
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, RotateConfig
 from modelopt.torch.quantization.conversion import create_and_replace_svdquant_linear_on_the_fly
 from modelopt.torch.quantization.nn import (
@@ -666,6 +668,153 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         quantizer.get_modelopt_state(properties_only=True) for quantizer in model.weight_quantizer
     ]
     assert restored_states == original_states
+
+
+@pytest.mark.parametrize(
+    ("case_sensitive", "shared"),
+    [(True, False), (True, True), (False, False)],
+    ids=["subtree", "shared-layer", "case-insensitive"],
+)
+def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
+    monkeypatch, case_sensitive, shared
+):
+    """Entries naming one quantizer each, as a finalized AutoQuantize search's, act as wildcards do."""
+    monkeypatch.setattr(quant_conversion, "_CASE_SENSITIVE_NAMES", case_sensitive)
+
+    def quantized():
+        model = torch.nn.Sequential(*(torch.nn.Linear(4, 4) for _ in range(8)))
+        model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+        if shared:
+            # A second name for the last layer, which named_modules skips.
+            model.add_module("8", model[7])
+        return model
+
+    quant_cfg = [{"quantizer_name": "*", "enable": False}]
+    for layer in range(8):
+        quant_cfg.append({"quantizer_name": f"{layer}.weight_quantizer", "cfg": {"num_bits": 4}})
+        quant_cfg.append({"quantizer_name": f"{layer}.input_quantizer", "enable": True})
+    # Replacing a quantizer with a SequentialQuantizer, and back, changes the names to find.
+    quant_cfg.append({"quantizer_name": "2.weight_quantizer", "cfg": [{"num_bits": 4}] * 2})
+    quant_cfg.append({"quantizer_name": "2.weight_quantizer.1", "enable": False})
+    quant_cfg.append({"quantizer_name": "3.weight_quantizer", "cfg": [{"num_bits": 8}] * 2})
+    quant_cfg.append({"quantizer_name": "3.weight_quantizer", "cfg": {"num_bits": 8}})
+    if shared:
+        quant_cfg.append({"quantizer_name": "8.weight_quantizer", "enable": False})
+    # The same names as one-character wildcards, matched by walking the model.
+    walked_cfg = [quant_cfg[0]] + [
+        {**entry, "quantizer_name": f"[{entry['quantizer_name'][0]}]{entry['quantizer_name'][1:]}"}
+        for entry in quant_cfg[1:]
+    ]
+
+    def states(model):
+        return {
+            name: (
+                type(module),
+                isinstance(module, TensorQuantizer)
+                and module.get_modelopt_state(properties_only=True),
+            )
+            for name, module in model.named_modules()
+            if isinstance(module, (TensorQuantizer, SequentialQuantizer))
+        }
+
+    walked = quantized()
+    mtq.set_quantizer_by_cfg(walked, walked_cfg)
+    named = quantized()
+    walks = 0
+    named_modules = torch.nn.Module.named_modules
+
+    def count_walks(self, *args, **kwargs):
+        nonlocal walks
+        walks += self is named
+        return named_modules(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.Module, "named_modules", count_walks)
+    mtq.set_quantizer_by_cfg(named, quant_cfg)
+    monkeypatch.undo()
+    assert states(named) == states(walked)
+    if not case_sensitive:
+        # Where fnmatch ignores case, every entry walks the model.
+        assert walks == len(quant_cfg)
+    elif shared:
+        # The check finds a shared module, so every entry walks the model.
+        assert walks == 1 + len(quant_cfg)
+    else:
+        # The check for shared modules, then only the "*" entry, also after a replacement.
+        assert walks == 2
+
+
+def _sequential_weight_quantizer(model):
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {"quantizer_name": "1.weight_quantizer", "cfg": [{"num_bits": 4}] * 2},
+            {"quantizer_name": "1.weight_quantizer.1", "enable": False},
+        ],
+    )
+
+
+def _sequential_weight_quantizer_in_context(model):
+    with mtq.preserve_quantizer_attributes_context(model):
+        _sequential_weight_quantizer(model)
+
+
+def _sequential_weight_quantizer_in_submodule(model):
+    mtq.set_quantizer_by_cfg(
+        model[1], [{"quantizer_name": "weight_quantizer", "cfg": [{"num_bits": 4}] * 2}]
+    )
+
+
+def _sequential_weight_quantizer_flattened(model):
+    _sequential_weight_quantizer(model)
+    with SequentialQuantizer.convert_to_single_quantizer(model):
+        mtq.set_quantizer_by_cfg(
+            model, [{"quantizer_name": "1.weight_quantizer.1", "enable": True}]
+        )
+
+
+def _second_layer_shares_the_first(model):
+    model[1] = model[0]
+
+
+@pytest.mark.parametrize(
+    ("replace", "sub_quantizer"),
+    [
+        (_sequential_weight_quantizer_in_context, "weight_quantizer.1"),
+        (_sequential_weight_quantizer_in_submodule, "weight_quantizer.1"),
+        (_sequential_weight_quantizer_flattened, "weight_quantizer.1"),
+        # named_modules skips the shared layer's second name, so neither entry matches it.
+        (_second_layer_shares_the_first, "weight_quantizer"),
+    ],
+)
+def test_set_quantizer_by_cfg_finds_named_quantizers_after_nested_replacement(
+    replace, sub_quantizer
+):
+    """Named entries act as wildcards do after a calibrator built mid-call changes the model."""
+
+    def configured(weight_quantizer, sub_quantizer):
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
+        model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+
+        class ReplacingCalibrator(MaxCalibrator):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                replace(model)
+
+        mtq.set_quantizer_by_cfg(
+            model,
+            [
+                {"quantizer_name": weight_quantizer, "cfg": {"calibrator": ReplacingCalibrator}},
+                {"quantizer_name": sub_quantizer, "enable": False},
+            ],
+        )
+        return {
+            name: module.get_modelopt_state(properties_only=True)
+            for name, module in model.named_modules()
+            if isinstance(module, TensorQuantizer)
+        }
+
+    walked = configured("[0].weight_quantizer", f"[1].{sub_quantizer}")
+    assert configured("0.weight_quantizer", f"1.{sub_quantizer}") == walked
 
 
 @pytest.mark.parametrize(

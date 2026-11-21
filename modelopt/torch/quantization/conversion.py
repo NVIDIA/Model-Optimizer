@@ -16,10 +16,13 @@
 """Quantization conversion/restore utilities."""
 
 import fnmatch
+import os
 import re
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 from typing import Any, cast
 
 import torch.nn as nn
@@ -276,6 +279,101 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
         _replace_quant_module(getattr(model, name), version=version, registry=registry)
 
 
+_WILDCARD_RE = re.compile(r"[*?[]")
+# fnmatch compares names after os.path.normcase, which ignores case on Windows.
+_CASE_SENSITIVE_NAMES = os.path.normcase("A") == "A"
+_SINGULAR_QUANTIZER_ATOM_RE = re.compile(r"(?:weight|input)_quantizer$")
+# The models a set_quantizer_by_cfg call in progress found to register each module only once.
+_UNSHARED_MODELS: ContextVar[tuple[nn.Module, ...]] = ContextVar("_UNSHARED_MODELS", default=())
+
+
+def _registers_each_module_once(model: nn.Module) -> bool:
+    seen = set()
+    for _, module in model.named_modules(remove_duplicate=False):
+        if id(module) in seen:
+            return False
+        seen.add(id(module))
+    return True
+
+
+def _check_still_unshared(model: nn.Module) -> None:
+    """Walk the whole model for the rest of the call if it now registers a module twice."""
+    unshared = _UNSHARED_MODELS.get()
+    if any(m is model for m in unshared) and not _registers_each_module_once(model):
+        _UNSHARED_MODELS.set(tuple(m for m in unshared if m is not model))
+
+
+def _with_subtree_walks(func):
+    """Let a call's wildcard-free entries walk only the subtree that can hold their matches.
+
+    ``named_modules`` names a module registered twice by its first path only, which a subtree walk
+    cannot tell, so in a model that shares a module every entry walks the whole model.
+    """
+
+    @wraps(func)
+    def wrapper(quant_model, *args, **kwargs):
+        unshared = _UNSHARED_MODELS.get()
+        if (
+            not _CASE_SENSITIVE_NAMES
+            or any(model is quant_model for model in unshared)
+            or not _registers_each_module_once(quant_model)
+        ):
+            return func(quant_model, *args, **kwargs)
+        token = _UNSHARED_MODELS.set((*unshared, quant_model))
+        try:
+            return func(quant_model, *args, **kwargs)
+        finally:
+            _UNSHARED_MODELS.reset(token)
+
+    return wrapper
+
+
+def _modules_under_quantizer_name(quant_model: nn.Module, name: str):
+    """Walk only the part of ``quant_model`` holding quantizers a wildcard-free ``name`` can match.
+
+    Each per-module entry of a finalized AutoQuantize search names one quantizer, and on a large
+    MoE there are tens of thousands of them: walking the whole model for each costs hours.
+    Normalizing a fused-experts name only singularizes a ``*_quantizer[s]`` atom and drops the
+    index after it, so a quantizer matching ``name`` has its atoms up to the first
+    ``*_quantizer`` one and lies below that atom or its plural. Each call looks the path up again,
+    so it sees quantizers replaced since the last one.
+    """
+    atoms = name.split(".")
+    head = next(
+        (i for i, atom in enumerate(atoms) if _SINGULAR_QUANTIZER_ATOM_RE.search(atom)),
+        len(atoms) - 1,
+    )
+    parent = quant_model
+    for atom in atoms[:head]:
+        parent = parent._modules.get(atom)
+        if parent is None:
+            return
+    for child_name, child in parent._modules.items():
+        if child is not None and child_name in (atoms[head], atoms[head] + "s"):
+            yield from child.named_modules(prefix=".".join([*atoms[:head], child_name]))
+
+
+def _matching_quantizers(
+    quant_model: nn.Module,
+    wildcard_or_filter_func: str | Callable,
+    parent_class: type[nn.Module] | None,
+):
+    """Yield the ``(name, quantizer)`` pairs ``wildcard_or_filter_func`` selects, in module order."""
+    if (
+        isinstance(wildcard_or_filter_func, str)
+        and wildcard_or_filter_func
+        and not _WILDCARD_RE.search(wildcard_or_filter_func)
+        and any(model is quant_model for model in _UNSHARED_MODELS.get())
+    ):
+        candidates = _modules_under_quantizer_name(quant_model, wildcard_or_filter_func)
+    else:
+        candidates = quant_model.named_modules()
+    for name, module in candidates:
+        if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):
+            yield name, module
+
+
+@_with_subtree_walks
 def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgType):
     """Apply a quantization config list to the quantizers in ``quant_model``.
 
@@ -346,6 +444,12 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                     for c in cfg
                 ]
             set_quantizer_attributes_full(quant_model, quantizer_name, attributes, parent_class)
+            if any(
+                not isinstance(a.calibrator, str)
+                for a in (attributes if isinstance(attributes, list) else [attributes])
+            ):
+                # The caller's calibrator class ran for each match and may have shared a module.
+                _check_still_unshared(quant_model)
 
 
 _FUSED_EXPERTS_QUANTIZER_LIST_RE = re.compile(
@@ -449,29 +553,26 @@ def set_quantizer_attributes_full(
         raise ValueError(
             "All elements in attributes list must be of type QuantizerAttributeConfig."
         )
-    for name, module in quant_model.named_modules():
-        if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):
-            if isinstance(attributes, list):
-                if not isinstance(module, SequentialQuantizer):
-                    parent_module = quant_model.get_submodule(name.rpartition(".")[0])
-                    module = SequentialQuantizer(
-                        *(TensorQuantizer() for _ in range(len(attributes)))
-                    )
-                    setattr(parent_module, name.split(".")[-1], module)
-                elif len(attributes) != len(module):
-                    warnings.warn(
-                        f"The number of attributes ({len(attributes)}) does not match the number of "
-                        f"quantizers of {module} leading to partial assignment.",
-                    )
-                module.set_from_attribute_config(attributes)
-            else:
-                if isinstance(module, SequentialQuantizer):
-                    # Downgrade SequentialQuantizer back to TensorQuantizer when the
-                    # new entry provides a single (non-list) config.
-                    parent_module = quant_model.get_submodule(name.rpartition(".")[0])
-                    module = TensorQuantizer()
-                    setattr(parent_module, name.split(".")[-1], module)
-                cast("TensorQuantizer", module).set_from_attribute_config(attributes)
+    for name, module in _matching_quantizers(quant_model, wildcard_or_filter_func, parent_class):
+        if isinstance(attributes, list):
+            if not isinstance(module, SequentialQuantizer):
+                parent_module = quant_model.get_submodule(name.rpartition(".")[0])
+                module = SequentialQuantizer(*(TensorQuantizer() for _ in range(len(attributes))))
+                setattr(parent_module, name.split(".")[-1], module)
+            elif len(attributes) != len(module):
+                warnings.warn(
+                    f"The number of attributes ({len(attributes)}) does not match the number of "
+                    f"quantizers of {module} leading to partial assignment.",
+                )
+            module.set_from_attribute_config(attributes)
+        else:
+            if isinstance(module, SequentialQuantizer):
+                # Downgrade SequentialQuantizer back to TensorQuantizer when the
+                # new entry provides a single (non-list) config.
+                parent_module = quant_model.get_submodule(name.rpartition(".")[0])
+                module = TensorQuantizer()
+                setattr(parent_module, name.split(".")[-1], module)
+            cast("TensorQuantizer", module).set_from_attribute_config(attributes)
 
 
 def set_quantizer_attributes_partial(
@@ -521,20 +622,17 @@ def set_quantizer_attributes_partial(
     ):
         raise ValueError("All elements in attributes list must be of type dict.")
 
-    for name, module in quant_model.named_modules():
-        if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):
-            module = cast("TensorQuantizer | SequentialQuantizer", module)  # for type checker
-            if isinstance(partial_attributes, list):
-                if not isinstance(module, SequentialQuantizer):
-                    raise ValueError(
-                        f"Attributes is a list but {module} is not a SequentialQuantizer."
-                    )
-                module.set_from_attribute_config(partial_attributes)
-            elif isinstance(module, SequentialQuantizer):
-                # Broadcast the dict to all sub-quantizers.
-                module.set_from_attribute_config([partial_attributes] * len(module))
-            else:
-                module.set_from_attribute_config(partial_attributes)
+    for name, module in _matching_quantizers(quant_model, wildcard_or_filter_func, parent_class):
+        module = cast("TensorQuantizer | SequentialQuantizer", module)  # for type checker
+        if isinstance(partial_attributes, list):
+            if not isinstance(module, SequentialQuantizer):
+                raise ValueError(f"Attributes is a list but {module} is not a SequentialQuantizer.")
+            module.set_from_attribute_config(partial_attributes)
+        elif isinstance(module, SequentialQuantizer):
+            # Broadcast the dict to all sub-quantizers.
+            module.set_from_attribute_config([partial_attributes] * len(module))
+        else:
+            module.set_from_attribute_config(partial_attributes)
 
 
 @contextmanager

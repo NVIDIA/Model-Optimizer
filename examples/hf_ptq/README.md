@@ -637,18 +637,23 @@ a KV-cache search, in a single `hf_ptq.py` process: not under `torchrun` or with
 
 Below 4 bits (IQ2 and similar GGML formats), the default search does no better than uniform
 quantization. The
-[Qwen3.6-35B-A3B](../../modelopt_recipes/models/Qwen/Qwen3.6-35B-A3B/auto_quantize/README.md)
-recipe uses this setup:
+[Qwen3.6-35B-A3B](../../modelopt_recipes/models/Qwen/Qwen3.6-35B-A3B/auto_quantize/README.md) and
+[Nemotron 3.5 Bolt](../../modelopt_recipes/models/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16/auto_quantize/README.md)
+recipes use this setup:
 
 - **Score KL in a low-bit context:** `auto_quantize_method: kl_div` with
   `method_options: {context_quant_level: lowest}`. Default scoring prices each layer with every
   other layer in BF16. At 2 bits, that rates early layers ~30× more sensitive than late ones and
   starves the late layers. A context scores every candidate with the other searched layers at their
-  lowest-bit format, or at the `k`-th from the lowest with `context_quant_level: k`. At NVFP4/FP8
-  budgets, context scoring did not beat the default gradient scoring in our tests.
+  lowest-bit format, or at the `k`-th from the lowest with `context_quant_level: k`. The Bolt
+  recipe uses `1` (IQ2_XXS), since its lowest candidate is IQ1_M. At NVFP4/FP8 budgets, context
+  scoring did not beat the default gradient scoring in our tests.
 - **Finalize with sequential GPTQ:** calibrate the IQ candidates with local GPTQ + imatrix and set
   `finalize_algorithm` to sequential GPTQ + imatrix. That gives ~20% lower KL than imatrix alone.
-- **Search the MoE experts only**, and keep the other layers at fixed formats.
+- **Search the MoE experts, and keep the other layers fixed**, as single-candidate search spaces
+  with `allow_no_quant: false` (the Bolt recipe holds them at its release's formats). On Nemotron
+  3.5 Bolt, also searching the non-expert layers in the same context measured 6–17% worse. Their
+  single-layer scores vary more than the gaps between their formats.
 - **Score the formats in parallel** with format shards, as above.
 
 ## Real Quant

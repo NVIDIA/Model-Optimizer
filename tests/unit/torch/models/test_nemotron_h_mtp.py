@@ -17,6 +17,7 @@ import copy
 import fnmatch
 import json
 import shutil
+import threading
 import warnings
 from unittest.mock import Mock
 
@@ -26,12 +27,19 @@ import torch
 pytest.importorskip("transformers")
 
 from huggingface_hub import constants as hub_constants
-from safetensors.torch import save_file
-from transformers import AutoModelForCausalLM, PreTrainedModel
+from safetensors.torch import load_file, save_file
+from transformers import (
+    AutoModelForCausalLM,
+    PretrainedConfig,
+    PreTrainedModel,
+    conversion_mapping,
+    modeling_utils,
+)
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_activation_scaling_factor, postprocess_state_dict
 from modelopt.torch.export.unified_export_hf import _process_quantized_modules
+from modelopt.torch.models import _onfly_decompress as onfly
 from modelopt.torch.models import hf
 from modelopt.torch.models.nemotron_h import mtp as adapter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -44,6 +52,7 @@ from modelopt.torch.quantization.model_calib import (
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
 @pytest.mark.parametrize(
@@ -182,6 +191,51 @@ def test_remote_consent_and_constructor_cleanup(tiny_checkpoint):
     assert cls.__init__ is original_init
     fresh = cls(source.config)
     assert not hasattr(getattr(fresh, "language_model", fresh), "mtp")
+
+
+def test_overlapping_loads_take_turns(tiny_checkpoint, monkeypatch):
+    """A load in another thread waits, so it neither reads nor restores this load's patches."""
+    cls, source, checkpoint = tiny_checkpoint
+    original_init = cls.__init__
+    lock = adapter._LOAD_LOCK
+    at_lock, entered = threading.Event(), threading.Event()
+    errors = []
+
+    class SignalingLock:
+        # Marks the other load reaching the lock, so its wait is contention and not slow setup.
+        def __enter__(self):
+            if threading.current_thread() is other:
+                at_lock.set()
+            return lock.__enter__()
+
+        def __exit__(self, *exc_info):
+            return lock.__exit__(*exc_info)
+
+    monkeypatch.setattr(adapter, "_LOAD_LOCK", SignalingLock())
+
+    def other_load():
+        try:
+            with adapter.prepare_for_loading(checkpoint, True):
+                entered.set()
+                cls(source.config)
+        except Exception as error:  # surfaced in the main thread
+            errors.append(error)
+        finally:
+            at_lock.set()  # a load that skips the lock fails the check below, not a timeout
+
+    other = threading.Thread(target=other_load, daemon=True)
+    with adapter.prepare_for_loading(checkpoint, True):
+        other.start()
+        assert at_lock.wait(timeout=30)
+        other.join(timeout=0.5)
+        assert other.is_alive(), "a load in another thread ran inside this one"
+        assert not entered.is_set()
+        model = cls(source.config)
+    other.join(timeout=30)
+    assert not other.is_alive()
+    assert not errors
+    assert hasattr(getattr(model, "language_model", model), "mtp")
+    assert cls.__init__ is original_init
 
 
 def _hub_checkpoint(checkpoint, source, monkeypatch, sharded):
@@ -532,3 +586,202 @@ def test_calibration_removes_capture_hook_on_error(tiny_checkpoint, failure):
     with pytest.raises((ValueError, RuntimeError), match=r"exactly one|cannot be multiplied"):
         model(input_ids=None if failure == "base" else torch.tensor([[1, 2]]), use_cache=False)
     assert not language_model.model.norm_f._forward_pre_hooks
+
+
+def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch):
+    """A puzzle Omni checkpoint (Nemotron 3.5 Bolt) loads in its own code and keeps its names."""
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["NemotronH_Omni_Reasoning_V3"],
+                "model_type": "nemotron_h_omni",
+                "llm_config": {"model_type": "nemotron_h_puzzle"},
+            }
+        )
+    )
+    if not hasattr(conversion_mapping.WeightRenaming("a", "b"), "scope_prefix"):
+        # Its renames would apply to every key, and their reverse corrupt the export's names.
+        with (
+            pytest.raises(RuntimeError, match="limits a sub-model's weight renames"),
+            hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True),
+        ):
+            pass
+        return
+    native = pytest.importorskip("transformers.models.nemotron_h.modeling_nemotron_h")
+    if not hasattr(conversion_mapping, "USER_REGISTERED_MAPPINGS"):
+        pytest.skip("this test resets USER_REGISTERED_MAPPINGS, which this transformers lacks")
+    # Leave transformers' registry as the test found it.
+    monkeypatch.setattr(conversion_mapping, "_checkpoint_conversion_mapping_cache", None)
+    monkeypatch.setattr(conversion_mapping, "USER_REGISTERED_MAPPINGS", set())
+
+    class PuzzleConfig(native.NemotronHConfig):
+        model_type = "nemotron_h_puzzle"
+
+    class PuzzleForCausalLM(native.NemotronHForCausalLM):
+        config_class = PuzzleConfig
+
+    class OmniConfig(PretrainedConfig):
+        model_type = "nemotron_h_omni"
+
+    class TinyOmni(PreTrainedModel):
+        config_class = OmniConfig
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.language_model = PuzzleForCausalLM(config.llm_config)
+            self.vision_projector = torch.nn.ModuleDict({"mlp1": torch.nn.LayerNorm(32)})
+            self.post_init()
+
+    # The class name transformers keys its own port's projector renames under.
+    omni_class = type("NemotronH_Omni_Reasoning_V3", (TinyOmni,), {})
+    # As the checkpoint's code does, for its root model type.
+    conversion_mapping.register_checkpoint_conversion_mapping(
+        "nemotron_h_omni",
+        [conversion_mapping.WeightRenaming(r"^mlp1\.0\.", "vision_projector.mlp1.")],
+        overwrite=True,
+    )
+    llm_config = PuzzleConfig(
+        vocab_size=32,
+        hidden_size=32,
+        intermediate_size=32,
+        layers_block_type=["attention"],
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        use_mamba_kernels=False,
+    )
+    config = OmniConfig(llm_config=llm_config)
+    source = omni_class(config).eval()
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.uniform_(-0.1, 0.1)
+    # The checkpoint's names: the language model's base model under ``backbone``, and ``mlp1.0``.
+    checkpoint = {
+        name.replace("language_model.model.", "language_model.backbone.").replace(
+            "vision_projector.mlp1.", "mlp1.0."
+        ): tensor.clone()
+        for name, tensor in source.state_dict().items()
+    }
+    save_file(checkpoint, tmp_path / "model.safetensors")
+
+    def loaded_source_tensors(model):
+        state = model.state_dict()
+        return {
+            name for name, tensor in source.state_dict().items() if torch.equal(state[name], tensor)
+        }
+
+    without_hook = loaded_source_tensors(omni_class.from_pretrained(tmp_path, config=config))
+    assert not any(name.startswith("language_model.model.") for name in without_hook)
+    # transformers 5.18 adds renames for its port of the Omni class, which the load must bypass.
+    port_renames = conversion_mapping.get_checkpoint_conversion_mapping(omni_class.__name__)
+
+    class PortOmni(PreTrainedModel):
+        config_class = OmniConfig
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.multi_modal_projector = torch.nn.ModuleDict({"layer_norm": torch.nn.LayerNorm(32)})
+            self.post_init()
+
+    # A model of the port's class name, with no puzzle language model, under the port's names.
+    port_class = type(omni_class.__name__, (PortOmni,), {})
+    port = port_class(OmniConfig())
+    with torch.no_grad():
+        for parameter in port.parameters():
+            parameter.uniform_(-0.1, 0.1)
+    port.config.save_pretrained(tmp_path / "port")
+    save_file(
+        {
+            name.replace("multi_modal_projector.layer_norm.", "mlp1.0."): tensor.clone()
+            for name, tensor in port.state_dict().items()
+        },
+        tmp_path / "port" / "model.safetensors",
+    )
+    stock = (
+        conversion_mapping.get_checkpoint_conversion_mapping,
+        modeling_utils.get_model_conversion_mapping,
+    )
+    with (
+        hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True),
+        # A nested load, and a load of another model in the same context, keep their own renames.
+        hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True),
+    ):
+        loaded = omni_class.from_pretrained(tmp_path, config=config)
+        port_loaded = port_class.from_pretrained(tmp_path / "port").state_dict()
+    assert all(torch.equal(port_loaded[name], tensor) for name, tensor in port.state_dict().items())
+    # Nothing the load changed outlives it.
+    assert (
+        conversion_mapping.get_checkpoint_conversion_mapping,
+        modeling_utils.get_model_conversion_mapping,
+    ) == stock
+    assert "nemotron_h_puzzle" not in conversion_mapping.USER_REGISTERED_MAPPINGS
+    assert loaded_source_tensors(loaded) == set(source.state_dict())
+    # A recipe quantizes the whole VLM, layer by layer for sequential GPTQ.
+    layers = LayerActivationCollector.get_decoder_layers(loaded)
+    assert layers is loaded.language_model.model.layers
+    restored = conversion_mapping.get_checkpoint_conversion_mapping(omni_class.__name__)
+    assert repr(restored) == repr(port_renames)
+    loaded.save_pretrained(tmp_path / "saved")
+    assert set(load_file(tmp_path / "saved" / "model.safetensors")) == set(checkpoint)
+    # A hook installed mid-load, as `_onfly_decompress` does, keeps that load's patch in its chain,
+    # and the next load still finishes. A load stuck on a lock holds only this test's locks.
+    monkeypatch.setattr(adapter, "_LOAD_LOCK", threading.RLock())
+    monkeypatch.setattr(adapter, "_MODEL_MAPPINGS_LOCK", threading.Lock())
+    monkeypatch.setattr(modeling_utils, "get_model_conversion_mapping", stock[1])
+    with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
+        patched = modeling_utils.get_model_conversion_mapping
+        monkeypatch.setattr(
+            modeling_utils, "get_model_conversion_mapping", lambda *a, **k: patched(*a, **k)
+        )
+    reloaded = []
+
+    def reload():
+        with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
+            reloaded.append(omni_class.from_pretrained(tmp_path, config=config))
+
+    other = threading.Thread(target=reload, daemon=True)
+    other.start()
+    other.join(timeout=60)
+    assert reloaded, "the load after a hook wrapped the previous load's patch did not finish"
+    assert loaded_source_tensors(reloaded[0]) == set(source.state_dict())
+
+    # A hook another installer publishes while the last load restores its patch stays and runs.
+    monkeypatch.setattr(modeling_utils, "get_model_conversion_mapping", stock[1])
+    calls, installers = [], []
+
+    def install_hook():
+        with onfly.CONVERSION_HOOK_LOCK:
+            inner = modeling_utils.get_model_conversion_mapping
+
+            def hook(*args, **kwargs):
+                calls.append(1)
+                return inner(*args, **kwargs)
+
+            modeling_utils.get_model_conversion_mapping = hook
+
+    class RacingModule:
+        """``modeling_utils``, where reading the patch back starts another installer."""
+
+        armed = False
+
+        def __getattr__(self, name):
+            value = getattr(modeling_utils, name)
+            if self.armed and name == "get_model_conversion_mapping":
+                type(self).armed = False
+                installers.append(threading.Thread(target=install_hook))
+                installers[-1].start()
+                installers[-1].join(timeout=1)  # until it publishes, or blocks on the lock
+            return value
+
+        def __setattr__(self, name, value):
+            setattr(modeling_utils, name, value)
+
+    monkeypatch.setattr(adapter, "modeling_utils", RacingModule())
+    with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
+        RacingModule.armed = True
+    installers[0].join(timeout=30)
+    omni_class.from_pretrained(tmp_path, config=config)
+    assert calls, "the restore dropped a hook published during it"
+    # The checkpoint's code, not transformers' port of its Omni class, can hold a puzzle model.
+    remote = type("Config", (PretrainedConfig,), {"__module__": "transformers_modules.bolt.cfg"})
+    assert hf.prefers_bundled_code("nemotron_h_omni", remote(llm_config=llm_config), tmp_path, {})
