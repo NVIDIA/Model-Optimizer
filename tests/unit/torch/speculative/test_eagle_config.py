@@ -23,6 +23,18 @@ from pydantic import ValidationError
 from modelopt.recipe.config import ModelOptEagleRecipe
 from modelopt.torch.speculative.config import EagleConfig
 
+
+@pytest.mark.parametrize("loss_type", ["soft_target_ce", "lk_lambda"])
+@pytest.mark.parametrize("base_lora", [False, True])
+def test_eagle_loss_base_lora_compatibility(loss_type, base_lora):
+    config = {"eagle_loss_type": loss_type, "eagle_base_lora": base_lora}
+    if loss_type == "lk_lambda" and base_lora:
+        with pytest.raises(ValidationError):
+            EagleConfig.model_validate(config)
+    else:
+        EagleConfig.model_validate(config)
+
+
 # --- Hidden-state mixing mode validator tests ---
 
 

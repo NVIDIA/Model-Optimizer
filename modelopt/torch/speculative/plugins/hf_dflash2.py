@@ -41,6 +41,7 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import DFlash2DMRegistry
+from ..losses import _lk_lambda_loss
 from .hf_dflash import HFDFlashModel, _block_tokens
 from .modeling_dflash2 import DFlash2Module
 
@@ -196,15 +197,20 @@ class HFDFlash2Model(HFDFlashModel):
             "supposed to have rejected this combination at convert time"
         )
         gold_probability = torch.exp(-ce)
-        tv_loss = ((1.0 - gold_probability) * weights).sum() / weight_sum
         if self.dflash_lk_loss_type == "tv":
-            return tv_loss
+            return ((1.0 - gold_probability) * weights).sum() / weight_sum
 
-        ce_loss = (ce * weights).sum() / weight_sum
         mask = terms.supervised_mask
         acceptance = (gold_probability.detach() * mask).sum() / (mask.sum() + 1e-6)
-        ce_share = self.dflash_lk_ce_scale * torch.exp(-self.dflash_lk_ce_decay * acceptance)
-        return ce_share * ce_loss + (1.0 - ce_share) * tv_loss
+        return _lk_lambda_loss(
+            ce,
+            gold_probability,
+            weights,
+            weight_sum,
+            eta=self.dflash_lk_ce_decay,
+            scale=self.dflash_lk_ce_scale,
+            mean_acceptance=acceptance,
+        )
 
     def _compute_loss(
         self,
