@@ -49,7 +49,9 @@ def _empty_cache():
 
 def clear_cuda_cache():
     """Clear the CUDA cache, once the other GPUs this process uses have finished their queued work."""
-    if torch.cuda.is_available():
+    # Before CUDA is initialized nothing is cached, and asking for the current GPU would initialize
+    # it, or raise in a forked child.
+    if torch.cuda.is_initialized():
         _empty_cache()
 
 
@@ -71,7 +73,7 @@ def maybe_clear_cuda_cache(slack_bytes: int = 4 * 1024**3) -> None:
     if _empty_cache_calls < _EMPTY_CACHE_CHECK_EVERY:
         return
     _empty_cache_calls = 0
-    if not torch.cuda.is_available():
+    if not torch.cuda.is_initialized():
         return
     if torch.cuda.memory_reserved() - torch.cuda.memory_allocated() > slack_bytes:
         _empty_cache()

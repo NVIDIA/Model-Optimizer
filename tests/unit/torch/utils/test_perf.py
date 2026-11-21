@@ -35,7 +35,7 @@ def cuda_stub(monkeypatch):
             self.empty_cache_calls = 0
 
     stub = Stub()
-    monkeypatch.setattr(perf.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(perf.torch.cuda, "is_initialized", lambda: True)
     monkeypatch.setattr(perf.torch.cuda, "device_count", lambda: 4)
     monkeypatch.setattr(perf.torch.cuda, "current_device", lambda: 1)
     monkeypatch.setattr(
@@ -135,16 +135,22 @@ def test_clearing_waits_for_the_other_gpus_holding_memory(cuda_stub, monkeypatch
     assert cuda_stub.calls == [("sync", 0), ("sync", 3), ("empty_cache",)]
 
 
-def test_no_cuda_is_a_noop(monkeypatch):
-    """Without CUDA the sampled call must not touch the allocator."""
-    monkeypatch.setattr(perf.torch.cuda, "is_available", lambda: False)
+def test_uninitialized_cuda_is_a_noop(monkeypatch):
+    """Before CUDA is initialized, as without CUDA, neither helper may touch it.
+
+    Asking for the current GPU would initialize CUDA during CPU-only work, or raise in a forked
+    child.
+    """
+    monkeypatch.setattr(perf.torch.cuda, "is_available", lambda: True)  # a GPU host
+    monkeypatch.setattr(perf.torch.cuda, "is_initialized", lambda: False)
     monkeypatch.setattr(perf, "_empty_cache_calls", 0)
 
     def _boom(*a, **k):
-        raise AssertionError("queried the allocator with no CUDA available")
+        raise AssertionError("touched CUDA before it was initialized")
 
-    monkeypatch.setattr(perf.torch.cuda, "memory_reserved", _boom)
-    monkeypatch.setattr(perf.torch.cuda, "empty_cache", _boom)
+    for name in ("current_device", "memory_reserved", "synchronize", "empty_cache"):
+        monkeypatch.setattr(perf.torch.cuda, name, _boom)
 
+    perf.clear_cuda_cache()
     for _ in range(perf._EMPTY_CACHE_CHECK_EVERY * 2):
         perf.maybe_clear_cuda_cache()
