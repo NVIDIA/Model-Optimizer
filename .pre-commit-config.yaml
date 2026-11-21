@@ -133,6 +133,8 @@ repos:
               modelopt/torch/speculative/plugins/modeling_dflash2.py|
               modelopt/torch/speculative/plugins/hf_dspark.py|
               modelopt/torch/speculative/plugins/modeling_dspark.py|
+              modelopt/torch/speculative/plugins/hf_dspine.py|
+              modelopt/torch/speculative/plugins/modeling_dspine.py|
               modelopt/torch/speculative/plugins/hf_lilicorr.py|
               modelopt/torch/speculative/plugins/modeling_lilicorr.py|
               modelopt/torch/speculative/plugins/hf_medusa.py|

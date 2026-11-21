@@ -31,6 +31,8 @@ Changelog
 
 *Speculative Decoding*
 
+- Add `DSpine <https://github.com/Tencent/DSpine>`_ draft training (``dflash_architecture_config.projector_type: dspine``, recipe ``general/speculative_decoding/dspine``): a causal DFlash draft with an adjacent causal injection after every layer, exported in the layout SGLang's ``--speculative-algorithm DSPINE`` loads.
+
 *Megatron Framework (M-LM / M-Bridge)*
 
 *Misc*

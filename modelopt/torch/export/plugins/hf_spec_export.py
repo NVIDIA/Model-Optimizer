@@ -485,7 +485,10 @@ class DFlashExporter(SpeculativeDecodingExporter):
         drafter_sd = self._extract_state_dict(full_sd)
         assert drafter_sd, "No dflash_module weights found in state dict"
         if dtype is not None and hf_quant_config is None:
-            drafter_sd = {k: v.to(dtype) for k, v in drafter_sd.items()}
+            # Integer tensors (e.g. DSpine's checkpoint version markers) keep their dtype.
+            drafter_sd = {
+                k: v.to(dtype) if v.is_floating_point() else v for k, v in drafter_sd.items()
+            }
         save_file(drafter_sd, f"{export_dir}/model.safetensors")
 
         # Export config
@@ -686,4 +689,59 @@ class DFlash2Exporter(DFlashExporter):
         # Mirror dflash_config.causal, which DFlashExporter writes unconditionally from
         # dflash_draft_attention; no parent writes a top-level is_causal.
         config["is_causal"] = config["dflash_config"]["causal"]
+        return config
+
+
+class DSpineExporter(DFlashExporter):
+    """Draft model exporter for DSpine (causal DFlash backbone + adjacent causal injection).
+
+    Writes the layout of the released DSpine drafters (e.g. ``tencent/Qwen3-8B-DSpine-b16``),
+    which SGLang's ``--speculative-algorithm DSPINE`` loads: ``selected_prefix_bridge.*`` and the
+    version markers are already captured by the inherited ``dflash_module.`` stripping.
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the fields SGLang's DSPINE loader reads."""
+        config = super()._export_config()
+        model = self.model
+        draft = model.dflash_module
+        num_layers = config["num_hidden_layers"]
+        config["architectures"] = ["DSpineDraftModel"]
+        config["is_causal"] = True
+        config["dflash_config"].update(
+            {
+                "draft_block_causal": True,
+                "selected_prefix_code_bridge": {
+                    "code_size": draft.selected_prefix_bridge.code_size,
+                    "rank": draft.selected_prefix_bridge.rank,
+                    "eps": 1e-6,
+                },
+                "selected_prefix_feature_layers": list(range(1, num_layers + 1)),
+                "selected_prefix_feature_writes": True,
+                "selected_prefix_feature_write_mode": "independent",
+                "selected_prefix_terminal": False,
+                "selected_prefix_decode_mode": "serial",
+                "selected_prefix_feature_gt_training": True,
+                "selected_prefix_feature_teacher_layers": sorted(
+                    i + 1 for i in draft.teacher_forcing_layers
+                ),
+                "selected_prefix_feature_teacher_schedule": {
+                    "kind": "block_bernoulli",
+                    "peak_probability": model.dflash_dspine_teacher_forcing_probability,
+                    "hold_fraction": model.dflash_dspine_teacher_forcing_hold_fraction,
+                    "zero_fraction": model.dflash_dspine_teacher_forcing_zero_fraction,
+                },
+                "selected_prefix_last_write_refine": {
+                    "kind": "exact_sender",
+                    "version": 1,
+                    "head_topk": draft.head_topk,
+                    "weight": 1.0,
+                },
+            }
+        )
+        if model.dflash_swa_window_size is not None:
+            # SGLang's DSPINE loader enables its sliding window only from layer_types; with
+            # full_attention layers it would serve the draft with full attention.
+            config["layer_types"] = ["sliding_attention"] * num_layers
+            config["use_sliding_window"] = True
         return config

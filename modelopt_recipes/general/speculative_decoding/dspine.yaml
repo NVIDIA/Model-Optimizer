@@ -1,0 +1,94 @@
+# DSpine speculative-decoding training recipe.
+#
+# DSpine (https://github.com/Tencent/DSpine) reuses the DFlash mode/pipeline with causal
+# in-block attention and an adjacent causal injection after every draft layer, selected via
+# dflash_architecture_config.projector_type=dspine. Defaults reproduce the released
+# tencent/Qwen3-8B-DSpine-b16 drafter; the export loads into SGLang with
+# --speculative-algorithm DSPINE. Regenerate the training responses with the target model
+# first: the draft is trained on teacher-forced tokens but drafts autoregressively.
+# Override fields via an OmegaConf dotlist.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptDFlashRecipe
+metadata:
+  description: DSpine training recipe (causal DFlash backbone + adjacent causal injection).
+
+# maps to ModelArguments (main.py)
+model:
+  model_name_or_path:
+  trust_remote_code: false
+  use_fake_base_for_offline: false
+
+# maps to DataArguments (main.py)
+data:
+  mode: online
+  data_path:
+  offline_data_path:
+  # Jinja chat template with {% generation %} tags for answer_only_loss.
+  chat_template:
+
+# maps to TrainingArguments (main.py)
+training:
+  # --- commonly modified ---
+  output_dir:
+  num_train_epochs: 6
+  per_device_train_batch_size: 1
+  learning_rate: 6.0e-4
+  # A float below 1 is a fraction of the run. The alignment weight warms up with the
+  # learning rate unless dflash_dspine_alignment_warmup_steps is set.
+  warmup_steps: 0.04
+  training_seq_len: 3072
+  logging_steps: 50
+  save_steps: 2000
+  cp_size: 1
+  dp_shard_size: 1
+  disable_tqdm: true
+  estimate_ar: false
+  ar_validate_steps: 0
+  answer_only_loss: true
+
+  # --- rarely modified ---
+  do_eval: false
+  lr_scheduler_type: linear
+  save_strategy: steps
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  dataloader_drop_last: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+  ddp_find_unused_parameters: false
+  ddp_timeout: 1800
+  report_to: tensorboard
+
+# maps to DFlashConfig (modelopt/torch/speculative/config.py).
+dflash:
+  dflash_block_size: 16
+  dflash_num_anchors: 512
+  dflash_use_torch_compile: false
+  # DSpine's fixed choices: causal blocks and exponential position decay (gamma 7).
+  dflash_draft_attention: causal
+  dflash_loss_objective: decay
+  dflash_loss_decay_factor: 7.0
+  # Qwen3 has no native mask token; 151669 is the id the released drafter uses.
+  dflash_mask_token_id: 151669
+  # Backbone and refinement terms: ce_alpha*CE + l1_alpha*L1.
+  dflash_ce_loss_alpha: 0.1
+  dflash_l1_loss_alpha: 0.9
+  dflash_dspine_alignment_weight: 0.5
+  dflash_dspine_teacher_forcing_probability: 0.5
+  dflash_dspine_teacher_forcing_hold_fraction: 0.16666666666666666
+  dflash_dspine_teacher_forcing_zero_fraction: 0.3333333333333333
+  dflash_architecture_config:
+    num_hidden_layers: 5
+    # Draft attention/MLP dims, set explicitly: the draft does not inherit them from the base.
+    num_attention_heads: 32
+    num_key_value_heads: 8
+    head_dim: 128
+    intermediate_size: 12288
+    projector_type: dspine
+    code_size: 1024
+    # SGLang's DSPINE kernels need a multiple of 128.
+    code_rank: 512
+    # Candidates the exact-sender refinement rescores; a power of two in [2, 64].
+    refine_top_k: 16
+    teacher_forcing_layers: 3
