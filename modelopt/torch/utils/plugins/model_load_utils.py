@@ -18,6 +18,7 @@
 import contextlib
 import copy
 import dataclasses
+import functools
 import inspect
 import json
 import logging
@@ -77,6 +78,7 @@ from modelopt.torch.utils import moe
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ParallelState,
+    _hf_parameter_plan_lookup,
     barrier,
     broadcast_state_dict,
     is_initialized,
@@ -2235,13 +2237,10 @@ def _ep_aware_caching_allocator_warmup(
 
     def _ep_aware(model, accelerator_device_map, hf_quantizer=None, *args, **kwargs):
         try:
-            try:  # where current transformers keeps it (5.18); older releases, under integrations
-                from transformers.distributed.tensor_parallel import _get_parameter_tp_plan
+            try:
+                get_parameter_plan = _hf_parameter_plan_lookup()
             except ImportError:
-                try:
-                    from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
-                except ImportError:
-                    _get_parameter_tp_plan = None
+                get_parameter_plan = None
             ws = (
                 torch.distributed.get_world_size()
                 if torch.distributed.is_available() and torch.distributed.is_initialized()
@@ -2267,8 +2266,8 @@ def _ep_aware_caching_allocator_warmup(
                     nb //= ep_degree
                 elif (
                     tp_plan
-                    and _get_parameter_tp_plan is not None
-                    and _get_parameter_tp_plan(pname, tp_plan, is_weight=True) is not None
+                    and get_parameter_plan is not None
+                    and get_parameter_plan(pname, tp_plan) is not None
                 ):
                     # Placed at its share over the ep submesh by transformers' TP branch, which ignores
                     # get_device, so it is on the device even when the rest of the dense part is on meta.
@@ -2564,8 +2563,10 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         ):
             _orig_uwc = _FineGrainedFP8HfQuantizer.update_weight_conversions
 
-            def _uwc_fixed(self, weight_conversions):
-                convs = _orig_uwc(self, weight_conversions)
+            # transformers 5.21+ passes the model too.
+            @functools.wraps(_orig_uwc)
+            def _uwc_fixed(self, weight_conversions, *args, **kwargs):
+                convs = _orig_uwc(self, weight_conversions, *args, **kwargs)
                 for conv in convs:
                     ops = getattr(conv, "operations", None)
                     # Match the expert converter update_weight_conversions produced:
@@ -2675,6 +2676,8 @@ _EP_STYLE_SWAP = {
     "ep_router": "torch_a2a_router",
     "moe_tp_experts": "torch_a2a_experts",
     "nemotron_experts_ep": "torch_a2a_experts",
+    # transformers 5.19+ (its own all-to-all dispatch).
+    "ep_dispatch_experts": "torch_a2a_experts",
 }
 
 
@@ -2868,6 +2871,11 @@ def _transformers_mesh_builder():
     return mixin if hasattr(mixin, "initialize_distributed_mesh") else None
 
 
+def _hf_keeps_ep_apart() -> bool:
+    """Whether transformers (5.19+) applies an ``ep_plan`` only through its own expert dispatch."""
+    return "ep_size" in {f.name for f in dataclasses.fields(hf_distributed.DistributedConfig)}
+
+
 @contextlib.contextmanager
 def _experts_sharded_over(ep_mesh):
     """Make ``from_pretrained`` shard the experts over ``ep_mesh`` on releases that build their own mesh."""
@@ -2876,16 +2884,35 @@ def _experts_sharded_over(ep_mesh):
         yield
         return
 
+    class _OneMesh:
+        """transformers 5.19+'s mesh manager, with ``ep_mesh`` for every axis it asks for."""
+
+        def get_mesh(self, dims):
+            return ep_mesh
+
+    manager = _OneMesh() if _hf_keeps_ep_apart() else ep_mesh
+
     def _ep_mesh(*args, **kwargs):
         index = torch.cuda.current_device() if ep_mesh.device_type == "cuda" else None
-        return torch.device(ep_mesh.device_type, index), ep_mesh
+        return torch.device(ep_mesh.device_type, index), manager
 
     original = mixin.initialize_distributed_mesh
     mixin.initialize_distributed_mesh = _ep_mesh
+    distributor = getattr(mixin, "DistributedMixin", None) if _hf_keeps_ep_apart() else None
+    if distributor is not None:
+        original_distribute = distributor.__dict__["maybe_distribute_model"]
+
+        def _expert_plan_only(cls, model, *args, **kwargs):
+            model.tp_plan = model.ep_plan  # no dense TP, nor the vocab-sharded embedding 5.19+ adds
+            return original_distribute.__func__(cls, model, *args, **kwargs)
+
+        distributor.maybe_distribute_model = classmethod(_expert_plan_only)
     try:
         yield
     finally:
         mixin.initialize_distributed_mesh = original
+        if distributor is not None:
+            distributor.maybe_distribute_model = original_distribute
 
 
 @contextlib.contextmanager
@@ -3229,6 +3256,10 @@ def load_and_prepare_ep(
     if _transformers_mesh_builder() is not None and "tp_size" in _dc_fields:
         # This release sizes its own mesh from tp_size; _experts_sharded_over swaps in the EP mesh.
         dc_kwargs["tp_size"] = ep_degree
+    if _hf_keeps_ep_apart():
+        # 5.19+ applies an ep_plan only for its own dispatch: _experts_sharded_over hands the TP
+        # path the (swapped) expert plan instead, to apply over the EP mesh as earlier releases did.
+        dc_kwargs = {"tp_size": ep_degree}
     distributed_config = hf_distributed.DistributedConfig(**dc_kwargs)
     from_pretrained_kwargs: dict[str, Any] = {
         "dtype": dtype,

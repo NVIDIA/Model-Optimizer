@@ -87,7 +87,9 @@ class EagleModule(nn.Module):
 
     def _maybe_init_rope(self, device=None):
         if self.config.eagle_decoder_type == "llama" and not hasattr(self, "rotary_emb"):
-            self.rotary_emb = LlamaRotaryEmbedding(config=self.config, device=device)
+            # transformers 5.19 dropped the device argument; build on CPU and move.
+            rotary_emb = LlamaRotaryEmbedding(config=self.config)
+            self.rotary_emb = rotary_emb if device is None else rotary_emb.to(device)
 
     def _expand_first_attn_in_dim(self, first_layer_attn):
         """Modify qkv projection in first layer to accept 2h hidden size."""

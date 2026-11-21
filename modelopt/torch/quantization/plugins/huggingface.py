@@ -560,11 +560,15 @@ def convert_hf_parallel_linears_on_the_fly(model):
     This method converts them to `HFColumnParallelLinear` and `HFRowParallelLinear` so that they
     can be treated as TP sharded layers and not like regular nn.Linear layers.
     """
-    # transformers>=5.16 keeps the TP mesh on the PreTrainedModel, which may sit inside a wrapper.
-    tp_mesh = next(
-        (m._device_mesh for m in model.modules() if getattr(m, "_device_mesh", None) is not None),
-        None,
+    # transformers>=5.16 keeps the TP mesh on the PreTrainedModel, which may sit inside a wrapper;
+    # 5.19+ keeps a (pp, fsdp, tp) mesh there and the tp one in its mesh manager.
+    holder = next(
+        (m for m in model.modules() if getattr(m, "_device_mesh", None) is not None), None
     )
+    tp_mesh = None
+    if holder is not None:
+        manager = getattr(holder, "_mesh_manager", None)
+        tp_mesh = manager.get_mesh("tp") if manager is not None else holder._device_mesh
     converted = False
     for module in model.modules():
         if HFColumnParallelLinear.is_compatible(module, tp_mesh):
