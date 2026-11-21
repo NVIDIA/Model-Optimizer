@@ -14,14 +14,35 @@
 # limitations under the License.
 """Keep fixed rule batches and direct IR passes in their required phase order."""
 
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 
 from onnxscript import ir
+from onnxscript.rewriter import pattern
 
 from . import cleanup as _cleanup
 from .context import DlaGraph
+from .operators import rules as operator_rules
 
 __all__ = []
+
+
+def apply_rules(
+    graph: DlaGraph, definitions: Sequence[type[pattern.RewriteRuleClassBase]], **options
+) -> int:
+    """Bind per-run state to one fixed SDK rule batch without discovering operators."""
+    return graph.apply_patterns([definition.rule(graph, **options) for definition in definitions])
+
+
+def individual_op_rewrites(graph: DlaGraph) -> int:
+    """Lower native operators, coordinate layouts, then lower logical arithmetic."""
+    count = 0
+    for definitions in (
+        operator_rules.INDEXING_RULES,
+        operator_rules.MATRIX_RULES,
+    ):
+        count += apply_rules(graph, definitions, views={})
+    graph.apply_pass(ir.passes.common.RemoveUnusedNodesPass())
+    return count
 
 
 def cleanup(graph: DlaGraph, *, preserve_identities: Collection[ir.Node] | None = None) -> int:
