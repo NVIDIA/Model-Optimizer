@@ -499,6 +499,50 @@ def test_sidecar_port_taken_from_response(monkeypatch):
     assert seen_ports == {advertised_port}
 
 
+def test_servers_sharing_a_host_use_their_own_agents(monkeypatch):
+    """Several servers on one node each run their own producer agent and sidecar, so a read
+    from one server must not go through the agent registered for another on the same host."""
+    seq, n_layers, hidden = 8, 3, 16
+    base = _rdma_sidecar_handler(seq, n_layers, hidden)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/completions":
+            sidecar = 18000 + request.url.port - 8000
+            return httpx.Response(
+                200, json={"kv_transfer_params": {"hs_req_id": "r", "hs_sidecar_port": sidecar}}
+            )
+        if request.url.path == "/meta":
+            meta = str(request.url.port).encode()
+            return httpx.Response(200, json={"agent_metadata": base64.b64encode(meta).decode()})
+        return base(request)
+
+    _mock_rdma(monkeypatch, handler)
+    used = []
+
+    class _Agent(_FakeNixlAgent):
+        def add_remote_agent(self, meta):
+            return meta.decode()
+
+        def initialize_xfer(self, op, ldescs, rdescs, remote):
+            used.append(remote)
+            return "xfer-handle"
+
+    sys.modules["nixl._api"].nixl_agent = lambda *a, **k: _Agent()
+    ds = EagleVllmStreamingDataset(
+        entries=[
+            {"conversation_id": f"c-{i}", "messages": [{"role": "user", "content": "x"}]}
+            for i in range(4)
+        ],
+        tokenizer=_tokenizer_returning(seq),
+        config=EagleVllmStreamingConfig(
+            server_urls=["http://node:8000", "http://node:8001"], model="m", max_seq_len=seq
+        ),
+    )
+    for i in range(4):
+        ds[i]
+    assert used == ["18000", "18001", "18000", "18001"]
+
+
 # ---------------------------------------------------------------------------
 # answer_only_loss template guard
 # ---------------------------------------------------------------------------
