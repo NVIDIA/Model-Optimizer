@@ -28,6 +28,7 @@ from onnxscript import ir
 from modelopt.onnx.graph_surgery.dla_transforms.cleanup import deduplicate_initializers
 from modelopt.onnx.graph_surgery.dla_transforms.context import DlaGraph
 from modelopt.onnx.graph_surgery.dla_transforms.stages import cleanup
+from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
 
 
 @pytest.mark.parametrize(
@@ -84,6 +85,85 @@ def test_cleanup_preserves_public_names_and_shared_reshape_consumers(shared, pre
         strict=True,
     ):
         np.testing.assert_array_equal(original, transformed)
+
+
+@pytest.mark.parametrize("fp16", [False, True])
+def test_final_cleanup_deduplicates_initializers_after_precision(fp16):
+    """Merge fixed payloads after rounding while preserving interfaces and exact bits."""
+    arrays = {
+        "weight": np.array([1, 1], np.float32),
+        "duplicate": np.array([1, 1], np.float32),
+        "rounded": np.array([1.0001, 1.0001], np.float32),
+        "scalar": np.array(1, np.float32),
+        "vector": np.array([1], np.float32),
+        "positive_zero": np.array(0, np.float32),
+        "negative_zero": np.array(-0.0, np.float32),
+        "nan_a": np.array(0x7FC00001, np.uint32).view(np.float32),
+        "nan_b": np.array(0x7FC00002, np.uint32).view(np.float32),
+    }
+    nodes = [
+        helper.make_node("Add", ["x", name], [f"out_{name}"], name=f"add_{name}")
+        for name in (*arrays, "overridable")
+    ]
+    nodes.append(helper.make_node("Identity", ["integer_bits"], ["integers"]))
+    outputs = [
+        helper.make_tensor_value_info(f"out_{name}", TensorProto.FLOAT, [2])
+        for name in (*arrays, "overridable")
+    ]
+    outputs.extend(
+        [
+            helper.make_tensor_value_info("integers", TensorProto.INT32, [2]),
+            helper.make_tensor_value_info("exposed", TensorProto.FLOAT16, [2]),
+        ]
+    )
+    initializers = [numpy_helper.from_array(array, name) for name, array in arrays.items()]
+    initializers.extend(
+        [
+            numpy_helper.from_array(np.array([1, 1], np.float32), "overridable"),
+            numpy_helper.from_array(np.array([1, 1], np.float16), "exposed"),
+            numpy_helper.from_array(np.array([0x3F800000, 0x3F800000], np.int32), "integer_bits"),
+        ]
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "deduplication",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [2]),
+                helper.make_tensor_value_info("overridable", TensorProto.FLOAT, [2]),
+            ],
+            outputs,
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=10,
+    )
+    saved = model.SerializeToString()
+    result = _transform_make_dla_compatible(model, force_fp16_activations=fp16, verbose=False)
+    assert model.SerializeToString() == saved
+    add_inputs = {
+        node.name.removeprefix("add_"): node.input[1]
+        for node in result.graph.node
+        if node.op_type == "Add"
+    }
+    assert add_inputs["weight"] == add_inputs["duplicate"]
+    assert (add_inputs["weight"] == add_inputs["rounded"]) == fp16
+    assert len({add_inputs[name] for name in ("weight", "scalar", "vector")}) == 3
+    assert add_inputs["positive_zero"] != add_inputs["negative_zero"]
+    assert (add_inputs["nan_a"] == add_inputs["nan_b"]) == fp16
+    kept = {value.name: value for value in result.graph.initializer}
+    assert kept["integer_bits"].data_type == TensorProto.INT32
+    assert {"exposed", "overridable"} <= kept.keys()
+    assert add_inputs["weight"] not in {"overridable", "exposed", "integer_bits"}
+    assert list(result.graph.input) == list(model.graph.input)
+    assert list(result.graph.output) == list(model.graph.output)
+    feeds = {"x": np.array([0, 0.5], np.float32), "overridable": np.array([2, 3], np.float32)}
+    for expected, actual in zip(
+        ReferenceEvaluator(model).run(None, feeds),
+        ReferenceEvaluator(result).run(None, feeds),
+        strict=True,
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=2e-3, atol=0, equal_nan=True)
 
 
 @pytest.mark.parametrize(

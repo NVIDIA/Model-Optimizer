@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Fixed operator rewrites into DLA-compatible primitives."""
 
 from __future__ import annotations
@@ -813,9 +814,6 @@ def _capture_lstm_sequence_layout(lstm):
 
 
 INDEXING_RULES = (GatherIndices, GatherElementsIndices)
-
 RECURRENT_RULES = (Lstm1, Lstm2, Lstm3, LstmSequenceLayout)
-
 MATRIX_RULES = (MatMulToConv, GemmToConv, GemmBiasToConv)
-
 LOGICAL_RULES = (WhereZero, LogicalNot, GreaterFloat)

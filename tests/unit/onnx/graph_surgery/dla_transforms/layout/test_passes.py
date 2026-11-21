@@ -20,16 +20,12 @@ import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 from onnx.reference import ReferenceEvaluator
-from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 from onnxscript import ir
 
-from modelopt.onnx.graph_surgery.dla_transforms import stages
 from modelopt.onnx.graph_surgery.dla_transforms.common import static_shape
 from modelopt.onnx.graph_surgery.dla_transforms.context import DlaGraph
-from modelopt.onnx.graph_surgery.dla_transforms.layout.passes import (
-    LayoutBoundaryCommit,
-    SplitAxisLayout,
-)
+from modelopt.onnx.graph_surgery.dla_transforms.layout.passes import SplitAxisLayout
+from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
 
 
 @pytest.mark.parametrize("output_count", [2, 4])
@@ -63,9 +59,7 @@ def test_split_axis_layout(output_count, shape, axis, mapped_axis):
     assert context.apply_pass(transform).modified
     assert transform.transformed_nodes == 1
     assert not context.apply_pass(transform).modified
-    context.apply_pass(LayoutBoundaryCommit(context))
-    transformed = ir.serde.serialize_model(context.model)
-    context.end_layout()
+    transformed = _transform_make_dla_compatible(source, verbose=False)
     onnx.checker.check_model(transformed, full_check=True)
     split = next(node for node in transformed.graph.node if node.op_type == "Split")
     assert len(split.output) == output_count
@@ -104,9 +98,9 @@ def test_scalar_gather_before_fixed_reshape(public_intermediate):
     )
     if public_intermediate:
         with pytest.raises(ValueError):
-            _lower_layout(model)
+            _transform_make_dla_compatible(model, verbose=False)
         return
-    transformed = _lower_layout(model)
+    transformed = _transform_make_dla_compatible(model, verbose=False)
     onnx.checker.check_model(transformed, full_check=True)
     x = np.arange(8, dtype=np.float32).reshape(4, 1, 2)
     np.testing.assert_array_equal(
@@ -137,7 +131,7 @@ def test_control_only_views_and_collapsed_public_boundaries(
     controls = np.array([1, 1] if kind == "Split" else [1], np.int64)
     selection_inputs = ["x" if shared_input else "control_x"]
     selection_attrs = {"axis": 0}
-    prefix, suffix = ([], [])
+    prefix, suffix = [], []
     outputs = []
     if computed_control:
         arrays.update(control_a=controls, control_b=np.zeros_like(controls))
@@ -192,7 +186,7 @@ def test_control_only_views_and_collapsed_public_boundaries(
         opset_imports=[helper.make_opsetid("", 21)],
         ir_version=10,
     )
-    transformed = _lower_layout(model)
+    transformed = _transform_make_dla_compatible(model, verbose=False)
     assert transformed.graph.input == model.graph.input
     assert transformed.graph.output == model.graph.output
     assert len({value.name for value in transformed.graph.initializer}) == len(
@@ -208,7 +202,7 @@ def test_control_only_views_and_collapsed_public_boundaries(
         ReferenceEvaluator(transformed).run(None, feeds),
         strict=True,
     ):
-        np.testing.assert_allclose(actual, expected, rtol=1e-06)
+        np.testing.assert_allclose(actual, expected, rtol=1e-6)
 
 
 def test_shared_native_control_views_and_canonical_native_output():
@@ -239,7 +233,7 @@ def test_shared_native_control_views_and_canonical_native_output():
         opset_imports=[helper.make_opsetid("", 21)],
         ir_version=10,
     )
-    transformed = _lower_layout(model)
+    transformed = _transform_make_dla_compatible(model, verbose=False)
     shapes = [node for node in transformed.graph.node if node.op_type == "Shape"]
     assert len(shapes) == 2 and shapes[0].input[0] == shapes[1].input[0]
     data = np.arange(6, dtype=np.float32).reshape(2, 3) / 8
@@ -257,7 +251,7 @@ def test_shared_native_control_views_and_canonical_native_output():
 def test_selected_singleton_axis_preserves_downstream_softmax(kind, axis):
     """A new leading singleton changes the planned collapse, requiring a real output view."""
     shape = [2, 3, 2, 1, 2]
-    operands, attributes, initializers = (["x"], {"axis": axis}, [])
+    operands, attributes, initializers = ["x"], {"axis": axis}, []
     if kind == "Split":
         attributes["num_outputs"] = 2
     else:
@@ -281,7 +275,7 @@ def test_selected_singleton_axis_preserves_downstream_softmax(kind, axis):
         opset_imports=[helper.make_opsetid("", 21)],
         ir_version=10,
     )
-    transformed = _lower_layout(model)
+    transformed = _transform_make_dla_compatible(model, verbose=False)
     assert transformed.graph.input == model.graph.input
     assert transformed.graph.output == model.graph.output
     working = ir.serde.deserialize_model(transformed)
@@ -294,14 +288,4 @@ def test_selected_singleton_axis_preserves_downstream_softmax(kind, axis):
         ReferenceEvaluator(transformed).run(None, feeds),
         strict=True,
     ):
-        np.testing.assert_allclose(actual, expected, rtol=1e-06, atol=1e-07)
-
-
-def _lower_layout(model):
-    """Execute layout directly before the public entry point is introduced."""
-    typed = SymbolicShapeInference.infer_shapes(model, auto_merge=True)
-    context = DlaGraph(ir.serde.deserialize_model(typed))
-    stages.layout(context)
-    result = ir.serde.serialize_model(context.model)
-    onnx.checker.check_model(result, full_check=True)
-    return result
+        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
