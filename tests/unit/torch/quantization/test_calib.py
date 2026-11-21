@@ -15,6 +15,7 @@
 
 """Unittests for AWQ and SVDQuant"""
 
+import copy
 from datetime import timedelta
 from functools import partial
 
@@ -516,6 +517,109 @@ def test_svdquant_lora_weights():
         assert torch.equal(module.weight, original_weight)
         assert module.weight_quantizer.svdquant_lora_a is not None
         assert module.weight_quantizer.svdquant_lora_b is not None
+
+
+class _LinearAttn(nn.Module):  # Qwen3-Next: qkv/z read the same input as a/b but fuse apart
+    def __init__(self):
+        super().__init__()
+        self.in_proj_qkv, self.in_proj_z = nn.Linear(64, 64), nn.Linear(64, 32)
+        self.in_proj_a, self.in_proj_b = nn.Linear(64, 16), nn.Linear(64, 16)
+
+
+class _SharedInputLLM(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q, self.k, self.v = nn.Linear(64, 64), nn.Linear(64, 32), nn.Linear(64, 32)
+        self.layer = nn.Module()
+        self.layer.linear_attn = _LinearAttn()
+        self.out = nn.Linear(256, 64)
+
+    def forward(self, x):
+        la = self.layer.linear_attn
+        projs = [self.q, self.k, self.v, la.in_proj_qkv, la.in_proj_z, la.in_proj_a, la.in_proj_b]
+        return self.out(torch.cat([proj(x) for proj in projs], dim=-1))
+
+
+def _svdquant_fused_group_scale_case(reference, loop, groups, kept):
+    """Check the scales and input ranges ``fused_group_scale`` gives ``groups`` and ``kept``.
+
+    ``groups`` maps each group export fuses to the input its members read.
+    """
+
+    def quantize(fused_group_scale):
+        config = mtq.INT8_SMOOTHQUANT_CFG.copy()
+        config["algorithm"] = {"method": "svdquant", "fused_group_scale": fused_group_scale}
+        return mtq.quantize(copy.deepcopy(reference), config, loop)
+
+    per_layer, shared = quantize(False), quantize(True)
+
+    def pqs(model, name):
+        return model.get_submodule(name).input_quantizer.pre_quant_scale
+
+    for group, inputs in groups.items():
+        # Export's resmooth: the mean of the members' pre_quant_scales.
+        mean = torch.stack([pqs(per_layer, n) for n in group]).mean(0)
+        assert not torch.equal(pqs(per_layer, group[0]), mean)
+        for name in group:
+            assert torch.allclose(pqs(shared, name).float(), mean.float())
+            # The final max calibration measured the input range under the shared scale.
+            expected = (inputs * pqs(shared, name)).abs().amax()
+            assert torch.allclose(shared.get_submodule(name).input_quantizer.amax, expected)
+    for name in kept:
+        assert torch.equal(pqs(shared, name), pqs(per_layer, name))
+
+
+def test_svdquant_fused_group_scale():
+    torch.manual_seed(0)
+    inputs = torch.randn(2, 16, 64) * torch.rand(64) * 10  # uneven channels: scales differ
+    linear_attn = "layer.linear_attn."
+    groups = {
+        ("q", "k", "v"): inputs,
+        (linear_attn + "in_proj_qkv", linear_attn + "in_proj_z"): inputs,
+    }  # in_proj_a/b are left unquantized by the default config
+    loop = partial(forward_loop, dataloader=[inputs])
+    _svdquant_fused_group_scale_case(_SharedInputLLM(), loop, groups, kept=["out"])
+
+
+def test_svdquant_fused_group_scale_diffusers():
+    diffusers = pytest.importorskip("diffusers")
+
+    class _CrossAttnBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = nn.Module()
+            self.attn.to_q, self.attn.to_k, self.attn.to_v = (nn.Linear(64, 64) for _ in range(3))
+            self.context_proj = nn.Linear(64, 64)  # reads the context too, but is not Q/K/V
+
+        def forward(self, x, context):
+            attn = self.attn
+            return (
+                x
+                + attn.to_q(x) * attn.to_k(context) * attn.to_v(context)
+                + self.context_proj(context)
+            )
+
+    class _Transformer(diffusers.ModelMixin, diffusers.ConfigMixin):
+        def __init__(self):
+            super().__init__()
+            self.blocks = nn.ModuleList(_CrossAttnBlock() for _ in range(2))
+
+        def forward(self, x, context):
+            for block in self.blocks:  # every block reads the same context tensor
+                x = block(x, context)
+            return x
+
+    torch.manual_seed(0)
+    x = torch.randn(2, 16, 64)
+    context = torch.randn(2, 16, 64) * torch.rand(64) * 10
+
+    def loop(model):
+        model(x, context)
+
+    # Export fuses each block's cross-attention K/V, not across blocks or with context_proj.
+    groups = {(f"blocks.{i}.attn.to_k", f"blocks.{i}.attn.to_v"): context for i in range(2)}
+    kept = [f"blocks.{i}.{n}" for i in range(2) for n in ("attn.to_q", "context_proj")]
+    _svdquant_fused_group_scale_case(_Transformer(), loop, groups, kept)
 
 
 def test_layerwise_calibrate_support_gate():

@@ -1251,6 +1251,17 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
         ),
     )
 
+    fused_group_scale: bool = ModeloptField(
+        default=False,
+        title="Give each fused group its exported smoothing scale during calibration",
+        description=(
+            "The linears that export fuses (q/k/v and gate/up for LLMs, each attention block's "
+            "Q/K/V for diffusers models) get the mean of their searched ``pre_quant_scale`` "
+            "before the SVD and the final max calibration, instead of only at export. The "
+            "activation ranges are then measured under the scale that is exported."
+        ),
+    )
+
 
 class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.
