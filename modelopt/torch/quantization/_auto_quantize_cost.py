@@ -22,6 +22,8 @@ from typing import Any, Final
 import regex as re
 import torch.nn as nn
 
+from .utils import weight_attr_names
+
 # Default target used by historical AutoQuantize calls when no explicit effective-bits
 # constraint is supplied. The value is intentionally kept for backward compatibility.
 DEFAULT_AUTO_QUANTIZE_EFFECTIVE_BITS: Final = 4.8
@@ -96,20 +98,14 @@ def is_routed_moe_module_name(name: str) -> bool:
 def _get_module_weight_numel(module: nn.Module) -> int:
     """Return the parameter count for a module's quantizable weights.
 
-    Standard quantized linear modules have a single ``weight`` parameter. Fused
-    MoE expert containers expose projection tensors directly instead, so both
-    fused projections contribute to AutoQuantize cost accounting.
+    Standard quantized linear modules have a single ``weight`` parameter. Modules that quantize
+    several named weights, such as fused MoE experts, count each of them.
     """
     weight = getattr(module, "weight", None)
-    if weight is not None:
-        return weight.numel()
-
-    # Fused MoE expert containers expose projection tensors directly instead of
-    # a single ``weight`` parameter.
-    return sum(
+    return (0 if weight is None else weight.numel()) + sum(
         param.numel()
-        for attr in ("gate_up_proj", "down_proj")
-        if (param := getattr(module, attr, None)) is not None
+        for name in weight_attr_names(module)
+        if name != "weight" and (param := getattr(module, name, None)) is not None
     )
 
 

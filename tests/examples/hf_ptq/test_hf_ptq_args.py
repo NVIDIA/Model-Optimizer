@@ -271,6 +271,18 @@ def test_hf_ptq_finalizes_searched_and_merged_scores(monkeypatch, tmp_path):
     )
     with pytest.raises(ValueError, match="quantization_formats do not match"):
         run("search", fp8_only)
+    # A checkpoint saved before per-weight search has no cost version. It still finalizes for a
+    # model without per-weight modules, and is refused for one whose experts it never searched.
+    old = safe_load(tmp_path / "search" / "rank0.pth")
+    del old["cost_version"]
+    safe_save(old, tmp_path / "old.pth")
+    assert run("old.pth")[0]
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            importlib.import_module("autoquant_utils"), "_has_per_weight_modules", lambda m: True
+        )
+        with pytest.raises(ValueError, match="predates per-weight AutoQuantize"):
+            run("old.pth")
     # So are another KL context's; a checkpoint that records none was scored without one.
     state = safe_load(tmp_path / "search" / "rank0.pth")
     state["method"] = "kl_div"

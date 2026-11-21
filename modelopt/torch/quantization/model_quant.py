@@ -51,6 +51,7 @@ from .algorithms import (
     AUTO_QUANTIZE_SEARCHERS,
     QuantRecipe,
     _algorithm_methods,
+    _has_per_weight_modules,
     _refuse_layerwise_dirs,
     _rewrites_weights,
     merge_auto_quantize_shards,
@@ -1320,7 +1321,8 @@ def auto_quantize(
     # retry on the same model, which a converted model would refuse. The saved modules hold every
     # weight conversion replaces (HF Conv1D's), so other searches save none and the searcher drops
     # them once those checks pass.
-    if rewrites_weights or format_shard is not None:
+    # A per-weight module's candidate may be refused after conversion; hand the model back then.
+    if rewrites_weights or format_shard is not None or _has_per_weight_modules(model):
         searcher.restore_unconverted = _save_module_attributes(model)
     # Calibration turns pre-quant-scale folding off for the whole process. Hand back the policy
     # found here on every exit, also after a failure while scoring, so later calibrations fold.

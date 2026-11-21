@@ -39,7 +39,12 @@ from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.config import LayerwiseConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_importance, pinned_packed_weight
-from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    QuantLinear,
+    QuantModuleRegistry,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.plugins.huggingface import (
     _QuantHFParallelLinear,
     _TransposedExpertsCalibMixin,
@@ -55,6 +60,7 @@ pytest.importorskip("transformers")
 import transformers
 from transformers import AutoModelForCausalLM, LlamaForCausalLM
 from transformers.integrations.finegrained_fp8 import FP8Linear
+from transformers.models.llama4.modeling_llama4 import Llama4TextExperts
 
 
 class HFModel(nn.Module):
@@ -438,6 +444,73 @@ def test_gpt_oss_experts_iter_weights_for_calibration_transposed():
         yielded[experts.down_proj_weight_quantizer].shape
         == experts.down_proj.transpose(-1, -2).shape
     )
+
+
+class _Llama4ExpertsModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        config = transformers.Llama4TextConfig(
+            hidden_size=32, intermediate_size=32, num_local_experts=2, hidden_act="silu"
+        )
+        self.proj = nn.Linear(32, 32)
+        self.experts = Llama4TextExperts(config)
+        # The experts allocate their weights uninitialized; PreTrainedModel would initialize them.
+        for weight in self.experts.parameters():
+            nn.init.normal_(weight, std=0.1)
+
+    def forward(self, input_ids):
+        return self.experts(self.proj(torch.nn.functional.one_hot(input_ids, 32).float()))
+
+
+def _tiny_gpt_oss():
+    model = get_tiny_gpt_oss(num_hidden_layers=1).float()
+    return model, model.model.layers[0].mlp.experts, lambda m, ids: m(ids).logits
+
+
+def _tiny_llama4_experts():
+    model = _Llama4ExpertsModel()
+    return model, model.experts, lambda m, ids: m(ids)
+
+
+@pytest.mark.parametrize("build", [_tiny_gpt_oss, _tiny_llama4_experts])
+def test_auto_quantize_searches_bmm_experts(build):
+    model, experts, forward = build()
+    _, search_state = mtq.auto_quantize(
+        model,
+        # Only an all-INT8 model meets 8 effective bits, so the experts must be searched.
+        constraints={"effective_bits": 8.0},
+        quantization_formats=[mtq.INT8_DEFAULT_CFG],
+        data_loader=[torch.randint(0, 32, (2, 8)) for _ in range(2)],
+        forward_step=forward,
+        loss_func=lambda output, batch: output.float().square().mean(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+    searched = {
+        name for stat in search_state["candidate_stats"].values() for name in stat["module_names"]
+    }
+    assert any(name.endswith("experts") for name in searched)
+    # The selected quantizers, not the ones present at conversion, must quantize the weights.
+    calls = []
+    hook = experts.gate_up_proj_weight_quantizer.register_forward_hook(lambda *_: calls.append(1))
+    with torch.no_grad():
+        forward(model, torch.randint(0, 32, (2, 8)))
+    hook.remove()
+    assert experts.gate_up_proj_weight_quantizer.is_enabled and calls
+
+
+def test_gpt_oss_clears_cached_weight_of_sequential_quantizer():
+    # A list-config candidate makes the weight quantizer sequential; the forward must not keep its
+    # quantized weight, or later forwards would reuse it.
+    model = get_tiny_gpt_oss(num_hidden_layers=1).float()
+    mtq.replace_quant_module(model)
+    experts = model.model.layers[0].mlp.experts
+    experts.gate_up_proj_weight_quantizer = SequentialQuantizer(
+        TensorQuantizer(), TensorQuantizer()
+    )
+    with torch.no_grad():
+        model(torch.randint(0, 32, (2, 8)))
+    assert not any(hasattr(module, "_cached_quant_val") for module in experts.modules())
 
 
 def test_transposed_experts_calib_mixin_yields_transposed_views():
