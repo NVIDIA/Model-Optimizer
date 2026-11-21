@@ -1138,9 +1138,18 @@ _W1_INT8_W2_INT4 = [
     {"quantizer_name": "*w1_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
     {"quantizer_name": "*w2_weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
 ]
+# Both cost 8 bits, but export records one format per module.
+_W1_INT8_W2_FP8 = [
+    {"quantizer_name": "*w1_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+    {"quantizer_name": "*w2_weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+]
 
 
-@pytest.mark.parametrize("entries", [_W1_ONLY, _W1_INT8_W2_INT4], ids=["partial", "mixed"])
+@pytest.mark.parametrize(
+    "entries",
+    [_W1_ONLY, _W1_INT8_W2_INT4, _W1_INT8_W2_FP8],
+    ids=["partial", "mixed", "same_cost"],
+)
 def test_auto_quantize_refuses_mixed_weight_formats_and_hands_the_model_back(entries):
     mixed = {"quant_cfg": [{"quantizer_name": "*", "enable": False}, *entries], "algorithm": "max"}
     QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)

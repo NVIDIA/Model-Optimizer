@@ -284,21 +284,22 @@ def _quantizer_compression(quantizer: TensorQuantizer) -> float:
 def _per_weight_compression(recipe: "QuantRecipe", quantizers: dict[str, nn.Module]) -> float:
     """The compression a candidate resolves an opted-in per-weight module's weights to.
 
-    Each weight takes its quantizer's format, the narrowest stage of a sequential one (e.g.
-    W4A8), as recipes are costed. A module is one search group at one cost, so its weights must
-    resolve alike: all quantized at one compression, or all unquantized (1.0).
+    A module is one search group, priced and exported at one format, so its weights must resolve
+    to one format: the same enabled quantizer stages (e.g. W4A8's two), or none (1.0). The cost
+    is the narrowest stage's, as recipes are costed.
     """
-    compressions = set()
+    formats: dict[tuple, list[TensorQuantizer]] = {}
     for attr, value in quantizers.items():
         if "weight_quantizer" in attr:
             enabled = [q for q in _iter_tensor_quantizers(value) if q.is_enabled]
-            compressions.add(min(map(_quantizer_compression, enabled)) if enabled else 1.0)
-    if len(compressions) > 1:
+            formats[tuple(map(_tensor_quantizer_format_signature, enabled))] = enabled
+    if len(formats) > 1:
         raise ValueError(
             f"AutoQuantize candidate {recipe} gives the weights of one module different formats; "
             "configure all of its weight quantizers alike."
         )
-    compression = compressions.pop() if compressions else 1.0
+    enabled = next(iter(formats.values()), [])
+    compression = min(map(_quantizer_compression, enabled)) if enabled else 1.0
     effective_bits = recipe.config.effective_bits
     return effective_bits / 16 if effective_bits is not None and compression < 1.0 else compression
 
@@ -2947,16 +2948,37 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False, algo
         candidate_stat = search_state["candidate_stats"][hparam_name]
         if candidate_stat.get("is_fixed", False):
             continue
-        if recipe == QuantRecipe(quant_cfg=None):
-            continue
         module_names = candidate_stat["module_names"]
         per_weight_modules = set(candidate_stat.get("per_weight_modules", ()))
         for module_name in module_names:
+            if module_name in per_weight_modules:
+                # Replayed after every global rule, as the search applied the candidate: to fresh
+                # quantizers, through the rules matching their module-relative names, in order.
+                for quantizer_attr in _get_replay_quantizer_attrs(candidate_stat, module_name):
+                    quantizer_name = f"{module_name}.{quantizer_attr}"
+                    per_module_entries.append(
+                        {
+                            "quantizer_name": quantizer_name,
+                            "cfg": _cfg_to_dict(mtq_config.QuantizerAttributeConfig()),
+                            "enable": True,
+                        }
+                    )
+                    for rule in recipe.config.quant_cfg:
+                        if fnmatch.fnmatch(quantizer_attr, rule["quantizer_name"]):
+                            replayed = {"quantizer_name": quantizer_name, "enable": rule["enable"]}
+                            if rule["cfg"] is not None:
+                                replayed["cfg"] = _cfg_to_dict(rule["cfg"])
+                            if rule.get("parent_class") is not None:
+                                replayed["parent_class"] = rule["parent_class"]
+                            per_module_entries.append(replayed)
+        if recipe == QuantRecipe(quant_cfg=None):
+            continue
+        for module_name in module_names:
+            if module_name in per_weight_modules:
+                continue
             for quantizer_attr in _get_replay_quantizer_attrs(candidate_stat, module_name):
                 matched_cfg, matched_enable = _match_quantizer_cfg(
-                    recipe.config.quant_cfg,
-                    quantizer_attr,
-                    path_scoped=module_name not in per_weight_modules,
+                    recipe.config.quant_cfg, quantizer_attr
                 )
                 if matched_enable is not None:
                     entry: dict[str, Any] = {
@@ -3056,10 +3078,9 @@ def _scopes_attr(pattern: str, quantizer_attr: str) -> bool:
     return prefix != pattern and (not prefix or prefix[-1] in ".*")
 
 
-def _match_quantizer_cfg(quant_cfg, quantizer_attr, path_scoped=True):
+def _match_quantizer_cfg(quant_cfg, quantizer_attr):
     # Last-match-wins to mirror set_quantizer_by_cfg behavior. Patterns may be path-scoped
-    # (e.g. "*mlp*weight_quantizer") while quantizer_attr is a bare name like "weight_quantizer";
-    # without ``path_scoped``, only the bare name is matched, as the search applied candidates.
+    # (e.g. "*mlp*weight_quantizer") while quantizer_attr is a bare name like "weight_quantizer".
     matched = None
     matched_enable = None
     for entry in quant_cfg:
@@ -3069,9 +3090,7 @@ def _match_quantizer_cfg(quant_cfg, quantizer_attr, path_scoped=True):
         pattern = entry["quantizer_name"]
         cfg = entry.get("cfg")
         enable = entry.get("enable", True)
-        if fnmatch.fnmatch(quantizer_attr, pattern) or (
-            path_scoped and _scopes_attr(pattern, quantizer_attr)
-        ):
+        if fnmatch.fnmatch(quantizer_attr, pattern) or _scopes_attr(pattern, quantizer_attr):
             matched = cfg
             matched_enable = enable
 

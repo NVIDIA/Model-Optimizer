@@ -200,26 +200,47 @@ def test_per_weight_format_shards_merge_into_the_live_search(method, tmp_path):
     assert merged_state["best"]["recipe"] == live["best"]["recipe"]
 
 
-def test_named_override_replays_on_per_weight_and_dense_modules_as_scored():
+def test_per_weight_modules_replay_every_rule_form_as_scored():
     named = _deny(
         {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
-        {"quantizer_name": "*w[12]*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        {"quantizer_name": "*w[12]*weight_quantizer", "cfg": _INT4_W},
+        # An enable-only rule keeps the format before it; a parent_class rule applies here too.
+        {"quantizer_name": "*w1_weight_quantizer", "enable": False},
+        {"quantizer_name": "*w1_weight_quantizer", "enable": True},
+        {
+            "quantizer_name": "*w2_input_quantizer",
+            "parent_class": "test.PerWeightExperts",
+            "cfg": {"num_bits": 8, "axis": None},
+        },
     )
-    model = _Model()
-    model, state = mtq.auto_quantize(
-        model,
-        constraints={"effective_bits": 8.0},
-        quantization_formats=[(named, "named")],
-        data_loader=[torch.randn(2, 4, 16) for _ in range(2)],
-        forward_step=lambda model, batch: model(batch),
-        loss_func=lambda output, batch: output.sum(),
-        num_calib_steps=2,
-        num_score_steps=2,
-    )
+    _CANDIDATES["named"] = named
+    try:
+        model, state = _search("gradient", ["named"], 5.0)
+    finally:
+        del _CANDIDATES["named"]
     replayed = _replayed(mtq.get_auto_quantize_config(state))
-    # Per-weight modules replay exactly; dense replay of such patterns is tracked in #3508.
+    # Dense replay of such patterns is tracked in #3508.
     assert _formats(replayed, ("experts",)) == _formats(model, ("experts",))
+    assert model.experts.w1_weight_quantizer.num_bits == 4
+    assert model.experts.w2_input_quantizer.is_enabled
     assert isinstance(state["best"]["recipe"]["experts.quant_recipe"], QuantRecipe)
+
+
+def test_path_rules_of_other_modules_leave_unquantized_per_weight_modules_alone():
+    path_rule = _deny(
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "experts.w[12]_*_quantizer", "cfg": _INT4_W},
+    )
+    _CANDIDATES["path_rule"] = path_rule
+    try:
+        _, state = _search("gradient", ["path_rule"], 8.0)
+    finally:
+        del _CANDIDATES["path_rule"]
+    best = state["best"]["recipe"]
+    best["experts.quant_recipe"] = QuantRecipe(quant_cfg=None)
+    replayed = _replayed(mtq.get_auto_quantize_config(state))
+    assert set(_formats(replayed, ("experts",)).values()) == {("disabled",)}
+    assert replayed.dense.weight_quantizer.is_enabled
 
 
 def test_per_weight_modules_are_priced_at_their_resolved_weight_format():
