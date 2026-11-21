@@ -11,6 +11,12 @@ outputs:
   head_sha:
     description: The PR's head commit.
     value: ${{ steps.pr-shas.outputs.head_sha }}
+  base_sha:
+    description: The current target branch commit.
+    value: ${{ steps.pr-shas.outputs.base_sha }}
+  base_ref:
+    description: The current target branch name.
+    value: ${{ steps.pr-shas.outputs.base_ref }}
   stacked:
     description: Whether the PR targets another PR's branch (not main, release/* or feature/*), so GPU tests are deferred.
     value: ${{ steps.pr-shas.outputs.stacked }}
@@ -31,6 +37,7 @@ runs:
         echo "head_sha=$(echo "$PR_INFO" | jq -r '.head.sha')" >> $GITHUB_OUTPUT
         echo "base_sha=$(echo "$PR_INFO" | jq -r '.base.sha')" >> $GITHUB_OUTPUT
         base_ref=$(echo "$PR_INFO" | jq -r '.base.ref')
+        echo "base_ref=$base_ref" >> "$GITHUB_OUTPUT"
         # Same base branches the unit tests run for (unit_tests.yml)
         [[ "$base_ref" == main || "$base_ref" == release/* || "$base_ref" == feature/* ]] && stacked=false || stacked=true
         echo "stacked=$stacked" | tee --append $GITHUB_OUTPUT

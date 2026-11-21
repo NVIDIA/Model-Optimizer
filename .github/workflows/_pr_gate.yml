@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       # Stacked PRs (base is another PR's branch) skip GPU tests; only the bottom PR, targeting main, runs them.
-      any_changed: ${{ steps.base.outputs.stacked != 'true' && (steps.changed-tests.outputs.any_modified || steps.non-pr.outputs.any_changed) || 'false' }}
+      any_changed: ${{ steps.base.outputs.stacked != 'true' && steps.changelog.outputs.reuse != 'true' && (steps.changed-tests.outputs.any_modified || steps.non-pr.outputs.any_changed) || 'false' }}
       stacked: ${{ steps.base.outputs.stacked == 'true' }}
     steps:
       # For non-PR triggers (schedule, workflow_dispatch), always run tests
@@ -43,6 +43,13 @@ jobs:
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
         id: base
         uses: ./.github/actions/pr-merge-base
+      - if: startsWith(github.ref, 'refs/heads/pull-request/')
+        id: changelog
+        uses: ./.github/actions/changelog-ci-gate
+        with:
+          head-sha: ${{ steps.base.outputs.head_sha }}
+          base-sha: ${{ steps.base.outputs.base_sha }}
+          base-ref: ${{ steps.base.outputs.base_ref }}
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
         name: Check for changes in test-relevant directories
         id: changed-tests
