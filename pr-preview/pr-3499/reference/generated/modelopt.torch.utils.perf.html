@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>perf - Model Optimizer 0.0.1.dev1+g0d5cf134c</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="plugins" href="modelopt.torch.utils.plugins.html" /><link rel="prev" title="network" href="modelopt.torch.utils.network.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>perf - Model Optimizer 0.0.1.dev1+g34a752eb9</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="plugins" href="modelopt.torch.utils.plugins.html" /><link rel="prev" title="network" href="modelopt.torch.utils.network.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -489,7 +489,7 @@ data-aria-dark="Switch to auto color mode">
 <table class="autosummary longtable docutils align-default">
 <tbody>
 <tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.utils.perf.clear_cuda_cache" title="modelopt.torch.utils.perf.clear_cuda_cache"><code class="xref py py-obj docutils literal notranslate"><span class="pre">clear_cuda_cache</span></code></a></p></td>
-<td><p>Clear the CUDA cache, once every GPU this process uses has finished its queued work.</p></td>
+<td><p>Clear the CUDA cache, once the other GPUs this process uses have finished their queued work.</p></td>
 </tr>
 <tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.utils.perf.get_available_gpu_memory" title="modelopt.torch.utils.perf.get_available_gpu_memory"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_available_gpu_memory</span></code></a></p></td>
 <td><p>Bytes a new allocation on <code class="docutils literal notranslate"><span class="pre">gpu</span></code> can get: the driver's free memory and our cached blocks.</p></td>
@@ -612,7 +612,7 @@ data-aria-dark="Switch to auto color mode">
 <dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.utils.perf.clear_cuda_cache">
 <span class="sig-name descname"><span class="pre">clear_cuda_cache</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.perf.clear_cuda_cache" title="Link to this definition">#</a></dt>
-<dd><p>Clear the CUDA cache, once every GPU this process uses has finished its queued work.</p>
+<dd><p>Clear the CUDA cache, once the other GPUs this process uses have finished their queued work.</p>
 </dd></dl>
 
 <dl class="py function">
