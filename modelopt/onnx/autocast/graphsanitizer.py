@@ -644,9 +644,10 @@ class GraphSanitizer:
         self.model = onnx_utils.export_onnx(gs_graph)
 
     def replace_custom_domain_nodes(self):
-        """Replace custom domain nodes with standard ONNX nodes."""
+        """Replace custom domain nodes with standard ONNX nodes available in the model's opset."""
+        opset = onnx_utils.get_opset_version(self.model)
         for node in self.model.graph.node:
-            if node.domain.startswith("com.microsoft") and node.op_type in self.standard_ops:
+            if node.domain.startswith("com.microsoft") and onnx.defs.has(node.op_type, opset):
                 logger.warning(
                     f"Replacing custom domain node {node.name}, domain {node.domain} with standard ONNX "
                     f"node {node.op_type}"
