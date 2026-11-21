@@ -25,6 +25,33 @@ import numpy as np
 import torch
 
 
+def _get_rope_parameters(config: Any) -> dict[str, Any]:
+    """Return the config's RoPE settings as one flat dict that includes ``rope_theta``."""
+    # transformers 5 folds config.json's rope_theta and rope_scaling into rope_parameters and drops
+    # the rope_theta attribute; transformers 4 keeps them as separate attributes.
+    params = getattr(config, "rope_parameters", None)
+    if not params:
+        params = {**(getattr(config, "rope_scaling", None) or {})}
+        params["rope_theta"] = getattr(config, "rope_theta", 10000.0)
+    if "rope_theta" not in params:
+        raise ValueError(f"Per-layer-type RoPE parameters are not supported: {sorted(params)}")
+    return params
+
+
+def _rope_length_limit(config: Any, rope: dict[str, Any], rope_type: str) -> int | None:
+    """Sequence length past which transformers switches this RoPE type to other frequencies."""
+    if "dynamic" in rope_type:
+        return config.max_position_embeddings
+    if rope_type != "longrope":
+        return None
+    if top_level := getattr(config, "original_max_position_embeddings", None):
+        return top_level
+    # Without the top-level value, transformers 5 switches at rope_scaling's value and
+    # transformers 4 at max_position_embeddings; take the earlier of the two.
+    nested = rope.get("original_max_position_embeddings") or config.max_position_embeddings
+    return min(nested, config.max_position_embeddings)
+
+
 def get_rope_caches(
     model_id: str,
     max_seq_len: int,
@@ -45,8 +72,8 @@ def get_rope_caches(
 
     Returns:
         Tuple of (cos_cache, sin_cache, config) where:
-        - cos_cache: Cosine cache as numpy array with shape [max_seq_len, head_dim//2]
-        - sin_cache: Sine cache as numpy array with shape [max_seq_len, head_dim//2]
+        - cos_cache: Cosine cache as numpy array with shape [max_seq_len, rotary_dim//2]
+        - sin_cache: Sine cache as numpy array with shape [max_seq_len, rotary_dim//2]
         - config: HuggingFace model configuration
 
     Example:
@@ -61,20 +88,38 @@ def get_rope_caches(
 
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
 
-    theta = getattr(config, "rope_theta", 10000.0)
+    rope = _get_rope_parameters(config)
+    rope_type = rope.get("rope_type", rope.get("type", "default"))
     head_dim = config.hidden_size // config.num_attention_heads
     partial_factor = getattr(config, "partial_rotary_factor", 1.0)
     dim = int(head_dim * partial_factor)
 
-    # Match builder: int64 -> float
-    inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim))
+    attention_scaling = 1.0
+    if rope_type == "default":
+        # Match builder: int64 -> float
+        inv_freq = 1.0 / (
+            rope["rope_theta"] ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)
+        )
+    else:
+        # Only scaled RoPE needs this; transformers < 4.43 lacks it.
+        from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+        if rope_type not in ROPE_INIT_FUNCTIONS:
+            raise ValueError(f"Unsupported rope_type {rope_type!r}")
+        limit = _rope_length_limit(config, rope, rope_type)
+        if limit is not None and max_seq_len > limit:
+            raise ValueError(
+                f"rope_type {rope_type!r} changes its frequencies past {limit} positions, which one "
+                f"static cache cannot follow; use max_seq_len <= {limit}"
+            )
+        # Scaled RoPE (llama3, yarn, ...): the function the exported rotary embedding was traced from.
+        inv_freq, attention_scaling = ROPE_INIT_FUNCTIONS[rope_type](config, "cpu")
     t = torch.arange(max_seq_len, dtype=torch.int64).float()
 
+    # GQA takes one column per inverse frequency: [max_seq_len, rotary_dim // 2].
     freqs = torch.outer(t, inv_freq)
-    emb = torch.cat((freqs, freqs), dim=-1)
-
-    cos_cache = emb.cos()
-    sin_cache = emb.sin()
+    cos_cache = freqs.cos() * attention_scaling
+    sin_cache = freqs.sin() * attention_scaling
 
     # Cast to target dtype
     dtype_map = {
@@ -86,11 +131,6 @@ def get_rope_caches(
 
     cos_cache = cos_cache.to(target_dtype)
     sin_cache = sin_cache.to(target_dtype)
-
-    # Slice to half (GQA expects this)
-    if cos_cache.shape[-1] == head_dim:
-        cos_cache = cos_cache[:, : head_dim // 2]
-        sin_cache = sin_cache[:, : head_dim // 2]
 
     # Convert to numpy - bfloat16 needs special handling
     if io_dtype == "bfloat16":
