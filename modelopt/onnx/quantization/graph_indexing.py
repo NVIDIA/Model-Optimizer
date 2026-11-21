@@ -375,8 +375,6 @@ def match_fp8_mha_pattern(graph: Graph, softmax_op: Node, has_fp8_qdq: bool) -> 
             The graph to match FP8 MHA pattern.
         softmax_op:
             The softmax op of FP8 MHA we want to match.
-        nodes_to_exclude:
-            List of Nodes to exclude from quantization.
         has_fp8_qdq:
             If True, match the FP8 MHA with Q/DQs.
             Else, match the FP8 MHA without Q/DQs.

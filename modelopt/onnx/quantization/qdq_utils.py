@@ -368,9 +368,8 @@ def insert_dq_nodes(
 
     Args:
         graph: The graph to modify.
-        weights: A map from ONNX initializer name to tensor.
+        quantized_weights: A map from ONNX initializer name to tensor.
         scales: A map from ONNX initializer name to desired scale factor for that initializer.
-        dq_only: Whether to only insert dq nodes.
         layer_info: Optional dictionary mapping tensor names to precision (old format) or
             to layer configuration dict (new format with precision, block_size, axis).
     """
