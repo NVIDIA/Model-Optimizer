@@ -109,6 +109,7 @@ Changelog
 - Add ``examples/hf_ptq/convert_ggml_to_int8.py`` to expand a checkpoint exported with a GGML recipe (IQ formats, ``q8_0``) into an INT8 weight-only compressed-tensors checkpoint. Stock vLLM serves it with its integer kernels at about half the BF16 weight memory, reproducing the GGML weights up to rounding their scales to the model dtype.
 - Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` moves each tensor once, to the one rank that writes it, instead of all-gathering each FSDP2 unit on every rank as the default export does. Fused MoE experts stay sharded, each rank writing its own, and a conversion mapping that splits or merges tensors, which the default export refuses, is reversed as a single-process export reverses it.
 - Add expert-parallel PTQ for HuggingFace MoE models to ``examples/hf_ptq/hf_ptq.py``: under ``torchrun``, each rank holds only its share of the routed experts, tokens reach them by all-to-all, and every rank calibrates on its own slice of the data. ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` override the automatic choice of expert-parallel degree and of FSDP2-sharding the dense layers, and the quantized checkpoint is written by every rank in parallel without gathering the model.
+- Add ``residue_max`` calibration for dense NVFP4/MXFP4 Linear layers, with shared channel selection, QDQ forward/backward, ModelOpt save/restore, and HF checkpoint export with metadata for residue-aware runtimes.
 
 *Quantization - Recipes*
 

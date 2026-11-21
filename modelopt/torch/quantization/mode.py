@@ -47,6 +47,7 @@ from .config import (
     QuantizeAlgoCfgType,
     QuantizeAlgorithmConfig,
     QuantizeConfig,
+    ResidueMaxCalibConfig,
     SmoothQuantCalibConfig,
     SVDQuantConfig,
     _QuantizeExportConfig,
@@ -57,8 +58,10 @@ from .conversion import (
     restore_export_quantized_model,
     restore_quantized_model,
     restore_quantizer_state,
+    restore_residue_model,
     restore_svdquant_model,
     update_quantize_metadata,
+    update_residue_metadata,
 )
 from .model_calib import (
     awq,
@@ -73,6 +76,7 @@ from .model_calib import (
     smoothquant,
     svdquant,
 )
+from .residue import residue_max_calibrate
 from .utils.calib_utils import reset_calib_forward_memory
 
 __all__ = ["BaseCalibrateModeDescriptor"]
@@ -569,6 +573,39 @@ class AWQFullModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = awq
     _distributed_calibration = False
+
+
+@CalibrateModeRegistry.register_mode
+class ResidueMaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for residue channel calibration and paired Linear QDQ."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specify the residue calibration config."""
+        return ResidueMaxCalibConfig
+
+    _calib_func = residue_max_calibrate
+    _supports_layerwise = False
+
+    @property
+    def next_modes(self) -> set[str]:
+        """Allow residue recalibration without further mode conversions."""
+        return {"residue_max_calibrate"}
+
+    @property
+    def restore(self) -> RestoreEntrypoint:
+        """Restore residue linears and their quantizers."""
+        return restore_residue_model
+
+    @property
+    def update_for_save(self) -> UpdateEntrypoint:
+        """Save residue module names with native quantizer metadata."""
+        return update_residue_metadata
+
+    @property
+    def update_for_new_mode(self) -> UpdateEntrypoint:
+        """Update residue metadata before another mode."""
+        return update_residue_metadata
 
 
 @CalibrateModeRegistry.register_mode

@@ -18,10 +18,14 @@ Most tests check the functionality of all the combinations in Quant Linear again
 in tensor_quant.
 """
 
+from copy import deepcopy
+
+import pytest
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization import utils as quant_utils
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -218,3 +222,43 @@ class TestQuantLinear:
         quant_desc_weight = tensor_quant.QUANT_DESC_8BIT_LINEAR_WEIGHT_PER_ROW
         quant_linear.Linear.default_quant_desc_input = quant_desc_input
         quant_linear.Linear.default_quant_desc_weight = quant_desc_weight
+
+
+@pytest.mark.parametrize("ratio", [0.0, 0.25])
+def test_residue_backward_without_quantization_matches_linear(ratio):
+    cfg = deepcopy(mtq.NVFP4_DEFAULT_CFG)
+    cfg["algorithm"] = {"method": "residue_max", "residue_ratio": ratio}
+    model = mtq.quantize(nn.Linear(64, 3), cfg, lambda m: m(torch.ones(2, 64)))
+    parameter = model.weight
+    before = parameter.detach().clone()
+    model.input_quantizer.disable()
+    model.weight_quantizer.disable()
+    inputs = torch.randn(2, 64, requires_grad=True)
+    output = model(inputs)
+    torch.testing.assert_close(output, F.linear(inputs, parameter, model.bias))
+    reference_inputs = inputs.detach().clone().requires_grad_()
+    reference_weight = parameter.detach().clone().requires_grad_()
+    reference_bias = model.bias.detach().clone().requires_grad_()
+    grad_output = torch.randn_like(output)
+    F.linear(reference_inputs, reference_weight, reference_bias).backward(grad_output)
+    output.backward(grad_output)
+    torch.testing.assert_close(parameter.grad, reference_weight.grad)
+    torch.testing.assert_close(model.bias.grad, reference_bias.grad)
+    torch.testing.assert_close(inputs.grad, reference_inputs.grad)
+    assert model.weight is parameter
+    assert torch.equal(model.weight, before)
+    assert model.in_features == 64
+
+
+@pytest.mark.parametrize("scale_shape", [(), (1,), (3, 1)])
+def test_broadcast_weight_pre_quant_scale(scale_shape):
+    inputs = torch.randn(2, 64)
+    cfg = deepcopy(mtq.MXFP4_DEFAULT_CFG)
+    cfg["algorithm"] = {"method": "residue_max"}
+    model = mtq.quantize(nn.Linear(64, 3), cfg, lambda m: m(inputs))
+    model.input_quantizer.pre_quant_scale = torch.tensor(2.0)
+    model.weight_quantizer.pre_quant_scale = torch.full(scale_shape, 0.5)
+    expected = F.linear(inputs, model.weight, model.bias)
+    model.input_quantizer.disable()
+    model.weight_quantizer.disable()
+    torch.testing.assert_close(model(inputs), expected)
