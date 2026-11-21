@@ -762,8 +762,10 @@ def _legacy_swiglu_load_factory(sharded_tensor, numel, saved_numel):
         fragmentations = list(sharded_tensor.axis_fragmentations)
         fragmentations[axis] = 1
         replica = replica_id if isinstance(replica_id, tuple) else (replica_id,)
+        # Megatron may remap the factory's key (e.g. to global layer numbers under PP).
         return dataclasses.replace(
             sharded_tensor,
+            key=key,
             data=whole,
             local_shape=tuple(whole.shape),
             global_offset=tuple(offset),

@@ -58,6 +58,7 @@ from megatron.core.parallel_state import (
     destroy_model_parallel,
     get_data_parallel_group,
     get_expert_model_parallel_rank,
+    get_pipeline_model_parallel_rank,
     get_tensor_model_parallel_group,
     get_tensor_model_parallel_rank,
 )
@@ -304,6 +305,7 @@ def _gpt_model_provider(
     etp_size=None,
     transformer_impl="local",
     activation_func="squared_relu",
+    pp_size=1,
     # Hybrid mamba MOE parameters
     is_hybrid=False,
     hybrid_layer_pattern=None,
@@ -334,6 +336,7 @@ def _gpt_model_provider(
         else:
             model = get_mcore_gpt_model(
                 tensor_model_parallel_size=tp_size,
+                pipeline_model_parallel_size=pp_size,
                 expert_model_parallel_size=ep_size,
                 expert_tensor_parallel_size=etp_size,
                 num_layers=4,
@@ -1731,11 +1734,13 @@ def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wr
 FP8_PC = mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG
 
 
-def _swiglu_fc1_row_state(model):
+def _swiglu_fc1_row_state(model, layer_offset=0):
     """Each gated linear_fc1's per-row weight quantizer buffers and LoRA B, as ``[rows, -1]``."""
     states = {}
     for name, module in model.named_modules():
         if name.endswith("mlp.linear_fc1"):
+            # Name it by its global layer, which a pipeline stage numbers from layer_offset.
+            name = re.sub(r"layers\.(\d+)", lambda m: f"layers.{int(m[1]) + layer_offset}", name)
             rows = module.weight.shape[0]
             tensors = dict(module.weight_quantizer.named_buffers(prefix="weight_quantizer"))
             if hasattr(module, "lora_B"):
@@ -1760,7 +1765,7 @@ def _saving_like_modelopt_0_48(model):
 
 
 def _test_swiglu_weight_quantizer_tp_reshard(
-    tmp_path, config, legacy, compress, lora, save_tp, load_tp, rank, size
+    tmp_path, config, legacy, compress, lora, save_tp, load_tp, load_pp, rank, size
 ):
     initialize_for_megatron(tensor_model_parallel_size=save_tp, seed=SEED)
     source = _gpt_model_provider(tp_size=save_tp, hidden_size=512, activation_func="swiglu")
@@ -1790,16 +1795,24 @@ def _test_swiglu_weight_quantizer_tp_reshard(
     del source
     destroy_model_parallel()
 
-    initialize_for_megatron(tensor_model_parallel_size=load_tp, seed=SEED)
-    target = _gpt_model_provider(tp_size=load_tp, hidden_size=512, activation_func="swiglu")
+    initialize_for_megatron(
+        tensor_model_parallel_size=load_tp, pipeline_model_parallel_size=load_pp, seed=SEED
+    )
+    target = _gpt_model_provider(
+        tp_size=load_tp, hidden_size=512, activation_func="swiglu", pp_size=load_pp
+    )
     restore_sharded_modelopt_state([target], tmp_path)
     target = load_distributed_checkpoint(tmp_path, target)
     tp_rank = get_tensor_model_parallel_rank()
-    states = _swiglu_fc1_row_state(target)
-    assert states.keys() == expected.keys()
-    for name, (gate, up) in expected.items():
+    layers_per_stage = len(target.decoder.layers)
+    states = _swiglu_fc1_row_state(
+        target, layer_offset=get_pipeline_model_parallel_rank() * layers_per_stage
+    )
+    assert states.keys() <= expected.keys() and (states or not per_row)
+    for name, state in states.items():
+        gate, up = expected[name]
         local = torch.cat([gate.chunk(load_tp)[tp_rank], up.chunk(load_tp)[tp_rank]])
-        assert torch.equal(states[name], local), name
+        assert torch.equal(state, local), name
     # A restored legacy model saves the current layout.
     saved_keys = []
     for v in target.sharded_state_dict().values():
@@ -1814,21 +1827,24 @@ def _test_swiglu_weight_quantizer_tp_reshard(
 
 
 @pytest.mark.parametrize(
-    ("config", "legacy", "compress", "lora", "save_tp", "load_tp"),
+    ("config", "legacy", "compress", "lora", "save_tp", "load_tp", "load_pp"),
     [
-        pytest.param(FP8_PC, False, False, False, 2, 1, id="fp8_per_channel"),
-        pytest.param(FP8_PC, True, False, False, 2, 1, id="fp8_per_channel-legacy"),
-        pytest.param(FP8_PC, True, False, False, 1, 2, id="fp8_per_channel-legacy-tp1to2"),
-        pytest.param(FP8_PC, False, True, False, 2, 1, id="fp8_per_channel-compressed"),
-        pytest.param(FP8_PC, True, True, False, 2, 1, id="fp8_per_channel-compressed-legacy"),
-        pytest.param(mtq.FP8_DEFAULT_CFG, False, True, False, 2, 1, id="fp8_per_tensor-compressed"),
-        pytest.param(mtq.INT4_AWQ_CFG, False, False, False, 2, 1, id="int4_awq"),
-        pytest.param(mtq.W4A8_AWQ_BETA_CFG, True, False, False, 2, 1, id="w4a8_awq-legacy"),
-        pytest.param(FP8_PC, True, False, True, 2, 2, id="fp8_per_channel-lora-legacy"),
+        pytest.param(FP8_PC, False, False, False, 2, 1, 1, id="fp8_per_channel"),
+        pytest.param(FP8_PC, True, False, False, 2, 1, 1, id="fp8_per_channel-legacy"),
+        pytest.param(FP8_PC, True, False, False, 1, 2, 1, id="fp8_per_channel-legacy-tp1to2"),
+        pytest.param(FP8_PC, True, False, False, 2, 1, 2, id="fp8_per_channel-legacy-tp2to1-pp2"),
+        pytest.param(FP8_PC, False, True, False, 2, 1, 1, id="fp8_per_channel-compressed"),
+        pytest.param(FP8_PC, True, True, False, 2, 1, 1, id="fp8_per_channel-compressed-legacy"),
+        pytest.param(
+            mtq.FP8_DEFAULT_CFG, False, True, False, 2, 1, 1, id="fp8_per_tensor-compressed"
+        ),
+        pytest.param(mtq.INT4_AWQ_CFG, False, False, False, 2, 1, 1, id="int4_awq"),
+        pytest.param(mtq.W4A8_AWQ_BETA_CFG, True, False, False, 2, 1, 1, id="w4a8_awq-legacy"),
+        pytest.param(FP8_PC, True, False, True, 2, 2, 1, id="fp8_per_channel-lora-legacy"),
     ],
 )
 def test_swiglu_weight_quantizer_tp_reshard(
-    dist_workers_size_2, tmp_path, config, legacy, compress, lora, save_tp, load_tp
+    dist_workers_size_2, tmp_path, config, legacy, compress, lora, save_tp, load_tp, load_pp
 ):
     """A gated linear_fc1's per-row weight quantizer state reloads at another TP size."""
     dist_workers_size_2.run(
@@ -1841,6 +1857,7 @@ def test_swiglu_weight_quantizer_tp_reshard(
             lora,
             save_tp,
             load_tp,
+            load_pp,
         )
     )
 
