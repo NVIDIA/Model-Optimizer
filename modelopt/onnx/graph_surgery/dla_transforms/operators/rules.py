@@ -29,17 +29,21 @@ if TYPE_CHECKING:
 
 __all__ = [
     "INDEXING_RULES",
+    "LOGICAL_RULES",
     "MATRIX_RULES",
     "RECURRENT_RULES",
     "GatherElementsIndices",
     "GatherIndices",
     "GemmBiasToConv",
     "GemmToConv",
+    "GreaterFloat",
+    "LogicalNot",
     "Lstm1",
     "Lstm2",
     "Lstm3",
     "LstmSequenceLayout",
     "MatMulToConv",
+    "WhereZero",
     "weight_eligible",
 ]
 
@@ -237,6 +241,166 @@ class GemmBiasToConv(_MatrixRule):
     def pattern(self, op, x, weight, bias):
         """Capture the Gemm form with a bias operand."""
         return op.Gemm(x, weight, bias, _outputs=["result"])
+
+
+class _LogicalRule(_OperatorRule):
+    def __init__(self, graph: DlaGraph, views=None):
+        super().__init__(graph, views)
+        self.zeros = self.views.setdefault("zeros", {})
+        self.masks = self.views.setdefault("masks", {})
+        self.floats = self.views.setdefault("floats", {})
+
+    def _float_view(self, op, value):
+        if value.dtype == ir.DataType.FLOAT:
+            return value
+        if value not in self.floats:
+            array = constant_array(value)
+            self.floats[value] = (
+                self.graph.add_initializer(op, array.astype(np.float32), "logical_float")
+                if array is not None
+                else op.Cast(value, to=ir.DataType.FLOAT)
+            )
+            self.floats[value].type, self.floats[value].shape = (
+                ir.TensorType(ir.DataType.FLOAT),
+                value.shape,
+            )
+        return self.floats[value]
+
+
+class WhereZero(_LogicalRule):
+    """Replace a finite FP32 zero-branch Where with multiplication by a float mask.
+
+    Where(c, x, 0) becomes x * Cast(c, FLOAT); Where(c, 0, y) uses 1-mask.
+    The zero branch must not add broadcast dimensions. NaN/Inf behavior and the
+    sign of zero are outside this finite-data lowering contract.
+    """
+
+    def pattern(self, op, condition, x, y):
+        """Capture both branch orientations of Where."""
+        return op.Where(condition, x, y, _outputs=["result"])
+
+    def check(self, context, condition, x, y, result):
+        """Require one zero branch and unchanged broadcast extent."""
+        for index, value in enumerate((x, y)):
+            if value not in self.zeros:
+                array = constant_array(value)
+                self.zeros[value] = array is not None and not np.count_nonzero(array)
+            if self.zeros[value]:
+                other = (y, x)[index]
+                shapes = [
+                    shape for v in (condition, x, y) if (shape := static_shape(v)) is not None
+                ]
+                if other.dtype != ir.DataType.FLOAT or len(shapes) != 3:
+                    return False
+                if np.broadcast_shapes(*shapes) != np.broadcast_shapes(
+                    shapes[0], shapes[2 - index]
+                ):
+                    return False
+                self.zeros[result] = index
+                return True
+        return False
+
+    def rewrite(self, op, condition, x, y, result):
+        """Multiply the nonzero branch by its shared float mask."""
+        zero_index = self.zeros[result]
+        key = (condition, zero_index)
+        if key not in self.masks:
+            array = constant_array(condition)
+            if array is not None and condition.dtype == ir.DataType.BOOL:
+                mask = array.astype(np.float32)
+                if zero_index == 0:
+                    mask = 1.0 - mask
+                self.masks[key] = self.graph.add_initializer(op, mask, "where_mask")
+            else:
+                mask = self._float_view(op, condition)
+                if zero_index == 0:
+                    mask = op.Sub(
+                        self.graph.add_initializer(op, np.array(1, np.float32), "where_one"), mask
+                    )
+                    mask.type, mask.shape = ir.TensorType(ir.DataType.FLOAT), condition.shape
+                self.masks[key] = mask
+        return op.Mul(y if zero_index == 0 else x, self.masks[key])
+
+
+class LogicalNot(_LogicalRule):
+    """Express a private binary Cast-to-BOOL/Not region as float arithmetic.
+
+    Not(Cast(x, BOOL)) becomes 1 - Clip(Cast(x, FLOAT), 0, 1) when x is BOOL
+    or fixed 0/1 data and every output consumer is a non-string Cast. Public
+    boolean outputs and unproven binary sources keep the original operators.
+    """
+
+    def pattern(self, op, x):
+        """Capture the private Cast-to-BOOL/Not region."""
+        return op.Not(op.Cast(x, to=int(ir.DataType.BOOL)), _outputs=["result"])
+
+    def check(self, context, x, result):
+        """Prove binary input values and numeric-only downstream uses."""
+        if context.root not in self.graph.batch_nodes or result.is_graph_output():
+            return False
+        if any(
+            user.domain
+            or user.op_type != "Cast"
+            or user.attributes.get_int("to", 0) == ir.DataType.STRING
+            for user, _ in result.uses()
+        ):
+            return False
+        array = constant_array(x)
+        return x.dtype == ir.DataType.BOOL or (
+            array is not None and np.all((array == 0) | (array == 1))
+        )
+
+    def rewrite(self, op, x, result):
+        """Emit the bounded float complement and update internal output typing."""
+        minimum = self.graph.add_initializer(op, np.array(0, np.float32), "not_min")
+        maximum = self.graph.add_initializer(op, np.array(1, np.float32), "not_max")
+        one = self.graph.add_initializer(op, np.array(1, np.float32), "not_one")
+        # SDK replacement carries this internal value's metadata to the new output.
+        result.type = ir.TensorType(ir.DataType.FLOAT)
+        cast = op.Cast(x, to=ir.DataType.FLOAT)
+        cast.type, cast.shape = result.type, x.shape
+        clipped = op.Clip(cast, minimum, maximum)
+        clipped.type, clipped.shape = result.type, x.shape
+        return op.Sub(one, clipped)
+
+
+class GreaterFloat(_LogicalRule):
+    """Give Greater private FP32 operands when the ordering conversion is exact.
+
+    Narrow numeric inputs use float views; INT32/INT64 cases require a fixed
+    operand strictly within the exact FP32 integer range. Existing FLOAT/FLOAT
+    comparisons stay unchanged, so an emitted Greater is already canonical.
+    """
+
+    def pattern(self, op, x, y):
+        """Capture Greater operands independently of their numeric type."""
+        return op.Greater(x, y, _outputs=["result"])
+
+    def check(self, context, x, y, result):
+        """Require conversion to preserve the comparison boundary."""
+        if context.root not in self.graph.batch_nodes or x.dtype == y.dtype == ir.DataType.FLOAT:
+            return False
+        exact = {
+            ir.DataType.FLOAT,
+            ir.DataType.FLOAT16,
+            ir.DataType.INT8,
+            ir.DataType.UINT8,
+            ir.DataType.INT16,
+            ir.DataType.UINT16,
+        }
+        if {x.dtype, y.dtype} <= exact:
+            return True
+        if not {x.dtype, y.dtype} <= exact | {ir.DataType.INT32, ir.DataType.INT64}:
+            return False
+        return any(
+            (array := constant_array(v)) is not None
+            and (not array.size or (array.min() > -(2**24) and array.max() < 2**24))
+            for v in (x, y)
+        )
+
+    def rewrite(self, op, x, y, result):
+        """Reuse private float views without changing the shared operands."""
+        return op.Greater(self._float_view(op, x), self._float_view(op, y))
 
 
 def weight_eligible(node: ir.Node, weight: ir.Value) -> bool:
@@ -653,3 +817,5 @@ INDEXING_RULES = (GatherIndices, GatherElementsIndices)
 RECURRENT_RULES = (Lstm1, Lstm2, Lstm3, LstmSequenceLayout)
 
 MATRIX_RULES = (MatMulToConv, GemmToConv, GemmBiasToConv)
+
+LOGICAL_RULES = (WhereZero, LogicalNot, GreaterFloat)

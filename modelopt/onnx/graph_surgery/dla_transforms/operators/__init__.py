@@ -15,4 +15,5 @@
 
 """DLA operator rules and direct graph passes."""
 
+from .passes import *
 from .rules import *
