@@ -345,9 +345,13 @@ _CASE_FILES = [
 
 @pytest.mark.parametrize("path", _CASE_FILES, ids=lambda p: p.parent.parent.name)
 def test_eval_cases_are_well_formed(path):
+    # A file keeps one of the two case formats in use under skills/: id/question/expected_skill or
+    # name/skills/query. Either way a case needs a unique id, a prompt and behaviors to judge.
     cases = json.loads(path.read_text())
-    names = [c["name"] for c in cases]
-    assert len(names) == len(set(names)), "duplicate eval case names"
+    ids = [c.get("id") or c.get("name") for c in cases]
+    assert all(ids) and len(ids) == len(set(ids)), "missing or duplicate eval case ids"
     for c in cases:
-        assert {"name", "skills", "query", "expected_behavior"} <= set(c), c.get("name")
-        assert c["skills"] and c["query"] and c["expected_behavior"], c["name"]
+        prompt = c.get("question") or c.get("query")
+        # a negative case ("must not trigger") has expected_skill null, so only its presence is required
+        assert "expected_skill" in c or c.get("skills"), c.get("id") or c.get("name")
+        assert prompt and c["expected_behavior"], c.get("id") or c.get("name")
