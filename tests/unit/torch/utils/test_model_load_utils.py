@@ -4090,25 +4090,33 @@ def test_an_fp8_config_object_is_read_against_the_checkpoints_own_config(
     assert _ckpt_quant_method(config, str(tmp_path)) == expected
 
 
-def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given():
+def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given(monkeypatch):
     """Newer transformers ignores ``from_pretrained``'s ``device_mesh`` and builds a world-sized one,
     which shards the experts over every rank when EP is below the world size. During the load it gets
-    the EP mesh instead, and its own builder is back afterwards, even when the load raises."""
+    the EP mesh instead, any other load is left alone, and transformers' own hooks are back
+    afterwards, even when the load raises."""
     mixin = _transformers_mesh_builder()
     if mixin is None:
         pytest.skip("this transformers honors from_pretrained's device_mesh")
+    own_mesh = object()
+    monkeypatch.setattr(mixin, "initialize_distributed_mesh", lambda config: (None, own_mesh))
     builder = mixin.initialize_distributed_mesh
     ep_mesh = SimpleNamespace(device_type="cpu")
     config = DistributedConfig(enable_expert_parallel=True, tp_plan="auto", tp_size=2)
-    with _experts_sharded_over(ep_mesh):
+    other = DistributedConfig(tp_size=2)
+    other_model = SimpleNamespace(tp_plan={"layers.*.mlp.up_proj": "colwise"}, ep_plan={})
+    with _experts_sharded_over(ep_mesh, config):
         _, device_map, device_mesh = PreTrainedModel.prepare_distribute_model(config)
+        assert mixin.initialize_distributed_mesh(other) == (None, own_mesh)
+        assert PreTrainedModel.maybe_distribute_model(other_model, other, None) is other_model
+        assert other_model.tp_plan == {"layers.*.mlp.up_proj": "colwise"}
 
     if _hf_keeps_ep_apart():  # transformers 5.19+ hands back a mesh manager
         device_mesh = device_mesh.get_mesh("tp")
     assert device_mesh is ep_mesh
     assert device_map == torch.device("cpu")
     assert mixin.initialize_distributed_mesh is builder
-    with pytest.raises(RuntimeError), _experts_sharded_over(ep_mesh):
+    with pytest.raises(RuntimeError), _experts_sharded_over(ep_mesh, config):
         raise RuntimeError("the load failed")
     assert mixin.initialize_distributed_mesh is builder
 

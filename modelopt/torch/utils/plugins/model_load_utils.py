@@ -2877,8 +2877,11 @@ def _hf_keeps_ep_apart() -> bool:
 
 
 @contextlib.contextmanager
-def _experts_sharded_over(ep_mesh):
-    """Make ``from_pretrained`` shard the experts over ``ep_mesh`` on releases that build their own mesh."""
+def _experts_sharded_over(ep_mesh, distributed_config):
+    """Make ``from_pretrained`` shard the experts over ``ep_mesh`` on releases that build their own mesh.
+
+    Only the load given ``distributed_config`` is affected; any other load delegates unchanged.
+    """
     mixin = _transformers_mesh_builder()
     if mixin is None:
         yield
@@ -2891,28 +2894,36 @@ def _experts_sharded_over(ep_mesh):
             return ep_mesh
 
     manager = _OneMesh() if _hf_keeps_ep_apart() else ep_mesh
+    original = mixin.initialize_distributed_mesh
 
-    def _ep_mesh(*args, **kwargs):
+    def _ep_mesh(config, *args, **kwargs):
+        if config is not distributed_config:
+            return original(config, *args, **kwargs)
         index = torch.cuda.current_device() if ep_mesh.device_type == "cuda" else None
         return torch.device(ep_mesh.device_type, index), manager
 
-    original = mixin.initialize_distributed_mesh
-    mixin.initialize_distributed_mesh = _ep_mesh
+    patches: list[tuple[Any, str, Any]] = [(mixin, "initialize_distributed_mesh", _ep_mesh)]
     distributor = getattr(mixin, "DistributedMixin", None) if _hf_keeps_ep_apart() else None
     if distributor is not None:
-        original_distribute = distributor.__dict__["maybe_distribute_model"]
+        distribute = vars(distributor)["maybe_distribute_model"].__func__
 
-        def _expert_plan_only(cls, model, *args, **kwargs):
-            model.tp_plan = model.ep_plan  # no dense TP, nor the vocab-sharded embedding 5.19+ adds
-            return original_distribute.__func__(cls, model, *args, **kwargs)
+        def _expert_plan_only(cls, model, config, mesh_manager, *args, **kwargs):
+            if mesh_manager is manager:
+                # 5.19+ applies an ep_plan only for its own dispatch: the TP path applies the
+                # (swapped) expert plan instead, with no dense TP nor the embedding it would shard.
+                model.tp_plan = model.ep_plan
+            return distribute(cls, model, config, mesh_manager, *args, **kwargs)
 
-        distributor.maybe_distribute_model = classmethod(_expert_plan_only)
+        patches.append((distributor, "maybe_distribute_model", classmethod(_expert_plan_only)))
+    # Every original is read before anything is patched, so a failed lookup patches nothing.
+    originals = [(obj, attr, vars(obj)[attr]) for obj, attr, _ in patches]
     try:
+        for obj, attr, patched in patches:
+            setattr(obj, attr, patched)
         yield
     finally:
-        mixin.initialize_distributed_mesh = original
-        if distributor is not None:
-            distributor.maybe_distribute_model = original_distribute
+        for obj, attr, kept in originals:
+            setattr(obj, attr, kept)
 
 
 @contextlib.contextmanager
@@ -3257,8 +3268,8 @@ def load_and_prepare_ep(
         # This release sizes its own mesh from tp_size; _experts_sharded_over swaps in the EP mesh.
         dc_kwargs["tp_size"] = ep_degree
     if _hf_keeps_ep_apart():
-        # 5.19+ applies an ep_plan only for its own dispatch: _experts_sharded_over hands the TP
-        # path the (swapped) expert plan instead, to apply over the EP mesh as earlier releases did.
+        # 5.19+ applies an ep_plan only for its own dispatch: _experts_sharded_over has the TP path
+        # apply the swapped expert plan over the EP mesh instead, as earlier releases did.
         dc_kwargs = {"tp_size": ep_degree}
     distributed_config = hf_distributed.DistributedConfig(**dc_kwargs)
     from_pretrained_kwargs: dict[str, Any] = {
@@ -3321,7 +3332,7 @@ def load_and_prepare_ep(
                 ep_degree, swapped_plan, dense_on_meta=plan.is_fsdp_dense
             ),
             _dense_ctx,
-            _experts_sharded_over(ep_submesh),
+            _experts_sharded_over(ep_submesh, distributed_config),
         ):
             model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
         model.eval()
