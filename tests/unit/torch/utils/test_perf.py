@@ -37,6 +37,7 @@ def cuda_stub(monkeypatch):
     stub = Stub()
     monkeypatch.setattr(perf.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(perf.torch.cuda, "device_count", lambda: 4)
+    monkeypatch.setattr(perf.torch.cuda, "current_device", lambda: 1)
     monkeypatch.setattr(
         perf.torch.cuda,
         "memory_reserved",
@@ -118,20 +119,20 @@ def test_slack_threshold_is_configurable(cuda_stub):
 
 
 @pytest.mark.parametrize("clear", ["clear_cuda_cache", "maybe_clear_cuda_cache"])
-def test_clearing_waits_for_every_gpu_holding_memory(cuda_stub, monkeypatch, clear):
-    """Each GPU with reserved memory finishes its queued work before the cache is emptied.
+def test_clearing_waits_for_the_other_gpus_holding_memory(cuda_stub, monkeypatch, clear):
+    """The other GPUs with reserved memory finish their queued work before the cache is emptied.
 
     With expandable segments, emptying the cache from one GPU unmapped another GPU's freed memory
-    that kernels queued there still read. GPUs holding nothing are skipped: syncing one would
-    create a context on it.
+    that kernels queued there still read; empty_cache itself waits for the current GPU. GPUs
+    holding nothing are skipped: syncing one would create a context on it.
     """
     cuda_stub.reserved = 8 * 1024**3
-    cuda_stub.gpu_reserved = {0: 1024, 2: 1024}
+    cuda_stub.gpu_reserved = {0: 1024, 1: 1024, 3: 1024}  # GPU 1 is current
     monkeypatch.setattr(perf, "_empty_cache_calls", perf._EMPTY_CACHE_CHECK_EVERY - 1)
 
     getattr(perf, clear)()
 
-    assert cuda_stub.calls == [("sync", 0), ("sync", 2), ("empty_cache",)]
+    assert cuda_stub.calls == [("sync", 0), ("sync", 3), ("empty_cache",)]
 
 
 def test_no_cuda_is_a_noop(monkeypatch):

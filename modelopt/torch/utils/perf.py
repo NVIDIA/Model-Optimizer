@@ -37,15 +37,18 @@ __all__ = [
 
 
 def _empty_cache():
-    # With expandable segments, empty_cache called while cuda:0 was current unmapped freed cuda:1
-    # memory that kernels still queued on cuda:1 read, an illegal memory access (PyTorch 2.13).
+    # With expandable segments, empty_cache waits for the current GPU's queued work but not for the
+    # others' before unmapping freed memory: from cuda:0 it unmapped cuda:1 memory that kernels
+    # still queued on cuda:1 read, an illegal memory access (PyTorch 2.13 and 2.14).
+    current = torch.cuda.current_device()
     for gpu in get_process_gpus():
-        torch.cuda.synchronize(gpu)
+        if gpu != current:
+            torch.cuda.synchronize(gpu)
     torch.cuda.empty_cache()
 
 
 def clear_cuda_cache():
-    """Clear the CUDA cache, once every GPU this process uses has finished its queued work."""
+    """Clear the CUDA cache, once the other GPUs this process uses have finished their queued work."""
     if torch.cuda.is_available():
         _empty_cache()
 
