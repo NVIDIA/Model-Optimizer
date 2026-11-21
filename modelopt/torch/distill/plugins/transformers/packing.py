@@ -62,9 +62,12 @@ def batch_documents(documents, token_budget, *, max_documents=8):
                 ]
             batch[key] = torch.cat(values, dim=axis)
         attention = batch.get("attention_mask")
-        batch["attention_mask"] = batch["valid_mask"].bool() & (
-            attention.bool() if attention is not None else True
+        lengths = batch["input_ids"].new_tensor(
+            [document["input_ids"].shape[-1] for document in group]
         )
+        # The MSE target mask can omit prompt tokens that remain attention context.
+        context = torch.arange(width, device=lengths.device)[None, :] < lengths[:, None]
+        batch["attention_mask"] = context & (attention.bool() if attention is not None else True)
         result.append(batch)
 
     for document in documents:

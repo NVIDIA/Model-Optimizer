@@ -256,9 +256,12 @@ class _BypassRunner:
             fields = self.fields[unit.name]
             if self.runtime is not None:
                 self.runtime.reduce_gradients(fields)
+            counts_by_device = {}
             for parameter in fields:
                 if parameter.grad is not None:
-                    parameter.grad.div_(count.to(parameter.device))
+                    if parameter.device not in counts_by_device:
+                        counts_by_device[parameter.device] = count.to(parameter.device)
+                    parameter.grad.div_(counts_by_device[parameter.device])
             if self.runtime is None:
                 torch.nn.utils.clip_grad_norm_(
                     fields, self.config.max_grad_norm, error_if_nonfinite=True
