@@ -163,6 +163,21 @@ def test_a_hessian_that_does_not_factor_is_retried_with_more_damping():
     torch.testing.assert_close(upper.T @ upper, torch.linalg.inv(damped))
 
 
+def test_a_zero_hessian_is_not_retried(monkeypatch):
+    # A never-routed expert's Hessian: damping scales with its all-zero diagonal, so a retry
+    # would factor the same matrix again.
+    factorizations = []
+    cholesky_ex = torch.linalg.cholesky_ex
+    monkeypatch.setattr(
+        torch.linalg, "cholesky_ex", lambda h: factorizations.append(h) or cholesky_ex(h)
+    )
+
+    upper = compute_hessian_inverse(torch.zeros(16, 16), torch.ones(4, 16), 0.01)
+
+    assert torch.equal(upper, torch.eye(16))
+    assert len(factorizations) == 1
+
+
 @pytest.mark.parametrize(("input_quantized", "forwards"), [(False, 1), (True, 2)])
 def test_gptq_runs_a_max_calibration_forward_only_for_activation_amax(input_quantized, forwards):
     """Weight amax comes from the weights; only an input quantizer needs a forward before GPTQ's."""

@@ -336,20 +336,27 @@ def compute_hessian_inverse(hessian, weight, perc_damp):
     mean = diagonal.mean()
     diagonal.add_(perc_damp * mean)
 
-    eye = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
     # A float32 Cholesky can fail on a Hessian a few outlier channels dominate; the identity would
-    # leave that weight to plain rounding, so first retry at 10x and 100x the damping.
+    # leave that weight to plain rounding, so first retry at 10x and 100x the damping. Damping
+    # cannot change a Hessian whose diagonal is all zero, as a never-routed expert's is.
     for attempt in range(3):
         # One factorization rather than three: with P the reversal, P H P = L L^T makes R = P L P
         # upper triangular with H = R R^T, so inv(R) is the upper Cholesky factor of inv(H).
         factor, info = torch.linalg.cholesky_ex(h.flip(0, 1))
         if not bool(info != 0):
-            if attempt:
-                print_rank_0(f"Hessian factored with damping {perc_damp * 10**attempt:g}")
-            return torch.linalg.solve_triangular(factor.flip(0, 1), eye, upper=True)
+            break
+        factor = None  # Free it before the next attempt allocates another.
+        if attempt == 2 or not bool(mean > 0):
+            print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
+            return torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
         diagonal.add_(9 * perc_damp * 10**attempt * mean)
-    print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
-    return eye
+    if attempt:
+        print_rank_0(f"Hessian factored with damping {perc_damp * 10**attempt:g}")
+    # Free the damped Hessian before the inverse needs two more matrices of its size.
+    del h, diagonal
+    factor = factor.flip(0, 1)
+    eye = torch.eye(factor.shape[0], device=factor.device, dtype=factor.dtype)
+    return torch.linalg.solve_triangular(factor, eye, upper=True)
 
 
 class GPTQHelper:
