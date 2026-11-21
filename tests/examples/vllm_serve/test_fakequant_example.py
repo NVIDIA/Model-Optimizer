@@ -33,10 +33,11 @@ from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
 from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
+from modelopt.torch.quantization.conversion import quantizer_state, set_quantizer_by_cfg
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
 
@@ -1032,3 +1033,58 @@ def test_constant_amax_kv_recipe_reloads_without_calibration_buffers(reload_util
     torch.save({}, path)
     with pytest.raises(ValueError, match="input_quantizer"):
         reload_utils.load_state_dict_from_path(str(path), model)
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_full_state_restore_overrides_disabled_conversion_defaults(reload_utils, dynamic):
+    """Saved activation settings survive defaults, including buffer-free dynamic state."""
+    original = torch.nn.Sequential(torch.nn.Linear(4, 4))
+    cfg = {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None}
+    mtq.quantize(original, cfg)
+    quantizer = original[0].input_quantizer
+    quantizer.set_from_attribute_config(
+        {"enable": True, "num_bits": 8, "axis": None, "type": "dynamic" if dynamic else "static"}
+    )
+    if not dynamic:
+        quantizer.amax = torch.tensor(3.0)
+    state = mto.modelopt_state(original)
+    for _, mode in state["modelopt_state_dict"]:
+        if "quantizer_state" in mode.get("metadata", {}):
+            mode["metadata"]["quantizer_state"] = quantizer_state(original)
+    restored = reload_utils.restore_from_modelopt_state_vllm(
+        torch.nn.Sequential(torch.nn.Linear(4, 4)), state
+    )
+    assert restored[0].input_quantizer.is_enabled
+    assert restored[0].input_quantizer.num_bits == 8
+    assert restored[0].input_quantizer._dynamic is dynamic
+    assert not restored[0].weight_quantizer.is_enabled
+
+
+@pytest.mark.parametrize("handle", ["input_quantizer", "weight_quantizer", "output_quantizer"])
+def test_attention_gate_uses_architecture_mapping_without_mlp_fusion(reload_utils, handle):
+    attention = f"model.layers.0.self_attn.gate_proj.{handle}"
+    mlp_gate = f"model.layers.0.mlp.gate_proj.{handle}"
+    mlp_up = f"model.layers.0.mlp.up_proj.{handle}"
+    metadata = {
+        attention: {"_disabled": False},
+        mlp_gate: {"_disabled": True},
+        mlp_up: {"_disabled": True},
+    }
+
+    def mapper(state):
+        return {
+            key.replace("self_attn.gate_proj.", "self_attn.output_gate_proj."): value
+            for key, value in state.items()
+        }
+
+    mapped = reload_utils.convert_dict_to_vllm(metadata, max_or_concat=False, map_fun=mapper)
+    assert mapped == {
+        f"model.layers.0.self_attn.output_gate_proj.{handle}": {"_disabled": False},
+        f"model.layers.0.mlp.gate_up_proj.{handle}": {"_disabled": True},
+    }
+    buffers = {attention: {"_amax": torch.tensor(3.0)}}
+    mapped_buffers = reload_utils.convert_dict_to_vllm(buffers, map_fun=mapper)
+    assert torch.equal(
+        mapped_buffers[f"model.layers.0.self_attn.output_gate_proj.{handle}"]["_amax"],
+        buffers[attention]["_amax"],
+    )
