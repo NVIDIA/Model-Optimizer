@@ -18,6 +18,7 @@
 import copy
 import random
 from collections import OrderedDict
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -25,10 +26,13 @@ import torch
 from _test_utils.bypass import BypassNetwork as _Network
 from _test_utils.bypass import bypass_problem as _problem
 from torch import nn
+from torch.utils._pytree import tree_map
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.distill._bypass_capture import ModuleBypassAdapter
+from modelopt.torch.distill._bypass_runner import _BypassRunner
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
@@ -100,6 +104,38 @@ def test_bypass_streams_independent_units_and_finalizes(tmp_path):
     )
     restored = mto.restore(plain, tmp_path / "student.pt")
     torch.testing.assert_close(restored(batches[0]), student(batches[0]), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("offload", ["cpu", "disk"])
+def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_path):
+    accelerate = pytest.importorskip("accelerate")
+    student, teacher, batches = _problem()
+    student.mlp, teacher.mlp = nn.Sequential(student.mlp), nn.Sequential(teacher.mlp)
+    reference = copy.deepcopy(student)
+    config = {
+        "num_steps": 2,
+        "global_batch_size": 2,
+        "micro_batch_size": 1,
+        "sequence_length": 3,
+        "modules": ["mlp"],
+    }
+    mtd.bypass(reference, teacher, batches, config)
+    if offload == "cpu":
+        accelerate.cpu_offload(student, execution_device="cpu", offload_buffers=True)
+    else:
+        accelerate.disk_offload(
+            student, tmp_path / "offload", execution_device="cpu", offload_buffers=True
+        )
+    assert not hasattr(student.mlp, "_hf_hook")
+    devices = {name: parameter.device for name, parameter in student.named_parameters()}
+    flags = {name: parameter.requires_grad for name, parameter in student.named_parameters()}
+    assert mtd.bypass(student, teacher, batches, config) is student
+    assert {name: parameter.device for name, parameter in student.named_parameters()} == devices
+    assert {
+        name: parameter.requires_grad for name, parameter in student.named_parameters()
+    } == flags
+    assert not hasattr(student.mlp[0].weight_quantizer, "_local_repair_state")
+    torch.testing.assert_close(student(batches[0]), reference(batches[0]), rtol=0, atol=0)
 
 
 def test_bypass_refuses_aliases_and_cleans_failed_replay():
@@ -358,6 +394,90 @@ def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch):
         torch.testing.assert_close(actual, wanted, rtol=1e-5, atol=1e-10)
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Paired normalization requires two GPUs")
+def test_bypass_transfers_normalization_count_once_per_boundary_device(monkeypatch):
+    student, teacher, batches = _problem()
+    original_to = torch.Tensor.to
+    original_replay = ModuleBypassAdapter.replay
+    original_teacher = ModuleBypassAdapter.teacher_microbatch
+    original_update = _BypassRunner._update
+    counts, transfers, observed = {}, [], []
+
+    def transport_replay(adapter, module, record):
+        device = next(module.parameters()).device
+        transported = replace(
+            record,
+            **{
+                name: tree_map(
+                    lambda value: value.to(device) if isinstance(value, torch.Tensor) else value,
+                    getattr(record, name),
+                )
+                for name in ("args", "kwargs", "replay_state")
+            },
+        )
+        with torch.cuda.device(device):
+            return original_replay(adapter, module, transported).to(record.target.device)
+
+    def teacher_microbatch(adapter, model, *args, **kwargs):
+        with torch.cuda.device(next(model.parameters()).device):
+            return original_teacher(adapter, model, *args, **kwargs)
+
+    def track_count_transfer(value, *args, **kwargs):
+        result = original_to(value, *args, **kwargs)
+        if id(value) in counts and value.device != result.device:
+            transfers[-1].append((counts[id(value)], value.device, result.device, result.dtype))
+        return result
+
+    def observe_update(runner, statistics, step):
+        fields = runner._checkpoint_fields()
+        raw = {name: p.grad.detach().cpu().clone() for name, p in fields.items()}
+        counts.update((id(count), name) for name, (_, count) in statistics.items())
+        transfers.append([])
+        try:
+            original_update(runner, statistics, step)
+        finally:
+            counts.clear()
+        observed.append(
+            {
+                name: (raw[name], p.grad.detach().cpu().clone(), p.detach().cpu().clone())
+                for name, p in fields.items()
+            }
+        )
+
+    monkeypatch.setattr(ModuleBypassAdapter, "replay", transport_replay)
+    monkeypatch.setattr(ModuleBypassAdapter, "teacher_microbatch", teacher_microbatch)
+    monkeypatch.setattr(torch.Tensor, "to", track_count_transfer)
+    monkeypatch.setattr(_BypassRunner, "_update", observe_update)
+    config = {"num_steps": 3, "global_batch_size": 2, "micro_batch_size": 1, "sequence_length": 3}
+    valid = [
+        torch.tensor([[True, True, True], [True, True, False]]),
+        torch.tensor([[True, True, False], [True, False, False]]),
+        torch.tensor([[True, True, True], [True, True, True]]),
+    ]
+    for teacher_device in ("cuda:1", "cuda:0"):
+        candidate = copy.deepcopy(student).to("cuda:1")
+        target = copy.deepcopy(teacher).to(teacher_device)
+        data = [
+            {"hidden_states": batch.to(teacher_device), "valid_mask": mask.to(teacher_device)}
+            for batch, mask in zip(batches[:3], valid)
+        ]
+        # The student owns a noncurrent GPU, including during normalization and Lion.
+        with torch.cuda.device(0):
+            mtd.bypass(candidate, target, data, config)
+    assert len(observed) == 6
+    for reference, paired in zip(observed[:3], observed[3:]):
+        assert reference.keys() == paired.keys()
+        for name in reference:
+            for actual, expected in zip(paired[name], reference[name]):
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert all(not copies for copies in transfers[:3])
+    for copies in transfers[3:]:
+        assert sorted(copies) == [
+            ("mlp", torch.device("cuda:0"), torch.device("cuda:1"), torch.int64),
+            ("moe", torch.device("cuda:0"), torch.device("cuda:1"), torch.int64),
+        ]
+
+
 @pytest.mark.timeout(180)
 def test_native_valid_token_mse_bounds_saved_state():
     pytest.importorskip("triton")
@@ -388,35 +508,3 @@ def test_native_valid_token_mse_bounds_saved_state():
         observed = torch.autograd.grad(actual, prediction)[0]
         torch.testing.assert_close(observed, expected, rtol=0, atol=0)
         assert (prediction.shape, torch.float32) not in saved
-
-
-@pytest.mark.parametrize("offload", ["cpu", "disk"])
-def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_path):
-    accelerate = pytest.importorskip("accelerate")
-    student, teacher, batches = _problem()
-    student.mlp, teacher.mlp = nn.Sequential(student.mlp), nn.Sequential(teacher.mlp)
-    reference = copy.deepcopy(student)
-    config = {
-        "num_steps": 2,
-        "global_batch_size": 2,
-        "micro_batch_size": 1,
-        "sequence_length": 3,
-        "modules": ["mlp"],
-    }
-    mtd.bypass(reference, teacher, batches, config)
-    if offload == "cpu":
-        accelerate.cpu_offload(student, execution_device="cpu", offload_buffers=True)
-    else:
-        accelerate.disk_offload(
-            student, tmp_path / "offload", execution_device="cpu", offload_buffers=True
-        )
-    assert not hasattr(student.mlp, "_hf_hook")
-    devices = {name: parameter.device for name, parameter in student.named_parameters()}
-    flags = {name: parameter.requires_grad for name, parameter in student.named_parameters()}
-    assert mtd.bypass(student, teacher, batches, config) is student
-    assert {name: parameter.device for name, parameter in student.named_parameters()} == devices
-    assert {
-        name: parameter.requires_grad for name, parameter in student.named_parameters()
-    } == flags
-    assert not hasattr(student.mlp[0].weight_quantizer, "_local_repair_state")
-    torch.testing.assert_close(student(batches[0]), reference(batches[0]), rtol=0, atol=0)
