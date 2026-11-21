@@ -124,6 +124,7 @@ from . import (  # isort: skip
     nemotron_h_nano_omni_reasoning_v3,
     qwen2_moe,
     qwen3,
+    qwen3_5,
     qwen3_5_moe,
     qwen3_moe,
     qwen3_next,

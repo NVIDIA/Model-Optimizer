@@ -38,11 +38,12 @@ from transformers import (
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.distill._bypass_capture import BypassUnit
+from modelopt.torch.distill._bypass_capture import BypassUnit, mse_statistics
 from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.quantization.repair import IQRepairPolicy
 from modelopt.torch.quantization.plugins.huggingface import register_hf_attentions_on_the_fly
 
 
@@ -847,3 +848,151 @@ def test_weight_patterns_keep_nested_router_frozen():
     )
     assert model.mlp.experts.weight_quantizer.is_enabled
     assert not model.mlp.gate.weight_quantizer.is_enabled
+
+
+@pytest.mark.parametrize(
+    ("family", "device"),
+    [
+        ("qwen3_next", "cpu"),
+        ("qwen3_vl_moe", "cpu"),
+        ("qwen3_5", "cpu"),
+        ("qwen3_5_text", "cpu"),
+        pytest.param("qwen3_5", "cuda", marks=pytest.mark.manual),
+        pytest.param("qwen3_5_text", "cuda", marks=pytest.mark.manual),
+    ],
+)
+def test_packed_document_batching_preserves_attention_context(family, device):
+    from _test_utils.transformers_families import build_model, cases, hf_torch_kernels
+
+    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA document batching requires an allocated GPU")
+    torch.manual_seed(43)
+    record = cases(["qwen3_5" if family == "qwen3_5_text" else family])[0]
+    teacher = build_model(record, device)
+    if family == "qwen3_5_text":
+        teacher = teacher.model.language_model
+    ids = torch.randint(3, 100, (2, 8), device=device)
+    docs = torch.tensor([[1, 1, 1, 1, 2, 2, 2, 2], [1, 1, 2, 2, 2, 3, 3, 3]], device=device)
+    positions = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3], [0, 1, 0, 1, 2, 0, 1, 2]], device=device)
+    if family == "qwen3_vl_moe":
+        positions = positions.unsqueeze(0).expand(3, -1, -1).clone()
+    valid = torch.ones_like(ids, dtype=torch.bool)
+    valid[:, 0] = False
+    valid[:, 1:] &= docs[:, 1:] == docs[:, :-1]
+    batch = {
+        "input_ids": ids,
+        "attention_mask": torch.ones_like(ids),
+        "valid_mask": valid,
+        "_packed_seq_ids": docs,
+        "position_ids": positions,
+    }
+    adapter = TransformersBypassAdapter()
+    with hf_torch_kernels(teacher):
+        student = _quantize(
+            copy.deepcopy(teacher),
+            {k: v for k, v in batch.items() if k not in ("_packed_seq_ids", "valid_mask")},
+            "iq2_s",
+        )
+        units = adapter.resolve_units(student, teacher, mtd.BypassConfig())
+        captured, separate, forwards = [], [], []
+        handle = teacher.register_forward_pre_hook(lambda *_: forwards.append(1))
+        adapter.teacher_microbatch(teacher, units, batch, lambda u, r: captured.append((u, r)))
+        batched_forwards = len(forwards)
+        forwards.clear()
+        for row in range(2):
+            for document in docs[row].unique_consecutive():
+                mask = docs[row] == document
+                pos = (
+                    positions[:, row : row + 1, mask]
+                    if positions.ndim == 3
+                    else positions[row : row + 1, mask]
+                )
+                item = {
+                    "input_ids": ids[row : row + 1, mask],
+                    "attention_mask": torch.ones_like(ids[row : row + 1, mask]),
+                    "valid_mask": valid[row : row + 1, mask],
+                    "position_ids": pos,
+                }
+                adapter.teacher_microbatch(
+                    teacher, units, item, lambda u, r: separate.append((u, r))
+                )
+        handle.remove()
+        if family.startswith("qwen3_5"):
+            assert batched_forwards < len(forwards)
+        without_attention = []
+        adapter.teacher_microbatch(
+            teacher,
+            units,
+            {key: value for key, value in batch.items() if key != "attention_mask"},
+            lambda u, r: without_attention.append((u, r)),
+        )
+        for unit in units:
+
+            def targets(records):
+                values = []
+                for owner, record in records:
+                    if owner.name == unit.name:
+                        mask = record.valid_mask
+                        values.append(
+                            record.target.flatten(0, 1) if mask is None else record.target[mask]
+                        )
+                return torch.cat(values)
+
+            for records in (captured, without_attention):
+                torch.testing.assert_close(
+                    targets(records), targets(separate), rtol=0.01, atol=0.01
+                )
+            if family.startswith("qwen3_5"):
+                module = student.get_submodule(unit.student_path)
+                policy = IQRepairPolicy()
+                fields = policy.prepare(module)
+                expected_count = int(valid.sum()) * targets(separate).shape[-1]
+                try:
+                    gradients = []
+                    for records in (captured, separate):
+                        for field in fields:
+                            field.grad = None
+                        count = 0
+                        for owner, record in records:
+                            if owner.name == unit.name:
+                                error, elements = mse_statistics(
+                                    adapter.replay(module, record), record.target, record.valid_mask
+                                )
+                                (error / expected_count).backward()
+                                count += int(elements)
+                        assert count == expected_count
+                        gradients.append(torch.cat([field.grad.flatten() for field in fields]))
+                    actual, reference = gradients
+                    assert torch.isfinite(actual).all() and reference.norm() > 0
+                    # BF16 row batching changes reductions, so bound aggregate raw-gradient drift.
+                    assert (actual - reference).norm() / reference.norm() < 0.02
+                finally:
+                    policy.close()
+        if family.startswith("qwen3_5"):
+            changed = ids.clone()
+            changed[0, :4] = (changed[0, :4] - 2) % 97 + 3
+            perturbed = []
+            adapter.teacher_microbatch(
+                teacher,
+                units,
+                {**batch, "input_ids": changed},
+                lambda u, r: perturbed.append((u, r)),
+            )
+            # Prompt tokens remain context even when omitted from the MSE target mask.
+            first_document_count = int(valid[0, :4].sum())
+            # The first document changes; every subsequent document stays independent.
+            for unit in units:
+                before, after = targets(captured), targets(perturbed)
+                assert not torch.equal(before[:first_document_count], after[:first_document_count])
+                torch.testing.assert_close(
+                    before[first_document_count:], after[first_document_count:], rtol=0, atol=0
+                )
+        mtd.bypass(
+            student,
+            teacher,
+            [batch],
+            {"num_steps": 1, "global_batch_size": 2, "sequence_length": 8},
+        )
+    assert all(torch.isfinite(p).all() for p in student.parameters())
