@@ -37,6 +37,7 @@ Changelog
 
 - Move agent skills to the repository-root ``skills/`` directory, with symlinks for agent discovery.
 - Prefix agent skill names with ``modelopt-``; existing names remain available as forwarding stubs.
+- The ``hf`` extra now supports transformers up to 5.23 (previously below 5.19), which current Megatron-Bridge requires.
 
 **Backward Breaking Changes**
 

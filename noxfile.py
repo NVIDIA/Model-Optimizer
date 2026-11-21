@@ -47,7 +47,7 @@ TORCH_VERSIONS = {
 # Extra install pins applied per transformers matrix entry (installed after the base
 # ``.[all,dev-test]`` install to constrain that env).
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": ("transformers~=5.18.0",),
+    "tf_latest": ("transformers~=5.23.0",),
     "tf_min": ("transformers~=5.5.0",),
 }
 

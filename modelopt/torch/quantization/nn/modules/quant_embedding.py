@@ -99,16 +99,18 @@ class _QuantEmbedding(QuantModule):
         keeps that quantizer disabled regardless of what configs target it, so a
         runtime check in this hot path is unnecessary.
         """
+        # e.g. transformers 5.23+'s TP wrapper for a vocab-sharded embedding.
+        lookup = self._patched_forward() or super().forward
         if is_torch_export_mode():
             # quantize_weight()'s attribute write is not allowed under torch.export;
             # weight quantization is still applied inline via _get_quantized_weight's
             # is_torch_export_mode() branch. Apply output_quantizer in this path too
             # so users who opt into output activation quantization don't silently
             # lose it during export — matches QuantInputBase.forward's behavior.
-            output = super().forward(input, *args, **kwargs)
+            output = lookup(input, *args, **kwargs)
         else:
             with self.quantize_weight():
-                output = super().forward(input, *args, **kwargs)
+                output = lookup(input, *args, **kwargs)
         return self.output_quantizer(output)
 
 

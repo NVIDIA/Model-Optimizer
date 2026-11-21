@@ -112,6 +112,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _ep_dense_meta_load,
     _experts_sharded_over,
     _fsdp2_shard_dense,
+    _hf_keeps_ep_apart,
     _load_ep_dense_distributed,
     _make_expert_param_matcher,
     _meta_model_factory,
@@ -3631,7 +3632,9 @@ def test_a_loaded_model_keeps_its_sharding_styles_out_of_its_saved_config(
 
     (model,) = built
     assert model.config.base_model_ep_plan == Qwen3MoeConfig.base_model_ep_plan
-    assert "torch_a2a_experts" in set(model.tp_plan.values())
+    # transformers 5.19+ keeps the expert plan apart from the tensor-parallel one.
+    plan = getattr(model, "ep_plan", None) or model.tp_plan
+    assert "torch_a2a_experts" in set(plan.values())
     assert model._device_mesh is mesh
     assert model.config._experts_implementation == "torch_a2a"
     assert not any("experts_implementation" in key for key in model.config.to_dict())
@@ -4100,6 +4103,8 @@ def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given():
     with _experts_sharded_over(ep_mesh):
         _, device_map, device_mesh = PreTrainedModel.prepare_distribute_model(config)
 
+    if _hf_keeps_ep_apart():  # transformers 5.19+ hands back a mesh manager
+        device_mesh = device_mesh.get_mesh("tp")
     assert device_mesh is ep_mesh
     assert device_map == torch.device("cpu")
     assert mixin.initialize_distributed_mesh is builder
@@ -4134,8 +4139,16 @@ def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given():
             {"enable_expert_parallel": True, "tp_size": 2},
             "auto",
         ),
+        # 5.19 on
+        (["tp_size", "tp_plan", "enable_expert_parallel", "ep_size"], True, {"tp_size": 2}, None),
     ],
-    ids=["no-tp-plan-field", "tp-plan-field", "own-mesh-builder", "own-mesh-builder-no-tp-plan"],
+    ids=[
+        "no-tp-plan-field",
+        "tp-plan-field",
+        "own-mesh-builder",
+        "own-mesh-builder-no-tp-plan",
+        "ep-size-field",
+    ],
 )
 def test_each_load_argument_goes_where_this_transformers_takes_it(
     ep_world_of_two, monkeypatch, fields, builds_its_mesh, config, tp_plan
@@ -5321,9 +5334,17 @@ def test_the_expert_converter_leads_with_a_merge_that_dequantizes_each_expert(
         FineGrainedFP8Config(weight_block_size=(4, 4), dequantize=True), pre_quantized=True
     )
 
+    # transformers 5.21+ also takes the model, whose experts keep no scale param, so it dequantizes.
+    args = ()
+    if "model" in inspect.signature(quantizer.update_weight_conversions).parameters:
+        model = nn.Module()
+        model.mlp = nn.Module()
+        model.mlp.experts = nn.Module()
+        model.mlp.experts.gate_up_proj = nn.Parameter(torch.empty(3, 24, 12))
+        args = (model,)
     [converter] = [
         conv
-        for conv in quantizer.update_weight_conversions([experts])
+        for conv in quantizer.update_weight_conversions([experts], *args)
         if conv.target_patterns == ["mlp.experts.gate_up_proj"]
     ]
 
@@ -5333,9 +5354,9 @@ def test_the_expert_converter_leads_with_a_merge_that_dequantizes_each_expert(
         for p, name in enumerate(("gate_proj", "up_proj"))
     }
     tensors = {}  # what the loader collects for each of the converter's source patterns
-    for name, pairs in blocks.items():
-        tensors[f"mlp.experts.*.{name}.weight$"] = [weight for weight, _ in pairs]
-        tensors[f"mlp.experts.*.{name}.weight_scale_inv$"] = [scale_inv for _, scale_inv in pairs]
+    for pattern in converter.source_patterns:
+        pairs = blocks["gate_proj" if "gate_proj" in pattern else "up_proj"]
+        tensors[pattern] = [pair["weight_scale_inv" in pattern] for pair in pairs]
     for op in converter.operations:
         tensors = op.convert(
             tensors,

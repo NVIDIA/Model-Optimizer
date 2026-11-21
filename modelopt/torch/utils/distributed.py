@@ -17,6 +17,7 @@
 
 import functools
 import gc
+import importlib
 import io
 import itertools
 import os
@@ -863,18 +864,16 @@ def reinstall_a2a_forwards(model, ep_mesh) -> int:
         from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
     except ImportError:  # older transformers
         from transformers.integrations.tensor_parallel import ALL_PARALLEL_STYLES
-    try:
-        from transformers.distributed.tensor_parallel import _get_parameter_tp_plan
-    except ImportError:
-        from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
+    get_parameter_plan = _hf_parameter_plan_lookup()
 
-    plan = getattr(model, "tp_plan", None) or {}
+    # transformers 5.19+ keeps the expert plan apart from the tensor-parallel one.
+    plan = getattr(model, "ep_plan", None) or getattr(model, "tp_plan", None) or {}
     if not plan:
         return 0
 
     n = 0
     for name, mod in model.named_modules():
-        style_name = _get_parameter_tp_plan(parameter_name=name, tp_plan=plan, is_weight=False)
+        style_name = get_parameter_plan(name, plan, False)
         if style_name not in ("torch_a2a_experts", "torch_a2a_router"):
             continue
         # Before transformers 5.16 a style installs its transforms as forward pre-hooks, which
@@ -894,6 +893,24 @@ def reinstall_a2a_forwards(model, ep_mesh) -> int:
             flush=True,
         )
     return n
+
+
+def _hf_parameter_plan_lookup():
+    """Transformers' ``(name, plan, is_weight) -> style`` lookup in a tensor- or expert-parallel plan."""
+    for module, name in (
+        ("transformers.distributed.parallel_utils", "_get_parameter_plan"),  # 5.23+
+        ("transformers.distributed.tensor_parallel", "_get_parameter_plan"),  # 5.19-5.22
+        ("transformers.distributed.tensor_parallel", "_get_parameter_tp_plan"),
+        ("transformers.integrations.tensor_parallel", "_get_parameter_tp_plan"),
+    ):
+        try:
+            lookup = getattr(importlib.import_module(module), name)
+            break
+        except (ImportError, AttributeError):
+            continue
+    else:
+        raise ImportError("transformers has no tensor-parallel plan lookup")
+    return lambda name, plan, is_weight=True: lookup(name, plan, is_weight=is_weight)
 
 
 def _release_cached_cuda_memory():

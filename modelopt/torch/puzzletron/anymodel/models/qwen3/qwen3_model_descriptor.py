@@ -63,7 +63,7 @@ class Qwen3ModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def init_rotary_embedding(model: Qwen3ForCausalLM, runtime):
-        model.model.rotary_emb = Qwen3RotaryEmbedding(model.config, runtime.device)
+        model.model.rotary_emb = Qwen3RotaryEmbedding(model.config).to(runtime.device)
 
     @staticmethod
     def input_embedding_name():

@@ -411,7 +411,9 @@ class DFlashModule(nn.Module):
         preventing the meta-tensor inv_freq issue on checkpoint resume.
         """
         if not hasattr(self, "rotary_emb"):
-            self.rotary_emb = _ROTARY_CLS(config=self._rotary_config, device=device)
+            # transformers 5.19 dropped the device argument; build on CPU and move.
+            rotary_emb = _ROTARY_CLS(config=self._rotary_config)
+            self.rotary_emb = rotary_emb if device is None else rotary_emb.to(device)
 
     def _init_weights(self, config):
         """Initialize weights matching HF PreTrainedModel._init_weights."""
