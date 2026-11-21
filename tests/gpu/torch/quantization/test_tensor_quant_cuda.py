@@ -25,7 +25,7 @@ from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTe
 import modelopt.torch.kernels.quantization.gemm as triton_kernel
 import modelopt.torch.quantization.utils as quant_utils
 from modelopt.torch.quantization import tensor_quant
-from modelopt.torch.quantization.extensions import get_cuda_ext, get_cuda_ext_fp8, get_cuda_ext_mx
+from modelopt.torch.quantization.extensions import get_cuda_ext, get_cuda_ext_mx
 from modelopt.torch.quantization.tensor_quant import mx_format_map
 
 if triton_kernel.IS_AVAILABLE:
@@ -195,26 +195,19 @@ class TestScaledE4M3:
             scaled = tensor_quant.scaled_e4m3(x * factor, amax * factor, None, 4, 3)
             assert torch.equal(scaled, reference * factor)
 
-    def test_runs_on_the_inputs_gpu(self, need_2_gpus, monkeypatch):
-        """The FP8 extension launches on the current GPU; a tensor on another one runs on its own."""
-        extension = get_cuda_ext_fp8(raise_if_failed=True)
-        launches = []
-        for name in ("fake_e4m3fy", "fake_e4m3fy_with_axis"):
-            launch = getattr(extension, name)
-            monkeypatch.setattr(
-                extension,
-                name,
-                lambda inputs, *args, launch=launch: (
-                    launches.append(torch.cuda.current_device()) or launch(inputs, *args)
-                ),
-            )
+    def test_runs_on_the_inputs_gpu(self, need_2_gpus):
+        """A tensor on a GPU other than the current one is cast by a kernel on its own GPU."""
         x = torch.randn(64, 16, device="cuda:1")
-        for amax in (x.abs().amax(), x.abs().amax(dim=1, keepdim=True)):
-            got = tensor_quant.scaled_e4m3_impl(x, amax)
-            expected = tensor_quant.scaled_e4m3_impl(x.to("cuda:0"), amax.to("cuda:0"))
-            torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
+        activities = [torch.profiler.ProfilerActivity.CUDA]
+        with torch.profiler.profile(activities=activities) as profile:
+            for amax in (x.abs().amax(), x.abs().amax(dim=1, keepdim=True)):
+                got = tensor_quant.scaled_e4m3_impl(x, amax)
+                expected = tensor_quant.scaled_e4m3_impl(x.to("cuda:0"), amax.to("cuda:0"))
+                torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
         assert torch.cuda.current_device() == 0
-        assert launches == [1, 0, 1, 0]
+        # With peer access, a launch from the wrong GPU can still compute the right values.
+        kernels = sorted(e.device_index for e in profile.events() if "e4m3fy" in e.name)
+        assert kernels == [0, 0, 1, 1]
 
 
 class Testfp4:
