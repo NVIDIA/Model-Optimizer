@@ -4,6 +4,26 @@ This folder includes popular 3rd-party LLM benchmarks for LLM accuracy evaluatio
 
 The following instructions show how to evaluate the Model Optimizer quantized LLM with the benchmarks, including the TensorRT-LLM deployment.
 
+## PyTorch KL evaluation prototype
+
+`kl_eval.py` measures conditional `KL(BF16 || fake-quant)` in nats between a BF16 model and a live, calibrated fake-quant candidate. Install ModelOpt and the [hf_ptq requirements](../hf_ptq/requirements.txt), authenticate with `hf auth login` for the private [prompt blend](https://huggingface.co/datasets/nvidia/balanced-benchmark-prompts-short-1000), then run from the repository root:
+
+```sh
+python examples/llm_eval/kl_eval.py prepare-reference \
+    --model Qwen/Qwen3.8-27B --reference ./kl-reference \
+    --attn_implementation flash_attention_2
+
+python examples/llm_eval/kl_eval.py evaluate \
+    --model Qwen/Qwen3.8-27B --reference ./kl-reference \
+    --recipe general/ptq/nvfp4_default-kv_fp8_cast
+```
+
+The measured Qwen3.8-27B run used Transformers 5.18.0, FlashAttention 2.8.1, flash-linear-attention 0.5.1 and causal-conv1d 1.7.0.
+
+`prepare-reference` greedily generates up to 1,024 tokens for the first 300 prompts of the pinned blend and saves the BF16 top-2,048 log-probabilities at 512 evenly spaced response positions. Override with `--num_examples`, `--max_new_tokens`, `--top_k`, `--score_tokens` (0 scores every position) and `--generation_batch_size` (default 64; lower it if generation runs out of memory). Prompts are never truncated, and an existing reference directory is never overwritten.
+
+`evaluate` calibrates the candidate with `hf_ptq.py` defaults (override with `--dataset`, `--calib_size`, `--calib_seq` and `--batch_size`), inherits the reference's attention backend, scores every stored prompt, and prints one scalar averaged equally across prompts. Use the same, unchanged checkpoint for both commands: evaluation rejects a different Hub revision, or a changed local config, weight index or weight file. Run in one process; a model too large for one GPU is split across all visible GPUs. It requires a text-only BF16 causal checkpoint and a fake-quant PTQ recipe; layerwise `checkpoint_dir` and `export_dir` are rejected.
+
 ## NeMo Evaluator
 
 [NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/get-started/quickstart/index.html#self-hosted-options) is the recommended way to evaluate a large choice of benchmarks on quantized checkpoints generated from [hf_ptq](../hf_ptq). Quantized checkpoints can be served with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang) and then evaluated using NeMo Evaluator.

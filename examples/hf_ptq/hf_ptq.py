@@ -361,7 +361,11 @@ def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
         )
 
 
-def load_model(args: argparse.Namespace):
+def load_model(
+    args: argparse.Namespace,
+    *,
+    resolved_recipe: ModelOptPTQRecipe | ModelOptAutoQuantizeRecipe | None = None,
+):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
     plan, hf_config = resolve_distribution(args)
@@ -457,7 +461,11 @@ def load_model(args: argparse.Namespace):
         vlm_wrapper
         and not args.calib_with_images
         and not args.use_fsdp2
-        and not _recipe_is_auto_quantize(args.recipe)
+        and not (
+            isinstance(resolved_recipe, ModelOptAutoQuantizeRecipe)
+            if resolved_recipe is not None
+            else _recipe_is_auto_quantize(args.recipe)
+        )
     ):
         print("VLM wrapper detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
@@ -1047,6 +1055,16 @@ def post_quantize(
     export_quantized(args, full_model, language_model, model_type)
 
 
+def require_live_calibration(recipe) -> None:
+    """Refuse recipes that cannot calibrate a model kept live (``export=False``) in this run."""
+    if any(
+        block.get(field) is not None
+        for block in recipe_layerwise_blocks(recipe)
+        for field in ("export_dir", "checkpoint_dir")
+    ):
+        raise ValueError("export=False does not support layerwise export_dir or checkpoint_dir.")
+
+
 def quantize_main(
     args: argparse.Namespace,
     full_model: torch.nn.Module,
@@ -1056,12 +1074,17 @@ def quantize_main(
     processor: ProcessorMixin | None,
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
+    *,
+    export: bool = True,
+    resolved_recipe: ModelOptPTQRecipe | ModelOptAutoQuantizeRecipe | None = None,
 ):
     # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
-    recipe = None
-    if args.recipe is not None:
-        print(f"Use recipe {args.recipe} for quantization")
+    # A caller that already validated the recipe passes it, so a later file edit cannot change it.
+    recipe = resolved_recipe
+    if recipe is None and args.recipe is not None:
         recipe = load_recipe(args.recipe)
+    if recipe is not None:
+        print(f"Use recipe {args.recipe} for quantization")
         if not isinstance(recipe, ModelOptPTQRecipe | ModelOptAutoQuantizeRecipe):
             raise TypeError(
                 f"Expected PTQ or AutoQuantize recipe, but got {type(recipe).__name__} "
@@ -1076,6 +1099,8 @@ def quantize_main(
         aq_config = None
 
     layerwise_cfgs = recipe_layerwise_blocks(recipe)
+    if not export:
+        require_live_calibration(recipe)
     is_layerwise = any(cfg.get("enable", False) for cfg in layerwise_cfgs)
     if aq_config is not None and _auto_quantize_finalizes(recipe, args):
         # This run only calibrates the frozen formats with finalize_algorithm, so its batch is
@@ -1259,6 +1284,9 @@ def quantize_main(
         # checkpoint directory main() downloaded.
         apply_cast_mxfp4_to_nvfp4(language_model, args.local_checkpoint_path)
 
+    if not export:
+        return full_model
+
     post_quantize(
         args,
         full_model,
@@ -1275,7 +1303,7 @@ def quantize_main(
     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--pyt_ckpt_path",
@@ -1584,7 +1612,7 @@ def parse_args() -> argparse.Namespace:
 
     add_mlflow_args(parser, HF_PTQ)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     # Flipped by export_quantized once a checkpoint is actually on disk. The MLflow pointer
     # is gated on it rather than on --export_path existing, which proves nothing.
     args.checkpoint_exported = False

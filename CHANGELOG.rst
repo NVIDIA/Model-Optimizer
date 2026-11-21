@@ -36,6 +36,7 @@ Changelog
 
 - Move agent skills to the repository-root ``skills/`` directory, with symlinks for agent discovery.
 - Prefix agent skill names with ``modelopt-``; existing names remain available as forwarding stubs.
+- Add ``examples/llm_eval/kl_eval.py``, which measures conditional KL between a BF16 model and its calibrated fake-quant candidate on a pinned prompt set.
 
 **Backward Breaking Changes**
 
