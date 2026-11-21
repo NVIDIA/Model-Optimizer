@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Counter and threshold logic of maybe_clear_cuda_cache, without needing a GPU."""
+"""The CUDA cache helpers' logic, without needing a GPU."""
 
 import pytest
 
@@ -22,21 +22,34 @@ from modelopt.torch.utils import perf
 
 @pytest.fixture
 def cuda_stub(monkeypatch):
-    """Stand in for the CUDA allocator: records empty_cache calls, lets tests set the slack."""
+    """Stand in for four GPUs' allocators: records synchronize and empty_cache calls, lets tests set
+    the current GPU's slack and what each GPU has reserved.
+    """
 
     class Stub:
         def __init__(self):
             self.reserved = 0
             self.allocated = 0
+            self.gpu_reserved = {}
+            self.calls = []
             self.empty_cache_calls = 0
 
     stub = Stub()
     monkeypatch.setattr(perf.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(perf.torch.cuda, "memory_reserved", lambda *a, **k: stub.reserved)
+    monkeypatch.setattr(perf.torch.cuda, "device_count", lambda: 4)
+    monkeypatch.setattr(
+        perf.torch.cuda,
+        "memory_reserved",
+        lambda device=None: stub.reserved if device is None else stub.gpu_reserved.get(device, 0),
+    )
     monkeypatch.setattr(perf.torch.cuda, "memory_allocated", lambda *a, **k: stub.allocated)
+    monkeypatch.setattr(
+        perf.torch.cuda, "synchronize", lambda device=None: stub.calls.append(("sync", device))
+    )
 
     def _empty_cache():
         stub.empty_cache_calls += 1
+        stub.calls.append(("empty_cache",))
 
     monkeypatch.setattr(perf.torch.cuda, "empty_cache", _empty_cache)
     # The counter is process-global; start each test from a known phase.
@@ -102,6 +115,23 @@ def test_slack_threshold_is_configurable(cuda_stub):
     for _ in range(perf._EMPTY_CACHE_CHECK_EVERY):
         perf.maybe_clear_cuda_cache(slack_bytes=1024**2)
     assert cuda_stub.empty_cache_calls == 1
+
+
+@pytest.mark.parametrize("clear", ["clear_cuda_cache", "maybe_clear_cuda_cache"])
+def test_clearing_waits_for_every_gpu_holding_memory(cuda_stub, monkeypatch, clear):
+    """Each GPU with reserved memory finishes its queued work before the cache is emptied.
+
+    With expandable segments, emptying the cache from one GPU unmapped another GPU's freed memory
+    that kernels queued there still read. GPUs holding nothing are skipped: syncing one would
+    create a context on it.
+    """
+    cuda_stub.reserved = 8 * 1024**3
+    cuda_stub.gpu_reserved = {0: 1024, 2: 1024}
+    monkeypatch.setattr(perf, "_empty_cache_calls", perf._EMPTY_CACHE_CHECK_EVERY - 1)
+
+    getattr(perf, clear)()
+
+    assert cuda_stub.calls == [("sync", 0), ("sync", 2), ("empty_cache",)]
 
 
 def test_no_cuda_is_a_noop(monkeypatch):
