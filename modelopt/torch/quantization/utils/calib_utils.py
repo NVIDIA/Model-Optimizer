@@ -338,7 +338,8 @@ def compute_hessian_inverse(hessian, weight, perc_damp):
 
     # A float32 Cholesky can fail on a Hessian a few outlier channels dominate; the identity would
     # leave that weight to plain rounding, so first retry at 10x and 100x the damping. Damping
-    # cannot change a Hessian whose diagonal is all zero, as a never-routed expert's is.
+    # scales perc_damp by the diagonal's mean, so it cannot change a Hessian when either is zero,
+    # as a never-routed expert's diagonal is.
     for attempt in range(3):
         # One factorization rather than three: with P the reversal, P H P = L L^T makes R = P L P
         # upper triangular with H = R R^T, so inv(R) is the upper Cholesky factor of inv(H).
@@ -346,7 +347,7 @@ def compute_hessian_inverse(hessian, weight, perc_damp):
         if not bool(info != 0):
             break
         factor = None  # Free it before the next attempt allocates another.
-        if attempt == 2 or not bool(mean > 0):
+        if attempt == 2 or not bool(perc_damp * mean > 0):
             print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
             return torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
         diagonal.add_(9 * perc_damp * 10**attempt * mean)
