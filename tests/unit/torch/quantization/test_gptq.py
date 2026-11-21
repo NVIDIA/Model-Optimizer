@@ -147,6 +147,52 @@ def test_hessian_inverse_is_the_upper_cholesky_factor_of_the_damped_inverse():
     torch.testing.assert_close(upper.T @ upper, torch.linalg.inv(damped))
 
 
+@pytest.mark.parametrize(
+    ("lowest_eigenvalue", "damping"), [(-0.05, 0.1), (-0.5, 1.0), (-2.0, None)]
+)
+def test_a_hessian_that_does_not_factor_is_retried_with_more_damping(lowest_eigenvalue, damping):
+    # Against a mean diagonal near 1.4, 1% damping leaves each Hessian indefinite. The lowest
+    # eigenvalue -0.05 factors at 10x the damping, -0.5 at 100x, and -2 never does, so it falls
+    # back to the identity, which would leave the weight to plain rounding.
+    generator = torch.Generator().manual_seed(0)
+    basis, _ = torch.linalg.qr(torch.randn(16, 16, dtype=torch.float64, generator=generator))
+    eigenvalues = torch.linspace(1.0, 2.0, 16, dtype=torch.float64)
+    eigenvalues[0] = lowest_eigenvalue
+    hessian = basis @ torch.diag(eigenvalues) @ basis.T
+    eye = torch.eye(16, dtype=torch.float64)
+
+    upper = compute_hessian_inverse(hessian, torch.ones(4, 16, dtype=torch.float64), 0.01)
+
+    if damping is None:
+        assert torch.equal(upper, eye)
+    else:
+        assert torch.equal(upper, upper.triu())
+        damped = hessian + damping * hessian.diagonal().mean() * eye
+        torch.testing.assert_close(upper.T @ upper, torch.linalg.inv(damped))
+
+
+@pytest.mark.parametrize(
+    ("hessian", "perc_damp"),
+    [
+        (torch.zeros(16, 16), 0.01),  # a never-routed expert's
+        (torch.diag(torch.tensor([1.0] * 15 + [-1.0])), 0.0),  # undamped, as gptq() accepts
+    ],
+)
+def test_a_hessian_damping_cannot_change_is_not_retried(monkeypatch, hessian, perc_damp):
+    # Damping scales perc_damp by the diagonal's mean; with either zero, a retry would factor the
+    # same matrix again.
+    factorizations = []
+    cholesky_ex = torch.linalg.cholesky_ex
+    monkeypatch.setattr(
+        torch.linalg, "cholesky_ex", lambda h: factorizations.append(h) or cholesky_ex(h)
+    )
+
+    upper = compute_hessian_inverse(hessian, torch.ones(4, 16), perc_damp)
+
+    assert torch.equal(upper, torch.eye(16))
+    assert len(factorizations) == 1
+
+
 @pytest.mark.parametrize(("input_quantized", "forwards"), [(False, 1), (True, 2)])
 def test_gptq_runs_a_max_calibration_forward_only_for_activation_amax(input_quantized, forwards):
     """Weight amax comes from the weights; only an input quantizer needs a forward before GPTQ's."""

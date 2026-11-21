@@ -36,10 +36,23 @@ __all__ = [
 ]
 
 
+def _empty_cache():
+    # With expandable segments, empty_cache waits for the current GPU's queued work but not for the
+    # others' before unmapping freed memory: from cuda:0 it unmapped cuda:1 memory that kernels
+    # still queued on cuda:1 read, an illegal memory access (PyTorch 2.13 and 2.14).
+    current = torch.cuda.current_device()
+    for gpu in get_process_gpus():
+        if gpu != current:
+            torch.cuda.synchronize(gpu)
+    torch.cuda.empty_cache()
+
+
 def clear_cuda_cache():
-    """Clear the CUDA cache."""
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    """Clear the CUDA cache, once the other GPUs this process uses have finished their queued work."""
+    # Before CUDA is initialized nothing is cached, and asking for the current GPU would initialize
+    # it, or raise in a forked child.
+    if torch.cuda.is_initialized():
+        _empty_cache()
 
 
 _EMPTY_CACHE_CHECK_EVERY = 64
@@ -60,10 +73,10 @@ def maybe_clear_cuda_cache(slack_bytes: int = 4 * 1024**3) -> None:
     if _empty_cache_calls < _EMPTY_CACHE_CHECK_EVERY:
         return
     _empty_cache_calls = 0
-    if not torch.cuda.is_available():
+    if not torch.cuda.is_initialized():
         return
     if torch.cuda.memory_reserved() - torch.cuda.memory_allocated() > slack_bytes:
-        torch.cuda.empty_cache()
+        _empty_cache()
 
 
 def get_cuda_memory_stats(device=None):

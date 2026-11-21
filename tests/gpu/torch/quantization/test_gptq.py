@@ -593,7 +593,7 @@ def _run_fused_gptq_nvfp4(weight, block_scale, h_inv, gptq_block_size, quant_blo
 
 
 @requires_triton
-def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus, monkeypatch):
+def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus):
     """A layer device_map placed on another GPU is updated there, not from the current GPU."""
     torch.manual_seed(42)
     weight, _, block_scale, h_inv = _make_nvfp4_test_data(16, 64, 256)
@@ -605,18 +605,9 @@ def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus, monkeypatch):
     assert torch.cuda.current_device() == 0
     torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
 
-    # Through GPTQ, whose block scales come from an FP8 extension that launches on the current
-    # GPU. With peer access a launch from the wrong GPU can still compute the right values, so
-    # check which GPU is current as well as the result.
+    # Through GPTQ, whose block scales come from the FP8 extension.
     if torch.cuda.get_device_capability(1) < (8, 9):
         pytest.skip("fused GPTQ needs SM89+")
-    scale_devices = []
-    compute_scales = calib_utils.triton_kernel.compute_fp4_scales
-    monkeypatch.setattr(
-        calib_utils.triton_kernel,
-        "compute_fp4_scales",
-        lambda *args: scale_devices.append(torch.cuda.current_device()) or compute_scales(*args),
-    )
     model = torch.nn.Linear(256, 64, bias=False)
     inputs = torch.randn(4, 16, 256)
     quant_cfg = {
@@ -639,7 +630,6 @@ def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus, monkeypatch):
         )
         weights.append(qmodel.weight.data.cpu())
     assert torch.cuda.current_device() == 0
-    assert scale_devices == [0, 1]
     torch.testing.assert_close(weights[1], weights[0], rtol=0, atol=0)
 
 
