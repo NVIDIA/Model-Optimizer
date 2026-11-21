@@ -21,6 +21,7 @@ import math
 import sys
 import time
 import warnings
+import weakref
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
@@ -1773,6 +1774,7 @@ def awq_lite(
     alpha_step: float = 0.1,
     debug: bool = False,
     use_weight_scale: bool = True,
+    fused_group_scale: bool = False,
     **kwargs,
 ):
     """Lite version of AWQ.
@@ -1781,6 +1783,9 @@ def awq_lite(
         model: Model to be calibrated.
         forward_loop: A callable which takes the model as argument and
             forwards calibration data through the model.
+        fused_group_scale: If True, the linears that export fuses (q/k/v and gate/up for LLMs,
+            each attention block's Q/K/V for diffusers models) get the mean of their searched
+            ``pre_quant_scale``, the scale export would give them. Used by :func:`svdquant`.
 
     See :class:`AWQLiteCalibConfig <modelopt.torch.quantization.config.AWQLiteCalibConfig>` for
     details on the remaining arguments.
@@ -1811,6 +1816,7 @@ def awq_lite(
             self.num_tokens = 0
             self.module = module
             self.is_enabled = True
+            self.input_peers = []  # per cache step: the helpers that read the same input tensor
 
         def setup(self):
             module = self.module
@@ -1871,7 +1877,7 @@ def awq_lite(
         self.awq_lite.loss[alpha] += loss.to(self.awq_lite.loss[alpha].device)
 
     def update_best_params(self):
-        if not self.awq_lite.is_enabled:
+        if not self.awq_lite.is_enabled or self.awq_lite.best_scale is not None:
             return
         self.awq_lite.loss.update({k: float(v) for k, v in self.awq_lite.loss.items()})
         self.awq_lite.best_alpha = min(self.awq_lite.loss, key=self.awq_lite.loss.get)
@@ -1901,6 +1907,8 @@ def awq_lite(
             return out_actual
 
         if AWQLiteHelper.cache_mode:
+            if fused_group_scale:
+                note_shared_input(self.awq_lite, input)
             # Get local tensor from Dtensor
             input = input.to_local() if hasattr(input, "to_local") else input
 
@@ -1934,6 +1942,69 @@ def awq_lite(
 
         # Now forward the actual output without any quantization
         return out_actual
+
+    shared_inputs: dict[int, tuple] = {}  # id(input) -> (weakref to input, helpers reading it)
+
+    def note_shared_input(helper, x):
+        # Identity, not data_ptr: a freed activation's memory can be reused by a later layer.
+        # The weakref proves the tensor is still the one recorded under this id.
+        entry = shared_inputs.get(id(x))
+        if entry is None or entry[0]() is not x:
+            if len(shared_inputs) > 4096:
+                for key in [k for k, (ref, _) in shared_inputs.items() if ref() is None]:
+                    del shared_inputs[key]
+            entry = (weakref.ref(x), [])
+            shared_inputs[id(x)] = entry
+        entry[1].append(helper)
+        helper.input_peers.append(entry[1])
+
+    def share_fused_group_scales(model):
+        """Give the linears that export fuses their mean pre_quant_scale.
+
+        Export replaces the pre_quant_scales of each fused group with their mean
+        (``preprocess_linear_fusion``). Taking the same mean here, before the scale is applied,
+        makes the weight smoothing and every later calibration step see the exported scale.
+        The groups come from export's own rule, applied to the inputs seen while caching.
+        """
+        from modelopt.torch.export.diffusers_utils import is_diffusers_object
+        from modelopt.torch.export.unified_export_hf import fused_linear_groups
+
+        helpers = [m.awq_lite for m in model.modules() if hasattr(m, "awq_lite")]
+        by_name = {h.name: h for h in helpers}
+        input_to_linear, keys_of = {}, {}
+        for h in helpers:  # model order, so every rank visits the groups in the same order
+            keys_of[h.name] = {
+                tuple(dict.fromkeys(p.name for p in peers)) for peers in h.input_peers
+            }
+            for key in keys_of[h.name]:
+                input_to_linear.setdefault(key, [by_name[n].module for n in key])
+            h.input_peers = []
+
+        num_groups = 0
+        for key, modules, _ in fused_linear_groups(
+            model,
+            input_to_linear,
+            qkv_only=is_diffusers_object(model),
+            name_of=lambda module: module.awq_lite.name,
+        ):
+            members = [m.awq_lite for m in modules]
+            if any(keys_of[m.name] != {key} for m in members) or not all(
+                m.is_enabled and m.num_search_steps > 0 for m in members
+            ):
+                warn_rank_0(
+                    f"awq_lite: {[m.name for m in members]} keep per-layer scales: they do not "
+                    "share an input on every step, or a member was not searched."
+                )
+                continue
+            for m in members:
+                update_best_params(m.module)
+            # The mean of the pre_quant_scales as export stores and averages them (weight dtype).
+            dtype, device = members[0].module.weight.dtype, members[0].best_scale.device
+            mean = torch.stack([(1.0 / m.best_scale).to(device, dtype) for m in members]).mean(0)
+            for m in members:
+                m.best_scale = 1.0 / mean.float()
+            num_groups += 1
+        print_rank_0(f"awq_lite: {num_groups} fused group(s) share their mean pre_quant_scale")
 
     # Pre-compute the name maps ONCE to avoid O(n^2) complexity in enable_weight_access_and_writeback
     names = module_name_maps(model)
@@ -2006,10 +2077,14 @@ def awq_lite(
         ):
             module.awq_lite.is_enabled = False
 
+    shared_inputs.clear()
     AWQLiteHelper.cache_mode = False
     print_rank_0("awq_lite: Searching parameters...")
     with torch.no_grad():
         forward_loop(model)
+
+    if fused_group_scale:
+        share_fused_group_scales(model)
 
     def postprocess(module, name):
         update_best_params(module)
@@ -2373,6 +2448,7 @@ def svdquant(
     forward_loop: ForwardLoop | None = None,
     lowrank: int = 32,
     skip_layers: list[str] | None = None,
+    fused_group_scale: bool = False,
     **kwargs,
 ):
     """Lite version of SVDQuant.
@@ -2421,7 +2497,7 @@ def svdquant(
                         quantizer.disable()
                         skipped_quantizers.append(quantizer)
 
-    awq(model, forward_loop, "awq_lite", **kwargs)
+    awq(model, forward_loop, "awq_lite", fused_group_scale=fused_group_scale, **kwargs)
 
     for quantizer in skipped_quantizers:
         quantizer.enable()
