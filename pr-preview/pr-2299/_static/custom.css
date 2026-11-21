@@ -1,0 +1,16 @@
+/* Hide Warnings outputs from rendered Jupyter Notebooks */
+div.nboutput.container div.output_area.stderr {
+    display: none;
+    visibility: hidden;
+}
+
+/* Use NVIDIA green for Shibuya's primary accent while retaining its accessible green palette. */
+html[data-accent-color="green"] {
+    --accent-9: #76b900;
+    --accent-a9: rgb(118 185 0 / 81%);
+}
+
+/* Show a `$` sign before bash code-blocks */
+div.highlight-bash pre::before {
+    content: "$ ";
+}

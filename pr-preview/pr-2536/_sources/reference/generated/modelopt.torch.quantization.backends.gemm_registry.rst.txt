@@ -1,0 +1,6 @@
+modelopt.torch.quantization.backends.gemm\_registry
+===================================================
+
+.. currentmodule:: modelopt.torch.quantization.backends
+
+.. autodata:: gemm_registry
