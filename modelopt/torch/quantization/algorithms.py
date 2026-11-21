@@ -54,7 +54,7 @@ from ._auto_quantize_cost import (
     normalize_auto_quantize_constraints,
 )
 from .config import LayerwiseConfig, QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
-from .conversion import set_quantizer_by_cfg
+from .conversion import _match_quantizer, set_quantizer_by_cfg
 from .ggml import GGML_FORMAT_REGISTRY
 from .ggml.common import PIN_OVERRIDES_WEIGHT, drop_search_scales
 from .nn import (
@@ -284,24 +284,87 @@ def _quantizer_compression(quantizer: TensorQuantizer) -> float:
 def _per_weight_compression(recipe: "QuantRecipe", quantizers: dict[str, nn.Module]) -> float:
     """The compression a candidate resolves an opted-in per-weight module's weights to.
 
-    A module is one search group, priced and exported at one format, so its weights must resolve
-    to one format: the same enabled quantizer stages (e.g. W4A8's two), or none (1.0). The cost
-    is the narrowest stage's, as recipes are costed.
+    A module is one search group, priced and exported at one format, so each of its weights must
+    be quantized alike, together with its input and output: the same enabled quantizer stages
+    (e.g. W4A8's two), or none (1.0). The cost is the narrowest weight stage's, as recipes are
+    costed.
     """
-    formats: dict[tuple, list[TensorQuantizer]] = {}
+    # Per weight, its enabled quantizer stages by role; a role whose quantizers are all disabled,
+    # or that the weight lacks (e.g. an output quantizer), leaves it unquantized alike.
+    projections: dict[str, dict[str, list[TensorQuantizer]]] = {}
     for attr, value in quantizers.items():
-        if "weight_quantizer" in attr:
-            enabled = [q for q in _iter_tensor_quantizers(value) if q.is_enabled]
-            formats[tuple(map(_tensor_quantizer_format_signature, enabled))] = enabled
+        if isinstance(value, SequentialQuantizer) and any(
+            isinstance(stage, SequentialQuantizer) for stage in value
+        ):
+            # Its replay could not rebuild such a quantizer, nor would export read it.
+            raise ValueError(
+                f"AutoQuantize candidate {recipe} applies a list config over another list config "
+                f"to {attr}, which nests their stages; give each quantizer one list config."
+            )
+        for role in ("input_quantizer", "weight_quantizer", "output_quantizer"):
+            if attr.endswith(role):
+                projection = projections.setdefault(attr.removesuffix(role), {})
+                if enabled := [q for q in _iter_tensor_quantizers(value) if q.is_enabled]:
+                    projection[role] = enabled
+    formats = {
+        tuple(
+            (role, tuple(map(_tensor_quantizer_format_signature, enabled)))
+            for role, enabled in sorted(projection.items())
+        )
+        for projection in projections.values()
+    }
     if len(formats) > 1:
         raise ValueError(
-            f"AutoQuantize candidate {recipe} gives the weights of one module different formats; "
-            "configure all of its weight quantizers alike."
+            f"AutoQuantize candidate {recipe} quantizes the weights of one module, or their "
+            "inputs, in different formats; configure all of its quantizers alike."
         )
-    enabled = next(iter(formats.values()), [])
+    enabled = next(iter(projections.values()), {}).get("weight_quantizer", [])
     compression = min(map(_quantizer_compression, enabled)) if enabled else 1.0
     effective_bits = recipe.config.effective_bits
     return effective_bits / 16 if effective_bits is not None and compression < 1.0 else compression
+
+
+def _cfg_to_dict(v):
+    if isinstance(v, mtq_config.QuantizerAttributeConfig):
+        return {
+            "num_bits": v.num_bits,
+            **v.model_dump(exclude_defaults=True),
+        }
+    if isinstance(v, list):
+        return [_cfg_to_dict(c) for c in v]
+    return v
+
+
+def _set_and_record_quantizers(
+    module: nn.Module, attrs: Sequence[str], quant_cfg
+) -> list[dict[str, Any]]:
+    """Apply ``quant_cfg`` to ``module`` as :func:`set_quantizer_by_cfg` does, and record it.
+
+    Returns each rule as applied to each quantizer under ``attrs`` it matched, by module-relative
+    name, in order. Rules apply to the module as it changes, e.g. to the stages a list config
+    creates, so replaying this record on fresh quantizers reproduces them where re-matching the
+    rules' patterns would not.
+    """
+    applied = []
+    for rule in mtq_config.normalize_quant_cfg_list(quant_cfg):
+        parent_class = rule.get("parent_class")
+        parent_class = QuantModuleRegistry[parent_class] if parent_class else None
+        names = [
+            name
+            for name, quantizer in module.named_modules()
+            if name.split(".")[0] in attrs
+            and _match_quantizer(rule["quantizer_name"], name, quantizer, parent_class, module)
+        ]
+        set_quantizer_by_cfg(module, [rule])
+        for name in names:
+            entry: dict[str, Any] = {"quantizer_name": name, "enable": rule["enable"]}
+            if rule["cfg"] is not None:
+                entry["cfg"] = _cfg_to_dict(rule["cfg"])
+            if rule.get("parent_class") is not None:
+                # A name also reaches a sequential quantizer's stages, which the class keeps out.
+                entry["parent_class"] = rule["parent_class"]
+            applied.append(entry)
+    return applied
 
 
 def _rewritten_weight(recipe: "QuantRecipe", name: str, module: nn.Module, attr: str, quantizer):
@@ -681,7 +744,7 @@ class QuantRecipeHparam(Hparam):
             name: tuple(_get_replay_quantizer_attr(attr) for attr in _get_quantizer_attrs(module))
             for module, name in zip(quant_modules or [], self.quant_module_names)
         }
-        # Replayed with live matching: their candidates were validated and scored that way.
+        # Replayed from the record of how each candidate set them: see _set_and_record_quantizers.
         self.per_weight_module_names = [
             name
             for module, name in zip(quant_modules or [], self.quant_module_names)
@@ -694,6 +757,9 @@ class QuantRecipeHparam(Hparam):
         # A format shard scores only its own formats; None scores every choice.
         self._scored_recipes: set | None = None
         self._ladder: list[QuantRecipe] | None = None
+        # By recipe signature, so a searcher pruning its stored formats keeps them aligned.
+        self.per_weight_replay: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        module_names = dict(zip(quant_modules or [], self.quant_module_names))
 
         # Module hashes depend on object identity, so sets can produce different orders per rank.
         self.quant_modules = list(dict.fromkeys(quant_modules or []))
@@ -739,7 +805,14 @@ class QuantRecipeHparam(Hparam):
                         _make_fresh_quantizer_for_attr(quant_module, attr_name),
                     )
 
-                set_quantizer_by_cfg(quant_module, quant_recipe.config.quant_cfg)
+                if getattr(quant_module, "_auto_quantize_per_weight_quantizers", False):
+                    self.per_weight_replay.setdefault(quant_recipe.checkpoint_signature, {})[
+                        module_names[quant_module]
+                    ] = _set_and_record_quantizers(
+                        quant_module, attr_names, quant_recipe.config.quant_cfg
+                    )
+                else:
+                    set_quantizer_by_cfg(quant_module, quant_recipe.config.quant_cfg)
                 quantizers = {
                     attr_name: getattr(quant_module, attr_name) for attr_name in attr_names
                 }
@@ -1561,6 +1634,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     stats.get("costs"),
                     stats.get("uncompressed_cost"),
                     stats.get("per_weight_modules"),
+                    stats.get("per_weight_replay"),
                 )
                 for name, stats in self.candidate_stats.items()
             },
@@ -1578,6 +1652,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 continue
             stats = self.candidate_stats[name]
             stats["per_weight_modules"] = hparam.per_weight_module_names
+            if hparam.per_weight_replay and not hparam.is_fixed:  # fixed: replayed as the baseline
+                stats["per_weight_replay"] = hparam.per_weight_replay
             # Per stored format: a searcher may have pruned them since initialization.
             stats["costs"] = [hparam.get_cost(recipe) for recipe in stats["formats"]]
             # Keep the no-quant cost as denominator metadata even when no-quant is not
@@ -1787,7 +1863,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 ),
             }
         )
-        self._verify_constraint(search_recipes)
+        if not _has_per_weight_modules(self.model):
+            # Per-weight modules may cost less than a candidate's nominal bits, e.g. weights a
+            # later rule enables; the resolved check below gates them, before calibration.
+            self._verify_constraint(search_recipes)
         self._cost_model = cost_model
         self.insert_hparams_after_merge_rules(
             self.model,
@@ -2907,16 +2986,6 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False, algo
     else:
         best_recipe = search_state["best"]["recipe"]
 
-    def _cfg_to_dict(v):
-        if isinstance(v, mtq_config.QuantizerAttributeConfig):
-            return {
-                "num_bits": v.num_bits,
-                **v.model_dump(exclude_defaults=True),
-            }
-        if isinstance(v, list):
-            return [_cfg_to_dict(c) for c in v]
-        return v
-
     fixed_quantization_config = search_state.get("fixed_quantization_config")
     quant_cfg: list[dict] = (
         copy.deepcopy(fixed_quantization_config["quant_cfg"])
@@ -2950,27 +3019,26 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False, algo
             continue
         module_names = candidate_stat["module_names"]
         per_weight_modules = set(candidate_stat.get("per_weight_modules", ()))
+        if per_weight_modules:
+            if "per_weight_replay" not in candidate_stat:
+                raise ValueError(
+                    f"The search state of {hparam_name} does not record how its candidates set "
+                    "per-weight modules; resume the search with the model once (without a "
+                    "finalize step) to record it, or search again."
+                )
+            replay = candidate_stat["per_weight_replay"][recipe.checkpoint_signature]
         for module_name in module_names:
             if module_name in per_weight_modules:
-                # Replayed after every global rule, as the search applied the candidate: to fresh
-                # quantizers, through the rules matching their module-relative names, in order.
-                for quantizer_attr in _get_replay_quantizer_attrs(candidate_stat, module_name):
-                    quantizer_name = f"{module_name}.{quantizer_attr}"
-                    per_module_entries.append(
-                        {
-                            "quantizer_name": quantizer_name,
-                            "cfg": _cfg_to_dict(mtq_config.QuantizerAttributeConfig()),
-                            "enable": True,
-                        }
-                    )
-                    for rule in recipe.config.quant_cfg:
-                        if fnmatch.fnmatch(quantizer_attr, rule["quantizer_name"]):
-                            replayed = {"quantizer_name": quantizer_name, "enable": rule["enable"]}
-                            if rule["cfg"] is not None:
-                                replayed["cfg"] = _cfg_to_dict(rule["cfg"])
-                            if rule.get("parent_class") is not None:
-                                replayed["parent_class"] = rule["parent_class"]
-                            per_module_entries.append(replayed)
+                # After every global rule, as the search set them: fresh, then as recorded.
+                fresh = _cfg_to_dict(mtq_config.QuantizerAttributeConfig())
+                per_module_entries.extend(
+                    {"quantizer_name": f"{module_name}.{attr}", "cfg": fresh, "enable": True}
+                    for attr in _get_replay_quantizer_attrs(candidate_stat, module_name)
+                )
+                per_module_entries.extend(
+                    {**entry, "quantizer_name": f"{module_name}.{entry['quantizer_name']}"}
+                    for entry in replay[module_name]
+                )
         if recipe == QuantRecipe(quant_cfg=None):
             continue
         for module_name in module_names:

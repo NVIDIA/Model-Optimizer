@@ -1143,14 +1143,33 @@ _W1_INT8_W2_FP8 = [
     {"quantizer_name": "*w1_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
     {"quantizer_name": "*w2_weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
 ]
+# Alike weights, but export reads one projection's activations as the module's format.
+_W1_INPUT_ONLY = [
+    {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+    {"quantizer_name": "*w1_input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+]
+
+
+# A list config over a list config nests stages, which neither replay nor export can rebuild.
+_W4A8 = [{"num_bits": 4, "block_sizes": {-1: 16}}, {"num_bits": 8, "axis": 0}]
+_NESTED = [
+    {"quantizer_name": "*weight_quantizer", "cfg": _W4A8},
+    {"quantizer_name": "*w[12]_weight_quantizer", "cfg": _W4A8},
+]
 
 
 @pytest.mark.parametrize(
-    "entries",
-    [_W1_ONLY, _W1_INT8_W2_INT4, _W1_INT8_W2_FP8],
-    ids=["partial", "mixed", "same_cost"],
+    ("entries", "refusal"),
+    [
+        (_W1_ONLY, "different formats"),
+        (_W1_INT8_W2_INT4, "different formats"),
+        (_W1_INT8_W2_FP8, "different formats"),
+        (_W1_INPUT_ONLY, "different formats"),
+        (_NESTED, "nests their stages"),
+    ],
+    ids=["partial", "mixed", "same_cost", "one_input", "nested"],
 )
-def test_auto_quantize_refuses_mixed_weight_formats_and_hands_the_model_back(entries):
+def test_auto_quantize_refuses_mixed_weight_formats_and_hands_the_model_back(entries, refusal):
     mixed = {"quant_cfg": [{"quantizer_name": "*", "enable": False}, *entries], "algorithm": "max"}
     QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)
     try:
@@ -1168,7 +1187,7 @@ def test_auto_quantize_refuses_mixed_weight_formats_and_hands_the_model_back(ent
                 num_score_steps=2,
             )
 
-        with pytest.raises(ValueError, match="different formats"):
+        with pytest.raises(ValueError, match=refusal):
             search([(mixed, "mixed")])
         # The refusal hands back the unconverted model, so a corrected search can run on it.
         assert not any(isinstance(module, QuantModule) for module in model.modules())
@@ -1236,50 +1255,6 @@ def test_kl_search_prefers_a_real_format_over_a_nominally_cheaper_no_op():
         QuantModuleRegistry.unregister(_BmmExperts)
     assert str(search_state["best"]["recipe"]["experts.quant_recipe"]).startswith("INT8")
     assert search_state["best"]["is_satisfied"]
-
-
-def test_get_auto_quantize_config_replays_per_weight_modules_as_scored():
-    # The search matched this full-path rule against bare names, so both weights were scored BF16.
-    recipe = QuantRecipe(
-        {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "experts.w1_weight_quantizer",
-                    "cfg": {"num_bits": 8, "axis": 0},
-                },
-            ],
-            "algorithm": "max",
-        },
-        name="w1_path",
-    )
-    attrs = [
-        "w1_input_quantizer",
-        "w1_weight_quantizer",
-        "w2_input_quantizer",
-        "w2_weight_quantizer",
-    ]
-    search_state = {
-        "best": {"recipe": {"experts.quant_recipe": recipe}},
-        "candidate_stats": {
-            "experts.quant_recipe": {
-                "module_names": ["experts"],
-                "quantizer_attrs": {"experts": attrs},
-                "per_weight_modules": ["experts"],
-            }
-        },
-        "disabled_layers": [],
-    }
-    config = mtq.get_auto_quantize_config(search_state)
-    QuantModuleRegistry.register({_BmmExperts: "test.BmmExperts"})(_QuantBmmExperts)
-    try:
-        model = torch.nn.ModuleDict({"experts": _BmmExperts()})
-        replace_quant_module(model)
-    finally:
-        QuantModuleRegistry.unregister(_BmmExperts)
-    set_quantizer_by_cfg(model, config["quant_cfg"])
-    assert not model["experts"].w1_weight_quantizer.is_enabled
-    assert not model["experts"].w2_weight_quantizer.is_enabled
 
 
 def test_ladder_of_a_cost_excluded_group_leads_with_its_real_low_bit_format():
