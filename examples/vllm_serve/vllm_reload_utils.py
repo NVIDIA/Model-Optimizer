@@ -152,7 +152,11 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     # Check if this is a non-expert gate/up projection that needs merging. Only *routed* experts
     # (``experts.<i>.``) merge into w13/w2 above; shared experts are a plain MLP whose gate/up
     # still merge into ``gate_up_proj``, so they must not be excluded by the "experts" substring.
-    if "mixer" not in key and not re.search(r"\.experts\.\d+\.", key):
+    if (
+        "mixer" not in key
+        and not re.search(r"\.experts\.\d+\.", key)
+        and not re.search(r"\.(self_attn|linear_attn)\.", key)
+    ):
         gate_up_match = re.search(r"(.*\.)(gate|up)_proj\.([^.]+_quantizer)(\..+)?$", key)
         if gate_up_match:
             suffix = gate_up_match.group(4) or ""
@@ -412,7 +416,7 @@ def filter_modelopt_state_quantizer_state_for_model(
     Align quantizer_state in modelopt_state metadata with the model.
 
     - Removes keys not in the model (handles TP sharding - each rank has a subset).
-    - Removes keys only when the quantizer is disabled (in the model).
+    - Restores saved configuration even when a newly converted quantizer is disabled.
     - Adds keys for quantizers in the model but not in metadata (e.g. disabled/excluded).
     Modifies modelopt_state in place. Call after convert_to_quantized_model so the model has
     quantizers.
@@ -422,36 +426,17 @@ def filter_modelopt_state_quantizer_state_for_model(
         model: Model with quantizers (must already be converted)
     """
     from modelopt.torch.quantization.conversion import quantizer_state
-    from modelopt.torch.quantization.nn import TensorQuantizer
-    from modelopt.torch.utils import get_unwrapped_name
 
     model_qstate = quantizer_state(model)
     model_keys = set(model_qstate.keys())
-    # Build name -> is_enabled for quantizers in the model
-    disabled_keys = set()
-    for name, module in model.named_modules():
-        if isinstance(module, (TensorQuantizer, SequentialQuantizer)):
-            unwrapped_name = get_unwrapped_name(name, model)
-            if not getattr(module, "is_enabled", True):
-                disabled_keys.add(unwrapped_name)
-
     for mode_entry in modelopt_state.get("modelopt_state_dict", []):
         metadata = mode_entry[1].get("metadata", {})
         if "quantizer_state" in metadata:
             saved = metadata["quantizer_state"]
 
-            # Keep keys that exist in the model. Remove disabled quantizers UNLESS they
-            # have registered buffers (e.g. _pre_quant_scale from AWQ/smoothquant on a
-            # disabled input_quantizer). Those buffers must reach _reset_pytorch_state_from_metadata
-            # so they get registered before set_quantizer_state_dict loads the values.
-            def _has_buffers(state: dict) -> bool:
-                return bool(state.get("_pytorch_state_metadata", {}).get("buffers"))
-
-            filtered = {
-                k: v
-                for k, v in saved.items()
-                if k in model_keys and (k not in disabled_keys or _has_buffers(v))
-            }
+            # Fresh conversion defaults must not override the saved recipe. Dynamic
+            # quantizers may be active without owning any calibration buffers.
+            filtered = {k: v for k, v in saved.items() if k in model_keys}
             # Add state for quantizers in model but not in metadata (e.g. disabled/excluded)
             for k in model_keys - filtered.keys():
                 state = model_qstate[k]
