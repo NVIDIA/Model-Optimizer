@@ -178,6 +178,7 @@ Changelog
 - ``export_hf_checkpoint`` now reads how a model is distributed from the plan recorded on it, and raises for an FSDP2-sharded model, or one in a multi-rank run, that carries none. ``load_pretrained`` and ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` record it; for a model you distribute yourself (``fsdp2_wrap`` and ``parallel_load_and_prepare_fsdp2`` record none), or export from several ranks as a DDP script does, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it, e.g. ``DistributionPlan(world_size)`` when every rank holds the whole model.
 - Streaming speculative-decoding training's vLLM connector (``modelopt.torch.speculative.plugins.rdma_hidden_states_connector``) now requires vLLM 0.22 or later. It is tested with vLLM 0.29 and later.
 - The yes/no environment variables ``MODELOPT_NVFP4_TRITON_SWEEP``, ``MODELOPT_SKIP_WEIGHT_QUANT_CHECK`` and ``MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP`` now take ``1``/``0``, ``true``/``false``, ``yes``/``no`` or ``on``/``off`` in any case and raise on any other value, which they used to ignore. ``modelopt.env`` documents every ``MODELOPT_*`` variable ModelOpt reads.
+- Megatron checkpoints now save the per-row weight quantizer state (e.g. FP8 per-channel, INT4 AWQ) of a gated (SwiGLU) MLP's ``linear_fc1`` in Megatron's SwiGLU layout, which earlier ModelOpt versions cannot load. Checkpoints saved by earlier versions still load, and are saved in the new layout from then on.
 
 **Deprecations**
 
@@ -270,6 +271,7 @@ Changelog
 - Nested ``only_student_forward()`` and ``only_teacher_forward()`` contexts now preserve the enclosing execution mode, including when an inner context is disabled or raises an exception.
 - Fix Megatron Top-K/Top-P distillation gradients being multiplied by the tensor-parallel size when tensor parallelism is enabled; reported loss values are unchanged.
 - Fix Megatron Top-K/Top-P distillation running out of memory at long sequence lengths with large vocabularies: since 0.48 its full-vocabulary normalizers kept several float32 copies of the logits alive. It now adds about one copy of the logits in their own dtype, and stays accurate for logits with a large common offset.
+- Fix loading a Megatron checkpoint at another tensor parallelism when a gated (SwiGLU) MLP's ``linear_fc1`` has per-row weight quantizer state (e.g. FP8 per-channel, INT4 AWQ): the state was applied to the wrong rows.
 
 *Misc*
 
