@@ -16,6 +16,7 @@
  */
 
 #include <ATen/ATen.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cfloat>
 #include <cuda_fp8.h>
@@ -69,6 +70,8 @@ __global__ void fake_e4m3fy_with_axis_cuda_kernel(const T *inputs, size_t n, con
 }
 
 at::Tensor fake_e4m3fy_with_axis(at::Tensor inputs, at::Tensor amax, int axis) {
+  // Launch on the inputs' GPU, which need not be the current one.
+  c10::cuda::CUDAGuard guard(inputs.device());
   inputs = inputs.contiguous();
   amax = amax.contiguous().to(at::kFloat);
   auto outputs = torch::empty_like(inputs);
@@ -92,6 +95,7 @@ at::Tensor fake_e4m3fy_with_axis(at::Tensor inputs, at::Tensor amax, int axis) {
 }
 
 at::Tensor fake_e4m3fy(at::Tensor inputs, at::Tensor amax) {
+  c10::cuda::CUDAGuard guard(inputs.device());
   inputs = inputs.contiguous();
   amax = amax.view(-1).to(at::kFloat);
   size_t numel = inputs.numel();
