@@ -21,6 +21,7 @@ Changelog
 *Quantization - QAT / QAD*
 
 - Add ``examples/llm_qat/dump_teacher_v3.py`` to write the teacher's top-k log-probs as Megatron-LM offline KD V3 corpus sources, so a vLLM or Hugging Face teacher can feed Megatron-LM offline distillation. The writer is ``modelopt.torch.distill.plugins.offline_kd_v3``.
+- Add offline QAD to ``examples/llm_qat``: dump the teacher's top-k log-probs once as a V3 corpus with ``dump_teacher_v3.py``, then train with ``--offline_teacher_dir`` instead of loading the teacher. ``--offline_teacher_top_k`` trains on only the first k of them.
 
 *Quantization - Export & Deployment*
 

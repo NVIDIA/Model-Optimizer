@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Write teacher targets as Megatron-LM offline KD V3 corpus sources.
+"""Write and read teacher targets as Megatron-LM offline KD V3 corpus sources.
 
 Megatron-LM's offline KD V3 format (``docs/user-guide/features/offline_logits_distillation_v3.md``,
 NVIDIA/Megatron-LM#9352) stores each sample's exact inputs next to the teacher's sparse top-k
@@ -21,24 +21,121 @@ log-probs, so a student trains on the cache alone. A corpus source is a director
 directories, each holding an Arrow IPC part and an ``index.json`` written last, which publishes the
 chunk.
 
-The first section adapts Hugging Face rows and teacher configs to the format. The second mirrors
-Megatron-LM's writer, which ModelOpt cannot import; each of its definitions names the Megatron-LM
-code whose output it reproduces byte for byte.
+The first section adapts Hugging Face rows and teacher configs to the format and reads sources
+back. The second mirrors Megatron-LM's writer, which ModelOpt cannot import; each of its
+definitions names the Megatron-LM code whose output it reproduces byte for byte.
 """
 
 import base64
+import glob
 import hashlib
 import json
 import os
+from collections import OrderedDict
 
 import numpy as np
 import pyarrow as pa
 import torch
 
-__all__ = ["chunk_dir", "corpus_settings", "publish_chunk", "strip_row", "topk_targets"]
+__all__ = [
+    "CorpusSource",
+    "chunk_dir",
+    "corpus_settings",
+    "publish_chunk",
+    "strip_row",
+    "topk_targets",
+]
 
 
-# ModelOpt side: Hugging Face rows in, and the settings the format leaves to each producer.
+# ModelOpt side: Hugging Face rows in and out, and the settings the format leaves to each producer.
+
+
+class CorpusSource:
+    """Random access to the samples of one corpus source, e.g. a ``dump_teacher_v3.py`` split.
+
+    The published chunks must share one settings dict, written for ``tokenizer``, and hold exactly
+    ``num_samples`` samples without overlapping. A block is the unit of compression, so the last few
+    decoded blocks are kept.
+    """
+
+    def __init__(self, source: str, tokenizer, cached_blocks: int = 4):
+        """Index the published chunks of ``source``."""
+        indexes = []
+        for path in sorted(glob.glob(os.path.join(source, "chunk-*", "index.json"))):
+            with open(path) as f:
+                indexes.append((os.path.dirname(path), json.load(f)))
+        if not indexes:
+            raise FileNotFoundError(f"{source} has no published chunks.")
+        self.settings = indexes[0][1]["settings"]
+        contract = self.settings["contract"]
+        if contract["tokenizer"]["sha256"] != _tokenizer_fingerprint(tokenizer):
+            raise ValueError(f"{source} was written with another tokenizer.")
+        self._blocks, rows, spans = [], [0], []
+        for directory, index in indexes:
+            if index["settings"] != self.settings:
+                raise ValueError(f"{directory} has other settings than the rest of {source}.")
+            producer = index.get("producer", {})
+            if "start_iteration" in producer and "end_iteration" in producer:
+                spans.append((producer["start_iteration"], producer["end_iteration"], directory))
+            schemas = [
+                pa.ipc.read_schema(pa.py_buffer(base64.b64decode(s))) for s in index["schemas"]
+            ]
+            for part in index["parts"]:
+                path = os.path.join(directory, part["path"])
+                for block in part["blocks"]:
+                    self._blocks.append(
+                        (path, schemas[part["schema"]], block["offset"], block["length"])
+                    )
+                    rows.append(block["rows"])
+        for (_, end, first), (start, _, second) in zip(sorted(spans), sorted(spans)[1:]):
+            if start < end:
+                raise ValueError(f"{first} and {second} overlap.")
+        self._starts = np.cumsum(rows)
+        if self._starts[-1] != contract["num_samples"]:
+            raise ValueError(
+                f"{source} holds {self._starts[-1]} of its {contract['num_samples']} samples; "
+                "finish writing it first."
+            )
+        self._cached_blocks = cached_blocks
+        self._cache = OrderedDict()
+
+    def __len__(self) -> int:
+        return int(self._starts[-1])
+
+    def __getitem__(self, i: int) -> dict:
+        """Sample ``i`` as numpy arrays; ``indices`` joins the split index columns into int64."""
+        if not 0 <= i < len(self):
+            raise IndexError(i)
+        block = int(np.searchsorted(self._starts, i, side="right")) - 1
+        batch = self._read_block(block)
+        sample = {}
+        for name, column in zip(batch.schema.names, batch.columns):
+            values = column[i - int(self._starts[block])].values
+            if pa.types.is_fixed_size_list(values.type):
+                width = values.type.list_size
+                values = values.flatten().to_numpy(zero_copy_only=False).reshape(-1, width)
+            else:
+                values = values.to_numpy(zero_copy_only=False)
+            sample[name] = values.copy()  # Arrow's buffers are read-only.
+        indices = sample.pop("indices_low").astype(np.int64)
+        if "indices_high" in sample:
+            indices |= sample.pop("indices_high").astype(np.int64) << 16
+        sample["indices"] = indices
+        return sample
+
+    def _read_block(self, block: int) -> pa.RecordBatch:
+        if block in self._cache:
+            self._cache.move_to_end(block)
+            return self._cache[block]
+        path, schema, offset, length = self._blocks[block]
+        with open(path, "rb") as f:
+            f.seek(offset)
+            message = pa.ipc.read_message(pa.py_buffer(f.read(length)))
+        batch = pa.ipc.read_record_batch(message, schema)
+        self._cache[block] = batch
+        if len(self._cache) > self._cached_blocks:
+            self._cache.popitem(last=False)
+        return batch
 
 
 def strip_row(input_ids: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100) -> dict:
