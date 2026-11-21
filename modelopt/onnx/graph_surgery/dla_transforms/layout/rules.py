@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 __all__ = [
     "AXIS_RULES",
     "INDEXING_RULES",
+    "NATIVE_RULES",
+    "NORMALIZATION_RULES",
     "RANK_ADAPTER_RULES",
     "SHAPE_RULES",
     "ArgMaxLayout",
@@ -42,7 +44,12 @@ __all__ = [
     "FlattenLayout",
     "GatherElementsLayout",
     "GatherLayout",
+    "GroupQueryAttentionLayout1",
+    "GroupQueryAttentionLayout2",
+    "GroupQueryAttentionLayout3",
+    "InstanceNormalizationLayout",
     "LogSoftmaxAxisLayout",
+    "LpNormalizationLayout",
     "QuantizeLinearAxisLayout",
     "ReduceMaxLayout",
     "ReduceMeanLayout",
@@ -704,6 +711,233 @@ AXIS_RULES = (
     ContribQuantizeLinearAxisLayout,
     SoftmaxAxisLayout,
     TopKAxisLayout,
+)
+
+
+class LpNormalizationLayout(_LayoutRule):
+    """Map LpNormalization axes and optionally lower scaled last-axis L2 for FP16.
+
+    The FP16 form is x / Max(Sqrt(ReduceSum(x*x)), 2**-14), only for p=2
+    followed by one constant-scaled Mul. Existing square/sum overflow behavior
+    and the minimum normal FP16 denominator are retained.
+    """
+
+    rule_name = "LpNormalization4D"
+
+    def pattern(self, op, x):
+        """Capture standard LpNormalization and its consumer-visible output."""
+        return op.LpNormalization(x, _outputs=["result"])
+
+    def check(self, context, result, **_):
+        """Choose axis remapping or the existing supported FP16 L2 decomposition."""
+        node = context.root
+        if node not in self.graph.native_shapes:
+            return False
+        axis = node.attributes.get_int("axis", -1)
+        source = self.graph.native_shapes[node][0][0]
+        promoted = self.graph.planned_shapes.get(node.inputs[0].name, source)
+        if source is None or promoted is None:
+            raise ValueError("TODO: provide static LpNormalization data dimensions")
+        mapped = _mapped_axis(axis, source, tuple(promoted))
+        if (
+            len(source) < 4
+            and node.inputs[0].name in self.graph.planned_shapes
+            and axis >= 0
+            and mapped == len(promoted) - 1
+        ):
+            mapped = -1
+        uses = node.outputs[0].uses()
+        scaled = False
+        if len(uses) == 1:
+            user, _ = next(iter(uses))
+            scaled = (
+                user.op_type == "Mul"
+                and not user.domain
+                and any(
+                    value is not node.outputs[0] and constant_array(value) is not None
+                    for value in user.inputs
+                )
+            )
+        self.decompose = (
+            self.graph.force_fp16_activations
+            and node.attributes.get_int("p", 2) == 2
+            and axis % len(source) == len(source) - 1
+            and scaled
+        )
+        self.axis, self.target_shape = -1 if self.decompose else mapped, promoted
+        return self.decompose or mapped != axis
+
+    def rewrite(self, op, x, result):
+        """Emit remapped normalization or its explicit FP16 arithmetic graph."""
+        node = result.producer()
+        if not self.decompose:
+            attrs = dict(node.attributes)
+            attrs["axis"] = self.axis
+            output = op.LpNormalization(x, **attrs)
+            output.type, output.shape = x.type, ir.Shape(self.target_shape)
+            return output
+
+        def emit(operator, inputs, shape, **attrs):
+            value = operator(*inputs, **attrs)
+            value.type, value.shape = x.type, ir.Shape(shape)
+            return value
+
+        squared = emit(op.Mul, [x, x], self.target_shape)
+        axes = self.graph.add_initializer(op, np.array([self.axis], np.int64), "l2_axes")
+        reduced_shape = list(self.target_shape)
+        reduced_shape[self.axis] = 1
+        summed = emit(op.ReduceSum, [squared, axes], reduced_shape, keepdims=1)
+        norm = emit(op.Sqrt, [summed], reduced_shape)
+        floor = self.graph.add_initializer(op, np.array(2**-14, np.float32), "l2_floor")
+        safe = emit(op.Max, [norm, floor], reduced_shape)
+        return emit(op.Div, [x, safe], self.target_shape)
+
+
+NORMALIZATION_RULES = (LpNormalizationLayout,)
+
+
+class InstanceNormalizationLayout(_LayoutRule):
+    """Preserve rank-three InstanceNormalization channel semantics in a 4D graph.
+
+    [N,C,L] is normalized through [N,C,L,1], then reshaped to its planned
+    [1,N,C,L] view. Leading-one promotion alone would move the channel axis.
+    """
+
+    rule_name = "InstanceNormalizationNative1"
+
+    def pattern(self, op, x):
+        """Capture InstanceNormalization without binding its scale or bias."""
+        return op.InstanceNormalization(x, _allow_other_inputs=True, _outputs=["result0"])
+
+    def check(self, context, **_):
+        """Select rank-three normalization whose data participates in the 4D plan."""
+        node = context.root
+        if node not in self.graph.native_shapes:
+            return False
+        shape = self.graph.native_shapes[node][0][0]
+        if shape is None:
+            raise ValueError("TODO: support symbolic InstanceNormalization dimensions")
+        if len(shape) not in (3, 4):
+            raise ValueError("TODO: support InstanceNormalization outside ranks three and four")
+        return len(shape) == 3 and (
+            node.inputs[0].name in self.graph.planned_shapes
+            or node.outputs[0].name in self.graph.planned_shapes
+        )
+
+    def rewrite(self, op, result0, **_):
+        """Normalize through the native-channel spatial view and restore its output."""
+        node = result0.producer()
+        inputs, outputs = self.graph.native_shapes[node]
+        args = list(node.inputs)
+        spatial = [*inputs[0], 1]
+        args[0] = self._reshape(op, args[0], spatial, "instance_spatial_shape")
+        result = op.InstanceNormalization(*args, **dict(node.attributes))
+        result.type, result.shape = node.outputs[0].type, ir.Shape(spatial)
+        output = self.graph.planned_shapes.get(node.outputs[0].name, outputs[0])
+        return self._reshape(op, result, output, "instance_output_shape")
+
+
+class _GroupQueryAttentionLayout(_LayoutRule):
+    def check(self, context, **_):
+        node = context.root
+        if node not in self.graph.native_shapes or len(node.outputs) != self.output_count:
+            return False
+        if self.graph.model.graph.opset_imports.get("com.microsoft") != 1:
+            raise ValueError("TODO: support this GroupQueryAttention contrib version")
+        inputs, outputs = self.graph.native_shapes[node]
+        return any(
+            value is not None
+            and value.name in self.graph.planned_shapes
+            and tuple(self.graph.planned_shapes[value.name]) != shape
+            for value, shape in zip(node.inputs, inputs, strict=True)
+        ) or any(
+            value.name in self.graph.planned_shapes
+            and tuple(self.graph.planned_shapes[value.name]) != shape
+            for value, shape in zip(node.outputs, outputs, strict=True)
+        )
+
+    def rewrite(self, op, result0, **_):
+        node = result0.producer()
+        inputs, outputs = self.graph.native_shapes[node]
+        args = list(node.inputs)
+        for index, (value, source) in enumerate(zip(args, inputs, strict=True)):
+            if (
+                value is not None
+                and value.name in self.graph.planned_shapes
+                and tuple(self.graph.planned_shapes[value.name]) != source
+            ):
+                args[index] = self._reshape(op, value, source, "attention_native_input")
+        results = op.GroupQueryAttention(
+            *args, _domain="com.microsoft", _outputs=self.output_count, **dict(node.attributes)
+        )
+        results = [results] if self.output_count == 1 else list(results)
+        for index, (result, original, shape) in enumerate(
+            zip(results, node.outputs, outputs, strict=True)
+        ):
+            result.type = original.type
+            result.shape = ir.Shape(shape) if shape is not None else original.shape
+            target = self.graph.planned_shapes.get(original.name)
+            if target is not None and tuple(target) != shape:
+                results[index] = self._reshape(op, result, target, "attention_output_shape")
+        return results[0] if self.output_count == 1 else results
+
+
+class GroupQueryAttentionLayout1(_GroupQueryAttentionLayout):
+    """Wrap one-output contrib GQA with native-input and planned-output Reshapes.
+
+    A promoted [1,B,S,H] query is restored to [B,S,H] for GQA. Original
+    optional operands/attributes survive; emitted GQA nodes are absent from the
+    layout-entry snapshot and therefore cannot acquire repeated adapters.
+    """
+
+    output_count = 1
+    rule_name = "GroupQueryAttentionNative1"
+
+    def pattern(self, op, x):
+        """Capture exactly the one-output GQA pattern; check verifies actual arity."""
+        return op.GroupQueryAttention(
+            x, _domain="com.microsoft", _allow_other_inputs=True, _outputs=["result0"]
+        )
+
+
+class GroupQueryAttentionLayout2(_GroupQueryAttentionLayout):
+    """Adapt two-output contrib GQA while preserving each declared output's native shape."""
+
+    output_count = 2
+    rule_name = "GroupQueryAttentionNative2"
+
+    def pattern(self, op, x):
+        """Capture the two-output GQA variant and retain optional operands."""
+        return op.GroupQueryAttention(
+            x, _domain="com.microsoft", _allow_other_inputs=True, _outputs=["result0", "result1"]
+        )
+
+
+class GroupQueryAttentionLayout3(_GroupQueryAttentionLayout):
+    """Adapt GQA with attention, present-key and present-value outputs independently.
+
+    Only outputs whose 4D plan differs from their native view receive adapters;
+    four-dimensional key/value caches retain their shapes and connections.
+    """
+
+    output_count = 3
+    rule_name = "GroupQueryAttentionNative3"
+
+    def pattern(self, op, x):
+        """Capture GQA with attention and both present-cache outputs."""
+        return op.GroupQueryAttention(
+            x,
+            _domain="com.microsoft",
+            _allow_other_inputs=True,
+            _outputs=["result0", "result1", "result2"],
+        )
+
+
+NATIVE_RULES = (
+    GroupQueryAttentionLayout1,
+    GroupQueryAttentionLayout2,
+    GroupQueryAttentionLayout3,
+    InstanceNormalizationLayout,
 )
 
 
