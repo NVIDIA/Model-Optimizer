@@ -34,10 +34,11 @@ import transformers
 from transformers import HfArgumentParser, PreTrainedModel, Trainer, TrainerCallback
 from transformers import modeling_utils as tf_modeling_utils
 
-from modelopt.torch.utils import print_rank_0, report_memory
+from modelopt.torch.utils import get_unwrapped_name, print_rank_0, report_memory
 
 from ..conversion import ModeloptStateManager, load_modelopt_state
 from .huggingface import (
+    _UNCONVERTED_SUBMODULES_FNS,
     _get_modelopt_state_path,
     _new_save_pretrained,
     _patch_model_init_for_modelopt,
@@ -169,12 +170,37 @@ def _legacy_tied_weights_keys_as_dict(model: nn.Module):
                 del module._tied_weights_keys
 
 
+@contextmanager
+def _skip_conversion_of_registered_submodules():
+    """Pass the registered submodules' state through transformers' save-time weight conversion."""
+    revert = getattr(tf_modeling_utils, "revert_weight_conversion", None)
+    if revert is None:
+        yield
+        return
+
+    def revert_other_state(model, state_dict):
+        names = (name for fn in _UNCONVERTED_SUBMODULES_FNS for name in fn(model))
+        # State-dict keys drop the names of wrappers such as activation checkpointing's.
+        prefixes = tuple(f"{get_unwrapped_name(name)}." for name in names)
+        kept = {key: value for key, value in state_dict.items() if key.startswith(prefixes)}
+        if not kept:
+            return revert(model, state_dict)
+        other = {key: value for key, value in state_dict.items() if key not in kept}
+        return {**revert(model, other), **kept}
+
+    tf_modeling_utils.revert_weight_conversion = revert_other_state
+    try:
+        yield
+    finally:
+        tf_modeling_utils.revert_weight_conversion = revert
+
+
 def _save_pretrained_with_checks(self, save_directory, *args, **kwargs):
     if getattr(self, "_tp_size", None) is not None and ModeloptStateManager.is_converted(self):
         raise NotImplementedError(
             "ModelOpt does not support saving tensor parallel sharded Huggingface transformer models yet. "
         )
-    with _legacy_tied_weights_keys_as_dict(self):
+    with _legacy_tied_weights_keys_as_dict(self), _skip_conversion_of_registered_submodules():
         return _new_save_pretrained(self, save_directory, *args, **kwargs)
 
 

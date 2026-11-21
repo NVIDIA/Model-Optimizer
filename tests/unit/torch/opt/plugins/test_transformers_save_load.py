@@ -22,6 +22,7 @@ import torch.nn as nn
 from _test_utils.torch.opt.utils import apply_mode_with_sampling
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
+    create_tiny_qwen3_moe_dir,
     get_tiny_qwen3vl,
     tf_modelopt_state_and_output_tester,
 )
@@ -126,6 +127,41 @@ def test_legacy_tied_weights_keys_as_dict_restores_class_attribute():
 
     assert _LegacyChild._tied_weights_keys == ["lm_head.weight"]
     assert "_tied_weights_keys" not in parent.child.__dict__
+
+
+@pytest.mark.parametrize(
+    "weight_cfg",
+    [
+        {"num_bits": 8, "axis": 0},
+        {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)}},
+    ],
+    ids=["int8", "nvfp4"],
+)
+def test_save_pretrained_quantized_fused_experts(tmp_path, weight_cfg):
+    """Quantized fused MoE experts save per expert by default and reload to the same state."""
+    model_ref = AutoModelForCausalLM.from_pretrained(
+        create_tiny_qwen3_moe_dir(tmp_path, dtype=torch.float32)
+    )
+    quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*experts*weight_quantizer*", "cfg": weight_cfg},
+    ]
+    mtq.quantize(
+        model_ref, {"quant_cfg": quant_cfg, "algorithm": "max"}, lambda m: m(**m.dummy_inputs)
+    )
+    model_ref.save_pretrained(tmp_path / "quantized")
+    # A caller's state_dict, as the HF Trainer passes, saves the same keys.
+    model_ref.save_pretrained(tmp_path / "from_state_dict", state_dict=model_ref.state_dict())
+
+    saved_keys = load_file(tmp_path / "quantized" / "model.safetensors").keys()
+    assert "model.layers.0.mlp.experts.0.gate_proj.weight" in saved_keys
+    assert "model.layers.0.mlp.experts.gate_up_proj_weight_quantizers.0._amax" in saved_keys
+    assert load_file(tmp_path / "from_state_dict" / "model.safetensors").keys() == saved_keys
+
+    model_test = AutoModelForCausalLM.from_pretrained(tmp_path / "quantized")
+    torch.testing.assert_close(model_test.state_dict(), model_ref.state_dict(), rtol=0, atol=0)
+    if weight_cfg["num_bits"] == 8:  # NVFP4 fake quant needs a GPU
+        tf_modelopt_state_and_output_tester(model_ref, model_test)
 
 
 def test_causal_lm_from_config(tmp_path):
