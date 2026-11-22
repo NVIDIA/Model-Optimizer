@@ -26,6 +26,7 @@ import math
 import os
 import re
 import sys
+import threading
 import warnings
 from collections import defaultdict
 from contextlib import contextmanager
@@ -2563,7 +2564,8 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         ):
             _orig_uwc = _FineGrainedFP8HfQuantizer.update_weight_conversions
 
-            # transformers 5.21+ passes the model too.
+            # Only reached on transformers < 5.10.1, or a newer one posing as it (the unit tests),
+            # where 5.21+ passes the model too.
             @functools.wraps(_orig_uwc)
             def _uwc_fixed(self, weight_conversions, *args, **kwargs):
                 convs = _orig_uwc(self, weight_conversions, *args, **kwargs)
@@ -2876,11 +2878,16 @@ def _hf_keeps_ep_apart() -> bool:
     return "ep_size" in {f.name for f in dataclasses.fields(hf_distributed.DistributedConfig)}
 
 
+# Held while _experts_sharded_over hooks transformers: overlapping scopes would restore each other's.
+_EXPERTS_SHARDED_OVER_ACTIVE = threading.Lock()
+
+
 @contextlib.contextmanager
 def _experts_sharded_over(ep_mesh, distributed_config):
     """Make ``from_pretrained`` shard the experts over ``ep_mesh`` on releases that build their own mesh.
 
-    Only the load given ``distributed_config`` is affected; any other load delegates unchanged.
+    Only the load given ``distributed_config`` is affected; any other load delegates unchanged. One
+    such load runs at a time: a second one while another is in progress is refused.
     """
     mixin = _transformers_mesh_builder()
     if mixin is None:
@@ -2917,6 +2924,8 @@ def _experts_sharded_over(ep_mesh, distributed_config):
         patches.append((distributor, "maybe_distribute_model", classmethod(_expert_plan_only)))
     # Every original is read before anything is patched, so a failed lookup patches nothing.
     originals = [(obj, attr, vars(obj)[attr]) for obj, attr, _ in patches]
+    if not _EXPERTS_SHARDED_OVER_ACTIVE.acquire(blocking=False):
+        raise RuntimeError("another expert-parallel load is in progress: load one model at a time.")
     try:
         for obj, attr, patched in patches:
             setattr(obj, attr, patched)
@@ -2924,6 +2933,7 @@ def _experts_sharded_over(ep_mesh, distributed_config):
     finally:
         for obj, attr, kept in originals:
             setattr(obj, attr, kept)
+        _EXPERTS_SHARDED_OVER_ACTIVE.release()
 
 
 @contextlib.contextmanager
