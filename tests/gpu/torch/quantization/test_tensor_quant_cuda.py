@@ -197,10 +197,16 @@ class TestScaledE4M3:
 
     def test_runs_on_the_inputs_gpu(self, need_2_gpus):
         """A tensor on a GPU other than the current one is cast by a kernel on its own GPU."""
-        if torch.cuda.get_device_capability(0) != torch.cuda.get_device_capability(1):
-            pytest.skip("the FP8 extension is built for the current GPU's architecture only")
         # Otherwise scaled_e4m3_impl falls back to eager, and there is no launch to check.
-        assert get_cuda_ext_fp8() is not None, "the FP8 extension is unavailable"
+        extension = get_cuda_ext_fp8()
+        assert extension is not None, "the FP8 extension is unavailable"
+        # A TORCH_CUDA_ARCH_LIST set before the build can leave out a GPU's architecture.
+        for gpu in (0, 1):
+            with torch.cuda.device(gpu):
+                try:
+                    extension.fake_e4m3fy(torch.ones(1, device=gpu), torch.ones((), device=gpu))
+                except RuntimeError as error:
+                    pytest.skip(f"the FP8 extension does not run on cuda:{gpu}: {error}")
         x = torch.randn(64, 16, device="cuda:1")
         activities = [torch.profiler.ProfilerActivity.CUDA]
         with torch.cuda.device(0), torch.profiler.profile(activities=activities) as profile:

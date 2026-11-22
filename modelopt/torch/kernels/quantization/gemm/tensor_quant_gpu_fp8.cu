@@ -16,6 +16,7 @@
  */
 
 #include <ATen/ATen.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cfloat>
@@ -89,6 +90,7 @@ at::Tensor fake_e4m3fy_with_axis(at::Tensor inputs, at::Tensor amax, int axis) {
     fake_e4m3fy_with_axis_cuda_kernel<<<numel / (BLOCK_SIZE * 4) + 1, BLOCK_SIZE, 0, stream>>>(
         inputs.data_ptr<scalar_t>(), numel, scale.data_ptr<float>(), inv_scale.data_ptr<float>(),
         axis_size, outer_size, outputs.data_ptr<scalar_t>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
   });
 
   return outputs;
@@ -109,6 +111,7 @@ at::Tensor fake_e4m3fy(at::Tensor inputs, at::Tensor amax) {
     fake_e4m3fy_kernel<<<numel / (BLOCK_SIZE * 4) + 1, BLOCK_SIZE, 0, stream>>>(
         inputs.data_ptr<scalar_t>(), numel, scale.data_ptr<float>(), inv_scale.data_ptr<float>(),
         outputs.data_ptr<scalar_t>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
   });
   return outputs;
 }
