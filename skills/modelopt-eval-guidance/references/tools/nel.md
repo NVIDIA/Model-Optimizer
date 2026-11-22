@@ -26,6 +26,18 @@ NEL has no run verdict of its own, so every check in `run-validity.md` applies. 
 - **Score fields:** the `Score Extraction` section of the matching task recipe; do not rely on ad hoc `results.yml`
   greps.
 
+## When the baseline fails the fault gate at the output cap
+
+The 2% response-fault gate counts responses that stopped at the output limit with no final answer. A reasoning
+model's long tail can exceed it at the NEL fallback budget (GPQA at 65536: 3.5% to 5.1% in four runs), so the
+baseline is invalid and no candidate comparison is possible. Do not stop there, and do not change one side only.
+The supported recovery is **one matched correction proposed by the evaluator with the evidence** (the length-stop
+and empty-answer counts, that prompt plus output still fits the served context, and the card's own guidance for
+long outputs), **approved by the parent or the user**, applied to the baseline and the candidate alike, with the
+original invalid run kept and the change labeled as a protocol change. In the earlier end-to-end runs raising the
+output budget from 65536 to 131072 on both sides, for GPQA only, brought the fault rate under the gate. If the
+approval is refused or the matched rerun is still invalid, report the comparison as blocked, not as a result.
+
 ## Doom loops
 
 Where `repetition_detection` goes in the config, and the `finish_reason` remap that the nemo-skills client needs, are
