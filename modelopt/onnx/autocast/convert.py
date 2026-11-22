@@ -56,10 +56,15 @@ def _capture_network_io_metadata(
 ) -> dict[str, list[onnx.ValueInfoProto]] | None:
     if not keep_io_types:
         return None
-    return {
+    metadata = {
         "input": [deepcopy(io) for io in model.graph.input],
         "output": [deepcopy(io) for io in model.graph.output],
     }
+    # GraphSanitizer.convert_fp64_to_fp32() turns FP64 I/O into FP32, so expect FP32 there.
+    for value in metadata["input"] + metadata["output"]:
+        if value.type.tensor_type.elem_type == onnx.TensorProto.DOUBLE:
+            value.type.tensor_type.elem_type = onnx.TensorProto.FLOAT
+    return metadata
 
 
 def convert_to_mixed_precision(
