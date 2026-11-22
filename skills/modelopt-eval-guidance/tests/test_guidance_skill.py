@@ -143,6 +143,15 @@ def test_nel_deletion_is_removing_files():
     assert adapters == {"nel_adapter.py", "gym_adapter.py"}
 
 
+def test_guidance_makes_the_tool_reference_the_first_read():
+    # round-5 NEL trials loaded the guidance but never opened their tool's file; step 0 must say to read it first
+    text = _text(_GUIDANCE / "SKILL.md")
+    assert re.search(
+        r"^0\. \*\*First, the reference file of the tool you are using\*\*", text, re.MULTILINE
+    )
+    assert "references/tools/<tool>.md" in text
+
+
 def test_each_tool_has_a_reference_and_the_index_lists_it():
     names = {p.name for p in _TOOL_FILES}
     assert names >= {"index.md", "nel.md", "gym.md"}
