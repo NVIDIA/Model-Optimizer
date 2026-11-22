@@ -182,12 +182,47 @@ def _sanitize_llama3_rope_config(config_data: dict[str, Any], model: Any) -> Non
             rope_config["rope_theta"] = rope_theta
 
 
-def sanitize_hf_config_for_deployment(config_data: dict[str, Any], model: Any) -> None:
+def _restore_source_field_names(
+    config_data: dict[str, Any], model_config: Any, source_config: Any
+) -> None:
+    """Write renamed top-level fields back under the names the source ``config.json`` used.
+
+    The export keeps the source's ``auto_map``, so a trusted reload builds the source's own config
+    class, which reads the source's field names. The class the export loaded with can rename them:
+    transformers' built-in ``nemotron_h_omni`` stores the source's ``llm_config`` as
+    ``text_config``, which the checkpoint's own class exposes only as a read-only property, so the
+    reload fails -- and renamed fields it does accept would silently fall back to their defaults.
+    """
+    auto_map = config_data.get("auto_map")
+    if not isinstance(source_config, dict) or not (
+        isinstance(auto_map, dict) and "AutoConfig" in auto_map
+    ):
+        return
+    renames = {
+        **getattr(model_config, "attribute_map", {}),
+        **getattr(model_config, "_legacy_field_names", {}),
+    }
+    for source_name, name in renames.items():
+        if (
+            source_name in source_config
+            and name not in source_config
+            and name in config_data
+            and source_name not in config_data
+        ):
+            config_data[source_name] = config_data.pop(name)
+
+
+def sanitize_hf_config_for_deployment(
+    config_data: dict[str, Any], model: Any, source_config: dict[str, Any] | None = None
+) -> None:
     """Sanitize exported Hugging Face config metadata for deployment runtimes.
 
     Fix conservative deployment-only config incompatibilities:
 
     * remove legacy config/model auto mappings from native NemotronH exports;
+    * write fields the loaded config class renamed back under the names ``source_config`` (the
+      source checkpoint's ``config.json``) used, when the export keeps the source's remote
+      ``AutoConfig``;
     * add missing llama3 ``rope_theta`` metadata when available;
     * trim trailing MTP/next-token-prediction ``layer_types`` entries only when
       the mismatch is exactly explained by next-token-prediction metadata.
@@ -202,6 +237,7 @@ def sanitize_hf_config_for_deployment(config_data: dict[str, Any], model: Any) -
             auto_map.pop(auto_class, None)
         if not auto_map:
             config_data.pop("auto_map")
+    _restore_source_field_names(config_data, model_config, source_config)
 
     _sanitize_llama3_rope_config(config_data, model)
 

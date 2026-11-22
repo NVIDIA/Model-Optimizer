@@ -296,6 +296,60 @@ def test_export_config_reloads_nemotron_h_with_source_auto_map(tmp_path, native,
     ).read_text()
 
 
+@pytest.mark.parametrize("rename_table", ["attribute_map", "_legacy_field_names"])
+def test_export_config_keeps_source_field_names_for_source_auto_map(tmp_path, rename_table):
+    """A loaded config class that renamed a field (as transformers' built-in ``nemotron_h_omni``
+    does ``llm_config`` -> ``text_config``) still exports it under the name the source's remote
+    config reads, where the renamed one is a read-only property.
+    """
+    transformers = pytest.importorskip("transformers")
+    from modelopt.torch.export.unified_export_hf import (
+        _write_hf_export_config,
+        save_non_weight_artifacts,
+    )
+
+    source, export = tmp_path / "source", tmp_path / "export"
+    source.mkdir()
+    (source / "configuration_source.py").write_text(
+        "from transformers import PretrainedConfig\n"
+        "class SourceConfig(PretrainedConfig):\n"
+        "    model_type = 'renamed_vlm'\n"
+        "    def __init__(self, llm_config=None, **kwargs):\n"
+        "        self.llm_config = llm_config\n"
+        "        super().__init__(**kwargs)\n"
+        "    @property\n"
+        "    def text_config(self):\n"
+        "        return self.llm_config\n"
+    )
+    auto_map = {"AutoConfig": "configuration_source.SourceConfig"}
+    llm_config = {"hidden_size": 8}
+    (source / "config.json").write_text(
+        json.dumps({"model_type": "renamed_vlm", "auto_map": auto_map, "llm_config": llm_config})
+    )
+
+    class LoadedConfig(transformers.PretrainedConfig):
+        model_type = "renamed_vlm"
+
+        def __init__(self, text_config=None, **kwargs):
+            self.text_config = text_config
+            super().__init__(**kwargs)
+
+    setattr(LoadedConfig, rename_table, {"llm_config": "text_config"})
+    model = torch.nn.Module()
+    model.config = LoadedConfig(text_config=llm_config, auto_map=auto_map)
+    model._modelopt_source_checkpoint = str(source)
+
+    save_non_weight_artifacts(model, export)
+    _write_hf_export_config(model, {"quantization": {"quant_algo": "FP8"}}, export)
+    reloaded = transformers.AutoConfig.from_pretrained(
+        export, trust_remote_code=True, local_files_only=True
+    )
+
+    assert reloaded.llm_config == llm_config
+    assert reloaded.quantization_config["quant_algo"] == "FP8"
+    assert model.config.text_config == llm_config
+
+
 def test_sanitize_hf_config_for_deployment_adds_rope_theta_to_llama3_rope_parameters():
     """Transformers 5.x requires rope_theta inside llama3 rope_parameters."""
     config_data = {

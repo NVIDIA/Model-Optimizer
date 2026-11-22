@@ -1779,13 +1779,12 @@ def _write_hf_export_config(
     original_config = f"{export_dir}/config.json"
     with open(original_config) as file:
         config_data = json.load(file)
+    source_config = _source_config_json(model)
     if remap_legacy_layer_types is not None:
         # Before the sanitize step: it trims trailing MTP entries from layer_types, and the
         # restore only matches a list that is still exactly the remap of the source's.
-        _restore_source_layer_types(
-            config_data, _source_config_json(model), getattr(model, "config", None)
-        )
-    sanitize_hf_config_for_deployment(config_data, model)
+        _restore_source_layer_types(config_data, source_config, getattr(model, "config", None))
+    sanitize_hf_config_for_deployment(config_data, model, source_config)
     if quantization_config is not None:
         config_data["quantization_config"] = quantization_config
     if export_sparse_attention_config is not None:
@@ -2106,11 +2105,7 @@ def _source_distributed_config_attrs(model: nn.Module):
     that cannot be read counts as having none. The run's values come back on exit, since the
     sharded model still reads them (transformers' ``tp_plan`` checks ``distributed_config``).
     """
-    source: Any = {}
-    ckpt = _source_checkpoint(model)
-    if ckpt and Path(ckpt, "config.json").is_file():
-        with contextlib.suppress(OSError, ValueError):
-            source = json.loads(Path(ckpt, "config.json").read_text())
+    source = _source_config_json(model)
 
     _missing = object()
     saved: list[tuple[Any, str, Any]] = []
