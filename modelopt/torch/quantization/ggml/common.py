@@ -252,7 +252,12 @@ def _pin_shapes(quantizer, weight: torch.Tensor):
 
 def pins_fit(quantizer, weight: torch.Tensor) -> bool:
     """Whether ``quantizer``'s pins have the shape of ``weight``'s."""
-    return all(buffer.shape == shape for _, buffer, shape, _ in _pin_shapes(quantizer, weight))
+    pins = list(_pin_shapes(quantizer, weight))
+    # Pins padded to whole blocks may have as many as another size's: compare the saved columns.
+    columns = getattr(quantizer, "_slices", (slice(None),))[-1].stop
+    if pins and columns is not None and columns != weight.shape[-1]:
+        return False
+    return all(buffer.shape == shape for _, buffer, shape, _ in pins)
 
 
 def resize_pins(quantizer, weight: torch.Tensor, *, sharded_blocks: bool = False) -> None:

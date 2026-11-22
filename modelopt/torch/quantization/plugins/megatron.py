@@ -553,7 +553,8 @@ class _MegatronParallelLinear(_ParallelLinear):
                 raise ValueError(
                     "This checkpoint stores the GGML pins of a gated MLP in ModelOpt 0.49.0rc0's "
                     "layout, which can't be loaded at another tensor-parallel size. Load it at the "
-                    "size it was saved at, or re-run quantization with this version."
+                    "size it was saved at and save it again with this version: the new checkpoint "
+                    "loads at any tensor-parallel size."
                 )
             for weight, leaf in leaves:
                 resize_pins(leaf, weight, sharded_blocks=self._is_row_parallel)
