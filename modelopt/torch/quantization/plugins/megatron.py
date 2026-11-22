@@ -289,7 +289,12 @@ def quant_module_set_extra_state(self, state: Any):
     the local shape can be different from the shape in the state due to change
     in tensor parallelism (TP).
     """
-    if state is None or not self.allow_post_restore:
+    if state is None:
+        return
+    # TODO: Drop the 0.49.0rc0 pin layout (sharded like any column-parallel state) in a future release.
+    # Read on every load, a converted model's too: the keys sharded_state_dict() requests follow it.
+    self._legacy_ggml_pin_layout = "modelopt_swiglu_ggml_pins" not in state
+    if not self.allow_post_restore:
         return
 
     quantizer_state = state.get("modelopt_quantizer_state", None)
@@ -312,9 +317,6 @@ def quant_module_set_extra_state(self, state: Any):
                     continue
                 maybe_promote_nvfp4_static_quantizer(module, quantizer_substate)
                 module.set_from_modelopt_state(quantizer_substate, properties_only=False)
-        # TODO: Drop the 0.49.0rc0 pin layout (sharded like any column-parallel state) in a
-        # future release.
-        self._legacy_ggml_pin_layout = "modelopt_swiglu_ggml_pins" not in state
         self.modelopt_post_restore()
 
     # Handle real_quantizer_state and q_tensor_state
@@ -553,8 +555,8 @@ class _MegatronParallelLinear(_ParallelLinear):
                 raise ValueError(
                     "This checkpoint stores the GGML pins of a gated MLP in ModelOpt 0.49.0rc0's "
                     "layout, which can't be loaded at another tensor-parallel size. Load it at the "
-                    "size it was saved at and save it again with this version: the new checkpoint "
-                    "loads at any tensor-parallel size."
+                    "size it was saved at and save it again with this version, which lifts this "
+                    "restriction (other TP limits on GGML pins still apply)."
                 )
             for weight, leaf in leaves:
                 resize_pins(leaf, weight, sharded_blocks=self._is_row_parallel)
@@ -741,6 +743,12 @@ class _QuantMegatronMLP(_MegatronMLP):
         # 0.49.0rc0 saved a gated linear_fc1's pins like any column-parallel state.
         if PINNED_PAYLOAD_PREFIX in key and getattr(
             self.linear_fc1, "_legacy_ggml_pin_layout", False
+        ):
+            return False
+        # A shared expert is registered for its pins: its other state (e.g. LoRA's B) keeps the
+        # layout it was saved in before.
+        if PINNED_PAYLOAD_PREFIX not in key and isinstance(
+            self, megatron_shared_experts.SharedExpertMLP
         ):
             return False
         return super()._is_swiglu_state(key, sharded_tensor)

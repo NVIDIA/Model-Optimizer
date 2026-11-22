@@ -1989,10 +1989,16 @@ def _test_shared_expert_checkpoint_from_before_its_registration(tmp_path, rank, 
     config["quant_cfg"].append({"quantizer_name": "*mlp.experts.*", "enable": False})
     with _quantizing_like_modelopt_0_48():
         mtq.quantize(source, config, get_forward(source))
+        # Grouped experts take no adapters.
+        mtq.enable_quant_lora(source, {"rank": 4, "target_modules": ["*shared_experts*"]})
+        with torch.no_grad():
+            for module in source.modules():
+                if hasattr(module, "lora_B"):
+                    module.lora_B.normal_()
         save_distributed_checkpoint(tmp_path, source)
         save_sharded_modelopt_state([source], tmp_path)
     expected = {n: p for n, p in source.named_parameters() if ".shared_experts." in n}
-    assert any("linear_fc1" in n for n in expected)
+    assert any(n.endswith("linear_fc1.lora_B") for n in expected)
     target = create_model()
     restore_sharded_modelopt_state([target], tmp_path)
     assert isinstance(target.decoder.layers[0].mlp.shared_experts, DynamicModule)
@@ -2003,7 +2009,8 @@ def _test_shared_expert_checkpoint_from_before_its_registration(tmp_path, rank, 
 
 
 def test_shared_expert_checkpoint_from_before_its_registration(dist_workers_size_2, tmp_path):
-    """A quantized shared expert saved before ModelOpt registered SharedExpertMLP still loads."""
+    """A quantized shared expert saved before ModelOpt registered SharedExpertMLP still loads, with
+    its LoRA adapter."""
     dist_workers_size_2.run(
         partial(_test_shared_expert_checkpoint_from_before_its_registration, tmp_path)
     )
@@ -2054,15 +2061,17 @@ def _test_ggml_rc0_pin_layout_same_tp(tmp_path, regular, rank, size):
             save_sharded_modelopt_state([source], tmp_path)
     assert any(name.endswith("linear_fc1") for name in expected)
     target = _gpt_model_provider(tp_size=size, hidden_size=512, activation_func="swiglu")
-    if regular:
-        target = mto.restore(target, tmp_path / f"rank{rank}.pth")
-    else:
-        restore_sharded_modelopt_state([target], tmp_path)
-        target = load_distributed_checkpoint(tmp_path, target)
-    restored = _pinned_effective_weights(target)
-    assert restored.keys() == expected.keys()
-    for name, weight in expected.items():
-        assert torch.equal(restored[name], weight), name
+    # Loaded twice into the same model: the second load reads the checkpoint's layout again.
+    for _ in range(1 if regular else 2):
+        if regular:
+            target = mto.restore(target, tmp_path / f"rank{rank}.pth")
+        else:
+            restore_sharded_modelopt_state([target], tmp_path)
+            target = load_distributed_checkpoint(tmp_path, target)
+        restored = _pinned_effective_weights(target)
+        assert restored.keys() == expected.keys()
+        for name, weight in expected.items():
+            assert torch.equal(restored[name], weight), name
     if not regular:
         # Saved again, it loads at another TP size, e.g. TP=1 to export it.
         whole = _whole_pinned_effective_weights(target, size, gated=True)
@@ -2085,7 +2094,7 @@ def _test_ggml_rc0_pin_layout_same_tp(tmp_path, regular, rank, size):
 @pytest.mark.parametrize("regular", [False, True], ids=["sharded", "mto_save"])
 def test_ggml_rc0_pin_layout_same_tp(dist_workers_size_2, tmp_path, regular):
     """Checkpoints with 0.49.0rc0's SwiGLU pin layout still load at the TP size they were saved at,
-    and saved again load at any."""
+    and, saved again, at another."""
     dist_workers_size_2.run(partial(_test_ggml_rc0_pin_layout_same_tp, tmp_path, regular))
 
 
