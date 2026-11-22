@@ -34,7 +34,7 @@ from onnx_graphsurgeon.exporters.onnx_exporter import OnnxExporter
 
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.quantization.gs_patching import _export_tensor_proto, _export_value_info_proto
-from modelopt.onnx.trt_utils import load_onnx_model
+from modelopt.onnx.trt_utils import interpret_trt_plugins_precision_flag, load_onnx_model
 from modelopt.onnx.utils import (
     clear_stale_value_info,
     get_input_names_from_bytes,
@@ -880,3 +880,45 @@ def test_get_shapes_keep_rank_for_unknown_dims():
 
     assert onnx_utils.get_input_shapes(model) == {"t": [1, 1, 8, 1]}
     assert onnx_utils.get_output_shapes(model) == {"t": [1, 1, 8, 1]}
+
+
+def _two_plugin_model():
+    graph = make_graph(
+        [
+            make_node("PluginA", ["x"], ["a"], name="plugin_a", domain="custom"),
+            make_node("PluginB", ["a"], ["y"], name="plugin_b", domain="custom"),
+        ],
+        "two_plugins",
+        [make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1, 4])],
+        [make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1, 4])],
+    )
+    return make_model(graph, opset_imports=[make_opsetid("", 17), make_opsetid("custom", 1)])
+
+
+@pytest.mark.parametrize(
+    ("trt_plugins_precision", "expected"),
+    [
+        (
+            ["PluginA:fp16", "PluginB:fp16"],
+            {"fp16": {"PluginA": {"inp": [0], "out": [0]}, "PluginB": {"inp": [0], "out": [0]}}},
+        ),
+        (
+            ["PluginA:[fp32]:[fp32]", "PluginB:[fp32]:[fp32]"],
+            {"fp32": {"PluginA": {"inp": [0], "out": [0]}, "PluginB": {"inp": [0], "out": [0]}}},
+        ),
+        (
+            ["PluginA:[fp32]:[fp16]"],
+            {
+                "fp32": {"PluginA": {"inp": [0], "out": []}},
+                "fp16": {"PluginA": {"inp": [], "out": [0]}},
+            },
+        ),
+    ],
+)
+def test_interpret_trt_plugins_precision_flag_keeps_every_cast(trt_plugins_precision, expected):
+    custom_ops_to_cast, custom_ops_to_quantize = interpret_trt_plugins_precision_flag(
+        _two_plugin_model(), trt_plugins_precision
+    )
+
+    assert custom_ops_to_cast == expected
+    assert custom_ops_to_quantize == {}
