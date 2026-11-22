@@ -743,24 +743,27 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         assert walks == 2
 
 
-def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_shares_a_layer():
-    """A named entry acts as its wildcard does after a calibrator built mid-call shares a layer."""
+@pytest.mark.parametrize("nested", [False, True], ids=["later-entry", "nested-call"])
+def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_shares_a_layer(nested):
+    """A named entry acts as its wildcard does after a calibrator built mid-call shares a layer,
+    whether the entry comes later in that call or in a call the calibrator makes."""
 
     def configured(weight_quantizer, sub_quantizer):
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
         model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+        sub_entry = {"quantizer_name": sub_quantizer, "enable": False}
 
         class SharingCalibrator(MaxCalibrator):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 model[1] = model[0]  # named_modules skips the second name
+                if nested:
+                    mtq.set_quantizer_by_cfg(model, [sub_entry])
 
         mtq.set_quantizer_by_cfg(
             model,
-            [
-                {"quantizer_name": weight_quantizer, "cfg": {"calibrator": SharingCalibrator}},
-                {"quantizer_name": sub_quantizer, "enable": False},
-            ],
+            [{"quantizer_name": weight_quantizer, "cfg": {"calibrator": SharingCalibrator}}]
+            + ([] if nested else [sub_entry]),
         )
         return {
             name: module.get_modelopt_state(properties_only=True)
