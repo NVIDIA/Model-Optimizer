@@ -116,6 +116,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _load_ep_dense_distributed,
     _make_expert_param_matcher,
     _meta_model_factory,
+    _one_ep_load_at_a_time,
     _refuse_unquantizable_experts,
     _resolve_target,
     _seed_parallel_states,
@@ -3391,6 +3392,40 @@ def test_a_plan_whose_expert_containers_match_no_module_is_refused(ep_world_of_t
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
 
 
+def test_an_expert_parallel_load_during_another_is_refused_before_it_hooks_anything(
+    ep_world_of_two, monkeypatch
+):
+    """Two loads hooking transformers at once would each take the other's hooks for the originals it
+    restores: a second load is refused before any of its hooks is set up."""
+    hooked = []
+
+    class _Loader:
+        @staticmethod
+        def from_pretrained(path, **kwargs):
+            hooked.append("from_pretrained")
+
+    monkeypatch.setattr(
+        model_load_utils,
+        "_ep_aware_caching_allocator_warmup",
+        lambda *args, **kwargs: hooked.append("warmup") or nullcontext(),
+    )
+    monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
+    monkeypatch.setattr(
+        "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
+    )
+    config = SimpleNamespace(
+        model_type=_NO_SPEC,
+        base_model_ep_plan={"layers.*.mlp.experts.*.gate_up_proj": "grouped_gemm"},
+    )
+
+    with (
+        _one_ep_load_at_a_time(),
+        pytest.raises(RuntimeError, match="another expert-parallel load is in progress"),
+    ):
+        load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
+    assert hooked == []
+
+
 def test_routed_experts_without_experts_in_their_names_are_refused(ep_world_of_two, monkeypatch):
     """Calibration tells routed experts by an ``experts`` in their names, and reduces the weight amax
     of any other module over the expert-parallel group, merging the scales of different experts."""
@@ -4107,7 +4142,7 @@ def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given(monkeypatc
     config = DistributedConfig(enable_expert_parallel=True, tp_plan="auto", tp_size=2)
     other = DistributedConfig(tp_size=2)
     other_model = SimpleNamespace(tp_plan={"layers.*.mlp.up_proj": "colwise"}, ep_plan={})
-    with _experts_sharded_over(ep_mesh, config):
+    with _one_ep_load_at_a_time(), _experts_sharded_over(ep_mesh, config):
         _, device_map, device_mesh = PreTrainedModel.prepare_distribute_model(config)
         assert mixin.initialize_distributed_mesh(other) == (None, own_mesh)
         assert PreTrainedModel.maybe_distribute_model(other_model, other, None) is other_model
@@ -4115,6 +4150,7 @@ def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given(monkeypatc
         patched = mixin.initialize_distributed_mesh
         with (
             pytest.raises(RuntimeError, match="in progress"),
+            _one_ep_load_at_a_time(),
             _experts_sharded_over(ep_mesh, other),
         ):
             pass
@@ -4126,7 +4162,11 @@ def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given(monkeypatc
     assert device_map == torch.device("cpu")
     assert mixin.initialize_distributed_mesh is builder
     assert vars(distributor).get("maybe_distribute_model") is distribute
-    with pytest.raises(RuntimeError), _experts_sharded_over(ep_mesh, config):
+    with (
+        pytest.raises(RuntimeError),
+        _one_ep_load_at_a_time(),
+        _experts_sharded_over(ep_mesh, config),
+    ):
         raise RuntimeError("the load failed")
     assert mixin.initialize_distributed_mesh is builder
     assert vars(distributor).get("maybe_distribute_model") is distribute

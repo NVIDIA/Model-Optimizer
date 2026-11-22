@@ -2878,16 +2878,11 @@ def _hf_keeps_ep_apart() -> bool:
     return "ep_size" in {f.name for f in dataclasses.fields(hf_distributed.DistributedConfig)}
 
 
-# Held while _experts_sharded_over hooks transformers: overlapping scopes would restore each other's.
-_EXPERTS_SHARDED_OVER_ACTIVE = threading.Lock()
-
-
 @contextlib.contextmanager
 def _experts_sharded_over(ep_mesh, distributed_config):
     """Make ``from_pretrained`` shard the experts over ``ep_mesh`` on releases that build their own mesh.
 
-    Only the load given ``distributed_config`` is affected; any other load delegates unchanged. One
-    such load runs at a time: a second one while another is in progress is refused.
+    Only the load given ``distributed_config`` is affected; any other load delegates unchanged.
     """
     mixin = _transformers_mesh_builder()
     if mixin is None:
@@ -2924,8 +2919,6 @@ def _experts_sharded_over(ep_mesh, distributed_config):
         patches.append((distributor, "maybe_distribute_model", classmethod(_expert_plan_only)))
     # Every original is read before anything is patched, so a failed lookup patches nothing.
     originals = [(obj, attr, vars(obj)[attr]) for obj, attr, _ in patches]
-    if not _EXPERTS_SHARDED_OVER_ACTIVE.acquire(blocking=False):
-        raise RuntimeError("another expert-parallel load is in progress: load one model at a time.")
     try:
         for obj, attr, patched in patches:
             setattr(obj, attr, patched)
@@ -2933,7 +2926,22 @@ def _experts_sharded_over(ep_mesh, distributed_config):
     finally:
         for obj, attr, kept in originals:
             setattr(obj, attr, kept)
-        _EXPERTS_SHARDED_OVER_ACTIVE.release()
+
+
+# Held through an expert-parallel load's transformers hooks: overlapping loads would restore each
+# other's originals.
+_EP_LOAD_HOOKS = threading.Lock()
+
+
+@contextlib.contextmanager
+def _one_ep_load_at_a_time():
+    """Refuse an expert-parallel load while another one in this process has transformers hooked."""
+    if not _EP_LOAD_HOOKS.acquire(blocking=False):
+        raise RuntimeError("another expert-parallel load is in progress: load one model at a time.")
+    try:
+        yield
+    finally:
+        _EP_LOAD_HOOKS.release()
 
 
 @contextlib.contextmanager
@@ -3337,7 +3345,9 @@ def load_and_prepare_ep(
         # The class the plan's decision chose, with its LM head where an auto class builds one.
         loader = _auto_class(hf_config, require_lm_head, trust_remote_code=trust_remote_code)
         print_rank_0(f"[ep] loader={loader.__name__} (require_lm_head={require_lm_head})")
+        # The guard comes first: it is taken before any hook reads what it restores, and released last.
         with (
+            _one_ep_load_at_a_time(),
             _ep_aware_caching_allocator_warmup(
                 ep_degree, swapped_plan, dense_on_meta=plan.is_fsdp_dense
             ),

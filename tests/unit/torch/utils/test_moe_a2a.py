@@ -416,17 +416,29 @@ def _fake_quantized_like_the_whole_module(rank, size, whole, local, owned):
     return whole, local
 
 
-def _real_experts_backward_job(rank, size, quantized):
+def _real_experts_backward_job(rank, size, quantized, post_norm):
     moe.register_torch_a2a()
     whole, local, owned = _split_qwen3_moe_experts(rank, size)
+    if post_norm:
+        # Each expert's output is normalized before its routing weight scales it (transformers 5.20+).
+        norm = torch.nn.RMSNorm(H).to(COMPUTE_DTYPE)
+        with torch.no_grad():
+            norm.weight.normal_(std=0.5)
+        for experts in (whole, local):
+            experts.has_post_expert_norm = True
+            experts.post_expert_norm = copy.deepcopy(norm)
     if quantized:
         whole, local = _fake_quantized_like_the_whole_module(rank, size, whole, local, owned)
     _assert_experts_backward_matches(rank, whole, local, owned, size)
 
 
-@pytest.mark.parametrize("quantized", [False, True], ids=["unquantized", "fake-quantized"])
+@pytest.mark.parametrize(
+    ("quantized", "post_norm"),
+    [(False, False), (True, False), (False, True)],
+    ids=["unquantized", "fake-quantized", "post-expert-norm"],
+)
 def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(
-    cpu_dist_workers, quantized
+    cpu_dist_workers, quantized, post_norm
 ):
     """transformers' fused experts, split over two ranks, train through the torch_a2a forward exactly
     as the whole module does on one process: same output, and same gradients for the hidden states,
@@ -435,7 +447,9 @@ def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
-    cpu_dist_workers.run(_real_experts_backward_job, quantized=quantized)
+    if post_norm and Version(transformers.__version__) < Version("5.20"):
+        pytest.skip("post-expert norms need transformers >= 5.20")
+    cpu_dist_workers.run(_real_experts_backward_job, quantized=quantized, post_norm=post_norm)
 
 
 def _fp32_routing_weights_job(rank, size):
