@@ -18,6 +18,8 @@
 import argparse
 import importlib.util
 import os
+import pickle
+import random
 
 # ---------------------------------------------------------------------------
 # Load eagle_utils from examples/ via importlib (not a package, so no import).
@@ -26,6 +28,7 @@ import os
 # ---------------------------------------------------------------------------
 import sys
 import types
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -546,12 +549,42 @@ def _make_data_args(sample_size, tmp_path, n_files=5):
     )
 
 
-def test_sample_size_positive_truncates(tmp_path):
-    """sample_size > 0 should truncate the dataset to that many samples."""
-    data_args = _make_data_args(sample_size=3, tmp_path=tmp_path, n_files=5)
-    tokenizer = MagicMock()
-    module = make_speculative_data_module(tokenizer, data_args, train_len=8)
-    assert len(module["train_dataset"]) == 3
+def test_sample_size_selects_reproducible_mixed_subset(tmp_path, monkeypatch):
+    """Every limit selects a prefix of the same reproducible shuffled file order."""
+    data_args = _make_data_args(sample_size=9, tmp_path=tmp_path, n_files=0)
+    for source in ("daring-anteater", "magpie", "sharegpt"):
+        for i in range(12):
+            (tmp_path / f"{source}-{i}.pt").touch()
+    files = list(tmp_path.rglob("*.pt"))
+    selections = []
+    rng_state = random.getstate()
+    try:
+        for listing in (files, files[::-1]):
+            # Filesystem enumeration and training RNG state may differ between ranks.
+            monkeypatch.setattr(Path, "rglob", lambda self, pattern, files=listing: iter(files))
+            random.random()
+            before = random.getstate()
+            selected = {}
+            for seed in (0, 42):
+                selected[seed] = {}
+                for sample_size in (-1, 9, 18):
+                    data_args.sample_size = sample_size
+                    module = make_speculative_data_module(
+                        MagicMock(), data_args, train_len=8, seed=seed
+                    )
+                    selected[seed][sample_size] = module["train_dataset"].dumped_files
+            assert random.getstate() == before
+            selections.append(selected)
+    finally:
+        random.setstate(rng_state)
+    assert selections[0] == selections[1]
+    assert selections[0][0][9] != selections[0][42][9]
+    for selected in selections[0].values():
+        assert len(selected[-1]) == len(set(selected[-1])) == len(files)
+        assert set(selected[-1]) == {str(path) for path in files}
+        for sample_size in (9, 18):
+            assert selected[sample_size] == selected[-1][:sample_size]
+        assert len({Path(path).stem.rsplit("-", 1)[0] for path in selected[9]}) > 1
 
 
 def test_sample_size_minus_one_uses_all(tmp_path):
@@ -560,6 +593,9 @@ def test_sample_size_minus_one_uses_all(tmp_path):
     tokenizer = MagicMock()
     module = make_speculative_data_module(tokenizer, data_args, train_len=8)
     assert len(module["train_dataset"]) == 5
+    assert sorted(module["train_dataset"].dumped_files) == sorted(
+        str(p) for p in tmp_path.glob("*.pt")
+    )
 
 
 def test_sample_size_zero_raises(tmp_path):
@@ -570,12 +606,16 @@ def test_sample_size_zero_raises(tmp_path):
         make_speculative_data_module(tokenizer, data_args, train_len=8)
 
 
-def test_sample_size_larger_than_dataset_uses_all(tmp_path):
-    """sample_size > number of files should use all samples without error."""
-    data_args = _make_data_args(sample_size=100, tmp_path=tmp_path, n_files=5)
+@pytest.mark.parametrize("sample_size", [5, 100])
+def test_sample_size_at_least_dataset_size_uses_all(tmp_path, sample_size):
+    """A limit covering every file preserves the full dataset's order."""
+    data_args = _make_data_args(sample_size=sample_size, tmp_path=tmp_path, n_files=5)
     tokenizer = MagicMock()
     module = make_speculative_data_module(tokenizer, data_args, train_len=8)
     assert len(module["train_dataset"]) == 5
+    assert sorted(module["train_dataset"].dumped_files) == sorted(
+        str(p) for p in tmp_path.glob("*.pt")
+    )
 
 
 def test_sample_size_no_pt_files_raises(tmp_path):
@@ -756,11 +796,18 @@ def test_offline_dataset_len_and_getitem(tmp_path):
         (True, "empty"),
     ],
 )
-def test_offline_dataset_handles_a_dump_without_aux_hidden_states(tmp_path, optional, expect):
-    """--no-aux-hidden-states dumps are readable only by modes that opt in."""
+@pytest.mark.parametrize("aux_storage", ["missing", "empty"])
+def test_offline_dataset_handles_a_dump_without_aux_hidden_states(
+    tmp_path, optional, expect, aux_storage
+):
+    """Missing or empty aux planes are readable only by modes that opt in."""
     p = tmp_path / "sample.pt"
     data = _make_offline_pt(p)
-    del data["aux_hidden_states"]
+    if aux_storage == "empty":
+        # vLLM writes this placeholder when only the final layer is extracted.
+        data["aux_hidden_states"] = torch.empty(0)
+    else:
+        del data["aux_hidden_states"]
     torch.save(data, p)
 
     ds = OfflineSupervisedDataset([str(p)], aux_hidden_states_optional=optional)
@@ -768,7 +815,11 @@ def test_offline_dataset_handles_a_dump_without_aux_hidden_states(tmp_path, opti
         with pytest.raises(KeyError, match="aux_hidden_states missing"):
             ds[0]
     else:
-        assert ds[0]["aux_hidden_states"].shape == (SEQ_LEN, 0)
+        item = ds[0]
+        assert item["aux_hidden_states"].shape == (SEQ_LEN, 0)
+        collator = EagleOfflineDataCollator(train_len=SEQ_LEN + 1)
+        batch = collator([item, item])
+        assert batch["base_model_outputs"]["aux_hidden_states"].shape == (2, SEQ_LEN + 1, 0)
 
 
 def test_offline_dataset_labels_shift(tmp_path):
@@ -828,3 +879,70 @@ def test_collator_batches_multiple(tmp_path):
         train_len,
         HIDDEN_SIZE,
     )
+
+
+def test_offline_custom_features_and_collation(tmp_path):
+    """Native state layouts reuse mask handling, padding and truncation without EAGLE metadata."""
+    mapping = {"raw_state": "target_state", "head_input": "teacher_hidden"}
+    records = []
+    files = []
+    for length in (4, 12):
+        record = {
+            "input_ids": torch.arange(length),
+            "loss_mask": torch.arange(length) % 2,
+            "raw_state": torch.randn(length, 4, 8),
+            "head_input": torch.randn(length, 8),
+            "hidden_states_prenorm": True,
+        }
+        path = tmp_path / f"{length}.pt"
+        torch.save(record, path)
+        records.append(record)
+        files.append(path)
+    dataset = OfflineSupervisedDataset(files, answer_only_loss=True, feature_key_mapping=mapping)
+    collator = EagleOfflineDataCollator(
+        8,
+        batch_keys=("input_ids", "attention_mask", "loss_mask"),
+        feature_keys=tuple(mapping.values()),
+        feature_output_key="mtp_boost_inputs",
+    )
+    batch = collator([dataset[0], dataset[1]])
+    assert set(batch) == {"input_ids", "attention_mask", "loss_mask", "mtp_boost_inputs"}
+    assert set(batch["mtp_boost_inputs"]) == set(mapping.values())
+    for i, record in enumerate(records):
+        length = min(len(record["input_ids"]), 8)
+        torch.testing.assert_close(batch["loss_mask"][i, :length], record["loss_mask"][:length])
+        assert not batch["attention_mask"][i, length:].any()
+        assert not batch["loss_mask"][i, length:].any()
+        for source, destination in mapping.items():
+            value = batch["mtp_boost_inputs"][destination][i]
+            torch.testing.assert_close(value[:length], record[source][:length])
+            assert not value[length:].any()
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        ("missing", KeyError),
+        ("corrupt", pickle.UnpicklingError),
+        ("short_feature", ValueError),
+        ("long_feature", ValueError),
+    ],
+)
+def test_offline_dump_failure_identifies_file_without_substitution(tmp_path, failure, error):
+    bad_path, good_path = tmp_path / "bad.pt", tmp_path / "good.pt"
+    _make_offline_pt(good_path)
+    if failure == "corrupt":
+        bad_path.write_bytes(b"not a checkpoint")
+    elif failure == "missing":
+        torch.save({"input_ids": torch.arange(4)}, bad_path)
+    else:
+        data = _make_offline_pt(bad_path)
+        if failure == "short_feature":
+            data["hidden_states"] = data["hidden_states"][:-1]
+        else:
+            data["aux_hidden_states"] = torch.randn(SEQ_LEN + 1, 4, HIDDEN_SIZE)
+        torch.save(data, bad_path)
+    dataset = OfflineSupervisedDataset([bad_path, good_path])
+    with pytest.raises(error) as exc:
+        dataset[0]
+    assert str(bad_path) in "\n".join(exc.value.__notes__)
