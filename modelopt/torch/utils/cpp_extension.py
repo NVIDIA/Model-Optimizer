@@ -65,8 +65,14 @@ def load_cpp_extension(
         )
     else:
         if not os.environ.get("TORCH_CUDA_ARCH_LIST"):
-            device_capability = torch.cuda.get_device_capability()
-            os.environ["TORCH_CUDA_ARCH_LIST"] = f"{device_capability[0]}.{device_capability[1]}"
+            # Every visible GPU's, not just the current one's: an extension built from one GPU is
+            # also launched on the others.
+            capabilities = {
+                torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count())
+            }
+            os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(
+                f"{a}.{b}" for a, b in sorted(capabilities)
+            )
         if os.name == "nt":
             # Define USE_CUDA so PyTorch's compiled_autograd.h takes its Windows-safe branch;
             # otherwise, nvcc + MSVC fail with "error C2872: 'std': ambiguous symbol".
