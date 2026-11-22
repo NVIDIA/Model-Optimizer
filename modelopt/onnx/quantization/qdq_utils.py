@@ -981,12 +981,13 @@ def remove_input_dq_and_output_q(
                 # The DQ was already removed because it feeds a quantized custom op input: connect that
                 # consumer directly to this custom op's output if it's quantized, otherwise keep the Q.
                 if dq_node[0].output[0] in removed_dq_outputs:
-                    if not quantizable_custom_ops[producer.op_type]["out"]:
+                    out_idx = list(producer.output).index(node.input[0])
+                    if out_idx not in quantizable_custom_ops[producer.op_type]["out"]:
                         continue
                     for consumer in graph.node:
                         for cons_idx, cons_inp in enumerate(consumer.input):
                             if cons_inp == out_name:
-                                consumer.input[cons_idx] = producer.output[0]
+                                consumer.input[cons_idx] = node.input[0]
 
                 # Rewire graph to connect the output of custom op to the input of DQ (skip Q)
                 # If the output tensor is meant to be quantized, delete Q. Otherwise, delete both Q/DQ.
