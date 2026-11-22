@@ -42,8 +42,11 @@ _CLEAR_WHILE_ANOTHER_GPU_WORKS = textwrap.dedent(
 def test_clearing_the_cache_waits_for_every_gpu(need_2_gpus):
     # With expandable segments, torch.cuda.empty_cache() from cuda:0 unmapped the freed tensor
     # while cuda:1 still read it: an illegal memory access. The allocator reads the setting once,
-    # when CUDA initializes, so the check runs in its own process.
-    env = {**os.environ, "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+    # when CUDA initializes, so the check runs in its own process. Synchronous launches or no
+    # caching would hide the race, and the newer alias would override the setting.
+    hiding = {"CUDA_LAUNCH_BLOCKING", "PYTORCH_NO_CUDA_MEMORY_CACHING", "PYTORCH_ALLOC_CONF"}
+    env = {key: value for key, value in os.environ.items() if key not in hiding}
+    env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     subprocess.run(
         [sys.executable, "-c", _CLEAR_WHILE_ANOTHER_GPU_WORKS], env=env, check=True, timeout=300
     )
