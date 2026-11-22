@@ -928,7 +928,8 @@ def load_pretrained(
       (:func:`~modelopt.torch.models.hf.prepare_model_for_loading`), e.g. to keep the MTP head a
       Nemotron-H checkpoint carries. ``model_type`` selects it; when omitted, the type of the
       ``config`` passed for the load, else of the checkpoint's config. A sharded load cannot run
-      it, so it refuses a checkpoint the hook would build modules for.
+      it, so it refuses a checkpoint the hook would build modules for; a plan left to decide
+      loads such a checkpoint whole.
     * The checkpoint tensors the model has no parameter for are recorded
       (:func:`record_unplaced_source_keys`), so the export carries them over unchanged. The model
       is returned alone: ``output_loading_info=True`` is refused. So is a ``variant``: the record
@@ -1775,6 +1776,8 @@ def _decide_distribution(
     ckpt_path: str, hf_config, world_size: int, ep_size, dense, trust_remote_code: bool, auto_class
 ) -> DistributionPlan:
     """The plan :func:`resolve_distribution_plan` returns, decided by this rank alone."""
+    from modelopt.torch.models.hf import checkpoint_has_mtp
+
     # What the caller set the EP degree and the dense layout with, for a refusal to name them.
     knob = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
     replicate = "MODELOPT_FSDP_SIZE=1" if dense is None else "dense='replicate'"
@@ -1812,6 +1815,20 @@ def _decide_distribution(
             f"dense={dense!r} ask to shard. To give every rank the whole model, plan ep_size=1 and "
             "dense='replicate' (MODELOPT_EP_DEGREE=1, MODELOPT_FSDP_SIZE=1)."
         )
+    if (
+        ep_size in ("auto", 1)
+        and dense in ("auto", "replicate")
+        and checkpoint_has_mtp(hf_config.model_type, ckpt_path)
+    ):
+        # Neither sharded load builds the MTP head the checkpoint carries (_sharded_load_kwargs
+        # refuses it), so with nothing asking to shard, plan the whole load, which builds it.
+        if not asked_to_replicate:
+            warn_rank_0(
+                f"{hf_config.model_type}: every rank loads the whole model, which must fit its GPU, "
+                "since this checkpoint carries an MTP head, which neither the expert-parallel nor "
+                "the FSDP2 load builds."
+            )
+        return DistributionPlan(world_size)
     # Building writes to the config it builds from, and only rank 0 decides: build from a copy, so
     # the config returned with the plan, which a sharded load builds from, is alike on every rank.
     hf_config = copy.deepcopy(hf_config)
@@ -2058,7 +2075,8 @@ def resolve_distribution_plan(
     that: ``ep_size=1`` with ``dense="replicate"`` (``MODELOPT_EP_DEGREE=1`` and
     ``MODELOPT_FSDP_SIZE=1``) replicates it, noting that every rank holds the whole MoE. An MoE the
     expert-parallel load cannot take is planned as a dense model is, at an EP degree left to the
-    decision or set to 1, with a warning saying why.
+    decision or set to 1, with a warning saying why. A checkpoint carrying an MTP head, which neither
+    sharded load builds, is planned whole on every rank unless the knobs ask to shard it.
     """
     # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
     # than leave the others waiting in a broadcast below for a rank that already raised.
