@@ -168,6 +168,7 @@ def test_nel_reference_keeps_the_nel_rules():
         "scancel",  # never cancel a wedged job
         "nemo_evaluator_config",
         "answer_tokens_statistics_avg",
+        "one matched correction",  # the supported recovery when the baseline fails the gate at the output cap
     ):
         assert needle in nel
 
