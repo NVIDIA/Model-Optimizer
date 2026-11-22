@@ -2929,7 +2929,8 @@ def _experts_sharded_over(ep_mesh, distributed_config):
 
 
 # Held through an expert-parallel load's transformers hooks: overlapping loads would restore each
-# other's originals.
+# other's originals. The warmup and dense-on-meta hooks act on any load meanwhile, so another
+# from_pretrained during an expert-parallel load is unsupported.
 _EP_LOAD_HOOKS = threading.Lock()
 
 
@@ -3311,9 +3312,6 @@ def load_and_prepare_ep(
         # transformers keeps the checkpoint's quantization_config, its weight_block_size included,
         # and takes only the loading attributes (dequantize) from this one.
         from_pretrained_kwargs["quantization_config"] = FineGrainedFP8Config(dequantize=True)
-        _patch_finegrained_fp8_dequant(
-            dtype
-        )  # correct transformers' block-fp8 dequant; emit model dtype
         print_rank_0(
             f"[ep] native block-fp8 checkpoint -> FineGrainedFP8Config(dequantize=True) -> {dtype}"
         )
@@ -3354,6 +3352,10 @@ def load_and_prepare_ep(
             _dense_ctx,
             _experts_sharded_over(ep_submesh, distributed_config),
         ):
+            if quant_method == "fp8":
+                # Correct transformers' block-fp8 dequant to emit the model dtype: class-wide, so set
+                # only once the guard admits this load.
+                _patch_finegrained_fp8_dequant(dtype)
             model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
         model.eval()
         # The config the model keeps goes back to the checkpoint's plan, as an export writes it out

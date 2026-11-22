@@ -3396,7 +3396,8 @@ def test_an_expert_parallel_load_during_another_is_refused_before_it_hooks_anyth
     ep_world_of_two, monkeypatch
 ):
     """Two loads hooking transformers at once would each take the other's hooks for the originals it
-    restores: a second load is refused before any of its hooks is set up."""
+    restores: a second load is refused before any of its hooks is set up, nor does it set the
+    class-wide block-fp8 dequant dtype the first one reads."""
     hooked = []
 
     class _Loader:
@@ -3409,6 +3410,19 @@ def test_an_expert_parallel_load_during_another_is_refused_before_it_hooks_anyth
         "_ep_aware_caching_allocator_warmup",
         lambda *args, **kwargs: hooked.append("warmup") or nullcontext(),
     )
+    for hook in ("_ep_dense_meta_load", "_experts_sharded_over"):
+        monkeypatch.setattr(
+            model_load_utils,
+            hook,
+            lambda *args, hook=hook, **kwargs: hooked.append(hook) or nullcontext(),
+        )
+    monkeypatch.setattr(
+        model_load_utils,
+        "_patch_finegrained_fp8_dequant",
+        lambda *args, **kwargs: hooked.append("fp8-dtype"),
+    )
+    monkeypatch.setattr(model_load_utils, "_ckpt_quant_method", lambda *args, **kwargs: "fp8")
+    monkeypatch.setattr(model_load_utils.moe, "require_transformers", lambda *args, **kwargs: None)
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
     monkeypatch.setattr(
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
