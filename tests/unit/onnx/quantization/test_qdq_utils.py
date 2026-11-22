@@ -1643,7 +1643,7 @@ def test_remove_input_dq_and_output_q_custom_op_chain(with_relu):
     ]
 
 
-@pytest.mark.parametrize("quantized_out", [[1], [0]])
+@pytest.mark.parametrize("quantized_out", [[1], [0], []])
 def test_remove_input_dq_and_output_q_multi_output_custom_op_chain(quantized_out):
     """Only PluginA's second output feeds PluginB; it is wired directly only if that output is quantized."""
     initializers = [
