@@ -720,9 +720,10 @@ class _QuantMegatronMLP(_MegatronMLP):
             return False
         if "_quantizer." not in key:
             return True
-        # Only per-row quantizer state has gate and up rows; per-tensor state is replicated.
-        shape = sharded_tensor.local_shape
-        return len(shape) > 0 and shape[0] == self.linear_fc1.weight.shape[0]
+        # Only per-row quantizer state has gate and up rows; per-tensor state is replicated. Per-block
+        # state may be flattened, as each row's blocks (e.g. compressed INT4 AWQ's scale).
+        shape, rows = sharded_tensor.local_shape, self.linear_fc1.weight.shape[0]
+        return len(shape) > 0 and shape[0] >= rows and shape[0] % rows == 0
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)

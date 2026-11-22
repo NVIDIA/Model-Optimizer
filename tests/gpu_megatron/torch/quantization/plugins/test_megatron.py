@@ -1788,6 +1788,10 @@ def _test_swiglu_weight_quantizer_tp_reshard(
     # FP8 per-tensor amax and scale have no rows; that case checks that saving keeps them replicated.
     per_row = config != mtq.FP8_DEFAULT_CFG
     assert expected or not per_row
+    # A compressed linear_fc1 keeps its per-row (or per-block) scale.
+    assert not (compress and per_row) or any(
+        k.endswith("weight_quantizer._scale") for k in expected
+    )
     with _saving_like_modelopt_0_48(source) if legacy else nullcontext():
         save_distributed_checkpoint(tmp_path, source)
         save_sharded_modelopt_state([source], tmp_path)
@@ -1839,6 +1843,8 @@ def _test_swiglu_weight_quantizer_tp_reshard(
             mtq.FP8_DEFAULT_CFG, False, True, False, 2, 1, 1, id="fp8_per_tensor-compressed"
         ),
         pytest.param(mtq.INT4_AWQ_CFG, False, False, False, 2, 1, 1, id="int4_awq"),
+        pytest.param(mtq.INT4_AWQ_CFG, False, True, False, 2, 1, 1, id="int4_awq-compressed"),
+        pytest.param(mtq.INT4_AWQ_CFG, True, True, False, 2, 1, 1, id="int4_awq-compressed-legacy"),
         pytest.param(mtq.W4A8_AWQ_BETA_CFG, True, False, False, 2, 1, 1, id="w4a8_awq-legacy"),
         pytest.param(FP8_PC, True, False, True, 2, 2, 1, id="fp8_per_channel-lora-legacy"),
     ],
