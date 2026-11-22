@@ -18,6 +18,7 @@
 import ast
 import dataclasses
 import inspect
+import math
 import re
 import textwrap
 import types
@@ -291,11 +292,14 @@ def quant_module_set_extra_state(self, state: Any):
     the local shape can be different from the shape in the state due to change
     in tensor parallelism (TP).
     """
-    if state is None or not self.allow_post_restore:
+    if state is None:
+        return
+    if not self.allow_post_restore:
+        # Loaded again once converted: only the checkpoint's layout is read, which the keys
+        # sharded_state_dict() requests follow (see restore_sharded_modelopt_state).
+        _read_swiglu_layout(self, state)
         return
 
-    # TODO: Drop the legacy layout (checkpoints saved before ModelOpt 0.49) in a future release.
-    self._legacy_swiglu_quantizer_state = "modelopt_swiglu_quantizer_state" not in state
     quantizer_state = state.get("modelopt_quantizer_state", None)
 
     if quantizer_state is not None:
@@ -316,16 +320,8 @@ def quant_module_set_extra_state(self, state: Any):
                     continue
                 maybe_promote_nvfp4_static_quantizer(module, quantizer_substate)
                 module.set_from_modelopt_state(quantizer_substate, properties_only=False)
-        saved_numels = _weight_quantizer_numels(self)
         self.modelopt_post_restore()
-        if self._legacy_swiglu_quantizer_state:
-            # State saved at another TP size, by key: tp_size * numel // saved_numel ranks saved it.
-            numels = _weight_quantizer_numels(self)
-            self._legacy_swiglu_tp_ratios = {
-                name: (numels[name], saved)
-                for name, saved in saved_numels.items()
-                if numels.get(name, saved) != saved
-            }
+    _read_swiglu_layout(self, state)
 
     # Handle real_quantizer_state and q_tensor_state
     real_quant_module_set_extra_state(self, state)
@@ -735,6 +731,28 @@ class _QuantMegatronMLP(_MegatronMLP):
                 if name in tp_ratios and self._is_swiglu_row_state(k, v):
                     sharded_state_dict[k] = _legacy_swiglu_load_factory(v, *tp_ratios[name])
         return sharded_state_dict
+
+
+def _read_swiglu_layout(module, state):
+    """Note how ``state``'s checkpoint laid out a gated linear_fc1's per-row quantizer state."""
+    # TODO: Drop the legacy layout (checkpoints saved before ModelOpt 0.49) in a future release.
+    module._legacy_swiglu_quantizer_state = "modelopt_swiglu_quantizer_state" not in state
+    module.__dict__.pop("_legacy_swiglu_tp_ratios", None)
+    if not module._legacy_swiglu_quantizer_state:
+        return
+    saved_numels = {
+        f"{name}.{buffer}": math.prod(meta["shape"])
+        for name, substate in (state.get("modelopt_quantizer_state") or {}).items()
+        if name.split(".")[0] == "weight_quantizer"
+        for buffer, meta in substate.get("_pytorch_state_metadata", {}).get("buffers", {}).items()
+    }
+    # State saved at another TP size, by key: tp_size * numel // saved_numel ranks saved it.
+    numels = _weight_quantizer_numels(module)
+    module._legacy_swiglu_tp_ratios = {
+        name: (numels[name], saved)
+        for name, saved in saved_numels.items()
+        if numels.get(name, saved) != saved
+    }
 
 
 def _weight_quantizer_numels(module) -> dict[str, int]:

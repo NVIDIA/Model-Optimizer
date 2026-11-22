@@ -187,6 +187,23 @@ def _load_extra_state_from_sharded_checkpoint(
             post_load_extra_state()
 
 
+def _read_checkpoint_layout(
+    model: torch.nn.Module,
+    checkpoint_name: str | Path,
+    prefix: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Hand a converted model's modules their saved extra state, with nothing restored from it."""
+    restoring = [m for m in model.modules() if getattr(m, "allow_post_restore", False)]
+    for module in restoring:
+        module.allow_post_restore = False
+    try:
+        _load_extra_state_from_sharded_checkpoint(model, checkpoint_name, prefix, metadata=metadata)
+    finally:
+        for module in restoring:
+            module.allow_post_restore = True
+
+
 def restore_sharded_modelopt_state(
     model: list[torch.nn.Module],
     checkpoint_name: str | Path,
@@ -211,10 +228,12 @@ def restore_sharded_modelopt_state(
 
     modelopt_checkpoint_name = f"{checkpoint_name}/modelopt_state"
 
-    # Early return if the model already has a modelopt_state or the checkpoint does not exist.
-    if not os.path.exists(modelopt_checkpoint_name) or mto.ModeloptStateManager.is_converted(
-        model[0]
-    ):
+    if not os.path.exists(modelopt_checkpoint_name):
+        return
+    if mto.ModeloptStateManager.is_converted(model[0]):
+        # Already restored (e.g. loaded before): its modules only read how this checkpoint laid out
+        # their state, which the keys their sharded_state_dict() requests follow.
+        _read_checkpoint_layout(model[0], checkpoint_name, prefix, metadata=metadata)
         return
 
     # Loading the common modelopt_state (replicated on all ranks).

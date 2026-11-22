@@ -1805,18 +1805,24 @@ def _test_swiglu_weight_quantizer_tp_reshard(
     target = _gpt_model_provider(
         tp_size=load_tp, hidden_size=512, activation_func="swiglu", pp_size=load_pp
     )
-    restore_sharded_modelopt_state([target], tmp_path)
-    target = load_distributed_checkpoint(tmp_path, target)
     tp_rank = get_tensor_model_parallel_rank()
     layers_per_stage = len(target.decoder.layers)
-    states = _swiglu_fc1_row_state(
-        target, layer_offset=get_pipeline_model_parallel_rank() * layers_per_stage
-    )
-    assert states.keys() <= expected.keys() and (states or not per_row)
-    for name, state in states.items():
-        gate, up = expected[name]
-        local = torch.cat([gate.chunk(load_tp)[tp_rank], up.chunk(load_tp)[tp_rank]])
-        assert torch.equal(state, local), name
+    offset = get_pipeline_model_parallel_rank() * layers_per_stage
+    stage = {
+        k
+        for k in expected
+        if offset <= int(re.search(r"layers\.(\d+)", k)[1]) < offset + layers_per_stage
+    }
+    # Loaded twice into the same model: the second load reads the checkpoint's layout again.
+    for _ in range(2):
+        restore_sharded_modelopt_state([target], tmp_path)
+        target = load_distributed_checkpoint(tmp_path, target)
+        states = _swiglu_fc1_row_state(target, layer_offset=offset)
+        assert states.keys() == stage
+        for name, state in states.items():
+            gate, up = expected[name]
+            local = torch.cat([gate.chunk(load_tp)[tp_rank], up.chunk(load_tp)[tp_rank]])
+            assert torch.equal(state, local), name
     # A restored legacy model saves the current layout.
     saved_keys = []
     for v in target.sharded_state_dict().values():
