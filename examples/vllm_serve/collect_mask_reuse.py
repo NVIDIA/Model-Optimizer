@@ -48,6 +48,7 @@ import argparse
 import importlib.metadata
 import importlib.util
 import json
+import math
 import os
 import stat
 import sys
@@ -89,6 +90,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_capture impor
 )
 from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_stream import (
     WHOLE_PREFILL_RANGES,
+    build_analytical_dense_capture,
     build_capture_stream,
     capture_stream_work,
     read_capture_stream_spools,
@@ -584,6 +586,19 @@ class _CaptureJournal:
         if _strict_progress_json((prior / "capture.request.json").read_bytes()) != self.request:
             raise CaptureContractError("resume identity differs: inputs/source/checkpoint/runtime")
         self.resume_path = prior / "capture.progress.jsonl"
+        # Only an uncommitted trailing write may be ignored. A receipt-bound
+        # journal must still match every byte and its complete hash chain.
+        self._allow_torn_resume = not any(
+            (prior / name).exists()
+            for name in (
+                "capture.partial.json",
+                "capture.complete.json",
+                "capture.failure.json",
+                "capture.collected.json",
+            )
+        )
+        if self._allow_torn_resume:
+            self._resume_file_sha = stable_file_sha256(self.resume_path, label="resume journal")
         self.resume_count, self.resume_digest = self._validate_prefix(
             self.resume_path, on_record=on_record
         )
@@ -642,11 +657,12 @@ class _CaptureJournal:
                 raise CaptureContractError("resume actual runtime geometry differs")
         self._write("capture.runtime.json", evidence)
 
-    @staticmethod
-    def _records(path):
+    def _records(self, path):
         with path.open("rb") as handle:
             for line in handle:
                 if not line.endswith(b"\n"):
+                    if path == self.resume_path and getattr(self, "_allow_torn_resume", False):
+                        return
                     raise CaptureContractError("capture journal has a partial final line")
                 yield line, _strict_progress_json(line)
 
@@ -697,7 +713,10 @@ class _CaptureJournal:
         )
         if validated is None or validated[:-1] != current or self.request_sha != current[1]:
             raise CaptureContractError("journal has no matching in-process prefix validation")
-        if stable_file_sha256(self.path, label="validated capture journal") != validated[4]:
+        expected_bytes = (
+            self._resume_file_sha if getattr(self, "_allow_torn_resume", False) else validated[4]
+        )
+        if stable_file_sha256(self.path, label="validated capture journal") != expected_bytes:
             raise CaptureContractError("validated capture journal changed before completion")
         return validated[3:]
 
@@ -742,8 +761,10 @@ class _CaptureJournal:
                 "planned_capture_count": len(self.invocations),
                 "identity_verification": "passed" if identity_verified else "failed",
                 "resumable_prefix": identity_verified
-                and stage == "collection"
-                and not isinstance(error, CaptureContractError),
+                and (
+                    stage == "publication"
+                    or (stage == "collection" and not isinstance(error, CaptureContractError))
+                ),
                 "failure_stage": stage,
                 "error_type": type(error).__name__ if error else None,
                 "eligible_as_capture_manifest": False,
@@ -979,6 +1000,8 @@ def _prepare_capture_inputs(args, *, prepared_request=None):
     prompt_snapshot = read_stable_file_snapshot(args.prompts_jsonl, label="prompt plan")
     prompt_plan_sha256 = prompt_snapshot.sha256
     prompts = parse_prompt_specs_jsonl(prompt_snapshot.payload)
+    if any(prompt.max_kv_tokens is None for prompt in prompts):
+        raise CaptureContractError("calibration context ranges require finite maximum lengths")
     vanilla_snapshot = read_stable_file_snapshot(args.vanilla_config, label="vanilla config")
     vanilla_config_sha256 = vanilla_snapshot.sha256
     threshold_scale_factor = parse_vanilla_prefill_fit(vanilla_snapshot.payload)
@@ -1050,6 +1073,7 @@ def _prepare_capture_inputs(args, *, prepared_request=None):
                     prompt=prompt,
                     target_sparsity=target,
                     threshold_scale_factor=threshold_scale_factor,
+                    coverage_ranges=sorted({(p.min_kv_tokens, p.max_kv_tokens) for p in prompts}),
                 )
                 for prompt in prompts
                 for target in targets
@@ -1066,6 +1090,13 @@ def _prepare_capture_inputs(args, *, prepared_request=None):
         for stream in streams
     ] != [(prompt.prompt_id, target.hex()) for prompt in prompts for target in targets]:
         raise CaptureContractError("prepared stream targets or parent order differ from CLI inputs")
+    if whole_prefill and not any(
+        chunk["dense_reason"] is None for request in streams for chunk in request["chunks"]
+    ):
+        raise CaptureContractError(
+            "capture plan has no sparse invocation to establish provider head/layer geometry; "
+            "include a longer prompt or a lower target sparsity"
+        )
     output_path = Path(args.output)
     manifest_path = (
         Path(args.output_manifest)
@@ -1075,7 +1106,10 @@ def _prepare_capture_inputs(args, *, prepared_request=None):
     if output_path.resolve() == manifest_path.resolve():
         raise CaptureContractError("observation and manifest output paths must differ")
     if getattr(args, "phase", "monolithic") != "finalize" and (
-        output_path.exists() or manifest_path.exists()
+        output_path.exists()
+        or output_path.is_symlink()
+        or manifest_path.exists()
+        or manifest_path.is_symlink()
     ):
         raise CaptureContractError("capture outputs already exist; refusing to overwrite them")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1168,7 +1202,9 @@ def _capture_request(args, inputs, controller):
     if whole_prefill:
         request["capture_scope"] = "whole-prefill"
         request["stream_requests"] = streams
-        request["coverage_ranges"] = [list(bounds) for bounds in WHOLE_PREFILL_RANGES]
+        request["coverage_ranges"] = streams[0].get(
+            "coverage_ranges", [list(b) for b in WHOLE_PREFILL_RANGES]
+        )
     return request, invocations
 
 
@@ -1223,6 +1259,74 @@ def _load_capture_engine(args, inputs, journal):
     return llm, tokenizer, sampling, observed_page
 
 
+def _normalize_stream_file(path, streams, fit, manifests, *, destination=None):
+    """Sort row offsets and stream payloads without copying the capture into a sort database."""
+    digest = sha256()
+    ordered_manifests = []
+    index = []
+
+    def key(row):
+        inv = row["invocation"]
+        hi = inv["max_kv_tokens"]
+        return (
+            inv["min_kv_tokens"],
+            math.inf if hi is None else hi,
+            inv["split"],
+            inv["prompt_id"],
+            float.fromhex(inv["target_sparsity_hex"]),
+        )
+
+    with tempfile.TemporaryDirectory(dir=path.parent) as directory, path.open("rb") as source:
+        offset = 0
+        template = None
+        for line, metadata in zip(source, manifests, strict=True):
+            template = json.loads(line)
+            index.append((key(template), source, offset, len(line), metadata))
+            offset += len(line)
+        if template is None:
+            raise CaptureContractError("no measured capture supplies head/layer geometry")
+        with tempfile.TemporaryFile(dir=directory) as analytical:
+            for request in streams:
+                for chunk in request["chunks"]:
+                    if chunk["dense_reason"] != "threshold_disabled":
+                        continue
+                    row = build_analytical_dense_capture(
+                        request, chunk, fit=fit, measured_template=template
+                    )
+                    payload = _canonical_capture_line(row)
+                    cells = template["global_num_heads"] ** 2 * (
+                        sum(len(v) for v in template["consumer_candidates_by_layer"].values())
+                        if "consumer_candidates_by_layer" in template
+                        else len(template["consumer_layers"])
+                    )
+                    metadata = {
+                        "candidate_cell_count": cells,
+                        "analytical_dense": row["analytical_dense"],
+                    }
+                    index.append((key(row), analytical, analytical.tell(), len(payload), metadata))
+                    analytical.write(payload)
+            ordered = Path(directory) / "captures.jsonl"
+            with ordered.open("wb") as target:
+                for _, stream, offset, count, metadata in sorted(index, key=lambda entry: entry[0]):
+                    stream.seek(offset)
+                    payload = stream.read(count)
+                    if len(payload) != count:
+                        raise CaptureContractError("capture changed while ordering rows")
+                    target.write(payload)
+                    digest.update(payload)
+                    ordered_manifests.append(metadata)
+                target.flush()
+                os.fsync(target.fileno())
+        if destination is None:
+            os.replace(ordered, path)
+        elif destination.exists():
+            if _spool_sha256(destination) != digest.hexdigest():
+                raise CaptureContractError("existing normalized solver input differs")
+        else:
+            os.link(ordered, destination, follow_symlinks=False)
+    return digest.hexdigest(), ordered_manifests
+
+
 def _capture_manifest(
     args,
     inputs,
@@ -1246,6 +1350,8 @@ def _capture_manifest(
     topology_discovery = args.plan.endswith("_topology_discovery")
     if args.validate_dense_output:
         for row in capture_manifests:
+            if row.get("analytical_dense") is not None:
+                continue
             shadow = row.get("dense_shadow_evidence", {})
             if shadow.get("enabled") is not True or not shadow.get("validated_layer_indices"):
                 raise CaptureContractError(
@@ -1310,14 +1416,21 @@ def _capture_manifest(
             manifest["observed_kv_page_tokens"] = observed_page
             manifest["whole_prefill"] = {
                 "schema_version": 1,
-                "coverage_ranges": [list(bounds) for bounds in WHOLE_PREFILL_RANGES],
+                "coverage_ranges": streams[0].get(
+                    "coverage_ranges", [list(b) for b in WHOLE_PREFILL_RANGES]
+                ),
                 "requests": streams,
                 "dense_exclusion_count": sum(
                     chunk["invocation"] is None
                     for request in streams
                     for chunk in request["chunks"]
                 ),
-                "measured_capture_count": capture_count,
+                "measured_capture_count": sum(
+                    c["invocation"] is not None for r in streams for c in r["chunks"]
+                ),
+                "analytical_dense_capture_count": sum(
+                    c["dense_reason"] == "threshold_disabled" for r in streams for c in r["chunks"]
+                ),
                 "work_by_request": [capture_stream_work(request) for request in streams],
                 "target_scope": (
                     "per-range selector constraint; whole-workload target requires measured execution accounting"
@@ -1618,7 +1731,7 @@ def _finalize_stage(args, inputs, request, invocations, files, receipt):
                 "collected_receipt_sha256": args.stage_receipt_sha256,
                 "typed_receipt_sha256": _spool_sha256(files.directory / f"capture.{status}.json"),
                 "normalized_file": normalized.name,
-                "normalized_sha256": digest.hexdigest(),
+                "normalized_sha256": _spool_sha256(normalized),
                 "status": status,
             },
         )
@@ -1632,6 +1745,13 @@ def _finalize_stage(args, inputs, request, invocations, files, receipt):
     geometry = runtime["geometry"]
     if not isinstance(geometry, dict):
         raise CaptureContractError("collected runtime geometry must be an object")
+    # Preserve the journal-normalized receipt bytes; this is a derived solver input.
+    calibrated = files.directory / "capture.calibration.jsonl"
+    capture_sha, manifests = _normalize_stream_file(
+        normalized, inputs.streams, inputs.threshold_scale_factor, manifests, destination=calibrated
+    )
+    normalized = calibrated
+    cells = sum(m["candidate_cell_count"] for m in manifests)
     manifest = _capture_manifest(
         args,
         inputs,
@@ -1639,7 +1759,7 @@ def _finalize_stage(args, inputs, request, invocations, files, receipt):
         len(manifests),
         cells,
         manifests,
-        digest.hexdigest(),
+        capture_sha,
     )
     manifest_stage = files.directory / "capture.manifest.staged.json"
     files.write_derived(manifest_stage.name, manifest)
@@ -1870,8 +1990,20 @@ def _run(args: argparse.Namespace, state: dict) -> tuple[Path, Path]:
         assert temporary_path is not None
         temporary_path.unlink(missing_ok=True)
         raise
-    capture_sha256 = capture_digest.hexdigest()
     state["stage"] = "publication"
+    capture_sha256 = capture_digest.hexdigest()
+    if whole_prefill:
+        try:
+            capture_sha256, capture_manifests = _normalize_stream_file(
+                temporary_path, streams, threshold_scale_factor, capture_manifests
+            )
+        except BaseException:
+            temporary_path.unlink(missing_ok=True)
+            raise
+        capture_count = len(capture_manifests)
+        candidate_cell_count = sum(
+            cast("int", m["candidate_cell_count"]) for m in capture_manifests
+        )
     manifest = _capture_manifest(
         args,
         inputs,

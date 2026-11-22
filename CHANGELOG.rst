@@ -6,6 +6,10 @@ Changelog
 
 **New Features**
 
+*Sparsity*
+
+- Added two-pass mask-reuse calibration with per-range work targets and replay-verified candidate export.
+
 *Quantization - ONNX*
 
 *Quantization - Algorithms*
@@ -23,6 +27,8 @@ Changelog
 *Megatron Framework (M-LM / M-Bridge)*
 
 *Misc*
+
+- Add offline cross-layer attention-mask calibration with vLLM whole-prefill capture, anchor discovery, and fixed-topology refitting. Benchmark mode can export a replayed candidate meeting the BMM1 target in every range while optimality and task accuracy are evaluated separately.
 
 **Backward Breaking Changes**
 

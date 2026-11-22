@@ -18,6 +18,7 @@
 import importlib.util
 import json
 import os
+import runpy
 import sys
 from hashlib import sha256
 from pathlib import Path
@@ -492,7 +493,7 @@ def test_capture_environment_rejects_extra_fa4_source_path(tmp_path, monkeypatch
 def resume_case(tmp_path, monkeypatch):
     checkpoint = tmp_path / "model"
     checkpoint.mkdir()
-    (checkpoint / "config.json").write_text("{}\n")
+    (checkpoint / "config.json").write_text('{"num_hidden_layers":2,"num_attention_heads":2}\n')
     (checkpoint / "model.safetensors").write_bytes(b"weights")
     witness = create_checkpoint_manifest(checkpoint, model="toy")
     source = tmp_path / "source"
@@ -583,7 +584,35 @@ def resume_case(tmp_path, monkeypatch):
     return args
 
 
-def test_partial_resume_matches_uninterrupted_capture_and_manifest_bytes(resume_case, tmp_path):
+def test_publication_failure_can_resume_completed_capture(resume_case, tmp_path, monkeypatch):
+    args = resume_case
+    args.max_wall_seconds = 3600
+    publish = collect_mask_reuse_cli._publish_no_clobber
+
+    def fail_publication(*args):
+        raise OSError("output filesystem does not support hard links")
+
+    monkeypatch.setattr(collect_mask_reuse_cli, "_publish_no_clobber", fail_publication)
+    with pytest.raises(OSError):
+        collect_mask_reuse_cli.run(args)
+    prior = Path(args.output).parent
+    assert json.loads((prior / "capture.failure.json").read_text())["resumable_prefix"]
+    monkeypatch.setattr(collect_mask_reuse_cli, "_publish_no_clobber", publish)
+    args.resume_from = prior
+    args.output = str(tmp_path / "new-destination/captures.jsonl")
+    capture, manifest = collect_mask_reuse_cli.run(args)
+    assert (
+        len(capture.read_bytes().splitlines())
+        == json.loads(manifest.read_text())["capture_count"]
+        == 4
+    )
+    assert _LLM.instances[-1].events.count("generate") == 0
+
+
+@pytest.mark.parametrize("torn_tail", [False, True])
+def test_partial_resume_matches_uninterrupted_capture_and_manifest_bytes(
+    resume_case, tmp_path, torn_tail
+):
     args = resume_case
     args.max_wall_seconds = 1e-12
     assert collect_mask_reuse_cli.run(args) is None
@@ -593,6 +622,10 @@ def test_partial_resume_matches_uninterrupted_capture_and_manifest_bytes(resume_
     assert receipt["eligible_as_capture_manifest"] is False
     assert not Path(args.output).exists()
     assert not Path(args.output + ".manifest.json").exists()
+    if torn_tail:
+        (prior / "capture.partial.json").unlink()
+        with (prior / "capture.progress.jsonl").open("ab") as handle:
+            handle.write(b'{"uncommitted":')
     before = (prior / "capture.progress.jsonl").read_bytes()
     args.resume_from = prior
     args.max_wall_seconds = None
@@ -732,6 +765,7 @@ def test_runtime_interruption_preserves_only_completed_requests(resume_case, tmp
 
 
 class _StreamLLM(_LLM):
+    discovery = False
     fail_after_chunk = None
     tamper_completion = False
     wrong_output_tokens = False
@@ -795,6 +829,19 @@ class _StreamLLM(_LLM):
                         eligible - 1,
                         eligible,
                     ]
+                    if self.discovery:
+                        consumer = payload.pop("consumer_layers")["1"]
+                        consumer.pop("anchor_layer")
+                        payload.update(
+                            capture_mode="topology_discovery",
+                            attention_layers=[0, 1],
+                            max_reuse_span=1,
+                            consumer_candidates_by_layer={"1": {"0": consumer}},
+                        )
+                        payload["anchor_stats_by_layer"]["1"] = dict(
+                            payload["anchor_stats_by_layer"]["0"]
+                        )
+
                 handle.write(
                     collect_mask_reuse_cli._canonical_capture_line(
                         {
@@ -854,6 +901,161 @@ def whole_resume_case(resume_case, tmp_path, monkeypatch):
     monkeypatch.setattr(_StreamLLM, "wrong_output_tokens", False)
     monkeypatch.setattr(_StreamLLM, "malformed_completion", False)
     return args
+
+
+def test_finished_whole_prefill_capture_resumes_after_sort_failure(
+    whole_resume_case, tmp_path, monkeypatch
+):
+    args = whole_resume_case
+    with monkeypatch.context() as patch:
+
+        def fail_sort(*args):
+            raise OSError("sort output is full")
+
+        patch.setattr(collect_mask_reuse_cli, "_normalize_stream_file", fail_sort)
+        with pytest.raises(OSError, match="sort output"):
+            collect_mask_reuse_cli.run(args)
+    prior = Path(args.output).parent
+    receipt = json.loads((prior / "capture.failure.json").read_bytes())
+    assert receipt["completed_capture_count"] == receipt["planned_capture_count"]
+    assert receipt["resumable_prefix"]
+    args.resume_from = prior
+    args.output = str(tmp_path / "resumed/captures.jsonl")
+    _, manifest = collect_mask_reuse_cli.run(args)
+    assert json.loads(manifest.read_bytes())["capture_count"] > 0
+    assert _StreamLLM.instances[-1].events.count("generate") == 0
+
+
+@pytest.mark.parametrize("discovery", [False, True])
+def test_whole_prefill_collector_output_runs_through_refit(
+    whole_resume_case, tmp_path, monkeypatch, discovery
+):
+    args = whole_resume_case
+    monkeypatch.setattr(_StreamLLM, "discovery", discovery)
+    if discovery:
+        args.plan = "test_topology_discovery"
+        args.max_reuse_span = 1
+    fit = json.loads(Path(args.vanilla_config).read_text())
+    fit["prefill"].update(a=82.07903190934026, b=8.239507888257323)
+    Path(args.vanilla_config).write_text(json.dumps(fit))
+    args.target_sparsities = [0.5, 0.6, 0.7]
+    args.max_model_len = 40961
+    prompts = Path(args.prompts_jsonl)
+    rows = [json.loads(line) for line in prompts.read_text().splitlines()]
+    for i, row in enumerate(rows):
+        tokens = list(range(i, i + 40960))
+        row.update(prompt_token_ids=tokens, prompt_token_ids_sha256=source_capture_sha256(tokens))
+    # Different-length parents deliberately share their early chunks. Preserve
+    # every planned observation without admitting duplicate full prompts.
+    for row in list(rows):
+        tokens = row["prompt_token_ids"][:32768]
+        rows.append(
+            {
+                **row,
+                "prompt_id": row["prompt_id"] + "-short",
+                "prompt_token_ids": tokens,
+                "prompt_token_ids_sha256": source_capture_sha256(tokens),
+            }
+        )
+    prompts.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    capture, manifest = collect_mask_reuse_cli.run(args)
+    evidence = json.loads(manifest.read_text())
+    assert evidence["capture_count"] == 54
+    assert evidence["whole_prefill"]["analytical_dense_capture_count"] == 16
+    # Old whole-prefill manifests could silently omit all-dense prefixes.
+    from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_stream import (
+        validate_whole_prefill_evidence,
+    )
+
+    omitted = json.loads(manifest.read_text())
+    omitted["whole_prefill"]["analytical_dense_capture_count"] = 0
+    omitted["capture_count"] -= 16
+    with pytest.raises(collect_mask_reuse_cli.CaptureContractError):
+        validate_whole_prefill_evidence(omitted)
+    topology = tmp_path / "topology.json"
+    if discovery:
+        discover = runpy.run_path(str(_SCRIPT_PATH.with_name("calibrate_mask_reuse_topology.py")))
+        discovery_args = [
+            "--checkpoint",
+            args.model,
+            "--captures",
+            str(capture),
+            "--capture-manifest",
+            str(manifest),
+            "--vanilla-config",
+            args.vanilla_config,
+            "--prompt-plan",
+            args.prompts_jsonl,
+            "--target-bmm1-skip-ratio",
+            "1e-8",
+            "--reuse-dropped-mass-report-threshold",
+            "0.02",
+            "--output",
+            str(topology),
+        ]
+        assert discover["main"](discovery_args) == 0
+        assert json.loads(topology.read_bytes())["provenance"]["selection_result"]["status"] in {
+            "within_tolerance",
+            "feasible",
+        }
+        for name, target, budget, expected in (
+            ("unmet", "1", "60", 2),
+            ("unresolved", "1e-8", "1e-9", 3),
+        ):
+            attempt = list(discovery_args)
+            attempt[attempt.index("--target-bmm1-skip-ratio") + 1] = target
+            output = tmp_path / (name + ".json")
+            attempt[attempt.index("--output") + 1] = str(output)
+            attempt += ["--solver-time-limit-seconds", budget]
+            if expected == 2:
+                with pytest.raises(SystemExit) as exc:
+                    discover["main"](attempt)
+                assert exc.value.code == 2
+            else:
+                assert discover["main"](attempt) == expected
+            assert not output.exists()
+            diagnostic = json.loads(Path(str(output) + ".report.json").read_bytes())
+            if expected == 3:
+                assert diagnostic["selection_status"] == "unresolved"
+    else:
+        topology.write_text('{"anchors":[0],"nearest":{"0":0,"1":0}}')
+    policy, report = tmp_path / "policy.json", tmp_path / "report.json"
+    cli = runpy.run_path(str(_SCRIPT_PATH.with_name("calibrate_mask_reuse.py")))
+    refit_args = [
+        "--checkpoint",
+        args.model,
+        "--compact-captures",
+        str(capture),
+        "--capture-manifest",
+        str(manifest),
+        "--vanilla-config",
+        args.vanilla_config,
+        "--topology",
+        str(topology),
+        "--target-bmm1-skip-ratio",
+        "1e-8",
+        "--reuse-dropped-mass-report-threshold",
+        "0.02",
+        "--output-policy",
+        str(policy),
+        "--output-report",
+        str(report),
+    ]
+    assert cli["main"](refit_args) == 0
+    result = json.loads(policy.read_bytes())
+    assert result["provenance"]["input_capture_count"] == 54
+    for row in result["calibration_report"]["by_bucket"]:
+        assert row["selection_result"]["status"] in {"within_tolerance", "feasible"}
+        assert row["bmm1_skip_objective"]["skipped_tiles"] > 0
+    assert (
+        json.loads(report.read_bytes())["candidate_policy_sha256"]
+        == sha256(policy.read_bytes()).hexdigest()
+    )
+    next_policy = tmp_path / "retried.json"
+    refit_args[refit_args.index("--output-policy") + 1] = str(next_policy)
+    refit_args[refit_args.index("--output-report") + 1] = str(tmp_path / "retried-report.json")
+    assert cli["main"]([*refit_args, "--previous-candidate", str(policy)]) == 0
+    assert json.loads(next_policy.read_bytes())["context_policies"] == result["context_policies"]
 
 
 @pytest.mark.parametrize("hard_kill", [False, True])

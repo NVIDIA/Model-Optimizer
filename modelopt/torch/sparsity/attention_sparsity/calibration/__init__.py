@@ -32,6 +32,7 @@ from .mask_reuse import (
     MaskReuseCalibrationError,
     canonical_prefill_threshold_scale_factor,
 )
+from .mask_reuse_benchmark import assess_mask_reuse_benchmark_gates
 from .mask_reuse_compact import (
     CompactMaskReuseCapture,
     CompactMaskReuseCaptureSource,
@@ -43,6 +44,12 @@ from .mask_reuse_solver import (
     MaskReuseSolverConfig,
     MaskReuseSolverError,
     MaskReuseSolverFailure,
+)
+from .mask_reuse_topology import (
+    TopologyDiscoveryCapture,
+    TopologyDiscoveryCaptureSource,
+    calibrate_mask_reuse_topology,
+    load_topology_discovery_captures,
 )
 from .ruler_dataset import RulerDatasetBuilder
 
@@ -60,12 +67,17 @@ __all__ = [
     "MaskReuseSolverFailure",
     "RulerDatasetBuilder",
     "StableFileSnapshot",
+    "TopologyDiscoveryCapture",
+    "TopologyDiscoveryCaptureSource",
     "VerifiedCheckpointManifest",
+    "assess_mask_reuse_benchmark_gates",
     "calibrate_compact_mask_reuse_policy",
+    "calibrate_mask_reuse_topology",
     "calibrate_sparse_attention",
     "canonical_prefill_threshold_scale_factor",
     "create_checkpoint_manifest",
     "load_compact_mask_reuse_captures",
+    "load_topology_discovery_captures",
     "read_stable_file_snapshot",
     "stable_file_sha256",
     "verify_checkpoint_manifest",

@@ -26,6 +26,7 @@ jobs:
         .github/workflows/_pr_gate.yml
         .github/workflows/gpu_tests.yml
         modelopt/**
+        examples/vllm_serve/**
         modelopt_recipes/**
         noxfile.py
         pyproject.toml

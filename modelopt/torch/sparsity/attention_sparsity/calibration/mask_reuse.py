@@ -20,6 +20,12 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+if TYPE_CHECKING:
+    from fractions import Fraction
 
 _FORMULA = "a * exp(b * target_sparsity)"
 
@@ -94,6 +100,23 @@ def _number(
     if not math.isfinite(result) or below or (maximum is not None and result > maximum):
         raise MaskReuseCalibrationError(f"{name} is outside its valid range")
     return result
+
+
+def _dropped_mass_matrix(raw: object, *, heads: int, label: str) -> tuple[tuple[float, ...], ...]:
+    """Validate a head-by-donor matrix without formatting a label for every element."""
+    if not isinstance(raw, list) or len(raw) != heads:
+        raise MaskReuseCalibrationError(f"{label} must have {heads} consumer rows")
+    rows = []
+    for head, row in enumerate(raw):
+        if not isinstance(row, list) or len(row) != heads:
+            raise MaskReuseCalibrationError(f"{label}[{head}] must cover every global donor head")
+        for donor, value in enumerate(row):
+            if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 1:
+                raise MaskReuseCalibrationError(
+                    f"{label}[{head}][{donor}] must be finite and in [0, 1]"
+                )
+        rows.append(tuple(map(float, row)))
+    return tuple(rows)
 
 
 def _sha256(value: object, name: str) -> str:
@@ -222,8 +245,10 @@ def _normalize_topology(raw: Mapping[str, object]) -> tuple[tuple[int, ...], dic
             raise MaskReuseCalibrationError(f"topology layer {layer} has invalid anchor {anchor}")
         if layer in anchor_set and anchor != layer:
             raise MaskReuseCalibrationError(f"topology anchor {layer} must map to itself")
-    if not any(layer != anchor for layer, anchor in nearest.items()):
-        raise MaskReuseCalibrationError("topology must contain at least one reuse layer")
+        if anchor != max(a for a in anchors if a <= layer):
+            raise MaskReuseCalibrationError(
+                f"topology layer {layer} must use its nearest preceding anchor"
+            )
     return anchors, dict(sorted(nearest.items()))
 
 
@@ -253,6 +278,7 @@ class _Selection:
     worst_prompt_total_dropped_mass: float = 0.0
     mean_prompt_total_dropped_mass: float = 0.0
     worst_individual_dropped_mass: float = 0.0
+    risk_objective: float | Fraction = 0.0
 
 
 @dataclass(slots=True)
@@ -384,24 +410,19 @@ def _risk_variant(max_anchor_dropped_mass, anchor_dropped_mass_report_threshold)
 
 
 def _pareto_donor_options(options):
-    """Prune only dominance that also preserves the canonical donor-map tie-break."""
-    kept = []
-    for candidate in options:
-        rank = (not candidate.choice.fallback, candidate.choice.donor_head)
-        dominated = False
-        for other in options:
-            if other is candidate:
-                continue
-            no_worse = other.bmm1_skipped_tiles >= candidate.bmm1_skipped_tiles and all(
-                a <= b for a, b in zip(other.risk_by_prompt, candidate.risk_by_prompt, strict=True)
-            )
-            canonical = (not other.choice.fallback, other.choice.donor_head) < rank
-            if no_worse and (other.bmm1_skipped_tiles > candidate.bmm1_skipped_tiles or canonical):
-                dominated = True
-                break
-        if not dominated:
-            kept.append(candidate)
-    return tuple(kept)
+    """Drop dominated choices and preserve one representative of equal alternatives."""
+    skipped = np.asarray([option.bmm1_skipped_tiles for option in options])
+    ranks = np.asarray(
+        [0 if option.choice.fallback else option.choice.donor_head + 1 for option in options]
+    )
+    risks = np.asarray([option.risk_by_prompt for option in options], dtype=np.float64)
+    dominates = skipped[:, None] >= skipped[None, :]
+    for prompt in risks.T:
+        dominates &= prompt[:, None] <= prompt[None, :]
+    dominates &= (skipped[:, None] > skipped[None, :]) | (ranks[:, None] < ranks[None, :])
+    keep = ~dominates.any(axis=0)
+    survivors = tuple(option for option, retained in zip(options, keep, strict=True) if retained)
+    return survivors
 
 
 def _validate_donor_head_mode(mode: str) -> None:
@@ -409,12 +430,36 @@ def _validate_donor_head_mode(mode: str) -> None:
         raise MaskReuseCalibrationError("donor_head_mode must be calibrated or same_index")
 
 
+def _validate_shared_prefix_provenance(allow, provenance):
+    if type(allow) is not bool:
+        raise MaskReuseCalibrationError("allow_same_group_prefixes must be boolean")
+    if allow:
+        if (provenance or {}).get("capture_scope") != "whole_prefill":
+            raise MaskReuseCalibrationError(
+                "shared prefixes require explicit whole-prefill provenance"
+            )
+        _sha256((provenance or {}).get("whole_prefill_plan_sha256"), "whole_prefill_plan_sha256")
+
+
+def _capture_fingerprint_owner(capture, allow_same_group_prefixes):
+    if not allow_same_group_prefixes:
+        return capture.bucket, capture.prompt_id
+    return (
+        capture.bucket,
+        capture.source_group_sha256,
+        capture.partition,
+        capture.inner_fold,
+        capture.source,
+        tuple(sorted(capture.geometry.items())),
+    )
+
+
 def _donor_head_candidates(mode: str, consumer_head: int, global_num_heads: int):
     return (consumer_head,) if mode == "same_index" else range(global_num_heads)
 
 
 def _canonical_evidence(raw: Mapping[str, object]) -> dict[str, str]:
-    missing = _EVIDENCE_FIELDS - raw.keys()
+    missing = {"vanilla_fit_sha256", "reuse_bundle_sha256"} - raw.keys()
     extra = raw.keys() - _EVIDENCE_FIELDS
     if missing or extra:
         raise MaskReuseCalibrationError(

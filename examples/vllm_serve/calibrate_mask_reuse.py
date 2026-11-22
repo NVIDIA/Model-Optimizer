@@ -71,10 +71,12 @@ from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_contracts
     validate_model_geometry,
 )
 from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_solver import (
+    DEFAULT_REFIT_TIME_LIMIT_SECONDS,
     MaskReuseSolverConfig,
     MaskReuseSolverError,
 )
 from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_stream import (
+    validate_whole_prefill_captures,
     validate_whole_prefill_evidence,
 )
 
@@ -159,7 +161,9 @@ def _evidence_artifacts(
     args: argparse.Namespace, *, vanilla_fit_sha256: str, checkpoint_sha256: str
 ) -> tuple[dict[str, str], dict[str, Path]]:
     paths = {
-        field: Path(getattr(args, attribute)) for field, attribute in _EVIDENCE_ARTIFACTS.items()
+        field: Path(getattr(args, attribute))
+        for field, attribute in _EVIDENCE_ARTIFACTS.items()
+        if getattr(args, attribute, None) is not None
     }
     for field, path in paths.items():
         value = _load_json_object(path, label=field)
@@ -282,15 +286,22 @@ def _validate_capture_manifest(
     vanilla_config_sha256: str,
 ) -> None:
     version = raw.get("capture_manifest_schema_version")
-    if type(version) is not int or version not in (4, 6, 8, 10):
+    if type(version) is not int or version not in (4, 5, 6, 7, 8, 9, 10, 11):
         raise ValueError("unsupported capture manifest schema version")
-    reference = version in (6, 8, 10)
+    reference = version >= 6
+    discovery = version % 2 == 1
     fields = (
         _CAPTURE_MANIFEST_FIELDS - capture_source_fields(reference=False)
     ) | capture_source_fields(reference=reference)
-    if version in (8, 10):
+    if discovery:
+        fields = (fields - {"compact_capture_file_sha256"}) | {
+            "topology_discovery_capture_file_sha256",
+            "capture_mode",
+            "max_reuse_span",
+        }
+    if version >= 8:
         fields |= {"observed_kv_page_tokens"}
-    if version == 10:
+    if version >= 10:
         fields |= {"whole_prefill"}
     missing = fields - raw.keys()
     extra = raw.keys() - fields
@@ -311,42 +322,29 @@ def _validate_capture_manifest(
         "compact_capture_file_sha256": compact_capture_sha256,
         "vanilla_config_file_sha256": vanilla_config_sha256,
     }
+    if discovery:
+        expected.pop("compact_capture_file_sha256")
+        expected.update(
+            capture_manifest_schema_version=version,
+            capture_protocol="modelopt_vllm_mask_reuse_reference_topology_discovery_v1"
+            if reference
+            else "modelopt_vllm_mask_reuse_topology_discovery_v1",
+            capture_mode="topology_discovery",
+            topology_discovery_capture_file_sha256=compact_capture_sha256,
+        )
+        if type(raw["max_reuse_span"]) is not int or raw["max_reuse_span"] <= 0:
+            raise ValueError("discovery capture requires a positive reuse span")
     for field, value in expected.items():
         if raw[field] != value:
             raise ValueError(f"capture manifest {field} does not match its verified input")
     validate_capture_source(raw, reference=reference)
     validate_manifest_counts(raw)
-    if version == 10:
+    if version >= 10:
         validate_whole_prefill_evidence(raw)
     if not isinstance(raw["engine_kwargs"], Mapping):
         raise ValueError("capture manifest engine_kwargs must be an object")
     if not isinstance(raw["dense_shadow_validation_requested"], bool):
         raise ValueError("capture manifest dense_shadow_validation_requested must be boolean")
-    if isinstance(raw["capture_count"], bool) or not isinstance(raw["capture_count"], int):
-        raise ValueError("capture manifest capture_count must be an integer")
-    if raw["capture_count"] <= 0:
-        raise ValueError("capture manifest must contain at least one capture")
-    captures = raw["captures"]
-    if not isinstance(captures, list) or len(captures) != raw["capture_count"]:
-        raise ValueError("capture manifest captures do not match capture_count")
-    candidate_cell_count = raw["candidate_cell_count"]
-    if (
-        isinstance(candidate_cell_count, bool)
-        or not isinstance(candidate_cell_count, int)
-        or candidate_cell_count <= 0
-    ):
-        raise ValueError("capture manifest candidate_cell_count must be positive")
-    observed_cells = 0
-    for index, capture in enumerate(captures):
-        if not isinstance(capture, Mapping) or not isinstance(
-            capture.get("candidate_cell_count"), int
-        ):
-            raise ValueError(
-                f"capture manifest captures[{index}].candidate_cell_count must be an integer"
-            )
-        observed_cells += int(capture["candidate_cell_count"])
-    if observed_cells != candidate_cell_count:
-        raise ValueError("capture manifest candidate-cell total is inconsistent")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -379,10 +377,10 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="JSON object containing anchors and nearest layer mappings",
     )
-    parser.add_argument("--calibration-plan", type=Path, required=True)
-    parser.add_argument("--family-registry", type=Path, required=True)
-    parser.add_argument("--grouped-fit", type=Path, required=True)
-    parser.add_argument("--outer-report", type=Path, required=True)
+    parser.add_argument("--calibration-plan", type=Path, help="Optional additional provenance JSON")
+    parser.add_argument("--family-registry", type=Path, help="Optional additional provenance JSON")
+    parser.add_argument("--grouped-fit", type=Path, help="Optional additional provenance JSON")
+    parser.add_argument("--outer-report", type=Path, help="Optional additional provenance JSON")
     risk = parser.add_mutually_exclusive_group()
     risk.add_argument(
         "--max-anchor-dropped-mass", type=float, help="Legacy hard-anchor-cap formulation"
@@ -403,8 +401,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Export a diagnostic maximum-skip candidate when the target is infeasible",
     )
+    parser.add_argument(
+        "--previous-candidate",
+        type=Path,
+        help="Use a capture-matched prior policy as the initial head assignment",
+    )
     parser.add_argument("--topology-sha256", help="Expected SHA-256 of the topology file")
-    parser.add_argument("--solver-time-limit-seconds", type=float, default=600.0)
+    parser.add_argument(
+        "--solver-time-limit-seconds", type=float, default=DEFAULT_REFIT_TIME_LIMIT_SECONDS
+    )
     parser.add_argument(
         "--reuse-dropped-mass-report-threshold",
         type=float,
@@ -437,6 +442,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.output_policy.resolve() == args.output_report.resolve():
         parser.error("--output-policy and --output-report must be different paths")
+    for path in (args.output_policy, args.output_report):
+        if path.exists() or path.is_symlink():
+            parser.error(f"output already exists: {path}")
 
     try:
         checkpoint = verify_checkpoint_manifest(
@@ -456,6 +464,9 @@ def main(argv: list[str] | None = None) -> int:
         topology_sha256 = topology_snapshot.sha256
         if args.topology_sha256 is not None and args.topology_sha256 != topology_sha256:
             raise ValueError("topology file SHA-256 does not match --topology-sha256")
+        previous = None
+        prior_provenance = {}
+        donor_mode = "calibrated"
         if "topology_selection_schema_version" in topology:
             if (
                 type(topology["topology_selection_schema_version"]) is not int
@@ -472,6 +483,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             if sorted(int(layer) for layer in topology["nearest"]) != topology["attention_layers"]:
                 raise ValueError("topology nearest mapping does not cover attention_layers")
+            donor_mode = (
+                topology["provenance"]
+                .get("candidate_restrictions", {})
+                .get("donor_head_mode", "calibrated")
+            )
             topology = {key: topology[key] for key in ("anchors", "nearest")}
         validate_capture_scope(capture_manifest, diagnostic=args.diagnostic_final_chunk)
         _validate_capture_manifest(
@@ -481,13 +497,29 @@ def main(argv: list[str] | None = None) -> int:
             compact_capture_sha256=evidence["reuse_bundle_sha256"],
             vanilla_config_sha256=evidence["vanilla_fit_sha256"],
         )
-        source = load_compact_mask_reuse_captures(args.compact_captures)
+        source = (
+            load_compact_mask_reuse_captures(
+                args.compact_captures,
+                topology=topology,
+                discovery_span=capture_manifest["max_reuse_span"],
+            )
+            if capture_manifest.get("capture_mode") == "topology_discovery"
+            else load_compact_mask_reuse_captures(args.compact_captures)
+        )
+        whole_prefill = "whole_prefill" in capture_manifest
+        if whole_prefill:
+            validate_whole_prefill_captures(source, capture_manifest)
         first = next(iter(source), None)
         if first is None:
             raise ValueError("capture file is empty")
         validate_model_geometry(
             checkpoint, [int(layer) for layer in topology["nearest"]], first.global_num_heads
         )
+        if args.previous_candidate:
+            previous, snapshot = _load_json_snapshot(
+                args.previous_candidate, label="prior candidate"
+            )
+            prior_provenance["previous_candidate_sha256"] = snapshot.sha256
         artifact = calibrate_compact_mask_reuse_policy(
             source,
             vanilla_calibration=vanilla_config,
@@ -500,11 +532,17 @@ def main(argv: list[str] | None = None) -> int:
             ),
             solver_config=MaskReuseSolverConfig(
                 backend=getattr(args, "solver", "highs"),
-                time_limit_seconds=getattr(args, "solver_time_limit_seconds", 600.0),
+                time_limit_seconds=getattr(
+                    args, "solver_time_limit_seconds", DEFAULT_REFIT_TIME_LIMIT_SECONDS
+                ),
             ),
             reuse_dropped_mass_report_threshold=(args.reuse_dropped_mass_report_threshold),
             target_bmm1_skip_ratio=args.target_bmm1_skip_ratio,
+            allow_same_group_prefixes=whole_prefill,
+            previous_candidate=previous,
+            donor_head_mode=donor_mode,
             source_provenance={
+                **prior_provenance,
                 "capture_manifest_sha256": capture_manifest_sha256,
                 "topology_file_sha256": topology_sha256,
                 "capture_provider": capture_source_provenance(capture_manifest),
@@ -523,11 +561,28 @@ def main(argv: list[str] | None = None) -> int:
             },
         )
         provenance = artifact.get("provenance")
-        if not isinstance(provenance, Mapping):
+        if not isinstance(provenance, dict):
             raise ValueError("calibrator returned no provenance object")
         if provenance.get("input_capture_count") != capture_manifest["capture_count"]:
             raise ValueError("calibrator capture count does not match capture manifest")
-        if provenance.get("candidate_cell_count") != capture_manifest["candidate_cell_count"]:
+        source_cells = provenance.get("candidate_cell_count")
+        if capture_manifest.get("capture_mode") == "topology_discovery":
+            nearest = topology["nearest"]
+            assert isinstance(nearest, Mapping)
+            layers = len(nearest)
+            span = capture_manifest["max_reuse_span"]
+            assert isinstance(span, int)
+            source_cells = (
+                provenance["input_capture_count"]
+                * first.global_num_heads**2
+                * sum(min(span, i) for i in range(layers))
+            )
+            provenance["discovery_projection"] = {
+                "source_candidate_cell_count": source_cells,
+                "topology_sha256": topology_sha256,
+                "source_capture_sha256": evidence["reuse_bundle_sha256"],
+            }
+        if source_cells != capture_manifest["candidate_cell_count"]:
             raise ValueError("calibrator candidate-cell count does not match capture manifest")
         for field, path in evidence_paths.items():
             if _stable_file_sha256(path, label=field) != evidence[field]:
@@ -548,7 +603,10 @@ def main(argv: list[str] | None = None) -> int:
         payload = _canonical_json_bytes(
             {"selection_status": "unresolved", "error": str(error), "solver": error.diagnostics}
         )
-        _publish_no_clobber(_temporary_payload(args.output_report, payload), args.output_report)
+        try:
+            _publish_no_clobber(_temporary_payload(args.output_report, payload), args.output_report)
+        except OSError as publication_error:
+            print(f"[ModelOpt] Could not publish unresolved report: {publication_error}")
         print(f"[ModelOpt] Selection unresolved; report: {args.output_report.resolve()}")
         return 3
     except (OSError, ValueError) as error:
@@ -566,7 +624,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not selection_target_met(artifact) and not args.allow_unmet_target:
         payload = _canonical_json_bytes(report)
-        _publish_no_clobber(_temporary_payload(args.output_report, payload), args.output_report)
+        try:
+            _publish_no_clobber(_temporary_payload(args.output_report, payload), args.output_report)
+        except OSError as error:
+            parser.error(f"could not publish infeasibility report: {error}")
         print(
             f"[ModelOpt] BMM1 target infeasible; no policy exported. Report: {args.output_report.resolve()}"
         )
@@ -574,7 +635,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         policy_payload = _canonical_json_bytes(artifact)
-        report_payload = _canonical_json_bytes(report)
+        report_payload = _canonical_json_bytes(
+            {**report, "candidate_policy_sha256": sha256(policy_payload).hexdigest()}
+        )
         _publish_candidate_outputs(
             args.output_policy, policy_payload, args.output_report, report_payload
         )

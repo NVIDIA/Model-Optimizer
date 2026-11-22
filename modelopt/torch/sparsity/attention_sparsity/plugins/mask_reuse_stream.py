@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from typing import Any
 
 from ..calibration.analytical_dense import ANALYTICAL_DENSE_EVIDENCE
+from ..calibration.mask_reuse_contracts import validate_context_buckets
 from .mask_reuse_capture import (
     MAX_QUERY_CHUNK_TOKENS,
     CaptureContractError,
@@ -54,6 +55,7 @@ __all__ = [
     "stream_chunk_identity",
     "validate_capture_stream",
     "validate_stream_acknowledgements",
+    "validate_whole_prefill_captures",
     "validate_whole_prefill_evidence",
 ]
 
@@ -84,11 +86,15 @@ def _chunk_geometries(length: int):
         yield {"q_tokens": end - start, "kv_tokens": end, "q_start_tokens": start}
 
 
-def _prefix_prompt(prompt: PromptSpec, length: int) -> PromptSpec:
-    assert prompt.prompt_token_ids is not None
-    bounds = next(
-        (bounds for bounds in WHOLE_PREFILL_RANGES if bounds[0] <= length <= bounds[1]), None
+def _range_for(length, ranges):
+    return next(
+        (tuple(b) for b in ranges if b[0] <= length and (b[1] is None or length <= b[1])), None
     )
+
+
+def _prefix_prompt(prompt: PromptSpec, length: int, ranges=WHOLE_PREFILL_RANGES) -> PromptSpec:
+    assert prompt.prompt_token_ids is not None
+    bounds = _range_for(length, ranges)
     if bounds is None:
         raise CaptureContractError("prefix lies outside the preregistered whole-prefill ranges")
     tokens = prompt.prompt_token_ids[:length]
@@ -107,13 +113,15 @@ def capture_stream_prompts(prompts: Sequence[PromptSpec]) -> list[PromptSpec]:
     """Derive fit inputs without treating related prefixes as independent source groups."""
     result = []
     seen = set()
+    ranges = sorted({(p.min_kv_tokens, p.max_kv_tokens) for p in prompts})
+    validate_context_buckets(ranges)
     for prompt in prompts:
         if prompt.prompt_token_ids is None:
             raise CaptureContractError("whole-prefill capture requires frozen exact token IDs")
         for geometry in _chunk_geometries(len(prompt.prompt_token_ids)):
-            if geometry["q_tokens"] <= 128 or geometry["kv_tokens"] > WHOLE_PREFILL_RANGES[-1][1]:
+            if geometry["q_tokens"] <= 128 or _range_for(geometry["kv_tokens"], ranges) is None:
                 continue
-            prefix = _prefix_prompt(prompt, geometry["kv_tokens"])
+            prefix = _prefix_prompt(prompt, geometry["kv_tokens"], ranges)
             if prefix.prompt_id in seen:
                 raise CaptureContractError("whole-prefill prefix prompt IDs are not unique")
             seen.add(prefix.prompt_id)
@@ -128,10 +136,13 @@ def build_capture_stream(
     prompt: PromptSpec,
     target_sparsity: float,
     threshold_scale_factor: Mapping[str, Any],
+    coverage_ranges=None,
 ) -> dict[str, Any]:
     """Bind every actual chunk to the full native request and its exact token prefix."""
     if prompt.prompt_token_ids is None:
         raise CaptureContractError("whole-prefill capture requires frozen exact token IDs")
+    if coverage_ranges is None:
+        coverage_ranges = [(prompt.min_kv_tokens, prompt.max_kv_tokens)]
     tokens = prompt.prompt_token_ids
     if source_capture_sha256(tokens) != prompt.prompt_token_ids_sha256:
         raise CaptureContractError("whole-prefill prompt token identity differs")
@@ -175,14 +186,14 @@ def build_capture_stream(
             "short_query"
             if geometry["q_tokens"] <= 128
             else "outside_coverage"
-            if length > WHOLE_PREFILL_RANGES[-1][1]
+            if _range_for(length, coverage_ranges) is None
             else "threshold_disabled"
             if log_threshold >= 0
             else None
         )
         invocation = None
         if dense_reason is None:
-            prefix = _prefix_prompt(prompt, length)
+            prefix = _prefix_prompt(prompt, length, coverage_ranges)
             assert prefix.prompt_token_ids is not None
             invocation = build_capture_invocation(
                 model=model,
@@ -206,6 +217,8 @@ def build_capture_stream(
             }
         )
     request = {"stream_schema_version": 1, "parent_invocation": parent, "chunks": chunks}
+    if tuple(map(tuple, coverage_ranges)) != WHOLE_PREFILL_RANGES:
+        request["coverage_ranges"] = [list(b) for b in coverage_ranges]
     validate_capture_stream(request)
     return request
 
@@ -213,10 +226,13 @@ def build_capture_stream(
 def validate_capture_stream(request: Mapping[str, Any]) -> None:
     """Reject missing, reordered, cross-source, or unaccounted-for chunk identities."""
     if (
-        set(request) != {"stream_schema_version", "parent_invocation", "chunks"}
+        set(request) - {"coverage_ranges"}
+        != {"stream_schema_version", "parent_invocation", "chunks"}
         or request["stream_schema_version"] != 1
     ):
         raise CaptureContractError("unsupported whole-prefill request schema")
+    ranges = request.get("coverage_ranges", WHOLE_PREFILL_RANGES)
+    validate_context_buckets([tuple(b) for b in ranges])
     parent = request["parent_invocation"]
     if not isinstance(parent, Mapping) or set(parent) != _PARENT_FIELDS:
         raise CaptureContractError("whole-prefill parent identity fields differ")
@@ -268,7 +284,7 @@ def validate_capture_stream(request: Mapping[str, Any]) -> None:
                 raise CaptureContractError("short-query exclusion has more than 128 query tokens")
             if (
                 reason == "outside_coverage"
-                and geometry["kv_tokens"] <= WHOLE_PREFILL_RANGES[-1][1]
+                and _range_for(geometry["kv_tokens"], ranges) is not None
             ):
                 raise CaptureContractError("outside-coverage exclusion lies inside coverage")
             continue
@@ -281,10 +297,7 @@ def validate_capture_stream(request: Mapping[str, Any]) -> None:
             or invocation["source_capture_sha256"] != chunk["prefix_source_capture_sha256"]
             or invocation["expected_geometry"] != geometry
             or (invocation["min_kv_tokens"], invocation["max_kv_tokens"])
-            not in WHOLE_PREFILL_RANGES
-            or not invocation["min_kv_tokens"]
-            <= geometry["kv_tokens"]
-            <= invocation["max_kv_tokens"]
+            != _range_for(geometry["kv_tokens"], ranges)
         ):
             raise CaptureContractError("chunk invocation differs from its exact prefix")
     # Includes dense exclusions; this is one head/layer's causal logical-tile denominator.
@@ -430,7 +443,7 @@ def validate_whole_prefill_evidence(raw):
     whole = raw["whole_prefill"]
     if (
         not isinstance(whole, Mapping)
-        or set(whole)
+        or set(whole) - {"analytical_dense_capture_count"}
         != {
             "schema_version",
             "coverage_ranges",
@@ -441,13 +454,18 @@ def validate_whole_prefill_evidence(raw):
             "work_by_request",
         }
         or whole["schema_version"] != 1
-        or whole["coverage_ranges"] != [list(bounds) for bounds in WHOLE_PREFILL_RANGES]
         or not isinstance(whole["requests"], list)
         or not whole["requests"]
     ):
         raise CaptureContractError("whole-prefill evidence schema or coverage differs")
+    validate_context_buckets([tuple(b) for b in whole["coverage_ranges"]])
+    parents, fingerprints, requests = {}, {}, set()
     for request in whole["requests"]:
         validate_capture_stream(request)
+        if [list(b) for b in request.get("coverage_ranges", WHOLE_PREFILL_RANGES)] != whole[
+            "coverage_ranges"
+        ]:
+            raise CaptureContractError("request coverage differs from manifest")
         parent = request["parent_invocation"]
         if (
             parent["model"] != raw["model"]
@@ -455,15 +473,68 @@ def validate_whole_prefill_evidence(raw):
             or parent["target_sparsity_hex"] not in raw["target_sparsity_hex"]
         ):
             raise CaptureContractError("whole-prefill request and manifest identities differ")
+        identity = (parent["split"], parent["prompt_id"])
+        metadata = {key: value for key, value in parent.items() if key != "target_sparsity_hex"}
+        if parents.setdefault(identity, metadata) != metadata:
+            raise CaptureContractError("whole-prefill parent changes across targets")
+        if fingerprints.setdefault(parent["source_capture_sha256"], identity) != identity:
+            raise CaptureContractError("one full source fingerprint names multiple parent prompts")
+        target_key = (*identity, parent["target_sparsity_hex"])
+        if target_key in requests:
+            raise CaptureContractError("whole-prefill plan repeats a parent target")
+        requests.add(target_key)
     chunks = [chunk for request in whole["requests"] for chunk in request["chunks"]]
     measured = sum(chunk["invocation"] is not None for chunk in chunks)
+    analytical = whole.get("analytical_dense_capture_count", 0)
     if (
         whole["work_by_request"] != [capture_stream_work(request) for request in whole["requests"]]
         or whole["dense_exclusion_count"] != len(chunks) - measured
         or whole["measured_capture_count"] != measured
-        or raw["capture_count"] != measured
+        or type(analytical) is not int
+        or analytical != sum(c["dense_reason"] == "threshold_disabled" for c in chunks)
+        or raw["capture_count"] != measured + analytical
     ):
         raise CaptureContractError("whole-prefill evidence omits measured or dense work")
+
+
+def validate_whole_prefill_captures(captures, raw):
+    """Bind every typed capture to its planned parent before allowing shared prefixes."""
+    validate_whole_prefill_evidence(raw)
+    expected = {}
+    fields = _PARENT_FIELDS - {"prompt_id", "sample_length", "source_capture_sha256"}
+    for request in raw["whole_prefill"]["requests"]:
+        parent = request["parent_invocation"]
+        for chunk in request["chunks"]:
+            if chunk["invocation"] is None and chunk["dense_reason"] != "threshold_disabled":
+                continue
+            geometry = chunk["geometry"]
+            prefix = f"{parent['prompt_id']}@prefix-{geometry['kv_tokens']}"
+            key = (parent["split"], prefix, parent["target_sparsity_hex"])
+            expected[key] = {
+                **{field: parent[field] for field in fields},
+                "prompt_id": prefix,
+                "sample_length": geometry["kv_tokens"],
+                "source_capture_sha256": chunk["prefix_source_capture_sha256"],
+                "geometry": geometry,
+                "bucket": _range_for(
+                    geometry["kv_tokens"], request.get("coverage_ranges", WHOLE_PREFILL_RANGES)
+                ),
+            }
+    for capture in captures:
+        target = capture.target_sparsity.hex()
+        key = (capture.split, capture.prompt_id, target)
+        actual = {
+            **{
+                field: getattr(capture, field) for field in _PARENT_FIELDS - {"target_sparsity_hex"}
+            },
+            "target_sparsity_hex": target,
+            "geometry": capture.geometry,
+            "bucket": capture.bucket,
+        }
+        if expected.pop(key, None) != actual:
+            raise CaptureContractError("capture does not match its whole-prefill parent plan")
+    if expected:
+        raise CaptureContractError("captures omit planned whole-prefill observations")
 
 
 def build_analytical_dense_capture(request, chunk, *, fit, measured_template):
@@ -472,7 +543,7 @@ def build_analytical_dense_capture(request, chunk, *, fit, measured_template):
         raise CaptureContractError("analytical all-keep input requires a threshold-disabled chunk")
     parent, geometry = request["parent_invocation"], chunk["geometry"]
     length = geometry["kv_tokens"]
-    bounds = next(bounds for bounds in WHOLE_PREFILL_RANGES if bounds[0] <= length <= bounds[1])
+    bounds = _range_for(length, request.get("coverage_ranges", WHOLE_PREFILL_RANGES))
     params = fit["prefill"]
     target = float.fromhex(parent["target_sparsity_hex"])
     log_threshold = (
@@ -495,9 +566,29 @@ def build_analytical_dense_capture(request, chunk, *, fit, measured_template):
         "expected_geometry": geometry,
     }
     heads = measured_template["global_num_heads"]
+    eligible = _eligible_tiles(geometry)
+    if "consumer_layers" in measured_template:
+        return {
+            "compact_capture_schema_version": 2,
+            "analytical_dense": dict(ANALYTICAL_DENSE_EVIDENCE),
+            "invocation": invocation,
+            "geometry": geometry,
+            "global_num_heads": heads,
+            "eligible_tiles": eligible,
+            "anchor_stats_by_layer": {
+                layer: {"retained_tiles": [eligible] * heads, "dropped_mass": [0.0] * heads}
+                for layer in measured_template["anchor_stats_by_layer"]
+            },
+            "consumer_layers": {
+                layer: {
+                    "anchor_layer": stats["anchor_layer"],
+                    "dropped_mass": [[0.0] * heads for _ in range(heads)],
+                }
+                for layer, stats in measured_template["consumer_layers"].items()
+            },
+        }
     layers = measured_template["attention_layers"]
     span = measured_template["max_reuse_span"]
-    eligible = _eligible_tiles(geometry)
     return {
         "topology_discovery_capture_schema_version": 2,
         "analytical_dense": dict(ANALYTICAL_DENSE_EVIDENCE),

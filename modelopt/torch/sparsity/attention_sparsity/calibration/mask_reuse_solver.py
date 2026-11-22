@@ -13,19 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Proof-aware, bounded optimization for offline mask-reuse calibration."""
+"""Bounded optimization for offline mask-reuse calibration."""
 
 from __future__ import annotations
 
 import math
 import struct
+import tempfile
 import time
 import weakref
 from array import array
-from contextlib import suppress
-from dataclasses import asdict, dataclass
-from fractions import Fraction
+from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
 
@@ -43,13 +44,17 @@ __all__ = [
 ]
 
 
+DEFAULT_REFIT_TIME_LIMIT_SECONDS = 1600.0
+NATIVE_FEASIBILITY_TOLERANCE = 1e-9
+
+
 @dataclass(frozen=True)
 class MaskReuseSolverConfig:
-    """Select an exact solver and a cooperative budget shared by all selection phases."""
+    """Configure the solver budget and absolute tolerance in normalized risk units."""
 
     backend: Literal["cbc", "highs"] = "highs"
     time_limit_seconds: float = 600.0
-    risk_absolute_tolerance: float = 0.0
+    risk_absolute_tolerance: float = 1e-7
     log: bool = False
 
     def __post_init__(self) -> None:
@@ -61,16 +66,17 @@ class MaskReuseSolverConfig:
                 raise ValueError(f"{name} must be finite and positive")
         if (
             type(self.risk_absolute_tolerance) not in (int, float)
-            or self.risk_absolute_tolerance != 0
+            or not math.isfinite(self.risk_absolute_tolerance)
+            or self.risk_absolute_tolerance < 0
         ):
-            raise ValueError("exact risk ordering requires risk_absolute_tolerance=0")
+            raise ValueError("risk_absolute_tolerance must be finite and nonnegative")
 
 
 class MaskReuseSolverError(RuntimeError):
     """A solve was unresolved or invalid; this is not a proof of infeasibility."""
 
     def __init__(self, message: str, diagnostics: list[dict[str, object]]) -> None:
-        """Retain completed phase diagnostics without exporting an unproved policy."""
+        """Retain completed phase diagnostics when a native solve stops."""
         super().__init__(message)
         self.diagnostics = list(diagnostics)
 
@@ -139,7 +145,7 @@ class _BatchHiGHS(pulp.HiGHS):
         if problem.solverModel.passModel(model) == highspy.HighsStatus.kError:
             raise pulp.PulpSolverError("HiGHS rejected the batched calibration model")
         initial = problem.__dict__.pop("_mask_reuse_initial_values", None)
-        if initial is not None:
+        if initial is not None and not getattr(self, "_disable_starts", False):
             # The selector validated this full assignment; omitted entries are
             # explicit zeros, not unspecified values in a partial MIP start.
             solution = highspy.HighsSolution()
@@ -198,7 +204,7 @@ class _PersistentHiGHS(_BatchHiGHS):
         import highspy
 
         values, self._incumbent = self._incumbent, None
-        if values is None:
+        if values is None or getattr(self, "_disable_starts", False):
             return
         variables = problem.variables()
         if len(values) != len(variables) or not all(math.isfinite(value) for value in values):
@@ -423,10 +429,32 @@ class _SolverSession:
         self._spent_seconds = spent_seconds
         self.records: list[dict[str, object]] = [dict(row) for row in records]
         self._highs_solver: _PersistentHiGHS | None = None
+        self._highs_cold = False
 
     @property
     def elapsed_seconds(self) -> float:
         return self._spent_seconds + time.monotonic() - self.started
+
+    def stage(self, seconds):
+        """Reserve this phase's share while preserving any outer allocation cutoff."""
+        return _SolverSession(
+            replace(self.config, time_limit_seconds=seconds),
+            allocation_remaining=self._allocation_remaining,
+        )
+
+    def record_stage(self, stage, finished, **coordinates):
+        """Keep wall times in session diagnostics and deterministic bounds in the artifact."""
+        self.records.extend(dict(row, **coordinates) for row in stage.records)
+        receipt = (
+            {
+                k: v
+                for k, v in stage.records[-1].items()
+                if k not in {"elapsed_seconds", "native_limit_seconds", "native_limit_source"}
+            }
+            if stage.records
+            else {}
+        )
+        return {**receipt, "finished": finished}
 
     def _remaining_seconds(self) -> float:
         remaining = self.config.time_limit_seconds - self.elapsed_seconds
@@ -471,17 +499,27 @@ class _SolverSession:
                     random_seed=1,
                     parallel="off",
                     small_matrix_value=1e-12,
-                    mip_feasibility_tolerance=1e-9,
+                    mip_feasibility_tolerance=NATIVE_FEASIBILITY_TOLERANCE,
                     mip_rel_gap=0.0,
                     mip_abs_gap=0.0,
+                    # Check native warm starts against the returned assignment.
+                    presolve="choose",
                 )
+                self._highs_solver._disable_starts = self._highs_cold
             solver = self._highs_solver
             solver.timeLimit = remaining
             solver._remaining_budget_seconds = self._native_remaining_seconds
         else:
             solver = pulp.PULP_CBC_CMD(
                 **kwargs,
-                options=["randomSeed 1", "randomCbcSeed 1", "increment 1e-12", "preprocess off"],
+                options=[
+                    "randomSeed 1",
+                    "randomCbcSeed 1",
+                    "increment 1e-12",
+                    "preprocess off",
+                    "primalTolerance 1e-9",
+                    "integerTolerance 1e-9",
+                ],
             )
         if not solver.available():
             raise MaskReuseSolverFailure(
@@ -489,12 +527,72 @@ class _SolverSession:
             )
         return solver
 
+    def _retry_without_warm_start(self, problem) -> bool:
+        if self.config.backend != "highs" or self._highs_cold:
+            return False
+        assert self._highs_solver is not None
+        self.records[-1]["cold_retry"] = True
+        self._highs_solver._discard()
+        self._highs_solver = None
+        self._highs_cold = True
+        problem.__dict__.pop("_mask_reuse_initial_values", None)
+        return True
+
+    def _solve_cbc(self, problem, solver):
+        # PuLP exposes only the status and rounded variable values. Read the
+        # native objective/bound before the per-call log disappears.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "solver.log"
+            solver.optionsDict["logPath"] = str(path)
+            status = problem.solve(solver)
+            fields = {}
+            if path.exists():
+                with path.open() as log:
+                    for line in log:
+                        if self.config.log:
+                            print(line, end="")
+                        if line.strip() == "Result - Problem proven infeasible":
+                            fields["proven_infeasible"] = True
+                        name, _, value = line.partition(":")
+                        if name in {"Objective value", "Lower bound", "Version"}:
+                            fields[name] = value.strip()
+        # CBC's MPS solution can say "Integer infeasible" while PuLP assigns
+        # NoSolutionFound. Only its explicit proof qualifies as infeasibility.
+        receipt = {"native_infeasibility_proven": True} if fields.get("proven_infeasible") else {}
+        if status == pulp.LpStatusOptimal and problem.sol_status == pulp.LpSolutionOptimal:
+            # CBC prints its optimal objective to eight decimal places.
+            reported = fields.get("Objective value")
+            if reported is not None and math.isfinite(float(reported)):
+                primal = float(reported)
+                receipt.update(primal_bound=primal, dual_bound=primal - 5e-9 - math.ulp(primal))
+        elif "Lower bound" in fields:
+            # The time-limit summary rounds the lower bound to three decimals.
+            bound = float(fields["Lower bound"])
+            if math.isfinite(bound):
+                receipt["dual_bound"] = bound - 0.0005 - math.ulp(bound)
+        if "Version" in fields:
+            receipt["backend_version"] = fields["Version"]
+        return status, receipt
+
     def minimize(self, problem: pulp.LpProblem, expression, phase: str) -> bool:
-        problem.setObjective(pulp.lpSum([expression]))
+        objective = pulp.lpSum([expression])
+        if not any(objective.values()):
+            # PuLP's temporary dummy column survives in CBC's later MPS bounds.
+            zero = getattr(problem, "_mask_reuse_zero", None)
+            if zero is None:
+                zero = pulp.LpVariable("mask_reuse_zero", 0, 0)
+                problem._mask_reuse_zero = zero
+                problem += zero == 0, "mask_reuse_zero"
+            objective += zero
+        problem.setObjective(objective)
         while True:
             started = time.monotonic()
             try:
-                status = problem.solve(self._solver())
+                solver = self._solver()
+                if self.config.backend == "cbc":
+                    status, receipt = self._solve_cbc(problem, solver)
+                else:
+                    status, receipt = problem.solve(solver), {}
                 # PuLP maps kUnboundedOrInfeasible to its infeasible pair. Only
                 # the native kInfeasible status proves infeasibility for HiGHS.
                 native_status = (
@@ -508,10 +606,14 @@ class _SolverSession:
                 raise MaskReuseSolverFailure(
                     f"solver error in {phase}: {error}", self.records
                 ) from error
+            observer = getattr(problem, "_mask_reuse_observe_assignment", None)
+            if observer is not None:
+                observer()
             solution_status = problem.sol_status
             self.records.append(
                 {
                     "phase": phase,
+                    **receipt,
                     "status": pulp.LpStatus.get(status, str(status)),
                     "solution_status": pulp.LpSolution.get(solution_status, str(solution_status)),
                     "elapsed_seconds": time.monotonic() - started,
@@ -541,20 +643,44 @@ class _SolverSession:
                 raise MaskReuseSolverFailure(
                     f"native solver failure in {phase}: {native_status}", self.records
                 )
-            infeasible = (
-                status == pulp.LpStatusInfeasible and solution_status == pulp.LpSolutionInfeasible
+            infeasible = status == pulp.LpStatusInfeasible and (
+                solution_status == pulp.LpSolutionInfeasible
+                or receipt.get("native_infeasibility_proven") is True
             )
             optimal = status == pulp.LpStatusOptimal and solution_status == pulp.LpSolutionOptimal
+            if native_status is not None and problem.isMIP():
+                info = problem.solverModel.getInfo()
+                for key, value in (
+                    ("primal_bound", info.objective_function_value),
+                    ("dual_bound", info.mip_dual_bound),
+                    ("native_gap", info.mip_gap),
+                ):
+                    if math.isfinite(value):
+                        self.records[-1][key] = value
             if optimal and native_status == "kOptimal" and problem.isMIP():
                 native = problem.solverModel
                 info = native.getInfo()
-                self.records[-1].update(
-                    native_gap=info.mip_gap,
-                    primal_bound=info.objective_function_value,
-                    dual_bound=info.mip_dual_bound,
+                # A status and gap certify the reported objective, not necessarily
+                # the returned point (HiGHS can retain a stale MIP-start buffer).
+                lp, solution = native.getLp(), native.getSolution()
+                actual = (
+                    math.fsum(c * v for c, v in zip(lp.col_cost_, solution.col_value)) + lp.offset_
                 )
-                if info.mip_gap != 0.0:
-                    raise MaskReuseSolverError("native MIP gap is nonzero", self.records)
+                reported = info.objective_function_value
+                consistent = (
+                    solution.value_valid
+                    and math.isfinite(actual)
+                    and math.isfinite(reported)
+                    and abs(actual - reported) <= 8 * max(math.ulp(actual), math.ulp(reported))
+                )
+                self.records[-1]["assignment_objective"] = actual
+                if not consistent and self._retry_without_warm_start(problem):
+                    continue
+                if not consistent:
+                    raise MaskReuseSolverFailure(
+                        f"native objective differs from returned assignment in {phase}",
+                        self.records,
+                    )
             if (
                 native_status is not None
                 and (
@@ -600,37 +726,13 @@ class _SolverSession:
                     )
                 raise MaskReuseSolverError(f"unresolved calibration solve in {phase}", self.records)
             self._check_allocation()
-            # Generated risk rows must be checked before fixing every objective,
-            # including later tie-breaks that can move to a different assignment.
+            # A new assignment can violate a risk row deferred during model assembly.
             separate = getattr(problem, "_mask_reuse_separate_constraints", None)
             added = separate is not None and separate()
             self._remaining_seconds()
             self._check_allocation()
             if not added:
-                fixed_risk = getattr(problem, "_mask_reuse_fixed_risk", None)
-                if fixed_risk is not None:
-                    variable, bound = fixed_risk
-                    actual = self._discrete_risk(problem, variable)
-                    if actual > bound + 8 * math.ulp(bound):
-                        raise MaskReuseSolverFailure(
-                            f"later tie-break worsened the fixed risk in {phase}", self.records
-                        )
                 return True
-
-    @staticmethod
-    def _discrete_risk(problem, variable):
-        """Evaluate original prompt-risk rows using the selected integer decisions."""
-        required = 0.0
-        for row in problem.constraints.values():
-            coefficient = row.get(variable, 0)
-            if coefficient >= 0 or row.sense != pulp.LpConstraintLE:
-                continue
-            others = [(v, c) for v, c in row.items() if v is not variable]
-            if any(v.cat != pulp.LpInteger for v, _ in others):
-                continue
-            numerator = math.fsum([row.constant, *(c * round(v.varValue) for v, c in others)])
-            required = max(required, -numerator / coefficient)
-        return required
 
     def require_work_target(
         self, skipped_tiles: int, minimum_tiles: int | None, *, phase: str
@@ -643,260 +745,18 @@ class _SolverSession:
                 self.records,
             )
 
-    def minimize_and_fix(self, problem: pulp.LpProblem, expression, phase: str, *, integral: bool):
-        if not self.minimize(problem, expression, phase):
-            return None
-        value = float(pulp.value(expression) or 0.0)
-        if not math.isfinite(value):
-            raise MaskReuseSolverFailure(f"nonfinite optimum in {phase}", self.records)
-        if integral:
-            if abs(value - round(value)) > 1e-5:
-                # This preview is not the feasibility/optimality certificate below.
-                terms = pulp.lpSum([expression])
-                rounded_objective = (
-                    int(terms.constant) if terms.constant == int(terms.constant) else None
-                )
-                maximum_residual = 0.0
-                for variable, coefficient in terms.items():
-                    if coefficient == 0:
-                        continue
-                    if variable.cat == pulp.LpInteger:
-                        column_value = float(variable.value())
-                        rounded_column = round(column_value)
-                        maximum_residual = max(maximum_residual, abs(column_value - rounded_column))
-                        if rounded_objective is not None and coefficient == int(coefficient):
-                            rounded_objective += int(coefficient) * rounded_column
-                        else:
-                            rounded_objective = None
-                    else:
-                        rounded_objective = None
-                self.records[-1]["integer_objective_diagnostics"] = {
-                    "diagnostic_only": True,
-                    "raw_objective": value,
-                    "nearest_integer": round(value),
-                    "objective_distance": abs(value - round(value)),
-                    "objective_tolerance": 1e-5,
-                    "integer_variable_max_residual": maximum_residual,
-                    "rounded_integer_objective": rounded_objective,
-                }
-                certified = None
-                if phase == "fix_cost" and self.config.backend == "highs":
-                    # Unsupported native metadata cannot repair the original failure.
-                    with suppress(
-                        AttributeError,
-                        IndexError,
-                        KeyError,
-                        TypeError,
-                        ValueError,
-                        OverflowError,
-                    ):
-                        certified = self._certify_integer_cost(problem, terms)
-                self._remaining_seconds()
-                self._check_allocation()
-                if certified is None:
-                    raise MaskReuseSolverFailure(f"nonintegral optimum in {phase}", self.records)
-                value = certified
-            value = round(value)
-            problem += pulp.lpSum([expression]) == value, phase
-        else:
-            if isinstance(expression, pulp.LpVariable):
-                # CBC's solution file rounds the continuous epigraph value.
-                # Fix the objective of the actual selected discrete policy.
-                value = self._discrete_risk(problem, expression)
-                problem._mask_reuse_fixed_risk = expression, value
-            problem += (
-                pulp.lpSum([expression]) <= value,
-                phase,
-            )
-        return value
-
-    def _certify_integer_cost(self, problem, expression):
-        """Certify a private integer point using exact feasibility and a native MIP bound."""
-        # Optional backend; this path is entered only after a HiGHS fix_cost solve.
-        import highspy
-
-        if problem is None:
-            return None
-        solver = self._highs_solver
-        native = problem.solverModel
-        if (
-            solver is None
-            or not solver.mip
-            or native is not solver._native
-            or not solver._owns_problem(problem)
-            or problem.sense != pulp.LpMinimize
-            or expression.constant != 0
-            or problem.status != pulp.LpStatusOptimal
-            or problem.sol_status != pulp.LpSolutionOptimal
-            or native.getModelStatus() != highspy.HighsModelStatus.kOptimal
-        ):
-            return None
-        for name, expected in (
-            ("solve_relaxation", False),
-            ("mip_abs_gap", 0.0),
-            ("mip_rel_gap", 0.0),
-            ("mip_feasibility_tolerance", 1e-9),
-            ("small_matrix_value", 1e-12),
-            ("threads", 1),
-            ("parallel", "off"),
-            ("random_seed", 1),
-        ):
-            status, actual = native.getOptionValue(name)
-            if status != highspy.HighsStatus.kOk or actual != expected:
-                return None
-        solution, info, lp = native.getSolution(), native.getInfo(), native.getLp()
-        variables, rows = problem.variables(), list(problem.constraints.values())
-        raw = list(solution.col_value)
-        costs, lower, upper = (
-            [float(value) for value in values]
-            for values in (lp.col_cost_, lp.col_lower_, lp.col_upper_)
-        )
-        integrality = list(lp.integrality_)
-        row_lower, row_upper = (
-            [float(value) for value in values] for values in (lp.row_lower_, lp.row_upper_)
-        )
-        if (
-            not solution.value_valid
-            or not info.valid
-            or info.primal_solution_status != highspy.kSolutionStatusFeasible
-            or info.mip_gap != 0.0
-            or lp.sense_ != highspy.ObjSense.kMinimize
-            or lp.offset_ != 0
-            or lp.num_col_ != len(variables)
-            or lp.num_row_ != len(rows)
-            or any(
-                len(values) != len(variables) for values in (raw, costs, lower, upper, integrality)
-            )
-            or len(row_lower) != len(rows)
-            or len(row_upper) != len(rows)
-        ):
-            return None
-        candidate, integer_cost = {}, 0
-        for index, variable in enumerate(variables):
-            self._remaining_seconds()
-            self._check_allocation()
-            value = float(raw[index])
-            coefficient = expression.get(variable, 0)
-            integer = variable.cat == pulp.LpInteger
-            if (
-                variable.index != index
-                or not math.isfinite(value)
-                or variable.value() != value
-                or costs[index] != coefficient
-                or problem.objective.get(variable, 0) != coefficient
-                or integrality[index]
-                != (highspy.HighsVarType.kInteger if integer else highspy.HighsVarType.kContinuous)
-                or lower[index] != (-math.inf if variable.lowBound is None else variable.lowBound)
-                or upper[index] != (math.inf if variable.upBound is None else variable.upBound)
-            ):
-                return None
-            if coefficient and (
-                not integer
-                or not math.isfinite(coefficient)
-                or coefficient != int(coefficient)
-                or abs(coefficient) >= 2**53
-                or float(coefficient) != coefficient
-            ):
-                return None
-            if integer:
-                rounded = round(value)
-                if abs(value - rounded) > 1e-8 or abs(rounded) >= 2**53:
-                    return None
-                candidate[variable] = Fraction(rounded)
-            else:
-                candidate[variable] = Fraction(value)
-            if (
-                variable.lowBound is not None and candidate[variable] < Fraction(variable.lowBound)
-            ) or (
-                variable.upBound is not None and candidate[variable] > Fraction(variable.upBound)
-            ):
-                return None
-            integer_cost += int(coefficient) * candidate[variable] if coefficient else 0
-        if (
-            problem.objective.constant != 0
-            or abs(integer_cost) >= 2**53
-            or any(variable not in candidate for variable in expression)
-        ):
-            return None
-
-        def satisfied(row):
-            residual = Fraction(row.constant) + sum(
-                (
-                    Fraction(coefficient) * candidate[variable]
-                    for variable, coefficient in row.items()
-                ),
-                Fraction(0),
-            )
-            return residual == 0 if row.sense == pulp.LpConstraintEQ else residual * row.sense >= 0
-
-        for index, row in enumerate(rows):
-            self._remaining_seconds()
-            self._check_allocation()
-            lb, ub = row.getLb(), row.getUb()
-            status, indices, coefficients = native.getRowEntries(index)
-            expected_entries = {
-                variable.index: coefficient for variable, coefficient in row.items() if coefficient
-            }
-            if (
-                status != highspy.HighsStatus.kOk
-                or row_lower[index] != (-math.inf if lb is None else lb)
-                or row_upper[index] != (math.inf if ub is None else ub)
-                or len(indices) != len(expected_entries)
-                or len(coefficients) != len(expected_entries)
-                or {int(i): float(c) for i, c in zip(indices, coefficients)} != expected_entries
-                or not satisfied(row)
-            ):
-                return None
-        omitted = getattr(problem, "_mask_reuse_omitted_risk_rows", None)
-        if (
-            getattr(problem, "_mask_reuse_separate_constraints", None) is not None
-            and omitted is None
-        ):
-            return None
-        if omitted is not None:
-            for row in omitted():
-                self._remaining_seconds()
-                self._check_allocation()
-                if not satisfied(row):
-                    return None
-        objective, bound = float(info.objective_function_value), float(info.mip_dual_bound)
-        if (
-            not math.isfinite(objective)
-            or not math.isfinite(bound)
-            or objective != native.getObjectiveValue()
-            or objective != pulp.value(expression)
-            or bound > objective
-            or not integer_cost - 1 < Fraction(bound) <= integer_cost
-        ):
-            return None
-        self.records[-1]["integer_cost_certificate"] = {
-            "kind": "exact_point_native_bound_not_rational_global_proof",
-            "integer_cost": int(integer_cost),
-            "native_objective": objective,
-            "native_bound": bound,
-        }
-        return int(integer_cost)
-
-    def lexicographic(
-        self, problem: pulp.LpProblem, expressions: Iterable, *, base: int, phase: str
-    ) -> None:
-        """Fix a unique digit tuple using bounded mixed-radix blocks, never huge weights."""
-        # A constant digit cannot break a tie. Skipping it preserves the exact
-        # tuple order and avoids thousands of no-op solves for dense fallback.
-        digits = [term for term in expressions if len(pulp.lpSum([term]))]
-        width = max(1, int(math.log(2**20, base)))
-        for offset in range(0, len(digits), width):
-            group = digits[offset : offset + width]
-            expression = pulp.lpSum(
-                digit * base ** (len(group) - i - 1) for i, digit in enumerate(group)
-            )
-            if (
-                self.minimize_and_fix(problem, expression, f"{phase}_{offset}", integral=True)
-                is None
-            ):
-                raise MaskReuseSolverFailure(f"lost feasibility during {phase}", self.records)
-
     def provenance(self) -> dict[str, object]:
+        try:
+            backend_version = (
+                version("highspy")
+                if self.config.backend == "highs"
+                else next(
+                    (row["backend_version"] for row in self.records if "backend_version" in row),
+                    None,
+                )
+            )
+        except PackageNotFoundError:
+            backend_version = None
         return {
             **asdict(self.config),
             "threads": 1,
@@ -904,6 +764,7 @@ class _SolverSession:
             "relative_gap": 0.0,
             "absolute_gap": 0.0,
             "pulp_version": pulp.__version__,
+            "backend_version": backend_version,
             "phases": [
                 {
                     key: value

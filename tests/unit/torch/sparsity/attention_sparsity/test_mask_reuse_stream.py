@@ -13,17 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Exact-prefix and dense-exclusion contracts; no GPU performance evidence."""
 
 import copy
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 
+from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_compact import (
+    CompactMaskReuseCapture,
+)
+from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_topology import (
+    TopologyDiscoveryCapture,
+)
 from modelopt.torch.sparsity.attention_sparsity.plugins import mask_reuse_capture, mask_reuse_stream
 from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_capture import (
     CaptureContractError,
@@ -33,12 +36,15 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_capture impor
     source_capture_sha256,
 )
 from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_stream import (
+    build_analytical_dense_capture,
     build_capture_stream,
     capture_stream_prompts,
     read_capture_stream_spools,
     stream_chunk_identity,
     validate_capture_stream,
     validate_stream_acknowledgements,
+    validate_whole_prefill_captures,
+    validate_whole_prefill_evidence,
 )
 
 
@@ -90,6 +96,67 @@ def test_stream_invocations_equal_independent_exact_prefixes():
         assert prefix.source_group_sha256 == prompt.source_group_sha256
         assert PromptSpec.from_mapping(json.loads(json.dumps(asdict(prefix)))) == prefix
     assert [c["geometry"]["q_tokens"] for c in request["chunks"]] == [8192, 8192, 129]
+
+
+@pytest.mark.parametrize(
+    "corruption", ["full_alias", "duplicate_request", "unknown_prefix", "missing"]
+)
+def test_shared_prefix_admission_requires_complete_parent_bound_captures(corruption):
+    prompt = _prompt(16384)
+    short = replace(
+        prompt,
+        prompt_id="short",
+        prompt_token_ids=prompt.prompt_token_ids[:8192],
+        prompt_token_ids_sha256=source_capture_sha256(prompt.prompt_token_ids[:8192]),
+    )
+    requests = [_request(p, a=32768.0, b=0.0) for p in (prompt, short)]
+    template = {
+        "global_num_heads": 1,
+        "anchor_stats_by_layer": {"0": {}},
+        "consumer_layers": {},
+    }
+    captures = [
+        CompactMaskReuseCapture.from_mapping(
+            build_analytical_dense_capture(
+                request, chunk, fit=_fit(32768.0, 0.0), measured_template=template
+            )
+        )
+        for request in requests
+        for chunk in request["chunks"]
+    ]
+    raw = {
+        "model": "toy",
+        "checkpoint_manifest_sha256": "c" * 64,
+        "target_sparsity_hex": [(0.7).hex()],
+        "capture_count": len(captures),
+        "whole_prefill": {
+            "schema_version": 1,
+            "coverage_ranges": requests[0]["coverage_ranges"],
+            "requests": requests,
+            "dense_exclusion_count": len(captures),
+            "measured_capture_count": 0,
+            "analytical_dense_capture_count": len(captures),
+            "target_scope": "model_wide",
+            "work_by_request": [mask_reuse_stream.capture_stream_work(r) for r in requests],
+        },
+    }
+    validate_whole_prefill_captures(captures, raw)
+    if corruption == "full_alias":
+        alias = _request(replace(prompt, prompt_id="alias"), a=32768.0, b=0.0)
+        raw["whole_prefill"]["requests"].append(alias)
+        with pytest.raises(CaptureContractError, match="full source fingerprint"):
+            validate_whole_prefill_evidence(raw)
+    elif corruption == "duplicate_request":
+        raw["whole_prefill"]["requests"].append(requests[0])
+        with pytest.raises(CaptureContractError, match="repeats a parent target"):
+            validate_whole_prefill_evidence(raw)
+    else:
+        if corruption == "unknown_prefix":
+            captures[0] = replace(captures[0], prompt_id="unknown@prefix-8192")
+        else:
+            captures.pop()
+        with pytest.raises(CaptureContractError):
+            validate_whole_prefill_captures(captures, raw)
 
 
 @pytest.mark.parametrize("dense_prefix", [False, True])
@@ -236,3 +303,51 @@ def test_ack_requires_exact_request_and_tp_membership():
     values[1]["rank"] = 0
     with pytest.raises(CaptureContractError, match="exactly once"):
         validate_stream_acknowledgements(values, request, expected_world_size=2)
+
+
+@pytest.mark.parametrize("tamper", [None, "mass", "retained", "threshold", "claim_measured"])
+def test_analytical_dense_is_explicit_and_exact(tamper):
+    request = _request(_prompt(16384), a=8192.0, b=0.0)
+    raw = build_analytical_dense_capture(
+        request,
+        request["chunks"][0],
+        fit=_fit(8192.0, 0.0),
+        measured_template={
+            "global_num_heads": 2,
+            "attention_layers": [0, 2, 4],
+            "max_reuse_span": 2,
+        },
+    )
+    if tamper == "mass":
+        raw["consumer_candidates_by_layer"]["2"]["0"]["dropped_mass"][0][0] = 0.001
+    elif tamper == "retained":
+        raw["anchor_stats_by_layer"]["0"]["retained_tiles"][0] -= 1
+    elif tamper == "threshold":
+        raw["invocation"].update(threshold_log2_hex=(-1.0).hex(), threshold_lambda_hex=(0.5).hex())
+    elif tamper == "claim_measured":
+        raw["analytical_dense"]["measured"] = True
+    if tamper:
+        with pytest.raises(ValueError, match="analytical"):
+            TopologyDiscoveryCapture.from_mapping(raw)
+        return
+    parsed = TopologyDiscoveryCapture.from_mapping(raw)
+    assert parsed.threshold_lambda == 1.0 and parsed.threshold_log2 == 0.0
+    compact = {
+        key: raw[key]
+        for key in (
+            "analytical_dense",
+            "invocation",
+            "geometry",
+            "global_num_heads",
+            "eligible_tiles",
+        )
+    }
+    compact.update(
+        compact_capture_schema_version=2,
+        anchor_stats_by_layer={"0": raw["anchor_stats_by_layer"]["0"]},
+        consumer_layers={
+            str(layer): {"anchor_layer": 0, "dropped_mass": [[0.0, 0.0], [0.0, 0.0]]}
+            for layer in (2, 4)
+        },
+    )
+    assert CompactMaskReuseCapture.from_mapping(compact).threshold_lambda == 1.0
