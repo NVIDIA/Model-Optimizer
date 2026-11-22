@@ -1262,6 +1262,18 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
         ),
     )
 
+    fused_group_svd: bool = ModeloptField(
+        default=False,
+        title="Give each fused group its exported low-rank branch during calibration",
+        description=(
+            "Requires ``fused_group_scale``. Each group export fuses gets one SVD of its "
+            "stacked weights (a shared ``lora_a``) instead of one SVD per linear, and after "
+            "the final max calibration its members share the group max of their input and "
+            "weight amax. Calibration then leaves each group as export writes it, and export "
+            "keeps it unchanged."
+        ),
+    )
+
 
 class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.

@@ -1423,6 +1423,21 @@ def _update_pre_quant_scale(module, new_pre_quant_scale):
     finish_stats_collection(module.weight_quantizer)
 
 
+def _is_fused_svdquant(modules):
+    """Whether the group already shares one ``pre_quant_scale`` and one ``lora_a``.
+
+    SVDQuant calibration with ``fused_group_svd`` leaves fused groups this way. Re-running the
+    joint SVD on them would only add rounding error, and their mean scale can differ from the
+    shared one in the last bit.
+    """
+    first = modules[0]
+    return all(
+        torch.equal(m.input_quantizer.pre_quant_scale, first.input_quantizer.pre_quant_scale)
+        and torch.equal(m.weight_quantizer.svdquant_lora_a, first.weight_quantizer.svdquant_lora_a)
+        for m in modules
+    )
+
+
 def _update_svdquant(modules, new_pre_quant_scale):
     """Updates the pre_quant_scale, svdquant_lora_a and svdquant_lora_b matrices when pre_quant_scale is changed."""
     new_pre_quant_scale = new_pre_quant_scale.to(torch.float32)
@@ -1643,7 +1658,8 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
             if all(
                 getattr(m.weight_quantizer, "svdquant_lora_a", None) is not None for m in modules
             ):
-                _update_svdquant(modules, avg_prequant_scale)
+                if not _is_fused_svdquant(modules):
+                    _update_svdquant(modules, avg_prequant_scale)
             else:
                 for module in modules:
                     if not torch.equal(module.input_quantizer.pre_quant_scale, avg_prequant_scale):

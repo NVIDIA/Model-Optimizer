@@ -581,6 +581,41 @@ def test_svdquant_fused_group_scale():
     _svdquant_fused_group_scale_case(_SharedInputLLM(), loop, groups, kept=["out"])
 
 
+def test_svdquant_fused_group_svd():
+    from modelopt.torch.export.quant_utils import preprocess_linear_fusion
+
+    torch.manual_seed(0)
+    inputs = torch.randn(2, 16, 64) * torch.rand(64) * 10
+    config = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
+    # Per-tensor weight amax, which export unifies across a fused group.
+    config["quant_cfg"] = [
+        {**e, "cfg": {"num_bits": 8, "axis": None}}
+        if e.get("quantizer_name") == "*weight_quantizer"
+        else e
+        for e in config["quant_cfg"]
+    ]
+    config["algorithm"] = {"method": "svdquant", "fused_group_scale": True, "fused_group_svd": True}
+    model = mtq.quantize(_SharedInputLLM(), config, partial(forward_loop, dataloader=[inputs]))
+
+    la = model.layer.linear_attn
+    for group in ([model.q, model.k, model.v], [la.in_proj_qkv, la.in_proj_z]):
+        first = group[0]
+        for m in group[1:]:
+            for attr in ("svdquant_lora_a", "amax"):
+                assert torch.equal(
+                    getattr(m.weight_quantizer, attr), getattr(first.weight_quantizer, attr)
+                )
+            for attr in ("pre_quant_scale", "amax"):
+                assert torch.equal(
+                    getattr(m.input_quantizer, attr), getattr(first.input_quantizer, attr)
+                )
+        # Export's fusion leaves the calibrated group unchanged.
+        before = [copy.deepcopy(m.state_dict()) for m in group]
+        preprocess_linear_fusion(group)
+        for m, state in zip(group, before):
+            assert all(torch.equal(v, m.state_dict()[k]) for k, v in state.items())
+
+
 def test_svdquant_fused_group_scale_diffusers():
     diffusers = pytest.importorskip("diffusers")
 
