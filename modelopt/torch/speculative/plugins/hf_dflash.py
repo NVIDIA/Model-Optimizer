@@ -906,7 +906,8 @@ class HFDFlashModel(DFlashModel):
                     "through= holds no draft output; the parameters cannot stand in for one "
                     "once the draft has run."
                 )
-            return sum(out.sum() * 0.0 for out in outputs)
+            # An fp16 sum can overflow to inf, and inf * 0 is NaN.
+            return sum(out.sum(dtype=torch.float32) * 0.0 for out in outputs)
         return sum(
             (p.reshape(-1)[0] * 0.0 for p in self.dflash_module.parameters() if p.requires_grad),
             torch.zeros((), device=device),

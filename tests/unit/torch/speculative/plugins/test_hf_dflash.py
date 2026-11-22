@@ -1600,6 +1600,14 @@ def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, kept_b
     assert all(output.grad is not None for output in outputs)
 
 
+def test_zero_loss_through_fp16_outputs_that_sum_past_their_range():
+    """fp16 tops out at 65504, so the outputs' sum overflows unless reduced in float32."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(model, [("dflash", get_dflash_config())])
+    logits = torch.ones(70000, dtype=torch.float16, requires_grad=True)
+    assert model._draft_zero_loss(logits.device, through=(logits,)).item() == 0.0
+
+
 _FSDP2_EMPTY_RANK_HEADS = {
     "dflash": ({}, {}),
     "dspark": (
