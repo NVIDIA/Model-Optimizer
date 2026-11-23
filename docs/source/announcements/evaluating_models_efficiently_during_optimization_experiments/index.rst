@@ -40,7 +40,7 @@ examples <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/llm_eval/
 - **Show where the model improves or worsens:** use paired statistical tests to distinguish model
   differences from evaluation noise.
 - **Check for regressions:** use confidence intervals and non-inferiority tests to rule out
-  unacceptable regression, even if the baseline is not shown to be better.
+  unacceptable regression, even if the baseline does not have a higher average score.
 - **Assess model reliability:** measure doomed reasoning loops, missing answers, and whether the
   model abstains appropriately.
 - **Measure inference efficiency:** compare output length, including reasoning tokens.
