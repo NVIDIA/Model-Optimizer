@@ -25,6 +25,18 @@ report the score as unverified.
 - **Output budget, repeats and the score definition** come from the benchmark's configuration.
 - **Investigating a baseline that does not match its published score:** `nemo-gym-score-triage`.
 
+## Which metric is the headline
+
+A run's headline in the tool's summary is `<agent>/mean/reward`, but for some benchmarks that is not the metric the vendor or NEL report. Compare like with like, and say which metric you used:
+
+| Benchmark | `mean/reward` is | The vendor and NEL headline | Gym metric to use for it |
+|---|---|---|---|
+| IFBench | strict prompt-level grade | prompt-level loose | `<agent>/mean/follow_all_instructions_loose` (a full run: strict 75.4 vs loose 79.6, NEL 78.7 to 79.9, vendor 79.5) |
+| SciCode | whole-problem accuracy | subtask accuracy | `<agent>/mean/subtask_accuracy` (a full run: problem 12.7 to 14.0, subtask 44.1 to 46.6, NEL subtask 44 to 49) |
+| AA-LCR | the judged accuracy of the config that ran | depends on the config: `bench.yaml` uses the same Qwen 235B judge and dataset as NEL; the v1.1 files use a corrected dataset and a different judge and give a different number | the config you ran; do not compare v1.1 with NEL's score |
+
+A baseline and its candidate always use the same metric, so a delta is unaffected; the choice matters when a score is compared with a vendor number or with another tool.
+
 ## Doom loops
 
 Gym counts `repetition_stops` (the model's own loops, scored). How to enable the detection per request is not
