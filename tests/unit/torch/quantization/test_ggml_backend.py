@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from _test_utils.torch.quantization.iq_llama_cpp_vectors import expected_values, packed_blocks
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.ggml as ggml
@@ -27,9 +28,10 @@ import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 import modelopt.torch.quantization.ggml.q8_0 as q8_0_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.backend import ggml_fake_quant
 from modelopt.torch.quantization.ggml.common import narrow_to_float32
+from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 # Every registered format, paired with its own module. The module -- not the registry -- supplies
@@ -326,4 +328,93 @@ def test_format_fake_quant_rejects_another_formats_quantizer(num_bits):
     with pytest.raises(ValueError, match=re.escape(expected)):
         GGML_FORMAT_REGISTRY[num_bits].fake_quant(
             torch.ones(1, block_size), SimpleNamespace(num_bits=other)
+        )
+
+
+@pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
+@pytest.mark.parametrize(
+    ("payload_layout", "scale_layout"),
+    [("native", "column"), ("flat", "column"), ("odd_offset", "column"), ("flat", "strided_fp16")],
+)
+def test_native_iq_fields_preserve_codes_and_match_reference(name, payload_layout, scale_layout):
+    """Edit native fields on views, reconstructing with aligned decoder inputs.
+
+    Odd offsets exercise the field helpers; decoder comparisons use aligned clones.
+    """
+    fmt = GGML_FORMAT_REGISTRY[name]
+    packed = torch.from_numpy(packed_blocks(name).copy())
+    expected = torch.from_numpy(expected_values(name).copy())
+    if payload_layout != "native":
+        packed, expected = packed[:1], expected[:1]
+        if payload_layout == "flat":
+            packed = packed.reshape(-1)
+        else:
+            storage = torch.empty(packed.numel() + 1, dtype=torch.uint8)
+            storage[1:] = packed.reshape(-1)
+            packed = storage[1:].reshape(1, 1, fmt.block_bytes)
+    original = packed.clone()
+    shape = torch.tensor(expected.shape)
+    torch.testing.assert_close(
+        fmt.dequantize(original, shape, dtype=torch.float32), expected, rtol=1e-6, atol=1e-8
+    )
+    spec = fmt.scale_spec
+    global_scale, local, local_max = decode_scale_fields(packed, fmt)
+    changed_global = global_scale * 2
+    changed_local = (local + 1).clamp_max(local_max)
+    replacement_scale = changed_global[:, None]
+    if scale_layout == "strided_fp16":
+        storage = torch.empty(2 * changed_global.numel(), dtype=torch.float16)
+        storage[::2] = changed_global
+        replacement_scale = storage[::2]
+    edited = replace_scale_fields(packed, fmt, replacement_scale, changed_local)
+    assert torch.equal(packed, original)
+    assert torch.equal(replace_scale_fields(edited, fmt, global_scale, local), original)
+
+    # Explicit bit masks come from GGML's layouts, independently of NativeScaleSpec.
+    allowed = torch.zeros_like(packed).reshape(-1, fmt.block_bytes)
+    if name == "iq1_m":
+        allowed[:, 48:] = 255
+    else:
+        allowed[:, :2] = 255
+        if name == "iq1_s":
+            allowed[:, 35:50:2] = 112
+        elif name == "iq2_xxs":
+            allowed[:, 9::8] = 240
+        elif name in {"iq2_xs", "iq2_s"}:
+            allowed[:, 66 if name == "iq2_xs" else 74 :] = 255
+    assert not ((edited.reshape_as(allowed) ^ original.reshape_as(allowed)) & ~allowed).any()
+    levels, _ = fmt.decode_int8(original, shape)
+    steps = changed_global[:, None]
+    steps = steps * (spec.local_multiplier * changed_local + spec.local_bias) / spec.divisor
+    reconstructed = levels.reshape(len(steps), -1, fmt.int8_group_size).float() * steps.unsqueeze(
+        -1
+    )
+    torch.testing.assert_close(
+        fmt.dequantize(edited, shape, dtype=torch.float32),
+        reconstructed.reshape(expected.shape),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+    if payload_layout == "native":
+        for value in (float("nan"), float("inf"), 65520, 1 + 2j):
+            illegal_global = torch.full(global_scale.shape, value)
+            with pytest.raises(ValueError):
+                replace_scale_fields(packed, fmt, illegal_global, local)
+        for value in (float("nan"), float("inf"), -1, local_max + 1, 0.5):
+            illegal_local = local.float().clone()
+            illegal_local[0, 0] = value
+            with pytest.raises(ValueError):
+                replace_scale_fields(packed, fmt, changed_global, illegal_local)
+        assert torch.equal(packed, original)
+    for accessor in ("read_local", "write_local"):
+        with pytest.raises(ValueError):
+            dataclasses.replace(spec, **{accessor: None})
+    with pytest.raises(ValueError):
+        decode_scale_fields(packed, dataclasses.replace(fmt, payload_scales=None))
+    with pytest.raises(ValueError):
+        replace_scale_fields(
+            packed,
+            dataclasses.replace(fmt, scale_fit=None, replace_payload_scales=None),
+            changed_global,
+            changed_local,
         )
