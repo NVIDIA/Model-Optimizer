@@ -1421,11 +1421,16 @@ def _quantize_awq_lite(
         # Transposes the weights and scales in-place
         use_column_major = kwargs.get("use_column_major", False)
         if use_column_major:
-            qdq.apply_column_major_transformation(gemm_weights_quantized, scales)
+            qdq.apply_column_major_transformation(
+                gemm_weights_quantized, scales, zero_points if use_zero_point else None
+            )
             dq_node_attributes = {"axis": 1, "block_size": block_size}
         else:
             dq_node_attributes = {"axis": 0, "block_size": block_size}
         scales = reshape_scales_for_per_channel_nodes(scales, block_size, layer_info)
+        if use_zero_point:
+            # Zero points follow the scales' layout, so per-channel ones are flattened too.
+            zero_points = reshape_scales_for_per_channel_nodes(zero_points, block_size, layer_info)
         qdq.insert_dq_nodes(
             graph_gs,
             scales,

@@ -240,6 +240,72 @@ def test_awq_gemm_trans_b(tmp_path, calibration_method, layers_8bit, use_column_
     assert np.abs(y - ref).max() / np.abs(ref).max() < 0.1
 
 
+@pytest.mark.parametrize("layers_8bit", [None, "gemm"])
+@pytest.mark.parametrize("use_column_major", [False, True])
+def test_awq_lite_gemm_trans_b_zero_point(tmp_path, layers_8bit, use_column_major):
+    # Asymmetric AWQ Lite: the zero points must keep the scales' layout through the transB
+    # transpose, the column-major transpose and the per-channel flattening.
+    rng = np.random.default_rng(0)
+    w = (rng.standard_normal((32, 32)) * np.logspace(-1, 1, 32)[:, None]).astype(np.float32)
+    x = rng.standard_normal((16, 32)).astype(np.float32)
+    gx = gs.Variable("x", dtype=np.float32, shape=x.shape)
+    gy = gs.Variable("y", dtype=np.float32, shape=(16, 32))
+    gemm = gs.Node(
+        "Gemm", "gemm", inputs=[gx, gs.Constant("w", w)], outputs=[gy], attrs={"transB": 1}
+    )
+    onnx_path = os.path.join(tmp_path, "gemm.onnx")
+    save_onnx(gs.export_onnx(gs.Graph([gemm], inputs=[gx], outputs=[gy], opset=21)), onnx_path)
+
+    model = quantize_int4(
+        onnx_path,
+        "awq_lite",
+        [{"x": x}],
+        block_size=8,
+        use_zero_point=True,
+        enable_mixed_quant=layers_8bit is not None,
+        layers_8bit=layers_8bit,
+        use_external_data_format=False,
+        use_column_major=use_column_major,
+    )
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    y = session.run(None, {"x": x})[0].astype(np.float32)
+    ref = x @ w.T
+    assert np.abs(y - ref).max() / np.abs(ref).max() < 0.1
+
+
+@pytest.mark.parametrize("calibration_method", ["awq_clip", "rtn_dq"])
+@pytest.mark.parametrize("op", ["Gemm", "MatMul"])
+def test_column_major_shared_weight(tmp_path, calibration_method, op):
+    # Two nodes reading one weight share its DQ node; in column-major mode each of them needs
+    # its transB flipped (Gemm) or the Transpose back (MatMul), not just the first one.
+    rng = np.random.default_rng(0)
+    w = rng.standard_normal((48, 32)).astype(np.float32)  # [N, K]
+    x = rng.standard_normal((16, 32)).astype(np.float32)
+    gx = gs.Variable("x", dtype=np.float32, shape=x.shape)
+    weight = gs.Constant("w", w if op == "Gemm" else np.ascontiguousarray(w.T))
+    attrs = {"transB": 1} if op == "Gemm" else {}
+    outputs = [gs.Variable(f"y{i}", dtype=np.float32, shape=(16, 48)) for i in range(2)]
+    nodes = [
+        gs.Node(op, f"node{i}", inputs=[gx, weight], outputs=[outputs[i]], attrs=dict(attrs))
+        for i in range(2)
+    ]
+    onnx_path = os.path.join(tmp_path, "shared.onnx")
+    save_onnx(gs.export_onnx(gs.Graph(nodes, inputs=[gx], outputs=outputs, opset=21)), onnx_path)
+
+    model = quantize_int4(
+        onnx_path,
+        calibration_method,
+        [{"x": x}],
+        block_size=8,
+        use_external_data_format=False,
+        use_column_major=True,
+    )
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    ref = x @ w.T
+    for y in session.run(None, {"x": x}):
+        assert np.abs(y - ref).max() / np.abs(ref).max() < 0.1
+
+
 @pytest.mark.parametrize("calibration_method", ["awq_lite", "awq_full"])
 @pytest.mark.parametrize(
     ("reuse_activations", "random_activation"),
