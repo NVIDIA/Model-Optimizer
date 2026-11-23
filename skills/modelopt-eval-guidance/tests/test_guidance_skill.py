@@ -43,10 +43,8 @@ def test_guidance_has_the_expected_files():
     assert names >= {
         "doom-loops.md",
         "external-baseline-check.md",
-        "nvfp4-modelcard-sampling.md",
         "quantization-benchmarks.md",
         "run-validity.md",
-        "vendor-reference-and-sampling.md",
     }
     frontmatter = _text(_GUIDANCE / "SKILL.md").split("---", 2)[1]
     assert re.findall(r"^name: (.+)$", frontmatter, re.MULTILINE) == ["modelopt-eval-guidance"]
@@ -189,12 +187,6 @@ def test_gym_reference_keeps_the_gym_rules():
         "UNVERIFIED",
     ):
         assert needle in gym
-
-
-def test_guidance_does_not_override_the_tools_output_budget():
-    text = _text(_GUIDANCE / "references/vendor-reference-and-sampling.md")
-    assert "Record, do not override" in text
-    assert "never invent one" in text
 
 
 def test_run_validity_leaves_the_fault_rule_to_the_tool():

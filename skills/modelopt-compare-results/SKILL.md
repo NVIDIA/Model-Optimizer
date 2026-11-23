@@ -21,7 +21,8 @@ change is being measured, typically a further quantized version of the baseline.
    config should match benchmark versions, task configs, serving args, token
    limits, dataset setup, credentials, cluster, and container as closely as
    possible; change only the model/checkpoint and checkpoint-specific serving or
-   quantization flags.
+   quantization flags. The two precisions' model cards may publish different sampling:
+   use one setting for both sides and record it.
 3. Fetch the baseline and candidate task list, configs, score artifacts, and
    logs. If the user provides MLflow runs or invocation IDs, fetch
    configs and artifacts as the tool's reference in `references/tools/` says; for runs

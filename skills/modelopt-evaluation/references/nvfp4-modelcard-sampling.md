@@ -14,7 +14,7 @@ Use it to cross-check published settings. It does not replace reading the card.
 ## Lookup
 
 **The card is the source of truth; this table is a reference, not a constraint.**
-For `max_new_tokens`, follow [the output-budget rule](vendor-reference-and-sampling.md#output-budget), including for caps in the notes.
+For `max_new_tokens`, follow [Model Card Research's token-budget rule](model-card-research.md#max_new_tokens--mandatory-model-card-lookup), including for caps in the notes.
 The lookup steps below apply only to `temperature` / `top_p`:
 
 1. **Exact row, resolved per field.** `eval` → use it, cite the row. `rec` → use
@@ -37,8 +37,9 @@ tune sampling per benchmark, so **follow the card you are working from** and use
 these as the cross-check. Where the two disagree, **escalate to the user on a
 regime change, not a nudge** — greedy (`temperature ≤ 0.1` or `top_p ≤ 1e-4`)
 versus sampled flips the regime and materially moves both score and variance;
-`0.95` vs `1.0` does not. Where per-task sampling goes is the evaluation tool's business (its reference says
-where); the output budget is the tool's, not this table's.
+`0.95` vs `1.0` does not. NEL accepts per-task `temperature` / `top_p` under
+`evaluation.tasks.*.nemo_evaluator_config`; only `max_new_tokens` is barred
+(see [launcher workflow](launcher-workflow.md#evaluation-params-template-top-level-params)).
 
 > **Never take sampling from a card's quickstart snippet.**
 > `SamplingParams(temperature=0.8, top_p=0.95)` and `max_tokens=32` are
@@ -48,7 +49,8 @@ where); the output budget is the tool's, not this table's.
 
 `provenance` — **`eval`** (20 rows): card ties the values to its accuracy table,
 authoritative. **`rec`** (5 rows): card recommends them for inference without
-that tie. `max_num_tokens` is the max generation length (the tool's output-token setting).
+that tie. `max_num_tokens` is the max generation length, i.e.
+`nemo_evaluator_config.config.params.max_new_tokens`.
 
 | Model card ID | temp | top_p | max_num_tokens | prov | notes |
 | --- | --- | --- | --- | --- | --- |
@@ -73,7 +75,7 @@ that tie. `max_num_tokens` is the max generation length (the tool's output-token
 | `nvidia/diffusiongemma-26B-A4B-it-NVFP4` | upstream | upstream | `null` (uncapped) | eval | defers to `google/diffusiongemma-26B-A4B-it`; diffusion decoding, serve with `--override-generation-config '{"max_new_tokens": null}'`. Uncapped is deliberate — do **not** substitute a numeric fallback |
 | `nvidia/Ising-Calibration-1.5-31B-NVFP4` | 0.2 | — | 8192 zero-shot / 32767 ICL | rec | domain model (Gemma-4-31B derivative) |
 | `nvidia/Mistral-Medium-3.5-128B-NVFP4` | 0.7 | 0.95 | — | eval | benchmarked with `reasoning_effort="high"` |
-| `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` | 1.0 | 0.95 | — | rec | its spec-decode siblings' cards say *Benchmarked with* these same values; eval recipes live in the evaluation tool's repository, client examples use `max_tokens=16000` |
+| `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` | 1.0 | 0.95 | — | rec | its spec-decode siblings' cards say *Benchmarked with* these same values; eval recipes live in NeMo Gym, client examples use `max_tokens=16000` |
 | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | 1.0 | 0.95 | — | rec | card: use across **all** tasks and serving backends |
 | `nvidia/NVIDIA-Nemotron-Labs-3-Elastic-30B-A3B-NVFP4` | 1.0 | 1.0 | — | rec | reasoning tasks |
 | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4` | 0.6 think / 0.2 instruct | 0.95 think / — | 20480 think / 1024 instruct | rec | think adds `reasoning_budget=16384`, `grace_period=1024`; instruct sets `top_k=1` |
@@ -95,7 +97,7 @@ that tie. `max_num_tokens` is the max generation length (the tool's output-token
 - **Per-task overrides are narrow** — SciCode (lower temperature), τ²-Bench
   Telecom (greedy or larger cap), GPQA Diamond (larger cap), Terminal-Bench
   (uncapped). Caps are observations, not selection rules; follow the
-  [output-budget rule](vendor-reference-and-sampling.md#output-budget).
+  [token-budget rule](model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
 
 ## Refreshing
 
