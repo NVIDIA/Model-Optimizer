@@ -27,6 +27,7 @@ from modelopt.torch.quantization.plugins.vllm_indexer import (
     _requantize_fp8_indexer_k_cache,
 )
 from modelopt.torch.quantization.plugins.vllm_mega_moe import _QuantVLLMMegaMoEExperts
+from modelopt.torch.utils import warn_rank_0
 
 __all__: list[str] = []
 
@@ -109,11 +110,16 @@ if VllmDeepseekV4Indexer is not None:
         _QuantVLLMDeepseekV4Indexer
     )
 
-# Imported only once the indexer is registered: an import that fails in a way not caught here
-# aborts this module, and must not take the indexer's registration with it.
+# Imported only once the indexer is registered, and never allowed to abort this module: a module
+# that fails halfway is imported again later and then fails registering the indexer twice.
 try:
     from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
 except (ImportError, NotImplementedError):
+    DeepseekV4MegaMoEExperts = None
+except Exception as e:  # an unexpected failure inside the vLLM build
+    warn_rank_0(
+        f"DeepSeek-V4's Mega-MoE experts will not be quantized: importing them failed: {e!r}"
+    )
     DeepseekV4MegaMoEExperts = None
 
 if DeepseekV4MegaMoEExperts is not None:

@@ -575,9 +575,13 @@ if kept == "kimi_k3_callback":
     assert kimi is not None, f"failing to import {failing} skipped Kimi-K3's module"
     assert kimi.prepare_kimi_mlps_on_the_fly in CUSTOM_MODEL_PLUGINS
 else:
+    # The model module still imports: one that failed halfway would fail here, registering the
+    # indexer a second time.
+    import modelopt.torch.models.deepseek_v4.modeling_ptq_vllm as deepseek_v4
     from vllm.models.deepseek_v4.attention import DeepseekV4Indexer
 
     assert DeepseekV4Indexer in QuantModuleRegistry, f"failing to import {failing} dropped it"
+    assert deepseek_v4.DeepseekV4MegaMoEExperts is None
 """
 
 
@@ -591,8 +595,8 @@ else:
     ],
 )
 def test_failed_vllm_model_import_keeps_other_registrations(failing, kept):
-    """A model module that fails to import leaves the other models' wrappers, and its own
-    registrations from before the failure, in place."""
+    """A model module that fails to import leaves the other models' wrappers in place, and a failed
+    DeepSeek-V4 Mega-MoE import leaves its module importable, with the indexer registered."""
     if kept == "deepseek_v4_indexer":
         try:
             importlib.import_module("vllm.models.deepseek_v4.attention")
