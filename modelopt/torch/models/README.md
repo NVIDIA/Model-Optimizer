@@ -77,8 +77,7 @@ after the interface wrapper and before the AST-based fallback — and exports no
 (`__all__ = []`). Every package still has a `specs.py`, even when its spec only records
 `model_type` and where the modeling code comes from. A model type that shares another type's
 PTQ code (`step3p7` uses `step3p5`'s, `llama4_text` uses `llama4`'s) still gets a
-`modeling_ptq.py` that imports the shared one, so loading it by model type works. Falcon's
-original remote-code types (`refined_web`, `refined_web_model`) get only that, without a spec.
+`modeling_ptq.py` that imports the shared one, so loading it by model type works.
 
 vLLM's model-specific wrappers follow the same pattern in `<model_type>/modeling_ptq_vllm.py`,
 on top of the generic ones in the vLLM plugin modules

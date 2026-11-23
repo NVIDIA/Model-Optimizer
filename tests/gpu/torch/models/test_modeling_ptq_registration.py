@@ -87,13 +87,10 @@ dense = model.transformer.h[0].self_attention.dense
 assert isinstance(dense, QuantModule), type(dense).__mro__
 assert loaded() == {"nemotron_h", "falcon"}, sorted(loaded())
 
-# Types whose PTQ code is another's, Falcon's original remote-code types (whose packages import
-# Falcon's, loaded above), and a VLM's language model, found through its nested config.
+# Types whose PTQ code is another's, and a VLM's language model, found through its nested config.
 for config, expected in [
     (SimpleNamespace(model_type="llama4_text"), {"llama4_text", "llama4"}),
     (SimpleNamespace(model_type="step3p7"), {"step3p7", "step3p5"}),
-    (SimpleNamespace(model_type="RefinedWeb"), {"refined_web"}),
-    (SimpleNamespace(model_type="RefinedWebModel"), {"refined_web_model"}),
     (SimpleNamespace(model_type="blip-2", text_config=SimpleNamespace(model_type="t5")), {"t5"}),
     (SimpleNamespace(model_type="llama"), set()),
 ]:
