@@ -616,6 +616,13 @@ if kept == "deepseek_v4_indexer":
     import vllm.models.deepseek_v4.attention
 
     sys.modules.pop(failing, None)
+elif kept == "kimi_k3_mlp_preparation":
+    # vLLM's Kimi-K3 package imports its model module itself, and failing that import inside the
+    # package would leave the package half-imported. Fail only the lookup modelopt makes; the module
+    # is handed back below, as when vLLM imports it while loading the model.
+    import vllm.models.kimi_k3.nvidia.model
+
+    kimi_model = sys.modules.pop(failing)
 
 
 class _FailingImport:
@@ -635,15 +642,15 @@ from modelopt.torch.quantization.plugins.custom import (
 )
 
 if kept == "kimi_k3_mlp_preparation":
-    # vLLM's Kimi-K3 module failed while modelopt was imported and imports now, as when vLLM
-    # loads the model; conversion's first step must still prepare the MLP.
+    # vLLM's Kimi-K3 module failed while modelopt was imported and is loaded now; conversion's
+    # first step must still prepare the MLP.
     from unittest.mock import Mock
 
     import torch
     import vllm.model_executor.layers.linear as vllm_linear
 
     sys.meta_path.remove(failing_import)
-    kimi_model = __import__(failing, fromlist=["KimiMLP"])
+    sys.modules[failing] = kimi_model
     down_proj = object.__new__(vllm_linear.RowParallelLinear)
     torch.nn.Module.__init__(down_proj)
     mlp = object.__new__(kimi_model.KimiMLP)
