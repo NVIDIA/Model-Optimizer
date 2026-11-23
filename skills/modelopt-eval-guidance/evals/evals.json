@@ -7,23 +7,10 @@
     "ground_truth": "Uses the NeMo Gym evaluation skills named by the task and does not load the NEL evaluation skills or run nel commands. Loads modelopt-eval-guidance for the vendor reference, run validity and external baseline check. Applies the external baseline check: exact-model published score only, a protocol-match checklist, and the statuses verified, failed or externally unverified. Treats a wrong, truncated or empty answer as the model's result under the tool's own health verdict and does not add a response-level invalidation of its own. Reports per-side truncation and output-limit counts before the score.",
     "expected_behavior": [
       "Uses the NeMo Gym evaluation skills named by the task and does not load the NEL evaluation skills or run nel commands",
-      "Loads modelopt-eval-guidance for the vendor reference, run validity and external baseline check",
+      "Loads modelopt-eval-guidance for run validity and the external baseline check",
       "Applies the external baseline check: exact-model published score only, a protocol-match checklist, and the statuses verified, failed or externally unverified",
       "Treats a wrong, truncated or empty answer as the model's result under the tool's own health verdict and does not add a response-level invalidation of its own",
       "Reports per-side truncation and output-limit counts before the score"
-    ]
-  },
-  {
-    "id": "output-budget-is-recorded-not-overridden",
-    "question": "The model card says max_new_tokens 32768 but the evaluation tool's benchmark budget is 65536. Which do I use?",
-    "expected_skill": "modelopt-eval-guidance",
-    "expected_script": null,
-    "ground_truth": "Keeps the evaluation tool's benchmark budget and does not replace it with the card value. Records the card's value next to the tool's value in the handoff and says they differ. Does not invent a numeric default or write a generic default with a card-not-checked comment. Does not lower repeats, token budgets or timeouts to make the run fit.",
-    "expected_behavior": [
-      "Keeps the evaluation tool's benchmark budget and does not replace it with the card value",
-      "Records the card's value next to the tool's value in the handoff and says they differ",
-      "Does not invent a numeric default or write a generic default with a card-not-checked comment",
-      "Does not lower repeats, token budgets or timeouts to make the run fit"
     ]
   },
   {

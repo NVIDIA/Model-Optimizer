@@ -136,6 +136,9 @@ For NVFP4 checkpoints, use `--quantization modelopt_fp4`.
 > error: no kernel image is available for execution on the device` (affects the
 > `flashinfer` and `cutlass` NVFP4 backends; `marlin` separately fails on
 > non-64-divisible layer dims).
+
+> **ARM64 or a non-standard compute capability (e.g. sm_121)** needs an NGC vLLM image built for that architecture;
+> the default serving image covers common GPUs only. Ask the user for the architecture if the model card does not say.
 > Cross-check via
 > `recipes.vllm.ai/<org>/<model>?hardware=b300` (JS-rendered — fetch the raw
 > markdown at `github.com/vllm-project/recipes/blob/main/<org>/<model>.md`). For

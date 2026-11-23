@@ -1,6 +1,6 @@
 ---
 name: modelopt-eval-guidance
-description: Tool-neutral guidance for the accuracy evaluation of a quantized checkpoint, whatever evaluation tool runs it - read the vendor model card, pick quantization-sensitive benchmarks, validate a finished run, check the baseline against the published score, and handle doom loops. Use it next to the evaluation tool's own skills whenever a baseline or candidate is evaluated; it holds the duties that do not depend on the tool.
+description: Tool-neutral guidance for the accuracy evaluation of a quantized checkpoint, whatever evaluation tool runs it - pick quantization-sensitive benchmarks, validate a finished run, check the baseline against the published score, and handle doom loops. Use it next to the evaluation tool's own skills whenever a baseline or candidate is evaluated; it holds the duties that do not depend on the tool.
 license: Apache-2.0
 ---
 
@@ -19,15 +19,11 @@ tool the task names (the default is named in the index), and do not load another
 0. **First, the reference file of the tool you are using** (`references/tools/<tool>.md`). Do not guess its
    name: open [references/tools/index.md](references/tools/index.md) and follow the link for your tool. It holds the rules that apply only to that tool, such as what must not be cancelled, where its
    sampling and health rules are, and its MLflow names; the files below defer to it.
-1. **Before choosing settings:** [vendor-reference-and-sampling.md](references/vendor-reference-and-sampling.md)
-   - the quantization-specific part of reading the model card (the tool's own skill does the extraction), the
-   output-budget rule, and the published NVFP4 sampling table
-   [nvfp4-modelcard-sampling.md](references/nvfp4-modelcard-sampling.md).
-2. **When choosing benchmarks for a quantized checkpoint:**
+1. **When choosing benchmarks for a quantized checkpoint:**
    [quantization-benchmarks.md](references/quantization-benchmarks.md).
-3. **When a model repeats itself until the token limit:** [doom-loops.md](references/doom-loops.md).
-4. **After each run finishes, before any score is reported:** [run-validity.md](references/run-validity.md).
-5. **Before accepting a baseline for a baseline-versus-candidate comparison:**
+2. **When a model repeats itself until the token limit:** [doom-loops.md](references/doom-loops.md).
+3. **After each run finishes, before any score is reported:** [run-validity.md](references/run-validity.md).
+4. **Before accepting a baseline for a baseline-versus-candidate comparison:**
    [external-baseline-check.md](references/external-baseline-check.md), then `modelopt-compare-results`.
 
 ## Rules for every evaluation, whatever the tool
