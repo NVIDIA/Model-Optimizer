@@ -726,11 +726,12 @@ def test_kimi_gemm_rs_guard_tracks_converted_down_projection(fake_parallel_state
     gemm_rs_ar.should_run.return_value = True
     mlp.gemm_rs_ar = gemm_rs_ar
 
-    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(mlp)
+    # Conversion runs the registered callbacks first, Kimi-K3's MLP preparation among them.
+    mtq.replace_quant_module(mlp)
     guard = mlp.gemm_rs_ar
-    converted = vllm_plugin.QuantModuleRegistry.convert(down_proj)
 
-    assert converted is down_proj
+    assert isinstance(guard, kimi_k3_ptq._KimiGemmRsArFakeQuantGuard)
+    assert mlp.down_proj is down_proj
     assert guard.down_proj is down_proj
     assert down_proj._fake_quant_supported
     for name in _VLLMParallelLinear._QUANTIZER_NAMES:
