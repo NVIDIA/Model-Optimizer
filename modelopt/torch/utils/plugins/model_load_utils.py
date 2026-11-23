@@ -2928,8 +2928,9 @@ def _experts_sharded_over(ep_mesh, distributed_config):
             setattr(obj, attr, kept)
 
 
-# Held through an expert-parallel load's transformers hooks: overlapping loads would restore each
-# other's originals. The warmup and dense-on-meta hooks act on any load meanwhile, so another
+# Held through an expert-parallel load, from its entry to its final barrier: an overlapping load's
+# collectives would pair with this one's, and its transformers hooks would restore each other's
+# originals. The warmup and dense-on-meta hooks act on any load meanwhile, so another
 # from_pretrained during an expert-parallel load is unsupported.
 _EP_LOAD_HOOKS = threading.Lock()
 
@@ -3020,6 +3021,8 @@ def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_mo
     return n_dense
 
 
+# Refused at entry, before any collective, and held until it returns.
+@_one_ep_load_at_a_time()
 def load_and_prepare_ep(
     ckpt_path: str,
     plan: DistributionPlan,
@@ -3343,9 +3346,7 @@ def load_and_prepare_ep(
         # The class the plan's decision chose, with its LM head where an auto class builds one.
         loader = _auto_class(hf_config, require_lm_head, trust_remote_code=trust_remote_code)
         print_rank_0(f"[ep] loader={loader.__name__} (require_lm_head={require_lm_head})")
-        # The guard comes first: it is taken before any hook reads what it restores, and released last.
         with (
-            _one_ep_load_at_a_time(),
             _ep_aware_caching_allocator_warmup(
                 ep_degree, swapped_plan, dense_on_meta=plan.is_fsdp_dense
             ),
@@ -3353,8 +3354,8 @@ def load_and_prepare_ep(
             _experts_sharded_over(ep_submesh, distributed_config),
         ):
             if quant_method == "fp8":
-                # Correct transformers' block-fp8 dequant to emit the model dtype: class-wide, so set
-                # only once the guard admits this load.
+                # Correct transformers' block-fp8 dequant to emit the model dtype: class-wide, which
+                # the guard keeps to this load.
                 _patch_finegrained_fp8_dequant(dtype)
             model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
         model.eval()

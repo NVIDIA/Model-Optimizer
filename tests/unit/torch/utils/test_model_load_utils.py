@@ -3396,9 +3396,16 @@ def test_an_expert_parallel_load_during_another_is_refused_before_it_hooks_anyth
     ep_world_of_two, monkeypatch
 ):
     """Two loads hooking transformers at once would each take the other's hooks for the originals it
-    restores: a second load is refused before any of its hooks is set up, nor does it set the
-    class-wide block-fp8 dequant dtype the first one reads."""
+    restores, and their collectives would pair with each other's: a second load is refused before
+    any collective, mesh or hook of its own, nor does it set the class-wide block-fp8 dequant dtype
+    the first one reads."""
     hooked = []
+    all_reduce = dist.all_reduce
+    monkeypatch.setattr(
+        dist,
+        "all_reduce",
+        lambda *args, **kwargs: hooked.append("collective") or all_reduce(*args, **kwargs),
+    )
 
     class _Loader:
         @staticmethod
@@ -3425,7 +3432,8 @@ def test_an_expert_parallel_load_during_another_is_refused_before_it_hooks_anyth
     monkeypatch.setattr(model_load_utils.moe, "require_transformers", lambda *args, **kwargs: None)
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
     monkeypatch.setattr(
-        "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
+        "torch.distributed.device_mesh.init_device_mesh",
+        lambda *args, **kwargs: hooked.append("mesh") or _Mesh(),
     )
     config = SimpleNamespace(
         model_type=_NO_SPEC,
