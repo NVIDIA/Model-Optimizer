@@ -188,5 +188,4 @@ Reproducibility limits
 
 The checkpoints and paired measurements are stored outside the public ModelOpt repository.
 To keep the repository lightweight, we include summary results here rather than question-level
-data, generated responses, or a full experiment environment, consistent with the `Qwen3.6 PTQ/QAD
-tutorial <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md>`__.
+data, generated responses, or a full experiment environment.
