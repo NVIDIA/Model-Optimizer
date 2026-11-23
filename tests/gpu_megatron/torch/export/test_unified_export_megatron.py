@@ -153,7 +153,7 @@ def test_megatron_name_remapping_exports_ggml_payload(qformat):
     # a + (r - a), which in bf16 differs from r by up to one ULP of a -- enough to fail a
     # relative tolerance wherever r is small next to a, as IQ1_S's grid near zero often is.
     logical_shape = torch.tensor([*packed.shape[:-2], packed.shape[-2] * block_size])
-    reference, _ = getattr(ggml, f"quantize_{qformat}")(linear.weight)
+    reference, _ = ggml.GGML_FORMAT_REGISTRY[qformat].plain_quantize(linear.weight)
     torch.testing.assert_close(
         dequantize(packed, logical_shape, dtype=torch.bfloat16),
         dequantize(reference, logical_shape, dtype=torch.bfloat16),
@@ -203,7 +203,8 @@ def _make_ggml_weight(rows):
 
 
 def _assert_ggml_payload_matches(qformat, packed, logical_weight):
-    expected, _ = getattr(ggml, f"quantize_{qformat}")(logical_weight)
+    # An unpinned weight exports as its forward encodes it.
+    expected, _ = ggml.GGML_FORMAT_REGISTRY[qformat].plain_quantize(logical_weight)
     torch.testing.assert_close(packed, expected.cpu(), rtol=0, atol=0)
 
 
