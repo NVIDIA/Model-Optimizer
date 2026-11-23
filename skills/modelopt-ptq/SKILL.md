@@ -4,9 +4,9 @@ description: >-
   Use when the user asks to "quantize a model", "run PTQ", "post-training
   quantization", "NVFP4 quantization", "FP8 quantization", "INT8
   quantization", "INT4 AWQ", "quantize LLM", "quantize MoE", "quantize VLM",
-  or needs to produce a quantized HuggingFace checkpoint from a pretrained
-  model using ModelOpt. Do NOT use for multi-candidate recipe
-  exploration or optimization (use modelopt-quant-recipe-search).
+  or needs to produce a quantized HuggingFace checkpoint or validate its
+  post-PTQ acceptance gate before deployment/evaluation. Do NOT use for
+  multi-candidate recipe exploration or optimization (use modelopt-quant-recipe-search).
 ---
 
 # ModelOpt Post-Training Quantization
@@ -181,12 +181,12 @@ Report the gate result before moving on. Follow the canonical report format and 
 
 ## Key API Rules
 
-- `mtq.register()` classes **must** define `_setup()` and call it from `__init__`
+- Registered classes must define `_setup()`. ModelOpt conversion calls it; direct subclass constructors must call it themselves.
 - Call `mto.enable_huggingface_checkpointing()` **before** quantization
 - Wildcard `*gate*` matches too broadly — use `*mlp.gate*` or `*router*`
 - VLMs: `hf_ptq.py` auto-extracts the language model via `extract_and_prepare_language_model_from_vl()` — no manual VLM handling needed in most cases
 - FP8 checkpoints: prefer `_QuantFP8Linear` (lazy dequant) over `FineGrainedFP8Config(dequantize=True)` which wastes ~2x memory. See `references/unsupported-models.md` for details
-- Custom quantizer names must end with `_input_quantizer` or `_weight_quantizer`
+- Match quantizer names to weight attributes: `weight` uses `input_quantizer`/`weight_quantizer`; other weights use `<weight_name>_input_quantizer`/`<weight_name>_weight_quantizer` (see `quantizer_attr_names()`).
 
 ## Common Pitfalls
 

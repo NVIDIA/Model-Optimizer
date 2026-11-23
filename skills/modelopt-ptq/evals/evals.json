@@ -2,88 +2,103 @@
   "skill_name": "modelopt-ptq",
   "evals": [
     {
-      "id": 1,
-      "prompt": "Quantize Qwen3-0.6B to nvfp4",
-      "expected_output": "Quantized checkpoint produced with config.json + safetensors via hf_ptq.py",
-      "files": [],
-      "expectations": [
-        "Skill auto-triggers and reads SKILL.md",
-        "Checks README support table — Qwen3 is listed",
-        "Takes path 4A or 4B depending on environment",
-        "Runs hf_ptq.py with --qformat nvfp4",
-        "Produces checkpoint directory with config.json and model safetensors"
+      "id": "listed-nvfp4",
+      "expected_skill": "modelopt-ptq",
+      "prompt": "Plan ModelOpt NVFP4 PTQ for Qwen/Qwen3-0.6B, a listed supported text model, from BF16 for vLLM on B200. Give the calibration choice and size, hf_ptq.py command template, export artifacts, and checkpoint/runtime validation gates before accuracy evaluation. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
+      "expected_output": "A fixed NVFP4 PTQ plan for the listed Qwen3-0.6B BF16 model, using the existing hf_ptq.py pipeline and representative text calibration, normally 512 samples. A command template names the checkpoint, nvfp4 qformat or selected recipe, calibration settings, and export path. Export includes config, safetensors weights/scales, and tokenizer assets. Before later accuracy evaluation, validate size against BF16, intended precision coverage, preserved model/tokenizer metadata, and a temporary vLLM canary on B200 with cleanup. No PTQ or serving results are claimed.",
+      "assertions": [
+        "Uses the existing hf_ptq.py pipeline for the listed model and provides a command template identifying source, NVFP4 format or recipe, calibration and export path.",
+        "Chooses representative text calibration and states a full calibration size, normally 512; does not require an unlisted-model smoke run for this listed model.",
+        "Names weights/scales, config and tokenizer export artifacts and size, intended precision coverage, metadata and temporary B200/vLLM canary gates before evaluation.",
+        "Stays within planning scope: no model download, calibration, job submission, service startup or fabricated results."
       ]
     },
     {
-      "id": 2,
-      "prompt": "Quantize HuggingFaceTB/SmolLM-135M to nvfp4",
-      "expected_output": "Agent follows 4C path, determines hf_ptq.py works via auto-detection, runs smoke test then full calibration",
-      "files": [],
-      "expectations": [
-        "Checks README — SmolLM is NOT listed",
-        "Reads unsupported-models.md (4C path)",
-        "Investigates model source — finds standard LlamaForCausalLM",
-        "Determines hf_ptq.py should work via auto-detection",
-        "Runs smoke test first (unlisted model requirement)",
-        "Runs full calibration after smoke test passes"
+      "id": "unlisted-standard",
+      "expected_skill": "modelopt-ptq",
+      "prompt": "Plan ModelOpt NVFP4 PTQ for HuggingFaceTB/SmolLM-135M for B200 inference. Treat it as unlisted in the verified support table; inspection of the checkpoint shows standard LlamaForCausalLM nn.Linear projections and no custom code. Explain whether a custom quantizer is needed, smoke/full calibration order, and export/validation steps. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
+      "expected_output": "Unlisted does not mean unsupported: the supplied standard LlamaForCausalLM nn.Linear structure should work through hf_ptq.py without a custom quantizer. Plan a four-sample smoke run first and proceed to full representative calibration only after success, then export and validate weights/config/tokenizer, coverage and runtime readiness. Treat all execution as future work.",
+      "assertions": [
+        "Recognizes that the supplied standard nn.Linear/LlamaForCausalLM model can use hf_ptq.py despite being unlisted, without requiring a custom quantizer.",
+        "Plans a small smoke calibration before full representative calibration and proceeds to full calibration only after smoke success.",
+        "Includes checkpoint export and coverage/metadata/runtime validation as future steps.",
+        "Stays within planning scope: no model download, calibration, job submission, service startup or fabricated results."
       ]
     },
     {
-      "id": 3,
-      "prompt": "Quantize OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview to nvfp4",
-      "expected_output": "Agent identifies VLM with trust_remote_code, follows unlisted model path, handles custom modeling code in checkpoint dir",
-      "files": [],
-      "expectations": [
-        "Checks README — InternVL is NOT listed",
-        "Reads unsupported-models.md (4C path)",
-        "Finds modeling code in checkpoint dir (trust_remote_code model)",
-        "Identifies VLM — only quantizes language model backbone",
-        "Uses remote cluster if clusters.yaml exists",
-        "Runs smoke test first (unlisted model)"
+      "id": "unlisted-vlm",
+      "expected_skill": "modelopt-ptq",
+      "prompt": "Plan NVFP4 PTQ for OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview, treated as an unlisted VLM with reviewed custom modeling files referenced by config auto_map. Target B200 inference. Explain custom-code/dependency checks, language-backbone versus vision coverage, calibration modality, smoke/full order, and export verification. Do not assume a generic MLP wildcard excludes vision. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
+      "expected_output": "For this unlisted VLM, inspect reviewed custom code, config auto_map, dependencies and runtime support; use trust_remote_code only where the inspected checkpoint requires it. Reuse hf_ptq.py language-backbone handling where compatible, quantize the intended language layers and explicitly preserve the vision branch. Use image-text calibration, not text alone, and smoke before full calibration. Verify exported vision tensors have no unintended quantization scales along with expected language coverage and metadata; serving readiness includes multimodal compatibility.",
+      "assertions": [
+        "Plans inspected custom-code/auto_map and dependency compatibility checks for this unlisted VLM, without executing custom code.",
+        "Targets the language backbone and explicitly excludes or preserves vision weights rather than trusting generic MLP wildcards.",
+        "Uses image-text calibration and smoke-before-full sequencing.",
+        "Checks unintended vision quantization scales and expected language coverage in export validation.",
+        "Stays within planning scope: no model download, calibration, job submission, service startup or fabricated results."
       ]
     },
     {
-      "id": 4,
-      "prompt": "Quantize supermmx/FakeUnsupported-0.6B to nvfp4",
-      "expected_output": "Agent patches ModelOpt plugin directly, then runs hf_ptq.py",
-      "files": [],
-      "expectations": [
-        "Checks README — model is NOT listed",
-        "Reads unsupported-models.md (4C path)",
-        "Finds modeling_fake_model.py — uses trust_remote_code",
-        "Identifies FusedGateUpProj as non-standard (nn.Parameter, not nn.Linear)",
-        "Patches modelopt/torch/quantization/plugins/huggingface.py with QuantFusedGateUpProj (Pattern 1)",
-        "Uses QuantModuleRegistry.register or on-the-fly registration (Pattern 3)",
-        "Runs hf_ptq.py (not a standalone custom script)",
-        "Runs smoke test first, then full calibration"
+      "id": "custom-fused-module",
+      "expected_skill": "modelopt-ptq",
+      "prompt": "Plan NVFP4 PTQ for a self-contained hypothetical unlisted HF checkpoint whose reviewed modeling_fake_model.py defines FusedGateUpProj using raw nn.Parameter and F.linear instead of nn.Linear. No existing ModelOpt registration covers it. Explain the ModelOpt integration points, quantizer setup/naming, reuse of hf_ptq.py, coverage checks, and smoke/full calibration sequence; no implementation patch is required. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
+      "expected_output": "Raw fused parameters need a ModelOpt quantized-module handler rather than nn.Linear discovery. Register or extend the existing plugin mechanism and initialize the input/weight TensorQuantizers in _setup: conversion calls it for QuantModule subclasses, while directly instantiated original-class subclasses call it from their constructor. Match quantizer names to the underlying weight attributes: weight uses input_quantizer/weight_quantizer; named projections use the corresponding prefixed names. Reuse hf_ptq.py rather than replacing the PTQ pipeline. Check pattern matches and actual coverage, smoke before full calibration, and validate export/runtime compatibility. No implementation patch is required.",
+      "assertions": [
+        "Identifies that raw fused nn.Parameter projections need a quantized-module handler/registration rather than standard nn.Linear discovery.",
+        "Describes input/weight TensorQuantizers matched to weight attributes (standard or projection-prefixed names both count), initialized through _setup by ModelOpt conversion or a direct subclass constructor; no implementation patch is required.",
+        "Reuses hf_ptq.py and verifies actual pattern/weight coverage, with smoke before full calibration.",
+        "Stays within planning scope: no model download, calibration, job submission, service startup or fabricated results."
       ]
     },
     {
-      "id": 5,
-      "prompt": "Quantize MiniMax-M2.5 to nvfp4",
-      "expected_output": "Agent detects FP8 pre-quantized checkpoint, relies on _QuantFP8Linear plugin for standard FP8Linear modules, dequantizes non-standard MoE expert weights manually, then runs PTQ",
-      "files": [],
-      "expectations": [
-        "Checks README — MiniMax-M2.5 is NOT listed",
-        "Reads unsupported-models.md (4C path)",
-        "Detects FP8 quantization_config in config.json (Step B)",
-        "Identifies _QuantFP8Linear plugin handles standard FP8Linear modules automatically",
-        "Identifies non-standard 3D MoE expert weights that need manual dequantization (Pattern 5)",
-        "Applies manual dequantize_fp8_params for fused expert tensors",
-        "Runs smoke test first, then full calibration"
+      "id": "fp8-source-experts",
+      "expected_skill": "modelopt-ptq",
+      "prompt": "Plan MiniMax-M2.5 FP8-source to NVFP4 PTQ for B200 inference. Treat it as unlisted. Inspection shows config quant_method=fp8, standard FP8Linear projections, and nonstandard fused 3D MoE expert tensors with scale-inverse metadata, uncovered by the standard plugin. Explain memory-aware handling of these two groups, layout/scale checks, smoke/full order, and output validation. A proposed partial recipe would make some FP8 layers BF16; state what must happen before running that recipe. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
+      "expected_output": "Recognize the FP8 source before PTQ. Existing _QuantFP8Linear lazy handling covers standard projections without eagerly widening the whole checkpoint. Inspect the supplied uncovered fused expert layout and scale granularity/orientation; use a validated expert handler or narrowly scoped conversion, applying inverse-scale semantics correctly without inventing tensor dimensions. Smoke before full calibration and validate actual expert/layer coverage, size and metadata. Before a partial recipe turns FP8 layers into BF16, identify the affected groups and obtain confirmation that the coverage reduction is intended.",
+      "assertions": [
+        "Distinguishes standard FP8Linear handled lazily by ModelOpt from the supplied uncovered fused expert tensors; avoids an unconditional full-model eager dequantization.",
+        "Requires validating fused expert layout and scale/inverse-scale semantics before selecting a handler or scoped conversion, without inventing dimensions.",
+        "Identifies FP8-to-BF16 fallback groups and requires confirmation before the partial recipe runs.",
+        "Plans smoke before full calibration and post-export precision coverage, size and metadata validation.",
+        "Stays within planning scope: no model download, calibration, job submission, service startup or fabricated results."
       ]
     },
     {
-      "id": 6,
-      "prompt": "Quantize an FP8 source checkpoint with a partial NVFP4 recipe, then evaluate the quantized checkpoint",
-      "expected_output": "Agent treats post-PTQ checkpoint validation as a required gate before submitting any eval",
-      "files": [],
-      "expectations": [
-        "After PTQ completes, reads checkpoint-validation.md before creating or submitting eval jobs",
-        "Reports source safetensors size, output safetensors size, and output/source ratio",
-        "Reports layer precision counts, including NVFP4/FP8/intended quantized layers, BF16 or excluded layers, unexpected unquantized layers, and declaration mismatches",
-        "Checks metadata consistency against the source checkpoint and records any diffs",
-        "Stops before eval submission if the size ratio is >= 1.0 for a compression recipe, if intended layer coverage is missing, or if metadata changes unexpectedly"
+      "id": "post-export-gate",
+      "expected_skill": "modelopt-ptq",
+      "prompt": "An FP8-source checkpoint has completed partial NVFP4 PTQ. Before anyone evaluates it, outline the required checkpoint acceptance report: source/output weight bytes, source precision, actual versus intended layer precision coverage, metadata, exact workspace/path, compatibility changes, and target-runtime canary plus cleanup. State blocking conditions and downstream handoff. No actual measurements or artifacts are supplied. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
+      "expected_output": "Keep downstream evaluation blocked until the checkpoint report and serving-readiness gate pass. Report source/output safetensors bytes and ratio, declared source precision, actual versus intended quantized/excluded/unexpected layer counts and declaration mismatches, and generation/tokenizer/chat-template/architecture/context/special-token diffs. Preserve the exact workspace/checkpoint path and compatibility inventory (dependency upgrades, source patches, custom code, environment variables, launcher/container changes; none when absent). Plan a temporary target-runtime deployment canary with recorded configuration/query/response and verified shutdown on success/failure/interruption. Block missing intended coverage, inconsistent metadata, unexplained compression failure, missing compatibility requirements, failed canary or cleanup; no measurements or readiness are invented.",
+      "assertions": [
+        "Keeps evaluation blocked until source/output weight-byte comparison, source precision, actual/intended coverage and declaration consistency, and metadata checks are recorded.",
+        "Preserves the exact workspace/path and records dependency upgrades, source patches, custom code, environment variables and launcher/container changes, using none where no change is required.",
+        "Plans a target-runtime serving canary recording configuration, query and response, and verified shutdown on success/failure/interruption before downstream handoff.",
+        "Blocks unexplained compression failure, missing intended coverage, inconsistent or unexpected metadata, missing handoff requirements, failed canary or cleanup; does not fabricate measurements.",
+        "Stays within planning scope: no model download, calibration, job submission, service startup or fabricated results."
+      ]
+    },
+    {
+      "id": "fixed-recipe-plan",
+      "expected_skill": "modelopt-ptq",
+      "prompt": "Outline fixed-recipe ModelOpt PTQ of Qwen/Qwen3-8B from BF16 to NVFP4 for vLLM on B200. Use one selected NVFP4 recipe and 512 representative calibration samples, not a recipe search or distillation run. Briefly cover environment/support and recipe-pattern checks, calibration choice, an hf_ptq.py command template, exported files, and the mandatory checkpoint and temporary serving-canary gates before a later accuracy evaluation. Include compatibility limits (Hopper calibration versus Blackwell inference) and future skill handoffs. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
+      "expected_output": "A fixed-recipe Qwen3-8B BF16-to-NVFP4 plan for vLLM on B200. Check environment, supported architecture, dependencies and recipe include/exclude matches before calibration. Use the one selected recipe, 512 representative text samples and hf_ptq.py with checkpoint, recipe or qformat, calibration settings, and export path. Export weights/scales, config and tokenizer assets. Gate future accuracy evaluation on measured size/coverage/metadata and a temporary vLLM canary with compatibility inventory, exact checkpoint path and shutdown. NVFP4 can be calibrated on Hopper but needs Blackwell for inference. Future deployment and evaluation handoffs retain the validated checkpoint/environment. Do not search recipes, distill, execute work or claim measured results.",
+      "assertions": [
+        "Plans one fixed NVFP4 recipe with 512 representative calibration samples; does not replace the requested PTQ with recipe search or distillation.",
+        "Checks environment, supported model and recipe layer-pattern coverage; supplies an hf_ptq.py command template and weights/scales, config and tokenizer export artifacts.",
+        "Requires size, actual coverage and metadata gates plus a temporary vLLM/B200 canary and shutdown before later accuracy evaluation.",
+        "States Hopper can calibrate NVFP4 but Blackwell is needed for inference, and identifies future deployment/evaluation handoffs preserving checkpoint and compatibility requirements.",
+        "Stays within planning scope: no model download, calibration, job submission, service startup or fabricated results."
+      ]
+    },
+    {
+      "id": "route-search-and-qad",
+      "expected_skill": null,
+      "prompt": "Route these two requests to the appropriate ModelOpt workflows: (A) search several quantization recipes for the smallest checkpoint within an accuracy budget; no recipe is selected yet; (B) explicitly train with QAD to recover an already measured BF16-to-PTQ accuracy gap. Explain where fixed-recipe PTQ fits, without pretending PTQ itself searches recipes or performs distillation. Do not start either workflow. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
+      "expected_output": "Route A to modelopt-quant-recipe-search because recipe selection and accuracy-budget optimization are its job. Route B to modelopt-qad because QAD training was explicitly requested for a measured accuracy gap. Fixed-recipe modelopt-ptq is appropriate only for a selected recipe/checkpoint production stage, including selected candidates in a larger search; it does not itself perform recipe optimization or distillation. No workflow is executed.",
+      "assertions": [
+        "Routes multi-recipe accuracy-budget search to modelopt-quant-recipe-search or its unambiguous workflow equivalent.",
+        "Routes explicitly requested QAD recovery training to modelopt-qad or its unambiguous workflow equivalent.",
+        "Explains PTQ produces checkpoints for selected recipes and does not itself search or distill; starts no workflow.",
+        "Stays within planning scope: no model download, calibration, job submission, service startup or fabricated results."
       ]
     }
   ]
