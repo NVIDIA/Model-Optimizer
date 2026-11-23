@@ -287,7 +287,8 @@ evaluation speed:
 
 - **Repetition-level: estimate accuracy on a fixed benchmark.** Treat its question set as a black box:
   compute one average score per complete run, then estimate uncertainty across independent runs.
-  Multiple complete passes can be expensive.
+  Multiple complete passes can be expensive. If scores vary widely across runs, you need more
+  repetitions to reach the same precision.
 - **Question-level: get accurate results quickly for the domain represented by a benchmark.**
   Use representative questions: compute an average score per question across repetitions, then
   estimate uncertainty across questions. With sufficiently independent questions, this approach can support faster experimentation.
