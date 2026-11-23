@@ -206,7 +206,9 @@ class TestScaledE4M3:
                 try:
                     extension.fake_e4m3fy(torch.ones(1, device=gpu), torch.ones((), device=gpu))
                 except RuntimeError as error:
-                    pytest.skip(f"the FP8 extension does not run on cuda:{gpu}: {error}")
+                    if "no kernel image is available" not in str(error):
+                        raise
+                    pytest.skip(f"the FP8 extension is not built for cuda:{gpu}'s architecture")
         x = torch.randn(64, 16, device="cuda:1")
         activities = [torch.profiler.ProfilerActivity.CUDA]
         with torch.cuda.device(0), torch.profiler.profile(activities=activities) as profile:

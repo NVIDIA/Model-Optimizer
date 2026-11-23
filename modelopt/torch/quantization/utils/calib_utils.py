@@ -541,8 +541,13 @@ class GPTQHelper:
             out_features, num_cols = self.weight.shape
             # A width the group size does not divide carries a scale for its padded last group.
             n_blocks = -(-num_cols // quant_block_size)
-            # The quantizer's own FP8 scales, so the fused update rounds onto the same grid.
-            block_scale = triton_kernel.compute_fp4_scales(quantizer.amax, quantizer.global_amax)
+            # The quantizer's own FP8 scales, so the fused update rounds onto the same grid. The FP8
+            # extension guards its launches, but its first call builds it for the current GPU's
+            # architecture, which should be the weight's GPU.
+            with torch.cuda.device(self.weight.device):
+                block_scale = triton_kernel.compute_fp4_scales(
+                    quantizer.amax, quantizer.global_amax
+                )
             gptq_blockwise_update_fused_scalar(
                 self.weight,
                 block_scale.reshape(out_features, n_blocks),
