@@ -207,7 +207,8 @@ def test_shape_awq(tmp_path):
 
 @pytest.mark.parametrize("calibration_method", ["awq_clip", "awq_lite"])
 @pytest.mark.parametrize("layers_8bit", [None, "gemm"])
-def test_awq_gemm_trans_b(tmp_path, calibration_method, layers_8bit):
+@pytest.mark.parametrize("use_column_major", [False, True])
+def test_awq_gemm_trans_b(tmp_path, calibration_method, layers_8bit, use_column_major):
     # torch.onnx.export writes nn.Linear on a 2-D input as Gemm(transB=1), whose weight is [N, K].
     # Its DQ node must block (or, at 8 bit, index its per-channel scale) along that layout's axes.
     # The weight is square with rows of very different ranges, so an 8-bit per-channel scale
@@ -231,6 +232,7 @@ def test_awq_gemm_trans_b(tmp_path, calibration_method, layers_8bit):
         enable_mixed_quant=layers_8bit is not None,
         layers_8bit=layers_8bit,
         use_external_data_format=False,
+        use_column_major=use_column_major,
     )
     session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
     y = session.run(None, {"x": x})[0].astype(np.float32)

@@ -364,6 +364,7 @@ def insert_dq_nodes(
     zero_points: dict[str, np.ndarray] | None = None,
     layer_info: dict[str, dict] | None = None,
     transposed_weights: set[str] | None = None,
+    column_major: bool = False,
 ):
     """Insert new initializers and DQ nodes into graph.
 
@@ -374,8 +375,9 @@ def insert_dq_nodes(
         dq_only: Whether to only insert dq nodes.
         layer_info: Optional dictionary mapping tensor names to precision (old format) or
             to layer configuration dict (new format with precision, block_size, axis).
-        transposed_weights: Weights stored as ``[N, K]`` (a ``Gemm`` with ``transB=1``) rather than
-            the ``[K, N]`` that ``attributes`` describe; their DQ node uses the other axis.
+        transposed_weights: Weights of a ``Gemm`` with ``transB=1``, stored as ``[N, K]`` (or as
+            ``[K, N]`` after the column-major transpose). Their DQ axis follows that stored layout.
+        column_major: Whether ``apply_column_major_transformation`` was applied to the weights.
     """
     logger.debug(f"Inserting DQ nodes for {len(scales)} weights")
 
@@ -418,7 +420,11 @@ def insert_dq_nodes(
         attrs = update_attributes_for_per_channel_nodes(attrs, num_bits)
         validate_scale_shape_for_per_channel_nodes(scale, attrs, num_bits)
         if attrs is not None and transposed_weights and name in transposed_weights:
-            attrs["axis"] = 1 - attrs["axis"]
+            stored_nk = not column_major
+            if "block_size" in attrs:
+                attrs["axis"] = 1 if stored_nk else 0  # blocks run along K
+            else:
+                attrs["axis"] = 0 if stored_nk else 1  # one scale per output channel (N)
         _insert_helper(
             name,
             quantized_weights[name],
