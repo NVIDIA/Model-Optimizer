@@ -21,7 +21,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pytest
 import torch
 import torch.nn as nn
-import transformers
 from _test_utils.torch.opt.utils import apply_mode_with_sampling
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
@@ -38,6 +37,7 @@ from transformers import (
     LlamaForCausalLM,
     Qwen3VLMoeConfig,
 )
+from transformers import __version__ as transformers_version
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter
 
@@ -204,12 +204,18 @@ def test_save_pretrained_quantized_fused_experts_in_overlapping_saves(tmp_path):
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         saves = {}
-        for name in ("first", "second"):  # both saves start before either converts
-            saves[name] = pool.submit(models[name].save_pretrained, tmp_path / f"{name}_quantized")
-            assert pauses[name][0].wait(60)
-        for name in ("first", "second"):  # the first save ends before the second converts
-            pauses[name][1].set()
-            saves[name].result()
+        try:
+            for name in ("first", "second"):  # both saves start before either converts
+                saves[name] = pool.submit(
+                    models[name].save_pretrained, tmp_path / f"{name}_quantized"
+                )
+                assert pauses[name][0].wait(60)
+            for name in ("first", "second"):  # the first save ends before the second converts
+                pauses[name][1].set()
+                saves[name].result()
+        finally:  # a failed save must not leave the other one waiting
+            for _, resume in pauses.values():
+                resume.set()
 
     for name, model in models.items():
         reloaded = AutoModelForCausalLM.from_pretrained(tmp_path / f"{name}_quantized")
@@ -222,7 +228,8 @@ def test_save_pretrained_warns_when_from_pretrained_cannot_load_fused_experts(tm
         "vocab_size": 32,
         "hidden_size": 32,
         "intermediate_size": 32,
-        "moe_intermediate_size": 16,
+        # 2 * moe_intermediate_size != hidden_size, so a transposed expert layout cannot pass
+        "moe_intermediate_size": 8,
         "num_experts": 4,
         "num_experts_per_tok": 2,
         "num_hidden_layers": 1,
@@ -246,7 +253,7 @@ def test_save_pretrained_warns_when_from_pretrained_cannot_load_fused_experts(tm
     registered_before = QuantModuleRegistry.get(experts_type)
     try:
         _quantize_experts(model)
-        if Version(transformers.__version__) < Version("5.21"):
+        if Version(transformers_version) < Version("5.21"):
             with pytest.warns(UserWarning, match="from_pretrained cannot load this checkpoint"):
                 model.save_pretrained(tmp_path / "quantized")
             # A load records only the conversions it used; a fresh load still runs the others.
