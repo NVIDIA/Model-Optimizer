@@ -185,10 +185,16 @@ def test_collector_collects_correct_number_of_inputs(monkeypatch):
         collector._unpatch_all_layers()
 
 
+class _CacheDisabledConfig:
+    @property
+    def use_cache(self) -> bool:
+        return False
+
+
 @pytest.mark.parametrize(
     "config",
-    [{}, SimpleNamespace(text_config={}), ModeloptBaseConfig()],
-    ids=["dict", "nested-dict", "pydantic"],
+    [{}, SimpleNamespace(text_config={}), ModeloptBaseConfig(), _CacheDisabledConfig()],
+    ids=["dict", "nested-dict", "pydantic", "read-only-disabled"],
 )
 def test_collector_activations_match_expected(monkeypatch, config):
     """First layer should receive the raw input data."""

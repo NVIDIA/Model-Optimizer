@@ -989,6 +989,8 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
             ):
                 continue  # This schema cannot accept a temporary cache flag.
             prev = config.use_cache if had_attr else None
+            if prev is False:
+                continue
             try:
                 config.use_cache = False
             except AttributeError:
