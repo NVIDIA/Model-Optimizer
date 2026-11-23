@@ -978,13 +978,12 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
     prior value is restored on exit if one existed.
     """
     states = []
-    for config in _iter_use_cache_configs(model):
-        had_attr = hasattr(config, "use_cache")
-        prev = config.use_cache if had_attr else None
-        config.use_cache = False
-        states.append((config, had_attr, prev))
-
     try:
+        for config in _iter_use_cache_configs(model):
+            had_attr = hasattr(config, "use_cache")
+            prev = config.use_cache if had_attr else None
+            config.use_cache = False
+            states.append((config, had_attr, prev))
         yield
     finally:
         for config, had_attr, prev in reversed(states):

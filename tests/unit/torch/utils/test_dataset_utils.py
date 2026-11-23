@@ -416,6 +416,18 @@ def test_disable_use_cache_restores_on_exception():
     assert model.config.use_cache is True
 
 
+def test_disable_use_cache_restores_on_setup_error():
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.use_cache = True
+    model.config.text_config = object()  # Does not allow setting use_cache.
+
+    with pytest.raises(AttributeError), _disable_use_cache(model):
+        pytest.fail("A read-only text config should prevent entering the context")
+
+    assert model.config.use_cache is True
+
+
 def test_get_max_batch_size_oom_retry_shrinks_input():
     """On OOM, target_input must be re-expanded to the halved batch size.
 
