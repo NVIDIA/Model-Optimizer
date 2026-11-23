@@ -107,14 +107,14 @@
   },
   {
     "id": "nemotron3-nano-bf16-reasoning",
-    "question": "Outline an NEL evaluation of nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 on IFEval and a reasoning task. Use local NEL-managed vLLM. Describe how you would verify the model card/version, reasoning sampling/parser, per-task thinking, secrets, logging and dry-run/canary/full gates. Treat the checkpoint and tools as unavailable. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "question": "Outline an NEL evaluation of nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 on IFEval and a reasoning task. Use local NEL-managed vLLM. Describe how you would verify the exact model card and serving recipe, sampling/parser requirements, per-task thinking settings, secrets, logging and dry-run/canary/full gates. NEL, checkpoint access and external sources are unavailable; local skill references remain readable. Leave model-specific facts pending verification. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
     "expected_skill": "modelopt-evaluation",
     "expected_script": null,
-    "ground_truth": "Plan for the exact BF16 handle with card-verified reasoning settings, temperature=1/top_p=1 if confirmed, nano_v3 parser downloaded via curl and its plugin flags, and a compatible vLLM image. Reasoning is a chat-template toggle; disable it for IFEval without a system prompt. Propose request/response interceptors with max_logged_requests/max_logged_responses, DUMMY_API_KEY for self-deployed nemo-skills tasks, missing-secret preflight, canary log checks and full-run validation. Unknown settings remain pending verification.",
+    "ground_truth": "Plan exact BF16 model-card/config and vLLM-recipe verification before selecting sampling, parser/plugin, image and generation settings. With those sources unavailable, leave model-specific values unverified rather than requiring a particular parser or sampling pair. Determine per-task thinking from applicable guidance and the model template; use only the supported mechanism without conflating reasoning with unrelated system-prompt settings. Include secret-safe environment setup, request/response logging with max_logged_requests/max_logged_responses, DUMMY_API_KEY for self-deployed nemo-skills tasks, dry-run, limited canary and full-run validation of logs, coverage and parsing before scores.",
     "expected_behavior": [
-      "Plans exact model identity and model-card/version verification; treats reasoning as a chat-template setting and disables it for IFEval without a system prompt.",
-      "Identifies custom parser/plugin and compatible serving image as preflight requirements, without claiming to have verified unavailable tools.",
-      "Plans secrets/logging, dry-run, limited canary and final log/coverage validation before scores."
+      "Plans exact-model card/config and vLLM-recipe verification; leaves unavailable sampling, parser/plugin and image requirements pending rather than claiming verified model-specific facts.",
+      "Determines per-task thinking settings from applicable guidance and the supported template/mechanism, preserving unrelated system-prompt settings; does not assume IFEval must disable thinking.",
+      "Plans secret-safe environment setup and request/response logging, then dry-run, limited canary and final log/coverage/parsing validation before scores."
     ]
   },
   {
@@ -131,12 +131,12 @@
   },
   {
     "id": "slurm-quantized-model",
-    "question": "Outline evaluation of local Llama-3.1-8B-FP8 checkpoint /checkpoints/llama-fp8 on MMLU and GSM8K using SLURM and NEL-managed vLLM. Identify needed cluster/account/output/registry inputs, quantization and model settings, and preflight/canary/full-run gates; all tools and checkpoint files are unavailable. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "question": "Outline evaluation of local Llama-3.1-8B-FP8 checkpoint /checkpoints/llama-fp8 on MMLU and GSM8K using SLURM and NEL-managed vLLM. Identify needed cluster/account/output/registry inputs, quantization and model settings, and preflight/canary/full-run gates; NEL, cluster access and checkpoint files are unavailable; local skill references remain readable. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
     "expected_skill": "modelopt-evaluation",
     "expected_script": null,
-    "ground_truth": "Plan SLURM with explicit missing hostname/account/partition/output and container credentials. Use checkpoint_path, inspect quantization metadata, allow vLLM auto-detection, and verify model-card sampling/context and compatible image before execution. Preserve requested tasks and propose dry-run, limited canary with logs, then full-run coverage/error accounting. No guessed cluster values or claimed submission.",
+    "ground_truth": "Plan SLURM with missing hostname/account/partition/output inputs. Determine registry/image access: public images need no credential preflight; private/restricted images require an appropriate credential check without exposing values. Use checkpoint_path, inspect quantization metadata, allow vLLM auto-detection, and verify model-card sampling/context and compatible image before execution. Preserve requested tasks and propose dry-run, limited canary with logs, then full-run coverage/error accounting. No guessed cluster values or claimed submission.",
     "expected_behavior": [
-      "Identifies missing SLURM execution and registry inputs rather than inventing host/account values.",
+      "Identifies missing SLURM execution inputs without inventing host/account values; makes registry credential checks conditional on private/restricted image access.",
       "Plans local-path quantization inspection and model-card/runtime compatibility checks without an unconditional vLLM quantization flag.",
       "Preserves requested tasks and dry-run/canary/full validation gates without submitting."
     ]
@@ -202,14 +202,15 @@
   },
   {
     "id": "doom-loop-repetition-stop",
-    "question": "Outline how to avoid doom loops in future matched BF16/NVFP4 Qwen3 GPQA and AA-LCR evaluations with NEL-managed vLLM and max_new_tokens65536. Specify repetition detection placement/version, per-task differences, provenance and final stop accounting. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "question": "Outline how to avoid doom loops in future matched BF16/NVFP4 Qwen3 GPQA and AA-LCR evaluations with NEL-managed vLLM and max_new_tokens=65536. Specify repetition detection placement/version, per-task differences, nemo-skills client compatibility, provenance and final stop accounting. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
     "expected_skill": "modelopt-evaluation",
     "expected_script": null,
-    "ground_truth": "Plan repetition_detection max_pattern_size=256, min_pattern_size=32, min_count=3 under top-level adapter_config.params_to_add; override max_pattern_size=1024 only for ns_aa_lcr. Require vLLM>=0.17.0. Match settings across models, record them in MLflow description/tags, and count repetition and length stops separately during validation. No execution or accuracy claim.",
+    "ground_truth": "Plan repetition_detection max_pattern_size=256, min_pattern_size=32, min_count=3 under top-level adapter_config.params_to_add; override max_pattern_size=1024 only for ns_aa_lcr. Require vLLM>=0.17.0. For ns_* tasks, preserve the documented serving-container pre_cmd remap from repetition to length, with NEMO_EVALUATOR_TRUST_PRE_CMD=1, to prevent client literal_error retries; verify this in canary logs. Match settings across models, record them in MLflow description/tags, and account for detector stops and output-limit hits during validation, recording the remap and any missing evidence rather than assuming finish_reason alone distinguishes them. No execution or accuracy claim.",
     "expected_behavior": [
       "Places repetition_detection under adapter_config.params_to_add with max_pattern_size=256, min_pattern_size=32, min_count=3.",
       "Overrides max_pattern_size=1024 only for ns_aa_lcr and requires vLLM>=0.17.0.",
-      "Matches both models settings, records provenance and reports repetition versus length stops separately."
+      "Plans the documented ns_* serving-container repetition-to-length remap and pre_cmd trust, preserving existing setup; checks canary logs for literal_error retries.",
+      "Matches both models settings, records detector-on provenance and the stop-reason remap, and accounts for detector/output-limit stops without inferring unavailable rates."
     ]
   },
   {
