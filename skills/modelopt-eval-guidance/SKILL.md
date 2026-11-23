@@ -29,9 +29,11 @@ tool the task names (the default is named in the index), and do not load another
 
 ## Rules for every evaluation, whatever the tool
 
-- **Serving deployment.** Before evaluating a checkpoint, check whether the tool's skills need a serving
-  deployment from the caller (image, parallelism, serve flags). If they do, load `modelopt-deployment`, write the
-  serving record (step 5c) and hand it to the tool. A tool that composes its own deployment keeps doing so.
+- **Serving deployment of a quantized checkpoint is ours.** The tool's model-card reading knows the baseline, not the
+  quantized format. Before any run of a quantized checkpoint, load `modelopt-deployment`, write the serving record
+  (step 5c: image that supports the format, parallelism, quantization and KV-cache flags from the checkpoint's
+  `hf_quant_config.json`) and hand it to the tool, which then applies it to the baseline's config. This holds even
+  when the tool can derive a deployment on its own. For a BF16 baseline the tool's own deployment stands.
 - **Tool-managed deployments.** Evaluate through the tool's own managed deployments. Evaluate an external or
   retained model-under-test endpoint only when the user explicitly asks; a retained PTQ smoke server is not
   authorization to evaluate it.
