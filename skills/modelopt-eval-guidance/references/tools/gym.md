@@ -47,6 +47,7 @@ policy_model.responses_api_models.vllm_model.sampling_overrides:
   repetition_detection: {max_pattern_size: 256, min_pattern_size: 32, min_count: 3}
 ```
 
+Larger sizes cut more escaped loops at more scheduler CPU; AA-LCR loops restate paragraphs up to about 4K tokens, so for AA-LCR alone use `max_pattern_size: 1024`.
 Under the benchmark's `run` block of the submit document this key is the literal dotted mapping key. It is forced onto
 every outbound request after the request body is merged. A forced-loop canary (vLLM 0.26) confirmed it end to end:
 the engine stopped every request with `repetition_detected`, Gym recorded the native stop reason, normalized the

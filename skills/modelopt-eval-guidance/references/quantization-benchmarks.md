@@ -46,12 +46,11 @@ the full suite.
 
 - **AA-LCR** is the most sensitive task in the set. Include it whenever the checkpoint supports the required
   context length (a maximum model length of 131072).
-- **Do not lower repeat or sample counts** for quantization comparisons: they are set for low variance, and fewer
-  repeats let noise mask real regressions. The count's field name and the exact values belong to the tool's
-  benchmark configuration (the tool's reference notes any benchmark that is run as several submissions).
+- **Do not lower repeat or sample counts** for quantization comparisons: fewer repeats let noise mask real regressions.
+  The values are the tool's benchmark configuration.
 - **Judge and user-simulator endpoints** (AA-LCR, HLE, AA-Omniscience, Tau2-Bench Telecom) must stay fixed
   across the baseline and quantized runs.
-- **MRCR traps:** the three variants use different datasets and are not comparable to each other; the KV-cache
+- **MRCR traps:** the KV-cache
   dtype must follow each checkpoint's `kv_cache_quant_algo` (`hf_quant_config.json`) instead of being pinned,
   because forcing it onto an uncalibrated checkpoint applies a quantization it was never calibrated for; and
   report the 2, 4 and 8 needle strata, since precision loss hits the 8-needle stratum while the aggregate still
