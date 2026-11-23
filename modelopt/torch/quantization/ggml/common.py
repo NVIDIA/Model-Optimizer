@@ -227,14 +227,14 @@ def pin_packed_weight(
     quantizer._quantizer_cache = None
 
 
-def _pin_shapes(quantizer, weight: torch.Tensor):
-    """Yield each pinned buffer of ``quantizer`` with its shape for ``weight``, and its block size."""
+def _pin_shapes(shapes: dict[str, torch.Size], weight: torch.Tensor):
+    """Yield each pin of ``shapes`` (by buffer name) with its shape for ``weight``, and block size."""
     # Local: the registry imports GGMLFormat from this module.
     from .registry import GGML_FORMAT_REGISTRY
 
-    for name, buffer in list(quantizer.named_buffers(recurse=False)):
+    for name, shape in shapes.items():
         if name.startswith(PINNED_IMPORTANCE_PREFIX):
-            yield name, buffer, weight.shape[-1:], None
+            yield name, weight.shape[-1:], None
         elif name.startswith(PINNED_PAYLOAD_PREFIX):
             format_name = name.removeprefix(PINNED_PAYLOAD_PREFIX)
             format_name = format_name.removesuffix("_search_scales").removesuffix("_source")
@@ -242,22 +242,30 @@ def _pin_shapes(quantizer, weight: torch.Tensor):
             # Block quantization pads the last dimension to whole blocks.
             blocks = -(-weight.shape[-1] // block_size)
             # ``[*rows, blocks, ...]``, the payload's block bytes or the source's keys last.
-            yield (
-                name,
-                buffer,
-                (*weight.shape[:-1], blocks, *buffer.shape[weight.dim() :]),
-                block_size,
-            )
+            yield name, (*weight.shape[:-1], blocks, *shape[weight.dim() :]), block_size
 
 
 def pins_fit(quantizer, weight: torch.Tensor) -> bool:
-    """Whether ``quantizer``'s pins have the shape of ``weight``'s."""
-    pins = list(_pin_shapes(quantizer, weight))
-    # Pins padded to whole blocks may have as many as another size's: compare the saved columns.
-    columns = getattr(quantizer, "_slices", (slice(None),))[-1].stop
-    if pins and columns is not None and columns != weight.shape[-1]:
-        return False
-    return all(buffer.shape == shape for _, buffer, shape, _ in pins)
+    """Whether ``quantizer``'s pins, or those of its saved modelopt state, have ``weight``'s shape."""
+    if isinstance(quantizer, dict):
+        buffers = quantizer.get("_pytorch_state_metadata", {}).get("buffers", {})
+        shapes = {name: torch.Size(meta["shape"]) for name, meta in buffers.items()}
+        slices = quantizer.get("_slices")
+    else:
+        shapes = {name: b.shape for name, b in quantizer.named_buffers(recurse=False)}
+        slices = getattr(quantizer, "_slices", None)
+    pins = [
+        (shapes[name], shape, block_size) for name, shape, block_size in _pin_shapes(shapes, weight)
+    ]
+    # Pins padded to whole blocks may have as many as another size's: compare the saved columns,
+    # which pins saved without padding fill whole blocks of.
+    columns = slices[-1].stop if slices else None
+    for saved, shape, block_size in pins:
+        if columns is None and block_size:
+            columns = saved[weight.dim() - 1] * block_size
+        if saved != shape:
+            return False
+    return not pins or columns is None or columns == weight.shape[-1]
 
 
 def resize_pins(quantizer, weight: torch.Tensor, *, sharded_blocks: bool = False) -> None:
@@ -267,7 +275,9 @@ def resize_pins(quantizer, weight: torch.Tensor, *, sharded_blocks: bool = False
     shape; the sharded checkpoint load that follows fills them with this shard. ``sharded_blocks``
     says the shards split the blocks (row-parallel layers), which only works without padding.
     """
-    for name, buffer, shape, block_size in _pin_shapes(quantizer, weight):
+    buffers = dict(quantizer.named_buffers(recurse=False))
+    for name, shape, block_size in _pin_shapes({n: b.shape for n, b in buffers.items()}, weight):
+        buffer = buffers[name]
         if buffer.shape == shape:
             continue
         if sharded_blocks and block_size and weight.shape[-1] % block_size:

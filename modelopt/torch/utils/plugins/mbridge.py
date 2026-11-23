@@ -42,7 +42,9 @@ from megatron.core.utils import unwrap_model
 from torch.distributed.checkpoint import FileSystemReader
 from transformers import AutoConfig, AutoTokenizer
 
+import modelopt.torch.opt as mto
 from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
+from modelopt.torch.opt.plugins.mcore_dist_checkpointing import restore_sharded_modelopt_state
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.megatron_layer_specs import (
     hybrid_stack_spec_grouped_mlp,
@@ -322,7 +324,12 @@ def load_modelopt_megatron_checkpoint(
     # has_modelopt_state / load_modelopt_state resolves the latest iter_* directory
     if restore_modelopt_state:
         if has_modelopt_state(megatron_path):
-            load_modelopt_state(model, megatron_path)
+            if mto.ModeloptStateManager.is_converted(unwrap_model(model)[0]):
+                # Megatron-Bridge skips a converted model (e.g. loaded into before), whose modules
+                # must still read how this checkpoint laid out their state.
+                restore_sharded_modelopt_state(unwrap_model(model), checkpoint_path)
+            else:
+                load_modelopt_state(model, megatron_path)
         elif any("_quantizer." in key for key in checkpoint_keys):
             # The quantizers cannot be rebuilt without the state, and the loader ignores the
             # leftover amax tensors, so the model would silently load unquantized.

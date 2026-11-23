@@ -306,6 +306,7 @@ def _gpt_model_provider(
     transformer_impl="local",
     activation_func="squared_relu",
     moe_shared_expert_intermediate_size=None,
+    pp_size=1,
     # Hybrid mamba MOE parameters
     is_hybrid=False,
     hybrid_layer_pattern=None,
@@ -336,6 +337,7 @@ def _gpt_model_provider(
         else:
             model = get_mcore_gpt_model(
                 tensor_model_parallel_size=tp_size,
+                pipeline_model_parallel_size=pp_size,
                 expert_model_parallel_size=ep_size,
                 expert_tensor_parallel_size=etp_size,
                 num_layers=4,
@@ -2047,7 +2049,8 @@ def _pinned_effective_weights(model):
     }
 
 
-def _test_ggml_rc0_pin_layout_same_tp(tmp_path, regular, rank, size):
+def _test_ggml_rc0_pin_layout_same_tp(tmp_path, loader, rank, size):
+    regular = loader == "mto_save"
     initialize_for_megatron(tensor_model_parallel_size=size, seed=SEED)
     source = _gpt_model_provider(tp_size=size, hidden_size=512, activation_func="swiglu")
     with _saving_like_modelopt_0_49_0rc0():
@@ -2062,17 +2065,27 @@ def _test_ggml_rc0_pin_layout_same_tp(tmp_path, regular, rank, size):
     assert any(name.endswith("linear_fc1") for name in expected)
     target = _gpt_model_provider(tp_size=size, hidden_size=512, activation_func="swiglu")
     # Loaded twice into the same model: the second load reads the checkpoint's layout again.
-    for _ in range(1 if regular else 2):
+    for i in range(1 if regular else 2):
         if regular:
             target = mto.restore(target, tmp_path / f"rank{rank}.pth")
+        elif loader == "mbridge":
+            from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
+
+            (target,) = load_modelopt_megatron_checkpoint([target], str(tmp_path))
         else:
-            restore_sharded_modelopt_state([target], tmp_path)
+            # Into a converted model, the restore only reads the layout: it loads no state.
+            with (
+                patch.object(target, "load_state_dict", side_effect=AssertionError)
+                if i
+                else nullcontext()
+            ):
+                restore_sharded_modelopt_state([target], tmp_path)
             target = load_distributed_checkpoint(tmp_path, target)
         restored = _pinned_effective_weights(target)
         assert restored.keys() == expected.keys()
         for name, weight in expected.items():
             assert torch.equal(restored[name], weight), name
-    if not regular:
+    if loader == "sharded":
         # Saved again, it loads at another TP size, e.g. TP=1 to export it.
         whole = _whole_pinned_effective_weights(target, size, gated=True)
         migrated = tmp_path / "migrated"
@@ -2091,25 +2104,33 @@ def _test_ggml_rc0_pin_layout_same_tp(tmp_path, regular, rank, size):
             assert torch.equal(restored[name], weight), name
 
 
-@pytest.mark.parametrize("regular", [False, True], ids=["sharded", "mto_save"])
-def test_ggml_rc0_pin_layout_same_tp(dist_workers_size_2, tmp_path, regular):
+@pytest.mark.parametrize("loader", ["sharded", "mto_save", "mbridge"])
+def test_ggml_rc0_pin_layout_same_tp(dist_workers_size_2, tmp_path, loader):
     """Checkpoints with 0.49.0rc0's SwiGLU pin layout still load at the TP size they were saved at,
     and, saved again, at another."""
-    dist_workers_size_2.run(partial(_test_ggml_rc0_pin_layout_same_tp, tmp_path, regular))
+    if loader == "mbridge":
+        pytest.importorskip("megatron.bridge")
+    dist_workers_size_2.run(partial(_test_ggml_rc0_pin_layout_same_tp, tmp_path, loader))
 
 
 def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
-    grouped = case in ("grouped_experts", "grouped_padded_fc2")
-    rc0 = case == "rc0_swiglu_pins"
+    grouped = case in ("grouped_experts", "grouped_padded_fc2", "grouped_aligned_fc2")
+    rc0 = case.startswith("rc0_swiglu_pins")
     # 352 pads linear_fc2's 704 input columns per TP=2 rank (1408 at TP=1) to whole blocks; 192
     # pads its 384 per rank but not the 768 at TP=1. 64 pads the experts' 128 linear_fc2 input
-    # columns per ETP=2 rank to the one 256-value block their 256 at ETP=1 fill, so the pins fit.
-    hidden_size = {"padded_row_parallel": 352, "padded_to_aligned": 192, "grouped_padded_fc2": 64}
-    hidden_size = hidden_size.get(case, 512)
+    # columns per ETP=2 rank to the one 256-value block their 256 at ETP=1 fill, so the pins fit
+    # either way.
+    hidden_size = {"padded_row_parallel": 352, "padded_to_aligned": 192}
+    hidden_size = hidden_size.get(case, 64 if case.endswith("_fc2") else 512)
+    # Saved at TP=2 and loaded at TP=1, or the other way around.
+    save_tp, load_tp = (1, size) if case == "grouped_aligned_fc2" else (size, 1)
+    # Only the first of the target's two pipeline stages has pins.
+    load_pp = size if case == "rc0_swiglu_pins_one_stage" else 1
 
-    def create_model(tp_size):
+    def create_model(tp_size, pp_size=1):
         return _gpt_model_provider(
             tp_size=tp_size,
+            pp_size=pp_size,
             hidden_size=hidden_size,
             activation_func="swiglu" if rc0 else "squared_relu",
             num_moe_experts=2 if grouped else None,
@@ -2119,20 +2140,23 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
         )
 
     initialize_for_megatron(
-        tensor_model_parallel_size=size,
-        expert_tensor_parallel_size=size if grouped else None,
+        tensor_model_parallel_size=save_tp,
+        expert_tensor_parallel_size=save_tp if grouped else None,
         seed=SEED,
     )
-    source = create_model(size)
+    source = create_model(save_tp)
     for module in source.modules():
         if isinstance(module, TopKRouter):
             module.topk = module.num_experts
     config = _iq2_xs_config("ptq")
-    if case == "grouped_padded_fc2":
-        # Only the experts' linear_fc2: every pin then has a shape that fits ETP=1.
-        for entry in config["quant_cfg"]:
-            if entry.get("quantizer_name") == "*mlp*weight_quantizer":
-                entry["quantizer_name"] = "*experts.linear_fc2.weight_quantizer"
+    for entry in config["quant_cfg"]:
+        if entry.get("quantizer_name") != "*mlp*weight_quantizer":
+            continue
+        if case.endswith("_fc2"):
+            # Only the experts' linear_fc2: every pin then has a shape that fits the other ETP.
+            entry["quantizer_name"] = "*experts.linear_fc2.weight_quantizer"
+        elif case == "rc0_swiglu_pins_one_stage":
+            entry["quantizer_name"] = "*layers.0.mlp*weight_quantizer"
     with _saving_like_modelopt_0_49_0rc0() if rc0 else nullcontext():
         mtq.quantize(source, config, get_forward(source))
         mtq.initialize_qdq_weights(source)
@@ -2143,18 +2167,26 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
     destroy_model_parallel()
 
     initialize_for_megatron(
-        tensor_model_parallel_size=1, expert_tensor_parallel_size=1 if grouped else None, seed=SEED
+        tensor_model_parallel_size=load_tp,
+        pipeline_model_parallel_size=load_pp,
+        expert_tensor_parallel_size=load_tp if grouped else None,
+        seed=SEED,
     )
-    target = create_model(1)
+    target = create_model(load_tp, load_pp)
+    if case == "rc0_swiglu_pins_converted":
+        # Already converted, with its own pins: the restore only reads the checkpoint's layout.
+        mtq.quantize(target, config, get_forward(target))
+        mtq.initialize_qdq_weights(target)
     if case == "padded_to_aligned":
         # The saved shards hold more blocks than TP=1 asks for; Megatron's shape check rejects it.
         restore_sharded_modelopt_state([target], tmp_path)
         with pytest.raises(CheckpointException, match="Global shape mismatch"):
             load_distributed_checkpoint(tmp_path, target)
         return
+    # A rank whose own pins fit raises too, rather than enter the weight load alone.
     error = NotImplementedError if grouped else ValueError
     match = "0.49.0rc0" if rc0 else r"can't be loaded at another"
-    with pytest.raises(error, match=match):
+    with pytest.raises(error if rank == 0 else (error, RuntimeError), match=match):
         restore_sharded_modelopt_state([target], tmp_path)
 
 
@@ -2165,7 +2197,10 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
         "padded_to_aligned",
         "grouped_experts",
         "grouped_padded_fc2",
+        "grouped_aligned_fc2",
         "rc0_swiglu_pins",
+        "rc0_swiglu_pins_converted",
+        "rc0_swiglu_pins_one_stage",
     ],
 )
 def test_ggml_payload_tp_reshard_rejected(dist_workers_size_2, tmp_path, case):
