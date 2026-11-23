@@ -71,6 +71,7 @@ Changelog
 - Add ``hessian_input_dtype`` to the GPTQ and ``local_hessian`` algorithm configs. ``bfloat16`` accumulates the float32 Hessian with a tensor-core GEMM on bfloat16 activations, several times faster and without a float32 copy of each batch; the default ``float32`` keeps the existing float32 GEMM.
 - GPTQ and imatrix calibration of ``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` now keep each weight's chosen super-block scales and search importance, and leave the weight unrounded instead of overwriting it with its decoding. QAD from such a checkpoint starts from the calibrated codes and trains codes under those fixed scales.
 - ``hf_ptq.py`` calibrates Qwen3.8 (``qwen4_exp``) without running its QSA indexer's per-query Python loop when every visible key fits the indexer's token budget, with bit-identical results. On Qwen3.8-Flash-Next this saves about two hours of layerwise calibration.
+- ``max`` and ``imatrix`` calibration of ``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` now derive each block's super-block scale from the weights and match each block's output energy, in place of fixed per-format scale anchors, which lowered KL divergence in all our tests (by up to half at IQ1) and matches or beats llama.cpp's own imatrix quantizer in most of them.
 
 *Quantization - QAT / QAD*
 
