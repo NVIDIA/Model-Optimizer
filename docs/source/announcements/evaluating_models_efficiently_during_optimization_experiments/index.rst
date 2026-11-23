@@ -105,11 +105,9 @@ was not established.
 | SciCode        | 43.52%   | 44.90%    | +1.38 [+0.08,    | 0.019 — yes      | 0.981            |
 |                |          |           | +2.67]           |                  |                  |
 +----------------+----------+-----------+------------------+------------------+------------------+
-| AA-Omniscience | 21.80%   | 21.92%    | +0.12 [−0.64,    | 0.381 — no       | 0.619            |
-|                |          |           | +0.88]           | evidence         |                  |
-+----------------+----------+-----------+------------------+------------------+------------------+
 
 On SciCode, the candidate is more accurate than the baseline (+1.38 pp; p = 0.019).
+MMLU-Pro shows “no evidence” because its p-value of 0.920 exceeds the 0.05 threshold.
 
 Check for regressions
 ~~~~~~~~~~~~~~~~~~~~~
