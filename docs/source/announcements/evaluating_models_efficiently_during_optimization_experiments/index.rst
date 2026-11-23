@@ -43,7 +43,7 @@ examples <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/llm_eval/
   unacceptable regression, even if the baseline does not have a higher average score.
 - **Assess model reliability:** measure doomed reasoning loops, missing answers, and whether the
   model abstains appropriately.
-- **Measure inference efficiency:** compare output length, including reasoning tokens.
+- **Measure verbosity:** compare output length, including reasoning tokens.
 
 **How can you evaluate faster?**
 
@@ -239,8 +239,8 @@ Candidate has a higher abstention ratio (p = 0.008).
 Compare outcomes on the same questions to check whether Candidate abstains where Baseline answers
 correctly or incorrectly.
 
-Measure inference efficiency
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Measure verbosity
+~~~~~~~~~~~~~~~~~
 
 Compare mean and median completion tokens, including reasoning, to assess how much generation each
 answer requires.

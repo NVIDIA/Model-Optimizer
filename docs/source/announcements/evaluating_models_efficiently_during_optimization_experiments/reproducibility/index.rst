@@ -81,16 +81,16 @@ guide’s five plots as CSV summaries:
 Statistical methods
 -------------------
 
-For accuracy, cap-hit and missing-final-answer rates, abstention ratio, and mean
-completion length, we calculate the difference by subtracting Baseline's value from Candidate's.
-Accuracy, rate, and ratio changes are in percentage points; length differences are in tokens,
+For accuracy, cap-hit and missing-final-answer rates, abstention ratio, and verbosity, we
+calculate the difference by subtracting Baseline's value from Candidate's. Accuracy, rate, and
+ratio changes are in percentage points. Verbosity differences are in completion tokens,
 including reasoning tokens.
 
-- **Accuracy and mean completion length:** average each model's repetitions within each question,
-  then subtract Baseline's average from Candidate's for that question. Across these paired question
-  differences, use a two-sided t-based 95% confidence interval and one-sided paired t-tests for the
-  stated direction. Degrees of freedom equal the number of questions minus one. Median lengths
-  describe all individual responses; the length tests concern means.
+- **Accuracy and verbosity (mean completion length):** average each model's repetitions within
+  each question, then subtract Baseline's average from Candidate's for that question. Across these
+  paired question differences, use a two-sided t-based 95% confidence interval and one-sided paired
+  t-tests for the stated direction. Degrees of freedom equal the number of questions minus one.
+  Median lengths describe individual responses. The verbosity tests compare mean lengths.
 - **Non-inferiority:** test whether Candidate's accuracy loss is smaller than an acceptable margin.
   For differences in pp, the t statistic is ``(mean_difference + margin) / standard_error``, using
   the upper tail and the same degrees of freedom. The guide examines margins of 2, 1, 0.5, and 0.1
