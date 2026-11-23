@@ -24,13 +24,19 @@ from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.custom import CUSTOM_MODEL_PLUGINS
 from modelopt.torch.quantization.plugins.vllm import _VLLMParallelLinear
 from modelopt.torch.quantization.plugins.vllm_mega_moe import _QuantVLLMMegaMoEExperts
+from modelopt.torch.utils import warn_rank_0
 
 __all__: list[str] = []
 
-# NotImplementedError: some vLLM model packages reject unsupported platforms at import.
+# NotImplementedError: some vLLM model packages reject unsupported platforms at import. Any other
+# error only warns: the MLP preparation registered below finds Kimi's classes when a model is
+# converted, so it must be registered even if vLLM's Kimi module only imports later.
 try:
     from vllm.models.kimi_k3.nvidia.model import KimiK3MegaMoEExperts
 except (ImportError, NotImplementedError):
+    KimiK3MegaMoEExperts = None
+except Exception as e:  # an unexpected failure inside the vLLM build
+    warn_rank_0(f"Kimi-K3's Mega-MoE experts will not be quantized: importing them failed: {e!r}")
     KimiK3MegaMoEExperts = None
 
 

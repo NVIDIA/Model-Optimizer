@@ -564,13 +564,37 @@ class _FailingImport:
             raise RuntimeError(f"simulated failure importing {name}")
 
 
-sys.meta_path.insert(0, _FailingImport())
+failing_import = _FailingImport()
+sys.meta_path.insert(0, failing_import)
 
 import modelopt.torch.quantization
 from modelopt.torch.quantization.nn import QuantModuleRegistry
-from modelopt.torch.quantization.plugins.custom import CUSTOM_MODEL_PLUGINS
+from modelopt.torch.quantization.plugins.custom import (
+    CUSTOM_MODEL_PLUGINS,
+    register_custom_model_plugins_on_the_fly,
+)
 
-if kept == "kimi_k3_callback":
+if kept == "kimi_k3_mlp_preparation":
+    # vLLM's Kimi-K3 module failed while modelopt was imported and imports now, as when vLLM
+    # loads the model; conversion's first step must still prepare the MLP.
+    from unittest.mock import Mock
+
+    import torch
+    import vllm.model_executor.layers.linear as vllm_linear
+
+    sys.meta_path.remove(failing_import)
+    kimi_model = __import__(failing, fromlist=["KimiMLP"])
+    down_proj = object.__new__(vllm_linear.RowParallelLinear)
+    torch.nn.Module.__init__(down_proj)
+    mlp = object.__new__(kimi_model.KimiMLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.gate_up_proj = Mock()
+    mlp.down_proj = down_proj
+    mlp.gemm_rs_ar = Mock()
+    register_custom_model_plugins_on_the_fly(mlp)
+    guard = type(mlp.gemm_rs_ar).__name__
+    assert guard == "_KimiGemmRsArFakeQuantGuard", f"conversion left Kimi-K3's MLP unprepared: {guard}"
+elif kept == "kimi_k3_callback":
     kimi = sys.modules.get("modelopt.torch.models.kimi_k3.modeling_ptq_vllm")
     assert kimi is not None, f"failing to import {failing} skipped Kimi-K3's module"
     assert kimi.prepare_kimi_mlps_on_the_fly in CUSTOM_MODEL_PLUGINS
@@ -592,16 +616,22 @@ else:
         # GLM's module is imported after DeepSeek-V4's and before Kimi-K3's.
         ("modelopt.torch.models.glm5_next.modeling_ptq_vllm", "kimi_k3_callback"),
         ("vllm.models.deepseek_v4.nvidia.model", "deepseek_v4_indexer"),
+        ("vllm.models.kimi_k3.nvidia.model", "kimi_k3_mlp_preparation"),
     ],
 )
 def test_failed_vllm_model_import_keeps_other_registrations(failing, kept):
     """A model module that fails to import leaves the other models' wrappers in place, and a failed
-    DeepSeek-V4 Mega-MoE import leaves its module importable, with the indexer registered."""
-    if kept == "deepseek_v4_indexer":
+    optional import leaves its model's module complete: DeepSeek-V4's indexer registered, Kimi-K3's
+    MLPs prepared once vLLM's Kimi module imports."""
+    needs = {
+        "deepseek_v4_indexer": "vllm.models.deepseek_v4.attention",
+        "kimi_k3_mlp_preparation": "vllm.models.kimi_k3.nvidia.model",
+    }.get(kept)
+    if needs:
         try:
-            importlib.import_module("vllm.models.deepseek_v4.attention")
+            importlib.import_module(needs)
         except (ImportError, NotImplementedError):
-            pytest.skip("this vLLM build has no DeepSeek-V4 indexer")
+            pytest.skip(f"this vLLM build has no {needs}")
     env = {k: v for k, v in os.environ.items() if k != "COVERAGE_PROCESS_START"}
     result = subprocess.run(
         [sys.executable, "-c", _CHECK_FAILED_IMPORT_IS_ISOLATED, failing, kept],
