@@ -95,12 +95,17 @@ including reasoning tokens.
   For differences in pp, the t statistic is ``(mean_difference + margin) / standard_error``, using
   the upper tail and the same degrees of freedom. The guide examines margins of 2, 1, 0.5, and 0.1
   pp.
-- **Cap-hit and missing-final-answer rates:** calculate paired-bootstrap 95%
+- **Cap-hit and missing-final-answer rates:** calculate two-sided 95% paired-bootstrap
   confidence intervals by sampling questions with replacement, keeping each question's repetitions
   and both models together. MMLU-Pro and SciCode use 100,000 resamples; AA uses 50,000, preserving 100
   questions per domain. The interval endpoints are the 2.5th and 97.5th percentiles.
   If neither model has an observed failure, bootstrapping gives a [0, 0] interval. This does not
   establish that failures cannot occur or that the models have equal failure rates.
+
+  For one-sided p-values, use a :ref:`paired permutation test <evaluation-pvalue-methods>`.
+  Even when failures are rare, swapping the models' results within each question shows how
+  unusual the observed difference would be if the models behaved the same.
+  Computing p-values with the bootstrap would be more complicated.
 - **Abstention ratio:** divide total abstentions by total responses not graded
   correct, pooling all repetitions. The denominator includes incorrect and partial answers,
   abstentions, and missing answers. Use the same domain-stratified paired question
