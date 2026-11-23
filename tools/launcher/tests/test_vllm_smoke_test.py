@@ -17,13 +17,18 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 _COMMON = Path(__file__).resolve().parents[1] / "common"
+_STREAMING_DFLASH2 = (
+    Path(__file__).resolve().parents[1] / "examples/Qwen/Qwen3-8B/hf_streaming_dflash2.yaml"
+)
 # service_utils.sh appends to modelopt/__init__.py only on local rank 0, so a rank set by an
 # enclosing Slurm/MPI job would hide the failure under test.
 _RANK_VARS = ("PMIX_LOCAL_RANK", "OMPI_COMM_WORLD_LOCAL_RANK", "SLURM_LOCALID", "SLURM_PROCID")
@@ -41,15 +46,15 @@ def _run(tmp_path, **env_overrides):
         (bin_dir / tool).chmod(0o755)
     (tmp_path / "train_out").mkdir()  # training left no exported-checkpoint-*
 
-    smoke_json = tmp_path / "out" / "smoke.json"
     env = {k: v for k, v in os.environ.items() if k not in _RANK_VARS}
     env.update(
         PATH=f"{bin_dir}:{os.environ['PATH']}",
         HF_MODEL_CKPT="/hf-local/target",
         DRAFT_CKPT_DIR=str(tmp_path / "train_out"),
-        SMOKE_JSON=str(smoke_json),
-        **env_overrides,
+        SMOKE_JSON=str(tmp_path / "out" / "smoke.json"),
     )
+    env.update(env_overrides)
+    smoke_json = Path(env["SMOKE_JSON"])
     proc = subprocess.run(
         ["bash", "common/specdec/vllm_smoke_test.sh"],
         cwd=tmp_path,
@@ -87,3 +92,27 @@ def test_invalid_config_fails_with_a_result(tmp_path, env, reason):
     assert result["stage"] == "invalid_config"
     assert result["reason"] == reason
     assert result["pass"] is False
+
+
+def test_smoke_only_rerun_keeps_the_original_verdict(tmp_path):
+    """The example's documented rerun reads an earlier export but must not touch its verdict.
+
+    The script deletes SMOKE_JSON before it starts, so a failed rerun writing there would
+    erase the earlier experiment's PASS.
+    """
+    pipeline = yaml.safe_load(_STREAMING_DFLASH2.read_text())["pipeline"]
+    global_vars = {**pipeline["global_vars"], "output_dir": "/cicd/earlier/dflash2"}
+    env = {}
+    for item in pipeline["task_2"]["environment"]:
+        for key, value in item.items():
+            value = re.sub(r"<<global_vars\.(\w+)>>", lambda m: global_vars[m.group(1)], value)
+            # The rerun's own /scratchspace and the /cicd view of earlier experiments.
+            env[key] = re.sub(r"^/(scratchspace|cicd)\b", lambda m: str(tmp_path / m[1]), value)
+    original = tmp_path / "cicd/earlier/dflash2/smoke_check.json"
+    original.parent.mkdir(parents=True)
+    original.write_text('{"pass": true}')
+
+    proc, result = _run(tmp_path, **{**env, "NUM_SPEC_TOKENS": "x"})  # fails before vLLM
+    assert proc.returncode == 1
+    assert result["stage"] == "invalid_config"
+    assert original.read_text() == '{"pass": true}'
