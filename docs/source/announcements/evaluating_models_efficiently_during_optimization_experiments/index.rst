@@ -180,6 +180,16 @@ rate was not established.
 |                | (106/6,000)   | (51/6,000)    | −0.48]        |               |               |
 +----------------+---------------+---------------+---------------+---------------+---------------+
 
+.. tip::
+
+   For exploratory evaluations on vLLM, enable its repetition detector to stop looping
+   responses early and save GPU time. Use the same settings for both checkpoints. Save the
+   stop reason so you can inspect the stopped responses and compare how often the detector
+   triggers for each checkpoint. To measure how often responses would reach the token cap
+   without early stopping, run with the detector off. See the
+   `ModelOpt instructions for stopping repeated reasoning
+   <https://github.com/NVIDIA/Model-Optimizer/blob/main/skills/modelopt-evaluation/references/doom_loops.md>`__.
+
 Missing final answers
 ^^^^^^^^^^^^^^^^^^^^^
 
