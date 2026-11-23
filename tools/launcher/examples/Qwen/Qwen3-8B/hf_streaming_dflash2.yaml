@@ -18,7 +18,8 @@
 # Site-specific settings left unset on purpose: slurm_config.time where the queue's default
 # is short, the NIXL and NCCL HCA pinning an InfiniBand fabric needs, and container-visible
 # cache paths such as HF_HOME (srun runs with --no-container-mount-home). The pinned images
-# are multi-arch (x86_64 and aarch64), and TRITON_CACHE_DIR is set node-local below.
+# are multi-arch (x86_64 and aarch64), and TRITON_CACHE_DIR is set node-local below. The
+# vLLM image is pinned by digest, which Slurm (pyxis) can pull only with enroot >= 4.0.
 #
 # Usage:
 #   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_dflash2.yaml --yes
@@ -116,8 +117,9 @@ pipeline:
       nodes: 2
       ntasks_per_node: 1
       gpus_per_node: 4
-      # A release with DFlash2 serving (vllm#52816).
-      container: vllm/vllm-openai:v0.31.0
+      # v0.31.0 has DFlash2 serving (vllm#52816). The digest is its multi-arch index
+      # (linux/amd64 and linux/arm64); task_2 uses the same image.
+      container: vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
 
   # Step 3: vLLM smoke test (uses the exported checkpoint from training).
   # The method stays "dflash": vLLM has no separate dflash2 method and selects the
@@ -134,7 +136,7 @@ pipeline:
       - TRITON_CACHE_DIR: /tmp/triton-cache
     slurm_config:
       _factory_: "slurm_factory"
-      container: vllm/vllm-openai:v0.31.0
+      container: vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 1
