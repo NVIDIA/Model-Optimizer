@@ -285,9 +285,7 @@ _SINGULAR_QUANTIZER_ATOM_RE = re.compile(r"(?:weight|input)_quantizer$")
 
 
 def _lists_each_registered_path(model: nn.Module) -> bool:
-    """Whether ``model.named_modules()`` lists the paths its ``_modules`` register, each once, in
-    the same order.
-    """
+    """Whether ``named_modules()`` lists exactly the paths ``_modules`` register, in order."""
 
     def registered(module, prefix):
         yield prefix
