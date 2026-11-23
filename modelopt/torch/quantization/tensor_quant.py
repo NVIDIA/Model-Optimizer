@@ -19,6 +19,7 @@ import warnings
 
 import torch
 from torch.autograd import Function
+from torch.jit._script import script as _script
 from torch.onnx import symbolic_helper
 
 import modelopt.torch.kernels.quantization.gemm as triton_kernel
@@ -307,7 +308,7 @@ QUANT_DESC_8BIT_CONVTRANSPOSE2D_WEIGHT_PER_CHANNEL = QuantizerAttributeConfig(nu
 QUANT_DESC_8BIT_CONVTRANSPOSE3D_WEIGHT_PER_CHANNEL = QuantizerAttributeConfig(num_bits=8, axis=(0))
 
 
-@torch.jit.script
+@_script
 def _fake_tensor_quant_backward(inputs, amax: torch.Tensor | None, grad_outputs):
     # Skip clip for MX formats
     if amax is None:
