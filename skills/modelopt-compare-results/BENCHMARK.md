@@ -68,7 +68,7 @@ Shared-source comparisons use the same signals and weights on both conditions. T
 | Agent | Dimension | Basis | Baseline → With skill (uplift) | Explanation |
 | --- | --- | --- | --- | --- |
 | claude-code | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
-| claude-code | Efficiency | Token-only comparison | 98.6% → 96.6% (-2.0 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
+| claude-code | Efficiency | Token-only comparison | 98.7% → 96.7% (-2.0 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
 | codex | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
 | codex | Efficiency | Token-only comparison | 93.6% → 92.5% (-1.1 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
 
@@ -78,15 +78,15 @@ Actual Tier 3 execution usage is reported for every observed agent/case pair and
 
 | Agent | Dataset case | With skill | Without skill | Delta | Change | Coverage |
 |---|---|---:|---:|---:|---:|---|
-| claude-code | All cases | 304,808 | 109,375 | +195,433 | +178.68% | skill 3/3; base 3/3 |
-| claude-code | baseline-vs-quantized-delta | 114,780 | 36,266 | +78,514 | +216.49% | skill 1/1; base 1/1 |
-| claude-code | interval-based-assessments | 115,246 | 36,779 | +78,467 | +213.35% | skill 1/1; base 1/1 |
-| claude-code | missing-baseline | 74,782 | 36,330 | +38,452 | +105.84% | skill 1/1; base 1/1 |
-| codex | All cases | 134,002 | 41,288 | +92,714 | +224.55% | skill 3/3; base 3/3 |
-| codex | baseline-vs-quantized-delta | 44,814 | 13,733 | +31,081 | +226.32% | skill 1/1; base 1/1 |
-| codex | interval-based-assessments | 44,805 | 14,016 | +30,789 | +219.67% | skill 1/1; base 1/1 |
-| codex | missing-baseline | 44,383 | 13,539 | +30,844 | +227.82% | skill 1/1; base 1/1 |
-| ALL AGENTS | Dataset aggregate | 438,810 | 150,663 | +288,147 | +191.25% | skill 6/6; base 6/6 |
+| claude-code | All cases | 304,034 | 109,266 | +194,768 | +178.25% | skill 3/3; base 3/3 |
+| claude-code | baseline-vs-quantized-delta | 114,672 | 36,210 | +78,462 | +216.69% | skill 1/1; base 1/1 |
+| claude-code | interval-based-assessments | 114,703 | 36,832 | +77,871 | +211.42% | skill 1/1; base 1/1 |
+| claude-code | missing-baseline | 74,659 | 36,224 | +38,435 | +106.10% | skill 1/1; base 1/1 |
+| codex | All cases | 133,990 | 41,308 | +92,682 | +224.37% | skill 3/3; base 3/3 |
+| codex | baseline-vs-quantized-delta | 44,845 | 13,710 | +31,135 | +227.10% | skill 1/1; base 1/1 |
+| codex | interval-based-assessments | 44,798 | 14,037 | +30,761 | +219.14% | skill 1/1; base 1/1 |
+| codex | missing-baseline | 44,347 | 13,561 | +30,786 | +227.02% | skill 1/1; base 1/1 |
+| ALL AGENTS | Dataset aggregate | 438,024 | 150,574 | +287,450 | +190.90% | skill 6/6; base 6/6 |
 
 Prompt tokens include cached reads, so total tokens are `prompt + completion` (cached is not added twice). The Efficiency score uses `(prompt - cached) + completion`. Change is `100 * (with - without) / without`; negative means fewer tokens. N/A comparisons include their reason in the coverage column; coverage is never estimated.
 

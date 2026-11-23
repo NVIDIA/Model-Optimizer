@@ -9,7 +9,7 @@ NVIDIA <br>
 ### License/Terms of Use: <br>
 Apache 2.0 <br>
 ## Use Case: <br>
-Developers and engineers use this skill to compare a baseline checkpoint against a quantized candidate, explain accuracy drops or regressions, and decide whether a quantized checkpoint is acceptable using NEL/MLflow evaluation outputs. <br>
+Developers and engineers using NVIDIA Model Optimizer use this skill to compare baseline and quantized (candidate) checkpoint evaluation runs, explain accuracy drops or regressions, and decide whether a quantized checkpoint is acceptable, including comparisons of NEL/MLflow evaluation outputs. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -34,7 +34,7 @@ Mitigation: Review and scan skill before deployment. <br>
 **Output Type(s):** [Analysis] <br>
 **Output Format:** [Markdown report with per-task comparison tables and verdicts] <br>
 **Output Parameters:** [1D] <br>
-**Other Properties Related to Output:** [Reports comparability, external baseline sanity, and quantization-feasibility verdicts; marks unavailable uncertainty explicitly.] <br>
+**Other Properties Related to Output:** [None] <br>
 
 ## Evaluation Agents Used: <br>
 - Claude Code (`aws/anthropic/bedrock-claude-opus-5-5`) <br>
@@ -43,7 +43,7 @@ Mitigation: Review and scan skill before deployment. <br>
 
 
 ## Evaluation Tasks: <br>
-3 evaluation tasks (3 positive), 1 attempt per task, run in the `k8s-sandbox` environment with each task attempt in its own isolated sandbox pod; each task was also attempted without the skill as a baseline. <br>
+3 evaluation tasks (3 positive), 1 attempt per task, each attempt in its own isolated sandbox pod (`k8s-sandbox` environment); evaluator version `1.6.10`, evaluation date 2026-11-23. Tier Status: Tier 1 static validation PASSED WITH OBSERVATIONS (11 validators; 12 findings); Tier 2 semantic deduplication PASSED (2 validators; 0 findings); Tier 3 live agent evaluation PASS (2 agents; 3 tasks). <br>
 
 ## Evaluation Metrics Used: <br>
 Reported benchmark dimensions: <br>
@@ -84,8 +84,6 @@ Recommended for publication based on the completed evaluation evidence in this r
 
 **How to read this table:** baseline is the same task attempted without the target skill. Scores are rounded to one decimal; threshold-adjacent values use additional precision so their displayed band matches the verdict. Uplift is derived from those displayed scores and shown in percentage points.
 
-Example: `47.0% → 92.0% (+45.0 points)` means the skill-assisted run scored 92.0%, 45.0 percentage points above its 47.0% no-skill baseline.
-
 #### Comparison details
 
 Shared-source comparisons use the same signals and weights on both conditions. They do not replace the full dimension scores above or change the publication verdict.
@@ -93,20 +91,12 @@ Shared-source comparisons use the same signals and weights on both conditions. T
 | Agent | Dimension | Basis | Baseline → With skill (uplift) | Explanation |
 | --- | --- | --- | --- | --- |
 | claude-code | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
-| claude-code | Efficiency | Token-only comparison | 98.6% → 96.6% (-2.0 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
+| claude-code | Efficiency | Token-only comparison | 98.7% → 96.7% (-2.0 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
 | codex | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
 | codex | Efficiency | Token-only comparison | 93.6% → 92.5% (-1.1 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
 
-### Tier Status
-
-| Tier | Purpose | Status | Evidence |
-|---|---|---|---|
-| Tier 1 | Static validation | **PASSED WITH OBSERVATIONS** | 11 validator(s); 12 finding(s) |
-| Tier 2 | Semantic deduplication | **PASSED** | 2 validator(s); 0 finding(s) |
-| Tier 3 | Live agent evaluation | **PASS** | 2 agent(s); 3 task(s) |
-
 ## Skill Version(s): <br>
-d2f94940 (source: git SHA, committed 2026-11-23) <br>
+f3ce47ec8 (source: git SHA, committed 2026-11-23) <br>
 
 ## Ethical Considerations: <br>
 NVIDIA believes Trustworthy AI is a shared responsibility and we have established policies and practices to enable development for a wide array of AI applications. When downloaded or used in accordance with our terms of service, developers should work with their internal team to ensure this skill meets requirements for the relevant industry and use case and addresses unforeseen product misuse. <br>
