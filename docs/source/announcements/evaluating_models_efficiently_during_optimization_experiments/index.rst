@@ -153,6 +153,8 @@ loops, missing answers, and whether it abstains when appropriate.
 
 Rare failures can make t-based approximations unreliable, so we use paired-bootstrap 95% confidence
 intervals and one-sided paired permutation tests for the rates below.
+For more information on the statistical methods and possible alternatives, see
+:ref:`Statistical methods <evaluation-statistical-methods>` in the Reproducibility Notes.
 
 Doomed reasoning loops
 ^^^^^^^^^^^^^^^^^^^^^^

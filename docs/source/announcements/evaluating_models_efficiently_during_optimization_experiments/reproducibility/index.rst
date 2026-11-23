@@ -76,6 +76,8 @@ guide’s five plots as CSV summaries:
   :ref:`Collect as much evaluation data as you need <evaluation-collect-data>`.
   CSV file: :download:`mmlu-accuracy-data-volume.csv <mmlu-accuracy-data-volume.csv>`.
 
+.. _evaluation-statistical-methods:
+
 Statistical methods
 -------------------
 
