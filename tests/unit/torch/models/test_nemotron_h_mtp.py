@@ -26,6 +26,7 @@ import torch
 
 pytest.importorskip("transformers")
 
+from _test_utils.torch.misc import ContendedLock
 from huggingface_hub import constants as hub_constants
 from safetensors.torch import load_file, save_file
 from transformers import (
@@ -39,8 +40,7 @@ from transformers import (
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_activation_scaling_factor, postprocess_state_dict
 from modelopt.torch.export.unified_export_hf import _process_quantized_modules
-from modelopt.torch.models import hf
-from modelopt.torch.models._onfly_decompress import CONVERSION_HOOK_LOCK
+from modelopt.torch.models import _onfly_decompress, hf
 from modelopt.torch.models.nemotron_h import mtp as adapter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg_context
@@ -698,13 +698,15 @@ def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch)
     def hook(*args, **kwargs):
         return below(*args, **kwargs)
 
+    assert adapter.CONVERSION_HOOK_LOCK is _onfly_decompress.CONVERSION_HOOK_LOCK
+    lock = ContendedLock()
+    monkeypatch.setattr(adapter, "CONVERSION_HOOK_LOCK", lock)
     load = hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True)
     load.__enter__()
-    with CONVERSION_HOOK_LOCK:
+    with lock:
         teardown = threading.Thread(target=load.__exit__, args=(None, None, None), daemon=True)
         teardown.start()
-        teardown.join(0.2)
-        assert teardown.is_alive()
+        assert lock.contended.wait(10)
         below = modeling_utils.get_model_conversion_mapping
         modeling_utils.get_model_conversion_mapping = hook
     teardown.join(10)

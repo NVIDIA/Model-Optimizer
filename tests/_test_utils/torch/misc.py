@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import random
+import threading
 
 import pytest
 import torch
@@ -66,3 +67,21 @@ def minimum_gpu(n):
         torch.cuda.device_count() < n,
         reason=f"Requires at least {n} GPUs",
     )
+
+
+class ContendedLock:
+    """A lock that sets ``contended`` when a thread waits for it, so a test holding it knows that
+    another thread has reached it."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.contended = threading.Event()
+
+    def __enter__(self):
+        if not self._lock.acquire(blocking=False):
+            self.contended.set()
+            self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc_info):
+        self._lock.release()
