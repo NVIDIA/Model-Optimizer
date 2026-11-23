@@ -77,7 +77,7 @@ find tools/launcher/local_experiments -name "config.json" -path "*/exported_mode
 | Local SLURM | `SLURM_HOST=$(hostname) SLURM_ACCOUNT=<acct> uv run launch.py --yaml <cfg> --yes` |
 | Local Docker | `uv run launch.py --yaml <cfg> hf_local=<cache> --yes` |
 
-The launcher SSHes to `SLURM_HOST` via `nemo_run.SSHTunnel`. If `identity` is omitted, it uses `~/.ssh/id_rsa`.
+The launcher SSHes to `SLURM_HOST` via `nemo_run.SSHTunnel`.
 
 > **`SLURM_HF_LOCAL` — HF cache bind-mount.** `slurm_factory` mounts the host HF
 > cache at `/hf-local` from `$SLURM_HF_LOCAL` (default `/hf-local`). If that host
