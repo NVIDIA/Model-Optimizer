@@ -39,8 +39,20 @@ A baseline and its candidate always use the same metric, so a delta is unaffecte
 
 ## Doom loops
 
-Gym counts `repetition_stops` (the model's own loops, scored). How to enable the detection per request is not
-verified; if the tool cannot pass the field, say so instead of editing the evaluation.
+Gym counts `repetition_stops` (the model's own loops, scored). **To turn the detection on**, put the detector in the
+policy model's `sampling_overrides` (not `extra_body`, which only supplies defaults that a request can replace):
+
+```yaml
+policy_model.responses_api_models.vllm_model.sampling_overrides:
+  repetition_detection: {max_pattern_size: 256, min_pattern_size: 32, min_count: 3}
+```
+
+Under the benchmark's `run` block of the submit document this key is the literal dotted mapping key. It is forced onto
+every outbound request after the request body is merged. A forced-loop canary (vLLM 0.26) confirmed it end to end:
+the engine stopped every request with `repetition_detected`, Gym recorded the native stop reason, normalized the
+finish reason to `stop` (so no client remap is needed, unlike a client that rejects `repetition`), and counted
+the stops. The saved model-call capture records the request before the override, so to see the engine-bound body
+set `NEMO_GYM_VLLM_TRANSPORT_LOG` to a mounted path before submitting.
 
 ## MLflow
 

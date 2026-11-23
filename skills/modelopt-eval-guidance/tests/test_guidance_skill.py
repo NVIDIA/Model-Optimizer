@@ -185,6 +185,7 @@ def test_gym_reference_keeps_the_gym_rules():
         "<agent>/mean/reward",
         "follow_all_instructions_loose",  # IFBench headline differs from the default reward
         "subtask_accuracy",  # SciCode headline
+        "sampling_overrides",  # where the doom-loop detector goes in a Gym config
         "UNVERIFIED",
     ):
         assert needle in gym
