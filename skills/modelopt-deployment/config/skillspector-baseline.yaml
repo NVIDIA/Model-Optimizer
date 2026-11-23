@@ -1,0 +1,25 @@
+version: 2
+scanner_version: 2.13.5
+rules: []
+fingerprints:
+  - hash: sha256:59efce99910a42d0304059d935270b4bda4d4e25a9e5c4aec5c8d8eceb2f281f
+    rule_id: SC2
+    file: SKILL.md
+    reason: 'SKILL.md:191: Local completion smoke test; python -m json.tool formats the JSON response without executing it.'
+  - hash: sha256:36f0ef1e1355a043a27c3aa6899b4538f2bf0fd5f15f87d763adc650deadd17e
+    rule_id: SC2
+    file: references/benchmarking.md
+    reason: 'references/benchmarking.md:33: Local chat completion coherence check; fixed Python parses JSON and checks Paris and 391 without executing the
+      response.'
+  - hash: sha256:c6ddb3796629646b5064e9cba86a48b64e460ba0c026365840983f24a1349fff
+    rule_id: SC2
+    file: scripts/deploy.sh
+    reason: 'scripts/deploy.sh:430: Local server health check; curl discards the response to /dev/null.'
+  - hash: sha256:d7a752026b0e0c1c7aa7a53849309976c5862bc93eeffdbf75be34bc8599eb5c
+    rule_id: SC2
+    file: scripts/deploy.sh
+    reason: 'scripts/deploy.sh:443: Local model metadata request; fixed Python parses JSON and extracts the model ID without executing it.'
+  - hash: sha256:de07706896358b1da89b45db5a8243ae492ab2178239a1d0fec1174f1f9ca5bc
+    rule_id: SC2
+    file: scripts/deploy.sh
+    reason: 'scripts/deploy.sh:461: Local completion smoke test; the response is formatted as JSON and its text extracted without execution.'
