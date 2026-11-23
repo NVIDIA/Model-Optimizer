@@ -31,8 +31,11 @@ from typing import Any
 import torch
 import torch.nn as nn
 import transformers
+from packaging.version import Version
 from transformers import HfArgumentParser, PreTrainedModel, Trainer, TrainerCallback
 from transformers import modeling_utils as tf_modeling_utils
+from transformers.conversion_mapping import get_model_conversion_mapping
+from transformers.core_model_loading import WeightConverter, WeightRenaming, rename_source_key
 
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0, report_memory
 
@@ -195,15 +198,15 @@ def _revert_weight_conversion(model, state_dict):
 
 
 def _warn_if_loading_converts(model, state_dict):
-    """Warn if ``from_pretrained`` would convert, and so fail to load, this unconverted state."""
-    from transformers.conversion_mapping import get_model_conversion_mapping
-    from transformers.core_model_loading import WeightConverter
+    """Warn if ``from_pretrained`` would convert, and so fail to load, this unconverted state.
 
-    conversions = getattr(model, "_weight_conversions", None) or get_model_conversion_mapping(
-        model, add_legacy=False
-    )
+    Each key is renamed as a fresh load of the checkpoint renames it: through the model's whole
+    conversion mapping, with transformers' own renaming order and scopes.
+    """
+    conversions = get_model_conversion_mapping(model)
+    renamings = [c for c in conversions if isinstance(c, WeightRenaming)]
     converters = [c for c in conversions if isinstance(c, WeightConverter)]
-    caught = [key for key in state_dict if any(c.compiled_sources.search(key) for c in converters)]
+    caught = [key for key in state_dict if rename_source_key(key, renamings, converters)[1]]
     if caught:
         warnings.warn(
             f"from_pretrained cannot load this checkpoint with transformers {transformers.__version__}:"
@@ -240,16 +243,15 @@ pretrained_model_patch_methods = [
     ("save_pretrained", _save_pretrained_with_checks),
 ]
 
+modeling_utils_patch_methods: list[tuple[str, Any]] = [
+    ("_load_state_dict_into_zero3_model", _load_params_and_buffers_into_zero3_model)
+]
+if Version(transformers.__version__) < Version("5.21"):
+    # Installed once, for every save: per-save swaps of this global would race between threads.
+    modeling_utils_patch_methods.append(("revert_weight_conversion", _revert_weight_conversion))
+
 register_for_patching("transformers", PreTrainedModel, pretrained_model_patch_methods)
-register_for_patching(
-    "transformers",
-    tf_modeling_utils,
-    [
-        ("_load_state_dict_into_zero3_model", _load_params_and_buffers_into_zero3_model),
-        # Installed once, for every save: per-save swaps of this global would race between threads.
-        ("revert_weight_conversion", _revert_weight_conversion),
-    ],
-)
+register_for_patching("transformers", tf_modeling_utils, modeling_utils_patch_methods)
 
 
 @dataclasses.dataclass

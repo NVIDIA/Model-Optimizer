@@ -38,6 +38,8 @@ from transformers import (
     LlamaForCausalLM,
     Qwen3VLMoeConfig,
 )
+from transformers.conversion_mapping import get_model_conversion_mapping
+from transformers.core_model_loading import WeightConverter
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -247,6 +249,12 @@ def test_save_pretrained_warns_when_from_pretrained_cannot_load_fused_experts(tm
         if Version(transformers.__version__) < Version("5.21"):
             with pytest.warns(UserWarning, match="from_pretrained cannot load this checkpoint"):
                 model.save_pretrained(tmp_path / "quantized")
+            # A load records only the conversions it used; a fresh load still runs the others.
+            model._weight_conversions = [
+                c for c in get_model_conversion_mapping(model) if not isinstance(c, WeightConverter)
+            ][:1]
+            with pytest.warns(UserWarning, match="from_pretrained cannot load this checkpoint"):
+                model.save_pretrained(tmp_path / "quantized_without_recorded_converters")
         else:
             with warnings.catch_warnings():
                 warnings.filterwarnings("error", message="from_pretrained cannot load")
