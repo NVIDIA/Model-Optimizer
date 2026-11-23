@@ -31,9 +31,9 @@ model's own result.
 
 ## What counts as an evaluation fault is the tool's rule
 
-Apply the tool's own rule (its reference says where it is), and only to that tool's runs. Do not add a response-
-level invalidation of your own: a wrong, truncated or empty answer, or a clean agent timeout, is the model's result
-where the tool says so.
+Apply the tool's own rule (its reference says where it is), and only to that tool's runs.
+Do not add a response-level invalidation of your own: a wrong, truncated or empty answer, or a clean agent timeout,
+is the model's result where the tool says so.
 
 ## Reading results from MLflow
 
