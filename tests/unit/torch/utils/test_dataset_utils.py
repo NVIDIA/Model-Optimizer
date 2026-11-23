@@ -417,10 +417,15 @@ def test_disable_use_cache_restores_on_exception():
 
 
 def test_disable_use_cache_restores_on_setup_error():
+    class ReadOnlyCacheConfig:
+        @property
+        def use_cache(self):
+            return True
+
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
     model.config.use_cache = True
-    model.config.text_config = object()  # Does not allow setting use_cache.
+    model.config.text_config = ReadOnlyCacheConfig()
 
     with pytest.raises(AttributeError), _disable_use_cache(model):
         pytest.fail("A read-only text config should prevent entering the context")

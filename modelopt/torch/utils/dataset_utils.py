@@ -968,12 +968,9 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
 
     KV caching is unwanted during calibration / memory-probe forward passes:
     it wastes memory, and for hybrid Mamba/attention models (e.g., NemotronH)
-    the cache state is mutated in-place and breaks correctness. Setting
-    ``use_cache`` unconditionally (rather than only when it was already
-    present) also sidesteps configs that never assign the attribute at all
-    — e.g., ``Step3p5Config`` from stepfun-ai/Step-3.5-Flash — where forward
-    code that reads ``self.config.use_cache`` would otherwise raise
-    ``AttributeError``. Step3.7 keeps the relevant language config nested
+    the cache state is mutated in-place and breaks correctness. Step-3.5-Flash
+    reads ``self.config.use_cache`` even when its config omits the flag, so
+    temporarily add it on writable configs. Step3.7 keeps the language config nested
     under ``text_config``; that config object is handled the same way. The
     prior value is restored on exit if one existed.
     """
@@ -982,7 +979,12 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
         for config in _iter_use_cache_configs(model):
             had_attr = hasattr(config, "use_cache")
             prev = config.use_cache if had_attr else None
-            config.use_cache = False
+            try:
+                config.use_cache = False
+            except AttributeError:
+                if had_attr:
+                    raise
+                continue  # Metadata-only configs, e.g. dicts, may not support attributes.
             states.append((config, had_attr, prev))
         yield
     finally:

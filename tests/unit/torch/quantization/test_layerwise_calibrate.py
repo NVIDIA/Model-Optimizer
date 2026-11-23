@@ -18,6 +18,7 @@
 import copy
 import json
 from collections import deque
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -183,11 +184,15 @@ def test_collector_collects_correct_number_of_inputs(monkeypatch):
         collector._unpatch_all_layers()
 
 
-def test_collector_activations_match_expected(monkeypatch):
+@pytest.mark.parametrize(
+    "config", [{}, SimpleNamespace(text_config={})], ids=["dict", "nested-dict"]
+)
+def test_collector_activations_match_expected(monkeypatch, config):
     """First layer should receive the raw input data."""
     _register_test_discoverer(monkeypatch)
     torch.manual_seed(0)
     model = _SimpleTwoLayerModel(dim=8)
+    model.config = config
     collector = LayerActivationCollector(model)
     data = [torch.randn(2, 8)]
 
