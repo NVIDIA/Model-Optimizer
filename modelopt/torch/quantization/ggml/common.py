@@ -435,6 +435,16 @@ class GGMLFormat:
 
     scale_spec: NativeScaleSpec | None = None
 
+    # Native IQ fields: 32 grid entries and auxiliary values per block (format-native axes),
+    # [blocks, choice_groups] local scales, and [blocks] shared scales. Optional without GSQ.
+    pack_fields: (
+        Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None
+    ) = None
+    unpack_fields: (
+        Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]
+        | None
+    ) = None
+
     def __post_init__(self):
         if (self.scale_fit is None) != (self.replace_payload_scales is None):
             raise ValueError(f"{self.name}: scale_fit needs replace_payload_scales, and vice versa")
