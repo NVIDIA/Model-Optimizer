@@ -167,16 +167,7 @@ def _encode_blocks(
     sign_bits = torch.arange(8, dtype=torch.int64, device=x.device)
     sign_mask = (negative.to(torch.int64) << sign_bits).sum(dim=-1)
 
-    packed = torch.empty((block_count, IQ2_S_BLOCK_BYTES), dtype=torch.uint8, device=x.device)
-    packed[:, :2] = d.contiguous().view(torch.uint8).reshape(block_count, 2)
-    packed[:, 2:34] = (selected_entry & 0xFF).to(torch.uint8)
-    packed[:, 34:66] = sign_mask.to(torch.uint8)
-    high = (selected_entry >> 8).reshape(block_count, _IQ2_S_SUBBLOCKS, 4)
-    packed[:, 66:74] = (
-        high[:, :, 0] | (high[:, :, 1] << 2) | (high[:, :, 2] << 4) | (high[:, :, 3] << 6)
-    ).to(torch.uint8)
-    packed[:, 74:] = (selected_local[:, 0::2] | (selected_local[:, 1::2] << 4)).to(torch.uint8)
-    return torch.where((d_float == 0).unsqueeze(1), 0, packed)
+    return _pack_fields(selected_entry, sign_mask, selected_local, d)
 
 
 @torch.no_grad()
@@ -275,25 +266,50 @@ def dequantize_iq2_s(
     ).reshape(shape)
 
 
+def _unpack_fields(
+    packed: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Read grid entries, sign or delta bits, local scales, and the shared FP16 scale."""
+    count = packed.shape[0]
+    d = packed[:, :2].contiguous().view(torch.float16).reshape(-1).float()
+    high = (
+        (packed[:, 66:74].long().unsqueeze(-1) >> (torch.arange(4, device=packed.device) * 2)) & 3
+    ).reshape(count, 32)
+    entries = packed[:, 2:34].long() | (high << 8)
+    auxiliary = packed[:, 34:66].long()
+    local = torch.stack((packed[:, 74:].long() & 15, packed[:, 74:].long() >> 4), -1).reshape(
+        count, 16
+    )
+    return entries.reshape(count, 32), auxiliary, local, d
+
+
+def _pack_fields(
+    entries: torch.Tensor, auxiliary: torch.Tensor, local: torch.Tensor, d: torch.Tensor
+) -> torch.Tensor:
+    """Pack native fields without searching the codebook; round the shared scale to FP16."""
+    entries, auxiliary, local = entries.long(), auxiliary.long(), local.long()
+    count = entries.shape[0]
+    packed = torch.empty((count, IQ2_S_BLOCK_BYTES), dtype=torch.uint8, device=entries.device)
+    native_d = d.clamp(-65504, 65504).to(torch.float16)
+    packed[:, :2] = native_d.contiguous().view(torch.uint8).reshape(count, 2)
+    packed[:, 2:34] = (entries & 255).to(torch.uint8)
+    packed[:, 34:66] = auxiliary.to(torch.uint8)
+    high = (
+        (entries.reshape(count, 8, 4) >> 8) << (torch.arange(4, device=entries.device) * 2)
+    ).sum(-1)
+    packed[:, 66:74] = high.to(torch.uint8)
+    packed[:, 74:] = (local[:, ::2] | (local[:, 1::2] << 4)).to(torch.uint8)
+    return torch.where((native_d == 0).unsqueeze(-1), 0, packed)
+
+
 def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Signed grid levels (±8, ±25, ±43) and the step of each 16-value half sub-block."""
-    count = blocks.shape[0]
     bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
-    high_shifts = torch.tensor([0, 2, 4, 6], dtype=torch.int64, device=blocks.device)
-    d = blocks[:, :2].contiguous().view(torch.float16).reshape(-1).float()
-    low = blocks[:, 2:34].to(torch.int64).reshape(count, _IQ2_S_SUBBLOCKS, 4)
-    sign_mask = blocks[:, 34:66].to(torch.int64).reshape(count, _IQ2_S_SUBBLOCKS, 4)
-    qh = blocks[:, 66:74].to(torch.int64).reshape(count, _IQ2_S_SUBBLOCKS)
-    scale_bytes = blocks[:, 74:].to(torch.int64)
-
-    entries = low | (((qh.unsqueeze(-1) >> high_shifts) & 0x3) << 8)
-    local = torch.empty((count, 16), dtype=torch.int64, device=blocks.device)
-    local[:, 0::2] = scale_bytes & 0x0F
-    local[:, 1::2] = scale_bytes >> 4
-    steps = d.unsqueeze(-1) * (0.5 + local.float()) * 0.25
+    entries, sign_mask, local, d = _unpack_fields(blocks)
     signs = 1.0 - 2.0 * ((sign_mask.unsqueeze(-1) >> bit_positions) & 1).float()
+    steps = d.unsqueeze(-1) * (0.5 + local.float()) * 0.25
     levels = iq2_s_grid(blocks.device)[entries] * signs
-    return levels.reshape(count, IQ2_S_BLOCK_SIZE), steps
+    return levels.reshape(-1, IQ2_S_BLOCK_SIZE), steps
 
 
 def _read_local_scales(blocks: torch.Tensor) -> torch.Tensor:
@@ -323,6 +339,8 @@ IQ2_S_FORMAT = GGMLFormat(
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
     int8_group_size=_IQ2_S_INT8_GROUP_SIZE,
     unpack_int8=_unpack_int8,
+    pack_fields=_pack_fields,
+    unpack_fields=_unpack_fields,
     weighted=True,
     choice_groups=16,
     num_choices=_IQ2_S_LOCAL_SCALES,
