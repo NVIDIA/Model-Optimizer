@@ -180,6 +180,8 @@ def test_gym_reference_keeps_the_gym_rules():
         "run-and-babysit-eval",
         "nemo-gym-score-triage",
         "<agent>/mean/reward",
+        "follow_all_instructions_loose",  # IFBench headline differs from the default reward
+        "subtask_accuracy",  # SciCode headline
         "UNVERIFIED",
     ):
         assert needle in gym
