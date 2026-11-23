@@ -292,12 +292,7 @@ def quant_module_set_extra_state(self, state: Any):
     the local shape can be different from the shape in the state due to change
     in tensor parallelism (TP).
     """
-    if state is None:
-        return
-    if not self.allow_post_restore:
-        # Loaded again once converted: only the checkpoint's layout is read, which the keys
-        # sharded_state_dict() requests follow (see restore_sharded_modelopt_state).
-        _read_swiglu_layout(self, state)
+    if state is None or not self.allow_post_restore:
         return
 
     quantizer_state = state.get("modelopt_quantizer_state", None)
@@ -538,6 +533,10 @@ class _MegatronParallelLinear(_ParallelLinear):
             self.gradient_accumulation_fusion = False
 
         super()._setup()
+
+    def modelopt_read_checkpoint_layout(self, state: dict):
+        """Read how a checkpoint loaded into this converted module laid out its state."""
+        _read_swiglu_layout(self, state)
 
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):
         if v.ndim == 4:

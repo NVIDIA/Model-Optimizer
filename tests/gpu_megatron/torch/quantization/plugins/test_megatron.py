@@ -1765,7 +1765,7 @@ def _saving_like_modelopt_0_48(model):
 
 
 def _test_swiglu_weight_quantizer_tp_reshard(
-    tmp_path, config, legacy, compress, lora, save_tp, load_tp, load_pp, rank, size
+    tmp_path, config, legacy, compress, lora, save_tp, load_tp, load_pp, rank, size, mbridge=False
 ):
     initialize_for_megatron(tensor_model_parallel_size=save_tp, seed=SEED)
     source = _gpt_model_provider(tp_size=save_tp, hidden_size=512, activation_func="swiglu")
@@ -1814,9 +1814,20 @@ def _test_swiglu_weight_quantizer_tp_reshard(
         if offset <= int(re.search(r"layers\.(\d+)", k)[1]) < offset + layers_per_stage
     }
     # Loaded twice into the same model: the second load reads the checkpoint's layout again.
-    for _ in range(2):
-        restore_sharded_modelopt_state([target], tmp_path)
-        target = load_distributed_checkpoint(tmp_path, target)
+    for i in range(2):
+        if mbridge:
+            from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
+
+            (target,) = load_modelopt_megatron_checkpoint([target], str(tmp_path))
+        else:
+            # Into a converted model, the restore only reads the layout: it loads no state.
+            with (
+                patch.object(target, "load_state_dict", side_effect=AssertionError)
+                if i
+                else nullcontext()
+            ):
+                restore_sharded_modelopt_state([target], tmp_path)
+            target = load_distributed_checkpoint(tmp_path, target)
         states = _swiglu_fc1_row_state(target, layer_offset=offset)
         assert states.keys() == stage
         for name, state in states.items():
@@ -1870,6 +1881,25 @@ def test_swiglu_weight_quantizer_tp_reshard(
             save_tp,
             load_tp,
             load_pp,
+        )
+    )
+
+
+def test_swiglu_legacy_checkpoint_loads_twice_through_mbridge(dist_workers_size_2, tmp_path):
+    """ModelOpt's Megatron-Bridge loader loads a legacy checkpoint twice into the same model."""
+    pytest.importorskip("megatron.bridge")
+    dist_workers_size_2.run(
+        partial(
+            _test_swiglu_weight_quantizer_tp_reshard,
+            tmp_path,
+            FP8_PC,
+            True,
+            False,
+            False,
+            2,
+            2,
+            1,
+            mbridge=True,
         )
     )
 
