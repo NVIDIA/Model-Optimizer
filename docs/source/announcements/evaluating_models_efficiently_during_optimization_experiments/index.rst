@@ -59,10 +59,11 @@ What should you measure, and how?
 
 We compare two NVFP4 Qwen3.6-35B-A3B checkpoints. Baseline underwent `post-training quantization
 (PTQ) and quantization-aware distillation
-(QAD) <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md>`__,
-preserving accuracy but increasing doomed reasoning loops. Candidate was trained directly from
-Baseline using Kahneman–Tversky Optimization (KTO), which learns from desirable and undesirable
-responses, aiming to reduce those loops while preserving accuracy. We use MMLU-Pro, SciCode and
+(QAD) <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md>`__.
+Even when benchmark accuracy stays stable, quantization may increase verbosity. In the worst
+cases, the extra verbosity takes the form of doomed reasoning loops. Candidate was trained
+directly from Baseline using Kahneman–Tversky Optimization (KTO), which learns from desirable and
+undesirable responses, aiming to reduce those loops while preserving accuracy. We use MMLU-Pro, SciCode and
 AA-Omniscience to illustrate these evaluation guidelines. See the :doc:`reproducibility notes <reproducibility/index>`.
 
 Choose a primary improvement metric before inspecting results. Prefer Candidate if it improves that
