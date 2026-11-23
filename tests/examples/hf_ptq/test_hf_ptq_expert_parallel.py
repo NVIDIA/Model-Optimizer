@@ -316,6 +316,43 @@ def test_only_a_kv_cache_search_is_refused_on_the_routes_this_script_adds(
 
 
 @pytest.mark.parametrize(
+    ("world_size", "use_fsdp2"),
+    [(2, False), (2, True), (1, False)],
+    ids=["replicated", "use_fsdp2", "single_process"],
+)
+@pytest.mark.parametrize("option", ["finalize_algorithm", "format_shard", "merge_shards"])
+def test_options_that_hand_scores_between_runs_are_refused_before_a_multi_rank_load(
+    hf_ptq, monkeypatch, torchrun, world_size, use_fsdp2, option
+):
+    """Finalizing saved scores and scoring or merging format shards hand one process's scores file
+    between runs, so a run of several ranks refuses them before the load, not after it."""
+    _serve(monkeypatch, hf_ptq, LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY))
+    recipe = "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits"
+    flags = {
+        "format_shard": {"auto_quantize_format_shard": (0, 2)},
+        "merge_shards": {"auto_quantize_merge_shards": "shard0.pth,shard1.pth"},
+    }.get(option, {})
+    if option == "finalize_algorithm":
+        autoquant_utils = importlib.import_module("autoquant_utils")
+        searched = autoquant_utils.load_recipe(recipe)
+        finalizing = searched.model_copy(
+            update={
+                "auto_quantize": searched.auto_quantize.model_copy(
+                    update={"finalize_algorithm": "max"}
+                )
+            }
+        )
+        monkeypatch.setattr(autoquant_utils, "load_recipe", lambda _recipe: finalizing)
+    args = _args(torchrun(world_size=world_size), use_fsdp2=use_fsdp2, recipe=recipe, **flags)
+
+    if world_size == 1:
+        hf_ptq.resolve_distribution(args)
+    else:
+        with pytest.raises(ValueError, match="run in one process"):
+            hf_ptq.resolve_distribution(args)
+
+
+@pytest.mark.parametrize(
     ("world_size", "use_fsdp2", "warns"),
     [(2, False, True), (2, True, False), (1, False, False)],
     ids=["replicated", "use_fsdp2", "single_process"],

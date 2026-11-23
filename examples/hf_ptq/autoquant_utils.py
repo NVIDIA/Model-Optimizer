@@ -419,6 +419,23 @@ def _recipe_is_kv_auto_quantize(recipe: str | None) -> bool:
     )
 
 
+def _auto_quantize_hands_scores_between_runs(args: argparse.Namespace) -> bool:
+    """True if the run finalizes saved scores or scores or merges format shards (peeked before
+    model load), which :func:`_auto_quantize_finalize_config` runs in one process only."""
+    # Off unless given, as _auto_quantize_finalize_config reads them, for args built without them.
+    if getattr(args, "auto_quantize_format_shard", None) is not None or getattr(
+        args, "auto_quantize_merge_shards", None
+    ):
+        return True
+    if args.recipe is None:
+        return False
+    loaded_recipe = load_recipe(args.recipe)
+    return (
+        isinstance(loaded_recipe, ModelOptAutoQuantizeRecipe)
+        and loaded_recipe.auto_quantize.finalize_algorithm is not None
+    )
+
+
 def _check_auto_quantize_shard_args(
     args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:

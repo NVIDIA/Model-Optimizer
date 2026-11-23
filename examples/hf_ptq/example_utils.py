@@ -30,7 +30,7 @@ import torch
 import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
-from autoquant_utils import _recipe_is_kv_auto_quantize
+from autoquant_utils import _auto_quantize_hands_scores_between_runs, _recipe_is_kv_auto_quantize
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from safetensors import safe_open
 from transformers import (
@@ -199,6 +199,13 @@ def resolve_distribution(args) -> tuple[DistributionPlan, Any]:
         raise NotImplementedError(
             f"{plan!r}: KV-cache AutoQuantize does not support expert parallelism yet. Quantize "
             "without expert parallelism: with --use_fsdp2, or in a single process."
+        )
+    if plan.world_size > 1 and _auto_quantize_hands_scores_between_runs(args):
+        # Before the load, rather than where the AutoQuantize stage refuses them after it.
+        raise ValueError(
+            f"{plan!r}: auto_quantize.finalize_algorithm, --auto_quantize_format_shard and "
+            "--auto_quantize_merge_shards run in one process; launch hf_ptq without torchrun "
+            "and without --use_fsdp2."
         )
     if plan.world_size > 1 and not args.use_fsdp2 and "lsq" in _calibration_methods(args):
         # Its scale calibration is the algorithm it runs first, synced or refused as that one is,
