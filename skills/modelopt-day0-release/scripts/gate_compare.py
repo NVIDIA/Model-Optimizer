@@ -185,11 +185,40 @@ def evaluate_comparison(baseline, candidate, threshold=0.01, relative=False, sca
     }
 
 
+def scores_from_run_summary(obj):
+    """Return ``{task: score}`` from a run summary (``{"tasks": {task: {"score": ...}}}``).
+
+    A plain ``{task: score}`` mapping passes through unchanged, so either tool's output can
+    be given to the gate. Only tasks whose status is ``SUCCESS`` and whose score is numeric are
+    kept: an ``UNVERIFIED`` or failed task is not compared even if it carries a score. The
+    task-set check in ``evaluate_comparison`` then reports the missing task as a mismatch
+    instead of comparing a gap.
+    """
+    tasks = obj.get("tasks") if isinstance(obj, dict) else None
+    if isinstance(tasks, dict) and tasks and all(isinstance(t, dict) for t in tasks.values()):
+        return {
+            name: t["score"]
+            for name, t in tasks.items()
+            if t.get("status") == "SUCCESS"
+            and isinstance(t.get("score"), (int, float))
+            and not isinstance(t.get("score"), bool)
+        }
+    return obj
+
+
 def main(argv=None):
     """CLI entry point: read baseline/candidate score JSON and print the verdict."""
     p = argparse.ArgumentParser(description="Day-0 compare gate")
-    p.add_argument("--baseline", required=True, help="baseline score JSON {task: score}")
-    p.add_argument("--candidate", required=True, help="candidate score JSON {task: score}")
+    p.add_argument(
+        "--baseline",
+        required=True,
+        help="baseline score JSON: {task: score} or a run summary with per-task scores",
+    )
+    p.add_argument(
+        "--candidate",
+        required=True,
+        help="candidate score JSON: {task: score} or a run summary with per-task scores",
+    )
     p.add_argument("--threshold", type=float, default=0.01, help="max drop fraction (default 0.01)")
     p.add_argument("--relative", action="store_true", help="measure drop relative to baseline")
     p.add_argument(
@@ -200,9 +229,9 @@ def main(argv=None):
 
     try:
         with open(args.baseline) as f:
-            baseline = json.load(f)
+            baseline = scores_from_run_summary(json.load(f))
         with open(args.candidate) as f:
-            candidate = json.load(f)
+            candidate = scores_from_run_summary(json.load(f))
         scales = json.loads(args.scales) if args.scales else None
     except (OSError, json.JSONDecodeError) as e:
         print(json.dumps({"pass": False, "failure_class": "USER_CONFIG_ERROR", "detail": str(e)}))

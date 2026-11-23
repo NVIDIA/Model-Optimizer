@@ -114,7 +114,7 @@ model benefits from them.
 1. Recover existing evidence:
    - Result tables, checkpoints, recipe logs, AutoQuant states, sensitivity
      reports, and active jobs.
-   - Use `modelopt-monitor`, `modelopt-launching-evals`, and `modelopt-compare-results` for execution
+   - Use `modelopt-monitor`, the evaluation tool's skills, and `modelopt-compare-results` for execution
      state and metric provenance.
 
 2. Define the target:
@@ -216,9 +216,9 @@ Do not reimplement workflows that existing skills own:
 | --- | --- |
 | Generate/check a quantized checkpoint | `modelopt-ptq` |
 | Serve a checkpoint or test backend flags | `modelopt-deployment` |
-| Create or submit NEL configs | `modelopt-evaluation` |
-| Resume/debug/analyze live eval runs | `modelopt-launching-evals` |
-| Track active Slurm/NEL jobs | `modelopt-monitor` |
+| Compose, submit, resume, debug or recover evaluations | the evaluation tool's skills (`modelopt-eval-guidance/references/tools/index.md`) |
+| Tool-neutral evaluation duties (vendor reference, run validity, baseline check) | `modelopt-eval-guidance` |
+| Track active Slurm and evaluation jobs | `modelopt-monitor` |
 | Fetch MLflow artifacts | `modelopt-accessing-mlflow` |
 | Compute baseline-vs-candidate deltas | `modelopt-compare-results` |
 

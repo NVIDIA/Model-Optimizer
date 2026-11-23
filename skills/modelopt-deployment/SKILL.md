@@ -136,6 +136,9 @@ For NVFP4 checkpoints, use `--quantization modelopt_fp4`.
 > error: no kernel image is available for execution on the device` (affects the
 > `flashinfer` and `cutlass` NVFP4 backends; `marlin` separately fails on
 > non-64-divisible layer dims).
+
+> **ARM64 or a non-standard compute capability (e.g. sm_121)** needs an NGC vLLM image built for that architecture;
+> the default serving image covers common GPUs only. Ask the user for the architecture if the model card does not say.
 > Cross-check via
 > `recipes.vllm.ai/<org>/<model>?hardware=b300` (JS-rendered — fetch the raw
 > markdown at `github.com/vllm-project/recipes/blob/main/<org>/<model>.md`). For
@@ -216,7 +219,7 @@ Before an accuracy evaluation of a checkpoint, derive the serving deployment exp
 3. Write the record: checkpoint path and revision, serving image, framework version, tensor/data parallel sizes, the full serve flags, parser and chat template, and the source of each value. When a quantizer's checkpoint validation (step 5) already served the checkpoint, write the deployment it used in this format and give it to the evaluation of that checkpoint; otherwise write the record next to the evaluation artifacts.
 4. Give the record to the evaluation tool. For a baseline and its quantized candidate, change only what the quantization requires and list each difference.
 
-A tool that composes its own deployment (as NEL does) keeps doing so. The record is then the cross-check of its resolved settings, not a second deployment.
+A tool that composes its own deployment keeps doing so. The record is then the cross-check of its resolved settings, not a second deployment.
 
 ### 6. Remote deployment (SSH/SLURM)
 

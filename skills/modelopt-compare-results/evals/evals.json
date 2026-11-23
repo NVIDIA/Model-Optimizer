@@ -41,5 +41,19 @@
       "Does not infer significance from overlapping individual score intervals or substitute a p-value against zero for the margin assessment",
       "Explains how the evidence compares without prescribing reruns or a stopping plan"
     ]
+  },
+  {
+    "name": "compare-gym-runs-uses-run-summary-scores",
+    "skills": [
+      "modelopt-compare-results"
+    ],
+    "query": "Compare the baseline and quantized NeMo Gym runs and tell me the accuracy drop.",
+    "files": [],
+    "expected_behavior": [
+      "Takes each task's score from the run summary (the run's MLflow <agent>/mean/reward, 0 to 1 scale, multiplied by 100) and not from a NEL task recipe",
+      "Confirms each run passed the run-validity checks in modelopt-eval-guidance and does not apply NEL Step 9 or the NEL bounded failure policy to a Gym run",
+      "Runs the external baseline check from modelopt-eval-guidance before applying the candidate-delta gate",
+      "Reports per-task timeout and output-limit counts for both runs"
+    ]
   }
 ]

@@ -142,8 +142,9 @@ with `DEPLOYMENT_HEALTH_FAILED`. When that happens, **drop to the deployment
 skill** to reproduce and debug serving in isolation (serve the checkpoint
 standalone, confirm `/health` + one generation, iterate on flags / TP / image /
 env vars) rather than burning full eval cycles on a broken endpoint — then carry
-the working command back into NEL's `deployment.command` and resume the eval. If
-the checkpoint genuinely can't serve, `POINT_INFEASIBLE`.
+the working settings back into the serving record (`modelopt-deployment`, step 5c) and the tool's
+deployment setting (its reference under `references/tools/`), and resume with the tool's recovery
+guidance; a broken deployment is never fixed by changing the evaluation's limits. If the checkpoint genuinely can't serve, `POINT_INFEASIBLE`.
 
 **Before submitting: assert baseline/candidate config parity.** The candidate
 config must differ from the baseline's in nothing but checkpoint path and served
@@ -154,11 +155,13 @@ diff <(grep -vE 'checkpoint_path|served_model_name' baseline.yaml) \
      <(grep -vE 'checkpoint_path|served_model_name' candidate.yaml)
 ```
 
-Any other difference biases the comparison and invalidates the gate: a mismatched
+For a tool that stores resolved configs, diff those under the same rule (its reference under
+`references/tools/` says where). Any other difference biases the
+comparison and invalidates the gate: a mismatched
 `parallelism` between the two sides was worth ~2 pp, enough to invert the sign of
 the delta. If the model card splits sampling params per scenario, apply the same
-split to both sides. Never set an unbounded `request_timeout` (`1e9`) — it turns a
-transient stall into a job that holds its GPUs until the wall clock kills it.
+split to both sides. Never set an unbounded request timeout, and change the evaluation's timeouts only as
+the tool's recovery guidance allows (its reference under `references/tools/`).
 
 Gate:
 
@@ -187,10 +190,10 @@ confidence interval above the minimum acceptable margin.
 
 Apply Step 3's declared run/stopping plan.
 
-**Re-running does not guarantee fresh samples.** With a warm NEL response cache a "re-run" can
-replay cached responses — two runs came back bit-identical to 16 digits. But an equal score is a
-signal to check provenance (invocation id, output dir, response artifacts), **not** proof of replay:
-discrete-scored tasks tie legitimately. Confirm replay before discarding a run as a duplicate.
+**Re-running does not guarantee fresh samples.** A tool's response cache can replay cached responses (two
+runs came back bit-identical to 16 digits); the tool's reference under `references/tools/` says how to check.
+An equal score is a signal to check provenance (run id, output dir, response artifacts), **not** proof of
+replay: discrete-scored tasks tie legitimately. Confirm replay before discarding a run as a duplicate.
 
 After recording the external status, produce per-task deltas and run:
 
@@ -229,24 +232,27 @@ decision (external sanity failures and implausible scores take precedence):
 `gate_compare.py` does not measure verbosity, so stopping after Step 5 leaves a
 hard gate unmeasured. Step 5's ACCEPT is accuracy-only — Step 6 requires both.
 
+The gate reads each side's token counts either from result directories (`--baseline`/`--candidate`; the invocation
+is in the tool's reference under `references/tools/`) or from MLflow:
+
+To read from MLflow instead of synced result trees (every supported tool exports to the same server),
+give each side a JSON file `{task: [run_id, ...]}` taken from the
+handoff (one run is one benchmark of one submission, so a task can list several):
+
 ```bash
 python "$SKILL_DIR/scripts/gate_verbosity.py" \
-    --baseline <baseline_eval_root> --candidate <candidate_eval_root> \
-    --glob 'eval_*' --exclude _high --threshold 0.05
+    --baseline-mlflow baseline_runs.json --candidate-mlflow candidate_runs.json \
+    --mlflow-uri "$MLFLOW_TRACKING_URI" --threshold 0.05
 ```
+
+The gate uses a run only when its status is `FINISHED` and a token count exists, and lists every
+run it did not use, with the reason, under `harvest_diagnostics.runs_not_used`. Metric names are
+per tool, in its adapter (`scripts/<tool>_adapter.py`) and reference.
 
 Exit codes follow the other gates: `0` pass, `1` the gate failed, `2` it could not read its input.
 A `2` means fix the invocation, not the checkpoint — check `--baseline`/`--candidate`, `--glob`
-(`no_files_matched` names the pattern that missed), and `--exclude`. If the detail names
-`collapsed_keys`, the artifact tree gave several tasks one name: point the gate at a tree whose
-task dirs are `<harness>.<task>` rather than `<invocation_id>.<job_index>`, or re-sync so each
-`artifacts/` carries its own `config.yml`.
-
-Read `response_stats.avg_completion_tokens` from each task's
-`artifacts/eval_factory_metrics.json`. Do **not** use the `reasoning.*` fields:
-`reasoning.*_tokens` are always `0` (only the reasoning/content split is missing)
-and the `*_words` siblings are a proxy that can disagree with the gate — one task
-read +6.10% FAIL in words and +1.32% PASS in tokens.
+(`no_files_matched` names the pattern that missed), and `--exclude`. The tool's reference under
+`references/tools/` explains any other detail.
 
 The gate is two-sided; a large drop in output length is also a change.
 
@@ -277,8 +283,8 @@ the final path after any move.
 ## Triage (gate failure → decision)
 
 For completed evaluations, apply
-[evaluation run validation](../modelopt-evaluation/references/run-validation.md) before
-triage; its policy overrides retry actions below. Warn but do not retry solely
+[run validity](../modelopt-eval-guidance/references/run-validity.md) (and the tool's own validity step in its reference under `references/tools/`) before
+triage; the tool's failure policy overrides retry actions below. Warn but do not retry solely
 for failures below tolerance. For runs that fail tolerance or an independent
 validation check, return findings and a recommendation to the parent/user for
 review; do not automatically resubmit.
@@ -293,9 +299,10 @@ Map a gate's `failure_class` to the next action:
 | `SIZE_NOT_REDUCED` | The output is not smaller than the source. If the recipe cannot shrink the source (e.g. mxfp4 under nvfp4, or fp8 under fp8), record `source_precision` in the validation summary and re-run the gate — that states *why* the growth is expected. Otherwise treat it as a real compression failure: check that the recipe matched the intended parameter mass and that the exporter did not retain the original tensors. `accept_size_growth: true` waives it unconditionally (no growth bound) and is a last resort, not the fix — it records no reason, so prefer `source_precision` where the claim is checkable. |
 | `CHECKPOINT_NOT_SERVABLE` | The Step 2b canary could not load/generate. Usually a tensor-naming or config-schema mismatch between the exporter and the serving stack, or missing/dangling auxiliary files (tokenizer). Fix the export; do not evaluate. |
 | `VERBOSITY_EXCEEDED` | Re-check run hygiene first (mixed reasoning effort, partial runs, unequal sample counts) — that has explained every false positive so far. If the delta survives matched, complete runs, it is a real behavioural change; do not publish on accuracy alone. |
-| `DEPLOYMENT_HEALTH_FAILED` | Drop to the **deployment** skill: reproduce serving standalone (`/health` + one generation), debug flags / image / TP / env, then carry the working command into NEL's `deployment.command` and retry the eval. If it can't serve, `POINT_INFEASIBLE`. |
+| `DEPLOYMENT_HEALTH_FAILED` | Drop to the **deployment** skill: reproduce serving standalone (`/health` + one generation), debug flags / image / TP / env, then carry the working settings back as in Step 4 and retry the eval. If it can't serve, `POINT_INFEASIBLE`. |
 | `EVAL_JUDGE_FAILED` | For completed runs, apply evaluation run validation above; return tolerance failures to the parent/user without automatic retry. Otherwise investigate auth/rate limits before retrying. |
 | `SAMPLE_ACCOUNTING_FAILED` | Investigate dropped/failed samples before trusting scores. |
+| `EVAL_UNVERIFIED` | The run finished but some grading was not recorded (the tool reports `UNVERIFIED`). Report the score as unverified, do not compare it, and follow the evaluation tool's recovery guidance before re-gating. Never fabricate or regrade a score. |
 | `EXTERNAL_BASELINE_MISMATCH` | Investigate baseline configuration, correct it, rerun the baseline, and repeat external sanity before comparison. |
 | `USER_CONFIG_ERROR` | Correct it from the request, workspace, or model/config metadata and retry; if irrecoverable, return `ANOMALOUS` with evidence. |
 | `UNKNOWN` | Investigate with the owning domain skill; if unresolved, return `ANOMALOUS` with the evidence and next automated retry or patch action. |

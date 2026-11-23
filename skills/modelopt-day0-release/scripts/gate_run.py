@@ -16,7 +16,8 @@
 """Day-0 evaluation-run gate.
 
 Validates that a completed evaluation run is trustworthy before its scores are
-compared. Mirrors the checks in modelopt-evaluation/references/run-validation.md. Pure
+compared. Mirrors the checks in modelopt-eval-guidance/references/run-validity.md
+(the tool's own policy is in its reference under references/tools/). Pure
 decision logic in ``evaluate_run`` (unit-tested without a cluster); ``main``
 reads a run-summary JSON and prints the verdict.
 
@@ -24,7 +25,7 @@ The run summary is a dict with, per task:
     {
       "tasks": {
         "<task>": {
-          "status": "SUCCESS" | "FAILED" | "RUNNING" | "PENDING" | "TIMEOUT" | "RESUMING",
+          "status": "SUCCESS" | "UNVERIFIED" | "FAILED" | "RUNNING" | "PENDING" | "TIMEOUT" | "RESUMING",
           "expected_samples": int,
           "scored_samples": int,
           "score": float | null,          # canonical score, if extracted
@@ -33,13 +34,20 @@ The run summary is a dict with, per task:
         }
       }
     }
-Apply run-validation.md's bounded failure policy before constructing this
+Apply the tool's failure policy (its reference under references/tools/) before constructing this
 summary; this gate does not verify failure rates or raw evidence. Preserve
 accepted failures in warnings and their original artifacts, never erase blockers.
 Only a terminal SUCCESS with complete, numeric scores passes. Non-terminal
 statuses (RUNNING/PENDING/TIMEOUT/RESUMING) do NOT pass — the run hasn't
-finished — but they classify as INFRA_TRANSIENT (wait for NEL to resume/finish;
-not a real regression), distinct from a terminal FAILED.
+finished — but they classify as INFRA_TRANSIENT (wait for the tool to resume/finish;
+not a real regression), distinct from a terminal FAILED. UNVERIFIED (the run
+finished but some grading was not recorded, as a tool may report it) does not pass
+either and classifies as EVAL_UNVERIFIED: report the score as unverified, never as
+verified.
+
+The same summary comes from any tool: a tool whose own run summary uses exactly these fields
+(status, expected_samples, scored_samples, score, errors, warnings) passes it through; otherwise
+the evaluator builds it from the validated run (the tool's reference says which).
 """
 
 import argparse
@@ -48,7 +56,9 @@ import math
 import sys
 
 _TERMINAL_OK = "SUCCESS"
-# Not done yet — NEL resumes/finishes these; transient, not a real failure.
+# Finished, but some grading was not recorded: neither a pass nor a model failure.
+_UNVERIFIED = "UNVERIFIED"
+# Not done yet — the tool resumes/finishes these; transient, not a real failure.
 _NON_TERMINAL = {"TIMEOUT", "RESUMING", "RUNNING", "PENDING"}
 
 
@@ -81,6 +91,9 @@ def evaluate_run(summary):
         if status in _NON_TERMINAL:
             ok = False
             reasons.append(f"status {status}: not terminal yet (resume/finish expected)")
+        elif status == _UNVERIFIED:
+            ok = False
+            reasons.append("status UNVERIFIED: run complete but some grading was not recorded")
         elif status != _TERMINAL_OK:
             ok = False
             reasons.append(f"status {status!r} is not SUCCESS")
@@ -126,6 +139,8 @@ def evaluate_run(summary):
     elif "not terminal" in flat:
         # Non-terminal (RUNNING/PENDING/TIMEOUT/RESUMING): wait for resume/finish.
         fc = "INFRA_TRANSIENT"
+    elif "status unverified" in flat:
+        fc = "EVAL_UNVERIFIED"
     elif "sample accounting" in flat or "no score" in flat or "score not numeric" in flat:
         fc = "SAMPLE_ACCOUNTING_FAILED"
     else:

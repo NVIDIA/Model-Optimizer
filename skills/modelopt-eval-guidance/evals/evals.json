@@ -1,0 +1,79 @@
+[
+  {
+    "id": "gym-evaluation-loads-neutral-guidance",
+    "question": "Evaluate this NVFP4 checkpoint on GPQA and IFBench with NeMo Gym and tell me whether the baseline score is credible.",
+    "expected_skill": "modelopt-eval-guidance",
+    "expected_script": null,
+    "ground_truth": "Uses the NeMo Gym evaluation skills named by the task and does not load the NEL evaluation skills or run nel commands. Loads modelopt-eval-guidance for the vendor reference, run validity and external baseline check. Applies the external baseline check: exact-model published score only, a protocol-match checklist, and the statuses verified, failed or externally unverified. Treats a wrong, truncated or empty answer as the model's result under the tool's own health verdict and does not add a response-level invalidation of its own. Reports per-side truncation and output-limit counts before the score.",
+    "expected_behavior": [
+      "Uses the NeMo Gym evaluation skills named by the task and does not load the NEL evaluation skills or run nel commands",
+      "Loads modelopt-eval-guidance for run validity and the external baseline check",
+      "Applies the external baseline check: exact-model published score only, a protocol-match checklist, and the statuses verified, failed or externally unverified",
+      "Treats a wrong, truncated or empty answer as the model's result under the tool's own health verdict and does not add a response-level invalidation of its own",
+      "Reports per-side truncation and output-limit counts before the score"
+    ]
+  },
+  {
+    "id": "read-scores-and-tokens-from-mlflow",
+    "question": "Here are the MLflow run ids for the baseline and quantized runs. Pull the scores and the average output length.",
+    "expected_skill": "modelopt-eval-guidance",
+    "expected_script": null,
+    "ground_truth": "Reads the runs from MLflow by run id and uses a run only when its status is FINISHED and the metric exists. Uses the tool's own metric names: NEL answer_tokens_statistics_avg at the repeat count, NeMo Gym <agent>/mean/output_tokens and <agent>/mean/reward on a 0 to 1 scale. Takes the task status from the tool's verdict, not from the MLflow run status, because a benchmark run can be FINISHED while its submission failed. Combines equal-repeat runs by averaging instead of reading one run as the whole benchmark.",
+    "expected_behavior": [
+      "Reads the runs from MLflow by run id and uses a run only when its status is FINISHED and the metric exists",
+      "Uses the tool's own metric names: NEL answer_tokens_statistics_avg at the repeat count, NeMo Gym <agent>/mean/output_tokens and <agent>/mean/reward on a 0 to 1 scale",
+      "Takes the task status from the tool's verdict, not from the MLflow run status, because a benchmark run can be FINISHED while its submission failed",
+      "Combines equal-repeat runs by averaging instead of reading one run as the whole benchmark"
+    ]
+  },
+  {
+    "id": "pick-quantization-sensitive-benchmarks",
+    "question": "Which benchmarks should I run to validate an NVFP4 checkpoint of a text model?",
+    "expected_skill": "modelopt-eval-guidance",
+    "expected_script": null,
+    "ground_truth": "Presents a recommended set with sensitivity (for example GPQA, SciCode and AA-LCR) and asks which to include. Flags AA-LCR as the most sensitive when the checkpoint supports the context length. States that GDPVal is not covered and the result is not an aggregate AA Index. Keeps the judge and user-simulator models fixed across baseline and quantized runs.",
+    "expected_behavior": [
+      "Presents a recommended set with sensitivity (for example GPQA, SciCode and AA-LCR) and asks which to include",
+      "Flags AA-LCR as the most sensitive when the checkpoint supports the context length",
+      "States that GDPVal is not covered and the result is not an aggregate AA Index",
+      "Keeps the judge and user-simulator models fixed across baseline and quantized runs"
+    ]
+  },
+  {
+    "id": "looping-model-doom-loop-handling",
+    "question": "Canary responses for my quantized model end in one block repeated until the token limit. What should I do?",
+    "expected_skill": "modelopt-eval-guidance",
+    "expected_script": null,
+    "ground_truth": "Shows the evidence and asks before turning on repetition detection, because it changes the evaluation protocol. Checks the serving backend version supports repetition_detection (vLLM 0.17.0 or later) and uses the probe; says SGLang and TRT-LLM do not support it. Uses identical values for baseline and candidate and reports scores as detector-on. Says how the field reaches the server depends on the tool and does not claim a Gym placement it has not verified.",
+    "expected_behavior": [
+      "Shows the evidence and asks before turning on repetition detection, because it changes the evaluation protocol",
+      "Checks the serving backend version supports repetition_detection (vLLM 0.17.0 or later) and uses the probe; says SGLang and TRT-LLM do not support it",
+      "Uses identical values for baseline and candidate and reports scores as detector-on",
+      "Says how the field reaches the server depends on the tool and does not claim a Gym placement it has not verified"
+    ]
+  },
+  {
+    "id": "retained-smoke-server-is-not-an-evaluation-endpoint",
+    "question": "My PTQ smoke server from the last step is still up. Just evaluate the checkpoint against it with the evaluation tool.",
+    "expected_skill": "modelopt-eval-guidance",
+    "expected_script": null,
+    "ground_truth": "Evaluates through the tool's own managed deployment and does not use the retained smoke server. Says a retained PTQ smoke server is not authorization to evaluate, and uses an external endpoint only if the user explicitly asks. Writes the serving record (modelopt-deployment step 5c) when the tool needs a deployment from the caller.",
+    "expected_behavior": [
+      "Evaluates through the tool's own managed deployment and does not use the retained smoke server",
+      "Says a retained PTQ smoke server is not authorization to evaluate, and uses an external endpoint only if the user explicitly asks",
+      "Writes the serving record (modelopt-deployment step 5c) when the tool needs a deployment from the caller"
+    ]
+  },
+  {
+    "id": "no-scores-from-an-incomplete-run-and-mlflow-export-is-verified",
+    "question": "The evaluation job finished but two of the eight repeats never scored. Report the accuracy.",
+    "expected_skill": "modelopt-eval-guidance",
+    "expected_script": null,
+    "ground_truth": "Does not report a score from the incomplete run and labels it incomplete with the findings. Does not resubmit the completed run on its own, and returns a recommendation to the parent or user. Configures the tool's MLflow export, verifies the run arrived, and says in the handoff whether it did.",
+    "expected_behavior": [
+      "Does not report a score from the incomplete run and labels it incomplete with the findings",
+      "Does not resubmit the completed run on its own, and returns a recommendation to the parent or user",
+      "Configures the tool's MLflow export, verifies the run arrived, and says in the handoff whether it did"
+    ]
+  }
+]

@@ -120,8 +120,8 @@ Workspaces carry over across the PTQ → Deploy → Eval pipeline. Each stage ad
 ```text
 workspaces/<session_id>/model-name-format/
   output/              ← PTQ: quantized checkpoint
-  eval_results/        ← Evaluation: NEL artifacts (results.yml per task)
-  eval_config.yaml     ← Evaluation: NEL config
+  eval_results/        ← Evaluation: result artifacts (the evaluation tool's own result layout; see `modelopt-eval-guidance/references/tools/`)
+  eval_config.yaml     ← Evaluation: the tool's run config
   scripts/             ← Deployment/PTQ: custom run scripts
   logs/                ← All: SLURM job logs
 ```

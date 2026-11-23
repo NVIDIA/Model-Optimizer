@@ -1,0 +1,27 @@
+[
+  {
+    "id": "register-a-gym-evaluation-job",
+    "question": "I just submitted a NeMo Gym evaluation, run id gym-job-20261118T042308Z-c3a9f3 with Slurm jobs 1980064 and 1984590. Keep an eye on it.",
+    "expected_skill": "modelopt-monitor",
+    "expected_script": null,
+    "ground_truth": "Registers one type gym entry for the run id and one type slurm entry per Slurm job id. Uses sacct for the Slurm terminal check and does not use nel status or nel commands for the Gym run. Leaves run-level health and recovery decisions to the Gym evaluation skill and reports its verdict when it changes. Reports only state changes and does not cancel jobs that are not the run's own.",
+    "expected_behavior": [
+      "Registers one type gym entry for the run id and one type slurm entry per Slurm job id",
+      "Uses sacct for the Slurm terminal check and does not use nel status or nel commands for the Gym run",
+      "Leaves run-level health and recovery decisions to the Gym evaluation skill and reports its verdict when it changes",
+      "Reports only state changes and does not cancel jobs that are not the run's own"
+    ]
+  },
+  {
+    "id": "nel-job-still-uses-nel-status",
+    "question": "Check on NEL invocation 7a3f9c21d0e84b55, is it done?",
+    "expected_skill": "modelopt-monitor",
+    "expected_script": null,
+    "ground_truth": "Uses nel status for a NEL job and the NEL state vocabulary. Reports the state change against last_status and updates the registry. On failure fetches nel info with logs instead of waiting to be asked.",
+    "expected_behavior": [
+      "Uses nel status for a NEL job and the NEL state vocabulary",
+      "Reports the state change against last_status and updates the registry",
+      "On failure fetches nel info with logs instead of waiting to be asked"
+    ]
+  }
+]

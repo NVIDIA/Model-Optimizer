@@ -1,6 +1,6 @@
 ---
 name: modelopt-compare-results
-description: Establish baseline-vs-candidate evaluation plans, delegate missing evaluations, compare validated results, and decide quantization feasibility. Use when the user asks to compare baseline vs quantized runs, explain an accuracy drop/regression, verify whether a quantized checkpoint is acceptable, or compare NEL/MLflow evaluation outputs. Do NOT use for generic single-model evaluation without comparison intent (use modelopt-evaluation), live NEL status/debugging (use modelopt-launching-evals), or generic MLflow browsing without a comparison goal (use modelopt-accessing-mlflow).
+description: Establish baseline-vs-candidate evaluation plans, delegate missing evaluations, compare validated results, and decide quantization feasibility. Use when the user asks to compare baseline vs quantized runs, explain an accuracy drop/regression, verify whether a quantized checkpoint is acceptable, or compare evaluation outputs (from result files or MLflow). Do NOT use for generic single-model evaluation without comparison intent (use modelopt-evaluation), live evaluation status/debugging (use the tool's own skills, listed in `modelopt-eval-guidance/references/tools/index.md`), or generic MLflow browsing without a comparison goal (use modelopt-accessing-mlflow).
 license: Apache-2.0
 ---
 
@@ -21,17 +21,21 @@ change is being measured, typically a further quantized version of the baseline.
    config should match benchmark versions, task configs, serving args, token
    limits, dataset setup, credentials, cluster, and container as closely as
    possible; change only the model/checkpoint and checkpoint-specific serving or
-   quantization flags.
+   quantization flags. The two precisions' model cards may publish different sampling:
+   use one setting for both sides and record it.
 3. Fetch the baseline and candidate task list, configs, score artifacts, and
-   logs. If the user provides MLflow runs or invocation IDs, use the
-   accessing-mlflow skill to fetch configs and artifacts.
-4. Confirm each run passed evaluation Step 9, "Verify completed evaluation run",
-   before comparing scores. If not, validate logs, server health,
+   logs. If the user provides MLflow runs or invocation IDs, fetch
+   configs and artifacts as the tool's reference in `references/tools/` says; for runs
+   of any tool, `modelopt-eval-guidance` (`references/run-validity.md`, "Reading
+   results from MLflow") lists the metrics and tags to use.
+4. Confirm each run passed the run-validity checks in `modelopt-eval-guidance`
+   (`references/run-validity.md`) and the tool's own validity step in its reference
+   under `references/tools/` before comparing scores. If not, validate logs, server health,
    judge/code-execution status, sample accounting, and reasoning parsing before
    computing deltas.
-5. For each task, use the canonical score field from the matching evaluation
-   skill task recipe, `recipes/tasks/<task>.md`, under **Score Extraction**.
-6. Use the evaluation skill's `references/run-validation.md` to perform the
+5. For each task, use the score field the evaluation tool defines for the benchmark:
+   the tool's reference under `references/tools/` says where it is.
+6. Use `modelopt-eval-guidance` (`references/external-baseline-check.md`) to perform the
    **External Baseline Sanity Check**. Record each source URL, protocol
    difference, and task status before applying the candidate-delta gate. A
    failed baseline blocks a success verdict; correct and rerun it first. If no
@@ -64,8 +68,8 @@ the validated runs are comparable:
    endpoint class, prompt, and scoring config.
 7. The same accuracy metric and score field is used for both runs.
 8. Timeout policies, effective limits, and failure scoring/exclusions match.
-   Apply **Timeout and Output-Limit Accounting** in the evaluation skill's
-   `references/run-validation.md` to both runs; matching limits alone cannot
+   Apply **Timeout and Output-Limit Accounting** in `modelopt-eval-guidance`
+   (`references/run-validity.md`) to both runs; matching limits alone cannot
    rule out serving-speed effects on scores.
 9. **Baseline precision matches the gate.** A `<1pp vs BF16` gate requires a true
    full-precision (BF16) baseline. Many models ship *natively quantized* (e.g.
@@ -77,14 +81,15 @@ the validated runs are comparable:
    report that gate as inconclusive; do not reinterpret it as an FP8/INT4 gate.
 
 For SciCode, keep `num_repeats: 1` and require **at least 8 runs per side**, comparing
-the two means — see the evaluation skill's `recipes/tasks/aa/scicode.md`. Fewer
+the two means; the tool's reference under `references/tools/` says how a run maps to repeats (confirm what a run
+contains before counting runs per side). Fewer
 than 8 valid runs on a side is `INDETERMINATE`, not a delta.
 
 If any item differs, either rerun with matched settings or label the result as
 not an apples-to-apples quantization comparison.
 
 These checks compare the baseline and candidate to each other. The external
-baseline check in the evaluation skill's `references/run-validation.md`
+baseline check in `modelopt-eval-guidance` (`references/external-baseline-check.md`)
 separately tests whether the baseline's absolute score is credible; both guards
 must be reported.
 
