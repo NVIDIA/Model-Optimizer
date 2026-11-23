@@ -113,8 +113,8 @@ On SciCode, the candidate is more accurate than the baseline (+1.38 pp; p = 0.01
 Check for regressions
 ~~~~~~~~~~~~~~~~~~~~~
 
-No evidence of a difference does not establish no regression. Choose an acceptable accuracy-loss
-margin, then use a non-inferiority test to assess whether the loss is smaller. The checks below use
+One-sided tests for improvement do not tell us about possible regression. 
+Choose an acceptable accuracy-loss margin, then use a non-inferiority test to assess whether the loss is smaller. The checks below use
 one-sided paired t-tests. “Yes” means the stated accuracy loss is ruled out (p < 0.05);
 “no evidence” means it has not been ruled out.
 
