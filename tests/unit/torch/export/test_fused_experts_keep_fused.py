@@ -53,6 +53,10 @@ from modelopt.torch.export.moe_utils import (
     split_fused_experts_state_dict,
 )
 from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
+
+# Nemotron-H's experts wrapper. These tests quantize the experts on their own, with no model
+# config whose type would load it on conversion.
+from modelopt.torch.models.nemotron_h import modeling_ptq  # noqa: F401
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
