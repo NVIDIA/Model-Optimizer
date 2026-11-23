@@ -331,6 +331,10 @@ After completing all 20 repetitions, we analyzed subsets of the saved responses:
 subtasks with one repetition, then additional repetitions on all 294 subtasks. In this retrospective
 comparison, the p-value first fell below 0.05 at 588 responses per model and below 0.001 at 882.
 
+A large drop in cap-hit rate from Baseline to Candidate may be detectable with only a few
+repetitions. Use a small pilot to estimate the size of the difference for your checkpoints
+and plan how many subtasks and repetitions to run.
+
 .. image:: images/scicode-cap-data-volume.svg
    :alt: SciCode cap-hit rate evidence excluding the 44 recovery-training subtasks: blue points increase coverage from ten to 294 subtasks with one repetition; green points add repetitions on all 294 subtasks, reaching 5,880 responses per model. Subsets of ten to 150 subtasks observe no cap hits and have no informative bootstrap interval. The lower panel shows permutation p-values.
    :width: 640px
