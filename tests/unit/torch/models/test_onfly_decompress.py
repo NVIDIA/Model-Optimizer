@@ -26,6 +26,7 @@ import copy
 import importlib.metadata
 import json
 import sys
+import threading
 from concurrent.futures import Future
 from types import SimpleNamespace
 
@@ -355,7 +356,16 @@ def test_install_rewrites_only_the_per_expert_weight_converters(monkeypatch):
     monkeypatch.setattr(mu, "get_model_conversion_mapping", stock_mapping)
     monkeypatch.setattr(onfly, "_read_compression", lambda cfg: compression)
     config = SimpleNamespace()
-    onfly.install_onfly_decompress(config)
+    # It publishes its hook under the lock the Nemotron-H puzzle loader restores its own under.
+    with onfly.CONVERSION_HOOK_LOCK:
+        install = threading.Thread(
+            target=onfly.install_onfly_decompress, args=(config,), daemon=True
+        )
+        install.start()
+        install.join(0.2)
+        assert install.is_alive()
+    install.join(10)
+    assert not install.is_alive()
     model = SimpleNamespace(config=config)
 
     # positionally, the way from_pretrained calls it, and a later parameter too

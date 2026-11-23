@@ -17,6 +17,7 @@ import copy
 import fnmatch
 import json
 import shutil
+import threading
 import warnings
 from unittest.mock import Mock
 
@@ -39,6 +40,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_activation_scaling_factor, postprocess_state_dict
 from modelopt.torch.export.unified_export_hf import _process_quantized_modules
 from modelopt.torch.models import hf
+from modelopt.torch.models._onfly_decompress import CONVERSION_HOOK_LOCK
 from modelopt.torch.models.nemotron_h import mtp as adapter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg_context
@@ -690,14 +692,23 @@ def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch)
     loaded.save_pretrained(tmp_path / "saved")
     assert set(load_file(tmp_path / "saved" / "model.safetensors")) == set(checkpoint)
 
-    # A hook installed over the patch during a load, as _onfly_decompress's can be, stays, and the
-    # patch it holds then passes a puzzle model to transformers' own collection.
+    # A hook another thread installs over the patch as the load ends, as _onfly_decompress's
+    # install can, takes the lock the teardown waits for, stays, and the patch it holds then passes
+    # a puzzle model to transformers' own collection.
     def hook(*args, **kwargs):
         return below(*args, **kwargs)
 
-    with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
+    load = hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True)
+    load.__enter__()
+    with CONVERSION_HOOK_LOCK:
+        teardown = threading.Thread(target=load.__exit__, args=(None, None, None), daemon=True)
+        teardown.start()
+        teardown.join(0.2)
+        assert teardown.is_alive()
         below = modeling_utils.get_model_conversion_mapping
         modeling_utils.get_model_conversion_mapping = hook
+    teardown.join(10)
+    assert not teardown.is_alive()
     assert modeling_utils.get_model_conversion_mapping is hook
     assert repr(hook(loaded)) == repr(stock[1](loaded))
     # Collected under that hook, a puzzle model's conversions would bypass it: its load is refused.

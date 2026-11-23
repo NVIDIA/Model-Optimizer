@@ -34,6 +34,7 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.masking_utils import create_causal_mask
 from transformers.models.nemotron_h import modeling_nemotron_h
 
+from modelopt.torch.models._onfly_decompress import CONVERSION_HOOK_LOCK
 from modelopt.torch.quantization.model_calib import (
     _needs_activation_forward_for_max_calib,
     _WeightInputHook,
@@ -267,16 +268,9 @@ def _puzzle_renames(config: dict):
             "sub-model's weight renames to that sub-model (5.9 or later); found "
             f"{transformers.__version__}."
         )
-    original = modeling_utils.get_model_conversion_mapping
-    if original is not conversion_mapping.get_model_conversion_mapping:
-        # The puzzle model's conversions come from transformers' own collection, bypassing it.
-        raise RuntimeError(
-            "Loading a nemotron_h_puzzle language model needs transformers' own conversion "
-            f"collection, which {original!r} replaces; load the checkpoint in a new process."
-        )
     loading = True
 
-    @wraps(original)
+    @wraps(conversion_mapping.get_model_conversion_mapping)
     def patch(model, *args, **kwargs):
         if loading and _has_puzzle_language_model(getattr(model, "config", None)):
             return _collect_puzzle_conversions(model, *args, **kwargs)
@@ -284,13 +278,22 @@ def _puzzle_renames(config: dict):
         # after the load, through a hook installed over this patch during it.
         return original(model, *args, **kwargs)
 
-    modeling_utils.get_model_conversion_mapping = patch
+    with CONVERSION_HOOK_LOCK:
+        original = modeling_utils.get_model_conversion_mapping
+        if original is not conversion_mapping.get_model_conversion_mapping:
+            # The puzzle model's conversions come from transformers' own collection, bypassing it.
+            raise RuntimeError(
+                "Loading a nemotron_h_puzzle language model needs transformers' own conversion "
+                f"collection, which {original!r} replaces; load the checkpoint in a new process."
+            )
+        modeling_utils.get_model_conversion_mapping = patch
     try:
         yield
     finally:
         loading = False
-        if modeling_utils.get_model_conversion_mapping is patch:
-            modeling_utils.get_model_conversion_mapping = original
+        with CONVERSION_HOOK_LOCK:
+            if modeling_utils.get_model_conversion_mapping is patch:
+                modeling_utils.get_model_conversion_mapping = original
 
 
 @contextmanager

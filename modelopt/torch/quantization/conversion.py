@@ -292,6 +292,15 @@ def _registers_each_module_once(model: nn.Module) -> bool:
     return True
 
 
+def _runs_registration_hooks() -> bool:
+    # A replaced quantizer, or one given a buffer or parameter, runs PyTorch's global registration
+    # hooks.
+    return any(
+        getattr(nn.modules.module, f"_global_{kind}_registration_hooks", None)
+        for kind in ("module", "parameter", "buffer")
+    )
+
+
 def _candidate_modules(
     quant_model: nn.Module, wildcard_or_filter_func: str | Callable, subtree: bool
 ):
@@ -359,7 +368,9 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
     # Whether wildcard-free names walk only their subtree, decided at the first one: not where
     # fnmatch ignores case, nor in a model that registers a module twice, since named_modules skips
-    # its second name and a subtree walk cannot tell which name that is.
+    # its second name and a subtree walk cannot tell which name that is, nor while PyTorch's global
+    # registration hooks are set: replacing a quantizer runs them, and they can register a module a
+    # second time mid-call.
     subtree = None
     for entry in quant_cfg:
         quantizer_name: str = entry["quantizer_name"]
@@ -377,7 +388,11 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
         else:
             parent_class = None
         if subtree is None and not _WILDCARD_RE.search(quantizer_name):
-            subtree = _CASE_SENSITIVE_NAMES and _registers_each_module_once(quant_model)
+            subtree = (
+                _CASE_SENSITIVE_NAMES
+                and not _runs_registration_hooks()
+                and _registers_each_module_once(quant_model)
+            )
 
         if cfg is None:
             # No cfg: only toggle the enable state, leave all other attributes unchanged.

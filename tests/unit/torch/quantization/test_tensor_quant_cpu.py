@@ -743,28 +743,50 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         assert walks == 2
 
 
-@pytest.mark.parametrize("nested", [False, True], ids=["later-entry", "nested-call"])
-def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_shares_a_layer(nested):
-    """A named entry acts as its wildcard does after a calibrator built mid-call shares a layer,
-    whether the entry comes later in that call or in a call the calibrator makes."""
+@pytest.mark.parametrize(
+    ("hooked", "nested"),
+    [(False, False), (False, True), (True, False)],
+    ids=["later-entry", "nested-call", "registration-hook"],
+)
+def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_layer(
+    hooked, nested
+):
+    """A named entry acts as its wildcard does after code run mid-call shares a layer: a calibrator
+    the caller supplies, for a later entry of that call or in a call the calibrator makes, or a
+    module registration hook, which replacing a quantizer runs."""
 
     def configured(weight_quantizer, sub_quantizer):
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
         model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
         sub_entry = {"quantizer_name": sub_quantizer, "enable": False}
 
+        def share():
+            model[1] = model[0]  # named_modules skips the second name
+            if nested:
+                mtq.set_quantizer_by_cfg(model, [sub_entry])
+
         class SharingCalibrator(MaxCalibrator):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                model[1] = model[0]  # named_modules skips the second name
-                if nested:
-                    mtq.set_quantizer_by_cfg(model, [sub_entry])
+                share()
 
-        mtq.set_quantizer_by_cfg(
-            model,
-            [{"quantizer_name": weight_quantizer, "cfg": {"calibrator": SharingCalibrator}}]
-            + ([] if nested else [sub_entry]),
-        )
+        def sharing_hook(module, name, submodule):
+            if isinstance(submodule, SequentialQuantizer) and model[1] is not model[0]:
+                share()
+
+        # A list replaces the quantizer with a SequentialQuantizer, under the hook.
+        cfg = [{"num_bits": 4}, {"num_bits": 8}] if hooked else {"calibrator": SharingCalibrator}
+        register = torch.nn.modules.module.register_module_module_registration_hook
+        handle = register(sharing_hook) if hooked else None
+        try:
+            mtq.set_quantizer_by_cfg(
+                model,
+                [{"quantizer_name": weight_quantizer, "cfg": cfg}]
+                + ([] if nested else [sub_entry]),
+            )
+        finally:
+            if handle is not None:
+                handle.remove()
         return {
             name: module.get_modelopt_state(properties_only=True)
             for name, module in model.named_modules()
