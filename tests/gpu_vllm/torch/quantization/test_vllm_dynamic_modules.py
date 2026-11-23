@@ -519,15 +519,6 @@ expected = {
 }
 missing = sorted(expected - sys.modules.keys())
 assert expected and not missing, f"the vLLM plugin did not import {missing}"
-
-# GLM-5.3-Flash's tests convert a stand-in indexer: check here that the native one is registered.
-from modelopt.torch.quantization.nn import QuantModuleRegistry
-
-glm5_next = sys.modules["modelopt.torch.models.glm5_next.modeling_ptq_vllm"]
-if glm5_next.VllmGlm5NextIndexer is not None:
-    dm_cls = QuantModuleRegistry[glm5_next.VllmGlm5NextIndexer]
-    assert issubclass(dm_cls, glm5_next._QuantVLLMGlm5NextIndexer), dm_cls.__mro__
-    print("GLM-5.3-Flash's native indexer is registered")
 """
 
 
@@ -549,9 +540,66 @@ def test_vllm_plugin_imports_every_model_package():
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    # The registry check ran wherever this vLLM build has GLM-5.3-Flash's native indexer.
-    checked = "GLM-5.3-Flash's native indexer is registered" in result.stdout
-    assert checked == (glm5_next_ptq.VllmGlm5NextIndexer is not None), result.stdout
+
+
+# The layouts of GLM-5.3-Flash's native indexer that the GLM module supports: the module of the
+# indexer, and that of its op. Located here without the module's own lookup, so that a lookup that
+# stops finding a supported layout fails the test below rather than skipping its check.
+_GLM5NEXT_LAYOUTS = (
+    ("vllm.models.glm5next.common.attention", "vllm.models.glm5next.sparse_indexer"),  # vLLM main
+    (  # vLLM 0.28 and later releases
+        "vllm.models.glm5next.nvidia.attention",
+        "vllm.model_executor.layers.sparse_attn_indexer_kpool",
+    ),
+)
+
+# Runs in a fresh interpreter; the native indexer's module is named on the command line.
+_CHECK_GLM5NEXT_INDEXER_REGISTERED = """
+import importlib
+import sys
+
+import modelopt.torch.quantization
+from modelopt.torch.models.glm5_next.modeling_ptq_vllm import _QuantVLLMGlm5NextIndexer
+from modelopt.torch.quantization.nn import QuantModuleRegistry
+
+native = importlib.import_module(sys.argv[1]).Indexer
+dm_cls = QuantModuleRegistry[native]
+assert issubclass(dm_cls, _QuantVLLMGlm5NextIndexer), dm_cls.__mro__
+# Quantization configs name the wrapper by this key, as ``parent_class``.
+assert QuantModuleRegistry["vllm_Glm5NextIndexer"] is dm_cls
+"""
+
+
+def _supported_glm5next_indexer_module() -> str | None:
+    """Return the module of GLM-5.3-Flash's native indexer, for a layout the GLM module supports."""
+    for indexer_path, op_path in _GLM5NEXT_LAYOUTS:
+        try:
+            # Each lookup raises when this vLLM build lacks that part of the layout.
+            _ = importlib.import_module(indexer_path).Indexer
+            op_cls = importlib.import_module(op_path).SparseAttnIndexerKpool
+            _ = importlib.import_module(op_cls.__module__).kpool_ops
+        except (ImportError, AttributeError, NotImplementedError):
+            continue
+        return indexer_path
+    return None
+
+
+@pytest.mark.timeout(300)
+def test_vllm_plugin_registers_native_glm5next_indexer():
+    """GLM-5.3-Flash's native indexer is registered, under its key, wherever vLLM has a supported
+    layout; the other GLM tests convert a stand-in indexer."""
+    indexer_path = _supported_glm5next_indexer_module()
+    if indexer_path is None:
+        pytest.skip("this vLLM build has no supported GLM-5.3-Flash native indexer")
+    env = {k: v for k, v in os.environ.items() if k != "COVERAGE_PROCESS_START"}
+    result = subprocess.run(
+        [sys.executable, "-c", _CHECK_GLM5NEXT_INDEXER_REGISTERED, indexer_path],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 # Runs in a fresh interpreter. The module named first fails to import with an error the model
