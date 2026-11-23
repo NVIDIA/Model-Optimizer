@@ -1,14 +1,15 @@
 ---
 name: modelopt-eval-guidance
-description: Tool-neutral guidance for the accuracy evaluation of a quantized checkpoint, whatever evaluation tool runs it - pick quantization-sensitive benchmarks, validate a finished run, check the baseline against the published score, and handle doom loops. Use it next to the evaluation tool's own skills whenever a baseline or candidate is evaluated; it holds the duties that do not depend on the tool.
+description: Tool-neutral guidance for judging a quantized checkpoint's accuracy, whatever evaluation tool runs it - pick quantization-sensitive benchmarks, check the baseline against the published score, take the tool's run verdict and report per-side limit counts for the comparison, and decide on doom-loop detection. Use it next to the evaluation tool's own skills whenever a baseline or candidate is evaluated; the tool fills the config and runs the evaluation.
 license: Apache-2.0
 ---
 
 # Evaluation Guidance
 
-The evaluation tool runs the evaluation: it composes the config, submits, resumes, and reports its own
-health verdict. This skill holds what a quantization workflow needs on top of that, and it applies to
-every tool.
+The evaluation tool owns what values go in the config and how the run goes (protocol, judge, sampling, budget,
+parsers, quantized-variant settings, submit, babysit, recover, MLflow tags, and whether the run is healthy and
+complete). This skill holds only what depends on the quantization workflow: which benchmarks are sensitive,
+whether the baseline is believable, and what the comparison needs from a finished run. It applies to every tool.
 
 Tool-specific details live in [references/tools/](references/tools/index.md), one file per tool: the skills that
 run it, where its health verdict and settings are, and its MLflow names. Use the skills and the reference of the
@@ -22,7 +23,7 @@ tool the task names (the default is named in the index), and do not load another
 1. **When choosing benchmarks for a quantized checkpoint:**
    [quantization-benchmarks.md](references/quantization-benchmarks.md).
 2. **When a model repeats itself until the token limit:** [doom-loops.md](references/doom-loops.md).
-3. **After each run finishes, before any score is reported:** [run-validity.md](references/run-validity.md).
+3. **After each run finishes, before any score is compared:** [run-validity.md](references/run-validity.md) (take the tool's verdict; report per-side limit counts).
 4. **Before accepting a baseline for a baseline-versus-candidate comparison:**
    [external-baseline-check.md](references/external-baseline-check.md), then `modelopt-compare-results`.
 
@@ -34,11 +35,10 @@ tool the task names (the default is named in the index), and do not load another
 - **Tool-managed deployments.** Evaluate through the tool's own managed deployments. Evaluate an external or
   retained model-under-test endpoint only when the user explicitly asks; a retained PTQ smoke server is not
   authorization to evaluate it.
-- **Complete the tool's own steps** (dry run, canary, full run, validation) before reporting anything.
-- **Never report scores from an incomplete or invalid run.** Label the result incomplete or invalid and return
-  the findings (see [run-validity.md](references/run-validity.md)).
-- **MLflow.** Configure the tool's export of the results to MLflow, verify that the run arrived, and say in the
-  handoff whether it did.
+- **Never report scores from an incomplete or invalid run.** The tool's verdict decides; label the result
+  incomplete or invalid and return the findings (see [run-validity.md](references/run-validity.md)).
+- **MLflow.** The tool exports the results; confirm the tool's export of the results to MLflow arrived and put the run id
+  in the handoff.
 - **Report timeout and output-limit counts** for both sides of a comparison, as `modelopt-compare-results` asks.
 
 ## Rules that belong to the tool, not to this skill
