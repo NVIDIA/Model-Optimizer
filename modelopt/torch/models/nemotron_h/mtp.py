@@ -19,6 +19,7 @@ import copy
 import inspect
 import json
 import re
+import types
 import weakref
 from contextlib import contextmanager
 from functools import wraps
@@ -208,45 +209,41 @@ class _NemotronHMTP(torch.nn.Module):
         return self.layers[-1].final_layernorm(mtp_hidden)
 
 
-@contextmanager
-def _puzzle_mapping_registry(class_name: str):
-    """For one collection of a puzzle Omni model's conversions, register its own code's renames.
+def _collect_puzzle_conversions(model, *args, **kwargs):
+    """Run transformers' conversion collection on a puzzle Omni model, with its code's renames.
 
-    transformers' renames for its port of the Omni class, whose class name the checkpoint's class
-    shares, are hidden, so the lookup falls back to the model type the checkpoint's code registers;
-    the puzzle language model gets the ``backbone.`` -> ``model.`` rename. Both are undone after.
+    The collection runs against a private view of transformers' registry, so no other load, in this
+    thread or another, sees a change. In it, transformers' renames for its port of the Omni class,
+    whose class name the checkpoint's class shares, are hidden, so the lookup falls back to the
+    model type the checkpoint's code registers, and the puzzle language model gets the
+    ``backbone.`` -> ``model.`` rename.
     """
-    conversion_mapping.get_checkpoint_conversion_mapping(class_name)  # builds the registry
-    cache = conversion_mapping._checkpoint_conversion_mapping_cache
-    # transformers skips a remote-code sub-model whose mapping was not registered.
-    registered = getattr(conversion_mapping, "USER_REGISTERED_MAPPINGS", set())
-    hidden = cache.pop(class_name, None)
-    added = "nemotron_h_puzzle" not in cache
-    if added:
-        cache["nemotron_h_puzzle"] = [conversion_mapping.WeightRenaming("backbone.", "model.")]
-        registered.add("nemotron_h_puzzle")
-    try:
-        yield
-    finally:
-        if hidden is not None:
-            cache[class_name] = hidden
-        if added:
-            del cache["nemotron_h_puzzle"]
-            registered.discard("nemotron_h_puzzle")
+    lookup = conversion_mapping.get_checkpoint_conversion_mapping
+    hidden = type(model).__name__
 
+    def puzzle_lookup(name):
+        if name == hidden:
+            return None
+        found = lookup(name)
+        if found is None and name == "nemotron_h_puzzle":
+            return [conversion_mapping.WeightRenaming("backbone.", "model.")]
+        return found
 
-def _puzzle_model_mappings(get_model_conversion_mapping):
-    """Transformers' conversion collection, giving a puzzle Omni model its own code's renames."""
-
-    @wraps(get_model_conversion_mapping)
-    def collect(model, *args, **kwargs):
-        if not _has_puzzle_language_model(getattr(model, "config", None)):
-            # Any other model, a native Omni among them, keeps transformers' renames.
-            return get_model_conversion_mapping(model, *args, **kwargs)
-        with _puzzle_mapping_registry(type(model).__name__):
-            return get_model_conversion_mapping(model, *args, **kwargs)
-
-    return collect
+    namespace = {
+        **vars(conversion_mapping),
+        "get_checkpoint_conversion_mapping": puzzle_lookup,
+        # transformers skips a remote-code sub-model whose mapping was not registered.
+        "USER_REGISTERED_MAPPINGS": {
+            *getattr(conversion_mapping, "USER_REGISTERED_MAPPINGS", ()),
+            "nemotron_h_puzzle",
+        },
+    }
+    collect = conversion_mapping.get_model_conversion_mapping
+    private = types.FunctionType(
+        collect.__code__, namespace, collect.__name__, collect.__defaults__, collect.__closure__
+    )
+    private.__kwdefaults__ = collect.__kwdefaults__
+    return private(model, *args, **kwargs)
 
 
 @contextmanager
@@ -271,12 +268,27 @@ def _puzzle_renames(config: dict):
             f"{transformers.__version__}."
         )
     original = modeling_utils.get_model_conversion_mapping
-    patch = _puzzle_model_mappings(original)
+    if original is not conversion_mapping.get_model_conversion_mapping:
+        # The puzzle model's conversions come from transformers' own collection, bypassing it.
+        raise RuntimeError(
+            "Loading a nemotron_h_puzzle language model needs transformers' own conversion "
+            f"collection, which {original!r} replaces; load the checkpoint in a new process."
+        )
+    loading = True
+
+    @wraps(original)
+    def patch(model, *args, **kwargs):
+        if loading and _has_puzzle_language_model(getattr(model, "config", None)):
+            return _collect_puzzle_conversions(model, *args, **kwargs)
+        # Any other model, a native Omni among them, keeps transformers' renames, as does any model
+        # after the load, through a hook installed over this patch during it.
+        return original(model, *args, **kwargs)
+
     modeling_utils.get_model_conversion_mapping = patch
     try:
         yield
     finally:
-        # A hook installed over the patch keeps it, and it changes only puzzle models.
+        loading = False
         if modeling_utils.get_model_conversion_mapping is patch:
             modeling_utils.get_model_conversion_mapping = original
 

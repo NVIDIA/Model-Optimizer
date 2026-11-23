@@ -650,15 +650,30 @@ def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch)
         },
         tmp_path / "port" / "model.safetensors",
     )
+    lookup = conversion_mapping.get_checkpoint_conversion_mapping
+    port_loaded = {}
+
+    def lookup_starting_a_port_load(name):
+        # In the puzzle model's collection, a load of another model, as another thread or a hook
+        # in the collection can start. Older transformers releases have no port to load.
+        if name == "nemotron_h_puzzle" and port_renames is not None and not port_loaded:
+            port_loaded.update(port_class.from_pretrained(tmp_path / "port").state_dict())
+        return lookup(name)
+
+    monkeypatch.setattr(
+        conversion_mapping, "get_checkpoint_conversion_mapping", lookup_starting_a_port_load
+    )
     stock = (
         conversion_mapping.get_checkpoint_conversion_mapping,
         modeling_utils.get_model_conversion_mapping,
     )
+    # Restores transformers' function after the test whatever a load leaves installed.
+    monkeypatch.setattr(modeling_utils, "get_model_conversion_mapping", stock[1])
     with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
-        # A load of another model in the same context keeps transformers' renames.
         loaded = omni_class.from_pretrained(tmp_path, config=config)
-        port_loaded = port_class.from_pretrained(tmp_path / "port").state_dict()
-    assert all(torch.equal(port_loaded[name], tensor) for name, tensor in port.state_dict().items())
+    if port_renames is not None:
+        # The port load started inside the puzzle model's collection keeps transformers' renames.
+        assert all(torch.equal(port_loaded[n], t) for n, t in port.state_dict().items())
     # Nothing the load changed outlives it.
     assert (
         conversion_mapping.get_checkpoint_conversion_mapping,
@@ -674,6 +689,23 @@ def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch)
     assert repr(restored) == repr(port_renames)
     loaded.save_pretrained(tmp_path / "saved")
     assert set(load_file(tmp_path / "saved" / "model.safetensors")) == set(checkpoint)
+
+    # A hook installed over the patch during a load, as _onfly_decompress's can be, stays, and the
+    # patch it holds then passes a puzzle model to transformers' own collection.
+    def hook(*args, **kwargs):
+        return below(*args, **kwargs)
+
+    with hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True):
+        below = modeling_utils.get_model_conversion_mapping
+        modeling_utils.get_model_conversion_mapping = hook
+    assert modeling_utils.get_model_conversion_mapping is hook
+    assert repr(hook(loaded)) == repr(stock[1](loaded))
+    # Collected under that hook, a puzzle model's conversions would bypass it: its load is refused.
+    with (
+        pytest.raises(RuntimeError),
+        hf.prepare_model_for_loading("nemotron_h_omni", tmp_path, True),
+    ):
+        pass
     # The checkpoint's code, not transformers' port of its Omni class, can hold a puzzle model.
     remote = type("Config", (PretrainedConfig,), {"__module__": "transformers_modules.bolt.cfg"})
     assert hf.prefers_bundled_code("nemotron_h_omni", remote(llm_config=llm_config), tmp_path, {})

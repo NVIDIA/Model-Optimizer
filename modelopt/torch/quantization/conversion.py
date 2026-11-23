@@ -401,15 +401,16 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                     else QuantizerAttributeConfig(**c, enable=enable)
                     for c in cfg
                 ]
-            set_quantizer_attributes_full(
-                quant_model, quantizer_name, attributes, parent_class, _subtree=bool(subtree)
-            )
             if any(
                 not isinstance(a.calibrator, str)
                 for a in (attributes if isinstance(attributes, list) else [attributes])
             ):
-                # The caller's calibrator class ran for each match and could rewire the model.
+                # The caller's calibrator class runs for each match and can rewire the model, before
+                # this entry's later matches too.
                 subtree = False
+            set_quantizer_attributes_full(
+                quant_model, quantizer_name, attributes, parent_class, _subtree=bool(subtree)
+            )
 
 
 _FUSED_EXPERTS_QUANTIZER_LIST_RE = re.compile(

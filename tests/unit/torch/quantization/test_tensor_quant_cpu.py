@@ -775,6 +775,32 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_shares_a
     assert configured("0.weight_quantizer", "1.weight_quantizer") == walked
 
 
+def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_aliases_a_later_match():
+    """A named entry acts as its wildcard does when the calibrator it builds puts a quantizer the
+    walk has passed in the place of one of the entry's later matches."""
+
+    def configured(weight_quantizer):
+        model = torch.nn.Module()
+        model.prior = TensorQuantizer()
+        # Both slots' names normalize to ``weight_quantizer``, so one entry matches both.
+        model.weight_quantizers = torch.nn.ModuleList([TensorQuantizer(), TensorQuantizer()])
+
+        class AliasingCalibrator(MaxCalibrator):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                model.weight_quantizers[1] = model.prior  # named_modules skips the second name
+
+        cfg = {"num_bits": 4, "calibrator": AliasingCalibrator}
+        mtq.set_quantizer_by_cfg(model, [{"quantizer_name": weight_quantizer, "cfg": cfg}])
+        return {
+            name: module.get_modelopt_state(properties_only=True)
+            for name, module in model.named_modules()
+            if isinstance(module, TensorQuantizer)
+        }
+
+    assert configured("weight_quantizer") == configured("[w]eight_quantizer")
+
+
 @pytest.mark.parametrize(
     "attribute_cfg",
     [
