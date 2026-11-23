@@ -553,6 +553,7 @@ def _quantize_awq_clip(
 
     scales = {}
     gemm_weights_quantized = {}
+    transposed_weights: set[str] = set()
 
     t = time.time()
 
@@ -637,6 +638,7 @@ def _quantize_awq_clip(
             if do_transpose:
                 qw = qw.T
                 scale = scale.T
+                transposed_weights.add(weight_tensor.name)
             scales[weight_tensor.name] = scale.astype(
                 onnx.helper.tensor_dtype_to_np_dtype(gemm_io_type)
             )
@@ -679,6 +681,7 @@ def _quantize_awq_clip(
             quantized_weights=gemm_weights_quantized,
             attributes=dq_node_attributes,
             layer_info=layer_info,
+            transposed_weights=transposed_weights,
         )
         # Add transpose nodes for column-major if needed
         if use_column_major:
@@ -1129,6 +1132,7 @@ def _quantize_awq_lite(
     zero_points = {}
     scales = {}
     gemm_weights_quantized = {}
+    transposed_weights: set[str] = set()
     input_tensors = {}
     pre_quant_scale = {}
 
@@ -1289,6 +1293,7 @@ def _quantize_awq_lite(
             if do_transpose:
                 qw = qw.T
                 scale = scale.T
+                transposed_weights.add(weight_tensor.name)
                 if zp is not None:
                     zp = zp.T
             if has_cupy:
@@ -1421,6 +1426,7 @@ def _quantize_awq_lite(
             attributes=dq_node_attributes,
             zero_points=zero_points if use_zero_point else None,
             layer_info=layer_info,
+            transposed_weights=transposed_weights,
         )
         # Add transpose nodes for column-major if needed
         if use_column_major:

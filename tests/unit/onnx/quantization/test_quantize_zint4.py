@@ -205,6 +205,39 @@ def test_shape_awq(tmp_path):
     )  # Ensure it passes.
 
 
+@pytest.mark.parametrize("calibration_method", ["awq_clip", "awq_lite"])
+@pytest.mark.parametrize("layers_8bit", [None, "gemm"])
+def test_awq_gemm_trans_b(tmp_path, calibration_method, layers_8bit):
+    # torch.onnx.export writes nn.Linear on a 2-D input as Gemm(transB=1), whose weight is [N, K].
+    # Its DQ node must block (or, at 8 bit, index its per-channel scale) along that layout's axes.
+    # The weight is square with rows of very different ranges, so an 8-bit per-channel scale
+    # applied along the wrong axis still loads but gives wrong outputs.
+    rng = np.random.default_rng(0)
+    w = (rng.standard_normal((32, 32)) * np.logspace(-1, 1, 32)[:, None]).astype(np.float32)
+    x = rng.standard_normal((16, 32)).astype(np.float32)
+    gx = gs.Variable("x", dtype=np.float32, shape=x.shape)
+    gy = gs.Variable("y", dtype=np.float32, shape=(16, 32))
+    gemm = gs.Node(
+        "Gemm", "gemm", inputs=[gx, gs.Constant("w", w)], outputs=[gy], attrs={"transB": 1}
+    )
+    onnx_path = os.path.join(tmp_path, "gemm.onnx")
+    save_onnx(gs.export_onnx(gs.Graph([gemm], inputs=[gx], outputs=[gy], opset=21)), onnx_path)
+
+    model = quantize_int4(
+        onnx_path,
+        calibration_method,
+        [{"x": x}],
+        block_size=8,
+        enable_mixed_quant=layers_8bit is not None,
+        layers_8bit=layers_8bit,
+        use_external_data_format=False,
+    )
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    y = session.run(None, {"x": x})[0].astype(np.float32)
+    ref = x @ w.T
+    assert np.abs(y - ref).max() / np.abs(ref).max() < 0.1
+
+
 @pytest.mark.parametrize("calibration_method", ["awq_lite", "awq_full"])
 @pytest.mark.parametrize(
     ("reuse_activations", "random_activation"),
