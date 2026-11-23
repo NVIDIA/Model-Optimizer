@@ -29,8 +29,13 @@ general model data, and export is only its first consumer.
 
 A package may also hold ``modeling_ptq.py`` and ``modeling_ptq_vllm.py``, the model-specific PTQ
 wrappers for transformers and vLLM. They are not imported here; the HF and vLLM quantization
-plugins import them (see ``README.md``).
+plugins import them with ``import_model_modules`` (see ``README.md``).
 """
+
+import importlib
+import os
+
+from modelopt.torch.utils import import_plugin
 
 from .moe import is_moe
 from .specs import (
@@ -66,6 +71,7 @@ __all__ = [
     "get_spec",
     "get_specs",
     "hf_model_type",
+    "import_model_modules",
     "is_moe",
     "list_all_possible",
     "match_class_names",
@@ -122,3 +128,21 @@ from . import (  # isort: skip
     t5,
     whisper,
 )
+
+
+def import_model_modules(module_name: str) -> None:
+    """Import ``<model_type>/<module_name>.py`` from every model package that has one.
+
+    The quantization plugins load the model-specific PTQ wrappers this way (``modeling_ptq`` for
+    transformers, ``modeling_ptq_vllm`` for vLLM), so they name no model: such a module registers
+    its wrappers on import, and adding one needs no list entry. Packages are visited in name
+    order, so the registration order is the same on every run, and each import is guarded on its
+    own, so a module that fails to import leaves the others registered.
+    """
+    models_dir = os.path.dirname(__file__)
+    # One file check per package: listing every package directory, as pkgutil does, takes ~40 ms
+    # on NFS.
+    for package in sorted(os.listdir(models_dir)):
+        if os.path.isfile(os.path.join(models_dir, package, f"{module_name}.py")):
+            with import_plugin(f"{package} {module_name}"):
+                importlib.import_module(f"{__name__}.{package}.{module_name}")
