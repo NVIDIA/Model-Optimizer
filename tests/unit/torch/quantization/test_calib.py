@@ -33,6 +33,7 @@ from modelopt.torch.quantization.model_calib import (
     disable_pre_quant_scale_and_resmooth,
     layerwise_calibrate,
     max_calibrate,
+    svd,
 )
 from modelopt.torch.quantization.nn import QuantLinear, TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -579,6 +580,21 @@ def test_svdquant_fused_group_scale():
     }  # in_proj_a/b are left unquantized by the default config
     loop = partial(forward_loop, dataloader=[inputs])
     _svdquant_fused_group_scale_case(_SharedInputLLM(), loop, groups, kept=["out"])
+
+
+@pytest.mark.parametrize(("shape", "rank"), [((128, 48), 4), ((48, 128), 4), ((6, 8), 8)])
+def test_svd_matches_full_svd(shape, rank):
+    """The top-rank factors match the full SVD for tall and wide weights, and pad past the rank."""
+    torch.manual_seed(0)
+    spectrum = torch.logspace(0, -2, min(shape))
+    u = torch.linalg.qr(torch.randn(shape[0], min(shape)))[0]
+    v = torch.linalg.qr(torch.randn(shape[1], min(shape)))[0]
+    weight = u * spectrum @ v.T
+    us, vt = svd(weight, rank)
+    assert us.shape == (shape[0], rank) and vt.shape == (rank, shape[1])
+    k = min(rank, *shape)
+    torch.testing.assert_close(us @ vt, u[:, :k] * spectrum[:k] @ v[:, :k].T, atol=1e-5, rtol=0)
+    torch.testing.assert_close(vt[:k] @ vt[:k].T, torch.eye(k), atol=1e-5, rtol=0)
 
 
 def test_svdquant_fused_group_svd():
