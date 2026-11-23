@@ -21,7 +21,7 @@ import os
 import random
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -976,8 +976,16 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
     prior value is restored on exit if one existed.
     """
     missing = object()
-    states = []
-    try:
+
+    def restore(config, prev):
+        if getattr(config, "use_cache", missing) is prev:
+            return
+        if prev is missing:
+            delattr(config, "use_cache")
+        else:
+            config.use_cache = prev
+
+    with ExitStack() as stack:
         for config in _iter_use_cache_configs(model):
             prev = getattr(config, "use_cache", missing)
             if (
@@ -989,22 +997,17 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
                 )
             ):
                 continue  # This schema cannot accept a temporary cache flag.
+            # An assignment validator may store the new value before raising.
+            stack.callback(restore, config, prev)
+            if prev is False:
+                continue
             try:
-                if prev is not False:
-                    config.use_cache = False
+                config.use_cache = False
             except AttributeError:
-                if prev is not missing:
+                # Ignore only metadata objects (e.g. dicts) that expose no cache flag.
+                if prev is not missing or hasattr(config, "use_cache"):
                     raise
-                continue  # Metadata-only configs, e.g. dicts, may not support attributes.
-            states.append((config, prev))
         yield
-    finally:
-        for config, prev in reversed(states):
-            if prev is missing:
-                with suppress(AttributeError):
-                    delattr(config, "use_cache")
-            elif getattr(config, "use_cache", missing) is not prev:
-                config.use_cache = prev
 
 
 def get_max_batch_size(

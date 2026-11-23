@@ -21,8 +21,10 @@ import pytest
 import torch
 from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
+from pydantic import ValidationError, model_validator
 from torch.utils.data import DataLoader
 
+from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.utils import dataset_utils
 from modelopt.torch.utils.dataset_utils import (
     DATASET_COMBOS,
@@ -419,21 +421,37 @@ def test_disable_use_cache_restores_on_exception(prev_value):
     assert model.config.use_cache is prev_value
 
 
-def test_disable_use_cache_restores_on_setup_error():
-    class ReadOnlyCacheConfig:
-        @property
-        def use_cache(self):
-            return True
+class _ReadOnlyCacheConfig:
+    @property
+    def use_cache(self):
+        return True
 
+
+class _ValidatedCacheConfig(ModeloptBaseConfig):
+    use_cache: bool = True
+
+    @model_validator(mode="after")
+    def require_cache(self):
+        if not self.use_cache:
+            raise ValueError("cache required")
+        return self
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "error"),
+    [(_ReadOnlyCacheConfig, AttributeError), (_ValidatedCacheConfig, ValidationError)],
+)
+def test_disable_use_cache_restores_on_setup_error(config_cls, error):
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
     model.config.use_cache = True
-    model.config.text_config = ReadOnlyCacheConfig()
+    model.config.text_config = config_cls()
 
-    with pytest.raises(AttributeError), _disable_use_cache(model):
-        pytest.fail("A read-only text config should prevent entering the context")
+    with pytest.raises(error), _disable_use_cache(model):
+        pytest.fail("A setup error should prevent entering the context")
 
     assert model.config.use_cache is True
+    assert model.config.text_config.use_cache is True
 
 
 def test_get_max_batch_size_oom_retry_shrinks_input():
