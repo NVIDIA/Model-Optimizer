@@ -38,7 +38,6 @@ from modelopt.torch.utils import get_unwrapped_name, print_rank_0, report_memory
 
 from ..conversion import ModeloptStateManager, load_modelopt_state
 from .huggingface import (
-    _UNCONVERTED_SUBMODULES_FNS,
     _get_modelopt_state_path,
     _new_save_pretrained,
     _patch_model_init_for_modelopt,
@@ -170,29 +169,48 @@ def _legacy_tied_weights_keys_as_dict(model: nn.Module):
                 del module._tied_weights_keys
 
 
-@contextmanager
-def _skip_conversion_of_registered_submodules():
-    """Pass the registered submodules' state through transformers' save-time weight conversion."""
-    revert = getattr(tf_modeling_utils, "revert_weight_conversion", None)
-    if revert is None:
-        yield
-        return
+def _revert_weight_conversion(model, state_dict):
+    """Revert transformers' load-time weight conversions except on state that modules keep out.
 
-    def revert_other_state(model, state_dict):
-        names = (name for fn in _UNCONVERTED_SUBMODULES_FNS for name in fn(model))
+    Before 5.21 (huggingface/transformers#49548), transformers matches a converted weight's name
+    anywhere in a key, so it also catches state named after the weight, such as the quantizers of
+    fused MoE experts (``experts.gate_up_proj_weight_quantizers.0._amax``), and fails to convert it.
+    A module names such submodules in ``_modelopt_unconverted_submodules()``; their state is saved
+    under its in-memory names. This can go once ModelOpt requires transformers 5.21.
+    """
+    revert = tf_modeling_utils._modelopt_cache["revert_weight_conversion"]
+    prefixes = tuple(
         # State-dict keys drop the names of wrappers such as activation checkpointing's.
-        prefixes = tuple(f"{get_unwrapped_name(name)}." for name in names)
-        kept = {key: value for key, value in state_dict.items() if key.startswith(prefixes)}
-        if not kept:
-            return revert(model, state_dict)
-        other = {key: value for key, value in state_dict.items() if key not in kept}
-        return {**revert(model, other), **kept}
+        f"{get_unwrapped_name(name)}.{submodule}."
+        for name, module in model.named_modules()
+        if hasattr(module, "_modelopt_unconverted_submodules")
+        for submodule in module._modelopt_unconverted_submodules()
+    )
+    kept = {key: value for key, value in state_dict.items() if key.startswith(prefixes)}
+    if not kept:
+        return revert(model, state_dict)
+    _warn_if_loading_converts(model, kept)
+    other = {key: value for key, value in state_dict.items() if key not in kept}
+    return {**revert(model, other), **kept}
 
-    tf_modeling_utils.revert_weight_conversion = revert_other_state
-    try:
-        yield
-    finally:
-        tf_modeling_utils.revert_weight_conversion = revert
+
+def _warn_if_loading_converts(model, state_dict):
+    """Warn if ``from_pretrained`` would convert, and so fail to load, this unconverted state."""
+    from transformers.conversion_mapping import get_model_conversion_mapping
+    from transformers.core_model_loading import WeightConverter
+
+    conversions = getattr(model, "_weight_conversions", None) or get_model_conversion_mapping(
+        model, add_legacy=False
+    )
+    converters = [c for c in conversions if isinstance(c, WeightConverter)]
+    caught = [key for key in state_dict if any(c.compiled_sources.search(key) for c in converters)]
+    if caught:
+        warnings.warn(
+            f"from_pretrained cannot load this checkpoint with transformers {transformers.__version__}:"
+            f" its weight conversion also matches {len(caught)} saved tensors, such as {caught[0]!r}."
+            " transformers 5.21 and later load it; or save and restore the model with mto.save and"
+            " mto.restore."
+        )
 
 
 def _save_pretrained_with_checks(self, save_directory, *args, **kwargs):
@@ -200,7 +218,7 @@ def _save_pretrained_with_checks(self, save_directory, *args, **kwargs):
         raise NotImplementedError(
             "ModelOpt does not support saving tensor parallel sharded Huggingface transformer models yet. "
         )
-    with _legacy_tied_weights_keys_as_dict(self), _skip_conversion_of_registered_submodules():
+    with _legacy_tied_weights_keys_as_dict(self):
         return _new_save_pretrained(self, save_directory, *args, **kwargs)
 
 
@@ -226,7 +244,11 @@ register_for_patching("transformers", PreTrainedModel, pretrained_model_patch_me
 register_for_patching(
     "transformers",
     tf_modeling_utils,
-    [("_load_state_dict_into_zero3_model", _load_params_and_buffers_into_zero3_model)],
+    [
+        ("_load_state_dict_into_zero3_model", _load_params_and_buffers_into_zero3_model),
+        # Installed once, for every save: per-save swaps of this global would race between threads.
+        ("revert_weight_conversion", _revert_weight_conversion),
+    ],
 )
 
 

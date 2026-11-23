@@ -39,7 +39,6 @@ from modelopt.torch.kernels.common.attention import (
 from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from modelopt.torch.models import import_model_modules
 from modelopt.torch.opt.dynamic import DynamicModule
-from modelopt.torch.opt.plugins.huggingface import register_unconverted_submodules
 from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState, recorded_distribution_plan
 
@@ -843,6 +842,13 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     def _first_proj_weight_quantizers_attr(self) -> str:
         return f"{self._first_proj_attr}_weight_quantizers"
 
+    def _modelopt_unconverted_submodules(self) -> tuple[str, ...]:
+        """The quantizers: ModelOpt's ``save_pretrained`` keeps their state out of weight conversion.
+
+        They are named after the fused weights, which transformers before 5.21 mistakes them for.
+        """
+        return _get_fused_experts_quantizer_attr_names(self)
+
     def _get_expert_idx_from_first_proj(self, weight: torch.Tensor) -> int:
         """Recover expert index from the first-projection weight slice's storage offset.
 
@@ -1290,17 +1296,6 @@ def _get_fused_experts_quantizer_attr_names(module):
 def _is_quant_fused_experts_module(module):
     """Return True for a converted HF fused-MoE-experts quantization wrapper."""
     return isinstance(module, _QuantFusedExperts)
-
-
-def _fused_experts_quantizer_names(model):
-    """Yield the names of the fused experts' quantizers, which transformers cannot convert on save."""
-    for name, module in model.named_modules():
-        if isinstance(module, _QuantFusedExperts):
-            for attr in _get_fused_experts_quantizer_attr_names(module):
-                yield f"{name}.{attr}"
-
-
-register_unconverted_submodules(_fused_experts_quantizer_names)
 
 
 @contextmanager

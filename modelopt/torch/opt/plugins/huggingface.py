@@ -19,7 +19,6 @@ import functools
 import os
 import threading
 import warnings
-from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -56,23 +55,6 @@ def register_for_patching(name: str, cls: type, patch_methods: list[tuple[str, A
     classes, methods_list = _LIBRARY_CLASSES_FOR_PATCHING[name]
     classes.append(cls)
     methods_list.append(patch_methods)
-
-
-# Registered by the modes that add such submodules, so the checkpointing plugins do not import them.
-_UNCONVERTED_SUBMODULES_FNS: list[Callable[[torch.nn.Module], Iterable[str]]] = []
-
-
-def register_unconverted_submodules(fn: Callable[[torch.nn.Module], Iterable[str]]) -> None:
-    """Register ``fn(model)``, naming submodules whose state ``save_pretrained`` saves unconverted.
-
-    transformers saves in the original checkpoint format by reverting its load-time weight
-    conversions, such as fusing per-expert MoE weights. It matches the converted weights' names
-    anywhere in a key, so it also catches state named after them, such as the quantizers of fused
-    experts (``experts.gate_up_proj_weight_quantizers.0._amax``), and fails to convert it. The named
-    submodules' state keeps its in-memory names instead, which ``from_pretrained`` loads as is
-    unless a load-time conversion matches them too.
-    """
-    _UNCONVERTED_SUBMODULES_FNS.append(fn)
 
 
 def _get_modelopt_state_path(model_name_or_path: str, subfolder: str = "") -> str:

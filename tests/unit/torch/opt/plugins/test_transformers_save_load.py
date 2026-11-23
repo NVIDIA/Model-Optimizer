@@ -13,12 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 import traceback
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
 import torch
 import torch.nn as nn
+import transformers
 from _test_utils.torch.opt.utils import apply_mode_with_sampling
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
@@ -26,13 +29,21 @@ from _test_utils.torch.transformers_models import (
     get_tiny_qwen3vl,
     tf_modelopt_state_and_output_tester,
 )
+from packaging.version import Version
 from safetensors.torch import load_file
-from transformers import AutoConfig, AutoModelForCausalLM, LlamaForCausalLM
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    LlamaForCausalLM,
+    Qwen3VLMoeConfig,
+)
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.opt.plugins.transformers import _legacy_tied_weights_keys_as_dict
+from modelopt.torch.quantization.nn import QuantModuleRegistry
 
 
 @pytest.mark.parametrize("model_cls", [LlamaForCausalLM, AutoModelForCausalLM])
@@ -129,6 +140,24 @@ def test_legacy_tied_weights_keys_as_dict_restores_class_attribute():
     assert "_tied_weights_keys" not in parent.child.__dict__
 
 
+def _quantize_experts(model, weight_cfg=None):
+    weight_cfg = weight_cfg or {"num_bits": 8, "axis": 0}
+    quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*experts*weight_quantizer*", "cfg": weight_cfg},
+    ]
+    input_ids = torch.randint(0, model.config.get_text_config().vocab_size, (1, 8))
+    mtq.quantize(
+        model, {"quant_cfg": quant_cfg, "algorithm": "max"}, lambda m: m(input_ids=input_ids)
+    )
+    return model
+
+
+def _tiny_quantized_qwen3_moe(path, weight_cfg=None):
+    model_dir = create_tiny_qwen3_moe_dir(path, dtype=torch.float32)
+    return _quantize_experts(AutoModelForCausalLM.from_pretrained(model_dir), weight_cfg)
+
+
 @pytest.mark.parametrize(
     "weight_cfg",
     [
@@ -139,16 +168,7 @@ def test_legacy_tied_weights_keys_as_dict_restores_class_attribute():
 )
 def test_save_pretrained_quantized_fused_experts(tmp_path, weight_cfg):
     """Quantized fused MoE experts save per expert by default and reload to the same state."""
-    model_ref = AutoModelForCausalLM.from_pretrained(
-        create_tiny_qwen3_moe_dir(tmp_path, dtype=torch.float32)
-    )
-    quant_cfg = [
-        {"quantizer_name": "*", "enable": False},
-        {"quantizer_name": "*experts*weight_quantizer*", "cfg": weight_cfg},
-    ]
-    mtq.quantize(
-        model_ref, {"quant_cfg": quant_cfg, "algorithm": "max"}, lambda m: m(**m.dummy_inputs)
-    )
+    model_ref = _tiny_quantized_qwen3_moe(tmp_path, weight_cfg)
     model_ref.save_pretrained(tmp_path / "quantized")
     # A caller's state_dict, as the HF Trainer passes, saves the same keys.
     model_ref.save_pretrained(tmp_path / "from_state_dict", state_dict=model_ref.state_dict())
@@ -162,6 +182,81 @@ def test_save_pretrained_quantized_fused_experts(tmp_path, weight_cfg):
     torch.testing.assert_close(model_test.state_dict(), model_ref.state_dict(), rtol=0, atol=0)
     if weight_cfg["num_bits"] == 8:  # NVFP4 fake quant needs a GPU
         tf_modelopt_state_and_output_tester(model_ref, model_test)
+
+
+def test_save_pretrained_quantized_fused_experts_in_overlapping_saves(tmp_path):
+    """A save that ends while a later one is still running does not undo the later one's fix."""
+    models, pauses = {}, {}
+    for name in ("first", "second"):
+        models[name] = _tiny_quantized_qwen3_moe(tmp_path / name)
+        reached, resume = threading.Event(), threading.Event()
+
+        # save_pretrained takes the state dict before it converts the weights' names.
+        def pause_once(module, state_dict, prefix, local_metadata, reached=reached, resume=resume):
+            if not reached.is_set():
+                reached.set()
+                assert resume.wait(60)
+
+        models[name].register_state_dict_post_hook(pause_once)
+        pauses[name] = (reached, resume)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        saves = {}
+        for name in ("first", "second"):  # both saves start before either converts
+            saves[name] = pool.submit(models[name].save_pretrained, tmp_path / f"{name}_quantized")
+            assert pauses[name][0].wait(60)
+        for name in ("first", "second"):  # the first save ends before the second converts
+            pauses[name][1].set()
+            saves[name].result()
+
+    for name, model in models.items():
+        reloaded = AutoModelForCausalLM.from_pretrained(tmp_path / f"{name}_quantized")
+        torch.testing.assert_close(reloaded.state_dict(), model.state_dict(), rtol=0, atol=0)
+
+
+def test_save_pretrained_warns_when_from_pretrained_cannot_load_fused_experts(tmp_path):
+    """Before transformers 5.21, Qwen3-VL-MoE's load-time conversion also matches its quantizers."""
+    text_config = {
+        "vocab_size": 32,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "moe_intermediate_size": 16,
+        "num_experts": 4,
+        "num_experts_per_tok": 2,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "rope_parameters": {"rope_type": "default", "mrope_section": [1, 1, 2]},
+    }
+    vision_config = {
+        "depth": 1,
+        "hidden_size": 16,
+        "intermediate_size": 16,
+        "num_heads": 2,
+        "out_hidden_size": 32,
+        "deepstack_visual_indexes": [0],
+    }
+    config = Qwen3VLMoeConfig(text_config=text_config, vision_config=vision_config)
+    AutoModelForImageTextToText.from_config(config).save_pretrained(tmp_path / "base")
+    model = AutoModelForImageTextToText.from_pretrained(tmp_path / "base")
+    experts_type = type(model.model.language_model.layers[0].mlp.experts)
+    registered_before = QuantModuleRegistry.get(experts_type)
+    try:
+        _quantize_experts(model)
+        if Version(transformers.__version__) < Version("5.21"):
+            with pytest.warns(UserWarning, match="from_pretrained cannot load this checkpoint"):
+                model.save_pretrained(tmp_path / "quantized")
+        else:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("error", message="from_pretrained cannot load")
+                model.save_pretrained(tmp_path / "quantized")
+            reloaded = AutoModelForImageTextToText.from_pretrained(tmp_path / "quantized")
+            torch.testing.assert_close(reloaded.state_dict(), model.state_dict(), rtol=0, atol=0)
+    finally:
+        # Quantizing registers the experts' class on the fly; other tests expect it unregistered.
+        if registered_before is None and QuantModuleRegistry.get(experts_type) is not None:
+            QuantModuleRegistry.unregister(experts_type)
 
 
 def test_causal_lm_from_config(tmp_path):
