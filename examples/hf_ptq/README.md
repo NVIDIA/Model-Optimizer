@@ -276,7 +276,9 @@ Kimi K3's routed experts ship packed as MXFP4. There are two ways to quantize it
   Each rank decompresses only its own routed experts to bf16 as they load; the
   model is then calibrated with the `--recipe` you pass, and each rank writes
   its share of the checkpoint. The experts are quantized again from bf16, not
-  cast from MXFP4. This flow needs:
+  cast from MXFP4. For a checkpoint vLLM loads, use
+  `--recipe model_type/kimi_k3/ptq/nvfp4_experts_only-kv_fp8_cast`, which keeps
+  the layers vLLM builds unquantized in BF16. This flow needs:
   - `--trust_remote_code`, since Kimi K3 runs the checkpoint's own modeling
     code, which ModelOpt patches for expert parallelism;
   - transformers 5.13 or newer, compressed-tensors 0.16 or newer to decompress

@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# QuantizerCfgList snippet of disabled quantizers for Kimi-K3. Splices in the standard
+# ``default_disabled_quantizers`` exclusions and appends the layers vLLM's Kimi-K3 model code
+# (vllm/models/kimi_k3/nvidia) builds unquantized whatever the checkpoint holds, so a checkpoint
+# that stores one of them quantized does not load. Recipes that import this should NOT also
+# import ``default_disabled_quantizers``.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+imports:
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+---
+  - $import: default_disabled_quantizers
+  # KimiMoE's latent down-projection: quant_config=None in the model card's image (main: vllm#57430).
+  - quantizer_name: '*block_sparse_moe.routed_expert_down_proj*'
+    enable: false
+  # KimiMoE's latent up-projection: quant_config=None in the model card's image (main: vllm#57430).
+  - quantizer_name: '*block_sparse_moe.routed_expert_up_proj*'
+    enable: false
+  # KimiDecoderLayer.self_attention_res_proj: quant_config=None in the image and on main.
+  - quantizer_name: '*self_attention_res_proj*'
+    enable: false
+  # KimiDecoderLayer.mlp_res_proj: quant_config=None in the image and on main.
+  - quantizer_name: '*mlp_res_proj*'
+    enable: false
+  # KimiLinearModel.output_attn_res_proj: quant_config=None in the image and on main.
+  - quantizer_name: '*output_attn_res_proj*'
+    enable: false
+  # KDA's q/k/v convolutions load into one conv1d built without the quantization config (kda.py).
+  - quantizer_name: '*self_attn.[qkv]_conv1d*'
+    enable: false
