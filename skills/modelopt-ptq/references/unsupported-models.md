@@ -128,8 +128,8 @@ class QuantCustomModule(OriginalModule):
 **Rules:**
 
 - Method MUST be named `_setup` (ModelOpt's `mtq.register()` asserts this)
-- Match quantizer names to weight attributes: `weight` uses `input_quantizer`/`weight_quantizer`; `proj_a` uses `proj_a_input_quantizer`/`proj_a_weight_quantizer` (see `quantizer_attr_names()`).
-- ModelOpt conversion calls `_setup()`. When directly instantiating an original-class subclass like the example, call it from `__init__` after `super().__init__()`; `QuantModule` subclasses use conversion instead.
+- Quantizer names MUST end with `_input_quantizer` or `_weight_quantizer` for wildcard matching
+- The `__init__` must call `super().__init__()` then `self._setup()`
 
 ## Pattern 2: MoE Models
 

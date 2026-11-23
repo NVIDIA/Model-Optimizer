@@ -8,7 +8,7 @@
       "expected_output": "A fixed NVFP4 PTQ plan for the listed Qwen3-0.6B BF16 model, using the existing hf_ptq.py pipeline and representative text calibration, normally 512 samples. A command template names the checkpoint, nvfp4 qformat or selected recipe, calibration settings, and export path. Export includes config, safetensors weights/scales, and tokenizer assets. Before later accuracy evaluation, validate size against BF16, intended precision coverage, preserved model/tokenizer metadata, and a temporary vLLM canary on B200 with cleanup. No PTQ or serving results are claimed.",
       "assertions": [
         "Uses the existing hf_ptq.py pipeline for the listed model and provides a command template identifying source, NVFP4 format or recipe, calibration and export path.",
-        "Chooses representative text calibration and states a full calibration size, normally 512; does not require an unlisted-model smoke run for this listed model.",
+        "Chooses representative text calibration and states a full calibration size, normally 512.",
         "Names weights/scales, config and tokenizer export artifacts and size, intended precision coverage, metadata and temporary B200/vLLM canary gates before evaluation.",
         "Stays within planning scope: no model download, calibration, job submission, service startup or fabricated results."
       ]
@@ -41,11 +41,11 @@
     {
       "id": "custom-fused-module",
       "expected_skill": "modelopt-ptq",
-      "prompt": "Plan NVFP4 PTQ for a self-contained hypothetical unlisted HF checkpoint whose reviewed modeling_fake_model.py defines FusedGateUpProj using raw nn.Parameter and F.linear instead of nn.Linear. No existing ModelOpt registration covers it. Explain the ModelOpt integration points, quantizer setup/naming, reuse of hf_ptq.py, coverage checks, and smoke/full calibration sequence; no implementation patch is required. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
-      "expected_output": "Raw fused parameters need a ModelOpt quantized-module handler rather than nn.Linear discovery. Register or extend the existing plugin mechanism and initialize the input/weight TensorQuantizers in _setup: conversion calls it for QuantModule subclasses, while directly instantiated original-class subclasses call it from their constructor. Match quantizer names to the underlying weight attributes: weight uses input_quantizer/weight_quantizer; named projections use the corresponding prefixed names. Reuse hf_ptq.py rather than replacing the PTQ pipeline. Check pattern matches and actual coverage, smoke before full calibration, and validate export/runtime compatibility. No implementation patch is required.",
+      "prompt": "Plan NVFP4 PTQ for a self-contained hypothetical unlisted HF checkpoint whose reviewed modeling_fake_model.py defines FusedGateUpProj using raw nn.Parameter and F.linear instead of nn.Linear. No existing ModelOpt registration covers it. Explain the module integration strategy, reuse of hf_ptq.py, coverage checks, and smoke/full calibration sequence; omit implementation and quantizer naming/constructor details. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
+      "expected_output": "Raw fused parameters need a ModelOpt quantized-module handler rather than nn.Linear discovery. Extend ModelOpt's plugin/registration mechanism with input and weight TensorQuantizers applied around the functional projections, then reuse hf_ptq.py. Check pattern matches and actual coverage, smoke before full calibration, and validate export/runtime compatibility. No implementation patch or quantizer naming/constructor convention is required.",
       "assertions": [
         "Identifies that raw fused nn.Parameter projections need a quantized-module handler/registration rather than standard nn.Linear discovery.",
-        "Describes input/weight TensorQuantizers matched to weight attributes (standard or projection-prefixed names both count), initialized through _setup by ModelOpt conversion or a direct subclass constructor; no implementation patch is required.",
+        "Plans input/weight quantization around functional projections through ModelOpt's plugin/registration mechanism, without requiring an implementation patch.",
         "Reuses hf_ptq.py and verifies actual pattern/weight coverage, with smoke before full calibration.",
         "Stays within planning scope: no model download, calibration, job submission, service startup or fabricated results."
       ]
@@ -66,7 +66,7 @@
     {
       "id": "post-export-gate",
       "expected_skill": "modelopt-ptq",
-      "prompt": "An FP8-source checkpoint has completed partial NVFP4 PTQ. Before anyone evaluates it, outline the required checkpoint acceptance report: source/output weight bytes, source precision, actual versus intended layer precision coverage, metadata, exact workspace/path, compatibility changes, and target-runtime canary plus cleanup. State blocking conditions and downstream handoff. No actual measurements or artifacts are supplied. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
+      "prompt": "Plan ModelOpt PTQ of an FP8-source checkpoint using one selected partial NVFP4 recipe for B200 inference, followed by accuracy evaluation. Focus on the required acceptance report after export: source/output weight bytes, source precision, actual versus intended layer precision coverage, metadata, exact workspace/path, compatibility changes, and target-runtime canary plus cleanup. State blocking conditions and downstream handoff. No actual measurements or artifacts are supplied. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
       "expected_output": "Keep downstream evaluation blocked until the checkpoint report and serving-readiness gate pass. Report source/output safetensors bytes and ratio, declared source precision, actual versus intended quantized/excluded/unexpected layer counts and declaration mismatches, and generation/tokenizer/chat-template/architecture/context/special-token diffs. Preserve the exact workspace/checkpoint path and compatibility inventory (dependency upgrades, source patches, custom code, environment variables, launcher/container changes; none when absent). Plan a temporary target-runtime deployment canary with recorded configuration/query/response and verified shutdown on success/failure/interruption. Block missing intended coverage, inconsistent metadata, unexplained compression failure, missing compatibility requirements, failed canary or cleanup; no measurements or readiness are invented.",
       "assertions": [
         "Keeps evaluation blocked until source/output weight-byte comparison, source precision, actual/intended coverage and declaration consistency, and metadata checks are recorded.",
@@ -90,14 +90,13 @@
       ]
     },
     {
-      "id": "route-search-and-qad",
+      "id": "route-recipe-search",
       "expected_skill": null,
-      "prompt": "Route these two requests to the appropriate ModelOpt workflows: (A) search several quantization recipes for the smallest checkpoint within an accuracy budget; no recipe is selected yet; (B) explicitly train with QAD to recover an already measured BF16-to-PTQ accuracy gap. Explain where fixed-recipe PTQ fits, without pretending PTQ itself searches recipes or performs distillation. Do not start either workflow. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
-      "expected_output": "Route A to modelopt-quant-recipe-search because recipe selection and accuracy-budget optimization are its job. Route B to modelopt-qad because QAD training was explicitly requested for a measured accuracy gap. Fixed-recipe modelopt-ptq is appropriate only for a selected recipe/checkpoint production stage, including selected candidates in a larger search; it does not itself perform recipe optimization or distillation. No workflow is executed.",
+      "prompt": "Which ModelOpt workflow should handle a search across several quantization recipes for the smallest checkpoint within an accuracy budget? No recipe is selected yet. Explain where fixed-recipe PTQ fits once a candidate is selected. Do not start the workflow. Plan only: do not download weights, run calibration, submit jobs, start services, or invent results. Reply in at most 450 words; source inspection is optional.",
+      "expected_output": "Route multi-candidate recipe selection and accuracy-budget optimization to modelopt-quant-recipe-search. Fixed-recipe modelopt-ptq produces a checkpoint for each selected recipe, including selected candidates in a larger search. No workflow is executed.",
       "assertions": [
         "Routes multi-recipe accuracy-budget search to modelopt-quant-recipe-search or its unambiguous workflow equivalent.",
-        "Routes explicitly requested QAD recovery training to modelopt-qad or its unambiguous workflow equivalent.",
-        "Explains PTQ produces checkpoints for selected recipes and does not itself search or distill; starts no workflow.",
+        "Explains PTQ produces checkpoints for selected recipes while the search workflow selects candidates; starts no workflow.",
         "Stays within planning scope: no model download, calibration, job submission, service startup or fabricated results."
       ]
     }
