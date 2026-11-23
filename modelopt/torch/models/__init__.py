@@ -33,7 +33,8 @@ plugins import them with ``import_model_modules`` (see ``README.md``).
 """
 
 import importlib
-import os
+import importlib.util
+import pkgutil
 
 from modelopt.torch.utils import import_plugin
 
@@ -137,12 +138,12 @@ def import_model_modules(module_name: str) -> None:
     transformers, ``modeling_ptq_vllm`` for vLLM), so they name no model: such a module registers
     its wrappers on import, and adding one needs no list entry. Packages are visited in name
     order, so the registration order is the same on every run, and each import is guarded on its
-    own, so a module that fails to import leaves the others registered.
+    own, so a module that fails to import leaves the others registered. Packages and modules are
+    found through the import system rather than as files on disk, so a zipped or bytecode-only
+    install finds them too.
     """
-    models_dir = os.path.dirname(__file__)
-    # One file check per package: listing every package directory, as pkgutil does, takes ~40 ms
-    # on NFS.
-    for package in sorted(os.listdir(models_dir)):
-        if os.path.isfile(os.path.join(models_dir, package, f"{module_name}.py")):
-            with import_plugin(f"{package} {module_name}"):
-                importlib.import_module(f"{__name__}.{package}.{module_name}")
+    for package in sorted(name for _, name, is_pkg in pkgutil.iter_modules(__path__) if is_pkg):
+        module = f"{__name__}.{package}.{module_name}"
+        with import_plugin(f"{package} {module_name}"):
+            if importlib.util.find_spec(module) is not None:
+                importlib.import_module(module)

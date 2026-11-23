@@ -61,8 +61,8 @@ Quantized-module wrappers and registrations that only one model needs (e.g. Llam
 BMM experts, Step's expert-indexed `MoELinear`) live in `<model_type>/modeling_ptq.py`; generic
 ones (fused/sequential MoE auto-detection, attention, `FP8Linear`) stay in
 `modelopt/torch/quantization/plugins/huggingface.py`. The HF plugin imports every package's
-`modeling_ptq` at its end with `import_model_modules`, which finds them by file name, so a new
-one needs no list entry and the plugins name no model. Leave the model's `__init__.py` importing
+`modeling_ptq` at its end with `import_model_modules`, which finds them through the import
+system, so a new one needs no list entry and the plugins name no model. Leave the model's `__init__.py` importing
 only `specs`: `modeling_ptq` pulls in quantization and transformers, which
 `import modelopt.torch.models` must not.
 

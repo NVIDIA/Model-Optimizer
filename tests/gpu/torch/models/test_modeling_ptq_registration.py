@@ -52,7 +52,7 @@ importlib.import_module(sys.argv[1])
 
 from modelopt.torch import models
 
-# The plugin finds every modeling_ptq by file name; check before the imports below load them.
+# The plugin finds every modeling_ptq itself; check before the imports below load them.
 expected = {
     f"modelopt.torch.models.{path.parent.name}.modeling_ptq"
     for path in Path(models.__file__).parent.glob("*/modeling_ptq.py")
