@@ -16,6 +16,8 @@
 import itertools
 import time
 
+from packaging.version import Version
+
 from .base import Model
 
 try:
@@ -23,6 +25,13 @@ try:
 except ImportError:
     print("sglang is not installed.")
     sglang = None
+
+
+def _cuda_graph_max_bs_kwarg():
+    # SGLang 0.5.14 split cuda_graph_max_bs into per-phase settings.
+    if Version(sgl.__version__).release >= (0, 5, 14):
+        return "cuda_graph_max_bs_decode"
+    return "cuda_graph_max_bs"
 
 
 class SGLANGModel(Model):
@@ -64,7 +73,7 @@ class SGLANGModel(Model):
             "max_running_requests": max_concurrent_requests,
             "attention_backend": kwargs.get("attention_backend"),
             "enable_torch_compile": kwargs.get("enable_torch_compile", False),
-            "cuda_graph_max_bs": max_concurrent_requests,
+            _cuda_graph_max_bs_kwarg(): max_concurrent_requests,
             "disable_cuda_graph": False,
             # Cross-engine `--max_seq_len` from run.py lands here as
             # `context_length` (sgl.Engine's spelling). None lets SGLang

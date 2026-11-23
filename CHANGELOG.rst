@@ -44,6 +44,8 @@ Changelog
 
 *Speculative Decoding*
 
+- ``specdec_bench --engine SGLANG`` now works with SGLang 0.5.14 and later.
+
 *Megatron Framework (M-LM / M-Bridge)*
 
 *Misc*
