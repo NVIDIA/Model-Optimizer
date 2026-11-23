@@ -294,6 +294,7 @@ def test_disable_use_cache_with_existing_attr(prev_value):
 
     with _disable_use_cache(model):
         assert model.config.use_cache is False
+        model.config.use_cache = not prev_value
 
     assert model.config.use_cache is prev_value
 
@@ -403,17 +404,19 @@ def test_forward_loop_raises_out_of_memory_for_a_model_over_several_ranks(world_
         assert batch_sizes == [4, 2, 2]
 
 
-def test_disable_use_cache_restores_on_exception():
+@pytest.mark.parametrize("prev_value", [True, False])
+def test_disable_use_cache_restores_on_exception(prev_value):
     """Restore must run even if the with-block raises."""
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
-    model.config.use_cache = True
+    model.config.use_cache = prev_value
 
     with pytest.raises(RuntimeError, match="boom"), _disable_use_cache(model):
         assert model.config.use_cache is False
+        model.config.use_cache = not prev_value
         raise RuntimeError("boom")
 
-    assert model.config.use_cache is True
+    assert model.config.use_cache is prev_value
 
 
 def test_disable_use_cache_restores_on_setup_error():

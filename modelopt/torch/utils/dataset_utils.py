@@ -975,12 +975,13 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
     under ``text_config``; that config object is handled the same way. The
     prior value is restored on exit if one existed.
     """
+    missing = object()
     states = []
     try:
         for config in _iter_use_cache_configs(model):
-            had_attr = hasattr(config, "use_cache")
+            prev = getattr(config, "use_cache", missing)
             if (
-                not had_attr
+                prev is missing
                 and isinstance(config, BaseModel)
                 and "use_cache" not in type(config).model_fields
                 and (
@@ -988,24 +989,22 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
                 )
             ):
                 continue  # This schema cannot accept a temporary cache flag.
-            prev = config.use_cache if had_attr else None
-            if prev is False:
-                continue
             try:
-                config.use_cache = False
+                if prev is not False:
+                    config.use_cache = False
             except AttributeError:
-                if had_attr:
+                if prev is not missing:
                     raise
                 continue  # Metadata-only configs, e.g. dicts, may not support attributes.
-            states.append((config, had_attr, prev))
+            states.append((config, prev))
         yield
     finally:
-        for config, had_attr, prev in reversed(states):
-            if had_attr:
-                config.use_cache = prev
-            else:
+        for config, prev in reversed(states):
+            if prev is missing:
                 with suppress(AttributeError):
                     delattr(config, "use_cache")
+            elif getattr(config, "use_cache", missing) is not prev:
+                config.use_cache = prev
 
 
 def get_max_batch_size(
