@@ -279,10 +279,10 @@ evaluation speed:
   Use representative questions: compute an average score per question across repetitions, then
   estimate uncertainty across questions. With sufficiently independent questions, this approach can support faster experimentation.
 
-Both approaches produce a single aggregate score per checkpoint for comparisons across experiments.
-With the same number of repetitions per question, they give the same mean score; they differ in how
-uncertainty is estimated. Keep per-question results for more detailed paired comparisons across
-experiments.
+In both approaches, we produce the same aggregate mean score by averaging across all questions
+and repetitions. Using question-level versus repetition-level analysis only changes how uncertainty
+is estimated with confidence intervals. Keep per-question results for more detailed paired
+comparisons across experiments.
 
 Is question-level analysis reliable on real benchmarks compared with repetition-level analysis?
 We compare the two approaches by spending the same response budget on more unique questions or
