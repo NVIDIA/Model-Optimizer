@@ -35,10 +35,6 @@ try:
     from vllm.models.deepseek_v4.attention import DeepseekV4Indexer as VllmDeepseekV4Indexer
 except (ImportError, NotImplementedError):
     VllmDeepseekV4Indexer = None
-try:
-    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
-except (ImportError, NotImplementedError):
-    DeepseekV4MegaMoEExperts = None
 
 
 class _QuantVLLMDeepseekV4Indexer(_QuantVLLMIndexerBase):
@@ -112,6 +108,13 @@ if VllmDeepseekV4Indexer is not None:
     QuantModuleRegistry.register({VllmDeepseekV4Indexer: "vllm_DeepseekV4Indexer"})(
         _QuantVLLMDeepseekV4Indexer
     )
+
+# Imported only once the indexer is registered: an import that fails in a way not caught here
+# aborts this module, and must not take the indexer's registration with it.
+try:
+    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
+except (ImportError, NotImplementedError):
+    DeepseekV4MegaMoEExperts = None
 
 if DeepseekV4MegaMoEExperts is not None:
     QuantModuleRegistry.register({DeepseekV4MegaMoEExperts: "vllm_DeepseekV4MegaMoEExperts"})(

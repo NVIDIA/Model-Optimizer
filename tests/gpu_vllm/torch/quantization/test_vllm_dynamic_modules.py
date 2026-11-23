@@ -542,6 +542,73 @@ def test_vllm_plugin_imports_every_model_package():
     assert result.returncode == 0, result.stderr
 
 
+# Runs in a fresh interpreter. The module named first fails to import with an error the model
+# modules do not catch, as an unexpected failure inside a vLLM build would; the registration named
+# second must survive it.
+_CHECK_FAILED_IMPORT_IS_ISOLATED = """
+import sys
+
+failing, kept = sys.argv[1:]
+
+if kept == "deepseek_v4_indexer":
+    # Only the Mega-MoE module fails, as on platforms where vLLM's DeepSeek-V4 package does not
+    # import its NVIDIA model module up front: the indexer's module is already importable.
+    import vllm.models.deepseek_v4.attention
+
+    sys.modules.pop(failing, None)
+
+
+class _FailingImport:
+    def find_spec(self, name, path=None, target=None):
+        if name == failing:
+            raise RuntimeError(f"simulated failure importing {name}")
+
+
+sys.meta_path.insert(0, _FailingImport())
+
+import modelopt.torch.quantization
+from modelopt.torch.quantization.nn import QuantModuleRegistry
+from modelopt.torch.quantization.plugins.custom import CUSTOM_MODEL_PLUGINS
+
+if kept == "kimi_k3_callback":
+    kimi = sys.modules.get("modelopt.torch.models.kimi_k3.modeling_ptq_vllm")
+    assert kimi is not None, f"failing to import {failing} skipped Kimi-K3's module"
+    assert kimi.prepare_kimi_mlps_on_the_fly in CUSTOM_MODEL_PLUGINS
+else:
+    from vllm.models.deepseek_v4.attention import DeepseekV4Indexer
+
+    assert DeepseekV4Indexer in QuantModuleRegistry, f"failing to import {failing} dropped it"
+"""
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize(
+    ("failing", "kept"),
+    [
+        # GLM's module is imported after DeepSeek-V4's and before Kimi-K3's.
+        ("modelopt.torch.models.glm5_next.modeling_ptq_vllm", "kimi_k3_callback"),
+        ("vllm.models.deepseek_v4.nvidia.model", "deepseek_v4_indexer"),
+    ],
+)
+def test_failed_vllm_model_import_keeps_other_registrations(failing, kept):
+    """A model module that fails to import leaves the other models' wrappers, and its own
+    registrations from before the failure, in place."""
+    if kept == "deepseek_v4_indexer":
+        try:
+            importlib.import_module("vllm.models.deepseek_v4.attention")
+        except (ImportError, NotImplementedError):
+            pytest.skip("this vLLM build has no DeepSeek-V4 indexer")
+    env = {k: v for k, v in os.environ.items() if k != "COVERAGE_PROCESS_START"}
+    result = subprocess.run(
+        [sys.executable, "-c", _CHECK_FAILED_IMPORT_IS_ISOLATED, failing, kept],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_kimi_legacy_gemm_rs_routes_by_down_proj_quantizers(fake_parallel_state, monkeypatch):
     kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
     if "run_gemm_rs" not in kimi_model.KimiMLP.forward.__code__.co_names:

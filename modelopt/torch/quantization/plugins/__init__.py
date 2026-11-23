@@ -77,9 +77,11 @@ with import_plugin("vllm"):
     from .vllm_layer_scope import *
     from .vllm_mega_moe import *
 
-    # The model-specific vLLM wrappers, after the generic ones above that they build on.
+    # The model-specific vLLM wrappers, after the generic ones above that they build on. Each is
+    # guarded on its own, so a model whose import fails leaves the other models' wrappers registered.
     for _model_type in ("deepseek_v4", "glm5_next", "kimi_k3"):
-        importlib.import_module(f"modelopt.torch.models.{_model_type}.modeling_ptq_vllm")
+        with import_plugin(f"{_model_type} vLLM"):
+            importlib.import_module(f"modelopt.torch.models.{_model_type}.modeling_ptq_vllm")
 
 with import_plugin("trl"):
     from .trl import *
