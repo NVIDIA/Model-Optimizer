@@ -16,8 +16,8 @@ tool the task names (the default is named in the index), and do not load another
 
 ## What to read, in order
 
-0. **First, the reference file of the tool you are using** (`references/tools/<tool>.md`, found through the
-   index). It holds the rules that apply only to that tool, such as what must not be cancelled, where its
+0. **First, the reference file of the tool you are using** (`references/tools/<tool>.md`). Do not guess its
+   name: open [references/tools/index.md](references/tools/index.md) and follow the link for your tool. It holds the rules that apply only to that tool, such as what must not be cancelled, where its
    sampling and health rules are, and its MLflow names; the files below defer to it.
 1. **Before choosing settings:** [vendor-reference-and-sampling.md](references/vendor-reference-and-sampling.md)
    - the quantization-specific part of reading the model card (the tool's own skill does the extraction), the

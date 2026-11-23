@@ -150,6 +150,9 @@ def test_guidance_makes_the_tool_reference_the_first_read():
         r"^0\. \*\*First, the reference file of the tool you are using\*\*", text, re.MULTILINE
     )
     assert "references/tools/<tool>.md" in text
+    assert (
+        "Do not guess its" in text and "references/tools/index.md" in text
+    )  # a tool file was once guessed wrongly
 
 
 def test_each_tool_has_a_reference_and_the_index_lists_it():
