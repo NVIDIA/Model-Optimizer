@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import (
@@ -185,7 +186,9 @@ def test_collector_collects_correct_number_of_inputs(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "config", [{}, SimpleNamespace(text_config={})], ids=["dict", "nested-dict"]
+    "config",
+    [{}, SimpleNamespace(text_config={}), ModeloptBaseConfig()],
+    ids=["dict", "nested-dict", "pydantic"],
 )
 def test_collector_activations_match_expected(monkeypatch, config):
     """First layer should receive the raw input data."""

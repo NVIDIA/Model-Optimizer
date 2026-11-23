@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
+from pydantic import BaseModel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
@@ -978,6 +979,15 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
     try:
         for config in _iter_use_cache_configs(model):
             had_attr = hasattr(config, "use_cache")
+            if (
+                not had_attr
+                and isinstance(config, BaseModel)
+                and "use_cache" not in type(config).model_fields
+                and (
+                    config.model_config.get("extra") != "allow" or config.model_config.get("frozen")
+                )
+            ):
+                continue  # This schema cannot accept a temporary cache flag.
             prev = config.use_cache if had_attr else None
             try:
                 config.use_cache = False
