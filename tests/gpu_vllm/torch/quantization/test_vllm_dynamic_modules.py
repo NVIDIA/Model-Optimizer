@@ -519,6 +519,15 @@ expected = {
 }
 missing = sorted(expected - sys.modules.keys())
 assert expected and not missing, f"the vLLM plugin did not import {missing}"
+
+# GLM-5.3-Flash's tests convert a stand-in indexer: check here that the native one is registered.
+from modelopt.torch.quantization.nn import QuantModuleRegistry
+
+glm5_next = sys.modules["modelopt.torch.models.glm5_next.modeling_ptq_vllm"]
+if glm5_next.VllmGlm5NextIndexer is not None:
+    dm_cls = QuantModuleRegistry[glm5_next.VllmGlm5NextIndexer]
+    assert issubclass(dm_cls, glm5_next._QuantVLLMGlm5NextIndexer), dm_cls.__mro__
+    print("GLM-5.3-Flash's native indexer is registered")
 """
 
 
@@ -540,6 +549,9 @@ def test_vllm_plugin_imports_every_model_package():
         check=False,
     )
     assert result.returncode == 0, result.stderr
+    # The registry check ran wherever this vLLM build has GLM-5.3-Flash's native indexer.
+    checked = "GLM-5.3-Flash's native indexer is registered" in result.stdout
+    assert checked == (glm5_next_ptq.VllmGlm5NextIndexer is not None), result.stdout
 
 
 # Runs in a fresh interpreter. The module named first fails to import with an error the model
