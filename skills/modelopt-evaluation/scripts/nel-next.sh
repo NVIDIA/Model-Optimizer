@@ -23,14 +23,14 @@
 # it into the 0.2.6 env would clobber `nel`, so this runs 0.4.x in a throwaway
 # `uvx` environment (uv resolves + caches + reuses it) and forwards to its `nel`.
 #
-# Usage (source .env FIRST so the config's ${VAR}s resolve; this never reads secrets):
+# Usage (export required variables via approved credential setup; never log secret values):
 #   "$SKILL_DIR/scripts/nel-next.sh" --setup-only|--which|--version
 #   "$SKILL_DIR/scripts/nel-next.sh" eval run <config.yaml> [--dry-run|--submit] [-O k=v ...]
 #   "$SKILL_DIR/scripts/nel-next.sh" eval {status|logs|report|merge|resume|stop} -r <run_id>
 #   "$SKILL_DIR/scripts/nel-next.sh" mlflow-push -r <run_id> -c <config.yaml> [-- -o k=v ...]
 #     Post-run: SLURM doesn't auto-export. Pulls the merged bundle(s) + pushes to MLflow
 #     using the config's export_config.mlflow (resolves ${MLFLOW_TRACKING_URI}, forces
-#     emit_traces=false to avoid the per-sample hang). Run after `source .env`.
+#     emit_traces=false to avoid the per-sample hang).
 #
 # Install source: NEL_NEXT_ORIGIN + NEL_NEXT_REF git build (default), or NEL_NEXT_SPEC
 # to force a PyPI release. Upstream `main` is 0.4.0 and ships the vendored TB 2.1 registry

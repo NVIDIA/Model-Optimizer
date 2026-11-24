@@ -75,8 +75,9 @@ benchmarks:
       log_stream_prefix: terminalbench-21-<model>-<framework>
 ```
 
-`cluster.eval_image: ${NEL_NEXT_EVAL_IMAGE}` (`0.5.0.1-harbor`) and the AWS creds
-come from `modelopttools:eval-config` (run it first) + the workspace `.env`.
+Use `modelopttools:eval-config` for the image setting (`NEL_NEXT_EVAL_IMAGE`,
+`0.5.0.1-harbor`). Export the required AWS variables into the launcher environment
+through approved credential setup; never print their values.
 
 **Timeout policy.** `max` uses the larger of `run_timeout` and the task's own
 budget (subject to any `max_agent_timeout` cap); 14400 is not a hard ceiling.

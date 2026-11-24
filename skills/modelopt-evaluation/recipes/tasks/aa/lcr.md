@@ -8,9 +8,9 @@
 
 Judge-scored (equality checker). The judge `model_id` is hardcoded in the fragment
 below (**Qwen3 235B**) — swap it for an equivalent on your own endpoint if needed.
-The judge `url` still comes from `.env` (`INFERENCE_JUDGE_URL`; see `recipes/env.example`)
-— config, not a secret, so no export; only `api_key` (`INFERENCE_API_KEY`) is
-exported. Keep the judge fixed.
+Use the judge URL from approved configuration (`INFERENCE_JUDGE_URL`).
+Export `INFERENCE_API_KEY` through approved credential setup; never print it.
+Keep the judge fixed.
 
 AA-LCR needs long context (~120K input tokens plus generation). Set deployment
 `--max-model-len` to at least `196608`, and use a larger value when the model
@@ -57,7 +57,7 @@ block. Per SKILL.md Step 3, the deployment flag must live inside
           num_repeats: 16
           judge:
             model_id: nvidia/qwen/qwen-235b   # Qwen3 235B; use an equivalent on your own endpoint if needed
-            url: <INFERENCE_JUDGE_URL>              # from .env (/v1 base)
+            url: <INFERENCE_JUDGE_URL>              # /v1 base URL
             api_key: INFERENCE_API_KEY       # env-var name; exported, read by harness
 ```
 

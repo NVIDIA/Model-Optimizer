@@ -8,10 +8,9 @@
 
 Text-only HLE, params aligned to Artificial Analysis Index v2; judge-scored. The
 judge `model_id` is hardcoded in the fragment below (**GPT-4o**) — swap it for an
-equivalent on your own endpoint if needed. The judge `url` still comes from `.env`
-(`INFERENCE_JUDGE_URL`; see `recipes/env.example`) — config, not a secret, so no export.
-Only `api_key` (`INFERENCE_API_KEY`) is exported and read by the harness. Keep the
-judge fixed across comparable runs.
+equivalent on your own endpoint if needed. Use the judge URL from approved
+configuration (`INFERENCE_JUDGE_URL`). Export `INFERENCE_API_KEY` through approved
+credential setup for the harness; never print it. Keep the judge fixed across comparable runs.
 
 `hle_strict_judge: true` (inside the `judge` block) enables strict judging.
 
@@ -36,7 +35,7 @@ Use this inside the top-level `evaluation.tasks` list:
         extra:
           judge:
             model_id: azure/openai/gpt-4o   # GPT-4o; use an equivalent on your own endpoint if needed
-            url: <INFERENCE_JUDGE_URL>              # from .env (/v1 base)
+            url: <INFERENCE_JUDGE_URL>              # /v1 base URL
             api_key: INFERENCE_API_KEY       # env-var name; exported, read by harness
             hle_strict_judge: true
 ```
