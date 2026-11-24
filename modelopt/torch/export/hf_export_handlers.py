@@ -41,7 +41,14 @@ from .quant_utils import (
     get_activation_scaling_factor,
     get_quantization_format,
     get_weight_block_size,
+    is_mxfp4_release_experts,
+    mxfp4_release_modules_to_not_convert,
     to_quantized_weight,
+)
+from .quantized_weight_export import (
+    capture_quantized_weight_export_state,
+    export_quantized_weight_tensors,
+    select_quantized_weight_export_state,
 )
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
@@ -476,6 +483,9 @@ def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> Non
         )
     if get_quantization_format(module) == QUANTIZATION_NONE:
         return
+    if mxfp4_release_modules_to_not_convert(ctx.model_type) and is_mxfp4_release_experts(module):
+        _export_mxfp4_release_experts(module, ctx.dtype)
+        return
     # TODO: consolidate uncalibrated experts handling logic
     set_expert_quantizer_amax(
         modules=module,
@@ -487,3 +497,36 @@ def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> Non
     )
     for weight_name in ["gate_up_proj", "down_proj"]:
         _export_weight(module, ctx, weight_name)
+
+
+def _export_mxfp4_release_experts(module: nn.Module, dtype: torch.dtype) -> None:
+    """Pack weight-only MXFP4 experts as their model's MXFP4 release stores them.
+
+    Each projection becomes ``<proj>_blocks``, its E2M1 codes as ``(num_experts, out_dim,
+    in_dim // 32, 16)`` bytes, and ``<proj>_scales``, its E8M0 scales as ``(num_experts,
+    out_dim, in_dim // 32)``. The functional export packs them from the view the experts
+    quantize in their forward, so the blocks run along ``in_dim`` as they do there.
+    """
+    packed = {}
+    # Both before either weight is replaced: that view reads both.
+    for weight_name in ("gate_up_proj", "down_proj"):
+        weight = getattr(module, weight_name)
+        state = capture_quantized_weight_export_state(module, weight_name, cpu=False)
+        assert state is not None, f"{weight_name} of {type(module).__name__} is not quantized"
+        scale_name = quantizer_attr_names(weight_name).weight_scale
+        codes, scales = [], []
+        # One expert at a time: packing takes several float32 copies of what it packs.
+        for expert in range(weight.shape[0]):
+            expert_state = select_quantized_weight_export_state(state, 0, [expert])
+            tensors = export_quantized_weight_tensors(
+                weight[expert : expert + 1], expert_state, dtype, weight_name
+            )
+            # Back from the weight's layout to the packed one, (1, out_dim, in_dim // 2).
+            codes.append(tensors[weight_name].permute(state.packing_permutation))
+            scales.append(tensors[scale_name].permute(state.packing_permutation))
+        packed[weight_name] = torch.cat(codes), torch.cat(scales)
+    for weight_name, (codes, scales) in packed.items():
+        blocks = codes.reshape(*scales.shape, -1)
+        delattr(module, weight_name)
+        module.register_buffer(f"{weight_name}_blocks", blocks)
+        module.register_buffer(f"{weight_name}_scales", scales)

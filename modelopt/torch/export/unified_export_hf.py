@@ -1764,8 +1764,10 @@ def _write_hf_export_config(
         quantization_details.get("quant_algo") is not None
         or quantization_details.get("kv_cache_quant_algo") is not None
     )
-    quantization_config = None
-    if hf_quant_config is not None and is_quantized_export:
+    # The model's MXFP4 release layout is described as the release describes it, alone: a
+    # runtime that finds hf_quant_config.json reads that instead.
+    quantization_config = (hf_quant_config or {}).get("mxfp4_release_quantization_config")
+    if quantization_config is None and hf_quant_config is not None and is_quantized_export:
         with open(f"{export_dir}/hf_quant_config.json", "w") as file:
             json.dump(hf_quant_config, file, indent=4)
         quantization_config = convert_hf_quant_config_format(hf_quant_config)

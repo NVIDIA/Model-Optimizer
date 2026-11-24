@@ -304,6 +304,17 @@ class ExportSpec(SpecSection):
     pre_quant_scale fusion). A structural fallback (``zero_centered_gamma``) stays
     in the engine."""
 
+    mxfp4_release_modules_to_not_convert: tuple[str, ...] = ()
+    """The ``modules_to_not_convert`` of the model's own MXFP4 release, for a model released
+    with MXFP4 experts (GPT-OSS).
+
+    Runtimes read such a model's MXFP4 experts only as its release stores them, so an
+    export whose only quantized modules are fused experts in weight-only MXFP4 is written
+    the same way: each projection as ``<proj>_blocks`` and ``<proj>_scales``, under
+    ``quantization_config = {"quant_method": "mxfp4", "modules_to_not_convert": ...}``
+    and without ``hf_quant_config.json``. The export refuses such experts beside any other
+    quantized module, which that layout cannot describe."""
+
 
 @dataclass(kw_only=True)
 class PTQSpec(SpecSection):

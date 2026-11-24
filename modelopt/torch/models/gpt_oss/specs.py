@@ -15,7 +15,7 @@
 
 """GPT-OSS specs (HF model type ``gpt_oss``)."""
 
-from ..specs import EPSpec, ModelSpec, MoESpec, register
+from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
@@ -37,6 +37,15 @@ register(
             block_names=("GptOssMLP", "GptOssMoE"),
             expert_linear_names=("gate_up_proj", "down_proj"),
             fused_expert_names=True,
+        ),
+        export_spec=ExportSpec(
+            # As openai/gpt-oss-20b and -120b list them.
+            mxfp4_release_modules_to_not_convert=(
+                "model.layers.*.self_attn",
+                "model.layers.*.mlp.router",
+                "model.embed_tokens",
+                "lm_head",
+            ),
         ),
     )
 )

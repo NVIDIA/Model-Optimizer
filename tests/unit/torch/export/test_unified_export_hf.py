@@ -1396,3 +1396,113 @@ def test_an_expert_parallel_export_it_cannot_write_is_refused_before_folding(
     assert after.keys() == before.keys()
     assert all(torch.equal(after[k], v) for k, v in before.items())
     assert not (tmp_path / "export").exists()
+
+
+def _tiny_gpt_oss():
+    """A tiny GPT-OSS whose expert in and out dims differ, so a transposed layout cannot pass."""
+    from _test_utils.torch.transformers_models import get_tiny_gpt_oss
+
+    return get_tiny_gpt_oss(
+        hidden_size=64, intermediate_size=96, num_hidden_layers=2, dtype=torch.float32
+    )
+
+
+def _quantize_experts_mxfp4(model, extra_quant_cfg=()):
+    from modelopt.recipe import load_recipe
+
+    config = load_recipe("general/ptq/mxfp4_mlp_weight_only").quantize.model_dump()
+    config["quant_cfg"] = [*config["quant_cfg"], *extra_quant_cfg]
+    return mtq.quantize(model, config)
+
+
+@pytest.mark.parametrize("placement", ["resident", "offloaded", "fsdp2"])
+def test_gpt_oss_mxfp4_experts_export_as_openai_releases_them(tmp_path, request, placement):
+    """Runtimes read GPT-OSS's MXFP4 experts only as openai/gpt-oss-* store them. Transformers reads
+    the export back to the weights the experts quantize to in their forward, blocked along in_dim."""
+    pytest.importorskip("transformers")
+    # Local imports: optional dependencies, guarded by the importorskip above.
+    from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+    from safetensors.torch import load_file
+    from torch.distributed.fsdp import fully_shard
+    from transformers import AutoConfig, AutoModelForCausalLM, Mxfp4Config
+
+    from modelopt.torch.quantization.qtensor import MXFP4QTensor
+
+    model = _tiny_gpt_oss()
+    expected = {}
+    for weight_name in ("gate_up_proj", "down_proj"):
+        weight = getattr(model.model.layers[0].mlp.experts, weight_name)
+        codes, scales = MXFP4QTensor.quantize(weight.detach().transpose(-1, -2).contiguous(), 32)
+        expected[weight_name] = codes.dequantize(scale=scales, block_sizes={-1: 32})
+    if placement == "offloaded":
+        model.save_pretrained(tmp_path / "source")
+        config = AutoConfig.from_pretrained(tmp_path / "source")
+        with init_empty_weights():
+            model = AutoModelForCausalLM.from_config(config, dtype=torch.float32)
+        device_map = {
+            "model.embed_tokens": "cpu",
+            "model.layers.0": "disk",
+            "model.layers.1": "cpu",
+        }
+        device_map |= {"model.norm": "cpu", "model.rotary_emb": "cpu", "lm_head": "cpu"}
+        model = load_checkpoint_and_dispatch(
+            model, tmp_path / "source", device_map, offload_folder=tmp_path / "offload"
+        )
+    elif placement == "fsdp2":
+        mesh = request.getfixturevalue("gloo_world_of_one")
+        for layer in model.model.layers:
+            fully_shard(layer, mesh=mesh)
+        fully_shard(model, mesh=mesh)
+        set_distribution_plan(model, DistributionPlan(1, dense="fsdp"))
+    export_dir = tmp_path / "export"
+    export_hf_checkpoint(_quantize_experts_mxfp4(model), export_dir=export_dir)
+
+    assert not (export_dir / "hf_quant_config.json").exists()
+    assert json.loads((export_dir / "config.json").read_text())["quantization_config"] == {
+        "quant_method": "mxfp4",
+        "modules_to_not_convert": [
+            "model.layers.*.self_attn",
+            "model.layers.*.mlp.router",
+            "model.embed_tokens",
+            "lm_head",
+        ],
+    }
+    tensors = load_file(export_dir / "model.safetensors")
+    prefix = "model.layers.0.mlp.experts."
+    assert {k.removeprefix(prefix) for k in tensors if k.startswith(prefix)} == {
+        "gate_up_proj_blocks",
+        "gate_up_proj_scales",
+        "gate_up_proj_bias",
+        "down_proj_blocks",
+        "down_proj_scales",
+        "down_proj_bias",
+    }
+    assert tensors[prefix + "gate_up_proj_blocks"].shape == (8, 192, 2, 16)
+    assert tensors[prefix + "down_proj_scales"].shape == (8, 64, 3)
+
+    reloaded = AutoModelForCausalLM.from_pretrained(
+        export_dir, quantization_config=Mxfp4Config(dequantize=True)
+    )
+    for weight_name, weight in expected.items():
+        actual = getattr(reloaded.model.layers[0].mlp.experts, weight_name)
+        torch.testing.assert_close(
+            actual.transpose(-1, -2), weight.to(actual.dtype), rtol=0, atol=0
+        )
+
+
+def test_gpt_oss_mxfp4_experts_export_refuses_other_quantized_modules(tmp_path):
+    """OpenAI's MXFP4 layout cannot describe an FP8 KV cache, so the export refuses it unwritten."""
+    pytest.importorskip("transformers")
+    model = _quantize_experts_mxfp4(
+        _tiny_gpt_oss(),
+        [{"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}}],
+    )
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+
+    with pytest.raises(NotImplementedError, match="cannot carry other quantized modules"):
+        export_hf_checkpoint(model, export_dir=tmp_path)
+
+    after = model.state_dict()
+    assert after.keys() == before.keys()
+    assert all(torch.equal(after[k], v) for k, v in before.items())
+    assert not any(tmp_path.iterdir())

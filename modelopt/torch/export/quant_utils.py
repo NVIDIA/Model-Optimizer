@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 
 from modelopt import __version__
-from modelopt.torch.models import get_spec, list_all_possible
+from modelopt.torch.models import get_spec, hf_model_type, list_all_possible
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
@@ -1850,6 +1850,70 @@ def _has_pre_quant_scale(module: nn.Module, weight_names: list[str]) -> bool:
     )
 
 
+def mxfp4_release_modules_to_not_convert(model_type: str | None) -> tuple[str, ...]:
+    """The ``modules_to_not_convert`` of the model type's MXFP4 release, empty without one.
+
+    See :attr:`~modelopt.torch.models.ExportSpec.mxfp4_release_modules_to_not_convert`.
+    """
+    spec = get_spec(model_type) if model_type else None
+    export_spec = spec.export_spec if spec is not None else None
+    return export_spec.mxfp4_release_modules_to_not_convert if export_spec is not None else ()
+
+
+def is_mxfp4_release_experts(module: nn.Module) -> bool:
+    """Whether ``module`` holds fused experts whose two projections are weight-only MXFP4."""
+    for weight_name in ("gate_up_proj", "down_proj"):
+        attrs = quantizer_attr_names(weight_name)
+        weight_quantizer = getattr(module, attrs.weight_quantizer, None)
+        if not isinstance(weight_quantizer, TensorQuantizer):
+            return False
+        input_quantizer = getattr(module, attrs.input_quantizer, None)
+        quantization = _get_quantization_from_quantizers(module, weight_quantizer, input_quantizer)
+        if quantization != QUANTIZATION_W4A16_MXFP4:
+            return False
+    return True
+
+
+def mxfp4_release_quantization_config(model: nn.Module) -> dict[str, Any] | None:
+    """Return the ``quantization_config`` of the model's MXFP4 release if its export takes that layout.
+
+    It does for a model released with MXFP4 experts (see
+    :attr:`~modelopt.torch.models.ExportSpec.mxfp4_release_modules_to_not_convert`) whose only
+    quantized modules are fused experts in weight-only MXFP4. ``None`` when no experts are.
+
+    Raises:
+        NotImplementedError: the experts are quantized beside another module, or in blocks other
+            than the release's 32 elements, which the release layout cannot carry.
+    """
+    modules_to_not_convert = mxfp4_release_modules_to_not_convert(hf_model_type(model))
+    if not modules_to_not_convert:
+        return None
+    experts = {name for name, module in model.named_modules() if is_mxfp4_release_experts(module)}
+    if not experts:
+        return None
+    quantized = {
+        name.rpartition(".")[0]
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer) and module.is_enabled
+    }
+    if others := sorted(quantized - experts):
+        raise NotImplementedError(
+            f"{hf_model_type(model)} exports weight-only MXFP4 experts as its MXFP4 release stores "
+            f"them, a layout that cannot carry other quantized modules: {others[:5]}"
+            f"{' ...' if len(others) > 5 else ''}. Quantize the experts alone, or in another format."
+        )
+    for name in sorted(experts):
+        module = model.get_submodule(name)
+        for weight_name in ("gate_up_proj", "down_proj"):
+            quantizer = getattr(module, quantizer_attr_names(weight_name).weight_quantizer)
+            if quantizer.block_sizes.get(-1) != 32:
+                raise NotImplementedError(
+                    f"{name}.{weight_name}: the MXFP4 release layout holds 32-element blocks, not "
+                    f"{quantizer.block_sizes.get(-1)}."
+                )
+    return {"quant_method": "mxfp4", "modules_to_not_convert": list(modules_to_not_convert)}
+
+
 def get_quant_config(
     model: nn.Module,
     is_modelopt_qlora: bool = False,
@@ -1868,7 +1932,10 @@ def get_quant_config(
             for diffusion models, whose attention quantizers do not represent a cache.
 
     Returns:
-        Dictionary containing the quantization configuration
+        Dictionary containing the quantization configuration. When the export writes the model's
+        MXFP4 release layout (:func:`mxfp4_release_quantization_config`), its
+        ``"mxfp4_release_quantization_config"`` is the ``quantization_config`` for
+        ``config.json``, in place of ModelOpt's.
     """
     # Find first quantized linear layer to determine quantization format
     quantization_format = None
@@ -2047,6 +2114,10 @@ def get_quant_config(
     elif len(kv_cache_formats) == 1:
         # Preserve the pre-AutoQuantize uniform KV schema, including partial coverage.
         quant_config["quantization"]["kv_cache_quant_algo"] = next(iter(kv_cache_formats))
+
+    # Decided here, before any weight is packed, so a refusal leaves the weights as they were.
+    if (release_config := mxfp4_release_quantization_config(model)) is not None:
+        quant_config["mxfp4_release_quantization_config"] = release_config
 
     return quant_config
 
