@@ -72,6 +72,7 @@ from .quant_format import (
     QUANTIZATION_W4A16_NVFP4,
 )
 from .quant_utils import (
+    _refuse_built_in_packing,
     get_activation_scaling_factor,
     get_kv_cache_dtype,
     get_kv_cache_scaling_factor,
@@ -1319,6 +1320,7 @@ class GPTModelExporter:
 
         if qformat == QUANTIZATION_NONE:
             return name_to_value, qformat, block_size
+        _refuse_built_in_packing(module)
         # GGML formats derive all block metadata directly from the weight and do not use amax or
         # separately exported scaling tensors. Keep the weight on-device until it can be packed
         # along its contraction axis, so the CUDA packer can be used. A weight that keeps pinned

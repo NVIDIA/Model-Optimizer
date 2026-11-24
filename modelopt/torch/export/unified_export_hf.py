@@ -142,6 +142,7 @@ from .quant_format import (
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
     _get_uncalibrated_static_input_module_names,
+    _refuse_built_in_packing,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -665,6 +666,8 @@ def _export_quantized_weight(
     if quantization_format == QUANTIZATION_NONE:
         return
 
+    # The built-in fused-experts packing passes a wrapper per expert, which a handler can match.
+    _refuse_built_in_packing(sub_module)
     block_size = get_weight_block_size(sub_module, weight_name)
     quantizer_attrs = quantizer_attr_names(weight_name)
     weight: nn.Parameter = getattr(sub_module, weight_name)

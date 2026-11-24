@@ -23,6 +23,7 @@ Changelog
 *Quantization - Export & Deployment*
 
 - ``examples/hf_ptq/convert_ggml_to_int8.py`` now also converts GGML exports that hold other formats (FP8, NVFP4, KV cache quantization): their GGML layers become ModelOpt ``INT8_PB_WO`` layers beside the rest of the export, which vLLM newer than 0.34.0 serves. Exports with only GGML layers still become compressed-tensors, and fused MoE experts now convert in both.
+- ``ExportModuleRegistry.register`` takes ``export_format``, an ``ExportFormat`` with the quantization format and block size in which the handler writes the weights it exports, which export then uses for those modules. With it, models quantized with a custom quantization backend (``register_quant_backend``) whose ``num_bits`` is the backend's own export from ``examples/hf_ptq/hf_ptq.py``, ``--vllm_fakequant_export`` included, and ``examples/llm_qat/export.py`` instead of failing with ``Unsupported quantizer``.
 
 *Quantization - Recipes*
 

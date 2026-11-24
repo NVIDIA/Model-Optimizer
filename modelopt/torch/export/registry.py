@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ExportContext",
+    "ExportFormat",
     "ExportHandler",
     "ExportModuleRegistry",
     "PrepareMoEInputsRegistry",
@@ -84,6 +85,25 @@ class ExportContext:
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]
+
+
+@dataclass(frozen=True, kw_only=True)
+class ExportFormat:
+    """The format in which an :data:`ExportModuleRegistry` handler writes the weights it exports."""
+
+    quantization_format: str
+    """A format of :mod:`~modelopt.torch.export.quant_format`, such as ``w4a16_nvfp4``."""
+
+    block_size: int = 0
+    """The number of weights per scale block, or 0 for a format without blocks."""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.quantization_format, str) or not self.quantization_format:
+            raise ValueError(
+                f"quantization_format must name a format, got {self.quantization_format!r}"
+            )
+        if not isinstance(self.block_size, int) or self.block_size < 0:
+            raise ValueError(f"block_size must be an int >= 0, got {self.block_size!r}")
 
 
 class _ExportHandlerRegistryCls:
@@ -165,7 +185,91 @@ class _ExportHandlerRegistryCls:
         return None
 
 
+class _ExportModuleRegistryCls(_ExportHandlerRegistryCls):
+    """The registry of the whole-model export walk, whose handlers can declare their format."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        # The format each handler declares, by the identity that re-registering it replaces it by.
+        self._declared: dict[tuple[str, str], ExportFormat] = {}
+
+    def register(
+        self,
+        *keys: type | str,
+        predicate: Callable[[nn.Module], bool] | None = None,
+        prepend: bool = False,
+        export_format: ExportFormat | None = None,
+    ) -> Callable[[ExportHandler], ExportHandler]:
+        """Return a decorator registering a handler function.
+
+        Keys, ``predicate`` and ``prepend`` match as in the other registries. ``export_format``
+        (an :class:`ExportFormat`) declares the format in which the handler writes the quantized
+        weights of the modules it exports. Export then reads the format and block size of such a
+        module, and with them its quantization config, from this entry instead of from the module's
+        quantizers, as long as the module's weight quantizer is enabled. The entry applies only to
+        the modules it matches first, the ones its handler exports, so register it with
+        ``prepend=True``.
+
+        Declare the format for weights that a custom quantization backend (see
+        :func:`~modelopt.torch.quantization.nn.modules.tensor_quantizer.register_quant_backend`)
+        quantizes with a ``num_bits`` of its own, such as a string, which tells export nothing of
+        how to store them, so that it raises ``NotImplementedError: Unsupported quantizer``. The
+        declared format covers the whole module, its input quantization included: ``w4a16_nvfp4``
+        for NVFP4 weights with unquantized inputs, ``nvfp4`` with NVFP4 inputs.
+
+        The handler writes the packed weight and every scale of the format, the input scale
+        included. Export itself writes the input quantizer's ``pre_quant_scale``. The handler
+        receives each module after the usual export preprocessing, which can change it: it can
+        merge the ``amax`` of layers that share an input, such as q/k/v and an MoE expert's gate and
+        up projections, and fold a pre-quant scale (AWQ) into the preceding layernorm or linear,
+        which rescales weights and recalibrates their ``amax``. Under
+        :attr:`ExportContext.keep_fused_experts`, the distributed export that packs a still-sharded
+        model, the handler must pack as the built-in handlers do, FSDP2-owned weights inside their
+        unit's weight-update window and fused experts kept fused, or raise.
+
+        ``export_hf_vllm_fq_checkpoint``, which writes the weights the backend fake-quantizes,
+        reads the declared format and does not call the handler. The exporters that pack weights
+        with the built-in math, such as the Megatron export, raise for these modules.
+
+        Usage::
+
+            register_quant_backend("my_backend", my_fake_quant)
+
+
+            @ExportModuleRegistry.register(
+                predicate=has_my_backend_weights,
+                prepend=True,
+                export_format=ExportFormat(
+                    quantization_format=QUANTIZATION_W4A16_NVFP4, block_size=16
+                ),
+            )
+            def _export_my_backend(name, module, ctx): ...
+        """
+        if export_format is not None and not isinstance(export_format, ExportFormat):
+            raise TypeError(f"export_format must be an ExportFormat, got {export_format!r}")
+        register = super().register(*keys, predicate=predicate, prepend=prepend)
+
+        def decorator(handler: ExportHandler) -> ExportHandler:
+            identity = (handler.__module__, handler.__qualname__)
+            self._declared.pop(identity, None)
+            if export_format is not None:
+                self._declared[identity] = export_format
+            return register(handler)
+
+        return decorator
+
+    def declared_format(self, module: nn.Module) -> ExportFormat | None:
+        """Return the format that the handler exporting ``module`` declares, or ``None``."""
+        # Format detection calls this for every quantized layer: match only if a format is declared.
+        if not self._declared:
+            return None
+        handler = self.match(module)
+        if handler is None:
+            return None
+        return self._declared.get((handler.__module__, handler.__qualname__))
+
+
 # Matches an MoE block's ``.experts`` container; the handler receives the enclosing block.
 PrepareMoEInputsRegistry = _ExportHandlerRegistryCls()
 # Matches and passes the same module to the handler during the whole-model export walk.
-ExportModuleRegistry = _ExportHandlerRegistryCls()
+ExportModuleRegistry = _ExportModuleRegistryCls()

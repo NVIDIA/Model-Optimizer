@@ -79,6 +79,7 @@ from .quant_format import (
     QUANTIZATION_W4A16_NVFP4,
     STATIC_INPUT_SCALE_FORMATS,
 )
+from .registry import ExportModuleRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,16 @@ def get_activation_scaling_factor(
     return get_scaling_factor(input_quantizer)
 
 
+def _refuse_built_in_packing(module: nn.Module) -> None:
+    """Raise for a module whose export handler declares its format: only that handler packs it."""
+    if ExportModuleRegistry.declared_format(module) is not None:
+        raise NotImplementedError(
+            f"The built-in export cannot pack this {type(module).__name__}: the "
+            "ExportModuleRegistry handler that declares its quantization format packs it, in "
+            "export_hf_checkpoint."
+        )
+
+
 def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") -> torch.Tensor:
     """Returns the weight scaling factor."""
     # module.weight_quantizer could be a TensorQuantizer (for algorithms except W4A8) or
@@ -200,6 +211,9 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
 
     if weight_quantizer is None:
         return None
+
+    if weight_quantizer.is_enabled:
+        _refuse_built_in_packing(module)
 
     if isinstance(weight_quantizer, SequentialQuantizer):
         return get_scaling_factor(weight_quantizer[0])
@@ -475,6 +489,10 @@ def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int
     if not weight_quantizer.is_enabled:
         return 0
 
+    declared = ExportModuleRegistry.declared_format(module)
+    if declared is not None:
+        return declared.block_size
+
     block_sizes = weight_quantizer.block_sizes
 
     if block_sizes:
@@ -512,6 +530,10 @@ def _get_quantization_from_quantizers(
 ) -> str | None:
     if weight_quantizer is None or not weight_quantizer.is_enabled:
         return QUANTIZATION_NONE
+
+    declared = ExportModuleRegistry.declared_format(layer)
+    if declared is not None:
+        return declared.quantization_format
 
     if isinstance(weight_quantizer, SequentialQuantizer):
         assert (
@@ -1925,7 +1947,10 @@ def get_quant_config(
 
             for weight_name in weight_names:
                 weight_block_size = get_weight_block_size(module, weight_name)
-                if quantization_format == QUANTIZATION_FP8_PB_WO:
+                if (
+                    quantization_format == QUANTIZATION_FP8_PB_WO
+                    and ExportModuleRegistry.declared_format(module) is None
+                ):
                     # One group size can describe only square two-dimensional blocks.
                     weight_quantizer = representative_weight_quantizer(module, weight_name)
                     if weight_quantizer is not None and weight_quantizer.is_enabled:

@@ -56,6 +56,7 @@ from .quant_format import (
 )
 from .quant_utils import (
     _get_quantization_from_quantizers,
+    _refuse_built_in_packing,
     get_kv_cache_dtype,
     get_kv_cache_scaling_factor,
     get_scaling_factor,
@@ -365,6 +366,7 @@ def _resolve_quantized_weight_export_inputs(
         )
     if not weight_quantizer.is_enabled:
         return None
+    _refuse_built_in_packing(module)
     quantization_format = _get_quantization_from_quantizers(
         module, weight_quantizer, input_quantizer
     )
