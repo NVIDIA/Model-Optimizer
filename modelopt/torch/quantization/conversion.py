@@ -25,6 +25,7 @@ from typing import Any, cast
 
 import torch.nn as nn
 
+from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.conversion import ApplyModeError, ModelLikeModule, ModeloptStateManager
 from modelopt.torch.opt.dynamic import _DMRegistryCls
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
@@ -289,6 +290,18 @@ def _of_callers_class(obj: Any) -> bool:
     return type(obj).__module__.partition(".")[0] not in ("builtins", "modelopt")
 
 
+def _runs_callers_code(obj: Any) -> bool:
+    # Applying an entry that holds a calibrator class or function, or an object of the caller's
+    # class, such as a config subclass whose model_copy() or items() an entry calls, runs it.
+    if _of_callers_class(obj) or callable(obj):
+        return True
+    if isinstance(obj, ModeloptBaseConfig):
+        obj = obj.__dict__
+    if isinstance(obj, dict):
+        return any(_runs_callers_code(k) or _runs_callers_code(v) for k, v in obj.items())
+    return isinstance(obj, (list, tuple)) and any(_runs_callers_code(x) for x in obj)
+
+
 def _allows_subtree_walk(model: nn.Module) -> bool:
     """Whether a subtree walk of ``model`` finds what ``named_modules()`` lists, entry after entry.
 
@@ -418,6 +431,10 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
     # they can register a module a second time mid-call.
     subtree = None
     for entry in quant_cfg:
+        if _runs_callers_code(entry):
+            # It runs as the entry applies, between its matches too, and can rewire the model, so
+            # the model is walked whole from this entry on.
+            subtree = False
         quantizer_name: str = entry["quantizer_name"]
         cfg = entry["cfg"]  # None, dict, or list — always explicit after normalization
         enable: bool = entry["enable"]  # always explicit after normalization
@@ -465,14 +482,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                     else QuantizerAttributeConfig(**c, enable=enable)
                     for c in cfg
                 ]
-            if any(
-                not isinstance(a.calibrator, str) or _of_callers_class(a.rotate)
-                for a in (attributes if isinstance(attributes, list) else [attributes])
-            ):
-                # The caller's calibrator class runs for each match and can rewire the model, before
-                # this entry's later matches too; the caller's rotation config, in a later entry.
-                subtree = False
-            elif subtree and _replaces_a_quantizer(
+            if subtree and _replaces_a_quantizer(
                 quant_model, quantizer_name, attributes, parent_class
             ):
                 # Replacing a quantizer runs its parent's __setattr__, such as a DynamicModule's,

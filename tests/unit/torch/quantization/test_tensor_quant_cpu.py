@@ -827,6 +827,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         ("setter", False),
         ("quantizer", False),
         ("getter", False),
+        ("config", False),
     ],
     ids=[
         "later-entry",
@@ -835,6 +836,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         "parent-setter",
         "quantizer-class",
         "parent-getter",
+        "config-class",
     ],
 )
 def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_layer(
@@ -843,7 +845,8 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
     """A named entry acts as its wildcard does after code run mid-call shares a layer: a calibrator
     the caller supplies, for a later entry of that call or in a call the calibrator makes, a buffer
     registration hook, the __setattr__ of a parent whose quantizer an entry replaces, a quantizer of
-    the caller's class, or the __getattr__ a parent_class entry runs to find a match's parent."""
+    the caller's class, the __getattr__ a parent_class entry runs to find a match's parent, or an
+    attribute config of the caller's class."""
 
     def configured(weight_quantizer, sub_quantizer):
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
@@ -875,9 +878,15 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
                     share()
                 return super().__getattr__(name)
 
+        class SharingConfig(QuantizerAttributeConfig):
+            def model_copy(self, *args, **kwargs):
+                share()
+                return super().model_copy(*args, **kwargs)
+
         entry = {"quantizer_name": weight_quantizer}
         if trigger == "calibrator":
-            cfg = {"calibrator": SharingCalibrator}
+            # The calibrator as a class, or as a constructor tuple.
+            cfg = {"calibrator": SharingCalibrator if nested else (SharingCalibrator, (), {})}
         elif trigger == "hook":
             # Pinning amax registers it as a buffer, under the hook.
             del model[0].weight_quantizer._amax
@@ -890,6 +899,8 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
             model.__class__ = SharingSequential
             entry["parent_class"] = "nn.Linear"
             cfg = {"num_bits": 4}
+        elif trigger == "config":
+            cfg = SharingConfig(num_bits=4)
         else:
 
             class SharingLinear(type(model[0])):
