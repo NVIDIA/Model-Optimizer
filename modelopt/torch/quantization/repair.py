@@ -462,7 +462,10 @@ class IQRepairPolicy:
 
         ``weight_access`` accepts ``writeback`` and ``rollback`` and forwards any idempotent owner
         rollback callback. Other owners always persist restored weights on failure.
-        ``synchronize_error`` must raise on every rank if any rank reports an error.
+        ``synchronize_error`` must raise on every rank if any rank reports an error. Owners
+        must coordinate recoverable entry/staging failures before issuing more collectives.
+        Coordination-resource allocation or backend collective failures invalidate this retry
+        protocol: the owner factory must terminate the distributed job.
         """
         states = {binding: state for binding, state, _, _ in self.adapters}
         access = (lambda **kwargs: nullcontext()) if weight_access is None else weight_access
@@ -532,7 +535,7 @@ class IQRepairPolicy:
         if backups or synchronize_error is not None:
             try:
                 # Peers without a backup still enter the same owner collectives.
-                with access(writeback=not owner_restored):
+                with access(writeback=not owner_restored, rollback=True):
                     for binding, weight in _resolved_weights(backups):
                         try:
                             weight.copy_(backups[binding])

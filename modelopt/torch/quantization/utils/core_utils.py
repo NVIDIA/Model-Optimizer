@@ -627,6 +627,8 @@ def fsdp2_weight_access_and_writeback_context(
     root_model: nn.Module,
     writeback: bool = True,
     names: "ModuleNames | None" = None,
+    *,
+    rollback: bool = False,
 ):
     """Context manager for FSDP2 weight access and writeback.
 
@@ -639,6 +641,9 @@ def fsdp2_weight_access_and_writeback_context(
     If TP is implemented with DTensor, the weight will be a local tensor of the
     TP DTensor under this context. Failed bodies discard local updates; all ranks still
     redistribute in owner order so peer failure handling can use the process group.
+    ``rollback=True`` coordinates local staging failures after completed gathers and before
+    writeback collectives. Coordination-resource allocation or backend collective failures
+    require the owner factory to terminate the distributed job rather than retry.
     """
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
     fsdp_module = _get_enclosing_fsdp_module(module, root_model, names)
@@ -657,6 +662,26 @@ def fsdp2_weight_access_and_writeback_context(
     refreshed = False
     ready = propagating = False
     error = None
+
+    failure_flag = (
+        torch.zeros((), dtype=torch.int32, device=fsdp_device_mesh.device_type)
+        if rollback
+        else None
+    )
+
+    def synchronize_staging_error(local_error):
+        if failure_flag is not None:
+            failure_flag.fill_(local_error is not None)
+            for dimension in range(fsdp_dim):
+                torch.distributed.all_reduce(
+                    failure_flag,
+                    op=torch.distributed.ReduceOp.MAX,
+                    group=fsdp_device_mesh.get_group(dimension),
+                )
+            if failure_flag.item() and local_error is None:
+                local_error = RuntimeError("FSDP2 weight-access staging failed on another rank")
+        if local_error is not None:
+            raise local_error
 
     def record_error(exc):
         nonlocal error
@@ -681,37 +706,42 @@ def fsdp2_weight_access_and_writeback_context(
                     fsdp_device_mesh.mesh_dim_names
                     == original_device_mesh.mesh_dim_names[:fsdp_dim]
                 ), "FSDP2 mesh should be a slice of DTensor's device mesh."
-            unsharded_dtensor = param.redistribute(
-                placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
-                device_mesh=original_device_mesh,
-            )
-            unsharded_tensor = unsharded_dtensor.to_local()
-            # Singleton/replicated gathers can alias the persistent shard: isolate body edits.
-            if (
-                unsharded_tensor.untyped_storage().data_ptr()
-                == param.to_local().untyped_storage().data_ptr()
-            ):
-                unsharded_dtensor = unsharded_dtensor.clone()
+            staging_error = None
+            try:
+                unsharded_dtensor = param.redistribute(
+                    placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
+                    device_mesh=original_device_mesh,
+                )
                 unsharded_tensor = unsharded_dtensor.to_local()
-            # CPU offload gathers on the host; mirror to the execution device for forward.
-            needs_gpu_copy = unsharded_tensor.device.type == "cpu" and torch.cuda.is_available()
-            gpu_tensor = (
-                unsharded_tensor.to(torch.cuda.current_device())
-                if needs_gpu_copy
-                else unsharded_tensor
-            )
-            cpu_writeback_tensor = unsharded_tensor if needs_gpu_copy else None
-            originals[name] = (
-                param,
-                unsharded_dtensor,
-                original_placements,
-                original_device_mesh,
-                cpu_writeback_tensor,
-                gpu_tensor,
-            )
-            _set_parameter(
-                module, name, nn.Parameter(gpu_tensor, requires_grad=param.requires_grad)
-            )
+                # Singleton/replicated gathers can alias the persistent shard: isolate body edits.
+                if (
+                    unsharded_tensor.untyped_storage().data_ptr()
+                    == param.to_local().untyped_storage().data_ptr()
+                ):
+                    unsharded_dtensor = unsharded_dtensor.clone()
+                    unsharded_tensor = unsharded_dtensor.to_local()
+                # CPU offload gathers on the host; mirror to the execution device for forward.
+                needs_gpu_copy = unsharded_tensor.device.type == "cpu" and torch.cuda.is_available()
+                gpu_tensor = (
+                    unsharded_tensor.to(torch.cuda.current_device())
+                    if needs_gpu_copy
+                    else unsharded_tensor
+                )
+                cpu_writeback_tensor = unsharded_tensor if needs_gpu_copy else None
+                originals[name] = (
+                    param,
+                    unsharded_dtensor,
+                    original_placements,
+                    original_device_mesh,
+                    cpu_writeback_tensor,
+                    gpu_tensor,
+                )
+                _set_parameter(
+                    module, name, nn.Parameter(gpu_tensor, requires_grad=param.requires_grad)
+                )
+            except BaseException as exc:
+                staging_error = exc
+            synchronize_staging_error(staging_error)
         ready = True
         yield
     except BaseException as exc:
@@ -729,10 +759,19 @@ def fsdp2_weight_access_and_writeback_context(
                 gpu_tensor,
             ) in originals.values():
                 try:
-                    if cpu_writeback_tensor is not None and not propagating:
-                        cpu_writeback_tensor.data.copy_(
-                            gpu_tensor.data.to(cpu_writeback_tensor.device)
-                        )
+                    staging_error = error if rollback else None
+                    if (
+                        staging_error is None
+                        and cpu_writeback_tensor is not None
+                        and not propagating
+                    ):
+                        try:
+                            cpu_writeback_tensor.data.copy_(
+                                gpu_tensor.data.to(cpu_writeback_tensor.device)
+                            )
+                        except BaseException as exc:
+                            staging_error = exc
+                    synchronize_staging_error(staging_error)
                     # A peer may have succeeded: keep collectives symmetric on body failure.
                     shard = unsharded_dtensor.redistribute(
                         placements=original_placements, device_mesh=original_device_mesh
@@ -779,10 +818,13 @@ def enable_weight_access_and_writeback(
             is its own module.
         writeback: Whether modified weights must be written back to the owning sharded/offload
             representation when exiting the context.
-        rollback: Retain aliased CPU backing snapshots for transactional Accelerate callers.
+        rollback: Retain aliased CPU backing snapshots for Accelerate and coordinate recoverable
+            FSDP2 staging failures before starting another collective.
     """
     if _get_enclosing_fsdp_module(module, root_model, names) is not None:
-        context = fsdp2_weight_access_and_writeback_context(module, root_model, writeback, names)
+        context = fsdp2_weight_access_and_writeback_context(
+            module, root_model, writeback, names, rollback=rollback
+        )
     elif is_quantized_parallel_linear(module) and hasattr(
         module, "enable_weight_access_and_writeback"
     ):
@@ -802,9 +844,9 @@ def enable_weight_access_and_writeback(
 def requires_weight_materialization(module, root_model, names: "ModuleNames | None" = None) -> bool:
     """Whether ``module``'s own weights are currently unreadable and need a window.
 
-    Mirrors the dispatch in :func:`enable_weight_access_and_writeback`, so callers
-    deciding *whether* to open a window agree with what opening one would do. Two things
-    must hold: the module owns tensors that are not directly readable right now
+    Checks the module's own weight owners; the dispatcher also accepts composite modules
+    with offloaded descendants. Two things must hold: the module owns tensors that are
+    not directly readable right now
     (offloaded to meta, or a sharded ``DTensor``), and a context exists that can
     materialize them. Modules already materialized are excluded -- re-entering a window
     would re-run export handlers over already-packed weights.

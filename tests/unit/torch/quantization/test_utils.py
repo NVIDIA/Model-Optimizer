@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import weakref
-from contextlib import nullcontext
 from unittest import mock
 
 import pytest
@@ -40,6 +39,7 @@ from modelopt.torch.quantization.utils.core_utils import (
     _fsdp2_param_groups,
     _fsdp2_persistent_parameters,
     enable_fake_quant,
+    enable_weight_access_and_writeback,
     fsdp2_weight_access_and_writeback_context,
     persistent_materialization,
 )
@@ -556,7 +556,15 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage):
             raise failure
         result = redistribute(tensor, *args, **kwargs)
         if (
-            failure_stage not in ("entry", "rank0_body", "singleton_body")
+            failure_stage == "rank0_entry"
+            and rank == 0
+            and tensor is originals["dense.weight"]
+            and armed
+        ):
+            armed = False
+            raise failure
+        if (
+            failure_stage not in ("entry", "rank0_body", "singleton_body", "rank0_entry")
             and tensor.placements[0].is_replicate()
             and armed
         ):
@@ -567,12 +575,8 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage):
 
     with (
         mock.patch.object(DTensor, "redistribute", fail_once),
-        (
-            pytest.raises(RuntimeError)
-            if failure_stage != "rank0_body" or rank == 0
-            else nullcontext()
-        ) as error,
-        fsdp2_weight_access_and_writeback_context(layer, layer),
+        pytest.raises(RuntimeError) as error,
+        enable_weight_access_and_writeback(layer, layer, rollback=True),
         torch.no_grad(),
     ):
         layer.dense.weight.add_(1)
@@ -581,14 +585,14 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage):
             failure_stage == "rank0_body" and rank == 0
         ):
             raise body_failure
-    if error is not None:
+    if not (failure_stage in ("rank0_entry", "rank0_body") and rank != 0):
         assert error.value is (
             body_failure
             if failure_stage in ("body_writeback", "rank0_body", "singleton_body")
             else failure
         )
     assert all(layer.get_parameter(name) is parameter for name, parameter in originals.items())
-    if failure_stage in ("entry", "body_writeback", "singleton_body") or (
+    if failure_stage in ("entry", "body_writeback", "singleton_body", "rank0_entry") or (
         failure_stage == "rank0_body" and rank == 0
     ):
         for name, parameter in originals.items():
@@ -599,11 +603,21 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage):
 
 @pytest.mark.parametrize(
     "failure_stage",
-    ["none", "entry", "writeback", "body_writeback", "rank0_body", "singleton_body"],
+    ["none", "entry", "writeback", "body_writeback", "rank0_body", "singleton_body", "rank0_entry"],
 )
 def test_fsdp2_weight_access_leaves_parameters_fsdp2_does_not_own(cpu_dist_workers, failure_stage):
     """An expert-parallel weight is a DTensor sharded over the experts that fully_shard was told to
     ignore. The weight-access window gathers FSDP2's parameters only, so it stays sharded: gathering
     it would hand every rank every expert. Each such weight misses the window's kept set, which it
     scans again once, not once per weight."""
-    cpu_dist_workers.run(_window_leaves_what_fsdp2_does_not_own_job, failure_stage)
+    if failure_stage == "rank0_entry":
+        # Warm imports before bounding the injected collective-order failure.
+        cpu_dist_workers.run(_window_leaves_what_fsdp2_does_not_own_job, "none")
+    timeout, grace = cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace
+    try:
+        if failure_stage == "rank0_entry":
+            cpu_dist_workers.job_timeout = 15
+            cpu_dist_workers.failure_grace = 2
+        cpu_dist_workers.run(_window_leaves_what_fsdp2_does_not_own_job, failure_stage)
+    finally:
+        cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace

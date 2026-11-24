@@ -453,6 +453,7 @@ def _iq_fsdp2_finalization_rollback_job(rank, size, device_type="cuda"):
             "rank0_writeback",
             "rank0_native",
             "all_entry",
+            "rank0_entry",
             "rank0_redistribute",
         )
     )
@@ -519,6 +520,7 @@ def _iq_fsdp2_finalization_rollback_job(rank, size, device_type="cuda"):
                 def access(*, writeback, rollback=False):
                     nonlocal armed
                     original_bias = model[0]._parameters["bias"]
+                    original_weight = model[0]._parameters["weight"]
                     redistribute = DTensor.redistribute
 
                     def fail_once(tensor, *args, **kwargs):
@@ -527,6 +529,15 @@ def _iq_fsdp2_finalization_rollback_job(rank, size, device_type="cuda"):
                             armed = False
                             raise failure
                         result = redistribute(tensor, *args, **kwargs)
+                        if (
+                            writeback
+                            and armed
+                            and stage == "rank0_entry"
+                            and rank == 0
+                            and tensor is original_weight
+                        ):
+                            armed = False
+                            raise failure
                         if (
                             writeback
                             and armed
@@ -541,7 +552,9 @@ def _iq_fsdp2_finalization_rollback_job(rank, size, device_type="cuda"):
 
                     with (
                         mock.patch.object(DTensor, "redistribute", fail_once),
-                        enable_weight_access_and_writeback(model, model, writeback=writeback),
+                        enable_weight_access_and_writeback(
+                            model, model, writeback=writeback, rollback=rollback
+                        ),
                     ):
                         yield
                     if writeback and armed and stage in ("all_writeback", "rank0_writeback"):
@@ -560,7 +573,12 @@ def _iq_fsdp2_finalization_rollback_job(rank, size, device_type="cuda"):
                 if stage in ("all_writeback", "all_entry") or rank == 0:
                     assert error.value is failure
                 else:
-                    assert isinstance(error.value, ValueError)
+                    assert isinstance(
+                        error.value,
+                        RuntimeError
+                        if stage in ("rank0_native", "rank0_entry", "rank0_redistribute")
+                        else ValueError,
+                    )
                 restored = model[0]._parameters["weight"]
                 assert isinstance(restored, DTensor) and restored.placements == (Shard(0),)
                 torch.testing.assert_close(restored.to_local(), original_shard, rtol=0, atol=0)
