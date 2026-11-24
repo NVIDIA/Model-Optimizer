@@ -15,11 +15,15 @@
 
 """Calibration tests."""
 
+import copy
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from _test_utils.torch.transformers_models import get_tiny_qwen3
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.unified_export_hf import requantize_resmooth_fused_llm_layers
 from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
 
 
@@ -126,3 +130,31 @@ def test_nvfp4_awq_clip_picks_the_same_clip_on_every_rank(need_2_gpus, dist_work
     every rank's copy of a weight the same clip, though each rank's own data would pick another. A
     rank that runs a weight on no tokens leaves it the clip the other ranks' tokens pick."""
     dist_workers.run(_nvfp4_awq_clip_on_every_rank_job)
+
+
+def test_nvfp4_svdquant_fused_groups_export_as_calibrated():
+    """With ``fused_group_scale`` and ``fused_group_svd``, the fusion HF export applies
+    (``requantize_resmooth_fused_llm_layers``, which finds q/k/v and gate/up by its own dummy
+    forward) leaves the calibrated NVFP4 model unchanged."""
+    torch.manual_seed(0)
+    model = get_tiny_qwen3().cuda()
+    input_ids = torch.randint(0, model.config.vocab_size, (2, 16), device="cuda")
+    config = copy.deepcopy(mtq.NVFP4_SVDQUANT_DEFAULT_CFG)
+    config["algorithm"] = {
+        "method": "svdquant",
+        "lowrank": 4,  # below the hidden size of 32, so the residual weight is not ~0
+        "fused_group_scale": True,
+        "fused_group_svd": True,
+    }
+    model = mtq.quantize(model, config, lambda m: m(input_ids))
+    for layer in model.model.layers:
+        attn, mlp = layer.self_attn, layer.mlp
+        for group in ([attn.q_proj, attn.k_proj, attn.v_proj], [mlp.gate_proj, mlp.up_proj]):
+            lora_a = group[0].weight_quantizer.svdquant_lora_a
+            assert all(torch.equal(m.weight_quantizer.svdquant_lora_a, lora_a) for m in group)
+
+    calibrated, logits = copy.deepcopy(model.state_dict()), model(input_ids).logits
+    requantize_resmooth_fused_llm_layers(model)
+    for name, value in model.state_dict().items():
+        assert torch.equal(value, calibrated[name]), name
+    assert torch.equal(model(input_ids).logits, logits)

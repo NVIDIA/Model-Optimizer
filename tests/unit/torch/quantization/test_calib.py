@@ -582,15 +582,18 @@ def test_svdquant_fused_group_scale():
     _svdquant_fused_group_scale_case(_SharedInputLLM(), loop, groups, kept=["out"])
 
 
+@pytest.mark.parametrize("autocast", [False, True])
 @pytest.mark.parametrize(("shape", "rank"), [((128, 48), 4), ((48, 128), 4), ((6, 8), 8)])
-def test_svd_matches_full_svd(shape, rank):
-    """The top-rank factors match the full SVD for tall and wide weights, and pad past the rank."""
+def test_svd_matches_full_svd(shape, rank, autocast):
+    """The top-rank factors match the full SVD for tall and wide weights, and pad past the rank.
+    Under BF16 autocast too, which would otherwise compute the Gram matrix in BF16."""
     torch.manual_seed(0)
     spectrum = torch.logspace(0, -2, min(shape))
     u = torch.linalg.qr(torch.randn(shape[0], min(shape)))[0]
     v = torch.linalg.qr(torch.randn(shape[1], min(shape)))[0]
     weight = u * spectrum @ v.T
-    us, vt = svd(weight, rank)
+    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
+        us, vt = svd(weight, rank)
     assert us.shape == (shape[0], rank) and vt.shape == (rank, shape[1])
     k = min(rank, *shape)
     torch.testing.assert_close(us @ vt, u[:, :k] * spectrum[:k] @ v[:, :k].T, atol=1e-5, rtol=0)
@@ -598,8 +601,8 @@ def test_svd_matches_full_svd(shape, rank):
 
 
 def test_svdquant_fused_group_svd():
-    from modelopt.torch.export.quant_utils import preprocess_linear_fusion
-
+    """Each group export fuses shares its lora_a and amax. That export then leaves an NVFP4
+    model unchanged is tested in ``tests/gpu/torch/quantization/test_calib_cuda.py``."""
     torch.manual_seed(0)
     inputs = torch.randn(2, 16, 64) * torch.rand(64) * 10
     config = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
@@ -625,11 +628,32 @@ def test_svdquant_fused_group_svd():
                 assert torch.equal(
                     getattr(m.input_quantizer, attr), getattr(first.input_quantizer, attr)
                 )
-        # Export's fusion leaves the calibrated group unchanged.
-        before = [copy.deepcopy(m.state_dict()) for m in group]
-        preprocess_linear_fusion(group)
-        for m, state in zip(group, before):
-            assert all(torch.equal(v, m.state_dict()[k]) for k, v in state.items())
+
+
+class _QKV(nn.Module):
+    def __init__(self, k_reads_a_copy):
+        super().__init__()
+        self.q, self.k, self.v = (nn.Linear(64, 64) for _ in range(3))
+        self.k_reads_a_copy = k_reads_a_copy
+
+    def forward(self, x):
+        return self.q(x) + self.k(x.clone() if self.k_reads_a_copy else x) + self.v(x)
+
+
+def _svdquant_fused_groups_differ_job(rank, size):
+    torch.manual_seed(0)
+    inputs = torch.randn(2, 16, 64) * torch.rand(64) * 10
+    model = _QKV(k_reads_a_copy=rank == 1)  # q/k/v share an input on rank 0, only q/v on rank 1
+    config = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
+    config["algorithm"] = {"method": "svdquant", "fused_group_scale": True}
+    with pytest.raises(RuntimeError, match="different fused groups"):
+        mtq.quantize(model, config, partial(forward_loop, dataloader=[inputs]))
+
+
+def test_svdquant_fused_groups_must_match_across_ranks(cpu_dist_workers):
+    """Ranks that find different fused groups refuse together, instead of each giving its copy of
+    the weights a different scale and low-rank branch."""
+    cpu_dist_workers.run(_svdquant_fused_groups_differ_job)
 
 
 def test_svdquant_fused_group_scale_diffusers():

@@ -1972,6 +1972,7 @@ def awq_lite(
         makes the weight smoothing and every later calibration step see the exported scale.
         The groups come from export's own rule, applied to the inputs seen while caching.
         """
+        # Imported here: modelopt.torch.export imports this module.
         from modelopt.torch.export.diffusers_utils import is_diffusers_object
         from modelopt.torch.export.unified_export_hf import fused_linear_groups
 
@@ -2002,6 +2003,27 @@ def awq_lite(
                     "share an input on every step, or a member was not searched."
                 )
                 continue
+            groups.append(members)
+
+        # The groups come from each data-parallel process's own forwards. A group one process
+        # fuses and another does not would leave the processes' copies of its weights with
+        # different scales and low-rank branches, which FSDP2 writes back shard by shard without
+        # noticing.
+        dp_group = helpers[0].module.parallel_state.data_parallel_group if helpers else None
+        group_names = [[m.name for m in members] for members in groups]
+        if dp_group is not None and dp_group.is_initialized():
+            names_per_process = DistributedProcessGroup.get_dist_syncd_obj(
+                group_names, dp_group, lambda objs: objs
+            )
+            if any(names != names_per_process[0] for names in names_per_process):
+                raise RuntimeError(
+                    "SVDQuant fused_group_scale: the data-parallel processes found different "
+                    f"fused groups ({[len(names) for names in names_per_process]} per process), "
+                    "because their forwards pass a shared input to different linears. Calibrate "
+                    "with fused_group_scale=False."
+                )
+
+        for members in groups:
             for m in members:
                 update_best_params(m.module)
             # The mean of the pre_quant_scales as export stores and averages them (weight dtype).
@@ -2009,9 +2031,8 @@ def awq_lite(
             mean = torch.stack([(1.0 / m.best_scale).to(device, dtype) for m in members]).mean(0)
             for m in members:
                 m.best_scale = 1.0 / mean.float()
-            groups.append([m.name for m in members])
         print_rank_0(f"awq_lite: {len(groups)} fused group(s) share their mean pre_quant_scale")
-        return groups
+        return group_names
 
     # Pre-compute the name maps ONCE to avoid O(n^2) complexity in enable_weight_access_and_writeback
     names = module_name_maps(model)
@@ -2438,12 +2459,14 @@ def _top_singular_factors(w, rank, oversample=32):
     a = w.T if wide else w
     matmul = torch.backends.cuda.matmul
     precision = matmul.fp32_precision
-    # TF32's 10-bit mantissa would swamp the squared condition number of the Gram matrix.
+    # TF32's 10-bit mantissa, or the 16-bit dtype autocast would run the matmuls in, would swamp the
+    # squared condition number of the Gram matrix.
     matmul.fp32_precision = "ieee"
     try:
-        basis = torch.linalg.eigh(a.T @ a)[1][:, -(rank + oversample) :]
-        u, s, yt = torch.linalg.svd(a @ basis, full_matrices=False)
-        u, s, v = u[:, :rank], s[:rank], basis @ yt[:rank].T
+        with torch.autocast(w.device.type, enabled=False):
+            basis = torch.linalg.eigh(a.T @ a)[1][:, -(rank + oversample) :]
+            u, s, yt = torch.linalg.svd(a @ basis, full_matrices=False)
+            u, s, v = u[:, :rank], s[:rank], basis @ yt[:rank].T
     finally:
         matmul.fp32_precision = precision
     return (v * s, u.T) if wide else (u * s, v.T)  # a = U·S·Vᵀ, and w = aᵀ when wide
@@ -2503,7 +2526,8 @@ def svdquant(
     def postprocess(modules, names):
         # One SVD of the stacked weights: the members share lora_a, as export fuses them.
         print_rank_0(f"SVD {', '.join(names)}")
-        us, vt = svd(torch.cat([m.weight.data for m in modules]), lowrank)
+        weights = [m.weight.data for m in modules]
+        us, vt = svd(weights[0] if len(weights) == 1 else torch.cat(weights), lowrank)
         for module, lora_b in zip(modules, us.split([m.weight.shape[0] for m in modules])):
             module.weight_quantizer.svdquant_lora_a = vt
             module.weight_quantizer.svdquant_lora_b = lora_b
@@ -2559,6 +2583,7 @@ def svdquant(
     max_calibrate(model, forward_loop)
 
     if fused_groups:
+        # Imported here: modelopt.torch.export imports this module.
         from modelopt.torch.export.quant_utils import preprocess_linear_fusion
 
         # Export's own fusion: the shared scale and lora_a are kept, and the members get the
