@@ -322,14 +322,13 @@ def load_modelopt_megatron_checkpoint(
 
     # Restore the ModelOpt state before loading weights.
     # has_modelopt_state / load_modelopt_state resolves the latest iter_* directory
-    if restore_modelopt_state:
+    if mto.ModeloptStateManager.is_converted(unwrap_model(model)[0]):
+        # Already converted (e.g. loaded into before), which Megatron-Bridge's restore skips: its
+        # modules still read how this checkpoint laid out their state, restoring none of it.
+        restore_sharded_modelopt_state(unwrap_model(model), checkpoint_path)
+    elif restore_modelopt_state:
         if has_modelopt_state(megatron_path):
-            if mto.ModeloptStateManager.is_converted(unwrap_model(model)[0]):
-                # Megatron-Bridge skips a converted model (e.g. loaded into before), whose modules
-                # must still read how this checkpoint laid out their state.
-                restore_sharded_modelopt_state(unwrap_model(model), checkpoint_path)
-            else:
-                load_modelopt_state(model, megatron_path)
+            load_modelopt_state(model, megatron_path)
         elif any("_quantizer." in key for key in checkpoint_keys):
             # The quantizers cannot be rebuilt without the state, and the loader ignores the
             # leftover amax tensors, so the model would silently load unquantized.

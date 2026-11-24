@@ -1831,7 +1831,10 @@ def _test_swiglu_weight_quantizer_tp_reshard(
         if mbridge:
             from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
 
-            (target,) = load_modelopt_megatron_checkpoint([target], str(tmp_path))
+            # The second load, into the converted model, loads its weights only.
+            (target,) = load_modelopt_megatron_checkpoint(
+                [target], str(tmp_path), restore_modelopt_state=i == 0
+            )
         else:
             # Into a converted model, the restore only reads the layout: it loads no state.
             with (
@@ -1902,7 +1905,8 @@ def test_swiglu_weight_quantizer_tp_reshard(
 
 
 def test_swiglu_legacy_checkpoint_loads_twice_through_mbridge(dist_workers_size_2, tmp_path):
-    """ModelOpt's Megatron-Bridge loader loads a legacy checkpoint twice into the same model."""
+    """ModelOpt's Megatron-Bridge loader loads a legacy checkpoint twice into the same model, the
+    second time its weights only."""
     pytest.importorskip("megatron.bridge")
     dist_workers_size_2.run(
         partial(
