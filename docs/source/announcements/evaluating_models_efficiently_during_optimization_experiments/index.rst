@@ -227,13 +227,11 @@ more repetitions per question, then measuring how much the resulting scores vary
 On SciCode, more subtasks with fewer repetitions gave more consistent Candidate accuracy
 estimates at the same response budget. The plot shows how much accuracy varied across
 eight groups, each with 280 responses per model.
+The choice of analysis level may depend on the benchmark and metric.
 
 .. figure:: images/budget-allocation-scicode-accuracy.svg
    :alt: Mean Candidate accuracy on SciCode with shading showing one observed standard deviation on either side of the mean. At 280 responses per model, the estimate varies less with more subtasks and fewer repetitions.
    :width: 720px
-
-The choice of analysis level can depend on the benchmark and metric. See the
-:ref:`fixed-budget analysis methods <evaluation-fixed-response-budgets>` in the Reproducibility Notes.
 
 .. _evaluation-collect-data:
 
