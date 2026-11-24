@@ -283,11 +283,18 @@ _CASE_SENSITIVE_NAMES = os.path.normcase("A") == "A"
 _SINGULAR_QUANTIZER_ATOM_RE = re.compile(r"(?:weight|input)_quantizer$")
 
 
-def _uses_stock_traversal(model: nn.Module) -> bool:
-    """Whether each module of ``model`` is registered once and keeps ``nn.Module.named_modules``.
+def _of_callers_class(obj: Any) -> bool:
+    # An entry sets a quantizer's calibrator's axis and copies its rotation config to disable it:
+    # code the caller defines there can rewire the model.
+    return type(obj).__module__.partition(".")[0] not in ("builtins", "modelopt")
 
-    ``named_modules()`` then lists exactly the paths ``_modules`` register, which a subtree walk
-    follows.
+
+def _allows_subtree_walk(model: nn.Module) -> bool:
+    """Whether a subtree walk of ``model`` finds what ``named_modules()`` lists, entry after entry.
+
+    It does where each module is registered once, under a nonempty name with no dot, and keeps
+    ``nn.Module.named_modules``, which then lists exactly the paths a subtree walk follows, and
+    where no quantizer holds a calibrator or rotation config of the caller's class.
     """
     seen = set()
     stack = [model]
@@ -297,6 +304,13 @@ def _uses_stock_traversal(model: nn.Module) -> bool:
         if id(module) in seen or (
             getattr(module.named_modules, "__func__", None) is not nn.Module.named_modules
         ):
+            return False
+        if isinstance(module, TensorQuantizer) and any(
+            _of_callers_class(getattr(module, attr, None)) for attr in ("_calibrator", "_rotate")
+        ):
+            return False
+        # setattr, unlike add_module, registers any name, which named_modules joins as is.
+        if any(not name or "." in name for name in module._modules):
             return False
         seen.add(id(module))
         stack.extend(child for child in module._modules.values() if child is not None)
@@ -378,10 +392,11 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
     """
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
     # Whether wildcard-free names walk only their subtree, which follows the model's _modules,
-    # decided at the first one: not where fnmatch ignores case, nor in a model that registers a
-    # module twice, whose second name named_modules skips, or overrides named_modules, nor while
+    # decided at the first one: not where fnmatch ignores case, nor where named_modules can list
+    # other paths or a calibrator or rotation config of the caller's class can run, nor while
     # PyTorch's global registration hooks are set: replacing a quantizer runs them, and they can
-    # register a module a second time mid-call.
+    # register a module a second time mid-call. The model's own classes, such as a parent whose
+    # __setattr__ runs as its quantizer is replaced, are trusted not to.
     subtree = None
     for entry in quant_cfg:
         quantizer_name: str = entry["quantizer_name"]
@@ -402,7 +417,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
             subtree = (
                 _CASE_SENSITIVE_NAMES
                 and not _runs_registration_hooks()
-                and _uses_stock_traversal(quant_model)
+                and _allows_subtree_walk(quant_model)
             )
 
         if cfg is None:
@@ -428,11 +443,11 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                     for c in cfg
                 ]
             if any(
-                not isinstance(a.calibrator, str)
+                not isinstance(a.calibrator, str) or _of_callers_class(a.rotate)
                 for a in (attributes if isinstance(attributes, list) else [attributes])
             ):
                 # The caller's calibrator class runs for each match and can rewire the model, before
-                # this entry's later matches too.
+                # this entry's later matches too; the caller's rotation config, in a later entry.
                 subtree = False
             set_quantizer_attributes_full(
                 quant_model, quantizer_name, attributes, parent_class, _subtree=bool(subtree)

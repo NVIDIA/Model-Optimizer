@@ -672,8 +672,22 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
 
 @pytest.mark.parametrize(
     ("case_sensitive", "layout"),
-    [(True, "plain"), (True, "shared-layer"), (True, "custom-traversal"), (False, "plain")],
-    ids=["subtree", "shared-layer", "custom-traversal", "case-insensitive"],
+    [
+        (True, "plain"),
+        (True, "shared-layer"),
+        (True, "dotted-name"),
+        (True, "empty-name"),
+        (True, "custom-traversal"),
+        (False, "plain"),
+    ],
+    ids=[
+        "subtree",
+        "shared-layer",
+        "dotted-name",
+        "empty-name",
+        "custom-traversal",
+        "case-insensitive",
+    ],
 )
 def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     monkeypatch, case_sensitive, layout
@@ -701,6 +715,14 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         if layout == "shared-layer":
             # A second name for the last layer, which named_modules skips.
             model.add_module("8", model[7])
+        elif layout == "dotted-name":
+            # setattr, unlike add_module, registers a name with a dot, which named_modules lists.
+            setattr(model, "8.weight_quantizer", TensorQuantizer())
+        elif layout == "empty-name":
+            # Or an empty name, below which named_modules lists names with no dot before them.
+            holder = torch.nn.Module()
+            holder.weight_quantizer = TensorQuantizer()
+            setattr(model, "", holder)
         model.hiding = traversal
         return model
 
@@ -715,6 +737,10 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     quant_cfg.append({"quantizer_name": "3.weight_quantizer", "cfg": {"num_bits": 8}})
     if layout == "shared-layer":
         quant_cfg.append({"quantizer_name": "8.weight_quantizer", "enable": False})
+    elif layout == "dotted-name":
+        quant_cfg.append({"quantizer_name": "8.weight_quantizer", "enable": True})
+    elif layout == "empty-name":
+        quant_cfg.append({"quantizer_name": "weight_quantizer", "enable": True})
     # The same names as one-character wildcards, matched by walking the model.
     walked_cfg = [quant_cfg[0]] + [
         {**entry, "quantizer_name": f"[{entry['quantizer_name'][0]}]{entry['quantizer_name'][1:]}"}
@@ -835,6 +861,65 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_aliases_
         }
 
     assert configured("weight_quantizer") == configured("[w]eight_quantizer")
+
+
+@pytest.mark.parametrize(
+    ("kind", "same_call"),
+    [("calibrator", False), ("rotation", False), ("rotation", True)],
+    ids=["installed-calibrator", "installed-rotation", "rotation-entry"],
+)
+def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_configured_object_shares_a_layer(
+    kind, same_call
+):
+    """A named entry acts as its wildcard does after a calibrator or rotation config of the caller's
+    class, set by an earlier call or entry, shares a layer when a later entry calls into it."""
+    model = None
+
+    def share():
+        model[1] = model[0]  # named_modules skips the second name
+
+    class SharingCalibrator(MaxCalibrator):
+        def __setattr__(self, name, value):
+            super().__setattr__(name, value)
+            if name == "_axis" and value == 0:
+                share()
+
+    class SharingRotation(RotateConfig):
+        def model_copy(self, *args, **kwargs):
+            share()
+            return super().model_copy(*args, **kwargs)
+
+    def configured(weight_quantizer, sub_quantizer):
+        nonlocal model
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
+        model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+        if kind == "calibrator":
+            setting = {"calibrator": SharingCalibrator}
+            # The quantizer keeps its calibrator until after an entry sets its axis.
+            trigger = {"cfg": {"num_bits": 4, "axis": 0}}
+        else:
+            setting = {"rotate": SharingRotation(enable=True)}
+            # Disabling a quantizer copies its rotation config.
+            trigger = {"enable": False}
+        setting_entries = [{"quantizer_name": weight_quantizer, "cfg": setting}]
+        entries = [
+            {"quantizer_name": weight_quantizer, **trigger},
+            {"quantizer_name": sub_quantizer, "cfg": {"num_bits": 6}},
+        ]
+        if same_call:
+            mtq.set_quantizer_by_cfg(model, setting_entries + entries)
+        else:
+            mtq.set_quantizer_by_cfg(model, setting_entries)
+            mtq.set_quantizer_by_cfg(model, entries)
+        assert model[1] is model[0]
+        return {
+            name: module.get_modelopt_state(properties_only=True)
+            for name, module in model.named_modules()
+            if isinstance(module, TensorQuantizer)
+        }
+
+    walked = configured("[0].weight_quantizer", "[1].weight_quantizer")
+    assert configured("0.weight_quantizer", "1.weight_quantizer") == walked
 
 
 @pytest.mark.parametrize(
