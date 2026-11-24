@@ -171,6 +171,11 @@ def _validate_hf_plan_aliases(model, plan, modules, parameters):
             )
 
 
+def _synchronize_placement_state(context, *state):
+    if any(value != state for value in _all_rank_values(context, state)):
+        raise ValueError("Bypass placement state must agree on all model ranks.")
+
+
 def _synchronize_validation(context, error):
     errors = sorted({message for message in _all_rank_values(context, error) if message})
     if errors:
@@ -282,19 +287,28 @@ def parallelize_native_transformers(model, context, *, initialize=None):
     from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
 
     saved = getattr(model, "_modelopt_bypass_placement", None)
-    if saved is not None:
-        if (
-            saved["dense_ranks"] != context.device_mesh.mesh.tolist()
-            or saved["expert_ranks"] != context.moe_mesh.mesh.tolist()
-        ):
-            raise ValueError("Prepared native Bypass meshes differ from the supplied rank ordering")
-        context.parallel_metadata[id(model)] = saved
-        context.tp_quantizer_layouts[id(model)] = {
-            id(model.get_submodule(name)): layout
-            for name, layout in saved["layouts_by_name"].items()
-        }
-        return saved
     adopted = getattr(model, "_mesh_manager", None) is not None
+    _synchronize_placement_state(context, saved is not None, adopted)
+    if saved is not None:
+        error, layouts = None, {}
+        try:
+            if (
+                saved["dense_ranks"] != context.device_mesh.mesh.tolist()
+                or saved["expert_ranks"] != context.moe_mesh.mesh.tolist()
+            ):
+                raise ValueError(
+                    "Prepared native Bypass meshes differ from the supplied rank ordering"
+                )
+            layouts = {
+                id(model.get_submodule(name)): layout
+                for name, layout in saved["layouts_by_name"].items()
+            }
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        _synchronize_validation(context, error)
+        context.parallel_metadata[id(model)] = saved
+        context.tp_quantizer_layouts[id(model)] = layouts
+        return saved
     config = copy.copy(getattr(model.config, "distributed_config", None))
     if config is None:
         config = DistributedConfig(
