@@ -58,6 +58,7 @@ Changelog
 *Megatron Framework (M-LM / M-Bridge)*
 
 - Preserve model-specific hybrid stacks when selecting MoE expert layouts in Megatron-Bridge, and reject grouped GEMM when a custom factory returns sequential experts. Custom built stack ``ModuleSpec`` values are now rejected; assign a named factory function instead.
+- Megatron checkpoints with GGML pins (e.g. ``general/ptq/iq2_xs``) now load at another tensor parallelism. A gated MLP's pins saved by 0.49.0rc0 load only at the tensor-parallel size they were saved at, and with Megatron-Bridge's or Megatron-LM's own loaders only into a model that isn't quantized yet: load them there and save again to use them at any size.
 
 *Misc*
 

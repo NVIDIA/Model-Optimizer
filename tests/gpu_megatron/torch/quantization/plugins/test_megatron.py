@@ -2067,16 +2067,32 @@ def _test_ggml_rc0_pin_layout_same_tp(tmp_path, loader, rank, size):
         else:
             save_distributed_checkpoint(tmp_path, source)
             save_sharded_modelopt_state([source], tmp_path)
+            if loader == "mbridge":
+                # The checkpoint without its modelopt_state, for a weights-only load.
+                (tmp_path / "weights").mkdir(exist_ok=True)
+                save_distributed_checkpoint(tmp_path / "weights", source)
     assert any(name.endswith("linear_fc1") for name in expected)
     target = _gpt_model_provider(tp_size=size, hidden_size=512, activation_func="swiglu")
     # Loaded twice into the same model: the second load reads the checkpoint's layout again.
     for i in range(1 if regular else 2):
+        if i:
+            # Cleared in place, so the checks see what the next load wrote.
+            for module in target.modules():
+                for name, buffer in module.named_buffers(recurse=False):
+                    if name.startswith(PINNED_PAYLOAD_PREFIX):
+                        buffer.zero_()
+                        module._quantizer_cache = None
         if regular:
             target = mto.restore(target, tmp_path / f"rank{rank}.pth")
         elif loader == "mbridge":
             from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
 
-            (target,) = load_modelopt_megatron_checkpoint([target], str(tmp_path))
+            # The second load, into the converted model, loads its weights only.
+            (target,) = load_modelopt_megatron_checkpoint(
+                [target],
+                str(tmp_path / "weights" if i else tmp_path),
+                restore_modelopt_state=i == 0,
+            )
         else:
             # Into a converted model, the restore only reads the layout: it loads no state.
             with (
@@ -2091,6 +2107,25 @@ def _test_ggml_rc0_pin_layout_same_tp(tmp_path, loader, rank, size):
         for name, weight in expected.items():
             assert torch.equal(restored[name], weight), name
     if loader == "sharded":
+        # A weight load that fails once the layout is read leaves a checkpoint to save whose
+        # layout marker says how its pins are written.
+        restore_sharded_modelopt_state([target], tmp_path)
+        with (
+            patch.object(target, "load_state_dict", side_effect=RuntimeError("weight load")),
+            pytest.raises(RuntimeError, match="weight load"),
+        ):
+            load_distributed_checkpoint(tmp_path, target)
+        resaved = tmp_path / "resaved"
+        resaved.mkdir(exist_ok=True)
+        save_distributed_checkpoint(resaved, target)
+        save_sharded_modelopt_state([target], resaved)
+        target = _gpt_model_provider(tp_size=size, hidden_size=512, activation_func="swiglu")
+        restore_sharded_modelopt_state([target], resaved)
+        target = load_distributed_checkpoint(resaved, target)
+        restored = _pinned_effective_weights(target)
+        assert restored.keys() == expected.keys()
+        for name, weight in expected.items():
+            assert torch.equal(restored[name], weight), name
         # Saved again, it loads at another TP size, e.g. TP=1 to export it.
         whole = _whole_pinned_effective_weights(target, size, gated=True)
         migrated = tmp_path / "migrated"
@@ -2135,7 +2170,8 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
     hidden_size = hidden_size.get(case, 64 if case.endswith("_fc2") else 512)
     # Saved at TP=2 and loaded at TP=1, or the other way around, or at the same size.
     save_tp, load_tp = (1, size) if case == "grouped_aligned_fc2" else (size, 1)
-    save_tp, load_tp = (size, size) if case == "unpinned_converted" else (save_tp, load_tp)
+    same_tp = ("unpinned_converted", "sequential_into_direct_converted", "undecodable_converted")
+    save_tp, load_tp = (size, size) if case in same_tp else (save_tp, load_tp)
     # Only the first of the target's two pipeline stages has pins.
     load_pp = size if case == "rc0_swiglu_pins_one_stage" else 1
 
@@ -2182,8 +2218,11 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
             entry["quantizer_name"] = "*layers.0.mlp*weight_quantizer"
         elif case == "mamba_in_proj":
             entry["quantizer_name"] = "*in_proj.weight_quantizer"
+    # A one-member SequentialQuantizer's pins are saved under weight_quantizer.0.
+    sequential = case == "sequential_into_direct_converted"
     with _saving_like_modelopt_0_49_0rc0() if rc0 else nullcontext():
-        mtq.quantize(source, config, get_forward(source))
+        source_config = _iq2_xs_config("ptq", sequential) if sequential else config
+        mtq.quantize(source, source_config, get_forward(source))
         mtq.initialize_qdq_weights(source)
         save_distributed_checkpoint(tmp_path, source)
         save_sharded_modelopt_state([source], tmp_path)
@@ -2213,10 +2252,24 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
     # A rank whose own pins fit raises too, rather than enter the weight load alone.
     error = NotImplementedError if grouped else ValueError
     match = "0.49.0rc0" if rc0 else r"can't be loaded at another"
-    match = {"mamba_in_proj": "by component", "unpinned_converted": "no buffers for"}.get(
-        case, match
-    )
-    with pytest.raises(error if rank == 0 else (error, RuntimeError), match=match):
+    match = {
+        "mamba_in_proj": "by component",
+        "unpinned_converted": "no buffers for",
+        "sequential_into_direct_converted": "doesn't have",
+        "undecodable_converted": "undecodable",
+    }.get(case, match)
+    # Undecodable extra state on one rank only.
+    undecodable = case == "undecodable_converted" and rank == 0
+    with (
+        patch.object(
+            sys.modules[restore_sharded_modelopt_state.__module__],
+            "safe_load",
+            side_effect=ValueError("undecodable"),
+        )
+        if undecodable
+        else nullcontext(),
+        pytest.raises(error if rank == 0 else (error, RuntimeError), match=match),
+    ):
         restore_sharded_modelopt_state([target], tmp_path)
     if case.endswith("_converted") and case != "unpinned_converted":
         # The rejected checkpoint changed nothing: saved again, the target reloads as it is.
@@ -2248,6 +2301,8 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
         "rc0_swiglu_pins_one_stage",
         "mamba_in_proj",
         "unpinned_converted",
+        "sequential_into_direct_converted",
+        "undecodable_converted",
     ],
 )
 def test_ggml_payload_tp_reshard_rejected(dist_workers_size_2, tmp_path, case):

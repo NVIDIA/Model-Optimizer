@@ -220,7 +220,9 @@ def quant_module_get_extra_state(self) -> dict:
 
     extra_state["modelopt_quantizer_state"] = quantizer_state
     # A gated linear_fc1's GGML pins are saved in Megatron's SwiGLU layout (not 0.49.0rc0's).
-    extra_state["modelopt_swiglu_ggml_pins"] = True
+    if not getattr(self, "_legacy_ggml_pin_layout", False):
+        # What sharded_state_dict() now writes, also after a failed load of a 0.49.0rc0 checkpoint.
+        extra_state["modelopt_swiglu_ggml_pins"] = True
 
     # Handle real_quantizer_state and q_tensor_state
     extra_state.update(real_quant_module_get_extra_state(self))
@@ -603,6 +605,17 @@ class _MegatronParallelLinear(_ParallelLinear):
             self._legacy_ggml_pin_layout = legacy
             return
         saved = state.get("modelopt_quantizer_state") or {}
+        names = {name for _, _, name in self._weight_quantizer_leaves()}
+        # Experts' quantizers are saved per EP rank, so another size may have experts this rank lacks.
+        experts = any(re.fullmatch(r"weight_quantizer\.\d+", name) for name in names)
+        for name, substate in saved.items():
+            if pin_names(substate) and name not in names:
+                if not (experts and re.match(r"weight_quantizer\.\d+", name)):
+                    raise ValueError(
+                        f"This checkpoint has GGML pins in {name}, which this quantized model "
+                        "doesn't have (e.g. it was quantized with another recipe), so they wouldn't "
+                        "load. Load it into a model that isn't quantized yet."
+                    )
         leaves = []
         for weight, leaf, name in self._weight_quantizer_leaves():
             # Saved per EP rank, as in quant_module_set_extra_state.
@@ -691,7 +704,11 @@ class _MegatronParallelLinear(_ParallelLinear):
         # The restore's first load has only the extra state; once the tensors load they are in this
         # rank's layout, so the next save writes the current one.
         if any(k.startswith(prefix) and not k.endswith("_extra_state") for k in state_dict):
-            self._legacy_ggml_pin_layout = False
+            self.modelopt_forget_checkpoint_layout()
+
+    def modelopt_forget_checkpoint_layout(self):
+        """Plan keys in this module's own layout again, as once a checkpoint's tensors load."""
+        self._legacy_ggml_pin_layout = False
 
 
 @QuantModuleRegistry.register(

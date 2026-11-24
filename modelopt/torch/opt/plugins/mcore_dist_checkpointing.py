@@ -207,20 +207,29 @@ def _read_checkpoint_layout(model: torch.nn.Module, checkpoint_name: str | Path,
     """Have a converted model's modules read how the checkpoint laid out their state, loading none."""
     extra_state_dict = _load_sharded_extra_state(model, checkpoint_name, prefix)
     readers = []
-    for name, module in model.named_modules():
-        state = extra_state_dict.get(f"{name}._extra_state" if name else "_extra_state")
-        read_layout = getattr(module, "modelopt_read_checkpoint_layout", None)
-        if callable(read_layout) and isinstance(state, torch.Tensor) and state.numel():
-            readers.append(partial(read_layout, safe_load(state.detach().cpu().numpy().tobytes())))
 
     def check_layouts():
-        for read_layout in readers:
-            read_layout(check_only=True)
+        for name, module in model.named_modules():
+            state = extra_state_dict.get(f"{name}._extra_state" if name else "_extra_state")
+            read_layout = getattr(module, "modelopt_read_checkpoint_layout", None)
+            if callable(read_layout) and isinstance(state, torch.Tensor) and state.numel():
+                state = safe_load(state.detach().cpu().numpy().tobytes())
+                read_layout(state, check_only=True)
+                readers.append(partial(read_layout, state))
 
-    # Every rank checks first, so a rejection on any rank leaves every module's layout as it was.
+    # Every rank decodes and checks first, so a failure on any rank leaves every module's layout as
+    # it was, and no rank enters the weight load alone.
     dist.all_reduce("ModelOpt's per-module state", check_layouts, combine=lambda _: None)
     for read_layout in readers:
         read_layout()
+
+
+def _forget_checkpoint_layout(model: torch.nn.Module):
+    """Have ``model``'s modules plan their keys in their own layout again, as after a load."""
+    for module in model.modules():
+        forget = getattr(module, "modelopt_forget_checkpoint_layout", None)
+        if callable(forget):
+            forget()
 
 
 def restore_sharded_modelopt_state(
