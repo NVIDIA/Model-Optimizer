@@ -282,6 +282,12 @@ def region_pattern_autotuning_workflow(
     if state_path.exists():
         logger.info(f"Resuming from checkpoint: {state_path}")
         autotuner.load_state(str(state_path))
+        if model_transform is None and autotuner.config.default_quant_type != quant_type:
+            raise ValueError(
+                f"Checkpoint quant_type={autotuner.config.default_quant_type} does not match "
+                f"requested quant_type={quant_type}. "
+                "Use a new output directory or a matching state file."
+            )
         if model_transform is not None:
             for pattern_schemes in autotuner.profiled_patterns:
                 for scheme in pattern_schemes.schemes:
