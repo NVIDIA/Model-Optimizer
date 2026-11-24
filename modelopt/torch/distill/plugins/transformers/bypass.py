@@ -126,12 +126,14 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             return model
         from ..._bypass_parallel import _size, prepare_quantizer_partitions
         from .parallel import (
+            _synchronize_placement_state,
             _synchronize_validation,
             apply_hf_tensor_parallelism,
             validate_hf_tensor_parallelism,
         )
 
         prepared = hasattr(model, "_modelopt_bypass_torch_mesh")
+        _synchronize_placement_state(self.context, prepared)
         error = None
         try:
             if initialize is not None:
