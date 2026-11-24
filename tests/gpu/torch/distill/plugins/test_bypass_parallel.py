@@ -33,7 +33,7 @@ from _test_utils.torch.distributed.utils import (
 )
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import fully_shard
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import ColwiseParallel, parallelize_module
 from torch.nn import functional as F
 
@@ -292,10 +292,20 @@ class _TPBoundary(torch.nn.Module):
         if self.parallel is not None:
             partial = self.parallel(inputs)
             output = output + (partial.full_tensor() if isinstance(partial, DTensor) else partial)
-        if self.mesh is not None and self.layout in ("replicate", "shard"):
-            if self.layout == "shard":
-                output = output.chunk(self.mesh.size(), dim=-1)[self.mesh.get_local_rank()]
-            placement = Shard(-1) if self.layout == "shard" else Replicate()
+        if self.mesh is not None and self.layout in (
+            "replicate",
+            "shard",
+            "sequence_shard",
+            "partial",
+        ):
+            placement = Replicate()
+            if self.layout in ("shard", "sequence_shard"):
+                dimension = -1 if self.layout == "shard" else 1
+                output = output.chunk(self.mesh.size(), dim=dimension)[self.mesh.get_local_rank()]
+                placement = Shard(dimension)
+            elif self.layout == "partial":
+                output = output / self.mesh.size()
+                placement = Partial()
             output = DTensor.from_local(output, self.mesh, [placement])
         return output
 
@@ -312,7 +322,13 @@ class _TPModel(torch.nn.Module):
 def _public_tp_loss_worker(rank, size, layout, max_norm):
     torch.manual_seed(704)
     cross_data = layout == "dp_tp"
-    teacher = _TPModel(layout == "mixed")
+    unsupported = layout in (
+        "sequence_shard",
+        "partial",
+        "asymmetric_sequence_shard",
+        "asymmetric_partial",
+    )
+    teacher = _TPModel(layout == "mixed" or unsupported)
     batch = torch.randn(2 if cross_data else 1, 4, 256)
     student = mtq.quantize(
         copy.deepcopy(teacher),
@@ -372,10 +388,30 @@ def _public_tp_loss_worker(rank, size, layout, max_norm):
                 model.mlp.layout = "shard" if mesh["dp"].get_local_rank() else "full"
             if layout == "disagree":
                 model.mlp.layout = "shard" if rank else "full"
-            if layout == "mixed":
+            if unsupported:
+                model.mlp.layout = layout.removeprefix("asymmetric_")
+                if layout.startswith("asymmetric_") and rank == 0:
+                    model.mlp.layout = "full"
+            if layout == "mixed" or unsupported:
                 parallelize_module(
                     model.mlp.parallel, mesh, ColwiseParallel(use_local_output=False)
                 )
+        if unsupported:
+            before = {
+                name: (value.to_local() if isinstance(value, DTensor) else value).clone()
+                for name, value in student.state_dict().items()
+            }
+            with (
+                bounded_collectives(10),
+                pytest.raises(ValueError, match="Unsupported TP boundary target placement"),
+            ):
+                mtd.bypass(student, teacher, [data], config, device_mesh=mesh)
+            for name, value in student.state_dict().items():
+                local = value.to_local() if isinstance(value, DTensor) else value
+                assert local.dtype == before[name].dtype
+                torch.testing.assert_close(local, before[name], rtol=0, atol=0)
+            assert not any("_local_repair_state" in name for name in student.state_dict())
+            return
         if layout == "disagree":
             before = copy.deepcopy(student.state_dict())
             with pytest.raises(ValueError, match="TP boundary loss ownership"):
@@ -418,6 +454,19 @@ def test_public_tp_bypass_counts_each_boundary_loss_once(bypass_cpu_workers, lay
 @pytest.mark.timeout(180)
 def test_public_tp_boundary_ownership_disagreement_refuses_without_update(bypass_cpu_workers):
     bypass_cpu_workers.run(_public_tp_loss_worker, "disagree", 1e8)
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    "layout", ["sequence_shard", "partial", "asymmetric_sequence_shard", "asymmetric_partial"]
+)
+def test_public_tp_unsupported_target_placement_refuses_without_update(bypass_cpu_workers, layout):
+    timeout = bypass_cpu_workers.job_timeout
+    try:
+        bypass_cpu_workers.job_timeout = 60
+        bypass_cpu_workers.run(_public_tp_loss_worker, layout, 1e8)
+    finally:
+        bypass_cpu_workers.job_timeout = timeout
 
 
 @pytest.fixture

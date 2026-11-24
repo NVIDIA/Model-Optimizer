@@ -21,7 +21,7 @@ from functools import partial
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import FSDPModule
-from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.utils._pytree import tree_map
 
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -168,13 +168,23 @@ class DistributedBypassRuntime:
 
     def record(self, unit, record, *, native_context=False):
         target = record.target
-        partitioned = False
+        partitioned, error = False, None
         if isinstance(target, DTensor):
             axes = target.device_mesh.mesh_dim_names or ()
             placement = target.placements[axes.index("tp")] if "tp" in axes else None
             partitioned = (
                 isinstance(placement, Shard) and placement.dim % target.ndim == target.ndim - 1
             )
+            if placement is not None and not isinstance(placement, Replicate) and not partitioned:
+                error = (
+                    f"Unsupported TP boundary target placement {placement}; "
+                    "expected Replicate or last-dimension Shard"
+                )
+        if _size(self.context.tensor_mesh) > 1:
+            # Streaming replay/backward can communicate: healthy peers must join this
+            # flag before any rank rejects its placement or localizes its target/mask.
+            self.synchronize_error(error)
+        if isinstance(target, DTensor):
             record = replace(record, target=target.to_local())
         self.boundary_modes[unit.name] = self.boundary_modes.get(unit.name, 0) | (
             2 if partitioned else 1
