@@ -299,27 +299,21 @@ comparisons across experiments.
 
 Is question-level analysis reliable on real benchmarks compared with repetition-level analysis?
 We compare the two approaches by spending the same response budget on more unique questions or
-more repetitions per question, then measuring how much the resulting scores vary. Each allocation
-produces 20 observed scores, using 1,000
-responses per model for MMLU-Pro and 280 for SciCode.
+more repetitions per question, then measuring how much the resulting scores vary.
 
-At the same response budget, more questions with fewer repetitions give more consistent Candidate
-accuracy estimates on both MMLU-Pro and SciCode, with lower observed standard deviation (SD).
-Shading shows ±1 SD across 20 group scores; solid lines show their mean.
+On SciCode, more subtasks with fewer repetitions gave more consistent Candidate accuracy
+estimates at the same response budget. The plot shows how much accuracy varied across
+20 groups, each with 280 responses per model.
 
-.. figure:: images/budget-allocation-accuracy.svg
-   :alt: Candidate mean accuracy with plus or minus one observed standard deviation. At fixed response budgets, using more unique questions gives less spread for MMLU-Pro and SciCode.
+.. figure:: images/budget-allocation-scicode-accuracy.svg
+   :alt: Mean Candidate accuracy on SciCode with shading showing one observed standard deviation on either side of the mean. At 280 responses per model, the estimate varies less with more subtasks and fewer repetitions.
    :width: 720px
 
-For SciCode, more subtasks with fewer repetitions give a more consistent estimate of Candidate's
-cap-hit-rate reduction relative to Baseline, with lower observed SD.
-
-.. figure:: images/budget-allocation-cap-hit-differences.svg
-   :alt: Mean Candidate minus Baseline cap-hit-rate differences on SciCode with plus or minus one observed standard deviation. More subtask coverage gives lower observed SD for the same response budget.
-   :width: 720px
-
-The proportion of questions and repetitions that gives lower SD can vary by benchmark and metric.
-See the :ref:`accuracy-difference analysis <evaluation-accuracy-differences>` in the Reproducibility Notes.
+More subtasks with fewer repetitions also gave a more consistent estimate of the SciCode
+cap-hit-rate difference. For the accuracy difference between checkpoints, more questions
+helped on SciCode and more repetitions helped slightly on MMLU-Pro. The choice of analysis level
+can depend on the benchmark and metric. See the
+:ref:`ablation plots and analysis <evaluation-accuracy-differences>` in the Reproducibility Notes.
 
 .. _evaluation-collect-data:
 

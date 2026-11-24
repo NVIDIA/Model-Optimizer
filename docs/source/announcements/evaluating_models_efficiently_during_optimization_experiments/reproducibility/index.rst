@@ -61,13 +61,13 @@ Saved metrics
 We save the means, observed standard deviations, confidence intervals, and p-values shown in the
 plots as CSV summaries:
 
-- **MMLU-Pro and SciCode: Candidate accuracy at fixed response budgets** — data used in the guide
-  section :ref:`Choose between question-level and repetition-level analysis <evaluation-choose-questions-and-repetitions>`.
+- **MMLU-Pro and SciCode: Candidate accuracy at fixed response budgets** — data used in the
+  :ref:`Choose between question-level and repetition-level analysis <evaluation-accuracy-differences>` ablation.
   CSV file: :download:`budget-allocation-accuracy.csv <budget-allocation-accuracy.csv>`.
 - **MMLU-Pro and SciCode: accuracy differences at fixed response budgets** — data used in the
-  :ref:`Choose between question-level and repetition-level analysis <evaluation-accuracy-differences>` ablation.
+  same ablation.
   CSV file: :download:`budget-allocation-differences.csv <budget-allocation-differences.csv>`.
-- **SciCode: cap-hit-rate differences at a fixed response budget** — data used in the same section.
+- **SciCode: cap-hit-rate differences at a fixed response budget** — data used in the same ablation.
   CSV file: :download:`budget-allocation-cap-hit-differences.csv <budget-allocation-cap-hit-differences.csv>`.
 - **SciCode: cap-hit rates** — data used in the guide section
   :ref:`Collect as much evaluation data as you need <evaluation-collect-data>`.
@@ -191,14 +191,34 @@ Ablations
 Choose between question-level and repetition-level analysis
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-We compare the spread of accuracy differences using the same fixed response budgets as the
-article, with 20 group scores per allocation. Shading shows ±1 observed standard deviation (SD).
+We compare the two approaches by spending the same response budget on more unique questions or
+more repetitions per question, then measuring how much the resulting scores vary. Each allocation
+produces 20 observed scores, using 1,000 responses per model for MMLU-Pro and 280 for SciCode.
+
+At the same response budget, more questions with fewer repetitions give more consistent Candidate
+accuracy estimates on both MMLU-Pro and SciCode, with lower observed standard deviation (SD).
+Shading shows ±1 SD across 20 group scores; solid lines show their mean.
+
+.. figure:: ../images/budget-allocation-accuracy.svg
+   :alt: Mean Candidate accuracy on MMLU-Pro with shading showing one observed standard deviation on either side of the mean. At 1,000 responses per model, the estimate varies less with more questions and fewer repetitions.
+   :width: 720px
+
+.. figure:: ../images/budget-allocation-scicode-accuracy.svg
+   :alt: Mean Candidate accuracy on SciCode with shading showing one observed standard deviation on either side of the mean. At 280 responses per model, the estimate varies less with more subtasks and fewer repetitions.
+   :width: 720px
 
 For Candidate − Baseline accuracy differences, more repetitions give slightly lower observed SD
 on MMLU-Pro, while more question coverage gives lower SD on SciCode.
 
 .. figure:: ../images/budget-allocation-differences.svg
    :alt: Mean Candidate minus Baseline accuracy differences with plus or minus one observed standard deviation. More repetitions slightly reduce spread for MMLU-Pro, while more subtask coverage gives less spread for SciCode.
+   :width: 720px
+
+For SciCode, more subtasks with fewer repetitions give a more consistent estimate of Candidate's
+cap-hit-rate reduction relative to Baseline, with lower observed SD.
+
+.. figure:: ../images/budget-allocation-cap-hit-differences.svg
+   :alt: Mean Candidate minus Baseline cap-hit-rate differences on SciCode with plus or minus one observed standard deviation. More subtask coverage gives lower observed SD for the same response budget.
    :width: 720px
 
 Reproducibility limits
