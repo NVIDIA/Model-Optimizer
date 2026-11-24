@@ -83,7 +83,9 @@ def test_native_partition_preserves_pinned_projection(name, dim):
     assert all(torch.equal(v, before[n]) for n, v in quantizer.state_dict().items())
 
 
-@pytest.mark.parametrize("format_name", ["fp8", "nvfp4"])
+@pytest.mark.parametrize(
+    "format_name", ["fp8", "nvfp4", "fp8_block", "fp8_block_padded", "nvfp4_swizzled"]
+)
 @pytest.mark.parametrize("inference_staging", [False, True])
 def test_packed_frozen_projection_staging_and_restore(format_name, inference_staging, tmp_path):
     import modelopt.torch.opt as mto
@@ -96,8 +98,9 @@ def test_packed_frozen_projection_staging_and_restore(format_name, inference_sta
     from modelopt.torch.quantization.utils.native_weight import get_pinned_native_weight
 
     torch.manual_seed(60)
+    columns = 258 if format_name == "fp8_block_padded" else 256
     model = mtq.quantize(
-        torch.nn.Sequential(torch.nn.Linear(256, 16, bias=False)),
+        torch.nn.Sequential(torch.nn.Linear(columns, 16, bias=False)),
         {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None},
     )
     layer = model[0]
@@ -105,6 +108,10 @@ def test_packed_frozen_projection_staging_and_restore(format_name, inference_sta
         native, scale = FP8QTensor.quantize(layer.weight.detach(), axis=0)
         double_scale = None
         attributes = {"num_bits": (4, 3), "axis": 0}
+    elif format_name.startswith("fp8_block"):
+        native, scale = FP8QTensor.quantize(layer.weight.detach(), block_sizes={-1: 128})
+        double_scale = None
+        attributes = {"num_bits": (4, 3), "block_sizes": {-1: 128}}
     else:
         native, scale, double_scale = NVFP4QTensor.quantize(
             layer.weight.detach(), 16, try_tensorrt=False
@@ -116,17 +123,27 @@ def test_packed_frozen_projection_staging_and_restore(format_name, inference_sta
     layer.weight_quantizer.set_from_attribute_config(
         QuantizerAttributeConfig(**attributes, fake_quant=False)
     )
+    if format_name == "nvfp4_swizzled":
+        padded = torch.zeros(128, 16, dtype=torch.uint8)
+        padded[:16] = scale.view(torch.uint8)
+        scale = padded.reshape(1, 4, 32, 4, 4).permute(0, 3, 2, 1, 4).contiguous().reshape(128, 16)
     layer.weight_quantizer._set_buffer("_scale", scale)
     if double_scale is not None:
         layer.weight_quantizer._set_buffer("_double_scale", double_scale)
     layer.weight = QTensorWrapper(native)
     decoded = native.dequantize(
-        scale=scale, double_scale=double_scale, block_sizes=layer.weight_quantizer.block_sizes
+        scale=scale.flatten() if format_name == "nvfp4_swizzled" else scale,
+        double_scale=double_scale,
+        block_sizes=layer.weight_quantizer.block_sizes,
     )
+    original_rotate = copy.deepcopy(layer.weight_quantizer._rotate)
+    original_pre_scale = layer.weight_quantizer._enable_pre_quant_scale
     with torch.inference_mode(inference_staging):
-        prepare_packed_weights_for_tp(model)
+        metadata = prepare_packed_weights_for_tp(model)
+    assert metadata["0"]["rotate"] == original_rotate
+    assert metadata["0"]["enable_pre_quant_scale"] == original_pre_scale
     layer.weight_quantizer.disable()
-    x = torch.randn(3, 256, requires_grad=True)
+    x = torch.randn(3, columns, requires_grad=True)
     expected = F.linear(x, decoded)
     actual = model(x)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -140,6 +157,10 @@ def test_packed_frozen_projection_staging_and_restore(format_name, inference_sta
         view = NativeWeightPartition(tuple(decoded.shape), dim, 1, 2)
         local = view.select(decoded)
         quantizer = copy.deepcopy(layer.weight_quantizer)
+        if format_name == "fp8_block_padded" and dim == 1:
+            with pytest.raises(ValueError):
+                native_weight_partition(quantizer, view, source=local)
+            continue
         fields, _, _ = native_weight_partition(quantizer, view, source=local)
         for name, value in fields.items():
             quantizer._set_buffer(name, value) if isinstance(value, torch.Tensor) else setattr(
@@ -148,18 +169,73 @@ def test_packed_frozen_projection_staging_and_restore(format_name, inference_sta
         pinned = get_pinned_native_weight(quantizer, local)
         assert pinned is not None
         codes = native._quantized_data.reshape(decoded.shape[0], -1)
-        expected_codes = view.select(codes, 2 if format_name == "nvfp4" and dim == 1 else 1)
+        expected_codes = view.select(
+            codes, 2 if format_name.startswith("nvfp4") and dim == 1 else 1
+        )
         assert torch.equal(
             pinned._quantized_data.view(torch.uint8).reshape(expected_codes.shape),
             expected_codes.view(torch.uint8),
         )
         quantizer.enable()
         torch.testing.assert_close(quantizer(local), local, rtol=0, atol=0)
+        assert get_pinned_native_weight(quantizer, local) is not None
+        if format_name.startswith("fp8_block"):
+            quantizer.axis = None
+            assert get_pinned_native_weight(quantizer, local) is None
     layer.weight_quantizer.enable()
     path = tmp_path / "staged.pt"
     mto.save(model, path)
-    restored = mto.restore(torch.nn.Sequential(torch.nn.Linear(256, 16, bias=False)), path)
+    restored = mto.restore(torch.nn.Sequential(torch.nn.Linear(columns, 16, bias=False)), path)
     torch.testing.assert_close(restored(x), expected, rtol=0, atol=0)
+    assert get_pinned_native_weight(restored[0].weight_quantizer, restored[0].weight) is not None
     assert torch.equal(
         restored[0].weight_quantizer._native_weight_codes, native._quantized_data.view(torch.uint8)
     )
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
+def test_packed_staging_rolls_back_all_modules(monkeypatch, failure):
+    from modelopt.torch.quantization import repair_partition
+    from modelopt.torch.quantization.qtensor import FP8QTensor, QTensorWrapper
+    from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
+
+    model = mtq.quantize(
+        torch.nn.Sequential(torch.nn.Linear(16, 16), torch.nn.Linear(16, 16)),
+        {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None},
+    )
+    snapshots = []
+    for layer in model:
+        native, scale = FP8QTensor.quantize(layer.weight.detach(), axis=0)
+        q = layer.weight_quantizer
+        q.set_from_attribute_config(
+            QuantizerAttributeConfig(num_bits=(4, 3), axis=0, fake_quant=False)
+        )
+        q._set_buffer("_scale", scale)
+        layer.weight = QTensorWrapper(native)
+        snapshots.append(
+            (layer.weight, dict(q._buffers), q._fake_quant, q._rotate, q._enable_pre_quant_scale)
+        )
+    original = repair_partition.pin_native_weight
+    calls = 0
+
+    def fail_second(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise failure("staging interrupted")
+        return original(*args)
+
+    monkeypatch.setattr(repair_partition, "pin_native_weight", fail_second)
+    with pytest.raises(failure, match="staging interrupted"):
+        prepare_packed_weights_for_tp(model)
+    for layer, (weight, buffers, fake_quant, rotate, pre_scale) in zip(model, snapshots):
+        q = layer.weight_quantizer
+        assert layer.weight is weight
+        assert q._buffers.keys() == buffers.keys()
+        assert all(q._buffers[name] is value for name, value in buffers.items())
+        assert (q._fake_quant, q._rotate, q._enable_pre_quant_scale) == (
+            fake_quant,
+            rotate,
+            pre_scale,
+        )
+        assert not hasattr(q, "_native_weight_meta")

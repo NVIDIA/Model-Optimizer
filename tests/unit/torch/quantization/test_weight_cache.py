@@ -306,3 +306,27 @@ def test_pinned_native_weights_honor_input_transforms(transform):
     torch.testing.assert_close(quantizer(source), reference(source), rtol=0, atol=0)
     with pytest.raises(ValueError):
         pin_native_weight(quantizer, native, source)
+
+
+@pytest.mark.parametrize("policy", ["clipped", "lsq", "learned"])
+def test_pinned_native_weights_preserve_backward_policy(policy):
+    model = _quantized_mlp(num_bits=(4, 3))
+    quantizer = model[0].weight_quantizer
+    source = model[0].weight.detach().clone().requires_grad_()
+    native, scale = FP8QTensor.quantize(source.detach(), axis=0)
+    quantizer._set_buffer("_scale", scale)
+    pin_native_weight(quantizer, native, source)
+    if policy == "clipped":
+        quantizer._pass_through_bwd = False
+    elif policy == "lsq":
+        quantizer._lsq = True
+    else:
+        quantizer.register_parameter("learned_scale", nn.Parameter(torch.ones(())))
+    reference = copy.deepcopy(quantizer)
+    del reference._native_weight_meta
+    expected = source.detach().clone().requires_grad_()
+    actual_output, expected_output = quantizer(source), reference(expected)
+    torch.testing.assert_close(actual_output, expected_output, rtol=0, atol=0)
+    actual_output.sum().backward()
+    expected_output.sum().backward()
+    torch.testing.assert_close(source.grad, expected.grad, rtol=0, atol=0)
