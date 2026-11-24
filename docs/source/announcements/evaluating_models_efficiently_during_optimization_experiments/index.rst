@@ -66,31 +66,29 @@ metric and meets your non-inferiority criteria for the others. Regressions highl
 Show where the model improves or worsens
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+Our primary question is whether Candidate is better than Baseline. We use paired question-level
+tests here to compare models across the domain represented by the benchmark. Pairing can reduce
+variation caused by question difficulty. For standardized reporting on a fixed benchmark, ModelOpt
+uses unpaired Welch t-tests on independent, complete-run scores to estimate uncertainty from
+variation between runs of those exact questions.
+
 We first average each model’s correctness across repetitions of each question, then compute
-**Candidate − Baseline** for each question. We calculate a paired 95% confidence interval for
-the mean difference by bootstrapping whole SciCode parent problems, keeping related subtasks
-together. This allows subtasks within a problem to be correlated and assumes independence
-across parent problems. Changes are reported in percentage points (pp), not relative percentages.
+**Candidate − Baseline** for each question. We use these differences to calculate both the
+confidence interval and the one-sided p-values. For SciCode, both calculations keep related
+subtasks together, allowing subtasks within a problem to be correlated and assuming independence
+across parent problems.
 
-We use paired question-level tests here to compare models across the domain represented by the
-benchmark. Pairing can reduce variation caused by question difficulty. For standardized reporting on
-a fixed benchmark, ModelOpt uses unpaired Welch t-tests on independent, complete-run scores to
-estimate uncertainty from variation between runs of those exact questions.
+We calculate a paired 95% confidence interval for the mean difference by bootstrapping whole
+SciCode parent problems.
+A one-sided paired test can detect improvement with less data than a two-sided test for any
+difference. Choose test directions before inspecting results. We calculate the one-sided p-values
+with a paired permutation test that swaps model labels for whole parent problems.
+When question-level differences are independent and a t approximation is suitable, a paired
+t-based confidence interval and a one-sided paired t-test are alternatives.
 
-Our primary question is whether Candidate is better than Baseline. A one-sided paired test
-can detect improvement with less data than a two-sided test for any difference. Reverse-direction
-p-values are reported for context.
-
-We calculate the one-sided p-values with a paired permutation test that swaps model labels for
-whole parent problems. When question-level differences are independent and a t approximation is
-suitable, a paired t-based confidence interval and a one-sided paired t-test are alternatives.
-
-Choose test directions before inspecting results. We use p < 0.05 for each test, without a stricter
-threshold for testing multiple metrics. Testing more metrics gives noise more opportunities to
-appear as an improvement.
-
-“Yes” means evidence of higher Candidate accuracy (p < 0.05); “no evidence” means higher accuracy
-was not established.
+The SciCode table reports the Candidate − Baseline accuracy difference in percentage points (pp)
+and shows reverse-direction p-values for context. We use p < 0.05 for each test. “No evidence”
+means higher Candidate accuracy was not established at that threshold.
 
 +----------------+----------+-----------+------------------+------------------+------------------+
 | Benchmark      | Baseline | Candidate | Difference [95%  | Candidate        | Baseline higher, |
@@ -100,8 +98,6 @@ was not established.
 | SciCode        | 42.81%   | 44.39%    | +1.57 [−0.48,    | 0.080 — no       | 0.931            |
 |                |          |           | +3.67]           | evidence         |                  |
 +----------------+----------+-----------+------------------+------------------+------------------+
-
-On SciCode, Candidate scored 1.57 pp higher, with inconclusive evidence of improvement (p = 0.080).
 
 Check for regressions
 ~~~~~~~~~~~~~~~~~~~~~
