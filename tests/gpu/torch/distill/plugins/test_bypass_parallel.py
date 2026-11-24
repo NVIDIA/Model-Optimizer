@@ -19,20 +19,38 @@ import copy
 from collections import OrderedDict
 from datetime import timedelta
 from functools import cache
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.distributed as dist
+from _test_utils.torch.distributed.utils import (
+    DistributedWorkerPool,
+    bounded_collectives,
+    default_worker_teardown,
+    get_live_pool,
+)
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.fsdp import fully_shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor.parallel import ColwiseParallel, parallelize_module
 from torch.nn import functional as F
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.quantization as mtq
-from modelopt.torch.distill._bypass_parallel import prepare_quantizer_partitions
+from modelopt.torch.distill._bypass_capture import BypassUnit, CaptureRecord, mse_statistics
+from modelopt.torch.distill._bypass_optimizer import Lion
+from modelopt.torch.distill._bypass_parallel import (
+    BypassMeshContext,
+    prepare_quantizer_partitions,
+    torch_mesh_context,
+)
+from modelopt.torch.distill._bypass_runner import _BypassRunner
+from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor import FP8QTensor, NVFP4QTensor, QTensorWrapper
+from modelopt.torch.quantization.repair import IQRepairPolicy, plan_iq_repair
 from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
 from modelopt.torch.quantization.utils.native_weight import get_pinned_native_weight
 
@@ -64,12 +82,28 @@ def _runtime_mesh(axis):
     return DeviceMesh.from_group(group, "cpu", mesh_dim_names=(axis,))
 
 
-def _replicated_field_worker(rank, size, expert):
-    from modelopt.torch.distill._bypass_optimizer import Lion
-    from modelopt.torch.distill._bypass_parallel import BypassMeshContext
-    from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
-    from modelopt.torch.quantization.repair import IQRepairPolicy
+@cache
+def _singleton_mesh(rank):
+    group = dist.new_group([rank], timeout=timedelta(seconds=10), use_local_synchronization=True)
+    return DeviceMesh.from_group(group, "cpu", mesh_dim_names=("dp",))
 
+
+@cache
+def _data_tensor_mesh():
+    groups = [
+        dist.new_group(ranks, timeout=timedelta(seconds=10))
+        for ranks in ([0, 2], [1, 3], [0, 1], [2, 3])
+    ]
+    data_rank, tensor_rank = divmod(dist.get_rank(), 2)
+    return DeviceMesh.from_group(
+        [groups[tensor_rank], groups[2 + data_rank]],
+        "cpu",
+        mesh=torch.arange(4).reshape(2, 2),
+        mesh_dim_names=("dp", "tp"),
+    )
+
+
+def _replicated_field_worker(rank, size, expert):
     torch.manual_seed(701)
     inputs = [torch.randn(1, 3, 256) * scale for scale in (0.5, 2.0)]
     teacher = torch.nn.Linear(256, 16, bias=False)
@@ -101,6 +135,13 @@ def _replicated_field_worker(rank, size, expert):
         fields, expected_fields = policy.prepare(student), expected_policy.prepare(reference)
         runtime.register(student, policy)
         runtime.validate_gradient_schedules({"mlp": fields})
+        # These are disjoint feature-loss contributions, not different full TP batches.
+        runtime.record(
+            BypassUnit("mlp", "", ""),
+            CaptureRecord(
+                (), {}, DTensor.from_local(teacher(inputs[rank]).detach(), mesh, [Shard(-1)])
+            ),
+        )
         losses = [F.mse_loss(reference(x), teacher(x).detach(), reduction="sum") for x in inputs]
         sum(losses).backward()
         F.mse_loss(
@@ -133,12 +174,166 @@ def test_replicated_native_fields_reduce_once_and_match_reference(bypass_cpu_wor
     bypass_cpu_workers.run(_replicated_field_worker, expert)
 
 
+class _TPBoundary(torch.nn.Module):
+    def __init__(self, mixed):
+        super().__init__()
+        self.dense = torch.nn.Linear(256, 16, bias=False)
+        self.parallel = torch.nn.Linear(256, 16, bias=False) if mixed else None
+        self.mesh, self.layout = None, "full"
+
+    def forward(self, inputs):
+        output = self.dense(inputs)
+        if self.parallel is not None:
+            partial = self.parallel(inputs)
+            output = output + (partial.full_tensor() if isinstance(partial, DTensor) else partial)
+        if self.mesh is not None and self.layout in ("replicate", "shard"):
+            if self.layout == "shard":
+                output = output.chunk(self.mesh.size(), dim=-1)[self.mesh.get_local_rank()]
+            placement = Shard(-1) if self.layout == "shard" else Replicate()
+            output = DTensor.from_local(output, self.mesh, [placement])
+        return output
+
+
+class _TPModel(torch.nn.Module):
+    def __init__(self, mixed):
+        super().__init__()
+        self.mlp = _TPBoundary(mixed)
+
+    def forward(self, hidden_states):
+        return self.mlp(hidden_states)
+
+
+def _public_tp_loss_worker(rank, size, layout, max_norm):
+    torch.manual_seed(704)
+    cross_data = layout == "dp_tp"
+    teacher = _TPModel(layout == "mixed")
+    batch = torch.randn(2 if cross_data else 1, 4, 256)
+    student = mtq.quantize(
+        copy.deepcopy(teacher),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda model: model(batch),
+    )
+    reference = copy.deepcopy(student)
+    config = {
+        "num_steps": 1,
+        "global_batch_size": batch.shape[0],
+        "micro_batch_size": 1,
+        "sequence_length": 4,
+        "max_grad_norm": max_norm,
+        "warmup_fraction": 0,
+        "scheduler": "constant",
+    }
+    mesh = _data_tensor_mesh() if cross_data else _runtime_mesh("tp")
+    tensor_mesh = mesh["tp"] if cross_data else mesh
+    data = (
+        {"hidden_states": batch, "valid_mask": torch.tensor([[True] * 4, [False] * 4])}
+        if cross_data
+        else batch
+    )
+    observations = []
+    original = DistributedBypassRuntime.clip_gradients
+
+    def observe(runtime, fields, bound):
+        before = [p.grad.detach().clone() for p in fields]
+        norm = original(runtime, fields, bound)
+        observations.append(
+            (
+                before,
+                norm.detach().clone(),
+                [p.grad.detach().clone() for p in fields],
+                [id(p) in runtime.tp_parameters for p in fields],
+            )
+        )
+        return norm
+
+    DistributedBypassRuntime.clip_gradients = observe
+    try:
+        mtd.bypass(
+            reference, copy.deepcopy(teacher), [data], config, device_mesh=_singleton_mesh(rank)
+        )
+        for model in (student, teacher):
+            model.mlp.mesh, model.mlp.layout = tensor_mesh, layout
+            if cross_data:
+                model.mlp.layout = "shard" if mesh["dp"].get_local_rank() else "full"
+            if layout == "disagree":
+                model.mlp.layout = "shard" if rank else "full"
+            if layout == "mixed":
+                parallelize_module(
+                    model.mlp.parallel, mesh, ColwiseParallel(use_local_output=False)
+                )
+        if layout == "disagree":
+            before = copy.deepcopy(student.state_dict())
+            with pytest.raises(ValueError, match="TP boundary loss ownership"):
+                mtd.bypass(student, teacher, [data], config, device_mesh=mesh)
+            for name, value in student.state_dict().items():
+                torch.testing.assert_close(value, before[name], rtol=0, atol=0)
+            return
+        if cross_data:
+            lane = mesh["dp"].get_local_rank()
+            data = {name: value[lane : lane + 1] for name, value in data.items()}
+        mtd.bypass(student, teacher, [data], config, device_mesh=mesh)
+    finally:
+        DistributedBypassRuntime.clip_gradients = original
+    expected, actual = observations
+    assert expected[1] > 0
+    for index in (0, 2):
+        for value, target, sharded in zip(actual[index], expected[index], actual[3], strict=True):
+            if sharded:
+                target = target.chunk(size, dim=0)[rank]
+            torch.testing.assert_close(value, target, rtol=2e-5, atol=1e-10)
+    torch.testing.assert_close(actual[1], expected[1], rtol=2e-5, atol=1e-10)
+    if max_norm < expected[1]:
+        assert any(not torch.equal(a, b) for a, b in zip(actual[0], actual[2], strict=True))
+    for name, target in reference.state_dict().items():
+        value = student.state_dict()[name]
+        value = value.full_tensor() if isinstance(value, DTensor) else value
+        if value.shape != target.shape:
+            target = target.chunk(size, dim=0)[rank]
+        assert value.dtype == target.dtype, name
+        torch.testing.assert_close(value.to(device=target.device), target, rtol=0, atol=0)
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("layout", ["full", "replicate", "shard", "mixed"])
+@pytest.mark.parametrize("max_norm", [1e8, 1e-4])
+def test_public_tp_bypass_counts_each_boundary_loss_once(bypass_cpu_workers, layout, max_norm):
+    bypass_cpu_workers.run(_public_tp_loss_worker, layout, max_norm)
+
+
+@pytest.mark.timeout(180)
+def test_public_tp_boundary_ownership_disagreement_refuses_without_update(bypass_cpu_workers):
+    bypass_cpu_workers.run(_public_tp_loss_worker, "disagree", 1e8)
+
+
+@pytest.fixture
+def data_tensor_cpu_workers(_dist_pools):
+    pool = get_live_pool(
+        _dist_pools,
+        ("bypass_cpu", 4),
+        lambda: DistributedWorkerPool(
+            world_size=4, backend="gloo", teardown_fn=default_worker_teardown, ready_timeout=180
+        ),
+    )
+    pool.job_timeout = 120
+    return pool
+
+
+@pytest.mark.timeout(180)
+def test_public_dp_tp_bypass_with_empty_partitioned_lane(data_tensor_cpu_workers):
+    data_tensor_cpu_workers.run(_public_tp_loss_worker, "dp_tp", 1e-4)
+
+
 def _functional_child_worker(rank, size):
-    from types import SimpleNamespace
-
-    from _test_utils.torch.distributed.utils import bounded_collectives
-    from torch.distributed.fsdp import fully_shard
-
+    # Optional Transformers integration must not gate the generic Torch workers.
     from modelopt.torch.distill.plugins.transformers.functional_fsdp import (
         install_functional_fsdp_calls,
     )
@@ -186,8 +381,6 @@ def test_functional_fsdp_child_gathers_weight_and_reshards(bypass_cpu_workers):
 
 class _DocumentTeacher(torch.nn.Module):
     def __init__(self):
-        from types import SimpleNamespace
-
         super().__init__()
         self.config = SimpleNamespace(
             model_type="bypass_document_test", _attn_implementation="sdpa"
@@ -205,15 +398,8 @@ class _DocumentTeacher(torch.nn.Module):
 
 
 def _unequal_documents_worker(rank, size):
-    from _test_utils.torch.distributed.utils import bounded_collectives
-
-    from modelopt.torch.distill._bypass_capture import BypassUnit, mse_statistics
-    from modelopt.torch.distill._bypass_optimizer import Lion
-    from modelopt.torch.distill._bypass_parallel import torch_mesh_context
-    from modelopt.torch.distill._bypass_runner import _BypassRunner
-    from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
+    # Optional Transformers integration must not gate the generic Torch workers.
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
-    from modelopt.torch.quantization.repair import plan_iq_repair
 
     torch.manual_seed(703)
     teacher = _DocumentTeacher()

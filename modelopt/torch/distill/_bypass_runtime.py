@@ -59,8 +59,9 @@ class DistributedBypassRuntime:
         self.student = None
         self.owners, self.parameter_meshes, self.parameter_names = {}, {}, {}
         self.expert_parameters, self.tp_parameters = set(), set()
+        self.unplaced_parameters, self.parameter_units = set(), {}
         self.flags, self.names, self.layouts = {}, None, {}
-        self.feature_units = set()
+        self.feature_units, self.boundary_modes = set(), {}
         self.context_modes = set()
 
     def gather_values(self, value):
@@ -147,11 +148,11 @@ class DistributedBypassRuntime:
                 meshes = [
                     self.context.expert_replica_mesh if expert else self.context.data_context_mesh
                 ]
-                # Unplaced dense fields replicate across TP; expert replica groups already
-                # cover their unpartitioned fields, including overlapping dense TP ranks.
-                sharded = self.layouts.get(id(quantizer), {}).get(name, None if expert else False)
-                if sharded is False:
+                sharded = self.layouts.get(id(quantizer), {}).get(name)
+                if sharded is False or (sharded is None and not expert):
                     meshes.append(self.context.tensor_mesh)
+                if sharded is None and not expert:
+                    self.unplaced_parameters.add(id(parameter))
                 if sharded:
                     self.tp_parameters.add(id(parameter))
                 if expert:
@@ -161,13 +162,19 @@ class DistributedBypassRuntime:
 
     def record(self, unit, record, *, native_context=False):
         target = record.target
+        partitioned = False
         if isinstance(target, DTensor):
-            if any(
-                isinstance(p, Shard) and p.dim % target.ndim == target.ndim - 1
-                for p in target.placements
-            ):
-                self.feature_units.add(unit.name)
+            axes = target.device_mesh.mesh_dim_names or ()
+            placement = target.placements[axes.index("tp")] if "tp" in axes else None
+            partitioned = (
+                isinstance(placement, Shard) and placement.dim % target.ndim == target.ndim - 1
+            )
             record = replace(record, target=target.to_local())
+        self.boundary_modes[unit.name] = self.boundary_modes.get(unit.name, 0) | (
+            2 if partitioned else 1
+        )
+        if partitioned:
+            self.feature_units.add(unit.name)
         cp = self.context.context_mesh
         if _size(cp) > 1:
             self.context_modes.add("native_sdpa" if native_context else "replicated_full_context")
@@ -223,6 +230,18 @@ class DistributedBypassRuntime:
         self.synchronize_error(
             "Missing selected teacher boundary" if set(statistics) != set(names) else None
         )
+        error = None
+        tp = self.context.tensor_mesh
+        if _size(tp) > 1:
+            for name in names:
+                mode = self.boundary_modes.get(name, 0)
+                agreement = torch.tensor(
+                    [mode, -mode], device=statistics[name][0].device, dtype=torch.int32
+                )
+                dist.all_reduce(agreement, op=dist.ReduceOp.MAX, group=tp.get_group())
+                if agreement[0].item() not in (1, 2) or agreement[0] != -agreement[1]:
+                    error = "Bypass TP boundary loss ownership differs across ranks or records"
+            self.synchronize_error(error)
         for name in names:
             for value in statistics[name]:
                 if name in self.feature_units:
@@ -249,7 +268,13 @@ class DistributedBypassRuntime:
             for unit, parameters in units.items():
                 for meshes, fields in self._gradient_groups(parameters):
                     signature = tuple(
-                        (self.parameter_names[id(p)], tuple(p.shape), str(p.dtype)) for p in fields
+                        (
+                            self.parameter_names[id(p)],
+                            tuple(p.shape),
+                            str(p.dtype),
+                            id(p) in self.unplaced_parameters,
+                        )
+                        for p in fields
                     )
                     for mesh in meshes:
                         if _size(mesh) > 1:
@@ -268,6 +293,7 @@ class DistributedBypassRuntime:
                 _, ranks = key
                 if any(by_rank.get(owner, {}).get(key) != signature for owner in ranks):
                     raise ValueError("Bypass gradient reduction schedules differ across ranks")
+        self.parameter_units = {id(p): unit for unit, fields in units.items() for p in fields}
 
     def reduce_gradients(self, parameters):
         # The complete metadata schedule was validated once, before the training loop.
@@ -283,6 +309,14 @@ class DistributedBypassRuntime:
                     continue
                 if parameter.grad is None:
                     parameter.grad = torch.zeros_like(parameter)
+                # Unplaced fields see a complete VJP for replicated TP losses. Weight
+                # those replicas before combining data lanes; native partial fields sum.
+                if (
+                    id(parameter) in self.unplaced_parameters
+                    and self.parameter_units[id(parameter)] not in self.feature_units
+                    and _size(self.context.tensor_mesh) > 1
+                ):
+                    parameter.grad.div_(self.context.tensor_mesh.size())
                 for mesh in meshes:
                     _sum(parameter.grad, mesh)
 
