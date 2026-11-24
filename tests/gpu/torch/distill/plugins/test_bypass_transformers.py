@@ -227,7 +227,15 @@ def test_transformers_bypass_selection_and_prefix(bits, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("family", "loss_key"), [("qwen3_next", "valid_mask"), ("qwen3_vl_moe", "loss_mask")]
+    ("family", "loss_key"),
+    [
+        ("qwen3_next", "valid_mask"),
+        ("qwen3_vl_moe", "loss_mask"),
+        ("deepseek_v3", "loss_mask"),
+        ("deepseek_v32", "loss_mask"),
+        ("kimi_k25", "loss_mask"),
+        ("minimax_m3_vl", "loss_mask"),
+    ],
 )
 def test_transformers_packed_replay_matches_independent_documents(family, loss_key):
     from _test_utils.transformers_families import build_model, cases, hf_torch_kernels
@@ -257,7 +265,16 @@ def test_transformers_packed_replay_matches_independent_documents(family, loss_k
         )
         units = adapter.resolve_units(student, teacher, mtd.BypassConfig())
         captured, separate = [], []
-        adapter.teacher_microbatch(teacher, units, batch, lambda u, r: captured.append((u, r)))
+        replay_shapes = []
+        handle = teacher.register_forward_pre_hook(
+            lambda _m, _a, kwargs: replay_shapes.append(tuple(kwargs["input_ids"].shape)),
+            with_kwargs=True,
+        )
+        try:
+            adapter.teacher_microbatch(teacher, units, batch, lambda u, r: captured.append((u, r)))
+        finally:
+            handle.remove()
+        assert any(shape[0] > 1 for shape in replay_shapes)
         for row in range(2):
             for document in docs[row].unique_consecutive():
                 mask = docs[row] == document
@@ -416,3 +433,38 @@ def test_shared_iq2_routed_iq1_and_frozen_down_through_public_bypass(frozen_form
     assert frozen
     for name, value in frozen.items():
         torch.testing.assert_close(after[name], value, rtol=0, atol=0)
+
+
+def test_teacher_replay_preserves_shared_input_and_output_embedding():
+    class Teacher(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(model_type="qwen3_next", rope_parameters={})
+            self.embed_tokens = nn.Embedding(8, 4)
+            self.mlp = nn.Linear(4, 4)
+            self.lm_head = self.embed_tokens
+
+        def get_input_embeddings(self):
+            return self.embed_tokens
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+        def forward(self, input_ids, **kwargs):
+            hidden = self.mlp(self.embed_tokens(input_ids))
+            return torch.nn.functional.linear(hidden, self.lm_head.weight)
+
+    teacher = Teacher()
+    tokens = torch.tensor([[1, 2, 3, 4]])
+    expected = teacher.mlp(teacher.embed_tokens(tokens)).detach()
+    captured = []
+    adapter = TransformersBypassAdapter()
+    adapter.student = copy.deepcopy(teacher)
+    adapter.teacher_microbatch(
+        teacher,
+        [BypassUnit("mlp", "mlp", "mlp")],
+        {"input_ids": tokens},
+        lambda _unit, record: captured.append(record.target),
+    )
+    torch.testing.assert_close(captured[0], expected, rtol=0, atol=0)
+    assert "forward" not in teacher.embed_tokens.__dict__

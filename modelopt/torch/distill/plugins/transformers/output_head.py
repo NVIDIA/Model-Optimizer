@@ -23,7 +23,15 @@ import torch
 @contextmanager
 def bypass_head_context(model, units, head, *, head_paths=None):
     """Avoid allocating unused vocabulary logits; restore any existing forward override."""
-    if head is None:
+    task = getattr(model, "thinker", model)
+    getter = getattr(task, "get_input_embeddings", None)
+    try:
+        input_embeddings = getter() if callable(getter) else None
+    except NotImplementedError:
+        input_embeddings = None
+    # Some tasks expose the input embedding module itself as their output head.
+    # Replacing its forward would corrupt tokens before the selected boundaries.
+    if head is None or head is input_embeddings:
         yield
         return
     paths = (
