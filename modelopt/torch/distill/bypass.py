@@ -76,6 +76,8 @@ def bypass(
         device_mesh: Caller-owned placement mesh, adopted by supported integrations.
             It determines the per-rank data-lane budget and TP/CP replication contract
             described above; use a data-lane sampler, rather than sharding across TP/CP.
+            TP DTensor boundary targets must be Replicate or sharded along the final
+            feature dimension; token/batch shards and partial sums refuse before replay.
 
     Finalization commits boundaries in order. Any failure during finalization may
     leave earlier boundaries committed; reload a saved checkpoint before retrying.
