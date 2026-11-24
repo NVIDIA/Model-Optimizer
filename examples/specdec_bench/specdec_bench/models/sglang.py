@@ -13,10 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import itertools
 import time
-
-from packaging.version import Version
 
 from .base import Model
 
@@ -28,8 +27,9 @@ except ImportError:
 
 
 def _cuda_graph_max_bs_kwarg():
-    # SGLang 0.5.14 split cuda_graph_max_bs into per-phase settings.
-    if Version(sgl.__version__).release >= (0, 5, 14):
+    # SGLang 0.5.14 split cuda_graph_max_bs into per-phase settings. Dev builds report
+    # 0.0.0.devN, so check the installed ServerArgs rather than the version.
+    if "cuda_graph_max_bs_decode" in inspect.signature(sgl.ServerArgs).parameters:
         return "cuda_graph_max_bs_decode"
     return "cuda_graph_max_bs"
 
