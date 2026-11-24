@@ -580,17 +580,20 @@ class ExternalDraftConfig(ModeloptBaseConfig):
     external_tvd_alpha: float = ModeloptField(
         default=0.9,
         ge=0.0,
+        allow_inf_nan=False,
         description=(
             "Weight on the TVD term when ``external_loss='tvd_ce'``. The two weights "
             "are not normalised: they scale the loss as given, so 0.9/0.1 is a "
             "convention rather than a constraint, and setting only one of them moves "
-            "the overall gradient magnitude as well as the ratio."
+            "the overall gradient magnitude as well as the ratio. Both must be finite, and "
+            "at least one must be positive."
         ),
     )
 
     external_ce_alpha: float = ModeloptField(
         default=0.1,
         ge=0.0,
+        allow_inf_nan=False,
         description=(
             "Weight on the cross-entropy term when ``external_loss='tvd_ce'``. CE is "
             "added because TVD is bounded and so discriminates weakly between tokens "
@@ -621,6 +624,20 @@ class ExternalDraftConfig(ModeloptBaseConfig):
         default=True,
         description=("Whether to report top-1 agreement with the base model during training."),
     )
+
+    @model_validator(mode="after")
+    def _check_tvd_ce_weights(self) -> Self:
+        # With both weights at zero, tvd_ce trains on a loss that is identically zero.
+        if (
+            self.external_loss == "tvd_ce"
+            and self.external_tvd_alpha == 0.0
+            and self.external_ce_alpha == 0.0
+        ):
+            raise ValueError(
+                "external_loss='tvd_ce' needs a positive external_tvd_alpha or "
+                "external_ce_alpha; with both at 0 the loss is always 0."
+            )
+        return self
 
 
 class EagleConfig(ModeloptBaseConfig):
