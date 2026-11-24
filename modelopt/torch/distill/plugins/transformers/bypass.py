@@ -115,6 +115,36 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             self._model_facts[model] = facts
         return facts
 
+    def _remember_tp_outputs(self, model, plan=None):
+        if (
+            self.context is None
+            or self.context.tensor_mesh is None
+            or self.context.tensor_mesh.size() == 1
+        ):
+            return
+        from .parallel import _tp_output_layouts
+
+        metadata = self.context.parallel_metadata.get(id(model))
+        if metadata is None:
+            metadata = getattr(model, "_modelopt_bypass_placement", {})
+        if "tp_outputs" in metadata:
+            return
+        outputs = getattr(model, "_modelopt_bypass_tp_outputs", None)
+        if outputs is None:
+            if plan is None:
+                plan = metadata.get("plans", {}).get("tp")
+            if plan is None:
+                if hasattr(model, "_modelopt_bypass_torch_mesh"):
+                    raise ValueError(
+                        "Prepared native HF model lacks retained TP output declarations"
+                    )
+                return  # Unplaced teachers have no applied native output declaration.
+            outputs = _tp_output_layouts(model, plan)
+        # Runtime-only facts describe the applied plan, never subsequently edited rules.
+        self.context.parallel_metadata[id(model)] = {**metadata, "tp_outputs": outputs}
+        if self.context.mesh_manager is None:
+            model._modelopt_bypass_tp_outputs = outputs
+
     def parallelize(self, model, *, initialize=None):
         """Stage native fields before caller-owned HF TP/EP/FSDP, or validate adoption."""
         self._model_facts.pop(model, None)
@@ -124,6 +154,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             from .parallel import parallelize_native_transformers
 
             parallelize_native_transformers(model, self.context, initialize=initialize)
+            self._remember_tp_outputs(model)
             return model
         from ..._bypass_parallel import _size, prepare_quantizer_partitions
         from .parallel import (
@@ -135,7 +166,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
 
         prepared = hasattr(model, "_modelopt_bypass_torch_mesh")
         _synchronize_placement_state(self.context, prepared)
-        error = None
+        error, tp_plan = None, None
         try:
             if initialize is not None:
                 raise ValueError("Native initialization callbacks require TransformersDeviceMesh")
@@ -143,8 +174,15 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 raise ValueError("Prepared Torch models must use their exact caller-owned mesh")
             if _size(self.context.pipeline_mesh) > 1:
                 raise ValueError("Native PP requires a validated family transport")
-            if _size(self.context.tensor_mesh) > 1 and not prepared:
-                validate_hf_tensor_parallelism(model, self.context.tensor_mesh)
+            if _size(self.context.tensor_mesh) > 1:
+                if prepared:
+                    if not hasattr(model, "_modelopt_bypass_tp_outputs"):
+                        raise ValueError(
+                            "Prepared native HF model lacks retained TP output declarations"
+                        )
+                else:
+                    tp_plan = model._expand_parallel_plan(model.tp_plan)
+                    validate_hf_tensor_parallelism(model, self.context.tensor_mesh)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
         _synchronize_validation(self.context, error)
@@ -152,9 +190,10 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
 
             prepare_packed_weights_for_tp(model)
-            apply_hf_tensor_parallelism(model, self.context.tensor_mesh)
+            apply_hf_tensor_parallelism(model, self.context.tensor_mesh, tp_plan)
             prepare_quantizer_partitions(model, self.context)
         model._modelopt_bypass_torch_mesh = self.device_mesh
+        self._remember_tp_outputs(model, tp_plan)
         return model
 
     def adopt(self, model):
@@ -339,6 +378,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         """Select dense/MoE owners and map their exact logical positions to the teacher."""
         for model in (student, teacher):
             self._model_facts.pop(model, None)
+            self._remember_tp_outputs(model)
         self.student = student
         layers, paths = self._selected_paths(student, config)
         targets = (

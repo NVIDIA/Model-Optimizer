@@ -19,7 +19,7 @@ import copy
 import re
 
 import torch
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import QTensorWrapper
@@ -117,6 +117,41 @@ def apply_hf_tensor_parallelism(model, mesh, plan=None):
 
     plan = model._expand_parallel_plan(model.tp_plan) if plan is None else plan
     return apply_tensor_parallelism(model, mesh, plan)
+
+
+def _tp_output_layouts(model, plan):
+    """Normalize exact native module output declarations, never weight ownership."""
+    from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
+
+    modules, outputs = dict(model.named_modules()), {}
+    for path, name in plan.items():
+        if path not in modules:
+            continue
+        style = ALL_PARALLEL_STYLES[name]
+        if name in (
+            "colwise",
+            "colwise_rep",
+            "colwise_gather_output",
+            "rowwise",
+            "rowwise_rep",
+            "rowwise_split_input",
+        ):
+            layout = style.output_layouts
+        elif name == "packed_colwise":
+            layout = Shard(-1)
+        elif name == "sequence_parallel":
+            layout = Shard(style.sequence_dim)
+        elif name in (
+            "all_reduce",
+            "moe_tp_experts",
+            "replicate",
+            "replicated_with_grad_allreduce",
+        ):
+            layout = Replicate()
+        else:
+            layout = f"Unsupported native TP boundary output style {name!r}"
+        outputs[path] = layout
+    return outputs
 
 
 def validate_hf_tensor_parallelism(model, mesh, plan=None):

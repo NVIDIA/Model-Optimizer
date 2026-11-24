@@ -110,7 +110,7 @@ def _data_tensor_mesh():
 
 
 def _measurement_metadata_worker(rank, size, path):
-    """Catch per-boundary collectives and healthy-path object serialization on real Gloo."""
+    """Check batched ownership agreement and object-free healthy metadata on real Gloo."""
     mesh = _runtime_mesh("tp")
     config = mtd.BypassConfig(global_batch_size=2, micro_batch_size=1, sequence_length=4)
     runtime = DistributedBypassRuntime(torch_mesh_context(mesh), config)
@@ -465,6 +465,232 @@ def test_public_tp_unsupported_target_placement_refuses_without_update(bypass_cp
     try:
         bypass_cpu_workers.job_timeout = 60
         bypass_cpu_workers.run(_public_tp_loss_worker, layout, 1e8)
+    finally:
+        bypass_cpu_workers.job_timeout = timeout
+
+
+def _plain_tp_owner_worker(rank, size, layout):
+    torch.manual_seed(718)
+    teacher = torch.nn.Sequential(OrderedDict([("mlp", torch.nn.Linear(256, 16, bias=False))]))
+    if layout == "equal_slice":
+        with torch.no_grad():
+            teacher.mlp.weight[8:].copy_(teacher.mlp.weight[:8])
+    batch = torch.randn(1, 4, 256)
+    student = mtq.quantize(
+        copy.deepcopy(teacher),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda model: model(batch),
+    )
+    mesh = _runtime_mesh("tp")
+    for model in (student, teacher):
+        parallelize_module(
+            model.mlp,
+            mesh,
+            ColwiseParallel(
+                output_layouts=Replicate() if layout == "local_full" else Shard(-1),
+                use_local_output=not (layout == "asymmetric" and rank == 0),
+            ),
+        )
+    if layout == "equal_slice":
+        actual = teacher(batch)
+        peers = [torch.empty_like(actual) for _ in range(size)]
+        dist.all_gather(peers, actual, group=mesh.get_group())
+        assert all(torch.equal(actual, peer) for peer in peers)
+    before = {
+        name: (value.to_local() if isinstance(value, DTensor) else value).clone()
+        for name, value in student.state_dict().items()
+    }
+    replays = []
+    handle = student.mlp.register_forward_pre_hook(lambda *args: replays.append(True))
+    try:
+        with bounded_collectives(10), pytest.raises(ValueError):
+            mtd.bypass(
+                student,
+                teacher,
+                [batch],
+                {"num_steps": 1, "global_batch_size": 1, "sequence_length": 4},
+                device_mesh=mesh,
+            )
+    finally:
+        handle.remove()
+    assert not replays, "Ambiguous plain output must refuse before native peer replay"
+    for name, value in student.state_dict().items():
+        local = value.to_local() if isinstance(value, DTensor) else value
+        assert local.dtype == before[name].dtype
+        torch.testing.assert_close(local, before[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("layout", ["local_slice", "equal_slice", "local_full", "asymmetric"])
+@pytest.mark.timeout(180)
+def test_plain_tp_native_owner_refuses_erased_output(bypass_cpu_workers, layout):
+    timeout = bypass_cpu_workers.job_timeout
+    try:
+        bypass_cpu_workers.job_timeout = 60
+        bypass_cpu_workers.run(_plain_tp_owner_worker, layout)
+    finally:
+        bypass_cpu_workers.job_timeout = timeout
+
+
+def _hf_plain_projection_worker(rank, size, style):
+    # The native HF runtime is optional; this worker executes its real resolved plan.
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+
+    torch.manual_seed(719)
+    teacher = LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=32,
+            hidden_size=256,
+            intermediate_size=512,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            use_cache=False,
+        )
+    ).eval()
+    teacher.config._attn_implementation = "eager"
+    batch = {"input_ids": torch.tensor([[1, 2, 3, 4]])}
+    path = "model.layers.0.mlp.gate_proj"
+    student = mtq.quantize(
+        copy.deepcopy(teacher),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": path + ".weight_quantizer",
+                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda model: model(**batch),
+    )
+    reference = copy.deepcopy(student)
+    config = {
+        "num_steps": 1,
+        "global_batch_size": 1,
+        "sequence_length": 4,
+        "modules": [path],
+        "max_grad_norm": 1e-5,
+        "scheduler": "constant",
+        "warmup_fraction": 0,
+    }
+    observations = []
+    original_clip = DistributedBypassRuntime.clip_gradients
+
+    def observe(runtime, fields, bound):
+        before = [p.grad.detach().clone() for p in fields]
+        norm = original_clip(runtime, fields, bound)
+        observations.append(
+            (before, norm.detach().clone(), [p.grad.detach().clone() for p in fields])
+        )
+        return norm
+
+    counts = []
+    original_statistics = DistributedBypassRuntime.reduce_statistics
+
+    def count_statistics(runtime, statistics, names):
+        result = original_statistics(runtime, statistics, names)
+        if runtime.context.tensor_mesh is not None and runtime.context.tensor_mesh.size() > 1:
+            counts.append(result[path][1].item())
+        return result
+
+    mesh = _runtime_mesh("tp")
+    adapter = TransformersBypassAdapter(mesh)
+    with (
+        patch.object(DistributedBypassRuntime, "clip_gradients", observe),
+        patch.object(DistributedBypassRuntime, "reduce_statistics", count_statistics),
+    ):
+        mtd.bypass(
+            reference, copy.deepcopy(teacher), [batch], config, device_mesh=_singleton_mesh(rank)
+        )
+        for model in (student, teacher):
+            plan = dict(model.tp_plan)
+            native_style = "colwise" if style == "conflict" else style
+            if style == "colwise_rep":
+                plan.update(
+                    {
+                        "model.layers.*.mlp.up_proj": "colwise_rep",
+                        "model.layers.*.mlp.down_proj": "rowwise_split_input",
+                    }
+                )
+            if style == "local_params":
+                # Keep a valid full MLP while the exact selected output style is unknown.
+                plan.update(
+                    {
+                        "model.layers.*.mlp." + name: "replicate"
+                        for name in ("gate_proj", "up_proj", "down_proj")
+                    }
+                )
+            plan[path.replace(".0.", ".*.")] = native_style
+            model._tp_plan = plan
+            expanded = model._expand_parallel_plan(plan)
+            assert expanded[path] == expanded[path + ".weight"] == native_style
+            print("HF exact plan", rank, style, path, expanded[path], flush=True)
+            adapter.parallelize(model)
+            # Fresh public adapters must consume applied facts, not these edited rules.
+            model._tp_plan = {"model.layers.*.mlp.gate_proj": "local_params"}
+        if style == "conflict":
+            teacher.get_submodule(path).register_forward_hook(
+                lambda module, args, output: DTensor.from_local(output, mesh, [Replicate()])
+            )
+        if style in ("local_params", "conflict"):
+            before = {
+                name: (value.to_local() if isinstance(value, DTensor) else value).clone()
+                for name, value in student.state_dict().items()
+            }
+            with bounded_collectives(10), pytest.raises(ValueError):
+                mtd.bypass(student, teacher, [batch], config, device_mesh=mesh)
+            for name, value in student.state_dict().items():
+                local = value.to_local() if isinstance(value, DTensor) else value
+                torch.testing.assert_close(local, before[name], rtol=0, atol=0)
+            return
+        boundary = teacher.get_submodule(path)
+        outputs = []
+        handle = boundary.register_forward_hook(
+            lambda module, args, output: outputs.append(tuple(output.shape))
+        )
+        try:
+            mtd.bypass(student, teacher, [batch], config, device_mesh=mesh)
+        finally:
+            handle.remove()
+        width = 512 // size if style == "colwise" else 512
+        assert outputs and all(shape == (1, 4, width) for shape in outputs), outputs
+        assert counts == [4 * 512], counts
+        print("HF boundary output/count", rank, style, outputs, counts, flush=True)
+    expected, actual = observations
+    for index in (0, 2):
+        for value, target in zip(actual[index], expected[index], strict=True):
+            target = target.chunk(size, dim=0)[rank] if target.shape != value.shape else target
+            torch.testing.assert_close(value, target, rtol=2e-4, atol=1e-9)
+    torch.testing.assert_close(actual[1], expected[1], rtol=2e-4, atol=1e-9)
+    for name, target in reference.state_dict().items():
+        value = student.state_dict()[name]
+        value = value.full_tensor() if isinstance(value, DTensor) else value
+        if value.shape != target.shape:
+            target = target.chunk(size, dim=0)[rank]
+        assert value.dtype == target.dtype, name
+        torch.testing.assert_close(value, target, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("style", ["colwise", "colwise_rep", "local_params", "conflict"])
+@pytest.mark.timeout(180)
+def test_plain_tp_native_hf_projection_matches_reference(bypass_cpu_workers, style):
+    pytest.importorskip("transformers", minversion="5.23")
+    timeout = bypass_cpu_workers.job_timeout
+    try:
+        bypass_cpu_workers.job_timeout = 90
+        bypass_cpu_workers.run(_hf_plain_projection_worker, style)
     finally:
         bypass_cpu_workers.job_timeout = timeout
 
