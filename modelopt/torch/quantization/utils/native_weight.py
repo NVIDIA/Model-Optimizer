@@ -62,22 +62,39 @@ def _format_key(quantizer):
             "_rotate_back",
             "_rotate_block_size",
             "_rotate_is_fp32",
+            "_enable_pre_quant_scale",
             *_POLICY_DEFAULTS,
         )
     }
 
 
+def _has_input_transform(quantizer):
+    return (
+        quantizer.pre_quant_scale is not None
+        or quantizer.bias is not None
+        or quantizer.rotate_is_enabled
+        or quantizer.rotate_back_is_enabled
+    )
+
+
+def _source_keys(source, dtype=None):
+    rows = source.detach().reshape(-1, source.shape[-1])
+    keys = torch.empty(rows.shape[0], dtype=torch.int64, device=source.device)
+    chunk_size = max(1, 1048576 // rows.shape[-1])
+    for start in range(0, len(rows), chunk_size):
+        values = rows[start : start + chunk_size]
+        keys[start : start + chunk_size] = _row_keys(values.to(dtype) if dtype else values)
+    return keys.reshape(source.shape[:-1])
+
+
 def pin_native_weight(quantizer, native, source):
     """Pin native codes/scales to the current source without adding a model branch."""
+    if _has_input_transform(quantizer):
+        raise ValueError("Native payload pinning requires disabled input transforms.")
     payload = native._quantized_data
     quantizer._set_buffer("_native_weight_codes", payload.contiguous().view(torch.uint8).clone())
     for dtype, label in _SOURCE_DTYPES.items():
-        rows = source.detach().reshape(-1, source.shape[-1])
-        keys = torch.empty(rows.shape[0], dtype=torch.int64, device=source.device)
-        chunk_size = max(1, 1048576 // rows.shape[-1])
-        for start in range(0, len(rows), chunk_size):
-            keys[start : start + chunk_size] = _row_keys(rows[start : start + chunk_size].to(dtype))
-        quantizer._set_buffer("_native_weight_source_" + label, keys.reshape(source.shape[:-1]))
+        quantizer._set_buffer("_native_weight_source_" + label, _source_keys(source, dtype))
     quantizer._native_weight_meta = {
         "class": f"{type(native).__module__}.{type(native).__qualname__}",
         "shape": tuple(native.metadata["shape"]),
@@ -92,12 +109,17 @@ def pin_native_weight(quantizer, native, source):
 
 
 def get_pinned_native_weight(quantizer, source):
-    """Return the native QTensor while its source matches, otherwise ``None``."""
+    """Return the native QTensor while its source matches, otherwise ``None``.
+
+    Unversioned inference tensors are rechecked on every read to detect in-place
+    changes. Packed staging creates versioned masters even inside inference mode.
+    """
     from ..qtensor.base_qtensor import get_native_tensor_class
 
     meta = getattr(quantizer, "_native_weight_meta", None)
     if (
         not meta
+        or _has_input_transform(quantizer)
         or tuple(source.shape) != tuple(meta["source_shape"])
         or source.dtype not in _SOURCE_DTYPES
     ):
@@ -109,7 +131,7 @@ def get_pinned_native_weight(quantizer, source):
     previous = _VALIDATED.get(quantizer)
     if previous is None or previous[0]() is None or previous[1] != key:
         expected = getattr(quantizer, "_native_weight_source_" + _SOURCE_DTYPES[source.dtype])
-        if not torch.equal(_row_keys(source), expected):
+        if not torch.equal(_source_keys(source), expected):
             return None
         if key is not None:
             _VALIDATED[quantizer] = (weakref.ref(_cache_base(source)), key)

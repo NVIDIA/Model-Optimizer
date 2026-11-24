@@ -149,25 +149,39 @@ def test_pinned_native_weight_reuses_the_step_cache(monkeypatch):
     assert (stats.misses, stats.hits) == (2, 10)
 
 
-def test_native_codec_identity_survives_custom_names_and_checkpoint_reload(monkeypatch, tmp_path):
+def test_native_codec_identity_survives_custom_names_and_checkpoint_reload(
+    monkeypatch, tmp_path, request
+):
     monkeypatch.setattr(
         base_qtensor, "_NATIVE_TENSOR_CLASSES", dict(base_qtensor._NATIVE_TENSOR_CLASSES)
     )
     builtin = qtensor_module.FP8QTensor
+    local_codecs = []
+
+    def restore_safe_globals():
+        keep = [item for item in torch.serialization.get_safe_globals() if item not in local_codecs]
+        torch.serialization.clear_safe_globals()
+        torch.serialization.add_safe_globals(keep)
+
+    request.addfinalizer(restore_safe_globals)
 
     class FP8QTensor(builtin):
         pass
+
+    local_codecs.append(FP8QTensor)
 
     def first_provider():
         class PluginTensor(builtin):
             pass
 
+        local_codecs.append(PluginTensor)
         return PluginTensor
 
     def second_provider():
         class PluginTensor(builtin):
             pass
 
+        local_codecs.append(PluginTensor)
         return PluginTensor
 
     first, second = first_provider(), second_provider()
@@ -271,3 +285,24 @@ def test_enrollment_by_chunk():
     with weight_cache_scope(chunks[0]) as stats:
         chunks[0](torch.randn(4, 16))
     assert stats.misses == 1
+
+
+@pytest.mark.parametrize("transform", ["pre_scale", "bias"])
+def test_pinned_native_weights_honor_input_transforms(transform):
+    model = _quantized_mlp(num_bits=(4, 3))
+    quantizer, source = model[0].weight_quantizer, model[0].weight
+    native, scale = FP8QTensor.quantize(source.detach(), axis=0)
+    quantizer._set_buffer("_scale", scale)
+    pin_native_weight(quantizer, native, source)
+    if transform == "pre_scale":
+        quantizer.pre_quant_scale = torch.full((16,), 2.0)
+    else:
+        quantizer.set_from_attribute_config(
+            QuantizerAttributeConfig(num_bits=(4, 3), axis=0, bias={-1: None, "type": "static"})
+        )
+        quantizer.bias_value = torch.tensor(0.125)
+    reference = copy.deepcopy(quantizer)
+    del reference._native_weight_meta
+    torch.testing.assert_close(quantizer(source), reference(source), rtol=0, atol=0)
+    with pytest.raises(ValueError):
+        pin_native_weight(quantizer, native, source)
