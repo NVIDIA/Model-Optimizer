@@ -59,13 +59,13 @@ Saved metrics
 -------------
 
 We save the means, observed standard deviations, confidence intervals, and p-values shown in the
-guide’s five plots as CSV summaries:
+plots as CSV summaries:
 
 - **MMLU-Pro and SciCode: Candidate accuracy at fixed response budgets** — data used in the guide
   section :ref:`Choose between question-level and repetition-level analysis <evaluation-choose-questions-and-repetitions>`.
   CSV file: :download:`budget-allocation-accuracy.csv <budget-allocation-accuracy.csv>`.
 - **MMLU-Pro and SciCode: accuracy differences at fixed response budgets** — data used in the
-  same section.
+  :ref:`Choose between question-level and repetition-level analysis <evaluation-accuracy-differences>` ablation.
   CSV file: :download:`budget-allocation-differences.csv <budget-allocation-differences.csv>`.
 - **SciCode: cap-hit-rate differences at a fixed response budget** — data used in the same section.
   CSV file: :download:`budget-allocation-cap-hit-differences.csv <budget-allocation-cap-hit-differences.csv>`.
@@ -182,6 +182,24 @@ The calculation uses each model's sample variance across repetitions and Welch's
 freedom. It treats runs as independent and allows different variances for the two models.
 At least two repetitions per model are needed to estimate those variances; with very few
 repetitions, the estimates may be unstable.
+
+Ablations
+---------
+
+.. _evaluation-accuracy-differences:
+
+Choose between question-level and repetition-level analysis
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+We compare the spread of accuracy differences using the same fixed response budgets as the
+article, with 20 group scores per allocation. Shading shows ±1 observed standard deviation (SD).
+
+For Candidate − Baseline accuracy differences, more repetitions give slightly lower observed SD
+on MMLU-Pro, while more question coverage gives lower SD on SciCode.
+
+.. figure:: ../images/budget-allocation-differences.svg
+   :alt: Mean Candidate minus Baseline accuracy differences with plus or minus one observed standard deviation. More repetitions slightly reduce spread for MMLU-Pro, while more subtask coverage gives less spread for SciCode.
+   :width: 720px
 
 Reproducibility limits
 ----------------------

@@ -311,19 +311,15 @@ Shading shows ±1 SD across 20 group scores; solid lines show their mean.
    :alt: Candidate mean accuracy with plus or minus one observed standard deviation. At fixed response budgets, using more unique questions gives less spread for MMLU-Pro and SciCode.
    :width: 720px
 
-For Candidate − Baseline accuracy differences, more repetitions give slightly lower observed SD
-on MMLU-Pro, while more question coverage gives lower SD on SciCode.
-
-.. figure:: images/budget-allocation-differences.svg
-   :alt: Mean Candidate minus Baseline accuracy differences with plus or minus one observed standard deviation. More repetitions slightly reduce spread for MMLU-Pro, while more subtask coverage gives less spread for SciCode.
-   :width: 720px
-
 For SciCode, more subtasks with fewer repetitions give a more consistent estimate of Candidate's
 cap-hit-rate reduction relative to Baseline, with lower observed SD.
 
 .. figure:: images/budget-allocation-cap-hit-differences.svg
    :alt: Mean Candidate minus Baseline cap-hit-rate differences on SciCode with plus or minus one observed standard deviation. More subtask coverage gives lower observed SD for the same response budget.
    :width: 720px
+
+The proportion of questions and repetitions that gives lower SD can vary by benchmark and metric.
+See the :ref:`accuracy-difference analysis <evaluation-accuracy-differences>` in the Reproducibility Notes.
 
 .. _evaluation-collect-data:
 
