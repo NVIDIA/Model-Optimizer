@@ -60,8 +60,9 @@ examples <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/llm_eval/
 What should you measure, and how?
 ---------------------------------
 
-Choose a primary improvement metric before inspecting results. Prefer Candidate if it improves that
-metric and meets your non-inferiority criteria for the others. Regressions highlight areas to improve.
+Choose a primary improvement metric before inspecting results. Prefer Candidate
+if it improves that metric and meets your non-inferiority criteria for the others. Regressions
+highlight areas to improve.
 
 Show where the model improves or worsens
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -72,19 +73,12 @@ variation caused by question difficulty. For standardized reporting on a fixed b
 uses unpaired Welch t-tests on independent, complete-run scores to estimate uncertainty from
 variation between runs of those exact questions.
 
-We first average each model’s correctness across repetitions of each question, then compute
-**Candidate − Baseline** for each question. We use these differences to calculate both the
-confidence interval and the one-sided p-values. For SciCode, both calculations keep related
-subtasks together, allowing subtasks within a problem to be correlated and assuming independence
-across parent problems.
-
-We calculate a paired 95% confidence interval for the mean difference by bootstrapping whole
-SciCode parent problems.
-A one-sided paired test can detect improvement with less data than a two-sided test for any
-difference. Choose test directions before inspecting results. We calculate the one-sided p-values
-with a paired permutation test that swaps model labels for whole parent problems.
-When question-level differences are independent and a t approximation is suitable, a paired
-t-based confidence interval and a one-sided paired t-test are alternatives.
+We use a paired 95% bootstrap confidence interval to show the uncertainty in the mean accuracy
+difference and a one-sided paired permutation test to assess evidence of improvement. A one-sided
+paired test can detect improvement with less data than a two-sided test for any difference.
+The bootstrap and permutation test account for correlations among subtasks from the same SciCode
+parent problem and assume independence across parent problems. See the
+:ref:`SciCode accuracy calculation <evaluation-statistical-methods>` in the Reproducibility Notes.
 
 The SciCode table reports the Candidate − Baseline accuracy difference in percentage points (pp)
 and shows reverse-direction p-values for context. We use p < 0.05 for each test. “No evidence”

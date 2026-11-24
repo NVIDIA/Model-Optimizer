@@ -29,11 +29,17 @@ summaries:
 Statistical methods
 -------------------
 
-- **SciCode accuracy:** group all scored subtasks and their repetitions by parent problem to
-  account for correlations among subtasks within a problem.
-  Resample paired parent problems for the 95% interval and swap model labels for whole parent
-  problems for the one-sided permutation p-values. Give each subtask equal weight in the mean
-  accuracy difference.
+- **SciCode accuracy:** to estimate the mean accuracy difference, first average each model’s
+  correctness across repetitions within each subtask, then compute **Candidate − Baseline** for
+  that subtask. Average those differences across subtasks.
+  For the confidence interval and p-values, group all scored subtasks and their repetitions by
+  parent problem. For the 95% interval, resample paired parent problems with replacement and
+  take the 2.5th and 97.5th percentiles of the resulting mean differences.
+  For the one-sided p-values, swap model labels for whole parent problems and count permuted mean
+  differences at least as extreme as the observed difference in the tested direction.
+
+  When question-level differences are independent and a t approximation is suitable, a paired
+  t-based confidence interval and a one-sided paired t-test are alternatives.
 
 - **Verbosity:** compare mean completion lengths using the paired difference for each question.
   Calculate a two-sided t-based 95% confidence interval and run one-sided paired t-tests for the
@@ -56,9 +62,9 @@ Statistical methods
   shows how unusual the observed difference would be if the models behaved the same.
   Computing p-values with the bootstrap would be more complicated.
 
-  The SciCode cap-hit tables use 50,000 bootstrap resamples and 50,000 random swaps with a
-  plus-one correction (seed ``2026111800``). The data-volume example uses the same bootstrap
-  and exact permutation p-values.
+The SciCode accuracy and cap-hit tables use 50,000 bootstrap resamples and 50,000 random swap
+patterns with a plus-one correction (seed ``2026111800``). The data-volume example uses the same
+bootstrap and exact permutation p-values.
 
 Each test uses p < 0.05. We do not make that threshold stricter because other metrics were also
 tested. Reverse-direction p-values provide context only.
