@@ -197,7 +197,18 @@ def test_bypass_refuses_aliases_and_cleans_failed_replay():
     assert not any("repair" in n for n, _ in student.named_modules())
 
 
-@pytest.mark.parametrize("mask_kind", ["valid_mask", "attention_mask", "attention_with_metadata"])
+@pytest.mark.parametrize(
+    "mask_kind",
+    [
+        "valid_mask",
+        "loss_mask",
+        "attention_mask",
+        "attention_with_metadata",
+        "additive_attention",
+        "weighted_valid",
+        "weighted_loss",
+    ],
+)
 def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch, mask_kind):
     from modelopt.torch.distill._bypass_optimizer import Lion
     from modelopt.torch.quantization.repair import IQRepairPolicy
@@ -206,6 +217,25 @@ def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch, mas
     reference = copy.deepcopy(student)
     x = batches[0]
     valid = torch.tensor([[True, True, True], [True, False, False]])
+    if mask_kind in ("additive_attention", "weighted_valid", "weighted_loss"):
+        key, mask = {
+            "additive_attention": (
+                "attention_mask",
+                torch.zeros_like(valid, dtype=torch.float32).masked_fill_(~valid, -torch.inf),
+            ),
+            "weighted_valid": ("valid_mask", valid.float() * 0.5),
+            "weighted_loss": ("loss_mask", valid.float() * 0.5),
+        }[mask_kind]
+        before = copy.deepcopy(student.state_dict())
+        with pytest.raises(ValueError):
+            mtd.bypass(
+                student,
+                teacher,
+                [{"hidden_states": x, key: mask}],
+                {"num_steps": 1, "global_batch_size": 2, "sequence_length": 3, "modules": ["mlp"]},
+            )
+        assert all(torch.equal(value, before[name]) for name, value in student.state_dict().items())
+        return
     policy = IQRepairPolicy()
     try:
         fields = policy.prepare(reference.mlp)
@@ -226,10 +256,10 @@ def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch, mas
         return original_step(optimizer, *args, **kwargs)
 
     monkeypatch.setattr(Lion, "step", record_actual_gradients)
-    batch = {
-        "hidden_states": x,
-        "valid_mask" if mask_kind == "valid_mask" else "attention_mask": valid,
-    }
+    key = mask_kind if mask_kind in ("valid_mask", "loss_mask") else "attention_mask"
+    batch = {"hidden_states": x, key: valid}
+    if mask_kind == "loss_mask":
+        batch["attention_mask"] = torch.ones_like(valid)
     if mask_kind == "attention_with_metadata":
         batch.update(_packed_seq_ids=torch.tensor([[0, 0, 1], [0, 1, 1]]), padding_mask=~valid)
     mtd.bypass(

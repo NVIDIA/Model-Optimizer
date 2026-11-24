@@ -44,8 +44,10 @@ def bypass(
         student: Existing ModelOpt IQ PTQ model; frozen formats may coexist.
         teacher: Separate original-weight callable with matching boundary paths.
         train_dataloader: Unique sample batches that exactly fill each global update.
-            Dict batches use ``valid_mask`` or ``attention_mask`` for loss validity;
-            other model-specific metadata does not define the loss mask.
+            Dict batches accept boolean ``valid_mask`` or ``loss_mask`` for loss
+            validity, in that order. Otherwise, ``attention_mask`` must be 2D
+            boolean/integer or 4D boolean. Weighted masks are unsupported; other
+            model-specific metadata does not define the loss mask.
         config: A :class:`BypassConfig`, a dict, or None for the established defaults.
         validation_dataloader: Optional held-out batches for final valid-token MSE.
         device_mesh: Caller-owned placement mesh, adopted by supported integrations.
