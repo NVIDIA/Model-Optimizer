@@ -29,21 +29,22 @@ summaries:
 Statistical methods
 -------------------
 
-- **SciCode accuracy:** keep all scored subtasks and repetitions from each parent problem together.
+- **SciCode accuracy:** group all scored subtasks and their repetitions by parent problem to
+  account for correlations among subtasks within a problem.
   Resample paired parent problems for the 95% interval and swap model labels for whole parent
   problems for the one-sided permutation p-values. Give each subtask equal weight in the mean
   accuracy difference.
 
-- **Verbosity:** across paired question differences, use a two-sided t-based 95% confidence
-  interval and one-sided paired t-tests for the stated direction. Degrees of freedom equal the
-  number of questions minus one.
-  Median lengths describe individual responses. The verbosity tests compare mean lengths.
+- **Verbosity:** compare mean completion lengths using the paired difference for each question.
+  Calculate a two-sided t-based 95% confidence interval and run one-sided paired t-tests for the
+  stated direction. Degrees of freedom equal the number of questions minus one.
+  Compute each model's median completion length across all its responses. The verbosity tests
+  compare mean lengths.
 - **Non-inferiority:** test whether Candidate's accuracy loss is smaller than an acceptable margin.
   For differences in pp, the t statistic is ``(mean_difference + margin) / standard_error``, using
   the upper tail of the t distribution. For SciCode, estimate the standard error across parent
-  problems with degrees of freedom equal to the number of parent problems minus one. The article
-  illustrates the 1 pp and 0.5 pp margins.
-- **Cap-hit and missing-final-answer rates:** calculate two-sided 95% paired-bootstrap
+  problems with degrees of freedom equal to the number of parent problems minus one.
+- **Cap-hit rates:** calculate two-sided 95% paired-bootstrap
   confidence intervals by sampling with replacement, using whole parent problems for SciCode
   cap hits. Keep all repetitions and both models together within each sampled group. The
   interval endpoints are the 2.5th and 97.5th percentiles.
@@ -113,7 +114,7 @@ independent question pairs, an
 <https://www.statsmodels.org/stable/generated/statsmodels.stats.contingency_tables.mcnemar.html>`__
 is another paired option.
 
-For a cap-hit or missing-final-answer comparison, take the tail in the stated direction.
+For a cap-hit comparison, take the tail in the stated direction.
 
 **Repetition-level:** for each model and repetition, divide the number of cap hits by 294. Apply a
 `one-sided Welch t-test
