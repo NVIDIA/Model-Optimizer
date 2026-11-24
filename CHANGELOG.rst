@@ -17,6 +17,8 @@ Changelog
 - Add ``context_quant_level`` to KL-divergence AutoQuantize (``method={"method": "kl_div", "context_quant_level": "lowest"}``, or ``method_options: {context_quant_level: lowest}`` in a recipe): each candidate is scored with every other searched layer at its lowest-bit format (an int picks the format by its 0-based index from the lowest), so low-bit budgets go to the layers whose error compounds most once the whole model is quantized. ``"lowest"`` is a good default; a context nearer the target budget measured the same in our tests.
 - GPTQ calibration is 25-35% faster in our MoE-expert and dense-MLP tests, with the GGML IQ formats and with NVFP4 under ``fused: true``. Results change only at round-off.
 - GPTQ now defaults to ``fused=True``, running the fused Triton update for static NVFP4 weights on SM89+ (4/6 scaling and other formats keep the unfused loop). Set ``fused: false`` to restore the previous behavior.
+- Add ``fused_group_scale`` and ``fused_group_svd`` to SVDQuant (``algorithm: {method: svdquant, fused_group_scale: true, fused_group_svd: true}``). They calibrate the layers that Hugging Face export fuses (q/k/v and gate/up, and Q/K/V in diffusers attention blocks) with the smoothing scale, low-rank branch and ranges that export writes, so the exported checkpoint is exactly the calibrated model instead of an unvalidated rewrite of it.
+- SVDQuant calibration is up to 4x faster on large models: its low-rank factors now come from an eigendecomposition instead of a full SVD. Results change only at BF16 round-off.
 
 *Quantization - QAT / QAD*
 
