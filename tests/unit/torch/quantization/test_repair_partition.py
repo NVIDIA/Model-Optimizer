@@ -191,6 +191,11 @@ def test_packed_frozen_projection_staging_and_restore(format_name, inference_sta
     assert torch.equal(
         restored[0].weight_quantizer._native_weight_codes, native._quantized_data.view(torch.uint8)
     )
+    # A changed master cannot silently switch an uncalibrated staged layer to dynamic amax.
+    with torch.no_grad():
+        restored[0].weight.add_(0.125)
+    with pytest.raises(ValueError, match="calibrat"):
+        restored(x)
 
 
 @pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])

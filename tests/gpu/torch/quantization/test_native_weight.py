@@ -34,18 +34,35 @@ from modelopt.torch.quantization.utils.native_weight import get_pinned_native_we
 )
 def test_staged_native_reads_bound_scratch_and_detect_inference_mutation():
     model = mtq.quantize(
-        torch.nn.Sequential(torch.nn.Linear(4096, 4096, bias=False, device="cuda")),
+        torch.nn.Sequential(
+            *(torch.nn.Linear(4096, 4096, bias=False, device="cuda") for _ in range(3))
+        ),
         {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None},
     )
-    layer, quantizer = model[0], model[0].weight_quantizer
-    native, scale = FP8QTensor.quantize(layer.weight.detach(), axis=0)
-    quantizer.set_from_attribute_config(
-        QuantizerAttributeConfig(num_bits=(4, 3), axis=0, fake_quant=False)
-    )
-    quantizer._set_buffer("_scale", scale)
-    layer.weight = QTensorWrapper(native)
+    for layer in model:
+        quantizer = layer.weight_quantizer
+        native, scale = FP8QTensor.quantize(layer.weight.detach(), axis=0)
+        quantizer.set_from_attribute_config(
+            QuantizerAttributeConfig(num_bits=(4, 3), axis=0, fake_quant=False)
+        )
+        quantizer._set_buffer("_scale", scale)
+        layer.weight = QTensorWrapper(native)
+    del native
+    packed_bytes = sum(layer.weight.numel() * layer.weight.element_size() for layer in model)
+    master_bytes = 3 * 4096 * 4096 * torch.tensor([], dtype=torch.float32).element_size()
+    torch.cuda.synchronize()
+    staging_baseline = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
     with torch.inference_mode():
         prepare_packed_weights_for_tp(model)
+        torch.cuda.synchronize()
+        staging_peak = torch.cuda.max_memory_allocated() - staging_baseline
+        staging_retained = torch.cuda.memory_allocated() - staging_baseline
+        # Atomic rollback retains all original payloads while new masters/pins accumulate.
+        # Allow one decoded matrix plus bounded fingerprint scratch beyond those outputs.
+        staging_budget = master_bytes + packed_bytes + master_bytes // 3 + 16 * 1024**2
+        assert staging_peak <= staging_budget
+        layer, quantizer = model[0], model[0].weight_quantizer
         elapsed, scratch = [], []
         for _ in range(4):
             torch.cuda.synchronize()
@@ -67,6 +84,12 @@ def test_staged_native_reads_bound_scratch_and_detect_inference_mutation():
             {
                 "device": torch.cuda.get_device_name(),
                 "shape": [4096, 4096],
+                "staging_layers": len(model),
+                "staging_packed_bytes": packed_bytes,
+                "staging_master_bytes": master_bytes,
+                "staging_extra_peak_bytes": staging_peak,
+                "staging_retained_extra_bytes": staging_retained,
+                "staging_extra_budget_bytes": staging_budget,
                 "first_read_seconds": elapsed[0],
                 "warm_median_seconds": statistics.median(elapsed[1:]),
                 "extra_peak_allocated_bytes": scratch,

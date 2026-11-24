@@ -16,7 +16,10 @@
 """Preserve an existing native payload through fake-quant checkpoint round-trips.
 
 The payload is authoritative only while its source weight and format still
-match. Cache validation keeps weak references, never gathered floating weights.
+match. Scale buffers are live codec fields: changing them changes the native
+weight without re-encoding its codes. Amax controls fake-quant fallback, not the
+native representation. To recalibrate/re-encode codes, clear _native_weight_meta
+first. Cache validation keeps weak references, never gathered floating weights.
 """
 
 import weakref
@@ -101,7 +104,13 @@ def _source_keys(source, dtype=None):
 
 
 def pin_native_weight(quantizer, native, source):
-    """Pin native codes/scales to the current source without adding a model branch."""
+    """Pin native codes/scales to the current source without adding a model branch.
+
+    Scale buffers remain live and are not fingerprinted. After changing a scale,
+    update the logical source from the decoded native fields and re-pin them
+    together. To recalibrate amax, clear ``_native_weight_meta`` first: amax alone
+    does not replace authoritative native codes. Re-pin after recalibration.
+    """
     if _has_input_transform(quantizer):
         raise ValueError("Native payload pinning requires disabled input transforms.")
     payload = native._quantized_data

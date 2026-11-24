@@ -250,6 +250,8 @@ def prepare_packed_weights_for_tp(model):
     Call before HF shards parameters. Returned metadata records the original packed
     deployment representation; native pins remain the source of codes during repair.
     Masters retain version counters even when the caller stages under inference mode.
+    Atomic rollback retains the original packed parameters until all layers succeed;
+    peak staging storage includes those payloads, new masters/pins and decoder scratch.
     """
     candidates, aliases, owners = [], {}, {}
     for name, module in model.named_modules():
