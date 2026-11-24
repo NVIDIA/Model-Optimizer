@@ -33,7 +33,7 @@ from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, r
 
 
 class _Network(nn.Sequential):
-    def forward(self, hidden_states, attention_mask=None):
+    def forward(self, hidden_states, attention_mask=None, _packed_seq_ids=None, padding_mask=None):
         return super().forward(hidden_states)
 
 
@@ -197,7 +197,8 @@ def test_bypass_refuses_aliases_and_cleans_failed_replay():
     assert not any("repair" in n for n, _ in student.named_modules())
 
 
-def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch):
+@pytest.mark.parametrize("mask_kind", ["valid_mask", "attention_mask", "attention_with_metadata"])
+def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch, mask_kind):
     from modelopt.torch.distill._bypass_optimizer import Lion
     from modelopt.torch.quantization.repair import IQRepairPolicy
 
@@ -225,10 +226,16 @@ def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch):
         return original_step(optimizer, *args, **kwargs)
 
     monkeypatch.setattr(Lion, "step", record_actual_gradients)
+    batch = {
+        "hidden_states": x,
+        "valid_mask" if mask_kind == "valid_mask" else "attention_mask": valid,
+    }
+    if mask_kind == "attention_with_metadata":
+        batch.update(_packed_seq_ids=torch.tensor([[0, 0, 1], [0, 1, 1]]), padding_mask=~valid)
     mtd.bypass(
         student,
         teacher,
-        [{"hidden_states": x, "valid_mask": valid}],
+        [batch],
         {
             "modules": ["mlp"],
             "num_steps": 1,
