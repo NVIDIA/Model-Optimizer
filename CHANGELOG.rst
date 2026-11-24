@@ -30,6 +30,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- The Qwen3-8B DFlash2 streaming launcher example (``tools/launcher/examples/Qwen/Qwen3-8B/hf_streaming_dflash2.yaml``) now exports the drafter to ``/scratchspace/dflash2/export`` (was ``/scratchspace/export``) and pins its vLLM image by digest, which Slurm can pull only with enroot 4.0 or later. On older enroot, point both vLLM tasks' ``slurm_config.container`` at a ``.sqsh`` built from that digest, as the example's header shows.
+
 **Deprecations**
 
 **Bug Fixes**

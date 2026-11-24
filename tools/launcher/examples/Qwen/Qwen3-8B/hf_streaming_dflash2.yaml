@@ -17,8 +17,10 @@
 #
 # Site-specific settings left unset on purpose: slurm_config.time where the queue's default
 # is short, the NIXL and NCCL HCA pinning an InfiniBand fabric needs, and container-visible
-# cache paths such as HF_HOME (srun runs with --no-container-mount-home). The pinned images
-# are multi-arch (x86_64 and aarch64), and TRITON_CACHE_DIR is set node-local below.
+# cache paths such as HF_HOME (srun runs with --no-container-mount-home). The same goes for
+# TRITON_CACHE_DIR: the launcher defaults it to /cicd/triton-cache, which every node shares,
+# so for a node-local cache launch with TRITON_CACHE_DIR=/tmp/triton-cache, as in the third
+# Usage line. The pinned images are multi-arch (x86_64 and aarch64).
 #
 # The vLLM image is pinned by digest, which Slurm (pyxis) can pull only with enroot >= 4.0.
 # On older enroot, or where Docker Hub pulls fail, build a .sqsh from the same digest for the
@@ -30,6 +32,8 @@
 #   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_dflash2.yaml \
 #       pipeline.task_1.slurm_config.container=/path/to/vllm.sqsh \
 #       pipeline.task_2.slurm_config.container=/path/to/vllm.sqsh --yes
+#   TRITON_CACHE_DIR=/tmp/triton-cache uv run launch.py \
+#       --yaml examples/Qwen/Qwen3-8B/hf_streaming_dflash2.yaml --yes
 
 job_name: Qwen3-8B_DFlash2_streaming
 pipeline:
@@ -117,8 +121,6 @@ pipeline:
       - EXPORT_EXTRA_ARGS: "--trust_remote_code"
       # Where the drafter is exported (train_eagle_streaming.sh defaults to /scratchspace/export).
       - EXPORT_PATH: <<global_vars.output_dir>>/export
-      # Node-local: a shared Triton cache breaks when jobs on different nodes write it.
-      - TRITON_CACHE_DIR: /tmp/triton-cache
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 2
@@ -142,7 +144,6 @@ pipeline:
       # This run's own /scratchspace, not output_dir: a rerun reading another experiment's
       # export must not replace that experiment's verdict.
       - SMOKE_JSON: /scratchspace/smoke_check.json
-      - TRITON_CACHE_DIR: /tmp/triton-cache
     slurm_config:
       _factory_: "slurm_factory"
       container: vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
