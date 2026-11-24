@@ -43,7 +43,14 @@ def bypass(
     Args:
         student: Existing ModelOpt IQ PTQ model; frozen formats may coexist.
         teacher: Separate original-weight callable with matching boundary paths.
-        train_dataloader: Unique sample batches that exactly fill each global update.
+        train_dataloader: Per-rank batches that exactly fill each update's sample budget:
+            ``config.global_batch_size`` without a mesh, or ``global_batch_size // dp_size``
+            with a mesh, where ``dp_size`` counts actual data lanes (including FSDP,
+            excluding TP and CP). The global batch must divide exactly over those lanes.
+            Data lanes supply unique samples; TP peers supply identical samples and masks.
+            CP peers replay identical full sequences and masks; valid-token ownership is
+            partitioned across CP ranks, so CP does not create additional sample lanes.
+            Ranks must execute the same number of microbatches per update.
             Dict batches accept boolean/integer ``valid_mask`` or ``loss_mask``,
             in that order, with nonzero meaning valid rather than a token weight.
             Otherwise, ``attention_mask`` must be 2D boolean/integer. Floating or
@@ -60,9 +67,15 @@ def bypass(
             HF 2D attention masks must be Boolean/integer; floating additive bias uses 4D.
         config: A :class:`BypassConfig`, a dict, or None for the established defaults.
         validation_dataloader: Optional held-out batches for finalized-student valid-token MSE.
+            Batches obey the same sequence length, nonempty batch and validity-mask rules
+            as training, with identical TP/CP samples and unique samples across data lanes.
+            Ranks must have matching batch-presence and microbatch-count schedules;
+            validation need not fill the training global-batch budget.
             Diagnostic failures propagate after committing training updates to the student.
             Zero-step preflight skips validation as well as training.
         device_mesh: Caller-owned placement mesh, adopted by supported integrations.
+            It determines the per-rank data-lane budget and TP/CP replication contract
+            described above; use a data-lane sampler, rather than sharding across TP/CP.
 
     Finalization commits boundaries in order. Any failure during finalization may
     leave earlier boundaries committed; reload a saved checkpoint before retrying.

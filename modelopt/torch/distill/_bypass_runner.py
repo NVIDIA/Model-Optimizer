@@ -86,11 +86,13 @@ class _BypassRunner:
                     raise
                 error = f"{type(exc).__name__}: {exc}"
             if self.runtime is not None:
-                schedules = self.runtime.gather_values((present, error, count))
-                errors = [state[1] for state in schedules if state[1] is not None]
-                if errors:
+                high_present, low_present, high_count, low_count, failed = self.runtime.max_values(
+                    [int(present), -int(present), count, -count, int(error is not None)]
+                )
+                if failed:
+                    errors = [message for message in self.runtime.gather_values(error) if message]
                     raise ValueError(f"Bypass validation reader failed: {errors}")
-                if len({(state[0], state[2]) for state in schedules}) != 1:
+                if high_present != -low_present or high_count != -low_count:
                     raise ValueError("Bypass ranks have unequal validation schedules")
             if not present:
                 return
@@ -120,16 +122,14 @@ class _BypassRunner:
             error = f"{type(exc).__name__}: {exc}"
         if self.runtime is not None:
             self.runtime.synchronize_error(error)
-            counts = self.runtime.gather_values(
-                sum(
-                    (self.adapter.batch_size(b) + self.config.micro_batch_size - 1)
-                    // self.config.micro_batch_size
-                    for b in window
-                )
+            count = sum(
+                (self.adapter.batch_size(b) + self.config.micro_batch_size - 1)
+                // self.config.micro_batch_size
+                for b in window
             )
-            self.runtime.synchronize_error(
-                "Bypass ranks have unequal microbatch schedules" if len(set(counts)) != 1 else None
-            )
+            high, low = self.runtime.max_values([count, -count])
+            if high != -low:
+                raise ValueError("Bypass ranks have unequal microbatch schedules")
         elif error:
             raise ValueError(error)
         return window

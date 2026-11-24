@@ -32,6 +32,7 @@ from modelopt.torch.quantization.utils.core_utils import (
 )
 
 from ._bypass_parallel import (
+    _all_rank_max,
     _all_rank_values,
     _size,
     _synchronize_error,
@@ -66,6 +67,9 @@ class DistributedBypassRuntime:
 
     def gather_values(self, value):
         return _all_rank_values(self.context, value)
+
+    def max_values(self, values):
+        return _all_rank_max(self.context, values)
 
     def synchronize_error(self, error):
         _synchronize_error(self.context, error)
@@ -149,6 +153,8 @@ class DistributedBypassRuntime:
                     self.context.expert_replica_mesh if expert else self.context.data_context_mesh
                 ]
                 sharded = self.layouts.get(id(quantizer), {}).get(name)
+                # Explicit False denotes native partial VJPs that must SUM over TP;
+                # missing layout denotes dense full-loss replicas, weighted below.
                 if sharded is False or (sharded is None and not expert):
                     meshes.append(self.context.tensor_mesh)
                 if sharded is None and not expert:
@@ -232,15 +238,18 @@ class DistributedBypassRuntime:
         )
         error = None
         tp = self.context.tensor_mesh
-        if _size(tp) > 1:
-            for name in names:
-                mode = self.boundary_modes.get(name, 0)
-                agreement = torch.tensor(
-                    [mode, -mode], device=statistics[name][0].device, dtype=torch.int32
-                )
-                dist.all_reduce(agreement, op=dist.ReduceOp.MAX, group=tp.get_group())
-                if agreement[0].item() not in (1, 2) or agreement[0] != -agreement[1]:
-                    error = "Bypass TP boundary loss ownership differs across ranks or records"
+        if _size(tp) > 1 and names:
+            modes = [self.boundary_modes.get(name, 0) for name in names]
+            agreement = torch.tensor(
+                [[mode, -mode] for mode in modes],
+                device=statistics[next(iter(names))][0].device,
+                dtype=torch.int32,
+            )
+            dist.all_reduce(agreement, op=dist.ReduceOp.MAX, group=tp.get_group())
+            # Recheck every measurement: changed/mixed placements must refuse before
+            # the conditional statistics reductions. Transfer all pairs only once.
+            if any(high not in (1, 2) or high != -low for high, low in agreement.tolist()):
+                error = "Bypass TP boundary loss ownership differs across ranks or records"
             self.synchronize_error(error)
         for name in names:
             for value in statistics[name]:
