@@ -29,6 +29,7 @@ import modelopt.torch.distill as mtd
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill._bypass_parallel import prepare_quantizer_partitions
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor import FP8QTensor, NVFP4QTensor, QTensorWrapper
 from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
 from modelopt.torch.quantization.utils.native_weight import get_pinned_native_weight
@@ -161,8 +162,9 @@ def test_native_packed_tp_preserves_codes_projection_and_input_vjp(
     bypass_cpu_workers.run(_native_packed_tp_worker, format_name, style)
 
 
+@pytest.mark.parametrize("format_name", ["iq", "fp8", "nvfp4"])
 @pytest.mark.timeout(60)
-def test_native_mesh_adoption_preserves_forward_and_hooks(tmp_path):
+def test_native_mesh_adoption_preserves_forward_and_hooks(tmp_path, format_name):
     pytest.importorskip("transformers", minversion="5.23")
     from torch.distributed.device_mesh import init_device_mesh
     from transformers import LlamaConfig, LlamaForCausalLM
@@ -215,16 +217,61 @@ def test_native_mesh_adoption_preserves_forward_and_hooks(tmp_path):
             },
             lambda m: m(**batch),
         )
+        if format_name != "iq":
+            layer = student.model.layers[0].self_attn.q_proj
+            attributes = (
+                {"num_bits": (4, 3), "axis": 0}
+                if format_name == "fp8"
+                else {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                }
+            )
+            quantizer = layer.weight_quantizer = TensorQuantizer(
+                QuantizerAttributeConfig(**attributes)
+            )
+            quantizer.pre_quant_scale = torch.linspace(0.75, 1.25, 256)
+            mtq.compress(
+                student,
+                config={"compress": {"default": False, "*self_attn.q_proj*": True}},
+            )
+            layer._use_real_quant_gemm = True
+            packed = layer.weight
+            assert isinstance(packed, QTensorWrapper)
+            native = packed.get_qtensor()
+            assert type(native) is (FP8QTensor if format_name == "fp8" else NVFP4QTensor)
+            native_metadata = copy.deepcopy(native.metadata)
+            codes = native._quantized_data.contiguous().view(torch.uint8).clone()
+            buffers = {name: value.clone() for name, value in quantizer.named_buffers()}
+            assert not quantizer.fake_quant
+            assert quantizer._enable_pre_quant_scale and not quantizer.rotate_is_enabled
         with torch.no_grad():
             expected = student(**batch).logits
-        assert adapter.parallelize(student) is student
         hooks = [(m, len(m._forward_hooks), len(m._forward_pre_hooks)) for m in student.modules()]
-        assert adapter.parallelize(student) is student
-        with torch.no_grad():
-            torch.testing.assert_close(student(**batch).logits, expected, rtol=0, atol=0)
         assert (
             mtd.bypass(student, teacher, [batch], {"num_steps": 0}, device_mesh=manager) is student
         )
+        if format_name != "iq":
+            assert layer.weight is packed
+            assert isinstance(layer.weight, QTensorWrapper)
+            restored = layer.weight.get_qtensor()
+            assert type(restored) is type(native)
+            assert restored.metadata == native_metadata
+            assert torch.equal(restored._quantized_data.contiguous().view(torch.uint8), codes)
+            assert dict(quantizer.named_buffers()).keys() == buffers.keys()
+            for name, value in quantizer.named_buffers():
+                assert torch.equal(
+                    value.contiguous().reshape(-1).view(torch.uint8),
+                    buffers[name].contiguous().reshape(-1).view(torch.uint8),
+                )
+            assert not quantizer.fake_quant
+            assert quantizer._enable_pre_quant_scale and not quantizer.rotate_is_enabled
+            assert layer._use_real_quant_gemm
+        assert student._mesh_manager is manager
+        assert adapter.parallelize(student) is student
+        assert adapter.parallelize(student) is student
+        with torch.no_grad():
+            torch.testing.assert_close(student(**batch).logits, expected, rtol=0, atol=0)
         assert all(
             len(m._forward_hooks) == after and len(m._forward_pre_hooks) == before
             for m, after, before in hooks
