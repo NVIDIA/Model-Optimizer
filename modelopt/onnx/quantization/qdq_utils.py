@@ -411,8 +411,7 @@ def insert_dq_nodes(
 
         num_bits = get_num_bits(layer_info, name)
         # Updating the attributes for per-channel nodes.
-        attrs = attributes.copy() if attributes is not None else None
-        attrs = update_attributes_for_per_channel_nodes(attrs, num_bits)
+        attrs = update_attributes_for_per_channel_nodes(attributes, num_bits)
         if attrs is not None and attrs.get("block_size", 0) > 0:
             # Gemm and column-major paths can transpose the stored weights and scales.
             blocked_axes = [
