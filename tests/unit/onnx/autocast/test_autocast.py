@@ -93,16 +93,19 @@ def test_invalid_model_path():
         convert_to_mixed_precision(onnx_path="nonexistent.onnx")
 
 
-def test_convert_contrib_op_without_tensorrt(tmp_path, monkeypatch):
+# Gelu is a standard op only from opset 20, so the contrib Gelu must keep its domain at opset 17.
+@pytest.mark.parametrize(("op_type", "opset"), [("BiasGelu", 21), ("Gelu", 17)])
+def test_convert_contrib_op_without_tensorrt(tmp_path, monkeypatch, op_type, opset):
     x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 4])
     y = onnx.helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [1, 4])
     bias = onnx.numpy_helper.from_array(np.ones(4, dtype=np.float32), name="bias")
-    node = onnx.helper.make_node("BiasGelu", ["X", "bias"], ["Y"], domain="com.microsoft")
+    node_inputs = ["X", "bias"] if op_type == "BiasGelu" else ["X"]
+    node = onnx.helper.make_node(op_type, node_inputs, ["Y"], domain="com.microsoft")
     graph = onnx.helper.make_graph([node], "contrib_graph", [x], [y], [bias])
     model = onnx.helper.make_model(
         graph,
         opset_imports=[
-            onnx.helper.make_opsetid("", 21),
+            onnx.helper.make_opsetid("", opset),
             onnx.helper.make_opsetid("com.microsoft", 1),
         ],
         ir_version=10,
@@ -115,9 +118,7 @@ def test_convert_contrib_op_without_tensorrt(tmp_path, monkeypatch):
     converted = convert_to_mixed_precision(str(model_path), providers=providers, keep_io_types=True)
 
     assert providers == ["cpu"]
-    assert (
-        next(n for n in converted.graph.node if n.op_type == "BiasGelu").domain == "com.microsoft"
-    )
+    assert next(n for n in converted.graph.node if n.op_type == op_type).domain == "com.microsoft"
     assert all(opset.domain != "trt.plugins" for opset in converted.opset_import)
     onnx.checker.check_model(converted)
 
