@@ -103,6 +103,59 @@ class ShardedDataset(torch.utils.data.Dataset):
             self._raw_samples = shard
 
 
+class PackedBlockDataCollator:
+    """Collate pre-packed fixed-length blocks for pretraining-style training.
+
+    The online collator renders conversations through a chat template. Raw corpus text has
+    no conversation structure, so that path cannot express it -- wrapping documents in
+    pseudo-turns would insert chat tokens into the text and, with ``answer_only_loss``, mask
+    most of it away.
+
+    Blocks are already fixed-length and already tokenized, so collation is a stack. ``labels``
+    defaults to ``input_ids``: for causal LM the shift belongs to the loss, not the data, and
+    the DFlash path shifts there (``shift_labels=not is_dflash``).
+    """
+
+    def __init__(self, train_len: int | None = None):
+        """Initialize the collator.
+
+        Args:
+            train_len: Optional right-truncation target for each block.
+        """
+        self.train_len = train_len
+
+    def __call__(self, instances):
+        """Stack a list of packed blocks into a batch."""
+        import torch
+
+        def column(name, default=None):
+            vals = [inst.get(name, default) for inst in instances]
+            if any(v is None for v in vals):
+                return None
+            out = torch.stack([v if torch.is_tensor(v) else torch.as_tensor(v) for v in vals])
+            # Right-truncate rather than pad: a packed block shorter than train_len would
+            # mean the packer and the trainer disagree, which is worth failing on, but a
+            # longer one is a harmless superset the caller may reuse across lengths.
+            if self.train_len is not None and out.size(1) > self.train_len:
+                out = out[:, : self.train_len]
+            return out
+
+        input_ids = column("input_ids")
+        if input_ids is None:
+            raise ValueError("packed dataset rows must carry an 'input_ids' column")
+        labels = column("labels")
+        if labels is None:
+            labels = input_ids.clone()
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": column("attention_mask"),
+        }
+        if batch["attention_mask"] is None:
+            batch["attention_mask"] = torch.ones_like(input_ids)
+        return batch
+
+
 class LanguageDataCollator:
     """Data collator for language modeling tasks.
 
