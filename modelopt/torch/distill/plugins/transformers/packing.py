@@ -51,8 +51,6 @@ def batch_documents(documents, token_budget, *, max_documents=8):
         batch = {}
         for key in group[0]:
             values = [document[key] for document in group]
-            if any(not isinstance(value, torch.Tensor) for value in values):
-                raise ValueError("Batched document metadata must be tensors.")
             axis = 1 if key == "position_ids" and values[0].ndim == 3 else 0
             if key not in ("sample_ids", "document_ids") or values[0].ndim > 1:
                 fill = -100 if key == "labels" else 0

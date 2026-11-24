@@ -31,7 +31,9 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill._bypass_capture import BypassUnit
 from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 
 def test_teacher_replay_caches_model_scans_without_changing_targets():
@@ -101,6 +103,35 @@ def test_teacher_replay_caches_model_scans_without_changing_targets():
         assert teacher.batches == ([(1, 2), (1, 2)] if enabled else [(2, 2)])
         torch.testing.assert_close(torch.cat(current), targets[0], rtol=0, atol=0)
         assert (teacher.scans, student.scans) == scans
+    student.mlp.input_quantizer.disable()
+    for name in (
+        "q_bmm_quantizer",
+        "k_bmm_quantizer",
+        "v_bmm_quantizer",
+        "p_bmm_quantizer",
+        "future_activation",
+    ):
+        student.mlp.add_module(
+            name, TensorQuantizer(QuantizerAttributeConfig(type="dynamic", enable=False))
+        )
+    for name in (
+        "q_bmm_quantizer",
+        "k_bmm_quantizer",
+        "v_bmm_quantizer",
+        "p_bmm_quantizer",
+        "future_activation",
+    ):
+        quantizer = getattr(student.mlp, name)
+        quantizer.enable()
+        teacher.batches.clear()
+        current = []
+        adapter.teacher_microbatch(
+            teacher, units, batch, lambda _unit, record: current.append(record.target)
+        )
+        assert teacher.batches == [(1, 2), (1, 2)], name
+        torch.testing.assert_close(torch.cat(current), targets[0], rtol=0, atol=0)
+        assert (teacher.scans, student.scans) == scans
+        quantizer.disable()
     teacher.lm_head = torch.nn.Linear(4, 9)
     widths = []
     handle = teacher.lm_head.register_forward_hook(
@@ -123,16 +154,16 @@ def test_teacher_replay_caches_model_scans_without_changing_targets():
     torch.testing.assert_close(torch.cat(current), targets[0], rtol=0, atol=0)
 
 
-def _quantize(model, batch, bits="iq1_m"):
+def _quantize(model, batch, bits="iq1_m", *, patterns=None):
     return mtq.quantize(
         model,
         {
             "quant_cfg": [
                 {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "*mlp*weight_quantizer*",
-                    "cfg": {"num_bits": bits, "backend": "ggml"},
-                },
+                *[
+                    {"quantizer_name": pattern, "cfg": {"num_bits": bits, "backend": "ggml"}}
+                    for pattern in (patterns or ["*mlp*weight_quantizer*"])
+                ],
                 {"quantizer_name": "*mlp.gate.weight_quantizer*", "enable": False},
                 {"quantizer_name": "*shared_expert_gate*", "enable": False},
             ],
@@ -235,6 +266,11 @@ def test_transformers_bypass_selection_and_prefix(bits, tmp_path):
         ("deepseek_v32", "loss_mask"),
         ("kimi_k25", "loss_mask"),
         ("minimax_m3_vl", "loss_mask"),
+        ("nemotron_h", "loss_mask"),
+        ("llama", "loss_mask"),
+        ("qwen3", "loss_mask"),
+        ("qwen3_moe", "loss_mask"),
+        ("qwen3_5_moe", "loss_mask"),
     ],
 )
 def test_transformers_packed_replay_matches_independent_documents(family, loss_key):
@@ -262,6 +298,7 @@ def test_transformers_packed_replay_matches_independent_documents(family, loss_k
             copy.deepcopy(teacher),
             {k: v for k, v in batch.items() if k not in ("_packed_seq_ids", loss_key)},
             "iq2_s",
+            patterns=adapter.weight_patterns(teacher) if family == "nemotron_h" else None,
         )
         units = adapter.resolve_units(student, teacher, mtd.BypassConfig())
         captured, separate = [], []
@@ -468,3 +505,26 @@ def test_teacher_replay_preserves_shared_input_and_output_embedding():
     )
     torch.testing.assert_close(captured[0], expected, rtol=0, atol=0)
     assert "forward" not in teacher.embed_tokens.__dict__
+
+
+def test_weight_patterns_keep_nested_router_frozen():
+    model = nn.Module()
+    model.config = SimpleNamespace(model_type="qwen3_moe")
+    model.mlp = nn.Module()
+    model.mlp.register_parameter("fused_weight", nn.Parameter(torch.randn(4, 4)))
+    model.mlp.gate = nn.Linear(4, 4)
+    model.mlp.experts = nn.Linear(4, 4)
+    patterns = TransformersBypassAdapter().weight_patterns(model, {"modules": ["mlp"]})
+    assert patterns
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                *[{"quantizer_name": pattern, "cfg": {"num_bits": 4}} for pattern in patterns],
+            ],
+            "algorithm": None,
+        },
+    )
+    assert model.mlp.experts.weight_quantizer.is_enabled
+    assert not model.mlp.gate.weight_quantizer.is_enabled
