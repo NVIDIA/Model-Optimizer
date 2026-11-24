@@ -32,11 +32,14 @@ from modelopt.torch.quantization.qtensor import FP8QTensor
 from modelopt.torch.quantization.utils.native_weight import pin_native_weight
 
 
-def _tiny_model(num_hidden_layers=1):
+def _tiny_model(num_hidden_layers=1, *, experts=False):
     # Transformers is optional, and the workers import this module before the test's skip check.
-    from transformers import LlamaConfig, LlamaForCausalLM
+    from transformers import LlamaConfig, LlamaForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-    config = LlamaConfig(
+    config_type, model_type = (
+        (Qwen3MoeConfig, Qwen3MoeForCausalLM) if experts else (LlamaConfig, LlamaForCausalLM)
+    )
+    config = config_type(
         vocab_size=32,
         hidden_size=32,
         intermediate_size=64,
@@ -44,9 +47,14 @@ def _tiny_model(num_hidden_layers=1):
         num_attention_heads=4,
         num_key_value_heads=2,
         use_cache=False,
+        **(
+            {"num_experts": 4, "num_experts_per_tok": 1, "moe_intermediate_size": 16}
+            if experts
+            else {}
+        ),
     )
-    config._attn_implementation = "eager"
-    return LlamaForCausalLM(config).eval()
+    config._attn_implementation = config._experts_implementation = "eager"
+    return model_type(config).eval()
 
 
 def _snapshot(model):
@@ -72,13 +80,44 @@ def _snapshot(model):
     forwards = [(module, module.forward) for module in model.modules()]
     markers = {
         name: (name in model.__dict__, getattr(model, name, None))
-        for name in ("_modelopt_bypass_torch_mesh", "_modelopt_bypass_placement", "_mesh_manager")
+        for name in (
+            "_modelopt_bypass_torch_mesh",
+            "_modelopt_bypass_placement",
+            "_mesh_manager",
+            "_device_mesh",
+            "_tp_size",
+            "_fsdp_size",
+            "_is_distributed_loading_by_transformers",
+            "_tp_plan",
+            "_ep_plan",
+            "_fsdp_plan",
+        )
     }
-    return tensors, values, hooks, forwards, markers
+    config = getattr(model.config, "distributed_config", None)
+    config_state = (
+        "distributed_config" in vars(model.config),
+        config,
+        copy.deepcopy(vars(config)) if config is not None else None,
+    )
+    containers = [
+        (module, name, getattr(module, name), tuple(getattr(module, name)))
+        for module in model.modules()
+        if hasattr(module, "_first_proj_weight_quantizers_attr")
+        for name in (module._first_proj_weight_quantizers_attr, "down_proj_weight_quantizers")
+    ]
+    native_meta = [
+        (module, copy.deepcopy(module._native_weight_meta))
+        for module in model.modules()
+        if getattr(module, "_native_weight_meta", None) is not None
+    ]
+    return tensors, values, hooks, forwards, markers, config_state, containers, native_meta
 
 
 def _assert_unchanged(model, snapshot):
-    tensors, values, hooks, forwards, markers = snapshot
+    tensors, values, hooks, forwards, markers, config_state, containers, native_meta = snapshot
+    for module, name, container, members in containers:
+        assert getattr(module, name) is container
+        assert tuple(container) == members
     current = {
         **dict(model.named_parameters(remove_duplicate=False)),
         **dict(model.named_buffers(remove_duplicate=False)),
@@ -102,6 +141,14 @@ def _assert_unchanged(model, snapshot):
         assert (name in model.__dict__) == present
         assert getattr(model, name, None) is marker
 
+    present, config, config_values = config_state
+    assert ("distributed_config" in vars(model.config)) == present
+    assert getattr(model.config, "distributed_config", None) is config
+    if config is not None:
+        assert vars(config) == config_values
+    for module, metadata in native_meta:
+        assert module._native_weight_meta == metadata
+
 
 @cache
 def _mesh_group():
@@ -110,7 +157,7 @@ def _mesh_group():
 
 
 @cache
-def _native_mesh():
+def _native_mesh(expert_parallel=False):
     # Keep native TP on the same bounded group for the persistent workers' lifetime.
     from transformers.distributed.utils import TransformersDeviceMesh
 
@@ -126,9 +173,9 @@ def _native_mesh():
             mesh_dim_names=("pp", "dp_replicate", "fsdp", "tp"),
         ),
         DeviceMesh.from_group(
-            [local, local, group, local],
+            [local, local, local, group] if expert_parallel else [local, local, group, local],
             "cpu",
-            ranks.reshape(1, 1, 2, 1),
+            ranks.reshape(1, 1, 1, 2) if expert_parallel else ranks.reshape(1, 1, 2, 1),
             mesh_dim_names=("pp", "dp_replicate", "efsdp", "ep"),
         ),
     )
@@ -138,16 +185,59 @@ def _torch_mesh_state_worker(rank, size, route, state):
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
     assert size == 2
+    fields = state.startswith("adopt_fields")
+    experts = state == "adopt_fields_experts"
     mesh = (
         DeviceMesh.from_group(_mesh_group(), "cpu", mesh_dim_names=("tp",))
         if route == "raw"
-        else _native_mesh()
+        else _native_mesh(expert_parallel=experts)
     )
-    model = _tiny_model()
+    model = _tiny_model(experts=experts)
+    original_containers = []
+    if fields:
+        model = mtq.quantize(
+            model,
+            {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None},
+        )
+        original_containers = [
+            (module, name, getattr(module, name))
+            for module in model.modules()
+            if hasattr(module, "_first_proj_weight_quantizers_attr")
+            for name in (module._first_proj_weight_quantizers_attr, "down_proj_weight_quantizers")
+        ]
     adapter = TransformersBypassAdapter(mesh)
     with bounded_collectives(10):
         assert adapter.parallelize(model) is model
     assert isinstance(model.model.layers[0].self_attn.q_proj.weight, DTensor)
+    if fields:
+        from transformers.distributed.configuration_utils import DistributedConfig
+
+        del model._modelopt_bypass_placement
+        for module, name, container in original_containers:
+            assert isinstance(module.gate_up_proj, DTensor)
+            assert module.gate_up_proj.to_local().shape[0] == 2
+            setattr(module, name, container)
+        layer = model.model.layers[0].self_attn.q_proj
+        quantizer = layer.weight_quantizer
+        quantizer.set_from_attribute_config(
+            QuantizerAttributeConfig(num_bits=(4, 3), axis=0, enable=True)
+        )
+        local = layer.weight.to_local()
+        native, scale = FP8QTensor.quantize(local.detach(), axis=0)
+        quantizer._set_buffer("_scale", scale)
+        pin_native_weight(quantizer, native, local)
+        valid_metadata = copy.deepcopy(quantizer._native_weight_meta)
+        if state == "adopt_fields" or rank == 1:
+            quantizer._native_weight_meta["source_shape"] = (30, 32)
+        if state == "adopt_fields":
+            del model.config.distributed_config
+        else:
+            model.config.distributed_config = DistributedConfig(
+                tp_size=2,
+                fsdp_size=1,
+                ep_size=2 if experts else 1,
+                tp_plan={"model.layers.*.self_attn.q_proj": "colwise"},
+            )
     if state == "adopt_missing" and rank == 1:
         delattr(model, "_mesh_manager" if route == "native" else "_modelopt_bypass_torch_mesh")
     elif state == "adopt_wrong_mesh":
@@ -172,6 +262,14 @@ def _torch_mesh_state_worker(rank, size, route, state):
     # A new adapter exposes any context writes made before collective refusal.
     if route == "native":
         adapter = TransformersBypassAdapter(mesh)
+    context_state = None
+    if fields:
+        adapter.context.parallel_metadata[id(model)] = {"previous": object()}
+        adapter.context.tp_quantizer_layouts[id(model)] = {"previous": object()}
+        context_state = [
+            (mapping, dict(mapping))
+            for mapping in (adapter.context.parallel_metadata, adapter.context.tp_quantizer_layouts)
+        ]
     snapshot = _snapshot(model)
     error = None
     with bounded_collectives(10):
@@ -187,6 +285,9 @@ def _torch_mesh_state_worker(rank, size, route, state):
     # Keep result collection independent of a failed placement/validation subgroup.
     errors = [None] * size
     dist.all_gather_object(errors, error)
+    if fields:
+        assert all(item is not None and item[0] == "ValueError" for item in errors), errors
+        assert errors[0] == errors[1], errors
     _assert_unchanged(model, snapshot)
     if state in ("reentry", "adopt_reentry"):
         assert errors == [None, None], errors
@@ -196,8 +297,30 @@ def _torch_mesh_state_worker(rank, size, route, state):
         assert all(item is not None and item[0] == "ValueError" for item in errors), errors
         assert errors[0] == errors[1], errors
         if route == "native":
-            assert not adapter.context.parallel_metadata
-            assert not adapter.context.tp_quantizer_layouts
+            if fields:
+                for mapping, previous in context_state:
+                    assert mapping.keys() == previous.keys()
+                    assert all(mapping[key] is value for key, value in previous.items())
+                assert adapter.context.parallel_metadata is context_state[0][0]
+                assert adapter.context.tp_quantizer_layouts is context_state[1][0]
+            else:
+                assert not adapter.context.parallel_metadata
+                assert not adapter.context.tp_quantizer_layouts
+    if fields:
+        # A refused adoption is retryable before and after correcting the peer's fields.
+        with bounded_collectives(10), pytest.raises(ValueError) as retry:
+            adapter.adopt(model)
+        assert str(retry.value) == errors[rank][1]
+        _assert_unchanged(model, snapshot)
+        quantizer._native_weight_meta = valid_metadata
+        with bounded_collectives(10):
+            adapter.adopt(model)
+        for module, name, container in original_containers:
+            assert tuple(getattr(module, name)) == tuple(container[rank * 2 : (rank + 1) * 2])
+        placed = _snapshot(model)
+        with bounded_collectives(10):
+            adapter.adopt(model)
+        _assert_unchanged(model, placed)
 
 
 @pytest.mark.parametrize(
@@ -213,7 +336,10 @@ def _torch_mesh_state_worker(rank, size, route, state):
         for route in ("raw", "native")
         for state in ("adopt_missing", "adopt_reentry")
     ]
-    + [("raw", "adopt_wrong_mesh"), ("native", "adopt_fresh")],
+    + [("raw", "adopt_wrong_mesh"), ("native", "adopt_fresh")]
+    + [
+        ("native", state) for state in ("adopt_fields", "adopt_fields_peer", "adopt_fields_experts")
+    ],
 )
 @pytest.mark.timeout(180)
 def test_torch_mesh_placement_state_is_collective(bypass_cpu_workers, route, state):
@@ -353,7 +479,16 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
             if route == "explicit_plan":
                 # HF expansion drops shared modules; an explicit plan must still resolve every owner.
                 plan = {"model.layers.0.self_attn.q_proj.weight": "colwise"}
-                if sharing == "module_alias":
+                if sharing in ("canonical_module", "unknown_key"):
+                    key = (
+                        "model.layers.0.self_attn.q_proj"
+                        if sharing == "canonical_module"
+                        else "missing.weight"
+                    )
+                    plan = {key: "colwise"}
+                elif sharing == "expanded_parameter":
+                    pass
+                elif sharing == "module_alias":
                     plan["model.layers.0.self_attn.o_proj"] = "colwise"
                 else:
                     plan["model.layers.0.self_attn.o_proj.weight"] = "rowwise"
@@ -364,7 +499,10 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
             error = (type(exc).__name__, str(exc))
     errors = [None] * size
     dist.all_gather_object(errors, error)
-    if sharing == "compatible":
+    if sharing == "expanded_parameter":
+        assert errors == [None, None], errors
+        _assert_unchanged(model, snapshot)
+    elif sharing == "compatible":
         assert errors == [None, None], errors
         assert first.weight_quantizer._amax is second.weight_quantizer._amax
         torch.testing.assert_close(
@@ -385,6 +523,8 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
                 if sharing == "tied_compatible"
                 else "model.layers.0.self_attn.o_proj"
             ) in errors[0][1], errors
+        elif sharing in ("canonical_module", "unknown_key"):
+            assert key in errors[0][1], errors
         else:
             assert "incompatible TP layouts" in errors[0][1], errors
 
@@ -402,7 +542,16 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
             "tied_compatible",
         )
     ]
-    + [("explicit_plan", "shared_module"), ("explicit_plan", "module_alias")],
+    + [
+        ("explicit_plan", sharing)
+        for sharing in (
+            "shared_module",
+            "module_alias",
+            "canonical_module",
+            "unknown_key",
+            "expanded_parameter",
+        )
+    ],
 )
 @pytest.mark.timeout(180)
 def test_shared_quantizer_fields_preflight(bypass_cpu_workers, route, sharing):
