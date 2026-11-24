@@ -124,19 +124,30 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
 
             parallelize_native_transformers(model, self.context, initialize=initialize)
             return model
-        if initialize is not None:
-            raise ValueError("Native initialization callbacks require TransformersDeviceMesh")
         from ..._bypass_parallel import _size, prepare_quantizer_partitions
-        from .parallel import apply_hf_tensor_parallelism, validate_hf_tensor_parallelism
+        from .parallel import (
+            _synchronize_validation,
+            apply_hf_tensor_parallelism,
+            validate_hf_tensor_parallelism,
+        )
 
-        if _size(self.context.pipeline_mesh) > 1:
-            raise ValueError("Native PP requires a validated family transport")
-        if _size(self.context.tensor_mesh) > 1 and not hasattr(
-            model, "_modelopt_bypass_torch_mesh"
-        ):
+        prepared = hasattr(model, "_modelopt_bypass_torch_mesh")
+        error = None
+        try:
+            if initialize is not None:
+                raise ValueError("Native initialization callbacks require TransformersDeviceMesh")
+            if prepared and model._modelopt_bypass_torch_mesh is not self.device_mesh:
+                raise ValueError("Prepared Torch models must use their exact caller-owned mesh")
+            if _size(self.context.pipeline_mesh) > 1:
+                raise ValueError("Native PP requires a validated family transport")
+            if _size(self.context.tensor_mesh) > 1 and not prepared:
+                validate_hf_tensor_parallelism(model, self.context.tensor_mesh)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        _synchronize_validation(self.context, error)
+        if _size(self.context.tensor_mesh) > 1 and not prepared:
             from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
 
-            validate_hf_tensor_parallelism(model, self.context.tensor_mesh)
             prepare_packed_weights_for_tp(model)
             apply_hf_tensor_parallelism(model, self.context.tensor_mesh)
             prepare_quantizer_partitions(model, self.context)
