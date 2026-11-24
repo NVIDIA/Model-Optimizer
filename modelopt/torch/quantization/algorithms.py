@@ -301,6 +301,12 @@ def _per_weight_compression(recipe: "QuantRecipe", quantizers: dict[str, nn.Modu
                 f"AutoQuantize candidate {recipe} applies a list config over another list config "
                 f"to {attr}, which nests their stages; give each quantizer one list config."
             )
+        if isinstance(value, SequentialQuantizer) and len({q.is_enabled for q in value}) > 1:
+            # Export reads a sequential quantizer as enabled or not by its first stage alone.
+            raise ValueError(
+                f"AutoQuantize candidate {recipe} enables only some stages of {attr}, which "
+                "export cannot represent; enable or disable all of its stages."
+            )
         for role in ("input_quantizer", "weight_quantizer", "output_quantizer"):
             if attr.endswith(role):
                 projection = projections.setdefault(attr.removesuffix(role), {})
@@ -319,9 +325,12 @@ def _per_weight_compression(recipe: "QuantRecipe", quantizers: dict[str, nn.Modu
             "inputs, in different formats; configure all of its quantizers alike."
         )
     enabled = next(iter(projections.values()), {}).get("weight_quantizer", [])
-    compression = min(map(_quantizer_compression, enabled)) if enabled else 1.0
-    effective_bits = recipe.config.effective_bits
-    return effective_bits / 16 if effective_bits is not None and compression < 1.0 else compression
+    if not enabled:
+        return 1.0
+    # The recipe's effective bits override its formats' own, which a named format may lack.
+    if (effective_bits := recipe.config.effective_bits) is not None:
+        return effective_bits / 16
+    return min(map(_quantizer_compression, enabled))
 
 
 def _cfg_to_dict(v):
@@ -757,6 +766,8 @@ class QuantRecipeHparam(Hparam):
         # A format shard scores only its own formats; None scores every choice.
         self._scored_recipes: set | None = None
         self._ladder: list[QuantRecipe] | None = None
+        # Resolved before calibration, which rewrites quantizer layouts (e.g. block axes).
+        self._per_weight_compressions: dict[tuple[QuantRecipe, nn.Module], float] = {}
         # By recipe signature, so a searcher pruning its stored formats keeps them aligned.
         self.per_weight_replay: dict[str, dict[str, list[dict[str, Any]]]] = {}
         module_names = dict(zip(quant_modules or [], self.quant_module_names))
@@ -794,9 +805,12 @@ class QuantRecipeHparam(Hparam):
             for quant_module in self.quant_modules:
                 attr_names = _get_quantizer_attrs(quant_module)
                 if quant_recipe == fixed_recipe:
-                    self._all_quantizer_choices[quant_recipe][quant_module] = fixed_quantizers[
-                        quant_module
-                    ]
+                    quantizers = fixed_quantizers[quant_module]
+                    if getattr(quant_module, "_auto_quantize_per_weight_quantizers", False):
+                        self._per_weight_compressions[quant_recipe, quant_module] = (
+                            _per_weight_compression(quant_recipe, quantizers)
+                        )
+                    self._all_quantizer_choices[quant_recipe][quant_module] = quantizers
                     continue
                 for attr_name in attr_names:
                     setattr(
@@ -816,10 +830,11 @@ class QuantRecipeHparam(Hparam):
                 quantizers = {
                     attr_name: getattr(quant_module, attr_name) for attr_name in attr_names
                 }
-                if getattr(quant_module, "_auto_quantize_per_weight_quantizers", False) and (
-                    _per_weight_compression(quant_recipe, quantizers) == 1.0
-                    and not quant_recipe.is_no_quant
-                ):
+                per_weight = getattr(quant_module, "_auto_quantize_per_weight_quantizers", False)
+                if per_weight:
+                    compression = _per_weight_compression(quant_recipe, quantizers)
+                    self._per_weight_compressions[quant_recipe, quant_module] = compression
+                if per_weight and compression == 1.0 and not quant_recipe.is_no_quant:
                     warnings.warn(
                         f"AutoQuantize candidate {quant_recipe} leaves the weights of "
                         f"{type(quant_module).__name__} unquantized: its rules match none of the "
@@ -1019,8 +1034,7 @@ class QuantRecipeHparam(Hparam):
         """The recipe's compression, or what it resolves a per-weight module's weights to."""
         if not getattr(quant_module, "_auto_quantize_per_weight_quantizers", False):
             return recipe.compression
-        quantizers = self._all_quantizer_choices[recipe][quant_module]
-        return _per_weight_compression(recipe, quantizers)
+        return self._per_weight_compressions[recipe, quant_module]
 
     @property
     def attrs(self) -> list[str]:
@@ -3010,6 +3024,15 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False, algo
         *_NON_GATED_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS,
         *sorted(recorded_attrs),
     )
+    # Per-weight modules' quantizers and their stages, searched or fixed: the search applied a
+    # recipe only to its own group, so none of its rules may reach them through a global entry.
+    per_weight_names = [
+        f"{module_name}.{attr}{stage}"
+        for stat in search_state["candidate_stats"].values()
+        for module_name in stat.get("per_weight_modules", ())
+        for attr in _get_replay_quantizer_attrs(stat, module_name)
+        for stage in ("", ".0", ".1", ".2")
+    ]
     # Track global (non per-module) recipe entries.  Last recipe wins for each pattern.
     global_entries: dict[str, dict] = {}
 
@@ -3060,9 +3083,13 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False, algo
         # Collect non-per-module entries (e.g. *[kv]_bmm_quantizer) from winning recipes.
         for recipe_entry in recipe.config.quant_cfg:
             pattern = recipe_entry["quantizer_name"]
-            if pattern == "*" or any(
-                fnmatch.fnmatch(attr, pattern) or pattern.endswith(attr)
-                for attr in _per_module_attrs
+            if (
+                pattern == "*"
+                or any(
+                    fnmatch.fnmatch(attr, pattern) or pattern.endswith(attr)
+                    for attr in _per_module_attrs
+                )
+                or fnmatch.filter(per_weight_names, pattern)
             ):
                 continue
             cfg = recipe_entry.get("cfg")

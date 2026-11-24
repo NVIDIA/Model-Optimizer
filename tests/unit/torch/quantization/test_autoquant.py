@@ -1156,6 +1156,11 @@ _NESTED = [
     {"quantizer_name": "*weight_quantizer", "cfg": _W4A8},
     {"quantizer_name": "*w[12]_weight_quantizer", "cfg": _W4A8},
 ]
+# Scored at its INT8 stage, but export reads the quantizer by its disabled INT4 stage.
+_FIRST_STAGE_OFF = [
+    {"quantizer_name": "*weight_quantizer", "cfg": _W4A8},
+    {"quantizer_name": "*weight_quantizer.0", "enable": False},
+]
 
 
 @pytest.mark.parametrize(
@@ -1166,8 +1171,9 @@ _NESTED = [
         (_W1_INT8_W2_FP8, "different formats"),
         (_W1_INPUT_ONLY, "different formats"),
         (_NESTED, "nests their stages"),
+        (_FIRST_STAGE_OFF, "only some stages"),
     ],
-    ids=["partial", "mixed", "same_cost", "one_input", "nested"],
+    ids=["partial", "mixed", "same_cost", "one_input", "nested", "first_stage_off"],
 )
 def test_auto_quantize_refuses_mixed_weight_formats_and_hands_the_model_back(entries, refusal):
     mixed = {"quant_cfg": [{"quantizer_name": "*", "enable": False}, *entries], "algorithm": "max"}

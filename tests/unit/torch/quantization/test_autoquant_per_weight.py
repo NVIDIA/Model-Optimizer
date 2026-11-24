@@ -20,14 +20,17 @@ import os
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.algorithms import (
     QuantRecipe,
     _iter_tensor_quantizers,
+    _per_weight_compression,
     _resolve_best_recipe,
     _tensor_quantizer_format_signature,
 )
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.utils import safe_load, safe_save
 
@@ -229,7 +232,7 @@ def test_per_weight_modules_replay_every_rule_form_as_scored():
         {"quantizer_name": "*w[12]*weight_quantizer", "cfg": [_INT4_W, {"num_bits": 8, "axis": 0}]},
         {"quantizer_name": "*w1_weight_quantizer", "enable": False},
         {"quantizer_name": "*w1_weight_quantizer", "enable": True},
-        {"quantizer_name": "*weight_quantizer.0", "enable": False},
+        {"quantizer_name": "*weight_quantizer.1", "cfg": {"num_bits": 8, "axis": None}},
         # A parent_class rule applies to the module's own quantizers, here a list config over a
         # list config without reaching its stages.
         {"quantizer_name": "*input_quantizer", "cfg": [{"num_bits": 8, "axis": None}] * 2},
@@ -247,7 +250,8 @@ def test_per_weight_modules_replay_every_rule_form_as_scored():
     replayed = _replayed(mtq.get_auto_quantize_config(state))
     # Dense replay of such patterns is tracked in #3508.
     assert _formats(replayed, ("experts",)) == _formats(model, ("experts",))
-    assert [q.is_enabled for q in model.experts.w1_weight_quantizer] == [False, True]
+    assert [q.is_enabled for q in model.experts.w1_weight_quantizer] == [True, True]
+    assert model.experts.w1_weight_quantizer[1].axis is None
     assert model.experts.w2_input_quantizer.is_enabled
     assert isinstance(state["best"]["recipe"]["experts.quant_recipe"], QuantRecipe)
 
@@ -320,3 +324,97 @@ def test_a_search_resumes_from_a_read_only_checkpoint(tmp_path, saved_before_cos
         checkpoint.parent.chmod(0o755)
         checkpoint.chmod(0o644)
     assert resumed["best"]["recipe"] == state["best"]["recipe"]
+
+
+def test_path_rules_of_other_groups_leave_fixed_per_weight_modules_at_their_baseline():
+    path_rule = _deny(
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "experts.w[12]_*_quantizer", "cfg": _INT4_W},
+    )
+    data = [torch.randn(2, 4, 16) for _ in range(2)]
+    _, state = mtq.auto_quantize(
+        _Model(),
+        constraints={"effective_bits": 16.0},
+        # The experts stay fixed at this baseline's BF16; only the dense layer is searched.
+        fixed_quantization_config=_deny(),
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["dense"],
+                "quantization_formats": [path_rule],
+                "allow_no_quant": False,
+            }
+        ],
+        data_loader=data,
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, batch: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+    replayed = _replayed(mtq.get_auto_quantize_config(state))
+    assert set(_formats(replayed, ("experts",)).values()) == {("disabled",)}
+    assert replayed.dense.weight_quantizer.is_enabled
+
+
+class _MixedRank(torch.nn.Module):
+    """A plain 2-D weight beside a 3-D expert bank."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(16, 16) * 0.1)
+        self.w1 = torch.nn.Parameter(torch.randn(2, 16, 16) * 0.1)
+
+    def forward(self, x):
+        return torch.bmm(F.linear(x, self.weight), self.w1)
+
+
+class _QuantMixedRank(QuantModule):
+    _auto_quantize_per_weight_quantizers = True
+
+    def _setup(self):
+        for prefix in ("", "w1_"):
+            setattr(self, f"{prefix}input_quantizer", TensorQuantizer())
+            setattr(self, f"{prefix}weight_quantizer", TensorQuantizer())
+
+    def forward(self, x):
+        hidden = F.linear(self.input_quantizer(x), self.weight_quantizer(self.weight))
+        return torch.bmm(self.w1_input_quantizer(hidden), self.w1_weight_quantizer(self.w1))
+
+
+def test_one_block_format_on_weights_of_different_rank_is_searched():
+    # Calibration lays the 2-D and 3-D weights' blocks out on different axes.
+    blocks = _deny(
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {"num_bits": 8, "block_sizes": {-1: 8, -2: 8}},
+        }
+    )
+    QuantModuleRegistry.register({_MixedRank: "test.MixedRank"})(_QuantMixedRank)
+    try:
+        model = torch.nn.Sequential(_MixedRank())
+        model, state = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=[(blocks, "blocks")],
+            data_loader=[torch.randn(2, 4, 16) for _ in range(2)],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, batch: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+        )
+    finally:
+        QuantModuleRegistry.unregister(_MixedRank)
+    stats = state["candidate_stats"]["0.quant_recipe"]
+    assert min(stats["costs"]) == stats["uncompressed_cost"] / 2
+
+
+def test_a_recipes_effective_bits_prices_a_named_weight_format():
+    q8_0 = {"num_bits": "q8_0", "block_sizes": {-1: 32}, "backend": "ggml"}
+    recipe = QuantRecipe(
+        {**_deny({"quantizer_name": "*weight_quantizer", "cfg": q8_0}), "effective_bits": 8.5},
+        name="q8_0",
+    )
+    quantizers = {
+        f"{name}_weight_quantizer": TensorQuantizer(QuantizerAttributeConfig(**q8_0))
+        for name in ("w1", "w2")
+    }
+    assert _per_weight_compression(recipe, quantizers) == 8.5 / 16
