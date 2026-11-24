@@ -919,9 +919,13 @@ def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, na
                     parameter_mesh.mesh_dim_names,
                 )
                 if mesh_names is not None and fsdp_names is not None:
-                    dimensions = [index for index, axis in enumerate(mesh_names) if axis in fsdp_names]
+                    dimensions = [
+                        index for index, axis in enumerate(mesh_names) if axis in fsdp_names
+                    ]
                     if not dimensions and not info.unsharded and parameter_mesh.size() > 1:
-                        raise ValueError("The parameter's FSDP axes are absent from its realized mesh")
+                        raise ValueError(
+                            "The parameter's FSDP axes are absent from its realized mesh"
+                        )
                 elif info.unsharded:
                     dimensions = []
                 elif parameter_mesh.ndim == original_device_mesh.ndim:
