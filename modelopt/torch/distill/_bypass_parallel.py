@@ -97,6 +97,8 @@ def _all_rank_values(context, value):
 def apply_tp_quantizer_fields(quantizer, fields):
     """Apply a validated field plan, including pinned native payload metadata."""
     for name, value in fields.items():
+        if getattr(quantizer, name, None) is value:
+            continue
         if isinstance(value, torch.Tensor):
             quantizer._set_buffer(name, value)
         else:

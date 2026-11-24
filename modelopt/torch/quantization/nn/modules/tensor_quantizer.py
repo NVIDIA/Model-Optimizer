@@ -162,6 +162,9 @@ class TensorQuantizer(nn.Module):
         "_padding",
         # Not saved: ranks restore one shared state, so they agree on the layout without it.
         "_consumed_block_sizes",
+        # Rank-local placement provenance is rebuilt from the realized mesh and local fields.
+        "_native_tp_activation_layout",
+        "_native_tp_activation_fields",
         # Extra flags added by huggingface
         "_is_hf_initialized",
         # Extra flags added by accelerate
