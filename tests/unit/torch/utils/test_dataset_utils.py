@@ -21,7 +21,9 @@ import pytest
 import torch
 from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
+from tokenizers import Tokenizer, models, pre_tokenizers, processors
 from torch.utils.data import DataLoader
+from transformers import PreTrainedTokenizerFast
 
 from modelopt.torch.utils import dataset_utils
 from modelopt.torch.utils.dataset_utils import (
@@ -797,6 +799,37 @@ def test_pack_documents_into_rows():
     assert (ids[1, 172:322] == 50).all() and ids[1, 322] == 99
     assert (ids[1, 323:] == 0).all()
     assert mask[1].sum() == 323
+
+
+@pytest.mark.parametrize("tokenizer_adds_bos", [False, True])
+def test_add_bos_starts_each_row_with_bos(monkeypatch, tokenizer_adds_bos):
+    vocab = {"<pad>": 0, "<s>": 1, "</s>": 2, "a": 3, "b": 4, "c": 5}
+    backend = Tokenizer(models.WordLevel(vocab, unk_token="<pad>"))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    if tokenizer_adds_bos:
+        backend.post_processor = processors.TemplateProcessing(
+            single="<s> $A", special_tokens=[("<s>", 1)]
+        )
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        bos_token="<s>",
+        eos_token="</s>",
+        pad_token="<pad>",
+        padding_side="left",
+    )
+    monkeypatch.setattr(
+        dataset_utils, "get_dataset_samples", lambda *_args, **_kwargs: ["a b c", "a"]
+    )
+
+    (batch,) = get_dataset_dataloader(
+        tokenizer=tokenizer, batch_size=2, num_samples=2, max_sample_length=3, add_bos=True
+    )
+
+    # BOS fits in max_sample_length and is the first real token after the left padding.
+    assert batch["input_ids"].tolist() == [[1, 3, 4], [0, 1, 3]]
+    assert batch["attention_mask"].tolist() == [[1, 1, 1], [0, 1, 1]]
+    with pytest.raises(ValueError, match="pack=False"):
+        get_dataset_dataloader(tokenizer=tokenizer, num_samples=2, pack=True, add_bos=True)
 
 
 # ---------------------------------------------------------------------------

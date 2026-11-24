@@ -754,6 +754,7 @@ def get_dataset_dataloader(
     pack: bool = False,
     distributed: bool = False,
     sampler_kwargs: dict | None = None,
+    add_bos: bool = False,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
@@ -787,11 +788,18 @@ def get_dataset_dataloader(
             (e.g. for data-parallel calibration). ``sampler_kwargs`` supplies ``num_replicas``
             and ``rank``.
         sampler_kwargs: Keyword args for the ``DistributedSampler`` when ``distributed=True``.
+        add_bos: Start each sample with the tokenizer's BOS token; nothing is added if it already
+            starts with one. Use it for tokenizers that do not add BOS although the model's prompts
+            start with it (e.g. through the chat template). A full-length sample drops its
+            last token to make room, and the batch keeps only ``input_ids`` and ``attention_mask``.
+            Not supported with ``pack=True``.
 
     Returns:
         An instance of dataloader.
     """
     assert tokenizer is not None, "Please provide a tokenizer."
+    if add_bos and (pack or tokenizer.bos_token_id is None):
+        raise ValueError("add_bos=True needs a tokenizer with a BOS token and pack=False.")
     # Tokenizer encoding may modify the tokenizer in place, so we need to clone it.
     tokenizer = copy.deepcopy(tokenizer)
 
@@ -884,15 +892,29 @@ def get_dataset_dataloader(
             sampler_kwargs=sampler_kwargs,
         )
 
-    batch_encoded = tokenizer(
-        all_samples,
-        return_tensors="pt",
-        padding=True,
-        # Left padding creates fully masked causal rows, which can yield NaNs in cuDNN backward.
-        padding_side="right" if include_labels else None,
-        truncation=True,
-        max_length=max_sample_length,
-    )
+    # Left padding creates fully masked causal rows, which can yield NaNs in cuDNN backward.
+    padding_side = "right" if include_labels else None
+    if add_bos:
+        bos_id = tokenizer.bos_token_id
+        # Prepend before padding so that BOS is each row's first real token.
+        input_ids = [
+            ids if ids[:1] == [bos_id] else [bos_id, *ids[: max_sample_length - 1]]
+            for ids in tokenizer(all_samples, truncation=True, max_length=max_sample_length)[
+                "input_ids"
+            ]
+        ]
+        batch_encoded = tokenizer.pad(
+            {"input_ids": input_ids}, padding=True, padding_side=padding_side, return_tensors="pt"
+        )
+    else:
+        batch_encoded = tokenizer(
+            all_samples,
+            return_tensors="pt",
+            padding=True,
+            padding_side=padding_side,
+            truncation=True,
+            max_length=max_sample_length,
+        )
     if device:
         batch_encoded = batch_encoded.to(device)
 

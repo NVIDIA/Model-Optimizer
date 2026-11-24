@@ -315,6 +315,7 @@ def make_calib_dataloader(
             max_sample_length=args.calib_seq,
             device=device,
             include_labels=include_labels,
+            add_bos=getattr(args, "calib_add_bos", False),
         )
     if world_size > 1 and calib_dataloader is not None and not args.calib_with_images:
         calib_dataloader = _shard_calib_dataloader(
@@ -1330,6 +1331,16 @@ def parse_args() -> argparse.Namespace:
         help="Maximum sequence length for calibration.",
         type=int,
         default=512,
+    )
+    parser.add_argument(
+        "--calib_add_bos",
+        action="store_true",
+        help=(
+            "Start each text sample of the quantization calibration data with the BOS token. Use "
+            "it when the tokenizer does not add BOS but the model's prompts start with it (e.g. "
+            "through the chat template). Not applied to sparsity calibration, "
+            "--calib_with_images, --specdec_offline_dataset, or model-provided calibration data."
+        ),
     )
     parser.add_argument("--export_path", default="exported_model")
     parser.add_argument(
