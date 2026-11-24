@@ -154,6 +154,41 @@ def test_teacher_replay_caches_model_scans_without_changing_targets():
     torch.testing.assert_close(torch.cat(current), targets[0], rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("failure", ["prepare", "validate", "documents"])
+def test_local_teacher_preparation_preserves_exception_identity(failure):
+    class BrokenBatch(dict):
+        def items(self):
+            raise original
+
+    class BrokenValidation(dict):
+        def get(self, key, default=None):
+            raise original
+
+    class BrokenModel(torch.nn.Module):
+        @property
+        def config(self):
+            raise original
+
+    original = OSError("caller preparation failure")
+    adapter = TransformersBypassAdapter()
+    model = torch.nn.Linear(1, 1) if failure != "documents" else BrokenModel()
+    batch = {"input_ids": torch.ones(1, 1, dtype=torch.long)}
+    with pytest.raises(OSError) as caught:
+        if failure == "prepare":
+            adapter._document_teacher(model, [], BrokenBatch(batch), lambda *_: None)
+        elif failure == "validate":
+            adapter.teacher_microbatch(model, [], BrokenValidation(batch), lambda *_: None)
+        else:
+            adapter.teacher_microbatch(model, [], batch, lambda *_: None)
+    assert caught.value is original
+    frames = []
+    tb = caught.value.__traceback__
+    while tb is not None:
+        frames.append(tb.tb_frame.f_code.co_name)
+        tb = tb.tb_next
+    assert {"prepare": "items", "validate": "get", "documents": "config"}[failure] in frames
+
+
 def _quantize(model, batch, bits="iq1_m", *, patterns=None):
     return mtq.quantize(
         model,

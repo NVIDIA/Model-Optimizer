@@ -31,7 +31,12 @@ from modelopt.torch.quantization.utils.core_utils import (
     module_name_maps,
 )
 
-from ._bypass_parallel import _all_rank_values, _size, prepare_quantizer_partitions
+from ._bypass_parallel import (
+    _all_rank_values,
+    _size,
+    _synchronize_error,
+    prepare_quantizer_partitions,
+)
 
 
 def _sum(value, mesh):
@@ -62,9 +67,7 @@ class DistributedBypassRuntime:
         return _all_rank_values(self.context, value)
 
     def synchronize_error(self, error):
-        errors = sorted({value for value in self.gather_values(error) if value})
-        if errors:
-            raise ValueError("; ".join(errors))
+        _synchronize_error(self.context, error)
 
     def initialize(self, student, teacher, units, adapter, batch):
         self.student, self.names = student, module_name_maps(student)
@@ -144,7 +147,9 @@ class DistributedBypassRuntime:
                 meshes = [
                     self.context.expert_replica_mesh if expert else self.context.data_context_mesh
                 ]
-                sharded = self.layouts.get(id(quantizer), {}).get(name)
+                # Unplaced dense fields replicate across TP; expert replica groups already
+                # cover their unpartitioned fields, including overlapping dense TP ranks.
+                sharded = self.layouts.get(id(quantizer), {}).get(name, None if expert else False)
                 if sharded is False:
                     meshes.append(self.context.tensor_mesh)
                 if sharded:

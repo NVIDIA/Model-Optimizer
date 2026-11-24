@@ -18,11 +18,12 @@
 import copy
 from collections import OrderedDict
 from datetime import timedelta
+from functools import cache
 
 import pytest
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor, Shard
 from torch.nn import functional as F
 
@@ -54,6 +55,283 @@ def test_hybrid_fsdp_plan_wraps_only_present_functional_children():
     assert children <= extended.keys() <= modules.keys()
     assert all(extended[name] == "free_full_weight" for name in children)
     assert plan == original
+
+
+@cache
+def _runtime_mesh(axis):
+    # Reuse bounded groups until persistent-worker teardown, including native tensor collectives.
+    group = dist.new_group(timeout=timedelta(seconds=10))
+    return DeviceMesh.from_group(group, "cpu", mesh_dim_names=(axis,))
+
+
+def _replicated_field_worker(rank, size, expert):
+    from modelopt.torch.distill._bypass_optimizer import Lion
+    from modelopt.torch.distill._bypass_parallel import BypassMeshContext
+    from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
+    from modelopt.torch.quantization.repair import IQRepairPolicy
+
+    torch.manual_seed(701)
+    inputs = [torch.randn(1, 3, 256) * scale for scale in (0.5, 2.0)]
+    teacher = torch.nn.Linear(256, 16, bias=False)
+    student = mtq.quantize(
+        copy.deepcopy(teacher),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda model: model(inputs[0]),
+    )
+    reference = copy.deepcopy(student)
+    if expert:
+        student._is_expert_parallel = True
+    mesh = _runtime_mesh("tp")
+    context = BypassMeshContext(
+        device_mesh=mesh, tensor_mesh=mesh, expert_replica_mesh=mesh if expert else None
+    )
+    runtime = DistributedBypassRuntime(context, mtd.BypassConfig(global_batch_size=1))
+    runtime.student = student
+    policy, expected_policy = IQRepairPolicy(), IQRepairPolicy()
+    try:
+        fields, expected_fields = policy.prepare(student), expected_policy.prepare(reference)
+        runtime.register(student, policy)
+        runtime.validate_gradient_schedules({"mlp": fields})
+        losses = [F.mse_loss(reference(x), teacher(x).detach(), reduction="sum") for x in inputs]
+        sum(losses).backward()
+        F.mse_loss(
+            student(inputs[rank]), teacher(inputs[rank]).detach(), reduction="sum"
+        ).backward()
+        # Each rank contributes a different real native-field VJP.
+        assert any(not torch.allclose(p.grad, q.grad) for p, q in zip(fields, expected_fields))
+        runtime.reduce_gradients(fields)
+        for actual, expected in zip(fields, expected_fields, strict=True):
+            torch.testing.assert_close(actual.grad, expected.grad, rtol=2e-5, atol=1e-8)
+        expected_norm = torch.nn.utils.clip_grad_norm_(expected_fields, 1e-4)
+        actual_norm = runtime.clip_gradients(fields, 1e-4)
+        torch.testing.assert_close(actual_norm, expected_norm)
+        for actual, expected in zip(fields, expected_fields, strict=True):
+            torch.testing.assert_close(actual.grad, expected.grad, rtol=2e-5, atol=1e-10)
+        for masters, active in ((fields, policy), (expected_fields, expected_policy)):
+            Lion(masters, lr=1e-3).step()
+            active.project_()
+            active.finalize_()
+        for name, expected in reference.state_dict().items():
+            torch.testing.assert_close(student.state_dict()[name], expected, rtol=0, atol=0)
+    finally:
+        policy.close()
+        expected_policy.close()
+
+
+@pytest.mark.parametrize("expert", [False, True])
+@pytest.mark.timeout(180)
+def test_replicated_native_fields_reduce_once_and_match_reference(bypass_cpu_workers, expert):
+    bypass_cpu_workers.run(_replicated_field_worker, expert)
+
+
+def _functional_child_worker(rank, size):
+    from types import SimpleNamespace
+
+    from _test_utils.torch.distributed.utils import bounded_collectives
+    from torch.distributed.fsdp import fully_shard
+
+    from modelopt.torch.distill.plugins.transformers.functional_fsdp import (
+        install_functional_fsdp_calls,
+    )
+
+    class FunctionalParent(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv1d = torch.nn.Conv1d(4, 8, 3, bias=False)
+
+        def forward(self, inputs):
+            return F.conv1d(inputs, self.conv1d.weight)
+
+    torch.manual_seed(702)
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(model_type="qwen3_next")
+    model.model = torch.nn.Module()
+    block = torch.nn.Module()
+    block.linear_attn = FunctionalParent()
+    model.model.layers = torch.nn.ModuleList([block])
+    parent = block.linear_attn
+    reference = copy.deepcopy(parent)
+    inputs = torch.randn(2, 4, 6)
+    mesh = _runtime_mesh("fsdp")
+    fully_shard(parent.conv1d, mesh=mesh, reshard_after_forward=True)
+    install_functional_fsdp_calls(model)
+    forward = parent.forward
+    install_functional_fsdp_calls(model)
+    assert parent.forward is forward
+    with bounded_collectives(10), torch.no_grad():
+        for _ in range(2):
+            torch.testing.assert_close(parent(inputs), reference(inputs), rtol=0, atol=0)
+            weight = parent.conv1d.weight
+            assert isinstance(weight, DTensor) and weight.placements == (Shard(0),)
+            assert weight.to_local().shape == (4, 4, 3)
+    parent.conv1d = fully_shard(copy.deepcopy(reference.conv1d), mesh=mesh)
+    with pytest.raises(ValueError):
+        install_functional_fsdp_calls(model)
+
+
+@pytest.mark.timeout(180)
+def test_functional_fsdp_child_gathers_weight_and_reshards(bypass_cpu_workers):
+    pytest.importorskip("transformers", minversion="5.23")
+    bypass_cpu_workers.run(_functional_child_worker)
+
+
+class _DocumentTeacher(torch.nn.Module):
+    def __init__(self):
+        from types import SimpleNamespace
+
+        super().__init__()
+        self.config = SimpleNamespace(
+            model_type="bypass_document_test", _attn_implementation="sdpa"
+        )
+        self.mlp = torch.nn.Linear(256, 16, bias=False)
+        self.group = None
+        self.seen = []
+
+    def forward(self, input_ids, position_ids=None, attention_mask=None, **kwargs):
+        if self.group is not None:
+            dist.all_reduce(torch.zeros(1), group=self.group)
+        self.seen.append((input_ids.shape[-1], attention_mask is None))
+        hidden = F.one_hot(input_ids, 256).float().cumsum(1)
+        return self.mlp(hidden)
+
+
+def _unequal_documents_worker(rank, size):
+    from _test_utils.torch.distributed.utils import bounded_collectives
+
+    from modelopt.torch.distill._bypass_capture import BypassUnit, mse_statistics
+    from modelopt.torch.distill._bypass_optimizer import Lion
+    from modelopt.torch.distill._bypass_parallel import torch_mesh_context
+    from modelopt.torch.distill._bypass_runner import _BypassRunner
+    from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
+    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+    from modelopt.torch.quantization.repair import plan_iq_repair
+
+    torch.manual_seed(703)
+    teacher = _DocumentTeacher()
+    tokens = torch.tensor([[1, 3, 5, 7], [9, 11, 13, 15]])
+    docs = torch.tensor([[1, 1, 2, 2], [1, 1, 1, 1]])
+    batch = {
+        "input_ids": tokens,
+        "_packed_seq_ids": docs,
+        "attention_mask": torch.ones(2, 1, 4, 4, dtype=torch.bool).tril_(),
+    }
+    student = mtq.quantize(
+        copy.deepcopy(teacher),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda model: model(tokens),
+    )
+    reference = copy.deepcopy(student)
+    units = [BypassUnit("mlp", "mlp", "mlp")]
+    config = mtd.BypassConfig(
+        num_steps=1,
+        global_batch_size=2,
+        sequence_length=4,
+        max_grad_norm=1e-5,
+        warmup_fraction=0,
+        scheduler="constant",
+    )
+    expected_adapter = TransformersBypassAdapter()
+    expected_adapter.student = reference
+    records = []
+    expected_adapter.teacher_microbatch(
+        teacher, units, batch, lambda unit, record: records.append(record)
+    )
+    expected_statistics = [torch.zeros(()), torch.zeros((), dtype=torch.long)]
+    for record in records:
+        error, count = mse_statistics(
+            expected_adapter.replay(reference.mlp, record), record.target, record.valid_mask
+        )
+        expected_statistics[0] += error.detach()
+        expected_statistics[1] += count
+    assert expected_statistics[1] == 8 * 16
+    expected_gradients = []
+    original_step = Lion.step
+
+    def observed_step(optimizer, closure=None):
+        expected_gradients.append(
+            [p.grad.clone() for group in optimizer.param_groups for p in group["params"]]
+        )
+        return original_step(optimizer, closure)
+
+    def run(model, target, adapter, data, runtime=None):
+        plan = plan_iq_repair([model.mlp], root_model=model)
+        runner = _BypassRunner(model, target, units, plan, config, adapter, runtime)
+        # Observe the actual training statistics without substituting runtime math.
+        original = runner._update
+
+        def update(statistics, step):
+            for actual, expected in zip(statistics["mlp"], expected_statistics, strict=True):
+                torch.testing.assert_close(actual, expected)
+            return original(statistics, step)
+
+        runner._update = update
+        runner.run([data])
+
+    Lion.step = observed_step
+    try:
+        run(reference, copy.deepcopy(teacher), expected_adapter, batch)
+        mesh = _runtime_mesh("dp")
+        adapter = TransformersBypassAdapter()
+        adapter.student = student
+        adapter.context = torch_mesh_context(mesh)
+        teacher.group = mesh.get_group()
+        teacher.seen.clear()
+        runtime = DistributedBypassRuntime(adapter.context, config)
+        local = {key: value[rank : rank + 1] for key, value in batch.items()}
+        objects = []
+        original_gather = dist.all_gather_object
+
+        def observed_gather(*args, **kwargs):
+            objects.append(args[1])
+            return original_gather(*args, **kwargs)
+
+        dist.all_gather_object = observed_gather
+        try:
+            with bounded_collectives(10):
+                adapter.teacher_microbatch(teacher, units, local, lambda *_: None)
+                assert not objects
+                invalid = {**local, "_packed_seq_ids": -local["_packed_seq_ids"]} if rank else local
+                with pytest.raises(ValueError) as refusal:
+                    adapter.teacher_microbatch(teacher, units, invalid, lambda *_: None)
+                assert "nonnegative" in str(refusal.value)
+                assert len(objects) == 1
+        finally:
+            dist.all_gather_object = original_gather
+        teacher.seen.clear()
+        with bounded_collectives(10):
+            run(student, teacher, adapter, local, runtime)
+    finally:
+        Lion.step = original_step
+    for actual, expected in zip(expected_gradients[1], expected_gradients[0], strict=True):
+        torch.testing.assert_close(actual, expected, rtol=2e-5, atol=1e-10)
+    # Rank 1's second forward is one safe all-invalid token with no caller mask.
+    assert teacher.seen == ([(2, False), (2, False)] if rank == 0 else [(4, False), (1, False)])
+    for name, expected in reference.state_dict().items():
+        torch.testing.assert_close(student.state_dict()[name], expected, rtol=0, atol=0)
+
+
+@pytest.mark.timeout(180)
+def test_unequal_document_slots_have_zero_contribution(bypass_cpu_workers):
+    pytest.importorskip("transformers", minversion="5.23")
+    bypass_cpu_workers.run(_unequal_documents_worker)
 
 
 def _asymmetric_gradient_schedule_worker(rank, size, mismatch):

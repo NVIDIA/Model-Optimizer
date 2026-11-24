@@ -137,6 +137,8 @@ class _BypassRunner:
                 if self.runtime is None:
                     prediction = self.adapter.replay(self.modules[unit.name], record)
                 else:
+                    # PR8's Transformers _document_teacher sets this only inside
+                    # CPSequenceLayout.attention(); this slice uses replicated CP replay.
                     record = self.runtime.record(
                         unit, record, native_context=getattr(self.adapter, "_native_context", False)
                     )
