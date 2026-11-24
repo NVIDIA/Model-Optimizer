@@ -179,16 +179,21 @@ def _valid_token_mask(batch):
     for key in ("valid_mask", "loss_mask"):
         mask = batch.get(key)
         if mask is not None:
-            if not isinstance(mask, torch.Tensor) or mask.dtype != torch.bool:
-                raise ValueError(f"{key} must be a boolean Tensor; Bypass does not weight tokens")
-            return mask
+            if not isinstance(mask, torch.Tensor) or mask.is_floating_point() or mask.is_complex():
+                raise ValueError(
+                    f"{key} must be a boolean or integer Tensor; Bypass does not weight tokens"
+                )
+            return mask.bool()
     attention = batch.get("attention_mask")
-    if isinstance(attention, torch.Tensor):
-        if attention.ndim == 2 and not attention.dtype.is_floating_point:
+    if attention is not None:
+        if (
+            isinstance(attention, torch.Tensor)
+            and attention.ndim == 2
+            and not attention.is_floating_point()
+            and not attention.is_complex()
+        ):
             return attention.bool()
-        if attention.ndim == 4 and attention.dtype == torch.bool:
-            return attention.any(-1).any(1)
-        raise ValueError("Provide valid_mask when using additive attention biases")
+        raise ValueError("Provide valid_mask or loss_mask with floating or 4D attention masks")
     return None
 
 

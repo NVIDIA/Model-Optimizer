@@ -207,6 +207,11 @@ def test_bypass_refuses_aliases_and_cleans_failed_replay():
         "additive_attention",
         "weighted_valid",
         "weighted_loss",
+        "integer_valid",
+        "integer_loss",
+        "integer_attention",
+        "attention4d",
+        "explicit_attention4d",
     ],
 )
 def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch, mask_kind):
@@ -217,7 +222,8 @@ def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch, mas
     reference = copy.deepcopy(student)
     x = batches[0]
     valid = torch.tensor([[True, True, True], [True, False, False]])
-    if mask_kind in ("additive_attention", "weighted_valid", "weighted_loss"):
+    attention4d = torch.ones(3, 3, dtype=torch.bool).tril()[None, None] & valid[:, None, None, :]
+    if mask_kind in ("additive_attention", "weighted_valid", "weighted_loss", "attention4d"):
         key, mask = {
             "additive_attention": (
                 "attention_mask",
@@ -225,6 +231,7 @@ def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch, mas
             ),
             "weighted_valid": ("valid_mask", valid.float() * 0.5),
             "weighted_loss": ("loss_mask", valid.float() * 0.5),
+            "attention4d": ("attention_mask", attention4d),
         }[mask_kind]
         before = copy.deepcopy(student.state_dict())
         with pytest.raises(ValueError):
@@ -258,6 +265,15 @@ def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch, mas
     monkeypatch.setattr(Lion, "step", record_actual_gradients)
     key = mask_kind if mask_kind in ("valid_mask", "loss_mask") else "attention_mask"
     batch = {"hidden_states": x, key: valid}
+    if mask_kind.startswith("integer_"):
+        key = {
+            "integer_valid": "valid_mask",
+            "integer_loss": "loss_mask",
+            "integer_attention": "attention_mask",
+        }[mask_kind]
+        batch = {"hidden_states": x, key: valid.long()}
+    if mask_kind == "explicit_attention4d":
+        batch.update(valid_mask=valid, attention_mask=attention4d)
     if mask_kind == "loss_mask":
         batch["attention_mask"] = torch.ones_like(valid)
     if mask_kind == "attention_with_metadata":
