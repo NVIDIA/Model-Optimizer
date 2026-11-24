@@ -641,6 +641,8 @@ def fsdp2_weight_access_and_writeback_context(
     If TP is implemented with DTensor, the weight will be a local tensor of the
     TP DTensor under this context. Failed bodies discard local updates; all ranks still
     redistribute in owner order so peer failure handling can use the process group.
+    ``rollback=False`` keeps the ordinary calibration path: rank-local entry/staging failures
+    are uncoordinated, so callers must terminate the distributed job rather than retry.
     ``rollback=True`` coordinates local staging failures after completed gathers and before
     writeback collectives. Coordination-resource allocation or backend collective failures
     require the owner factory to terminate the distributed job rather than retry.
