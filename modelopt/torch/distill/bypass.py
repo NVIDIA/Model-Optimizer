@@ -69,6 +69,8 @@ def bypass(
         device_mesh: Caller-owned placement mesh, adopted by supported integrations.
             It determines the per-rank data-lane budget and TP/CP replication contract
             described above; use a data-lane sampler, rather than sharding across TP/CP.
+            TP DTensor boundary targets must be Replicate or sharded along the final
+            feature dimension; token/batch shards and partial sums refuse before replay.
 
     For HF PTQ, use
     :meth:`TransformersBypassAdapter.weight_patterns
