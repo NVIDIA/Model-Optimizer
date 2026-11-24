@@ -160,6 +160,8 @@ def plan_tp_input_quantizer_fields(quantizer, view, aliases, *, metadata_only=Fa
     if quantizer is None:
         return {}
     rowwise = view is not None and view.dim == 1 and view.size > 1
+    if not rowwise and getattr(quantizer, "_native_tp_activation_checkpoint", None) is not None:
+        raise ValueError("Replicated inputs cannot consume transported native TP fields.")
     if not isinstance(quantizer, TensorQuantizer):
         noop = isinstance(quantizer, SequentialQuantizer) and all(
             isinstance(member, TensorQuantizer)

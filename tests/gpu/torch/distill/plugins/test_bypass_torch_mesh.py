@@ -128,6 +128,7 @@ def _snapshot(model):
                 for name in (
                     "_native_tp_activation_layout",
                     "_native_tp_activation_fields",
+                    "_native_tp_activation_checkpoint",
                     "_quantizer_cache",
                     "_block_reshape_size",
                     "_original_shape",
@@ -945,7 +946,7 @@ def test_tied_static_weight_placement(bypass_cpu_workers, route, changed):
     bypass_cpu_workers.run(_tied_static_weight_worker, route, changed)
 
 
-def _activation_state_resume_worker(rank, size):
+def _activation_state_resume_worker(rank, size, static):
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
     assert size == 2
@@ -958,7 +959,11 @@ def _activation_state_resume_worker(rank, size):
                 {"quantizer_name": "*", "enable": False},
                 {
                     "quantizer_name": "*o_proj.input_quantizer",
-                    "cfg": {"num_bits": 8, "axis": -1, "enable": True},
+                    "cfg": {
+                        "num_bits": 8,
+                        **({"block_sizes": {-1: 16, "type": "static"}} if static else {"axis": -1}),
+                        "enable": True,
+                    },
                 },
             ],
             "algorithm": "max",
@@ -971,7 +976,7 @@ def _activation_state_resume_worker(rank, size):
         TransformersBypassAdapter(mesh).parallelize(model)
         expected = model(tokens).logits
     fields = {name: getattr(quantizer, name).clone() for name in ("_amax", "_pre_quant_scale")}
-    assert fields["_amax"].shape == (1, 1, 16)
+    assert fields["_amax"].shape == ((4, 1) if static else (1, 1, 16))
     assert quantizer._native_tp_activation_layout == (32, rank, 2, 1)
     shared = [mto.modelopt_state(model) if rank == 0 else None]
     dist.broadcast_object_list(shared, src=0)
@@ -996,15 +1001,44 @@ def _activation_state_resume_worker(rank, size):
     assert set(restored._native_tp_activation_fields) == set(fields)
     mode = next(
         mode
-        for _, mode in shared[0]["modelopt_state_dict"]
+        for _, mode in reversed(shared[0]["modelopt_state_dict"])
         if "quantizer_state" in mode["metadata"]
     )
     state = mode["metadata"]["quantizer_state"]["model.layers.0.self_attn.o_proj.input_quantizer"]
     assert "_native_tp_activation_layout" not in state
     assert "_native_tp_activation_fields" not in state
+    descriptor = state["_native_tp_activation_checkpoint"]
+    assert descriptor["layout"] == (32, 2, 1)
+    assert descriptor["fields"] == {name: tuple(value.shape) for name, value in fields.items()}
+
+    if static:
+        for failure in ("legacy", "malformed"):
+            candidate = mto.restore_from_modelopt_state(_tiny_model(), copy.deepcopy(shared[0]))
+            quantizer = candidate.model.layers[0].self_attn.o_proj.input_quantizer
+            quantizer.load_state_dict(restored.state_dict())
+            if rank == 1:
+                if failure == "legacy":
+                    del quantizer._native_tp_activation_checkpoint
+                else:
+                    quantizer._native_tp_activation_checkpoint["fields"]["_amax"] = (2, 1)
+            snapshot = _snapshot(candidate)
+            adapter = TransformersBypassAdapter(mesh)
+            adapter.context.parallel_metadata[id(candidate)] = {"previous": object()}
+            adapter.context.tp_quantizer_layouts[id(candidate)] = {"previous": object()}
+            context = [
+                (name, getattr(adapter.context, name), dict(getattr(adapter.context, name)))
+                for name in ("parallel_metadata", "tp_quantizer_layouts")
+            ]
+            with bounded_collectives(10), pytest.raises(ValueError):
+                adapter.parallelize(candidate)
+            _assert_unchanged(candidate, snapshot)
+            for name, mapping, previous in context:
+                assert getattr(adapter.context, name) is mapping
+                assert mapping == previous
 
 
+@pytest.mark.parametrize("static", [False, True])
 @pytest.mark.timeout(180)
-def test_activation_runtime_state_resume(bypass_cpu_workers):
+def test_activation_runtime_state_resume(bypass_cpu_workers, static):
     pytest.importorskip("transformers", minversion="5.23")
-    bypass_cpu_workers.run(_activation_state_resume_worker)
+    bypass_cpu_workers.run(_activation_state_resume_worker, static)
