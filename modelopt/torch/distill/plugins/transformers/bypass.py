@@ -273,6 +273,33 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         validate_unit_ownership(student, teacher, units)
         return units
 
+    def _batch_with_validity(self, batch):
+        documents = batch.get("_packed_seq_ids") if isinstance(batch, dict) else None
+        if documents is None:
+            return batch
+        tokens = batch.get("input_ids")
+        if (
+            not isinstance(documents, torch.Tensor)
+            or not isinstance(tokens, torch.Tensor)
+            or documents.shape != tokens.shape
+            or documents.ndim != 2
+            or documents.is_floating_point()
+            or documents.is_complex()
+            or bool((documents < 0).any())
+        ):
+            raise ValueError("Packed document IDs must be nonnegative integers matching input_ids")
+        if batch.get("valid_mask") is not None or batch.get("loss_mask") is not None:
+            return batch
+        # This HF-owned convention defines zero as padding, independently of 4D attention.
+        return {**batch, "valid_mask": documents.ne(0)}
+
+    def validate_batch(self, batch, config):
+        """Establish HF-owned packed validity before generic budget/mask preflight."""
+        if not isinstance(batch, dict):
+            raise ValueError("Transformers Bypass requires dict batches")
+        self._validate_text_batch(batch)
+        super().validate_batch(self._batch_with_validity(batch), config)
+
     def microbatches(self, batch, size):
         """Preserve [RoPE axes,batch,sequence] wrapper positions when slicing samples."""
         positions = batch.get("position_ids") if isinstance(batch, dict) else None
@@ -458,6 +485,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
 
     def teacher_microbatch(self, teacher, units, batch, consume):
         """Preserve independent document recurrence and stream each native boundary."""
+        batch = self._batch_with_validity(batch)
         self._validate_text_batch(batch)
         facts = self._facts(teacher)
         spec = facts.spec

@@ -61,12 +61,15 @@ def test_teacher_replay_caches_model_scans_without_changing_targets():
         "input_ids": torch.tensor([[1, 2, 3, 4]]),
         "_packed_seq_ids": torch.tensor([[1, 1, 2, 2]]),
     }
+    adapter.validate_batch(batch, mtd.BypassConfig(sequence_length=4))
     units = [BypassUnit("mlp", "mlp", "mlp")]
     targets = []
     for _ in range(2):
+        current = []
         adapter.teacher_microbatch(
-            teacher, units, batch, lambda _unit, record: targets.append(record.target)
+            teacher, units, batch, lambda _unit, record: current.append(record.target)
         )
+        targets.append(torch.cat(current))
         if len(targets) == 1:
             scans = teacher.scans, student.scans
     torch.testing.assert_close(targets[0], targets[1], rtol=0, atol=0)
@@ -106,6 +109,16 @@ def test_teacher_replay_caches_model_scans_without_changing_targets():
     finally:
         handle.remove()
     assert widths and set(widths) == {1}
+    packed_4d = {
+        **batch,
+        "attention_mask": torch.ones(1, 1, 4, 4, dtype=torch.bool).tril_(),
+    }
+    adapter.validate_batch(packed_4d, mtd.BypassConfig(sequence_length=4))
+    current = []
+    adapter.teacher_microbatch(
+        teacher, units, packed_4d, lambda _unit, record: current.append(record.target)
+    )
+    torch.testing.assert_close(torch.cat(current), targets[0], rtol=0, atol=0)
 
 
 def _quantize(model, batch, bits="iq1_m"):
@@ -211,8 +224,10 @@ def test_transformers_bypass_selection_and_prefix(bits, tmp_path):
             )
 
 
-@pytest.mark.parametrize("family", ["qwen3_next", "qwen3_vl_moe"])
-def test_transformers_packed_replay_matches_independent_documents(family):
+@pytest.mark.parametrize(
+    ("family", "loss_key"), [("qwen3_next", "valid_mask"), ("qwen3_vl_moe", "loss_mask")]
+)
+def test_transformers_packed_replay_matches_independent_documents(family, loss_key):
     from _test_utils.transformers_families import build_model, cases, hf_torch_kernels
 
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
@@ -229,12 +244,13 @@ def test_transformers_packed_replay_matches_independent_documents(family):
         "attention_mask": torch.ones_like(ids),
         "_packed_seq_ids": docs,
         "position_ids": positions,
+        loss_key: torch.arange(8).expand(2, -1).remainder(2).bool(),
     }
     adapter = TransformersBypassAdapter()
     with hf_torch_kernels(teacher):
         student = _quantize(
             copy.deepcopy(teacher),
-            {k: v for k, v in batch.items() if k != "_packed_seq_ids"},
+            {k: v for k, v in batch.items() if k not in ("_packed_seq_ids", loss_key)},
             "iq2_s",
         )
         units = adapter.resolve_units(student, teacher, mtd.BypassConfig())
@@ -252,6 +268,7 @@ def test_transformers_packed_replay_matches_independent_documents(family):
                     "input_ids": ids[row : row + 1, mask],
                     "attention_mask": torch.ones_like(ids[row : row + 1, mask]),
                     "position_ids": pos,
+                    loss_key: batch[loss_key][row : row + 1, mask],
                 }
                 adapter.teacher_microbatch(
                     teacher, units, item, lambda u, r: separate.append((u, r))

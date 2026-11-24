@@ -55,6 +55,8 @@ def bypass(
             Global Python/NumPy/CPU RNG and CUDA RNG on resident model devices are
             seeded and restored. Readers using other CUDA devices must own their
             generators; reader generators and worker state advance independently.
+            The HF adapter additionally derives default validity from ``_packed_seq_ids``:
+            zero denotes padding and positive IDs identify documents. Explicit loss masks win.
         config: A :class:`BypassConfig`, a dict, or None for the established defaults.
         validation_dataloader: Optional held-out batches for finalized-student valid-token MSE.
             Diagnostic failures propagate after committing training updates to the student.
