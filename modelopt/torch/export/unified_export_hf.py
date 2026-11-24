@@ -1779,7 +1779,12 @@ def _write_hf_export_config(
     original_config = f"{export_dir}/config.json"
     with open(original_config) as file:
         config_data = json.load(file)
-    source_config = _source_config_json(model)
+    # Read only when a restore can use it: transformers' layer-type remap, or a remote
+    # ``AutoConfig`` that may read the source's field names.
+    auto_map = config_data.get("auto_map")
+    has_auto_config = isinstance(auto_map, dict) and "AutoConfig" in auto_map
+    needs_source = has_auto_config or remap_legacy_layer_types is not None
+    source_config = _source_config_json(model) if needs_source else None
     if remap_legacy_layer_types is not None:
         # Before the sanitize step: it trims trailing MTP entries from layer_types, and the
         # restore only matches a list that is still exactly the remap of the source's.

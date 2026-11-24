@@ -182,20 +182,34 @@ def _sanitize_llama3_rope_config(config_data: dict[str, Any], model: Any) -> Non
             rope_config["rope_theta"] = rope_theta
 
 
+def _auto_config_target(auto_map: Any) -> str | None:
+    """The ``module.Class`` an ``auto_map`` names for ``AutoConfig``, without a ``<repo>--`` prefix.
+
+    A config loaded by Hub ID saves its ``auto_map`` with the repo prefixed; the source's
+    ``config.json`` names the same class without it.
+    """
+    target = auto_map.get("AutoConfig") if isinstance(auto_map, dict) else None
+    return target.rsplit("--", 1)[-1] if isinstance(target, str) else None
+
+
 def _restore_source_field_names(
     config_data: dict[str, Any], model_config: Any, source_config: Any
 ) -> None:
     """Write renamed top-level fields back under the names the source ``config.json`` used.
 
-    The export keeps the source's ``auto_map``, so a trusted reload builds the source's own config
-    class, which reads the source's field names. The class the export loaded with can rename them:
-    transformers' built-in ``nemotron_h_omni`` stores the source's ``llm_config`` as
-    ``text_config``, which the checkpoint's own class exposes only as a read-only property, so the
-    reload fails -- and renamed fields it does accept would silently fall back to their defaults.
+    Only when the export keeps the source's own ``AutoConfig``: a trusted reload then builds the
+    source's config class, which reads the source's field names. The class the export loaded with
+    can rename them: transformers' built-in ``nemotron_h_omni`` stores the source's ``llm_config``
+    as ``text_config``, which the checkpoint's own class exposes only as a read-only property, so
+    the reload fails -- and renamed fields it does accept would silently fall back to their
+    defaults. An export that names a different ``AutoConfig`` reads its own names, so it is left
+    alone.
     """
-    auto_map = config_data.get("auto_map")
-    if not isinstance(source_config, dict) or not (
-        isinstance(auto_map, dict) and "AutoConfig" in auto_map
+    target = _auto_config_target(config_data.get("auto_map"))
+    if (
+        not isinstance(source_config, dict)
+        or target is None
+        or target != _auto_config_target(source_config.get("auto_map"))
     ):
         return
     renames = {
@@ -212,35 +226,8 @@ def _restore_source_field_names(
             config_data[source_name] = config_data.pop(name)
 
 
-def sanitize_hf_config_for_deployment(
-    config_data: dict[str, Any], model: Any, source_config: dict[str, Any] | None = None
-) -> None:
-    """Sanitize exported Hugging Face config metadata for deployment runtimes.
-
-    Fix conservative deployment-only config incompatibilities:
-
-    * remove legacy config/model auto mappings from native NemotronH exports;
-    * write fields the loaded config class renamed back under the names ``source_config`` (the
-      source checkpoint's ``config.json``) used, when the export keeps the source's remote
-      ``AutoConfig``;
-    * add missing llama3 ``rope_theta`` metadata when available;
-    * trim trailing MTP/next-token-prediction ``layer_types`` entries only when
-      the mismatch is exactly explained by next-token-prediction metadata.
-    """
-    model_config = getattr(model, "config", None)
-    auto_map = config_data.get("auto_map")
-    if isinstance(auto_map, dict) and type(model_config).__module__.startswith(
-        "transformers.models.nemotron_h."
-    ):
-        # The native schema cannot reload through the source's legacy read-only config.
-        for auto_class in ("AutoConfig", "AutoModel", "AutoModelForCausalLM"):
-            auto_map.pop(auto_class, None)
-        if not auto_map:
-            config_data.pop("auto_map")
-    _restore_source_field_names(config_data, model_config, source_config)
-
-    _sanitize_llama3_rope_config(config_data, model)
-
+def _trim_nextn_layer_types(config_data: dict[str, Any], model: Any) -> None:
+    """Trim trailing ``layer_types`` entries exactly explained by next-token-prediction layers."""
     num_hidden_layers = _as_nonnegative_int(config_data.get("num_hidden_layers"))
     layer_types = config_data.get("layer_types")
     if num_hidden_layers is None or not isinstance(layer_types, list):
@@ -263,6 +250,37 @@ def sanitize_hf_config_for_deployment(
             stacklevel=2,
         )
         config_data["layer_types"] = layer_types[:num_hidden_layers]
+
+
+def sanitize_hf_config_for_deployment(
+    config_data: dict[str, Any], model: Any, source_config: dict[str, Any] | None = None
+) -> None:
+    """Sanitize exported Hugging Face config metadata for deployment runtimes.
+
+    Fix conservative deployment-only config incompatibilities:
+
+    * remove legacy config/model auto mappings from native NemotronH exports;
+    * add missing llama3 ``rope_theta`` metadata when available;
+    * trim trailing MTP/next-token-prediction ``layer_types`` entries only when
+      the mismatch is exactly explained by next-token-prediction metadata;
+    * write fields the loaded config class renamed back under the names ``source_config`` (the
+      source checkpoint's ``config.json``) used, when the export keeps the source's remote
+      ``AutoConfig``.
+    """
+    model_config = getattr(model, "config", None)
+    auto_map = config_data.get("auto_map")
+    if isinstance(auto_map, dict) and type(model_config).__module__.startswith(
+        "transformers.models.nemotron_h."
+    ):
+        # The native schema cannot reload through the source's legacy read-only config.
+        for auto_class in ("AutoConfig", "AutoModel", "AutoModelForCausalLM"):
+            auto_map.pop(auto_class, None)
+        if not auto_map:
+            config_data.pop("auto_map")
+    _sanitize_llama3_rope_config(config_data, model)
+    _trim_nextn_layer_types(config_data, model)
+    # Last, so the fixes above read the names the loaded class uses.
+    _restore_source_field_names(config_data, model_config, source_config)
 
 
 def _is_hf_hub_offline() -> bool:
