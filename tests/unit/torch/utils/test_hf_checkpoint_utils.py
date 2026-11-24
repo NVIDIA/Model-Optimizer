@@ -303,6 +303,8 @@ def test_export_config_keeps_source_field_names_for_source_auto_map(tmp_path, re
     config reads, where the renamed one is a read-only property.
     """
     transformers = pytest.importorskip("transformers")
+    # Optional dependency: imported after the transformers skip, so installs without the HF
+    # extras (CI's partial-install job) skip this test instead of loading the HF exporter.
     from modelopt.torch.export.unified_export_hf import (
         _write_hf_export_config,
         save_non_weight_artifacts,
