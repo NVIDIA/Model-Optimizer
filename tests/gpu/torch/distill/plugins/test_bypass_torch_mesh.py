@@ -148,7 +148,13 @@ def _torch_mesh_state_worker(rank, size, route, state):
     with bounded_collectives(10):
         assert adapter.parallelize(model) is model
     assert isinstance(model.model.layers[0].self_attn.q_proj.weight, DTensor)
-    if state == "prepared_fresh" and rank == 1:
+    if state == "adopt_missing" and rank == 1:
+        delattr(model, "_mesh_manager" if route == "native" else "_modelopt_bypass_torch_mesh")
+    elif state == "adopt_wrong_mesh":
+        other = DeviceMesh.from_group(_mesh_group(), "cpu", mesh_dim_names=("tp",))
+        if rank == 1:
+            model._modelopt_bypass_torch_mesh = other
+    elif state == "adopt_fresh" or (state == "prepared_fresh" and rank == 1):
         model = _tiny_model()
     elif state == "marker_loss" and rank == 1:
         del model._modelopt_bypass_placement
@@ -170,14 +176,19 @@ def _torch_mesh_state_worker(rank, size, route, state):
     error = None
     with bounded_collectives(10):
         try:
-            assert adapter.parallelize(model) is model
+            if state.startswith("adopt_"):
+                assert adapter.adopt(model) is None
+                if state == "adopt_reentry":
+                    assert adapter.adopt(model) is None
+            else:
+                assert adapter.parallelize(model) is model
         except Exception as exc:
             error = (type(exc).__name__, str(exc))
     # Keep result collection independent of a failed placement/validation subgroup.
     errors = [None] * size
     dist.all_gather_object(errors, error)
     _assert_unchanged(model, snapshot)
-    if state == "reentry":
+    if state in ("reentry", "adopt_reentry"):
         assert errors == [None, None], errors
         if route == "native":
             assert id(model) in adapter.context.parallel_metadata
@@ -196,7 +207,13 @@ def _torch_mesh_state_worker(rank, size, route, state):
         for route in ("raw", "native")
         for state in ("prepared_fresh", "reentry", "mesh_policy")
     ]
-    + [("native", "marker_loss"), ("native", "adopted_fresh")],
+    + [("native", "marker_loss"), ("native", "adopted_fresh")]
+    + [
+        (route, state)
+        for route in ("raw", "native")
+        for state in ("adopt_missing", "adopt_reentry")
+    ]
+    + [("raw", "adopt_wrong_mesh"), ("native", "adopt_fresh")],
 )
 @pytest.mark.timeout(180)
 def test_torch_mesh_placement_state_is_collective(bypass_cpu_workers, route, state):

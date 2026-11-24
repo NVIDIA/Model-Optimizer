@@ -157,20 +157,23 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         return model
 
     def adopt(self, model):
-        """Validate already realized placement without installing another set of hooks."""
+        """Collectively validate realized placement without installing another set of hooks."""
         if self.context is None:
             return
+        from .parallel import _synchronize_validation
+
+        error = None
         if self.context.mesh_manager is not None:
             if not getattr(model, "_mesh_manager", None) and self.context.device_mesh.size() > 1:
-                raise ValueError(
-                    "Prepare IQ placement with TransformersBypassAdapter.parallelize first"
-                )
-            self.parallelize(model)
+                error = "Prepare IQ placement with TransformersBypassAdapter.parallelize first"
         elif (
             getattr(model, "_modelopt_bypass_torch_mesh", None) is not self.device_mesh
             and self.context.device_mesh.size() > 1
         ):
-            raise ValueError("Already placed Torch models must use their exact caller-owned mesh")
+            error = "Already placed Torch models must use their exact caller-owned mesh"
+        _synchronize_validation(self.context, error)
+        if self.context.mesh_manager is not None:
+            self.parallelize(model)
 
     def _provider(self, model):
         spec = _model_spec(model)
