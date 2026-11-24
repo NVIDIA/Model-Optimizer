@@ -247,6 +247,7 @@ Changelog
 - Fix BF16-to-FP8 ONNX export with ``ml_dtypes`` 0.7.0 producing NaN FP8 weights for very small convolution weights.
 - Fix AutoCast turning FP64 initializers and ``Constant`` values that exceed the FP32 range into infinities. They are now clamped to the largest FP32 value and the affected tensor is named in a warning.
 - Fix AutoCast flipping the sign of an initializer value too small for the target precision; such values now keep their sign.
+- ONNX PTQ can use CPU calibration when TensorRT is installed but cannot initialize a CUDA device. Models requiring TensorRT plugins still require a usable TensorRT runtime.
 
 *Speculative Decoding*
 
