@@ -1858,20 +1858,13 @@ def _source_config_json(model: nn.Module) -> Any:
     """The source checkpoint's ``config.json`` as parsed, or ``{}`` if it cannot be read.
 
     Read through ``resolve_checkpoint_file``, which keeps the file inside the checkpoint directory
-    and bounds its size. A Hub snapshot's files link into the repo's ``blobs/``, also for a
-    ``subfolder`` checkpoint, so the snapshot is the directory the read is contained in.
+    and bounds its size.
     """
     ckpt = _source_checkpoint(model)
-    if not ckpt:
-        return {}
-    root, name = Path(ckpt), Path("config.json")
-    for parent in root.parents:
-        if parent.parent.name == "snapshots":
-            root, name = parent, root.relative_to(parent) / name
-            break
     # RuntimeError: a symlink loop on Python < 3.13, and the RecursionError of a deeply nested file.
     with contextlib.suppress(OSError, ValueError, RuntimeError):
-        return json.loads(resolve_checkpoint_file(root, name).read_text())
+        if ckpt:
+            return json.loads(resolve_checkpoint_file(Path(ckpt), "config.json").read_text())
     return {}
 
 
@@ -2111,7 +2104,11 @@ def _source_distributed_config_attrs(model: nn.Module):
     that cannot be read counts as having none. The run's values come back on exit, since the
     sharded model still reads them (transformers' ``tp_plan`` checks ``distributed_config``).
     """
-    source = _source_config_json(model)
+    source: Any = {}
+    ckpt = _source_checkpoint(model)
+    if ckpt and Path(ckpt, "config.json").is_file():
+        with contextlib.suppress(OSError, ValueError):
+            source = json.loads(Path(ckpt, "config.json").read_text())
 
     _missing = object()
     saved: list[tuple[Any, str, Any]] = []

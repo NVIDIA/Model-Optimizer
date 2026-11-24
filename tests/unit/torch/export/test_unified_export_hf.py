@@ -1153,11 +1153,9 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
     assert config.text_config.base_model_ep_plan is swapped_plan
 
 
-@pytest.mark.parametrize("hub_subfolder", [False, True], ids=["local", "hub_subfolder"])
-def test_export_config_restores_what_transformers_renamed_on_load(tmp_path, hub_subfolder):
+def test_export_config_restores_what_transformers_renamed_on_load(tmp_path):
     """transformers 5.18 renames deepseek_sparse_attention to indexed_attention when it loads a
-    config; the export keeps the names the source checkpoint ships, which runtimes validate. A
-    Hub subfolder checkpoint links its config.json into the repo's blobs/."""
+    config; the export keeps the names the source checkpoint ships, which runtimes validate."""
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.18"):
         pytest.skip("this transformers does not rename deepseek_sparse_attention")
@@ -1168,18 +1166,11 @@ def test_export_config_restores_what_transformers_renamed_on_load(tmp_path, hub_
         "layer_types": names,
         "mlp_layer_types": ["dense", "sparse"],
     }
-    config_json = json.dumps({"model_type": "glm5_next", "text_config": text})
-    if hub_subfolder:
-        (tmp_path / "blobs").mkdir()
-        (tmp_path / "blobs" / "sha").write_text(config_json)
-        source = tmp_path / "snapshots" / "rev" / "sub"
-        source.mkdir(parents=True)
-        (source / "config.json").symlink_to("../../../blobs/sha")
-    else:
-        source = tmp_path / "source"
-        source.mkdir()
-        (source / "config.json").write_text(config_json)
-    export = tmp_path / "export"
+    source, export = tmp_path / "source", tmp_path / "export"
+    source.mkdir()
+    (source / "config.json").write_text(
+        json.dumps({"model_type": "glm5_next", "text_config": text})
+    )
     config = transformers.AutoConfig.from_pretrained(source)
     config.save_pretrained(export)
     assert json.loads((export / "config.json").read_text())["text_config"]["layer_types"] == [
