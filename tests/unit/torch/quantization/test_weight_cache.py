@@ -330,3 +330,25 @@ def test_pinned_native_weights_preserve_backward_policy(policy):
     actual_output.sum().backward()
     expected_output.sum().backward()
     torch.testing.assert_close(source.grad, expected.grad, rtol=0, atol=0)
+
+
+def test_pinned_native_scales_are_live_codec_fields():
+    from modelopt.torch.quantization.utils.native_weight import dequantize_pinned_native
+
+    model = _quantized_mlp(num_bits=(4, 3))
+    q, source = model[0].weight_quantizer, model[0].weight
+    native, scale = FP8QTensor.quantize(source.detach(), axis=0)
+    q._set_buffer("_scale", scale)
+    pin_native_weight(q, native, source)
+    original = q(source).detach().clone()
+    q._scale.mul_(0.5)
+    q._amax.mul_(2)
+    pinned = get_pinned_native_weight(q, source)
+    assert pinned is not None
+    expected = dequantize_pinned_native(q, pinned, source.dtype)
+    torch.testing.assert_close(q(source), expected, rtol=0, atol=0)
+    torch.testing.assert_close(q(source), original * 0.5, rtol=0, atol=0)
+    # Update the logical master and re-pin after changing native scales.
+    updated = expected.detach().clone().requires_grad_()
+    pin_native_weight(q, pinned, updated)
+    torch.testing.assert_close(q(updated), updated, rtol=0, atol=0)

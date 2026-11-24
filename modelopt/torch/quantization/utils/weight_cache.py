@@ -258,6 +258,17 @@ def _pinned_native_value(quantizer, inputs, source):
             if quantizer.is_static_block_quant:
                 value = quantizer._process_for_blockquant(value)
             return value.reshape(inputs.shape)
+    meta = getattr(quantizer, "_native_weight_meta", None)
+    if (
+        meta
+        and meta.get("native_scale_buffers")
+        and getattr(quantizer, "_amax", None) is None
+        and not quantizer._use_constant_amax
+        and not getattr(quantizer, "_local_repair_active", False)
+    ):
+        raise ValueError(
+            "Native pin no longer applies; calibrate thresholds before fake-quant fallback."
+        )
     return None
 
 
