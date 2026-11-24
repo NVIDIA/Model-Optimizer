@@ -553,8 +553,39 @@ def _validate_rowwise_activation_statistics(quantizer, view, blocks, channel_blo
     )
 
 
+def _activation_checkpoint_fields(quantizer, view, blocks):
+    checkpoint = getattr(quantizer, "_native_tp_activation_checkpoint", None)
+    if checkpoint is None:
+        return None
+    if (
+        not isinstance(checkpoint, dict)
+        or checkpoint.keys() != {"layout", "fields", "block_sizes"}
+        or not isinstance(checkpoint["layout"], tuple)
+        or not all(type(dim) is int for dim in checkpoint["layout"])
+        or checkpoint["layout"] != (view.shape[-1], view.size, view.split_factor)
+        or checkpoint["block_sizes"] != blocks
+        or not isinstance(checkpoint["fields"], dict)
+        or not checkpoint["fields"]
+        or not checkpoint["fields"].keys()
+        <= {"_amax", "_global_amax", "_pre_quant_scale", "_bias_value"}
+    ):
+        raise ValueError("Native TP activation checkpoint layout is incompatible with this view.")
+    fields = {}
+    for name, shape in checkpoint["fields"].items():
+        value = getattr(quantizer, name, None)
+        if (
+            not isinstance(shape, tuple)
+            or not all(type(dim) is int for dim in shape)
+            or not isinstance(value, torch.Tensor)
+            or tuple(value.shape) != shape
+        ):
+            raise ValueError("Native TP activation checkpoint fields do not match their shapes.")
+        fields[name] = value
+    return fields
+
+
 def activation_partition(quantizer, view):
-    """Keep calibrated input-channel fields aligned with a row-parallel weight."""
+    """Align row-parallel input fields; legacy flattened blocks require original geometry."""
     if view.dim != 1 or view.size == 1:
         return {}
     blocks = quantizer.block_sizes or {}
@@ -570,12 +601,15 @@ def activation_partition(quantizer, view):
     _validate_rowwise_activation_statistics(quantizer, view, blocks, channel_block)
     layout = (view.shape[-1], view.rank, view.size, view.split_factor)
     previous = getattr(quantizer, "_native_tp_activation_layout", None)
+    checkpoint_fields = _activation_checkpoint_fields(quantizer, view, blocks)
     if previous is not None:
         if previous != layout:
             raise ValueError(
                 "Restore full calibrated activation fields before changing their TP layout."
             )
         return {}
+    if checkpoint_fields is not None:
+        return {**checkpoint_fields, "_native_tp_activation_layout": layout}
     fields = {}
     for name in ("_amax", "_global_amax", "_pre_quant_scale", "_bias_value"):
         value = getattr(quantizer, name, None)
@@ -591,7 +625,16 @@ def activation_partition(quantizer, view):
         elif value.shape[-1] == view.local_shape[-1]:
             fields[name] = value
         elif name == "_amax" and channel_block and quantizer.is_static_block_quant:
-            if original_shape and original_shape[-1] == view.local_shape[-1]:
+            # Full and local checkpoint maxima can both be flattened to (blocks, 1).
+            if not original_shape or original_shape[-1] not in (
+                view.shape[-1],
+                view.local_shape[-1],
+            ):
+                raise ValueError(
+                    "Ambiguous static activation blocks require original calibration geometry "
+                    "or a native TP activation checkpoint layout; restore or recalibrate them."
+                )
+            if original_shape[-1] == view.local_shape[-1]:
                 fields[name] = value
                 continue
             view.intervals(channel_block)
@@ -614,5 +657,10 @@ def activation_partition(quantizer, view):
                 "Calibrated TP activation fields do not match the input-channel shard."
             )
     if fields:
+        fields["_native_tp_activation_checkpoint"] = {
+            "layout": (view.shape[-1], view.size, view.split_factor),
+            "fields": {name: tuple(value.shape) for name, value in fields.items()},
+            "block_sizes": copy.deepcopy(blocks),
+        }
         fields["_native_tp_activation_layout"] = layout
     return fields
