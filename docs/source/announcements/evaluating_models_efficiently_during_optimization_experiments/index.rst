@@ -321,12 +321,14 @@ for the SciCode analysis and the MMLU-Pro accuracy example.
 Test known weaknesses on a focused subset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Freeze a subset from earlier baseline failures to screen for targeted improvements. Our focused
-subset uses 11 held-out subtasks × 10 repetitions (110 responses per model). For comparison, the
-SciCode row shows the broader evaluation: 294 subtasks × 20 repetitions (5,880 responses per model).
+Freeze a subset from earlier baseline failures to screen for targeted improvements. On SciCode,
+we identified 55 subtasks with earlier Baseline failures, used 44 for training, and held out 11
+for validation. The focused evaluation used those 11 subtasks × 10 repetitions (110 responses
+per model), compared with 294 subtasks × 20 repetitions (5,880 responses per model) in the
+broader evaluation. As intended, Baseline’s cap-hit rate was higher on the focused subset
+(10.91%, compared with 1.29% in the broader evaluation).
 
-“Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05); “no evidence” means a lower
-rate was not established.
+“Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05).
 
 +----------------+---------------+---------------+---------------+---------------+---------------+
 | Benchmark      | Baseline cap  | Candidate cap | Difference    | Candidate     | Candidate     |
@@ -334,9 +336,6 @@ rate was not established.
 |                |               |               |               | p-value       | p-value       |
 |                |               |               |               |               | (context)     |
 +================+===============+===============+===============+===============+===============+
-| SciCode        | 1.29%         | 0.00%         | −1.29 [−1.70, | <0.001 — yes  | 1.000         |
-|                | (76/5,880)    | (0/5,880)     | −0.92]        |               |               |
-+----------------+---------------+---------------+---------------+---------------+---------------+
 | Focused subset | 10.91%        | 0.00% (0/110) | −10.91        | 0.004 — yes   | 1.000         |
 |                | (12/110)      |               | [−18.18,      |               |               |
 |                |               |               | −5.45]        |               |               |
