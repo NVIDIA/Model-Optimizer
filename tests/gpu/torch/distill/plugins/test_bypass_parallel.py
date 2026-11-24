@@ -221,8 +221,11 @@ def _validation_refusal_worker(rank, size, problem):
         lambda model: model(batch),
     )
     before = copy.deepcopy(student.state_dict())
-    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("cp",))
+    axis = "dp" if problem == "global_batch" else "cp"
+    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=(axis,))
     recipe = {"num_steps": 1, "global_batch_size": 2, "sequence_length": 4}
+    if problem == "global_batch" and rank == 0:
+        recipe["global_batch_size"] = 1
     if problem in ("iterator", "length", "advance", "microbatches"):
         reference = copy.deepcopy(student)
         mtd.bypass(reference, copy.deepcopy(teacher), [batch], recipe, device_mesh=mesh)
@@ -250,7 +253,7 @@ def _validation_refusal_worker(rank, size, problem):
 
     validation = None if problem == "presence" and rank == 1 else Validation()
     try:
-        with bounded_collectives(seconds=10), pytest.raises(ValueError):
+        with bounded_collectives(seconds=10), pytest.raises(ValueError) as refusal:
             mtd.bypass(
                 student,
                 teacher,
@@ -259,6 +262,10 @@ def _validation_refusal_worker(rank, size, problem):
                 validation_dataloader=validation,
                 device_mesh=mesh,
             )
+        if problem == "global_batch":
+            errors = [None] * size
+            dist.all_gather_object(errors, str(refusal.value), group=group)
+            assert len(set(errors)) == 1
         assert all(torch.equal(value, before[name]) for name, value in student.state_dict().items())
         assert not any("_local_repair_state" in name for name in student.state_dict())
     finally:
@@ -268,7 +275,16 @@ def _validation_refusal_worker(rank, size, problem):
 @pytest.mark.timeout(180)
 @pytest.mark.parametrize(
     "problem",
-    ["presence", "iterator", "length", "advance", "microbatches", "train_advance", "resolve"],
+    [
+        "presence",
+        "iterator",
+        "length",
+        "advance",
+        "microbatches",
+        "train_advance",
+        "resolve",
+        "global_batch",
+    ],
 )
 def test_distributed_bypass_refuses_unequal_validation(bypass_cpu_workers, problem):
     timeout = bypass_cpu_workers.job_timeout
