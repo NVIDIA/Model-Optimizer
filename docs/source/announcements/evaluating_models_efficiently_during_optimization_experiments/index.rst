@@ -24,8 +24,12 @@ waste time? How many questions and repetitions do you need to measure improvemen
 regressions?
 
 This article helps you evaluate models quickly and reliably during optimization experiments.
-We illustrate these guidelines using real evaluation results from two NVFP4 Qwen3.6-35B-A3B
-checkpoints.
+We use SciCode as the main worked example, comparing two NVFP4 Qwen3.6-35B-A3B checkpoints to
+test whether applying Kahneman–Tversky Optimization (KTO) to the baseline reduces reasoning
+loops while preserving accuracy.
+See how we apply these guidelines in practice across a broader set of benchmarks in the
+`KTO tutorial
+<https://github.com/NVIDIA/Model-Optimizer/blob/13ad0ef401ec5e4480abd1b8eb236ccdf50ef802/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/kto/README.md>`__.
 
 For standardized evaluation and acceptance checks before releasing optimized models, follow the
 `ModelOpt evaluation
@@ -56,13 +60,6 @@ examples <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/llm_eval/
 
 What should you measure, and how?
 ---------------------------------
-
-We illustrate these guidelines in practice by comparing two NVFP4 Qwen3.6-35B-A3B checkpoints
-to test whether applying Kahneman–Tversky Optimization (KTO) to the baseline reduces reasoning
-loops while preserving accuracy. See the :doc:`reproducibility notes <reproducibility/index>` for checkpoint details.
-See how we apply these guidelines in practice across a broader set of benchmarks in the
-`KTO tutorial
-<https://github.com/NVIDIA/Model-Optimizer/blob/13ad0ef401ec5e4480abd1b8eb236ccdf50ef802/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/kto/README.md>`__.
 
 Choose a primary improvement metric before inspecting results. Prefer Candidate if it improves that
 metric and meets your non-inferiority criteria for the others. Regressions highlight areas to improve.
@@ -97,15 +94,11 @@ was not established.
 |                |          |           | CI], pp          | higher, p-value  | p-value          |
 |                |          |           |                  |                  | (context)        |
 +================+==========+===========+==================+==================+==================+
-| MMLU-Pro       | 84.51%   | 84.26%    | −0.26 [−0.61,    | 0.920 — no       | 0.080            |
-|                |          |           | +0.10]           | evidence         |                  |
-+----------------+----------+-----------+------------------+------------------+------------------+
 | SciCode        | 43.52%   | 44.90%    | +1.38 [+0.08,    | 0.019 — yes      | 0.981            |
 |                |          |           | +2.67]           |                  |                  |
 +----------------+----------+-----------+------------------+------------------+------------------+
 
 On SciCode, the candidate is more accurate than the baseline (+1.38 pp; p = 0.019).
-MMLU-Pro shows “no evidence” because its p-value of 0.920 exceeds the 0.05 threshold.
 
 Check for regressions
 ~~~~~~~~~~~~~~~~~~~~~
@@ -159,7 +152,7 @@ Reproducibility Notes for details.
 Doomed reasoning loops
 ^^^^^^^^^^^^^^^^^^^^^^
 
-The candidate has fewer cap hits on both SciCode and AA-Omniscience (p < 0.001).
+The candidate has fewer cap hits on SciCode (p < 0.001).
 “Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05); “no evidence” means a lower
 rate was not established.
 
@@ -169,14 +162,8 @@ rate was not established.
 |                |               |               |               | p-value       | p-value       |
 |                |               |               |               |               | (context)     |
 +================+===============+===============+===============+===============+===============+
-| MMLU-Pro       | 0.05%         | 0.03%         | −0.02 [−0.07, | 0.244 — no    | 0.878         |
-|                | (10/20,000)   | (6/20,000)    | +0.02]        | evidence      |               |
-+----------------+---------------+---------------+---------------+---------------+---------------+
 | SciCode        | 1.29%         | 0.00%         | −1.29 [−1.70, | <0.001 — yes  | 1.000         |
 |                | (76/5,880)    | (0/5,880)     | −0.92]        |               |               |
-+----------------+---------------+---------------+---------------+---------------+---------------+
-| AA-Omniscience | 1.77%         | 0.85%         | −0.92 [−1.38, | <0.001 — yes  | 1.000         |
-|                | (106/6,000)   | (51/6,000)    | −0.48]        |               |               |
 +----------------+---------------+---------------+---------------+---------------+---------------+
 
 .. tip::
@@ -231,19 +218,12 @@ as accuracy. “Yes” means evidence of shorter Candidate completions on averag
 |                | median      | median      | median, %   | tokens      | p-value     | p-value     |
 |                |             |             |             |             |             | (context)   |
 +================+=============+=============+=============+=============+=============+=============+
-| MMLU-Pro       | 2,803 /     | 2,759 /     | −1.6% /     | −44 [−99,   | 0.057 — no  | 0.943       |
-|                | 2,157       | 2,145       | −0.6%       | +11]        | evidence    |             |
-+----------------+-------------+-------------+-------------+-------------+-------------+-------------+
 | SciCode        | 6,188 /     | 3,048 /     | −50.7% /    | −3,140      | <0.001 —    | 1.000       |
 |                | 3,205       | 1,802       | −43.8%      | [−3,666,    | yes         |             |
 |                |             |             |             | −2,614]     |             |             |
 +----------------+-------------+-------------+-------------+-------------+-------------+-------------+
-| AA-Omniscience | 4,280 /     | 3,097 /     | −27.6% /    | −1,183      | <0.001 —    | 1.000       |
-|                | 1,756       | 1,705       | −2.9%       | [−1,764,    | yes         |             |
-|                |             |             |             | −602]       |             |             |
-+----------------+-------------+-------------+-------------+-------------+-------------+-------------+
 
-The candidate uses fewer tokens on average on SciCode and AA-Omniscience (p < 0.001).
+The candidate uses fewer tokens on average on SciCode (p < 0.001).
 
 How can you evaluate faster?
 ----------------------------
@@ -286,10 +266,9 @@ estimates at the same response budget. The plot shows how much accuracy varied a
    :alt: Mean Candidate accuracy on SciCode with shading showing one observed standard deviation on either side of the mean. At 280 responses per model, the estimate varies less with more subtasks and fewer repetitions.
    :width: 720px
 
-More subtasks with fewer repetitions also gave a more consistent estimate of the SciCode
-cap-hit-rate difference. For the accuracy difference between checkpoints, more questions
-helped on SciCode and more repetitions helped slightly on MMLU-Pro. The choice of analysis level
-can depend on the benchmark and metric. See the
+More subtasks with fewer repetitions also gave more consistent estimates of the SciCode
+cap-hit-rate and accuracy differences between checkpoints. The choice of analysis level can
+depend on the benchmark and metric. See the
 :ref:`ablation plots and analysis <evaluation-accuracy-differences>` in the Reproducibility Notes.
 
 .. _evaluation-collect-data:
