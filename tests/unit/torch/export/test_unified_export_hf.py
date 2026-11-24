@@ -1159,7 +1159,9 @@ def test_export_config_keeps_the_source_layer_type_names(tmp_path, monkeypatch):
     monkeypatch.setattr(
         unified_export_hf,
         "remap_legacy_layer_types",
-        lambda types: ["indexed_attention" if t == "deepseek_sparse_attention" else t for t in types],
+        lambda types: [
+            "indexed_attention" if t == "deepseek_sparse_attention" else t for t in types
+        ],
     )
     source, export = tmp_path / "source", tmp_path / "export"
     source.mkdir()
