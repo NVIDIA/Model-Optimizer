@@ -316,6 +316,20 @@ class TestMSECalibrator:
         # amax should be closer to 255
         assert (amax - 255.0).abs() < (amax - 256.0).abs()
 
+    @pytest.mark.parametrize("num_bits", [8, (4, 3)])
+    def test_gaussian(self, num_bits):
+        # MSE calibration of a Gaussian clips only the far tail, so amax must stay close to
+        # max|x| for both INT8 and FP8 E4M3 (and not collapse to the first candidate bin).
+        torch.manual_seed(0)
+        x = torch.randn(100_000)
+        calibrator = calib.HistogramCalibrator(num_bits, None, False, num_bins=256)
+        calibrator.collect(x)
+
+        amax = calibrator.compute_amax("mse", start_bin=16)
+
+        x_max = x.abs().max()
+        assert 0.7 * x_max < amax <= x_max
+
     def test_repr(self):
         calibrator = calib.HistogramCalibrator(8, None, False)
         repr(calibrator)
