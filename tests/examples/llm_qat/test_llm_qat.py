@@ -26,6 +26,7 @@ from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 from datasets import load_from_disk
 from safetensors.torch import load_file
+from transformers import AutoTokenizer
 
 REPO = Path(__file__).resolve().parents[3]
 README = REPO / "examples/llm_qat/README.md"
@@ -341,6 +342,14 @@ def test_qwen3_qlora_nvfp4(tiny_qwen3_path, dataset_cache_dir, tmp_path):
     base_model_dir = export_dir / "base_model"
     assert (export_dir / "adapter_model.safetensors").is_file()
     assert (base_model_dir / "hf_quant_config.json").is_file()
+
+    # Without a tokenizer, transformers silently builds a near-empty one that encodes prompts to [].
+    prompt = "The quick brown fox jumps over the lazy dog."
+    expected_ids = AutoTokenizer.from_pretrained(tiny_qwen3_path).encode(
+        prompt, add_special_tokens=False
+    )
+    exported = AutoTokenizer.from_pretrained(base_model_dir, local_files_only=True)
+    assert expected_ids and exported.encode(prompt, add_special_tokens=False) == expected_ids
 
     with open(base_model_dir / "hf_quant_config.json") as f:
         assert json.load(f)["quantization"]["quant_algo"] == "NVFP4"
