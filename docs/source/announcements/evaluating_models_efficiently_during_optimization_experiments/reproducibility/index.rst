@@ -45,7 +45,7 @@ Statistical methods
   For differences in pp, the t statistic is ``(mean_difference + margin) / standard_error``, using
   the upper tail of the t distribution. For SciCode, estimate the standard error across parent
   problems with degrees of freedom equal to the number of parent problems minus one.
-  
+
 - **Cap-hit rates:** calculate two-sided 95% paired-bootstrap
   confidence intervals by sampling with replacement, using whole parent problems for SciCode
   cap hits. Keep all repetitions and both models together within each sampled group. The
@@ -67,11 +67,9 @@ Statistical methods
   compare mean lengths.
 
 The SciCode accuracy and cap-hit tables use 50,000 bootstrap resamples and 50,000 random swap
-patterns with a plus-one correction (seed ``2026111800``). The data-volume example uses the same
-bootstrap and exact permutation p-values.
-
-Each test uses p < 0.05. We do not make that threshold stricter because other metrics were also
-tested. Reverse-direction p-values provide context only.
+patterns. The p-value is ``(extreme swaps + 1) / (total swaps + 1)``, counting swaps that give a
+difference at least as extreme as the observed one in the tested direction. The SciCode cap-hit
+plot uses the same bootstrap and exact permutation p-values.
 
 .. _evaluation-fixed-response-budgets:
 
@@ -86,7 +84,7 @@ Each score uses 280 responses per model.
 
 We shuffle the sorted IDs of the 294 eligible SciCode subtasks with seed ``20261124``. The
 fixed-budget analyses use the first 280 subtasks in that order to allow exact grouping
-across 1, 2, 4, and 8 repetitions. The data-volume analysis uses prefixes of the same
+across 1, 2, 4, and 8 repetitions. The SciCode cap-hit plot uses prefixes of the same
 order. The dotted reference in the SciCode accuracy plot uses all 294 subtasks with
 eight repetitions.
 
@@ -108,7 +106,7 @@ Both methods test whether Candidate has a lower cap-hit rate, using identical re
 then subtract Baseline's average from Candidate's. Sum these paired differences within each parent
 problem. To calculate the exact `paired permutation p-value
 <https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html>`__ for
-the data-volume example, swap the models' results for each whole parent problem or leave them
+the SciCode cap-hit plot, swap the models' results for each whole parent problem or leave them
 unchanged, keeping all subtasks and repetitions together. The p-value is the fraction of possible
 swaps giving a mean difference across subtasks equal to or lower than the observed difference,
 including ties.

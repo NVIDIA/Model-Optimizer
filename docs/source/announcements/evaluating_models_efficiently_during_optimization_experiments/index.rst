@@ -220,9 +220,12 @@ Is question-level analysis reliable on real benchmarks compared with repetition-
 We compare the two approaches by spending the same response budget on more unique questions or
 more repetitions per question, then measuring how much the resulting scores vary.
 On SciCode, more subtasks with fewer repetitions gave more consistent Candidate accuracy
-estimates at the same response budget. The plot shows how much accuracy varied across
-eight groups, each with 280 responses per model.
-The choice of analysis level may depend on the benchmark and metric.
+estimates at the same response budget. At each repetition count, we split the saved responses
+into eight groups of 280 responses per model. Each group covers 280 subtasks at one repetition,
+down to 35 subtasks at eight repetitions. The plot shows how much accuracy varied across the
+groups.
+The choice of analysis level may depend on the benchmark and metric. See the
+:ref:`fixed-budget analysis <evaluation-fixed-response-budgets>` in the Reproducibility Notes.
 
 .. figure:: images/budget-allocation-scicode-accuracy.svg
    :alt: Mean Candidate accuracy on SciCode with shading showing one observed standard deviation on either side of the mean. At 280 responses per model, the estimate varies less with more subtasks and fewer repetitions.
