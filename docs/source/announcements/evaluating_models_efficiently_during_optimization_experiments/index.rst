@@ -110,19 +110,20 @@ MMLU-Pro shows “no evidence” because its p-value of 0.920 exceeds the 0.05 t
 Check for regressions
 ~~~~~~~~~~~~~~~~~~~~~
 
-One-sided tests for improvement do not tell us about possible regression. 
-Choose an acceptable accuracy-loss margin, then use a non-inferiority test to assess whether the loss is smaller. The checks below use
-one-sided paired t-tests. “Yes” means the stated accuracy loss is ruled out (p < 0.05);
-“no evidence” means it has not been ruled out.
+One-sided tests for improvement do not tell us about possible regression.
+Choose an acceptable accuracy-loss margin for your use case before inspecting results, then
+use a non-inferiority test to assess whether the loss is smaller.
 
-============================ =================== =============== ======================
-Rule out an accuracy loss of MMLU-Pro p-value    SciCode p-value AA-Omniscience p-value
-============================ =================== =============== ======================
-2.0 pp                       <0.001 — yes        <0.001 — yes    <0.001 — yes
-1.0 pp                       <0.001 — yes        <0.001 — yes    0.002 — yes
-0.5 pp                       0.088 — no evidence 0.002 — yes     0.056 — no evidence
-0.1 pp                       0.804 — no evidence 0.013 — yes     0.288 — no evidence
-============================ =================== =============== ======================
+The table illustrates two possible margins using one-sided paired t-tests on SciCode.
+“Yes” means the stated accuracy loss is ruled out (p < 0.05). “No evidence” means it has
+not been ruled out.
+
+============================ ===================
+Rule out an accuracy loss of SciCode p-value
+============================ ===================
+1.0 pp                       <0.001 — yes
+0.5 pp                       0.002 — yes
+============================ ===================
 
 Assess model reliability
 ~~~~~~~~~~~~~~~~~~~~~~~~
