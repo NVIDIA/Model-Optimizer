@@ -176,11 +176,15 @@ def _valid_token_mask(batch):
     """Use explicit loss validity or standard attention masks, not model-owned metadata."""
     if not isinstance(batch, dict):
         return None
-    if isinstance(batch.get("valid_mask"), torch.Tensor):
-        return batch["valid_mask"].bool()
+    for key in ("valid_mask", "loss_mask"):
+        mask = batch.get(key)
+        if mask is not None:
+            if not isinstance(mask, torch.Tensor) or mask.dtype != torch.bool:
+                raise ValueError(f"{key} must be a boolean Tensor; Bypass does not weight tokens")
+            return mask
     attention = batch.get("attention_mask")
     if isinstance(attention, torch.Tensor):
-        if attention.ndim == 2:
+        if attention.ndim == 2 and not attention.dtype.is_floating_point:
             return attention.bool()
         if attention.ndim == 4 and attention.dtype == torch.bool:
             return attention.any(-1).any(1)
@@ -331,6 +335,7 @@ class ModuleBypassAdapter:
 
     def validate_batch(self, batch, config):
         """Check declared context budgets for tokens or sequence-shaped hidden states."""
+        _valid_token_mask(batch)
         values = (
             batch.get("input_ids", batch.get("hidden_states")) if isinstance(batch, dict) else batch
         )
