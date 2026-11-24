@@ -59,7 +59,13 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
-from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX, pins_fit, resize_pins
+from ..ggml.common import (
+    PINNED_IMPORTANCE_PREFIX,
+    PINNED_PAYLOAD_PREFIX,
+    check_pin_blocks,
+    pins_fit,
+    resize_pins,
+)
 from ..nn import (
     GroupedQuantizer,
     QuantModule,
@@ -542,41 +548,59 @@ class _MegatronParallelLinear(_ParallelLinear):
             if isinstance(leaf, TensorQuantizer)
         ]
 
-    def _check_pin_reshard(self):
-        """Raise if GGML pins saved at another tensor-parallel size would load misplaced."""
+    def _check_pin_reshard(self, leaves) -> bool:
+        """Whether ``leaves``' GGML pins were saved at another TP size; raise if they'd load misplaced.
+
+        ``leaves`` pairs each weight with its quantizer, or with the quantizer's saved state.
+        """
+        unfit = [
+            (weight, quantizer) for weight, quantizer in leaves if not pins_fit(quantizer, weight)
+        ]
+        if not unfit:
+            return False
         if isinstance(self.weight_quantizer, GroupedQuantizer):
             raise NotImplementedError(
                 "GGML pins of grouped experts can't be loaded at another expert "
                 "tensor-parallel size. Load the checkpoint at the size it was saved at."
             )
-        if getattr(self, "_modelopt_gated_fc1", False) and getattr(
-            self, "_legacy_ggml_pin_layout", False
-        ):
+        gated_fc1 = getattr(self, "_modelopt_gated_fc1", False)
+        if gated_fc1 and getattr(self, "_legacy_ggml_pin_layout", False):
             raise ValueError(
                 "This checkpoint stores the GGML pins of a gated MLP in ModelOpt 0.49.0rc0's "
                 "layout, which can't be loaded at another tensor-parallel size. Load it at the "
                 "size it was saved at and save it again with this version, which lifts this "
                 "restriction (other TP limits on GGML pins still apply)."
             )
+        # Pins are sharded plainly, or like a gated linear_fc1's weight; not like one Megatron
+        # splits by component (e.g. a Mamba or GatedDeltaNet in_proj).
+        if getattr(self, "_modelopt_weight_factory", False) and not gated_fc1:
+            raise ValueError(
+                "GGML pins can't be loaded at another tensor-parallel size here: Megatron shards "
+                "this layer's weight by component. Load the checkpoint at the tensor-parallel "
+                "size it was saved at."
+            )
+        for weight, quantizer in unfit:
+            check_pin_blocks(quantizer, weight, sharded_blocks=self._is_row_parallel)
+        return True
 
     def modelopt_post_restore(self, prefix: str = ""):
         # GGML pins are restored at the saved shard's shape; the sharded load fills this rank's.
-        leaves = self._weight_quantizer_leaves()
-        if not all(pins_fit(leaf, weight) for weight, leaf, _ in leaves):
-            self._check_pin_reshard()
-            for weight, leaf, _ in leaves:
-                resize_pins(leaf, weight, sharded_blocks=self._is_row_parallel)
+        leaves = [(weight, leaf) for weight, leaf, _ in self._weight_quantizer_leaves()]
+        if self._check_pin_reshard(leaves):
+            for weight, leaf in leaves:
+                resize_pins(leaf, weight)
         super().modelopt_post_restore(prefix=prefix)
 
     def modelopt_read_checkpoint_layout(self, state: dict):
         """Read how a checkpoint loaded into this converted module laid out its state."""
         self._legacy_ggml_pin_layout = "modelopt_swiglu_ggml_pins" not in state
         saved = state.get("modelopt_quantizer_state") or {}
-        for weight, _, name in self._weight_quantizer_leaves():
-            # Saved per EP rank, as in quant_module_set_extra_state.
-            substate = saved.get(name, saved.get(re.sub(r"(weight_quantizer)\.\d+", r"\1.0", name)))
-            if substate is not None and not pins_fit(substate, weight):
-                self._check_pin_reshard()
+        # Saved per EP rank, as in quant_module_set_extra_state.
+        leaves = [
+            (weight, saved.get(name, saved.get(re.sub(r"(weight_quantizer)\.\d+", r"\1.0", name))))
+            for weight, _, name in self._weight_quantizer_leaves()
+        ]
+        self._check_pin_reshard([(weight, state) for weight, state in leaves if state is not None])
 
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):
         if v.ndim == 4:

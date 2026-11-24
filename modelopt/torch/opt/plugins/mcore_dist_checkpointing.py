@@ -23,6 +23,7 @@ from typing import Any
 
 import torch
 from megatron.core import dist_checkpointing, mpu
+from megatron.core.dist_checkpointing.mapping import ShardedTensorFactory
 from megatron.core.dist_checkpointing.strategies.common import COMMON_STATE_FNAME
 from megatron.core.dist_checkpointing.strategies.torch import TorchDistLoadShardedStrategy
 from megatron.core.dist_checkpointing.validation import StrictHandling
@@ -140,6 +141,11 @@ def _load_sharded_extra_state(
 ) -> dict[str, Any]:
     """Load the extra state of ``model``'s modules from the checkpoint, by state-dict name."""
     sharded_state_dict = model.sharded_state_dict(prefix=prefix)
+    # Whether Megatron shards each such module's weight through a factory (e.g. split by component).
+    for name, module in model.named_modules():
+        weight = sharded_state_dict.get(f"{prefix}{name}.weight")
+        if hasattr(module, "modelopt_read_checkpoint_layout") and weight is not None:
+            module._modelopt_weight_factory = isinstance(weight, ShardedTensorFactory)
     extra_sharded_state_dict = {k: v for k, v in sharded_state_dict.items() if "_extra_state" in k}
     extra_state_dict = dist_checkpointing.load(
         extra_sharded_state_dict,

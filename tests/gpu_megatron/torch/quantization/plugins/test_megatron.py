@@ -2116,11 +2116,17 @@ def test_ggml_rc0_pin_layout_same_tp(dist_workers_size_2, tmp_path, loader):
 def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
     grouped = case in ("grouped_experts", "grouped_padded_fc2", "grouped_aligned_fc2")
     rc0 = case.startswith("rc0_swiglu_pins")
+    if case == "mamba_in_proj" and not HAS_MAMBA:
+        pytest.skip("Mamba is not installed")
     # 352 pads linear_fc2's 704 input columns per TP=2 rank (1408 at TP=1) to whole blocks; 192
     # pads its 384 per rank but not the 768 at TP=1. 64 pads the experts' 128 linear_fc2 input
     # columns per ETP=2 rank to the one 256-value block their 256 at ETP=1 fill, so the pins fit
     # either way.
-    hidden_size = {"padded_row_parallel": 352, "padded_to_aligned": 192}
+    hidden_size = {
+        "padded_row_parallel": 352,
+        "padded_row_parallel_converted": 352,
+        "padded_to_aligned": 192,
+    }
     hidden_size = hidden_size.get(case, 64 if case.endswith("_fc2") else 512)
     # Saved at TP=2 and loaded at TP=1, or the other way around.
     save_tp, load_tp = (1, size) if case == "grouped_aligned_fc2" else (size, 1)
@@ -2128,6 +2134,17 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
     load_pp = size if case == "rc0_swiglu_pins_one_stage" else 1
 
     def create_model(tp_size, pp_size=1):
+        if case == "mamba_in_proj":
+            # Megatron saves a Mamba in_proj's weight split into its components.
+            return get_mcore_hybrid_model(
+                tensor_model_parallel_size=tp_size,
+                num_layers=2,
+                hybrid_layer_pattern="MM",
+                hidden_size=hidden_size,
+                ffn_hidden_size=None,
+                skip_moe=True,
+                sequence_parallel=tp_size > 1,
+            ).cuda()
         return _gpt_model_provider(
             tp_size=tp_size,
             pp_size=pp_size,
@@ -2157,6 +2174,8 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
             entry["quantizer_name"] = "*experts.linear_fc2.weight_quantizer"
         elif case == "rc0_swiglu_pins_one_stage":
             entry["quantizer_name"] = "*layers.0.mlp*weight_quantizer"
+        elif case == "mamba_in_proj":
+            entry["quantizer_name"] = "*in_proj.weight_quantizer"
     with _saving_like_modelopt_0_49_0rc0() if rc0 else nullcontext():
         mtq.quantize(source, config, get_forward(source))
         mtq.initialize_qdq_weights(source)
@@ -2173,7 +2192,7 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
         seed=SEED,
     )
     target = create_model(load_tp, load_pp)
-    if case == "rc0_swiglu_pins_converted":
+    if case.endswith("_converted"):
         # Already converted, with its own pins: the restore only reads the checkpoint's layout.
         mtq.quantize(target, config, get_forward(target))
         mtq.initialize_qdq_weights(target)
@@ -2186,6 +2205,7 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
     # A rank whose own pins fit raises too, rather than enter the weight load alone.
     error = NotImplementedError if grouped else ValueError
     match = "0.49.0rc0" if rc0 else r"can't be loaded at another"
+    match = "by component" if case == "mamba_in_proj" else match
     with pytest.raises(error if rank == 0 else (error, RuntimeError), match=match):
         restore_sharded_modelopt_state([target], tmp_path)
 
@@ -2194,6 +2214,7 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
     "case",
     [
         "padded_row_parallel",
+        "padded_row_parallel_converted",
         "padded_to_aligned",
         "grouped_experts",
         "grouped_padded_fc2",
@@ -2201,6 +2222,7 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
         "rc0_swiglu_pins",
         "rc0_swiglu_pins_converted",
         "rc0_swiglu_pins_one_stage",
+        "mamba_in_proj",
     ],
 )
 def test_ggml_payload_tp_reshard_rejected(dist_workers_size_2, tmp_path, case):
