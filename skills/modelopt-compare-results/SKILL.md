@@ -1,6 +1,6 @@
 ---
 name: modelopt-compare-results
-description: Establish baseline-vs-candidate evaluation plans, delegate missing evaluations, compare validated results, and decide quantization feasibility. Use when the user asks to compare baseline vs quantized runs, explain an accuracy drop/regression, verify whether a quantized checkpoint is acceptable, or compare evaluation outputs (from result files or MLflow). Do NOT use for generic single-model evaluation without comparison intent (use modelopt-evaluation), live evaluation status/debugging (use the tool's own skills, listed in `modelopt-eval-guidance/references/tools/index.md`), or generic MLflow browsing without a comparison goal (use modelopt-accessing-mlflow).
+description: Establish baseline-vs-candidate evaluation plans, delegate missing evaluations, compare validated results, and decide quantization feasibility. Use when the user asks to compare baseline vs quantized runs, explain an accuracy drop/regression, verify whether a quantized checkpoint is acceptable, or compare evaluation outputs (from result files or MLflow). Do NOT use for generic single-model evaluation without comparison intent (use modelopt-evaluation), live evaluation status/debugging (use the tool's own skills), or generic MLflow browsing without a comparison goal (use modelopt-accessing-mlflow).
 license: Apache-2.0
 ---
 
@@ -25,18 +25,16 @@ change is being measured, typically a further quantized version of the baseline.
    use one setting for both sides and record it.
 3. Fetch the baseline and candidate task list, configs, score artifacts, and
    logs. If the user provides MLflow runs or invocation IDs, fetch
-   configs and artifacts as the tool's reference in `references/tools/` says; for runs
-   of any tool, `modelopt-eval-guidance` (`references/run-validity.md`, "Reading
-   results from MLflow") lists the metrics and tags to use.
-4. Confirm each run passed the run-validity checks in `modelopt-eval-guidance`
-   (`references/run-validity.md`) and the tool's own validity step in its reference
-   under `references/tools/` before comparing scores. If not, validate logs, server health,
+   configs and artifacts, and the metrics and tags to use, as the tool's reference in
+   `references/tools/` says.
+4. Confirm each run passed the tool's own validity step (its reference under
+   `references/tools/` says where) before comparing scores. If not, validate logs, server health,
    judge/code-execution status, sample accounting, and reasoning parsing before
    computing deltas.
 5. For each task, use the score field the evaluation tool defines for the benchmark:
    the tool's reference under `references/tools/` says where it is.
-6. Use `modelopt-eval-guidance` (`references/external-baseline-check.md`) to perform the
-   **External Baseline Sanity Check**. Record each source URL, protocol
+6. Use the tool's baseline check (its reference under `references/tools/` says where) to
+   perform the **External Baseline Sanity Check**. Record each source URL, protocol
    difference, and task status before applying the candidate-delta gate. A
    failed baseline blocks a success verdict; correct and rerun it first. If no
    credible comparable reference exists, label the baseline externally
@@ -68,8 +66,8 @@ the validated runs are comparable:
    endpoint class, prompt, and scoring config.
 7. The same accuracy metric and score field is used for both runs.
 8. Timeout policies, effective limits, and failure scoring/exclusions match.
-   Apply **Timeout and Output-Limit Accounting** in `modelopt-eval-guidance`
-   (`references/run-validity.md`) to both runs; matching limits alone cannot
+   Apply the tool's **Timeout and Output-Limit Accounting** (its reference says where) to
+   both runs; matching limits alone cannot
    rule out serving-speed effects on scores.
 9. **Baseline precision matches the gate.** A `<1pp vs BF16` gate requires a true
    full-precision (BF16) baseline. Many models ship *natively quantized* (e.g.
@@ -88,9 +86,8 @@ than 8 valid runs on a side is `INDETERMINATE`, not a delta.
 If any item differs, either rerun with matched settings or label the result as
 not an apples-to-apples quantization comparison.
 
-These checks compare the baseline and candidate to each other. The external
-baseline check in `modelopt-eval-guidance` (`references/external-baseline-check.md`)
-separately tests whether the baseline's absolute score is credible; both guards
+These checks compare the baseline and candidate to each other. The tool's external
+baseline check separately tests whether the baseline's absolute score is credible; both guards
 must be reported.
 
 ## Report Format

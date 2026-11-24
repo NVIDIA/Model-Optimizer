@@ -87,8 +87,6 @@ which does not verify rates or raw evidence.
 
 ## Timeout and Output-Limit Accounting
 
-> Mirrored in the tool-neutral `modelopt-eval-guidance`; keep both in sync until the NEL files are removed.
-
 For every benchmark/run, including successful and non-reasoning runs, inspect
 structured response/trial artifacts, logs, and resolved config. Report counts,
 percentages, explicit denominators, and artifact paths before the score:
@@ -127,8 +125,6 @@ do not extrapolate sampled rates.
   changes. Longer-timeout diagnostics are not automatically leaderboard-comparable.
 
 ## External Baseline Sanity Check
-
-> Mirrored in the tool-neutral `modelopt-eval-guidance`; keep both in sync until the NEL files are removed.
 
 For a baseline-vs-candidate comparison, perform this check after run validation
 and before applying the candidate-delta gate or issuing a success verdict. This

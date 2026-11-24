@@ -1,6 +1,6 @@
 ---
 name: modelopt-evaluation
-description: NEL backend - creates configs, launches and validates accuracy evaluations with NeMo Evaluator Launcher (NEL). Use when the task or user names NEL (nel, nemo-evaluator-launcher) or names no evaluation tool — NEL is the default; for another named tool use that tool's skills. Also use for validating completed NEL runs. Not for quantizing models (use modelopt-ptq), standalone serving (use modelopt-deployment), or comparing completed baseline-vs-quantized results (use modelopt-compare-results).
+description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Always load when validating completed runs or reporting evaluation scores, including standalone modelopt-launching-evals analysis. Not for quantizing models (use modelopt-ptq), standalone serving (use modelopt-deployment), or comparing completed baseline-vs-quantized results (use modelopt-compare-results).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073).
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
@@ -8,10 +8,7 @@ license: Apache-2.0
 
 # NeMo Evaluator Launcher Assistant
 
-Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints. If the caller has not supplied a serving record, load `modelopt-deployment` first and derive one (step 5c); Step 3 uses it to cross-check the NEL deployment config, and NEL's own canary is the serving check.
-
-Tool-neutral duties (vendor reference check and sampling, quantization-aware benchmark choice, run validity, the
-external baseline check, doom loops) are in `modelopt-eval-guidance`; this skill keeps the NEL mechanics.
+Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints.
 
 ## Completed-run analysis
 

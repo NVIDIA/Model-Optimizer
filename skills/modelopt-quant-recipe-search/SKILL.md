@@ -7,7 +7,7 @@ description: >-
   choose compute-vs-memory success metrics, select ModelOpt recipe baselines,
   design AutoQuant/manual recipe deltas, interpret sensitivity, and decide next
   candidates. Do NOT use for a single known PTQ recipe run (use modelopt-ptq), serving
-  (use modelopt-deployment), creating/running evals (use the evaluation skills of the tool you use, listed in modelopt-eval-guidance/references/tools/index.md),
+  (use modelopt-deployment), creating/running evals (use the evaluation skills of the tool you use: `modelopt-evaluation` for the default tool, the Gym skills for Gym),
   monitoring jobs (use modelopt-monitor), MLflow browsing (use modelopt-accessing-mlflow), or
   comparing completed baseline-vs-candidate scores only (use modelopt-compare-results).
 ---
@@ -28,9 +28,9 @@ then ask only for missing decisions that change the search.
 
 - Use `modelopt-ptq` to produce and validate checkpoints.
 - Use `modelopt-deployment` to serve checkpoints and debug serving-specific flags.
-- Use the evaluation skills of the tool you use to compose, run, resume, debug and recover evals; the tool
-  index is `modelopt-eval-guidance/references/tools/index.md`.
-- Use `modelopt-eval-guidance` for the evaluation duties that do not depend on the tool.
+- Use the evaluation skills of the tool you use to compose, run, resume, debug and recover evals: the default tool's are
+  `modelopt-evaluation` and `modelopt-launching-evals`; Gym's are its own skills.
+- Use `modelopt-eval-guidance` for the Gym path's evaluation duties; the default tool's are in `modelopt-evaluation`.
 - Use `modelopt-monitor` for active job tracking.
 - Use `modelopt-accessing-mlflow` for MLflow artifact lookup.
 - Use `modelopt-compare-results` for validated baseline-vs-candidate deltas and score-field comparability.

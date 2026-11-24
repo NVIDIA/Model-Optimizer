@@ -1,7 +1,5 @@
 # Doom Loops: Stop Repeating Reasoning Early
 
-> Mirrored in the tool-neutral `modelopt-eval-guidance`; keep both in sync until the NEL files are removed.
-
 Damaged (often quantized) reasoning models can repeat one block verbatim until
 `max_new_tokens`, burning the full budget on a sample that scores wrong anyway.
 vLLM ≥ 0.17.0 ends such a request through the per-request `repetition_detection` field.

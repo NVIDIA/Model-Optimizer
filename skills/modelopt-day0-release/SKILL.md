@@ -283,7 +283,7 @@ the final path after any move.
 ## Triage (gate failure → decision)
 
 For completed evaluations, apply
-[run validity](../modelopt-eval-guidance/references/run-validity.md) (and the tool's own validity step in its reference under `references/tools/`) before
+the tool's own validity step (its reference under `references/tools/` says where; for Gym, [run validity](../modelopt-eval-guidance/references/run-validity.md)) before
 triage; the tool's failure policy overrides retry actions below. Warn but do not retry solely
 for failures below tolerance. For runs that fail tolerance or an independent
 validation check, return findings and a recommendation to the parent/user for

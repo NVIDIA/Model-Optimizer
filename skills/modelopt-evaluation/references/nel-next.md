@@ -123,7 +123,7 @@ output:
 ## vLLM deployment — map SKILL Step 3 onto nel-next fields
 
 Same `recipes.vllm.ai` (exact variant) + model-card / `config.json` cross-check as
-SKILL.md Step 3 (same vLLM), and check the resolved `services.<svc>` fields against the serving record from `modelopt-deployment` step 5c. The 0.2.6 `command:` maps to structured `services.<svc>`:
+SKILL.md Step 3 (same vLLM). The 0.2.6 `command:` maps to structured `services.<svc>`:
 
 | 0.2.6 `command:` | nel-next `services.<svc>` |
 |---|---|

@@ -4,6 +4,8 @@
   artifacts for NEL runs.
 - **Run validity:** also apply evaluation Step 9, "Verify completed evaluation run", and the NEL policy in
   `modelopt-evaluation/references/run-validation.md`, before comparing scores.
+- **Baseline check and timeout accounting:** the **External Baseline Sanity Check** and the timeout and
+  output-limit accounting in `modelopt-evaluation/references/run-validation.md`.
 - **Score field:** the matching task recipe's **Score Extraction** section
   (`modelopt-evaluation/recipes/tasks/<task>.md`).
 - **SciCode:** see the NEL recipe `modelopt-evaluation/recipes/tasks/aa/scicode.md`; it runs as several separate

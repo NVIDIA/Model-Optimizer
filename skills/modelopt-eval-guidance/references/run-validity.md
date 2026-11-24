@@ -1,9 +1,8 @@
 # Run Validity
 
-Use this after a run finishes and before any score is compared, for every tool. Whether the run is healthy and
+Use this after a Gym run finishes and before any score is compared. Whether the run is healthy and
 complete (logs, coverage, judge and sandbox faults, reasoning parsing, recovery) is decided by the evaluation
-tool: take its verdict from the tool's reference. A tool with no verdict of its own lists the checks it needs in
-its reference ("Run checks"). This file holds only what the quantized-versus-baseline comparison adds.
+tool: take its verdict from the tool's reference. This file holds only what the quantized-versus-baseline comparison adds.
 
 ## Before any score is compared
 

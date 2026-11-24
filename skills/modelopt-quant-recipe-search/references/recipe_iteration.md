@@ -216,8 +216,8 @@ Do not reimplement workflows that existing skills own:
 | --- | --- |
 | Generate/check a quantized checkpoint | `modelopt-ptq` |
 | Serve a checkpoint or test backend flags | `modelopt-deployment` |
-| Compose, submit, resume, debug or recover evaluations | the evaluation tool's skills (`modelopt-eval-guidance/references/tools/index.md`) |
-| Tool-neutral evaluation duties (vendor reference, run validity, baseline check) | `modelopt-eval-guidance` |
+| Compose, submit, resume, debug or recover evaluations | the evaluation tool's skills (default tool: `modelopt-evaluation`, `modelopt-launching-evals`; Gym: its own skills) |
+| Gym evaluation duties (run validity, baseline check, benchmark choice) | `modelopt-eval-guidance` (default tool: `modelopt-evaluation`) |
 | Track active Slurm and evaluation jobs | `modelopt-monitor` |
 | Fetch MLflow artifacts | `modelopt-accessing-mlflow` |
 | Compute baseline-vs-candidate deltas | `modelopt-compare-results` |

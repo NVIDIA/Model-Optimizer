@@ -1,7 +1,5 @@
 # Quantization-Aware Benchmark Recommendations
 
-> Mirrored in the tool-neutral `modelopt-eval-guidance`; keep both in sync until the NEL files are removed.
-
 When evaluating a quantized checkpoint, prioritize benchmarks that are sensitive
 to precision loss. The Artificial Analysis (AA) Index v2 suite under
 `recipes/tasks/aa/` is the default set for quantized-checkpoint validation.

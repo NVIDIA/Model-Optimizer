@@ -1,26 +1,26 @@
 ---
 name: modelopt-eval-guidance
-description: Tool-neutral guidance for judging a quantized checkpoint's accuracy, whatever evaluation tool runs it - pick quantization-sensitive benchmarks, check the baseline against the published score, take the tool's run verdict and report per-side limit counts for the comparison, and decide on doom-loop detection. Use it next to the evaluation tool's own skills whenever a baseline or candidate is evaluated; the tool fills the config and runs the evaluation.
+description: Guidance for judging a quantized checkpoint's accuracy when NeMo Gym runs the evaluation - pick quantization-sensitive benchmarks, check the baseline against the published score, take Gym's run verdict and report per-side limit counts for the comparison, and decide on doom-loop detection. Use it next to the Gym evaluation skills whenever a baseline or candidate is evaluated through Gym; Gym fills the config and runs the evaluation.
 license: Apache-2.0
 ---
 
 # Evaluation Guidance
 
-The evaluation tool owns what values go in the config and how the run goes (protocol, judge, sampling, budget,
+The evaluation tool (NeMo Gym) owns what values go in the config and how the run goes (protocol, judge, sampling, budget,
 parsers, quantized-variant settings, submit, babysit, recover, MLflow tags, and whether the run is healthy and
 complete). This skill holds what the Day 0 workflow does around the tool: which benchmarks to run, asking for the baseline
 and the quantized evaluation (both go through the tool), the serving record, whether the baseline is believable, and
-what the comparison needs from a finished run. It applies to every tool.
+what the comparison needs from a finished run. It applies to Gym runs; runs of the default tool are self-contained in
+`modelopt-evaluation` and `modelopt-launching-evals` and do not load it.
 
-Tool-specific details live in [references/tools/](references/tools/index.md), one file per tool: the skills that
-run it, where its health verdict and settings are, and its MLflow names. Use the skills and the reference of the
-tool the task names (the default is named in the index), and do not load another tool's skills.
+Gym-specific details live in [references/tools/](references/tools/index.md): the skills that run it, where its
+health verdict and settings are, and its MLflow names. The Gym skills come from the NVIDIA-NeMo/Gym repository.
 
 ## What to read, in order
 
-0. **First, the reference file of the tool you are using** (`references/tools/<tool>.md`). Do not guess its
-   name: open [references/tools/index.md](references/tools/index.md) and follow the link for your tool. It holds the rules that apply only to that tool, such as what must not be cancelled, where its
-   sampling and health rules are, and its MLflow names; the files below defer to it.
+0. **First, the Gym reference file** ([references/tools/gym.md](references/tools/gym.md); the index is
+   [references/tools/index.md](references/tools/index.md)). Do not guess its name. It holds where Gym's sampling
+   and health rules are and its MLflow names; the files below defer to it.
 1. **When choosing benchmarks for a quantized checkpoint:**
    [quantization-benchmarks.md](references/quantization-benchmarks.md).
 2. **When a model repeats itself until the token limit:** [doom-loops.md](references/doom-loops.md).
@@ -28,7 +28,7 @@ tool the task names (the default is named in the index), and do not load another
 4. **Before accepting a baseline for a baseline-versus-candidate comparison:**
    [external-baseline-check.md](references/external-baseline-check.md), then `modelopt-compare-results`.
 
-## Rules for every evaluation, whatever the tool
+## Rules for every Gym evaluation
 
 - **Serving deployment of a quantized checkpoint is ours.** The tool's model-card reading knows the baseline, not the
   quantized format. Before any run of a quantized checkpoint, load `modelopt-deployment`, write the serving record
@@ -56,9 +56,8 @@ tool the task names (the default is named in the index), and do not load another
 
 ## Reading results
 
-Read results from MLflow when the run was exported there, with the run id from the handoff. Both tools
-export to the same experiment; the metric names differ by tool, so confirm the name in the run before using
-it. Take scores and token counts from a run only when its status is `FINISHED` and the metric exists, and take
+Read results from MLflow when the run was exported there, with the run id from the handoff. Gym exports
+to the shared experiment; confirm the metric name in the run before using it. Take scores and token counts from a run only when its status is `FINISHED` and the metric exists, and take
 the task status from the tool's own verdict (a benchmark's run can be `FINISHED` while its submission failed
 overall). Details are in [run-validity.md](references/run-validity.md#reading-results-from-mlflow) and the tool's
 reference.

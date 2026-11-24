@@ -16,8 +16,9 @@
 """Day-0 evaluation-run gate.
 
 Validates that a completed evaluation run is trustworthy before its scores are
-compared. Mirrors the checks in modelopt-eval-guidance/references/run-validity.md
-(the tool's own policy is in its reference under references/tools/). Pure
+compared. Mirrors the run-validity checks (Gym: modelopt-eval-guidance/references/run-validity.md;
+the default tool: modelopt-evaluation/references/run-validation.md; the tool's own policy is in
+its reference under references/tools/). Pure
 decision logic in ``evaluate_run`` (unit-tested without a cluster); ``main``
 reads a run-summary JSON and prints the verdict.
 
