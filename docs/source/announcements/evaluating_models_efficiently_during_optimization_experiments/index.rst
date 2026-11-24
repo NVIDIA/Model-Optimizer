@@ -24,9 +24,8 @@ waste time? How many questions and repetitions do you need to measure improvemen
 regressions?
 
 This article helps you evaluate models quickly and reliably during optimization experiments.
-We use SciCode as the main worked example, comparing two NVFP4 Qwen3.6-35B-A3B checkpoints to
-test whether applying Kahneman–Tversky Optimization (KTO) to the baseline reduces reasoning
-loops while preserving accuracy.
+We use SciCode to compare two NVFP4 Qwen3.6-35B-A3B checkpoints and test whether
+Kahneman–Tversky Optimization (KTO) reduces reasoning loops while preserving accuracy.
 See how we apply these guidelines in practice across a broader set of benchmarks in the
 `KTO tutorial
 <https://github.com/NVIDIA/Model-Optimizer/blob/13ad0ef401ec5e4480abd1b8eb236ccdf50ef802/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/kto/README.md>`__.
@@ -68,19 +67,22 @@ Show where the model improves or worsens
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 We first average each model’s correctness across repetitions of each question, then compute
-**Candidate − Baseline** for each question. We calculate t-based 95% confidence intervals across
-these paired question-level differences. Changes are reported in percentage points (pp), not
-relative percentages. For simplicity, this example treats questions and SciCode subtasks as
-independent.
+**Candidate − Baseline** for each question. We calculate a paired 95% confidence interval for
+the mean difference by bootstrapping whole SciCode parent problems, keeping related subtasks
+together. Changes are reported in percentage points (pp), not relative percentages.
 
 We use paired question-level tests here to compare models across the domain represented by the
 benchmark. Pairing can reduce variation caused by question difficulty. For standardized reporting on
 a fixed benchmark, ModelOpt uses unpaired Welch t-tests on independent, complete-run scores to
 estimate uncertainty from variation between runs of those exact questions.
 
-Our primary question is whether Candidate is better than Baseline. A one-sided paired t-test can
-detect improvement with less data than a two-sided test for any difference. Reverse-direction
+Our primary question is whether Candidate is better than Baseline. A one-sided paired test
+can detect improvement with less data than a two-sided test for any difference. Reverse-direction
 p-values are reported for context.
+
+We calculate the one-sided p-values with a paired permutation test that swaps model labels for
+whole parent problems. When question-level differences are independent and a t approximation is
+suitable, a paired t-based confidence interval and a one-sided paired t-test are alternatives.
 
 Choose test directions before inspecting results. We use p < 0.05 for each test, without a stricter
 threshold for testing multiple metrics. Testing more metrics gives noise more opportunities to
@@ -94,11 +96,11 @@ was not established.
 |                |          |           | CI], pp          | higher, p-value  | p-value          |
 |                |          |           |                  |                  | (context)        |
 +================+==========+===========+==================+==================+==================+
-| SciCode        | 43.52%   | 44.90%    | +1.38 [+0.08,    | 0.019 — yes      | 0.981            |
-|                |          |           | +2.67]           |                  |                  |
+| SciCode        | 42.81%   | 44.39%    | +1.57 [−0.48,    | 0.080 — no       | 0.931            |
+|                |          |           | +3.67]           | evidence         |                  |
 +----------------+----------+-----------+------------------+------------------+------------------+
 
-On SciCode, the candidate is more accurate than the baseline (+1.38 pp; p = 0.019).
+On SciCode, Candidate scored 1.57 pp higher, with inconclusive evidence of improvement (p = 0.080).
 
 Check for regressions
 ~~~~~~~~~~~~~~~~~~~~~
@@ -107,15 +109,15 @@ One-sided tests for improvement do not tell us about possible regression.
 Choose an acceptable accuracy-loss margin for your use case before inspecting results, then
 use a non-inferiority test to assess whether the loss is smaller.
 
-The table illustrates two possible margins using one-sided paired t-tests on SciCode.
+The table illustrates two possible margins on SciCode.
 “Yes” means the stated accuracy loss is ruled out (p < 0.05). “No evidence” means it has
 not been ruled out.
 
 ============================ ===================
 Rule out an accuracy loss of SciCode p-value
 ============================ ===================
-1.0 pp                       <0.001 — yes
-0.5 pp                       0.002 — yes
+1.0 pp                       0.009 — yes
+0.5 pp                       0.028 — yes
 ============================ ===================
 
 Assess model reliability
@@ -144,7 +146,9 @@ loops, missing answers, and whether it abstains when appropriate.
 
 The doomed reasoning loops example below shows how to report rare failures using cap-hit rates.
 Rare failures can make t-based approximations unreliable, so we use paired-bootstrap 95% confidence
-intervals and one-sided paired permutation tests for the rates below.
+intervals and one-sided paired permutation tests for the rates below. For SciCode cap hits,
+we keep all subtasks and repetitions from each parent problem together, as in the accuracy
+analysis.
 The confidence intervals and p-values come from different procedures and need not lead to the
 same conclusion. See :ref:`Statistical methods <evaluation-statistical-methods>` in the
 Reproducibility Notes for details.
@@ -162,8 +166,8 @@ rate was not established.
 |                |               |               |               | p-value       | p-value       |
 |                |               |               |               |               | (context)     |
 +================+===============+===============+===============+===============+===============+
-| SciCode        | 1.29%         | 0.00%         | −1.29 [−1.70, | <0.001 — yes  | 1.000         |
-|                | (76/5,880)    | (0/5,880)     | −0.92]        |               |               |
+| SciCode        | 1.53%         | 0.00%         | −1.53 [−2.03, | <0.001 — yes  | 1.000         |
+|                | (36/2,352)    | (0/2,352)     | −1.04]        |               |               |
 +----------------+---------------+---------------+---------------+---------------+---------------+
 
 .. tip::
@@ -193,11 +197,11 @@ We exclude empty final responses.
 |               |               |               |               | p-value       | p-value       |
 |               |               |               |               |               | (context)     |
 +===============+===============+===============+===============+===============+===============+
-| Abstention    | 17.39%        | 19.00%        | +1.61 [+0.31, | 0.008 — yes   | 0.992         |
-| ratio         | (816/4,692)   | (890/4,685)   | +2.91]        |               |               |
+| Abstention    | 33.30%        | 35.18%        | +1.88 [+0.32, | 0.010 — yes   | 0.990         |
+| ratio         | (1,566/4,703) | (1,653/4,699) | +3.45]        |               |               |
 +---------------+---------------+---------------+---------------+---------------+---------------+
 
-Candidate has a higher abstention ratio (p = 0.008).
+Candidate has a higher abstention ratio (p = 0.010).
 
 Compare outcomes on the same questions to check whether Candidate abstains where Baseline answers
 correctly or incorrectly.
@@ -208,8 +212,8 @@ Measure verbosity
 Compare mean and median completion tokens, including reasoning, to assess how much generation each
 answer requires.
 
-For mean length, we use the same question-level paired t-tests and t-based 95% confidence intervals
-as accuracy. “Yes” means evidence of shorter Candidate completions on average (p < 0.05);
+For mean length, we use question-level paired t-tests and t-based 95% confidence intervals.
+“Yes” means evidence of shorter Candidate completions on average (p < 0.05);
 “no evidence” means a lower mean length was not established.
 
 +----------------+-------------+-------------+-------------+-------------+-------------+-------------+
@@ -218,9 +222,9 @@ as accuracy. “Yes” means evidence of shorter Candidate completions on averag
 |                | median      | median      | median, %   | tokens      | p-value     | p-value     |
 |                |             |             |             |             |             | (context)   |
 +================+=============+=============+=============+=============+=============+=============+
-| SciCode        | 6,188 /     | 3,048 /     | −50.7% /    | −3,140      | <0.001 —    | 1.000       |
-|                | 3,205       | 1,802       | −43.8%      | [−3,666,    | yes         |             |
-|                |             |             |             | −2,614]     |             |             |
+| SciCode        | 6,512 /     | 3,063 /     | −53.0% /    | −3,450      | <0.001 —    | 1.000       |
+|                | 2,993       | 1,803       | −39.8%      | [−4,236,    | yes         |             |
+|                |             |             |             | −2,664]     |             |             |
 +----------------+-------------+-------------+-------------+-------------+-------------+-------------+
 
 The candidate uses fewer tokens on average on SciCode (p < 0.001).
@@ -229,8 +233,7 @@ How can you evaluate faster?
 ----------------------------
 
 When reducing question coverage, choose a representative subset before inspecting results and use
-the same question IDs for both models. See :ref:`Data preparation <evaluation-data-preparation>`
-for how we selected the benchmark questions.
+the same question IDs for both models.
 
 .. _evaluation-prioritize-question-coverage:
 .. _evaluation-choose-questions-and-repetitions:
@@ -260,15 +263,13 @@ more repetitions per question, then measuring how much the resulting scores vary
 
 On SciCode, more subtasks with fewer repetitions gave more consistent Candidate accuracy
 estimates at the same response budget. The plot shows how much accuracy varied across
-20 groups, each with 280 responses per model.
+eight groups, each with 280 responses per model.
 
 .. figure:: images/budget-allocation-scicode-accuracy.svg
    :alt: Mean Candidate accuracy on SciCode with shading showing one observed standard deviation on either side of the mean. At 280 responses per model, the estimate varies less with more subtasks and fewer repetitions.
    :width: 720px
 
-More subtasks with fewer repetitions also gave more consistent estimates of the SciCode
-cap-hit-rate and accuracy differences between checkpoints. The choice of analysis level can
-depend on the benchmark and metric. See the
+The choice of analysis level can depend on the benchmark and metric. See the
 :ref:`ablation plots and analysis <evaluation-accuracy-differences>` in the Reproducibility Notes.
 
 .. _evaluation-collect-data:
@@ -282,30 +283,31 @@ statistical target.
 
 **How many responses show fewer cap hits on SciCode?**
 
-After completing all 20 repetitions, we analyzed subsets of the saved responses: first 10–294
-subtasks with one repetition, then additional repetitions on all 294 subtasks. In this retrospective
-comparison, the p-value first fell below 0.05 at 588 responses per model and below 0.001 at 882.
+After completing all eight repetitions, we analyzed subsets of the saved responses. We first
+increased coverage from 10 to 294 subtasks with one repetition, then added repetitions on all
+294 subtasks. In this retrospective comparison, the p-value first fell below 0.05 at 250
+responses per model and below 0.001 at 882.
 
 A large drop in cap-hit rate from Baseline to Candidate may be detectable with only a few
 repetitions. Use a small pilot to estimate the size of the difference for your checkpoints
 and plan how many subtasks and repetitions to run.
 
 .. image:: images/scicode-cap-data-volume.svg
-   :alt: SciCode cap-hit rate evidence excluding the 44 recovery-training subtasks: blue points increase coverage from ten to 294 subtasks with one repetition; green points add repetitions on all 294 subtasks, reaching 5,880 responses per model. Subsets of ten to 150 subtasks observe no cap hits and have no informative bootstrap interval. The lower panel shows permutation p-values.
+   :alt: SciCode cap-hit rate evidence excluding the 44 recovery-training subtasks: blue points increase coverage from ten to 294 subtasks with one repetition; green points add repetitions on all 294 subtasks, reaching 2,352 responses per model. The ten-subtask subset has no observed cap hits and no informative bootstrap interval. The lower panel shows permutation p-values.
    :width: 640px
 
-See the :ref:`data-volume ablations <evaluation-data-volume-ablations>` in the Reproducibility Notes
-for the SciCode analysis and the MMLU-Pro accuracy example.
+See the :ref:`SciCode data-volume ablation <evaluation-data-volume-ablations>` in the
+Reproducibility Notes.
 
 Test known weaknesses on a focused subset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Freeze a subset from earlier baseline failures to screen for targeted improvements. On SciCode,
 we identified 55 subtasks with earlier Baseline failures, used 44 for training, and held out 11
-for validation. The focused evaluation used those 11 subtasks × 10 repetitions (110 responses
-per model), compared with 294 subtasks × 20 repetitions (5,880 responses per model) in the
-broader evaluation. As intended, Baseline’s cap-hit rate was higher on the focused subset
-(10.91%, compared with 1.29% in the broader evaluation).
+for validation. The focused evaluation used those 11 subtasks × 8 repetitions (88 responses per
+model), compared with 294 subtasks × 8 repetitions (2,352 responses per model) in the broader
+evaluation. As intended, Baseline’s cap-hit rate was higher on the focused subset
+(10.23%, compared with 1.53% in the broader evaluation).
 
 “Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05).
 
@@ -315,12 +317,12 @@ broader evaluation. As intended, Baseline’s cap-hit rate was higher on the foc
 |                |               |               |               | p-value       | p-value       |
 |                |               |               |               |               | (context)     |
 +================+===============+===============+===============+===============+===============+
-| Focused subset | 10.91%        | 0.00% (0/110) | −10.91        | 0.004 — yes   | 1.000         |
-|                | (12/110)      |               | [−18.18,      |               |               |
-|                |               |               | −5.45]        |               |               |
+| Focused subset | 10.23%        | 0.00% (0/88)  | −10.23        | 0.004 — yes   | 1.000         |
+|                | (9/88)        |               | [−14.77,      |               |               |
+|                |               |               | −5.68]        |               |               |
 +----------------+---------------+---------------+---------------+---------------+---------------+
 
-The focused held-out subset detects fewer candidate cap hits with 110 responses per model. Use it
+The focused held-out subset detects fewer candidate cap hits with 88 responses per model. Use it
 for a quick check of known weaknesses, then evaluate broader accuracy and reliability separately.
 
 .. toctree::
