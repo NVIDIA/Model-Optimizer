@@ -1047,6 +1047,29 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
         assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
+def _tiny_nemotron_h_moe():
+    native = pytest.importorskip("transformers.models.nemotron_h.configuration_nemotron_h")
+    return native.NemotronHConfig(
+        layers_block_type=["moe"],
+        n_routed_experts=8,
+        moe_intermediate_size=8,
+        moe_shared_expert_intermediate_size=8,
+        hidden_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+        use_mamba_kernels=False,
+    )
+
+
+def _index_checkpoint(path, mtp: bool = True) -> None:
+    """Index ``path``'s tensors, with a two-block Nemotron-H MTP head's when ``mtp``."""
+    keys = ["mtp.layers.0.eh_proj.weight", "mtp.layers.1.final_layernorm.weight"] if mtp else []
+    (path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys([*keys, "lm_head.weight"], "model-1.safetensors")})
+    )
+
+
 @needs_ep_transformers
 @pytest.mark.parametrize(
     ("knobs", "has_mtp", "gpu", "plan"),
@@ -1066,27 +1089,11 @@ def test_a_checkpoint_carrying_an_mtp_head_is_decided_whole(
     Left to decide, the plan loads such a checkpoint whole on every rank, which builds and quantizes
     the head, rather than an expert-parallel or, by GPU memory, FSDP2 plan the load then refuses; an
     EP degree asked for is kept, for the load to refuse naming the way out."""
-    native = pytest.importorskip("transformers.models.nemotron_h.configuration_nemotron_h")
     for knob, value in knobs.items():
         monkeypatch.setenv(knob, value)
     run_as(4)
-    serve(
-        native.NemotronHConfig(
-            layers_block_type=["moe"],
-            n_routed_experts=8,
-            moe_intermediate_size=8,
-            moe_shared_expert_intermediate_size=8,
-            hidden_size=16,
-            num_attention_heads=2,
-            num_key_value_heads=1,
-            vocab_size=32,
-            use_mamba_kernels=False,
-        )
-    )
-    keys = ["mtp.layers.0.eh_proj.weight", "mtp.layers.1.final_layernorm.weight"] if has_mtp else []
-    (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": dict.fromkeys([*keys, "lm_head.weight"], "model-1.safetensors")})
-    )
+    serve(_tiny_nemotron_h_moe())
+    _index_checkpoint(tmp_path, has_mtp)
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: gpu)
 
     with warnings.catch_warnings(record=True) as caught:
@@ -1095,6 +1102,47 @@ def test_a_checkpoint_carrying_an_mtp_head_is_decided_whole(
     warned = [w for w in caught if "MTP head" in str(w.message)]
     # A replication both knobs ask for is the caller's choice, and gets no warning.
     assert bool(warned) is (plan == DistributionPlan(4) and "MODELOPT_FSDP_SIZE" not in knobs)
+
+
+class _WholeLoadReachedError(Exception):
+    """Stops a whole-model load at its loading hook."""
+
+
+@needs_ep_transformers
+@pytest.mark.parametrize(
+    ("checkpoint_type", "model_type", "whole"),
+    [("nemotron_h", "toy_moe", False), ("qwen3_moe", "nemotron_h", True)],
+    ids=["hook-free-override", "mtp-hook-override"],
+)
+def test_the_mtp_decision_follows_the_loading_hook_load_pretrained_runs(
+    run_as, serve, loaders, a_gpu, monkeypatch, tmp_path, checkpoint_type, model_type, whole
+):
+    """``load_pretrained``'s ``model_type`` picks the loading hook, which says whether the load
+    builds an MTP head, so the plan follows it rather than the checkpoint config's type: a
+    checkpoint whose hook builds none still shards, and one whose hook builds it loads whole."""
+    run_as(4)
+    if checkpoint_type == "nemotron_h":
+        serve(_tiny_nemotron_h_moe())
+    else:
+        serve(Qwen3MoeConfig(**{**_TINY, "num_experts": 8, "moe_intermediate_size": 8}))
+    _index_checkpoint(tmp_path)
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    hooked = []
+
+    def whole_load(hook_type, *args, **kwargs):
+        hooked.append(hook_type)
+        raise _WholeLoadReachedError
+
+    monkeypatch.setattr(models_hf, "prepare_model_for_loading", whole_load)
+
+    if whole:
+        with pytest.raises(_WholeLoadReachedError):
+            load_pretrained(str(tmp_path), model_type=model_type)
+        assert hooked == [model_type]
+        assert loaders == {}
+    else:
+        load_pretrained(str(tmp_path), model_type=model_type)
+        assert set(loaders) == {"ep"}
 
 
 def _prepares_as_its_spec_states(model_type):
