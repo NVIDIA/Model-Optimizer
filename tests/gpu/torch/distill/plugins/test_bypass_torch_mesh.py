@@ -109,32 +109,99 @@ def _mesh_group():
     return dist.new_group(timeout=timedelta(seconds=10))
 
 
-def _torch_mesh_identity_worker(rank, size):
+@cache
+def _native_mesh():
+    # Keep native TP on the same bounded group for the persistent workers' lifetime.
+    from transformers.distributed.utils import TransformersDeviceMesh
+
+    group = _mesh_group()
+    singletons = [dist.new_group([rank], timeout=timedelta(seconds=10)) for rank in range(2)]
+    local = singletons[dist.get_rank()]
+    ranks = torch.arange(2)
+    return TransformersDeviceMesh(
+        DeviceMesh.from_group(
+            [local, local, local, group],
+            "cpu",
+            ranks.reshape(1, 1, 1, 2),
+            mesh_dim_names=("pp", "dp_replicate", "fsdp", "tp"),
+        ),
+        DeviceMesh.from_group(
+            [local, local, group, local],
+            "cpu",
+            ranks.reshape(1, 1, 2, 1),
+            mesh_dim_names=("pp", "dp_replicate", "efsdp", "ep"),
+        ),
+    )
+
+
+def _torch_mesh_state_worker(rank, size, route, state):
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
     assert size == 2
-    group = _mesh_group()
-    mesh_a = DeviceMesh.from_group(group, "cpu", mesh_dim_names=("tp",))
-    mesh_b = DeviceMesh.from_group(group, "cpu", mesh_dim_names=("tp",))
-    assert mesh_a is not mesh_b
+    mesh = (
+        DeviceMesh.from_group(_mesh_group(), "cpu", mesh_dim_names=("tp",))
+        if route == "raw"
+        else _native_mesh()
+    )
     model = _tiny_model()
-    adapter = TransformersBypassAdapter(mesh_a)
+    adapter = TransformersBypassAdapter(mesh)
     with bounded_collectives(10):
         assert adapter.parallelize(model) is model
-        assert isinstance(model.model.layers[0].self_attn.q_proj.weight, DTensor)
-        snapshot = _snapshot(model)
-        assert adapter.parallelize(model) is model
-        _assert_unchanged(model, snapshot)
-        with pytest.raises(ValueError):
-            TransformersBypassAdapter(mesh_b).parallelize(model)
-        assert model._modelopt_bypass_torch_mesh is mesh_a
-        _assert_unchanged(model, snapshot)
+    assert isinstance(model.model.layers[0].self_attn.q_proj.weight, DTensor)
+    if state == "prepared_fresh" and rank == 1:
+        model = _tiny_model()
+    elif state == "marker_loss" and rank == 1:
+        del model._modelopt_bypass_placement
+    elif state == "adopted_fresh":
+        del model._modelopt_bypass_placement
+        if rank == 1:
+            model = _tiny_model()
+    elif state == "mesh_policy":
+        if route == "raw":
+            other = DeviceMesh.from_group(_mesh_group(), "cpu", mesh_dim_names=("tp",))
+            adapter = TransformersBypassAdapter(other if rank == 0 else mesh)
+        elif rank == 0:
+            # A saved ordering can be stale on just one rank.
+            model._modelopt_bypass_placement["dense_ranks"] = []
+    # A new adapter exposes any context writes made before collective refusal.
+    if route == "native":
+        adapter = TransformersBypassAdapter(mesh)
+    snapshot = _snapshot(model)
+    error = None
+    with bounded_collectives(10):
+        try:
+            assert adapter.parallelize(model) is model
+        except Exception as exc:
+            error = (type(exc).__name__, str(exc))
+    # Keep result collection independent of a failed placement/validation subgroup.
+    errors = [None] * size
+    dist.all_gather_object(errors, error)
+    _assert_unchanged(model, snapshot)
+    if state == "reentry":
+        assert errors == [None, None], errors
+        if route == "native":
+            assert id(model) in adapter.context.parallel_metadata
+    else:
+        assert all(item is not None and item[0] == "ValueError" for item in errors), errors
+        assert errors[0] == errors[1], errors
+        if route == "native":
+            assert not adapter.context.parallel_metadata
+            assert not adapter.context.tp_quantizer_layouts
 
 
+@pytest.mark.parametrize(
+    ("route", "state"),
+    [
+        (route, state)
+        for route in ("raw", "native")
+        for state in ("prepared_fresh", "reentry", "mesh_policy")
+    ]
+    + [("native", "marker_loss"), ("native", "adopted_fresh")],
+)
 @pytest.mark.timeout(180)
-def test_raw_torch_mesh_reentry_preserves_placement(bypass_cpu_workers):
+def test_torch_mesh_placement_state_is_collective(bypass_cpu_workers, route, state):
     pytest.importorskip("transformers", minversion="5.23")
-    bypass_cpu_workers.run(_torch_mesh_identity_worker)
+    bypass_cpu_workers.run(_torch_mesh_state_worker, route, state)
 
 
 def _torch_mesh_validation_worker(rank, size, failure):
