@@ -502,7 +502,7 @@ def test_get_max_batch_size_oom_retry_shrinks_input(custom_probe):
     device_props.total_memory = 10**12
 
     with (
-        patch("torch.cuda.empty_cache"),
+        patch("modelopt.torch.utils.dataset_utils.clear_cuda_cache"),
         patch("torch.cuda.get_device_properties", return_value=device_props),
         patch("torch.cuda.device_count", return_value=1),
         patch("torch.cuda.mem_get_info", side_effect=[(free_before, 0), (free_after, 0)]),
@@ -550,7 +550,7 @@ def _batch_size_job(rank, world_size, planned):
     with (
         # A rank left waiting in the reduction gives up in seconds.
         bounded_collectives(),
-        patch("torch.cuda.empty_cache"),
+        patch("modelopt.torch.utils.dataset_utils.clear_cuda_cache"),
         patch(
             "torch.cuda.get_device_properties",
             return_value=SimpleNamespace(total_memory=10**12),
