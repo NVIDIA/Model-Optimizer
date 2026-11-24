@@ -46,7 +46,12 @@ import torch
 import transformers
 from arguments import get_training_args
 from transformers.trainer_utils import get_last_checkpoint
-from utils import get_lora_config, get_metrics_with_perplexity, make_supervised_data_module
+from utils import (
+    get_lora_config,
+    get_metrics_with_perplexity,
+    load_model,
+    make_supervised_data_module,
+)
 
 import modelopt.torch.opt as mto
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer, QATTrainer
@@ -71,11 +76,7 @@ def train():
     if model_args.attn_implementation:
         model_kwargs["attn_implementation"] = model_args.attn_implementation
 
-    model = transformers.AutoModelForCausalLM.from_pretrained(
-        model_args.model_name_or_path,
-        dtype=torch.bfloat16,
-        **model_kwargs,
-    )
+    model = load_model(model_args.model_name_or_path, dtype=torch.bfloat16, **model_kwargs)
     model.generation_config.do_sample = True
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.model_name_or_path, model_max_length=model_args.model_max_length
@@ -106,11 +107,7 @@ def train():
     distill_config = None
     if distill_args.distill:
         assert distill_args.teacher_model is not None, "Teacher model is required for distillation."
-        teacher = transformers.AutoModelForCausalLM.from_pretrained(
-            distill_args.teacher_model,
-            dtype=torch.bfloat16,
-            **model_kwargs,
-        )
+        teacher = load_model(distill_args.teacher_model, dtype=torch.bfloat16, **model_kwargs)
         distill_config = {
             "teacher_model": teacher,
             "temperature": distill_args.temperature,

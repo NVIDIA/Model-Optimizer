@@ -147,7 +147,7 @@ activations and tensor-core math are what deliver the throughput.
   only, BF16 activations.
 - **`mxfp4_mlp_weight_only`** — MXFP4 weights on MLP/MoE layers only, BF16
   activations. Needs no calibration forward pass; the QAT starting point for the
-  GPT-OSS family (see `examples/gpt-oss`).
+  GPT-OSS family (see `examples/llm_qat`).
 - **`iq1_s` / `iq1_m` / `iq2_xxs` / `iq2_xs` / `iq2_s`** — GGML-compatible IQ weights
   on the MLP/MoE layers, with BF16 activations; attention, `lm_head`, MoE routers,
   `conv1d` and the vision branch stay in BF16. The formats trade size against

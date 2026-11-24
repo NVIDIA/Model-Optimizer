@@ -83,8 +83,7 @@ jobs:
               - examples/hf_ptq/convert_ggml_to_int8.py # tests/examples/vllm_serve serves its output
               - "!**/*.{md,rst,png,ipynb}"
             trtllm:
-              - "{examples,tests/examples}/{gpt-oss,hf_ptq,llm_eval}/**"
-              - examples/dataset/** # data prep for gpt-oss
+              - "{examples,tests/examples}/{hf_ptq,llm_eval}/**"
               - "!**/*.{md,rst,png,ipynb}"
             megatron:
               - "{examples,tests/examples}/megatron_bridge/**"
@@ -180,8 +179,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # hf_ptq is the longest and stays alone. gpt-oss upgrades datasets and trl, so it goes after llm_eval.
-        example: ["llm_eval gpt-oss", hf_ptq]
+        # hf_ptq is the longest and stays alone.
+        example: [llm_eval, hf_ptq]
     uses: ./.github/workflows/_example_tests_runner.yml
     permissions:
       contents: read
