@@ -261,7 +261,6 @@ def _pinned_native_value(quantizer, inputs, source):
     meta = getattr(quantizer, "_native_weight_meta", None)
     if (
         meta
-        and meta.get("native_scale_buffers")
         and getattr(quantizer, "_amax", None) is None
         and not quantizer._use_constant_amax
         and not getattr(quantizer, "_local_repair_active", False)

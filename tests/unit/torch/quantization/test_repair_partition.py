@@ -95,7 +95,10 @@ def test_packed_frozen_projection_staging_and_restore(format_name, inference_sta
         native_weight_partition,
         prepare_packed_weights_for_tp,
     )
-    from modelopt.torch.quantization.utils.native_weight import get_pinned_native_weight
+    from modelopt.torch.quantization.utils.native_weight import (
+        get_pinned_native_weight,
+        pin_native_weight,
+    )
 
     torch.manual_seed(60)
     columns = 258 if format_name == "fp8_block_padded" else 256
@@ -191,6 +194,9 @@ def test_packed_frozen_projection_staging_and_restore(format_name, inference_sta
     assert torch.equal(
         restored[0].weight_quantizer._native_weight_codes, native._quantized_data.view(torch.uint8)
     )
+    # Re-pinning is supported after native field edits and must retain safe miss behavior.
+    q = restored[0].weight_quantizer
+    pin_native_weight(q, get_pinned_native_weight(q, restored[0].weight), restored[0].weight)
     # A changed master cannot silently switch an uncalibrated staged layer to dynamic amax.
     with torch.no_grad():
         restored[0].weight.add_(0.125)
