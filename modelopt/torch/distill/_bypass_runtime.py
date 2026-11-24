@@ -45,6 +45,7 @@ class DistributedBypassRuntime:
 
     def __init__(self, context, config):
         self.context = context
+        self.micro_batch_size = config.micro_batch_size
         self.local_batch_size, remainder = divmod(config.global_batch_size, context.dp_size)
         if remainder or not self.local_batch_size:
             raise ValueError("Global batch must divide exactly over actual data lanes")
@@ -75,6 +76,12 @@ class DistributedBypassRuntime:
             self.owners[module] = _get_enclosing_fsdp_module(module, student, self.names)
         if not any(isinstance(module, FSDPModule) for module in student.modules()):
             return
+        error = None
+        try:
+            batch = next(iter(adapter.microbatches(batch, self.micro_batch_size)))
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        self.synchronize_error(error)
         self.flags = {
             name: parameter.requires_grad for name, parameter in student.named_parameters()
         }

@@ -95,7 +95,8 @@ def _unique_batch_worker(rank, size, axis, unequal):
             ]
         )
     )
-    batches = [torch.randn(1, 4, 256) for _ in range(4)]
+    batch_size = 2 if axis == "fsdp" else 1
+    batches = [torch.randn(batch_size, 4, 256) for _ in range(4)]
     student = mtq.quantize(
         copy.deepcopy(teacher),
         {
@@ -112,7 +113,7 @@ def _unique_batch_worker(rank, size, axis, unequal):
     )
     config = {
         "num_steps": 2,
-        "global_batch_size": 2,
+        "global_batch_size": 2 * batch_size,
         "micro_batch_size": 1,
         "sequence_length": 4,
         "warmup_fraction": 0,
@@ -159,11 +160,35 @@ def _unique_batch_worker(rank, size, axis, unequal):
             assert not any("_local_repair_state" in key for key in student.state_dict())
         assert all(torch.equal(value, before[name]) for name, value in student.state_dict().items())
         return
+    forward_sizes, handles = {}, []
+    if axis == "fsdp":
+        for name, module in (
+            ("student", student),
+            ("teacher", teacher),
+            ("mlp", student.mlp),
+            ("moe", student.moe),
+        ):
+            sizes = forward_sizes[name] = []
+            handles.append(
+                module.register_forward_pre_hook(
+                    lambda module, args, sizes=sizes: sizes.append(args[0].shape[0])
+                )
+            )
     Lion.step = observed_step
     try:
         mtd.bypass(student, teacher, local, config, device_mesh=mesh)
     finally:
         Lion.step = original_step
+        for handle in handles:
+            handle.remove()
+    if axis == "fsdp":
+        # One bounded warmup precedes four training microbatches on each data lane.
+        assert forward_sizes == {
+            "student": [1],
+            "teacher": [1] * 5,
+            "mlp": [1] * 5,
+            "moe": [1] * 5,
+        }, forward_sizes
     for actual, expected in zip(gradients, expected_gradients, strict=True):
         for a, b in zip(actual, expected, strict=True):
             torch.testing.assert_close(a, b, rtol=2e-5, atol=1e-14)
