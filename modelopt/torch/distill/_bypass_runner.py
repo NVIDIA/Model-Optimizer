@@ -174,15 +174,15 @@ class _BypassRunner:
                 with torch.profiler.record_function("modelopt.bypass.update"):
                     self._update(self._measure(window, training=True), step)
                 window.clear()
+            for name, policy in self.policies.items():
+                policy.finalize_(
+                    weight_access=partial(self._weight_access, name),
+                )
             if validation_dataloader is not None:
                 statistics = self._measure(validation_dataloader, training=False)
                 _LOG.info(
                     "Bypass final validation mse=%s",
                     {n: (e / c).item() for n, (e, c) in statistics.items()},
-                )
-            for name, policy in self.policies.items():
-                policy.finalize_(
-                    weight_access=partial(self._weight_access, name),
                 )
             return self.student
         finally:

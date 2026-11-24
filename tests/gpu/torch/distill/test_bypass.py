@@ -17,6 +17,8 @@
 
 import copy
 import random
+import subprocess
+import sys
 from collections import OrderedDict
 
 import numpy as np
@@ -87,7 +89,8 @@ def _problem():
     return student, teacher, batches
 
 
-def test_bypass_streams_independent_units_and_finalizes(tmp_path):
+@pytest.mark.parametrize("validation_failure", [False, True])
+def test_bypass_streams_independent_units_and_finalizes(tmp_path, validation_failure):
     student, teacher, batches = _problem()
     teacher_state = copy.deepcopy(teacher.state_dict())
     initial = (student(batches[0]) - teacher(batches[0])).square().mean().item()
@@ -115,13 +118,28 @@ def test_bypass_streams_independent_units_and_finalizes(tmp_path):
         "scheduler": "constant",
         "warmup_fraction": 0,
     }
+
+    def validation_batches():
+        yield batches[0]
+        if validation_failure:
+            raise RuntimeError("deliberate validation failure")
+
     try:
-        result = mtd.bypass(student, teacher, batches, config)
+        if validation_failure:
+            with pytest.raises(RuntimeError, match="deliberate validation failure"):
+                mtd.bypass(
+                    student, teacher, batches, config, validation_dataloader=validation_batches()
+                )
+            result = student
+        else:
+            result = mtd.bypass(
+                student, teacher, batches, config, validation_dataloader=validation_batches()
+            )
     finally:
         for handle in handles:
             handle.remove()
     assert result is student
-    assert len(teacher_inputs) == len(student_inputs) == 16
+    assert len(teacher_inputs) == len(student_inputs) == 18
     for actual, expected in zip(student_inputs, teacher_inputs):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert student.training and teacher.training and not teacher.head.training
@@ -513,3 +531,22 @@ def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_p
     } == flags
     assert not hasattr(student.mlp[0].weight_quantizer, "_local_repair_state")
     torch.testing.assert_close(student(batches[0]), reference(batches[0]), rtol=0, atol=0)
+
+
+@pytest.mark.timeout(240)
+@pytest.mark.parametrize("first", ["distill", "quantization"])
+def test_distill_quantization_import_order_keeps_trainer_plugin(first):
+    pytest.importorskip("transformers")
+    code = "\n".join(
+        [
+            f"import modelopt.torch.{first}",
+            "import sys",
+            "import modelopt.torch.distill as mtd",
+            "import modelopt.torch.quantization as mtq",
+            "assert callable(mtd.bypass)",
+            "assert 'modelopt.torch.quantization.plugins.transformers_trainer' in sys.modules",
+            "assert hasattr(mtq.plugins, 'QATTrainer')",
+            "assert hasattr(mtq.plugins, 'QADTrainer')",
+        ]
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=180)
