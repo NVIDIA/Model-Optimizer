@@ -231,15 +231,26 @@ def native_weight_partition(quantizer, view, source=None):
             fields[importance_name] = importance
     elif source is not None:
         _pinned_native_fields(quantizer, view, fields, source)
+    axis = quantizer.axis
+    axes = (axis,) if isinstance(axis, int) else axis or ()
+    # Dynamic maxima are preserved only when the split does not divide their reduction.
+    dynamic_is_local = (
+        quantizer._dynamic
+        and not quantizer.block_sizes
+        and view.dim in {value % 2 for value in axes}
+    )
     if (
         not quantizer.is_mx_format
-        and not quantizer._dynamic
+        and not dynamic_is_local
         and not quantizer._use_constant_amax
         and quantizer.backend != "ggml"
         and getattr(quantizer, "_amax", None) is None
         and "_scale" not in fields
     ):
-        raise ValueError("Native TP fields require calibrated thresholds or pinned native scales.")
+        raise ValueError(
+            "Native TP fields require calibrated thresholds, shard-local dynamic reductions "
+            "or pinned native scales."
+        )
     layouts = {"global_delta": True, "local_delta": True} if quantizer.backend == "ggml" else {}
     return fields, layouts, bool(blocks) and quantizer.is_static_block_quant
 

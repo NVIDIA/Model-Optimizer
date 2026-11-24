@@ -274,3 +274,27 @@ def test_native_partition_preserves_threshold_policy(policy):
     else:
         fields, _, _ = native_weight_partition(quantizer, view)
         assert "_amax" not in fields
+
+
+@pytest.mark.parametrize("axis", [0, 1, -1, -2, (0,), (-2,), None])
+@pytest.mark.parametrize("dim", [0, 1])
+def test_dynamic_partition_requires_local_threshold_reductions(axis, dim):
+    torch.manual_seed(7)
+    weight = torch.randn(4, 32) * torch.tensor([1.0] * 16 + [100.0] * 16)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=(4, 3), axis=axis, type="dynamic")
+    )
+    view = NativeWeightPartition(tuple(weight.shape), dim, 0, 2)
+    axes = (axis,) if isinstance(axis, int) else axis or ()
+    before = copy.deepcopy(quantizer.state_dict())
+    if dim not in {value % 2 for value in axes}:
+        with pytest.raises(ValueError, match="require calibrated thresholds"):
+            native_weight_partition(quantizer, view)
+    else:
+        fields, _, _ = native_weight_partition(quantizer, view)
+        assert not fields
+        torch.testing.assert_close(
+            quantizer(view.select(weight)), view.select(quantizer(weight)), rtol=0, atol=0
+        )
+    assert quantizer.state_dict().keys() == before.keys()
+    assert all(torch.equal(value, before[name]) for name, value in quantizer.state_dict().items())
