@@ -32,7 +32,7 @@ from modelopt.torch.quantization.utils.native_weight import get_pinned_native_we
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native read memory qualification needs CUDA"
 )
-def test_staged_native_reads_bound_scratch_and_detect_inference_mutation():
+def test_staged_native_reads_bound_scratch_and_detect_inference_mutation(capsys):
     model = mtq.quantize(
         torch.nn.Sequential(
             *(torch.nn.Linear(4096, 4096, bias=False, device="cuda") for _ in range(3))
@@ -78,21 +78,22 @@ def test_staged_native_reads_bound_scratch_and_detect_inference_mutation():
         # Inference mode permits in-place edits; identity alone cannot validate freshness.
         layer.weight.add_(1)
         assert get_pinned_native_weight(quantizer, layer.weight) is None
-    print(
-        "Native pinned read CUDA metrics: "
-        + json.dumps(
-            {
-                "device": torch.cuda.get_device_name(),
-                "shape": [4096, 4096],
-                "staging_layers": len(model),
-                "staging_packed_bytes": packed_bytes,
-                "staging_master_bytes": master_bytes,
-                "staging_extra_peak_bytes": staging_peak,
-                "staging_retained_extra_bytes": staging_retained,
-                "staging_extra_budget_bytes": staging_budget,
-                "first_read_seconds": elapsed[0],
-                "warm_median_seconds": statistics.median(elapsed[1:]),
-                "extra_peak_allocated_bytes": scratch,
-            }
+    with capsys.disabled():
+        print(
+            "Native pinned read CUDA metrics: "
+            + json.dumps(
+                {
+                    "device": torch.cuda.get_device_name(),
+                    "shape": [4096, 4096],
+                    "staging_layers": len(model),
+                    "staging_packed_bytes": packed_bytes,
+                    "staging_master_bytes": master_bytes,
+                    "staging_extra_peak_bytes": staging_peak,
+                    "staging_retained_extra_bytes": staging_retained,
+                    "staging_extra_budget_bytes": staging_budget,
+                    "first_read_seconds": elapsed[0],
+                    "warm_median_seconds": statistics.median(elapsed[1:]),
+                    "extra_peak_allocated_bytes": scratch,
+                }
+            )
         )
-    )
