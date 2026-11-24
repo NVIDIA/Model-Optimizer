@@ -679,6 +679,7 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         (True, "empty-name"),
         (True, "custom-traversal"),
         (True, "equal-modules"),
+        (True, "changing-equality"),
         (True, "newline-name"),
         (True, "scripted"),
         (False, "plain"),
@@ -690,6 +691,7 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         "empty-name",
         "custom-traversal",
         "equal-modules",
+        "changing-equality",
         "newline-name",
         "scripted",
         "case-insensitive",
@@ -714,12 +716,17 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
                     yield name, module
 
     class EqualHolder(torch.nn.Module):
-        def __init__(self):
+        def __init__(self, num_bits=8):
             super().__init__()
             self.weight_quantizer = TensorQuantizer()
+            self.weight_quantizer.num_bits = num_bits
 
         def __eq__(self, other):
-            return isinstance(other, EqualHolder)
+            # Holders of quantizers of one width are equal, which entries can change.
+            return (
+                isinstance(other, EqualHolder)
+                and other.weight_quantizer.num_bits == self.weight_quantizer.num_bits
+            )
 
         def __hash__(self):
             return 0
@@ -744,6 +751,10 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
             # Two modules that compare equal, the second of which named_modules skips.
             model.add_module("8", EqualHolder())
             model.add_module("9", EqualHolder())
+        elif layout == "changing-equality":
+            # Or that come to compare equal once an entry makes the first one's quantizer 4-bit.
+            model.add_module("8", EqualHolder())
+            model.add_module("9", EqualHolder(num_bits=4))
         elif layout == "newline-name":
             # Or a name ending in a newline, which normalizing a fused-experts name keeps.
             experts = torch.nn.Module()
@@ -760,6 +771,9 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     for layer in range(8):
         quant_cfg.append({"quantizer_name": f"{layer}.weight_quantizer", "cfg": {"num_bits": 4}})
         quant_cfg.append({"quantizer_name": f"{layer}.input_quantizer", "enable": True})
+    if layout == "changing-equality":
+        quant_cfg.append({"quantizer_name": "8.weight_quantizer", "cfg": {"num_bits": 4}})
+        quant_cfg.append({"quantizer_name": "9.weight_quantizer", "enable": True})
     # Replacing a quantizer with a SequentialQuantizer, and back, changes the names to find.
     first_replacing = len(quant_cfg)
     quant_cfg.append({"quantizer_name": "2.weight_quantizer", "cfg": [{"num_bits": 4}] * 2})

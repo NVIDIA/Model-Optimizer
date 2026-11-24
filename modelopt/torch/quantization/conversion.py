@@ -305,19 +305,22 @@ def _runs_callers_code(obj: Any) -> bool:
 def _allows_subtree_walk(model: nn.Module) -> bool:
     """Whether a subtree walk of ``model`` finds what ``named_modules()`` lists, entry after entry.
 
-    It does where each module is registered once, under a nonempty name with no dot or final
-    newline, in a dict, and keeps ``nn.Module.named_modules``, which then lists exactly the paths a
-    subtree walk follows, and where no quantizer, nor its calibrator or rotation config, is of the
-    caller's class.
+    It does where each module is registered once, keeps ``object``'s equality and hash, is under a
+    nonempty name with no dot or final newline, in a dict, and keeps ``nn.Module.named_modules``,
+    which then lists exactly the paths a subtree walk follows, and where no quantizer, nor its
+    calibrator or rotation config, is of the caller's class.
     """
     seen = set()
     stack = [model]
     while stack:
         module = stack.pop()
-        # named_modules lists a module equal to one it has listed once, as a set does; an override
+        # named_modules skips a module equal to one it has listed, as a set does, which a class's
+        # own equality or hash can base on state the entries change; an override of named_modules
         # can list other paths, and change what it lists as entries apply.
-        if module in seen or (
-            getattr(module.named_modules, "__func__", None) is not nn.Module.named_modules
+        if (
+            any("__eq__" in vars(c) or "__hash__" in vars(c) for c in type(module).__mro__[:-1])
+            or module in seen
+            or getattr(module.named_modules, "__func__", None) is not nn.Module.named_modules
         ):
             return False
         if isinstance(module, (TensorQuantizer, SequentialQuantizer)) and (
