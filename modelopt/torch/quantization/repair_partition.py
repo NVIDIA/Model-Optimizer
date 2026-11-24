@@ -20,12 +20,10 @@ import math
 from dataclasses import dataclass
 
 import torch
-from torch.distributed.tensor import Shard
-from torch.distributed.tensor.placement_types import _StridedShard
 
 from .ggml.common import PINNED_PAYLOAD_PREFIX
 from .ggml.registry import GGML_FORMAT_REGISTRY
-from .nn import QuantModule, TensorQuantizer
+from .nn import TensorQuantizer
 from .qtensor import FP8QTensor, NVFP4QTensor, QTensorWrapper
 from .qtensor.base_qtensor import get_native_tensor_class
 from .utils.native_weight import pin_native_weight
@@ -81,44 +79,6 @@ class NativeWeightPartition:
         pieces = [value.narrow(self.dim, start, width) for start, width in self.intervals(block)]
         selected = pieces[0].clone() if len(pieces) == 1 else torch.cat(pieces, dim=self.dim)
         return selected.view(dtype)
-
-
-def quantized_weight_bindings(module):
-    """Name each physical weight and the quantizers that follow its ownership."""
-    if not isinstance(module, QuantModule):
-        return ()
-    if hasattr(module, "_first_proj_weight_quantizers_attr"):
-        return (
-            (
-                module._first_proj_attr,
-                module._first_proj_weight_quantizers_attr,
-                module._first_proj_input_quantizer_attr,
-            ),
-            ("down_proj", "down_proj_weight_quantizers", "down_proj_input_quantizer"),
-        )
-    return (("weight", "weight_quantizer", "input_quantizer"),)
-
-
-def native_tp_weight_view(name, shape, placement, mesh, *, allow_expert_axis=False):
-    """Resolve the same physical matrix geometry before and after native sharding."""
-    if not isinstance(placement, (Shard, _StridedShard)):
-        return None
-    fused = len(shape) == 3 and name != "weight"
-    if len(shape) != 2 + int(fused):
-        raise ValueError("Native TP fields require physical matrix or fused expert views.")
-    dim = placement.dim % len(shape) - int(fused)
-    if dim not in (0, 1):
-        # EP separately validates contiguous ownership of whole expert quantizer lists.
-        if fused and dim == -1 and allow_expert_axis and not isinstance(placement, _StridedShard):
-            return None
-        raise ValueError("Native TP fields require physical matrix or fused expert views.")
-    return NativeWeightPartition(
-        tuple(shape[int(fused) :]),
-        dim,
-        mesh.get_local_rank(),
-        mesh.size(),
-        placement.split_factor if isinstance(placement, _StridedShard) else 1,
-    )
 
 
 def _pinned_native_fields(quantizer, view, fields, source):
@@ -195,7 +155,7 @@ def native_weight_partition(quantizer, view, source=None):
     local_grid = tuple(
         math.ceil(n / blocks.get(axis, 1)) for axis, n in enumerate(view.local_shape)
     )
-    fields, sharded = {}, {}
+    fields = {}
     for name in (
         "_amax",
         "_global_amax",
@@ -210,7 +170,6 @@ def native_weight_partition(quantizer, view, source=None):
             continue
         if hasattr(value, "to_local"):
             value = value.to_local()
-        part = False
         block_field = name == "_scale" or (name == "_amax" and quantizer.is_static_block_quant)
         if block_field and blocks and value.numel() in (math.prod(grid), math.prod(local_grid)):
             value = (
@@ -229,19 +188,14 @@ def native_weight_partition(quantizer, view, source=None):
                     )
                 )
                 value = value.reshape(target)
-            part = True
         elif value.numel() > 1:
             if name == "_pre_quant_scale" and value.shape[-1] == view.shape[-1] and view.dim == 1:
                 value = view.select(value.reshape(-1, view.shape[-1])).reshape(
                     *value.shape[:-1], -1
                 )
-                part = True
             elif value.ndim == 2 and value.shape[view.dim] == view.shape[view.dim]:
                 value = view.select(value)
-                part = True
-            elif value.ndim == 2 and value.shape[view.dim] == view.local_shape[view.dim]:
-                part = True
-        fields[name], sharded[name] = value, part
+        fields[name] = value
     if quantizer.backend == "ggml":
         fmt = GGML_FORMAT_REGISTRY[quantizer.num_bits]
         if view.shape[-1] % fmt.block_size:
@@ -288,213 +242,14 @@ def native_weight_partition(quantizer, view, source=None):
     return fields, layouts, bool(blocks) and quantizer.is_static_block_quant
 
 
-def validate_native_weight_partition(quantizer, view):
-    """Validate physical field geometry using metadata only, before changing a model."""
-    probe = copy.copy(quantizer)
-    probe._buffers = {
-        name: torch.empty_like(value, device="meta") if isinstance(value, torch.Tensor) else value
-        for name, value in quantizer._buffers.items()
-    }
-    probe._parameters = {
-        name: torch.nn.Parameter(
-            torch.empty_like(value, device="meta"), requires_grad=value.requires_grad
-        )
-        if value is not None
-        else None
-        for name, value in quantizer._parameters.items()
-    }
-    # Real packed staging will supply a logical master, without changing the native field shapes.
-    probe._fake_quant = True
-    native_weight_partition(probe, view)
-    meta = getattr(quantizer, "_native_weight_meta", None)
-    if meta is None:
-        return
-    if tuple(meta["source_shape"]) not in (view.shape, view.local_shape):
-        raise ValueError("Pinned native payload does not match its physical weight geometry.")
-    cls = get_native_tensor_class(meta["class"])
-    if cls not in _NATIVE_TP_CODECS:
-        raise ValueError("This native codec needs its own physical payload TP partitioner.")
-    packed = cls is NVFP4QTensor
-    codes = probe._native_weight_codes.view(meta["code_dtype"])
-    shape = tuple(meta["source_shape"])
-    if codes.numel() % shape[0] or codes.numel() // shape[0] * (2 if packed else 1) < shape[1]:
-        raise ValueError("Native code padding does not match complete logical weight rows.")
-    if shape == view.shape and view.dim == 1:
-        view.intervals(2 if packed else 1)
-
-
-def validate_activation_partition(quantizer, view):
-    """Validate calibrated input fields without copying their storage."""
-    probe = copy.copy(quantizer)
-    probe._buffers = {
-        name: torch.empty_like(value, device="meta") if isinstance(value, torch.Tensor) else value
-        for name, value in quantizer._buffers.items()
-    }
-    activation_partition(probe, view)
-
-
-def validate_tp_output_quantizer(quantizer, view):
-    """Accept only output quantizers that need no reduction or field transport."""
-    if quantizer is None or view.size == 1:
-        return
-    for member in quantizer.modules():
-        if not isinstance(member, TensorQuantizer):
-            continue
-        enabled = member.is_enabled and (member._if_quant or member._if_calib)
-        if view.dim == 1:
-            if enabled:
-                raise ValueError(
-                    "Rowwise TP output quantization must run after the native reduction."
-                )
-            continue
-        output_view = NativeWeightPartition(
-            (1, view.shape[0]), 1, view.rank, view.size, view.split_factor
-        )
-        scale = member.pre_quant_scale
-        if scale is not None and scale.numel() > 1:
-            raise ValueError(
-                "Colwise TP output pre-scale fields require explicit channel partitions."
-            )
-        if member.rotate_is_enabled or member.rotate_back_is_enabled:
-            try:
-                output_view.intervals(member.rotate_block_size or view.shape[0])
-            except ValueError as exc:
-                raise ValueError(
-                    "Colwise TP output rotation requires complete local blocks."
-                ) from exc
-        if not enabled:
-            continue
-        if any(
-            isinstance(getattr(member, name, None), torch.Tensor)
-            and getattr(member, name).numel() > 1
-            for name in ("_amax", "_global_amax", "_bias_value")
-        ):
-            raise ValueError(
-                "Colwise TP output calibration fields require explicit channel partitions."
-            )
-        fixed = (
-            isinstance(getattr(member, "_amax", None), torch.Tensor) or member._use_constant_amax
-        )
-        if member.backend is not None or (not member.is_mx_format and not fixed):
-            raise ValueError(
-                "Colwise TP output quantization requires fixed scalar calibration or independent MX blocks."
-            )
-        try:
-            activation_partition(member, output_view)
-        except ValueError as exc:
-            raise ValueError(
-                "Colwise TP output statistics require independent complete local blocks."
-            ) from exc
-
-
-def _validate_rowwise_activation_statistics(quantizer, view, blocks, channel_block):
-    if quantizer.rotate_is_enabled or quantizer.rotate_back_is_enabled:
-        view.intervals(quantizer.rotate_block_size or view.shape[-1])
-    if not quantizer.is_enabled:
-        return
-    if (quantizer.bias or {}).get("type") == "dynamic":
-        raise ValueError("Rowwise TP dynamic activation bias requires global channel statistics.")
-    if channel_block:
-        view.intervals(channel_block)
-    if (
-        quantizer.is_mx_format
-        or isinstance(getattr(quantizer, "_amax", None), torch.Tensor)
-        or quantizer._use_constant_amax
-    ):
-        return
-    numeric_blocks = any(
-        isinstance(axis, int) and size is not None for axis, size in blocks.items()
-    )
-    if numeric_blocks and blocks.get("type", "static") == "static":
-        # Static block setup retains every unblocked axis; complete channel blocks are local.
-        return
-    if blocks.get("type") != "dynamic":
-        axes = quantizer.axis
-        axes = (axes,) if isinstance(axes, int) else axes or ()
-        if -1 in axes:
-            return
-        consumed = getattr(quantizer, "_consumed_block_sizes", None) or blocks
-        reduced = {
-            axis for axis, size in consumed.items() if isinstance(axis, int) and size is None
-        }
-        if reduced and all(axis < 0 for axis in reduced) and -1 not in reduced:
-            return
-    raise ValueError(
-        "Rowwise TP activation statistics require calibrated amax or independent channel statistics."
-    )
-
-
-def activation_partition(quantizer, view):
-    """Keep calibrated input-channel fields aligned with a row-parallel weight."""
-    if view.dim != 1 or view.size == 1:
-        return {}
-    blocks = quantizer.block_sizes or {}
-    original_shape = getattr(quantizer, "_original_shape", ())
-    channel_block = blocks.get(-1) or blocks.get(len(original_shape) - 1)
-    if channel_block is None and blocks.get("type") == "dynamic":
-        sizes = [
-            size for axis, size in blocks.items() if isinstance(axis, int) and size is not None
-        ]
-        if len(sizes) == 1:
-            # A valid dynamic-block forward applies this block to its final axis.
-            channel_block = sizes[0]
-    _validate_rowwise_activation_statistics(quantizer, view, blocks, channel_block)
-    layout = (view.shape[-1], view.rank, view.size, view.split_factor)
-    previous = getattr(quantizer, "_native_tp_activation_layout", None)
-    if previous is not None:
-        if previous != layout:
-            raise ValueError(
-                "Restore full calibrated activation fields before changing their TP layout."
-            )
-        return {}
-    fields = {}
-    for name in ("_amax", "_global_amax", "_pre_quant_scale", "_bias_value"):
-        value = getattr(quantizer, name, None)
-        if value is None or value.numel() == 1:
-            continue
-        if name == "_amax" and blocks.get("type") == "dynamic" and not quantizer.is_mx_format:
-            # E4M3 block scaling consumes amax.amax(), so retain the exact full calibration.
-            continue
-        if value.shape[-1] == view.shape[-1]:
-            fields[name] = view.select(value.reshape(-1, view.shape[-1])).reshape(
-                *value.shape[:-1], -1
-            )
-        elif value.shape[-1] == view.local_shape[-1]:
-            fields[name] = value
-        elif name == "_amax" and channel_block and quantizer.is_static_block_quant:
-            if original_shape and original_shape[-1] == view.local_shape[-1]:
-                fields[name] = value
-                continue
-            view.intervals(channel_block)
-            channels = math.ceil(view.shape[-1] / channel_block)
-            if value.numel() % channels:
-                raise ValueError("Static activation blocks do not match the input-channel layout.")
-            selected = view.select(value.reshape(-1, channels), channel_block)
-            numeric_blocks = [
-                axis for axis in blocks if isinstance(axis, int) and blocks[axis] is not None
-            ]
-            target = (
-                (-1, 1) if len(numeric_blocks) == 1 else (*value.shape[:-2], selected.shape[-1], 1)
-            )
-            fields[name] = selected.reshape(target)
-        elif quantizer.block_sizes or (
-            quantizer.axis is not None
-            and -1 in ((quantizer.axis,) if isinstance(quantizer.axis, int) else quantizer.axis)
-        ):
-            raise ValueError(
-                "Calibrated TP activation fields do not match the input-channel shard."
-            )
-    if fields:
-        fields["_native_tp_activation_layout"] = layout
-    return fields
-
-
+@torch.inference_mode(False)
 @torch.no_grad()
 def prepare_packed_weights_for_tp(model):
     """Stage packed parameters as logical masters while retaining authoritative native bytes.
 
     Call before HF shards parameters. Returned metadata records the original packed
     deployment representation; native pins remain the source of codes during repair.
+    Masters retain version counters even when the caller stages under inference mode.
     """
     candidates, aliases, owners = [], {}, {}
     for name, module in model.named_modules():

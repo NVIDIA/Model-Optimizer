@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Native IQ payload placement, mesh adoption and real four-GPU projection checks."""
+"""Native payload partitions and frozen-weight staging with CPU reference codecs."""
 
 import copy
 
@@ -79,15 +79,13 @@ def test_native_partition_preserves_pinned_projection(name, dim):
         (0, 0, 2, 0),
     ):
         with pytest.raises(ValueError):
-            native_weight_partition(
-                quantizer,
-                NativeWeightPartition((4, 512), bad_dim, bad_rank, bad_size, bad_split),
-            )
+            NativeWeightPartition((4, 512), bad_dim, bad_rank, bad_size, bad_split)
     assert all(torch.equal(v, before[n]) for n, v in quantizer.state_dict().items())
 
 
 @pytest.mark.parametrize("format_name", ["fp8", "nvfp4"])
-def test_packed_frozen_projection_staging_and_restore(format_name, tmp_path):
+@pytest.mark.parametrize("inference_staging", [False, True])
+def test_packed_frozen_projection_staging_and_restore(format_name, inference_staging, tmp_path):
     import modelopt.torch.opt as mto
     from modelopt.torch.quantization.qtensor import FP8QTensor, NVFP4QTensor, QTensorWrapper
     from modelopt.torch.quantization.repair_partition import (
@@ -125,7 +123,9 @@ def test_packed_frozen_projection_staging_and_restore(format_name, tmp_path):
     decoded = native.dequantize(
         scale=scale, double_scale=double_scale, block_sizes=layer.weight_quantizer.block_sizes
     )
-    prepare_packed_weights_for_tp(model)
+    with torch.inference_mode(inference_staging):
+        prepare_packed_weights_for_tp(model)
+    layer.weight_quantizer.disable()
     x = torch.randn(3, 256, requires_grad=True)
     expected = F.linear(x, decoded)
     actual = model(x)
