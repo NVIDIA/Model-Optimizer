@@ -37,10 +37,10 @@ from ..._bypass_parallel import (
     _size,
     plan_tp_input_quantizer_fields,
     prepare_quantizer_partitions,
-    torch_mesh_context,
     validate_tp_quantizer_aliases,
     validate_tp_replicated_inputs,
 )
+from ..._bypass_parallel import torch_mesh_context as torch_mesh_context
 
 __all__ = []
 
