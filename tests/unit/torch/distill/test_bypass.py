@@ -18,7 +18,7 @@
 import pytest
 import torch
 
-from modelopt.torch.distill._bypass_capture import mse_statistics
+from modelopt.torch.distill._bypass_capture import _MSE_CHUNK_ELEMENTS, mse_statistics
 
 
 def test_lion_conflicting_gradients_and_effective_schedule():
@@ -42,7 +42,9 @@ def test_lion_conflicting_gradients_and_effective_schedule():
         assert learning_rate(config, step) == pytest.approx(expected, abs=1e-12)
 
 
-def test_masked_mse_keeps_narrow_saved_activations_and_fp32_vjp():
+@pytest.mark.parametrize("chunk_elements", [1 << 16, 1 << 24])
+def test_masked_mse_keeps_narrow_saved_activations_and_fp32_vjp(monkeypatch, chunk_elements):
+    monkeypatch.setitem(_MSE_CHUNK_ELEMENTS, "cpu", chunk_elements)
     torch.manual_seed(18)
     prediction = torch.randn(2, 513, 257, dtype=torch.bfloat16, requires_grad=True)
     target = torch.randn_like(prediction, requires_grad=True)

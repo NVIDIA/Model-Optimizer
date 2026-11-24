@@ -32,6 +32,7 @@ from ._bypass_capture import mse_statistics
 from ._bypass_optimizer import Lion, learning_rate
 
 _LOG = logging.getLogger(__name__)
+_OPTIMIZERS = {"lion": Lion}
 
 
 class _BypassRunner:
@@ -163,7 +164,9 @@ class _BypassRunner:
                 with self._weight_access(unit.name, writeback=False):
                     fields = policy.prepare_plan(self.plan, index)
                 self.fields[unit.name] = fields
-                self.optimizers[unit.name] = Lion(fields, lr=self.config.max_lr)
+                self.optimizers[unit.name] = _OPTIMIZERS[self.config.optimizer](
+                    fields, lr=self.config.max_lr
+                )
             for step in range(1, self.config.num_steps + 1):
                 window = first if step == 1 else self._window(batches)
                 for optimizer in self.optimizers.values():

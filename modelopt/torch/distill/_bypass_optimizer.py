@@ -20,6 +20,8 @@ import math
 import torch
 from torch.optim import Optimizer
 
+_LION_CHUNK_ELEMENTS = 1 << 18
+
 
 class Lion(Optimizer):
     """Sign-momentum Lion with FP32 state, betas (0.9, 0.99), and zero decay."""
@@ -58,8 +60,8 @@ class Lion(Optimizer):
                     parameter.grad.view(-1),
                     state["exp_avg"].view(-1),
                 )
-                for start in range(0, parameter.numel(), 262144):
-                    chunk = slice(start, start + 262144)
+                for start in range(0, parameter.numel(), _LION_CHUNK_ELEMENTS):
+                    chunk = slice(start, start + _LION_CHUNK_ELEMENTS)
                     direction = momentum[chunk].mul(beta1).add_(gradient[chunk], alpha=1 - beta1)
                     value[chunk].add_(direction.sign_(), alpha=-group["lr"])
                     momentum[chunk].mul_(beta2).add_(gradient[chunk], alpha=1 - beta2)

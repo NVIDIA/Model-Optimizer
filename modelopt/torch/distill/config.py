@@ -155,7 +155,9 @@ class BypassConfig(ModeloptBaseConfig):
     """
 
     num_steps: int = ModeloptField(default=512, ge=0, description="Complete global-batch updates.")
-    optimizer: Literal["lion"] = ModeloptField(default="lion")
+    optimizer: Literal["lion"] = ModeloptField(
+        default="lion", description="Optimizer used for IQ scale masters."
+    )
     max_lr: float = ModeloptField(default=0.001, gt=0, allow_inf_nan=False)
     warmup_fraction: float = ModeloptField(default=0.05, ge=0, le=1, allow_inf_nan=False)
     scheduler: Literal["cosine", "linear", "constant"] = ModeloptField(default="cosine")
