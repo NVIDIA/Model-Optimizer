@@ -1187,10 +1187,15 @@ def load_pretrained(
         keys = None
         # from_pretrained read ckpt_path's safetensors (``variant`` is refused, ``subfolder`` is in
         # ckpt_path) unless handed its weights another way; unsure what it read, keep its record.
+        # Given both a single file and an index, it reads the single file, the index's shards not.
         read_elsewhere = (
             kwargs.get("state_dict") is not None
             or kwargs.get("gguf_file")
             or kwargs.get("use_safetensors") is False
+            or all(
+                os.path.isfile(os.path.join(ckpt_path, name))
+                for name in ("model.safetensors", "model.safetensors.index.json")
+            )
         )
         if not read_elsewhere and getattr(model, "_weight_conversions", None):
             if stored := stored_tensor_files(ckpt_path):

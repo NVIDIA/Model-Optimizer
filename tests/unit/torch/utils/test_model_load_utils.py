@@ -434,6 +434,19 @@ def test_the_record_is_the_conversions_the_read_tensors_used(
     assert every("lm_head") != "lm_head"
 
 
+def test_load_pretrained_keeps_the_record_when_unsure_what_was_read(tmp_path, monkeypatch):
+    """Given ``model.safetensors`` and an index, from_pretrained reads the single file, whatever
+    the index says, so pruning by the index's shards could drop a conversion that ran."""
+    ref = _tiny_llava_checkpoint(tmp_path, drop=("lm_head.",), tie=True)
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"metadata": {}, "weight_map": {"language_model.lm_head.weight": "model.safetensors"}}
+        )
+    )
+    model = load_pretrained(str(tmp_path), _loads_as_on_transformers_5_5(monkeypatch))
+    assert len(model._weight_conversions) == len(get_model_conversion_mapping(ref))
+
+
 def test_unsourced_parameter_raises(tmp_path, gloo_group):
     _tiny_llava_checkpoint(tmp_path, drop=("model.multi_modal_projector.",))
     with pytest.raises(RuntimeError, match="get no tensor from the checkpoint"):
