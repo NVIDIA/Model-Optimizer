@@ -27,7 +27,6 @@ from modelopt.torch.quantization.repair_partition import (
     native_tp_weight_view,
     prepare_packed_weights_for_tp,
     quantized_weight_bindings,
-    validate_activation_partition,
     validate_native_weight_partition,
     validate_tp_output_quantizer,
 )
@@ -36,8 +35,10 @@ from ..._bypass_parallel import (
     BypassMeshContext,
     _all_rank_values,
     _size,
+    plan_tp_input_quantizer_fields,
     prepare_quantizer_partitions,
     validate_tp_quantizer_aliases,
+    validate_tp_replicated_inputs,
 )
 
 __all__ = []
@@ -152,13 +153,20 @@ def validate_hf_tensor_parallelism(model, mesh, plan=None):
     if expanded:
         plan = model._expand_parallel_plan(model.tp_plan)
     parameters = dict(model.named_parameters(remove_duplicate=False))
-    aliases = {}
+    aliases, placed_inputs = {}, set()
     for full, style in plan.items():
         if full in parameters:
             owner, _, name = full.rpartition(".")
             _validate_parameter_geometry(
-                modules[owner], name, ALL_PARALLEL_STYLES[style], mesh, full, aliases
+                modules[owner],
+                name,
+                ALL_PARALLEL_STYLES[style],
+                mesh,
+                full,
+                aliases,
+                placed_inputs=placed_inputs,
             )
+    validate_tp_replicated_inputs(model, placed_inputs, aliases, metadata_only=True)
     _validate_hf_plan_aliases(
         model, plan, modules, parameters, rules=model.tp_plan if expanded else None
     )
@@ -244,7 +252,15 @@ def _expert_partitions(model, plan, context, adopted):
 
 
 def _validate_parameter_geometry(
-    module, name, style, mesh, full_name, aliases=None, *, allow_expert_axis=False
+    module,
+    name,
+    style,
+    mesh,
+    full_name,
+    aliases=None,
+    *,
+    allow_expert_axis=False,
+    placed_inputs=None,
 ):
     """Resolve the installed HF style on a storage-free logical parameter."""
     parameter = module._parameters[name]
@@ -297,8 +313,11 @@ def _validate_parameter_geometry(
             if aliases is not None:
                 validate_tp_quantizer_aliases(quantizer, view, aliases)
     activation = getattr(module, input_name, None)
-    if isinstance(activation, TensorQuantizer):
-        validate_activation_partition(activation, view)
+    plan_tp_input_quantizer_fields(
+        activation, view, {} if aliases is None else aliases, metadata_only=True
+    )
+    if placed_inputs is not None:
+        placed_inputs.add((id(module), input_name))
 
 
 def _restore_parallel_plans(model, original_plans):
@@ -422,7 +441,7 @@ def parallelize_native_transformers(model, context, *, initialize=None):
         if not adopted:
             modules = dict(model.named_modules(remove_duplicate=False))
             parameters = dict(model.named_parameters(remove_duplicate=False))
-            aliases = {}
+            aliases, placed_inputs = {}, set()
             for plan, mesh, allow_expert_axis in (
                 (tp_plan, context.tensor_mesh, False),
                 (ep_plan, context.expert_mesh, True),
@@ -438,7 +457,9 @@ def parallelize_native_transformers(model, context, *, initialize=None):
                             name,
                             aliases,
                             allow_expert_axis=allow_expert_axis,
+                            placed_inputs=placed_inputs,
                         )
+            validate_tp_replicated_inputs(model, placed_inputs, aliases, metadata_only=True)
             # HF retains merged original rules, while expansion drops secondary module owners.
             tp_rules = model.tp_plan if config.tp_size > 1 else {}
             if config.ep_size > 1:
