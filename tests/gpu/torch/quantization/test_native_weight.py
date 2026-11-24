@@ -61,7 +61,6 @@ def test_staged_native_reads_bound_scratch_and_detect_inference_mutation(capsys)
         # Atomic rollback retains all original payloads while new masters/pins accumulate.
         # Allow one decoded matrix plus bounded fingerprint scratch beyond those outputs.
         staging_budget = master_bytes + packed_bytes + master_bytes // 3 + 16 * 1024**2
-        assert staging_peak <= staging_budget
         layer, quantizer = model[0], model[0].weight_quantizer
         elapsed, scratch = [], []
         for _ in range(4):
@@ -73,11 +72,6 @@ def test_staged_native_reads_bound_scratch_and_detect_inference_mutation(capsys)
             torch.cuda.synchronize()
             elapsed.append(time.perf_counter() - start)
             scratch.append(torch.cuda.max_memory_allocated() - allocated)
-        assert scratch[0] <= 16 * 1024**2
-        assert max(scratch[1:]) <= 1024**2
-        # Inference mode permits in-place edits; identity alone cannot validate freshness.
-        layer.weight.add_(1)
-        assert get_pinned_native_weight(quantizer, layer.weight) is None
     with capsys.disabled():
         print(
             "Native pinned read CUDA metrics: "
@@ -97,3 +91,10 @@ def test_staged_native_reads_bound_scratch_and_detect_inference_mutation(capsys)
                 }
             )
         )
+    assert staging_peak <= staging_budget
+    assert scratch[0] <= 16 * 1024**2
+    assert max(scratch[1:]) <= 1024**2
+    # Inference mode permits in-place edits; identity alone cannot validate freshness.
+    with torch.inference_mode():
+        layer.weight.add_(1)
+        assert get_pinned_native_weight(quantizer, layer.weight) is None

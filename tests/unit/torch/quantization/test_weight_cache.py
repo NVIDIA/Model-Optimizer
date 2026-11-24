@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import copy
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -352,3 +353,36 @@ def test_pinned_native_scales_are_live_codec_fields():
     updated = expected.detach().clone().requires_grad_()
     pin_native_weight(q, pinned, updated)
     torch.testing.assert_close(q(updated), updated, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("policy", ["uncalibrated", "constant", "dynamic"])
+@pytest.mark.parametrize("cached", [False, True])
+def test_native_pin_miss_preserves_threshold_policy(policy, cached):
+    model = _quantized_mlp(num_bits=(4, 3))
+    linear = model[0]
+    quantizer, source = linear.weight_quantizer, linear.weight
+    del quantizer._amax
+    if policy == "constant":
+        quantizer.set_from_attribute_config(
+            QuantizerAttributeConfig(num_bits=(4, 3), axis=0, use_constant_amax=True)
+        )
+    elif policy == "dynamic":
+        quantizer.set_from_attribute_config(
+            QuantizerAttributeConfig(num_bits=(4, 3), axis=0, type="dynamic")
+        )
+    native, scale = FP8QTensor.quantize(source.detach(), axis=0)
+    quantizer._set_buffer("_scale", scale)
+    pin_native_weight(quantizer, native, source)
+    reference = copy.deepcopy(quantizer)
+    del reference._native_weight_meta
+    with torch.no_grad():
+        source.add_(0.125)
+    assert get_pinned_native_weight(quantizer, source) is None
+    if cached:
+        enable_weight_cache(linear)
+    with weight_cache_scope(linear) if cached else nullcontext():
+        if policy == "uncalibrated":
+            with pytest.raises(ValueError, match="calibrate thresholds"):
+                quantizer(source)
+        else:
+            torch.testing.assert_close(quantizer(source), reference(source), rtol=0, atol=0)

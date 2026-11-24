@@ -263,6 +263,8 @@ def _pinned_native_value(quantizer, inputs, source):
         meta
         and getattr(quantizer, "_amax", None) is None
         and not quantizer._use_constant_amax
+        and not quantizer._dynamic
+        and not quantizer.is_mx_format
         and not getattr(quantizer, "_local_repair_active", False)
     ):
         raise ValueError(

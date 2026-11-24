@@ -233,6 +233,8 @@ def native_weight_partition(quantizer, view, source=None):
         _pinned_native_fields(quantizer, view, fields, source)
     if (
         not quantizer.is_mx_format
+        and not quantizer._dynamic
+        and not quantizer._use_constant_amax
         and quantizer.backend != "ggml"
         and getattr(quantizer, "_amax", None) is None
         and "_scale" not in fields
