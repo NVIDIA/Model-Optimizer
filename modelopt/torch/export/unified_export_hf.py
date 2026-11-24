@@ -1864,7 +1864,9 @@ def _source_config_json(model: nn.Module) -> Any:
     # RuntimeError: a symlink loop on Python < 3.13, and the RecursionError of a deeply nested file.
     with contextlib.suppress(OSError, ValueError, RuntimeError):
         if ckpt:
-            return json.loads(resolve_checkpoint_file(Path(ckpt), "config.json").read_text())
+            return json.loads(
+                resolve_checkpoint_file(Path(ckpt), "config.json").read_text(encoding="utf-8")
+            )
     return {}
 
 
