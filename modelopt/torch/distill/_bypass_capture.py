@@ -173,13 +173,11 @@ def _validate_student_owners(student, paths, backings):
 
 
 def _valid_token_mask(batch):
+    """Use explicit loss validity or standard attention masks, not model-owned metadata."""
     if not isinstance(batch, dict):
         return None
-    for name in ("valid_mask", "_packed_seq_ids"):
-        if isinstance(batch.get(name), torch.Tensor):
-            return batch[name].bool()
-    if isinstance(batch.get("padding_mask"), torch.Tensor):
-        return ~batch["padding_mask"].bool()
+    if isinstance(batch.get("valid_mask"), torch.Tensor):
+        return batch["valid_mask"].bool()
     attention = batch.get("attention_mask")
     if isinstance(attention, torch.Tensor):
         if attention.ndim == 2:
