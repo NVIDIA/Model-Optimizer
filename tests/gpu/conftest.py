@@ -59,12 +59,6 @@ def calib_jsonl(tmp_path_factory):
 
 @pytest.fixture
 def bypass_cpu_workers(_dist_pools):
-    from _test_utils.torch.distributed.utils import (
-        DistributedWorkerPool,
-        default_worker_teardown,
-        get_live_pool,
-    )
-
     return get_live_pool(
         _dist_pools,
         ("bypass_cpu", 2),
