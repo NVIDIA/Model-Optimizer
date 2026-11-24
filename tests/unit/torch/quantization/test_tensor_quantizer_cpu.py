@@ -119,3 +119,21 @@ def test_grouped_quantizer_preserves_nested_sequential_state_dict_layout():
     )
 
     assert list(grouped.state_dict()) == ["0.0._amax", "0.1._amax", "1._amax"]
+
+
+def test_activation_placement_properties_are_runtime_only():
+    quantizer = TensorQuantizer(amax=1.0)
+    legacy = {
+        "_native_tp_activation_layout": (32, 0, 2, 1),
+        "_native_tp_activation_fields": ("_amax",),
+    }
+    for name, value in legacy.items():
+        setattr(quantizer, name, value)
+    state = quantizer.get_modelopt_state()
+    assert not legacy.keys() & state.keys()
+    restored = TensorQuantizer()
+    restored.set_from_modelopt_state({**state, **legacy})
+    restored.load_state_dict(quantizer.state_dict())
+    assert all(not hasattr(restored, name) for name in legacy)
+    inputs = torch.tensor([0.1, 0.5, 1.5])
+    torch.testing.assert_close(restored(inputs), quantizer(inputs), rtol=0, atol=0)
