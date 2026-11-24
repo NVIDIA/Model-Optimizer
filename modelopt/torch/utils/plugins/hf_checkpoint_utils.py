@@ -604,28 +604,15 @@ def checkpoint_tensor_files(ckpt: "str | Path") -> dict[str, str]:
     Files the index never names are not included: the loader never opens them, and
     :func:`copy_off_index_safetensors` copies them into the export whole.
     """
-    tensor_files = indexed_weight_map(ckpt)
-    for name, file_name in stored_tensor_files(ckpt).items():
-        tensor_files.setdefault(name, file_name)
-    return tensor_files
-
-
-def stored_tensor_files(ckpt: "str | Path") -> dict[str, str]:
-    """``tensor name -> file`` for the tensors the weight files the loader opens actually store.
-
-    The keys ``from_pretrained`` reads: the headers of the files the index names, or of the single
-    ``model.safetensors``. Unlike :func:`checkpoint_tensor_files`, an index entry no file stores is
-    not one of them, so every name here can be read from its file.
-    """
     weight_map = indexed_weight_map(ckpt)
     if not (Path(ckpt) / "model.safetensors.index.json").exists():
         return weight_map  # The single file's header already listed all of it.
-    stored: dict[str, str] = {}
+    tensor_files = dict(weight_map)
     for file_name in sorted(set(weight_map.values())):
         with safe_open(str(Path(ckpt) / file_name), framework="pt") as f:
             for name in f.keys():  # noqa: SIM118 - safe_open is not iterable
-                stored.setdefault(name, file_name)
-    return stored
+                tensor_files.setdefault(name, file_name)
+    return tensor_files
 
 
 def read_safetensors_subset(

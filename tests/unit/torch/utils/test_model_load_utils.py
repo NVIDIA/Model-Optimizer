@@ -372,55 +372,38 @@ def test_published_layout_vlm_loads_every_weight(tmp_path, gloo_group):
     assert model._weight_conversions, "renamings the published layout needs were not recorded"
 
 
-def _loads_as_on_transformers_5_5(monkeypatch):
-    """The whole-model load class, as on a Transformers without ``was_used`` (5.5): its
-    ``from_pretrained`` records every conversion, and nothing says which ones ran."""
+def _as_on_transformers_5_5(monkeypatch):
+    """Loads as a Transformers without ``was_used`` (5.5) does: ``WeightTransform`` has no
+    ``was_used``, and ``from_pretrained`` records every conversion. Returns the class to load by."""
+    monkeypatch.delattr(WeightTransform, "was_used", raising=False)
 
     class Loader:
         @staticmethod
         def from_pretrained(*args, **kwargs):
+            # A newer from_pretrained keeps the conversions was_used names: all of them here.
             with monkeypatch.context() as patch:
                 patch.setattr(WeightTransform, "was_used", lambda self: True, raising=False)
-                model = LlavaForConditionalGeneration.from_pretrained(*args, **kwargs)
-            monkeypatch.delattr(WeightTransform, "was_used", raising=False)
-            return model
+                return LlavaForConditionalGeneration.from_pretrained(*args, **kwargs)
 
     return Loader
 
 
 @pytest.mark.parametrize("loader", ["fsdp2", "whole"])
-def test_the_record_is_the_conversions_the_read_tensors_used(
-    tmp_path, request, monkeypatch, loader
-):
-    """Without ``was_used`` (5.5) the load works out the record from the tensors it reads.
+def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monkeypatch, loader):
+    """Without ``was_used`` (5.5) the load still records only the conversions it matched a key with.
 
-    The projector is stored in the shard but missing from the index; the index lists a
-    ``language_model.lm_head`` no shard stores (the head is tied). The projector loads and keeps
-    the name every conversion gave it; the head's rename never ran, and recording it would rename
-    ``lm_head`` in the export (to ``language_model.model.lm_head`` for Gemma3).
+    The head is tied, so the checkpoint has no ``language_model.lm_head`` and that rename never
+    runs; recorded anyway, it renames ``lm_head`` in the export (to ``language_model.model.lm_head``
+    for Gemma3). The renames the load did run keep the names every conversion gives.
     """
     ref = _tiny_llava_checkpoint(tmp_path, drop=("lm_head.",), tie=True)
-    shard = "model-00001-of-00001.safetensors"
-    stored = load_file(tmp_path / "model.safetensors")
-    (tmp_path / "model.safetensors").rename(tmp_path / shard)
-    weight_map = dict.fromkeys(
-        [k for k in stored if not k.startswith("multi_modal_projector.")]
-        + ["language_model.lm_head.weight"],
-        shard,
-    )
-    (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps({"metadata": {}, "weight_map": weight_map})
-    )
+    auto_class = _as_on_transformers_5_5(monkeypatch)
     if loader == "fsdp2":
         request.getfixturevalue("gloo_group")
-        monkeypatch.delattr(WeightTransform, "was_used", raising=False)
         model = _fsdp2_load(tmp_path)
     else:
-        model = load_pretrained(str(tmp_path), _loads_as_on_transformers_5_5(monkeypatch))
+        model = load_pretrained(str(tmp_path), auto_class)
 
-    projector = model.model.multi_modal_projector.linear_1.weight
-    projector = projector.full_tensor() if isinstance(projector, DTensor) else projector
-    assert torch.equal(projector.detach(), ref.model.multi_modal_projector.linear_1.weight)
     to_source = build_reverse_name_mapper(model)
     recorded, model._weight_conversions = (
         model._weight_conversions,
@@ -428,23 +411,10 @@ def test_the_record_is_the_conversions_the_read_tensors_used(
     )
     every = build_reverse_name_mapper(model)  # every conversion, as recorded before
     model._weight_conversions = recorded
-    projector = "model.multi_modal_projector.linear_1"
-    assert to_source(projector) == every(projector)
     assert to_source("lm_head") == "lm_head"
     assert every("lm_head") != "lm_head"
-
-
-def test_load_pretrained_keeps_the_record_when_unsure_what_was_read(tmp_path, monkeypatch):
-    """Given ``model.safetensors`` and an index, from_pretrained reads the single file, whatever
-    the index says, so pruning by the index's shards could drop a conversion that ran."""
-    ref = _tiny_llava_checkpoint(tmp_path, drop=("lm_head.",), tie=True)
-    (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps(
-            {"metadata": {}, "weight_map": {"language_model.lm_head.weight": "model.safetensors"}}
-        )
-    )
-    model = load_pretrained(str(tmp_path), _loads_as_on_transformers_5_5(monkeypatch))
-    assert len(model._weight_conversions) == len(get_model_conversion_mapping(ref))
+    for name in ("model.multi_modal_projector.linear_1", "model.language_model.layers.0.mlp"):
+        assert to_source(name) == every(name)
 
 
 def test_unsourced_parameter_raises(tmp_path, gloo_group):

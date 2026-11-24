@@ -62,6 +62,7 @@ from transformers import (
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import (
     WeightConverter,
+    WeightTransform,
     build_glob_alternation,
     dot_natural_key,
     rename_source_key,
@@ -110,7 +111,6 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     indexed_weight_map,
     off_index_safetensors_files,
     read_safetensors_subset,
-    stored_tensor_files,
 )
 
 try:  # where newer transformers keeps it; older releases, under integrations (now a partial shim)
@@ -238,40 +238,58 @@ def _resolve_target(plan: dict, key: str) -> tuple[str, str | None]:
     )
 
 
-def _used_conversions(
-    conversions: list, keys: "Iterable[str]", legacy_renames: dict | None = None
-) -> list:
-    """The ``conversions`` some of ``keys`` matches: what ``from_pretrained`` records.
+@contextmanager
+def _flagging_used_conversions():
+    """Flag each conversion as the load matches a key with it, as ``was_used`` does.
 
-    Transformers flags a conversion as used (``was_used``) when it matches a key, so resolving the
-    keys has already flagged them. One without ``was_used`` (5.5) flags nothing and records every
-    conversion; the export then reverts renames no key took, and names Gemma3's tied ``lm_head``,
-    which has no checkpoint tensor, ``language_model.model.lm_head``. There the matching is replayed
-    here, as :func:`_resolve_target` resolves a key: ``legacy_renames`` first, then every renaming
-    in turn, then the first converter that matches.
+    Transformers keeps the record of a load's conversions to those some key matched
+    (``was_used``), and the export reverts that record. One without ``was_used`` (5.5) keeps every
+    conversion, and the export then reverts renames no key took: Gemma3's tied ``lm_head``, which
+    its checkpoint has no tensor for, comes out as ``language_model.model.lm_head``. There the flag
+    is set here, where Transformers matches each key the load reads, so the load's own matching
+    decides it, whatever files and keys it read.
+
+    Yields the ids of the conversions matched in the block, or ``None`` when Transformers keeps
+    ``was_used`` itself; :func:`_used_conversions` reads either.
     """
-    if all(callable(getattr(c, "was_used", None)) for c in conversions):
+    if callable(getattr(WeightTransform, "was_used", None)):
+        yield None
+        return
+    matched: set[int] = set()
+    classes, pending = [], [WeightTransform]
+    while pending:
+        cls = pending.pop()
+        pending.extend(cls.__subclasses__())
+        if "rename_source_key" in vars(cls):
+            classes.append(cls)
+
+    def flagging(rename):
+        def rename_source_key(self, source_key):
+            renamed, source_pattern = rename(self, source_key)
+            if source_pattern is not None:
+                matched.add(id(self))
+            return renamed, source_pattern
+
+        return rename_source_key
+
+    originals = {cls: vars(cls)["rename_source_key"] for cls in classes}
+    try:
+        for cls, rename in originals.items():
+            cls.rename_source_key = flagging(rename)
+        yield matched
+    finally:
+        for cls, rename in originals.items():
+            cls.rename_source_key = rename
+
+
+def _used_conversions(conversions: list, matched: set[int] | None) -> list:
+    """The ``conversions`` a load matched a key with.
+
+    ``matched`` is what :func:`_flagging_used_conversions` yielded for the load.
+    """
+    if matched is None:
         return [c for c in conversions if c.was_used()]
-    if not all(callable(getattr(c, "rename_source_key", None)) for c in conversions):
-        return list(conversions)
-    renamings = [c for c in conversions if not isinstance(c, WeightConverter)]
-    converters = [c for c in conversions if isinstance(c, WeightConverter)]
-    used: set[int] = set()
-    for key in keys:
-        for old, new in (legacy_renames or {}).items():
-            key = re.sub(old, new, key)
-        for renaming in renamings:
-            key, matched = renaming.rename_source_key(key)
-            if matched is not None:
-                used.add(id(renaming))
-        for converter in converters:
-            key, matched = converter.rename_source_key(key)
-            if matched is not None:
-                used.add(id(converter))
-                break
-        if len(used) == len(conversions):
-            break
-    return [c for c in conversions if id(c) in used]
+    return [c for c in conversions if id(c) in matched]
 
 
 def _conversion_plans(model: nn.Module) -> list[dict]:
@@ -1180,26 +1198,17 @@ def load_pretrained(
                     stacklevel=2,
                 )
             whole = None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class
-            with prepare_model_for_loading(
-                model_type, ckpt_path, trust_remote_code, model_class=whole
+            with (
+                prepare_model_for_loading(
+                    model_type, ckpt_path, trust_remote_code, model_class=whole
+                ),
+                _flagging_used_conversions() as matched,
             ):
                 model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
         keys = None
-        # from_pretrained read ckpt_path's safetensors (``variant`` is refused, ``subfolder`` is in
-        # ckpt_path) unless handed its weights another way; unsure what it read, keep its record.
-        # Given both a single file and an index, it reads the single file, the index's shards not.
-        read_elsewhere = (
-            kwargs.get("state_dict") is not None
-            or kwargs.get("gguf_file")
-            or kwargs.get("use_safetensors") is False
-            or all(
-                os.path.isfile(os.path.join(ckpt_path, name))
-                for name in ("model.safetensors", "model.safetensors.index.json")
-            )
-        )
-        if not read_elsewhere and getattr(model, "_weight_conversions", None):
-            if stored := stored_tensor_files(ckpt_path):
-                model._weight_conversions = _used_conversions(model._weight_conversions, stored)
+        if matched is not None and getattr(model, "_weight_conversions", None):
+            # A Transformers without was_used kept every conversion; keep the ones the load used.
+            model._weight_conversions = _used_conversions(model._weight_conversions, matched)
     set_distribution_plan(model, plan)
     unplaced = record_unplaced_source_keys(model, ckpt_path, keys)
     if unplaced:
@@ -1643,17 +1652,16 @@ def parallel_load_and_prepare_fsdp2(
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
 
     # Bucket each checkpoint tensor by its target's decoder layer (root params go to
-    # non_layer_sources). Every tensor the files the index names store, not only the ones it lists:
-    # the same map reads them below and records the conversions they used, so what is placed is
-    # read. The unplaced ones fall out of this same pass. A model built from its config ran no
+    # non_layer_sources). Every tensor in the files the index names, not only the ones it lists, so
+    # the unplaced ones fall out of this same pass. A model built from its config ran no
     # conversions of its own, so the stock plan is the only one.
-    tensor_files = stored_tensor_files(resolved_path)
-    layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
-        tensor_files,
-        [plan] if plan else [],
-        model_param_names,
-        layer_prefixes,
-    )
+    with _flagging_used_conversions() as matched:
+        layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
+            checkpoint_tensor_files(resolved_path),
+            [plan] if plan else [],
+            model_param_names,
+            layer_prefixes,
+        )
     if unplaced:
         logger.debug(
             "%d checkpoint keys have no parameter in the built model (e.g. an MTP head); "
@@ -1666,16 +1674,14 @@ def parallel_load_and_prepare_fsdp2(
     record_unplaced_source_keys(model, resolved_path, unplaced)
     # What from_pretrained records: the conversions some checkpoint key used. The export reverts
     # these and would otherwise query the wrapped class, which has lost them.
-    model._weight_conversions = (
-        _used_conversions(plan["conversions"], tensor_files, plan["legacy_renames"]) if plan else []
-    )
+    model._weight_conversions = _used_conversions(plan["conversions"] if plan else [], matched)
     _check_every_param_sourced(model, sourced_targets)
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 
     owned_layer_indices = _layers_for_rank(len(decoder_layers), world_size, rank)
     owned_layer_state_dicts = _read_owned_layers(
-        resolved_path, tensor_files, layer_sources, owned_layer_indices, plan
+        resolved_path, weight_map, layer_sources, owned_layer_indices, plan
     )
 
     # Smaller broadcast_chunk_size lowers the transient GPU peak (more, smaller collectives).
@@ -1700,7 +1706,7 @@ def parallel_load_and_prepare_fsdp2(
     # TODO: layerwise support.
     non_layer = None
     if rank == 0:
-        non_layer = _read_and_convert(resolved_path, tensor_files, set(non_layer_sources), plan)
+        non_layer = _read_and_convert(resolved_path, weight_map, set(non_layer_sources), plan)
     non_layer = broadcast_state_dict(non_layer, src=0, device=device)
     if cpu_offload:
         non_layer = {k: v.cpu() for k, v in non_layer.items()}
