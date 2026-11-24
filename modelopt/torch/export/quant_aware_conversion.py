@@ -865,9 +865,6 @@ def _build_reverse_rules(
             f"transformers.core_model_loading unavailable: {exc}"
         ) from exc
 
-    source_keys = _source_checkpoint_keys(model)
-    conversions = _conversions_used_by(conversions, source_keys, WeightConverter)
-
     split_rules: list[SplitRule] = []
     merge_rules: list[_MergeRule] = []
     # WeightRenamings and expert-leaf (converter-derived) renames are collected
@@ -935,42 +932,13 @@ def _build_reverse_rules(
     # substrings and are applied first.
     weight_renamings = _drop_shadowed_prefix_renames(model, weight_renamings)
     rename_rules = leaf_renamings + list(reversed(weight_renamings))
-    return split_rules, merge_rules, rename_rules, expert_fused_leaves, source_keys
-
-
-def _conversions_used_by(conversions: list, source_keys: set[str] | None, converter_cls) -> list:
-    """The ``conversions`` some of ``source_keys`` matched on load: what ``from_pretrained`` keeps.
-
-    A Transformers without ``was_used`` keeps every conversion, matched or not, and reversing a
-    rename no source key took invents a name no checkpoint has: Gemma3's tied ``lm_head``, absent
-    from its checkpoint, reverts through ``language_model.lm_head -> lm_head`` and then
-    ``language_model.model -> language_model`` to ``language_model.model.lm_head``. Replaying the
-    load's matching over the source keys restores the record a newer Transformers keeps. With
-    ``was_used``, or without the source keys to replay, ``conversions`` is returned as given.
-    """
-    if (
-        not source_keys
-        or all(callable(getattr(c, "was_used", None)) for c in conversions)
-        or not all(callable(getattr(c, "rename_source_key", None)) for c in conversions)
-    ):
-        return conversions
-    renamings = [c for c in conversions if not isinstance(c, converter_cls)]
-    converters = [c for c in conversions if isinstance(c, converter_cls)]
-    used: set[int] = set()
-    # Mirrors transformers' ``rename_source_key``: every renaming in turn, then the first converter.
-    for key in source_keys:
-        for renaming in renamings:
-            key, matched = renaming.rename_source_key(key)
-            if matched is not None:
-                used.add(id(renaming))
-        for converter in converters:
-            key, matched = converter.rename_source_key(key)
-            if matched is not None:
-                used.add(id(converter))
-                break
-        if len(used) == len(conversions):
-            break
-    return [c for c in conversions if id(c) in used]
+    return (
+        split_rules,
+        merge_rules,
+        rename_rules,
+        expert_fused_leaves,
+        _source_checkpoint_keys(model),
+    )
 
 
 # ModelOpt's export splits a fused ``gate_up_proj`` into these per-expert linears,

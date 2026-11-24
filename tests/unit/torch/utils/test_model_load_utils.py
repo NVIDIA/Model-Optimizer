@@ -86,13 +86,20 @@ from transformers import (
     T5Config,
     WhisperConfig,
 )
-from transformers.core_model_loading import Concatenate, MergeModulelist, WeightConverter
+from transformers.core_model_loading import (
+    Concatenate,
+    MergeModulelist,
+    WeightConverter,
+    WeightRenaming,
+    WeightTransform,
+)
 from transformers.distributed import DistributedConfig
 
 import modelopt.torch.models.hf as models_hf
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 import modelopt.torch.utils.moe as moe
+from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
 from modelopt.torch.export.unified_export_hf import _llm_dummy_forward
 from modelopt.torch.models import _onfly_decompress, get_spec
 from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
@@ -119,6 +126,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _resolve_target,
     _seed_parallel_states,
     _transformers_mesh_builder,
+    _used_conversions,
     build_meta_causal_lm,
     load_and_prepare_ep,
     load_pretrained,
@@ -289,7 +297,7 @@ _PUBLISHED_LAYOUT = {
 }
 
 
-def _tiny_llava_checkpoint(path, drop=()):
+def _tiny_llava_checkpoint(path, drop=(), tie=False):
     text = LlamaConfig(
         vocab_size=64,
         hidden_size=32,
@@ -297,7 +305,7 @@ def _tiny_llava_checkpoint(path, drop=()):
         num_hidden_layers=2,
         num_attention_heads=4,
         num_key_value_heads=2,
-        tie_word_embeddings=False,
+        tie_word_embeddings=tie,
     )
     vision = CLIPVisionConfig(
         hidden_size=16,
@@ -308,6 +316,7 @@ def _tiny_llava_checkpoint(path, drop=()):
         patch_size=14,
     )
     config = LlavaConfig(text_config=text, vision_config=vision, image_token_index=63)
+    config.tie_word_embeddings = tie
     config.architectures = ["LlavaForConditionalGeneration"]
     config.dtype = torch.float32  # the meta build defaults to bfloat16 otherwise
     torch.manual_seed(0)
@@ -362,6 +371,32 @@ def test_published_layout_vlm_loads_every_weight(tmp_path, gloo_group):
     assert isinstance(model.model.multi_modal_projector, FSDPModule)
     # The export reverses exactly the renamings the load ran, as after from_pretrained.
     assert model._weight_conversions, "renamings the published layout needs were not recorded"
+
+
+def test_a_rename_no_key_took_is_not_recorded_without_was_used(tmp_path, gloo_group, monkeypatch):
+    """A Transformers without ``was_used`` (5.5) flags nothing, so the load works out the record.
+
+    The tied ``lm_head`` has no checkpoint tensor, so its ``language_model.lm_head`` rename never
+    ran; recording it anyway makes the export name it ``language_model.model.lm_head``.
+    """
+    monkeypatch.delattr(WeightTransform, "was_used", raising=False)
+    _tiny_llava_checkpoint(tmp_path, drop=("lm_head.",), tie=True)
+    model = _fsdp2_load(tmp_path)
+    assert build_reverse_name_mapper(model)("lm_head") == "lm_head"
+    assert model._weight_conversions, "renamings the published layout needs were not recorded"
+
+
+def test_used_conversions_replays_the_loaders_key_resolution(tmp_path, monkeypatch):
+    """The replay sees what the load saw: a tensor the index omits, after the legacy renames."""
+    monkeypatch.delattr(WeightTransform, "was_used", raising=False)
+    save_file({"kept.weight": torch.zeros(1), "old.block.weight": torch.zeros(1)}, tmp_path / "a")
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"kept.weight": "a"}})
+    )
+    took = WeightRenaming(r"^new\.block", "block")
+    conversions = [WeightRenaming("^unused", "x"), took]
+    tensor_files = hf_checkpoint_utils.checkpoint_tensor_files(tmp_path)
+    assert _used_conversions(conversions, tensor_files, {r"^old\.": "new."}) == [took]
 
 
 def test_unsourced_parameter_raises(tmp_path, gloo_group):

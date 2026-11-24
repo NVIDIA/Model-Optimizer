@@ -341,44 +341,6 @@ def test_mixed_namespace_config_names_track_the_weights(tmp_path):
     )
 
 
-def test_rename_no_source_key_took_is_not_reverted_without_was_used(tmp_path, monkeypatch):
-    """A Transformers without ``was_used`` records every conversion, matched on load or not.
-
-    Gemma3's tied ``lm_head`` has no checkpoint tensor, so its ``language_model.lm_head`` rename
-    never ran; reverting it anyway chains into ``language_model.model.lm_head``, a name no
-    checkpoint has. The renames some source key took must still revert.
-    """
-    pytest.importorskip("transformers.core_model_loading")
-    # Local import: transformers is an optional dependency for ModelOpt.
-    from transformers.core_model_loading import WeightRenaming, WeightTransform
-
-    monkeypatch.delattr(WeightTransform, "was_used", raising=False)
-    (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps(
-            {
-                "weight_map": dict.fromkeys(
-                    ["language_model.model.layers.0.self_attn.q_proj.weight"],
-                    "model-00001-of-00001.safetensors",
-                )
-            }
-        )
-    )
-    model = types.SimpleNamespace(
-        name_or_path=str(tmp_path),
-        config=None,
-        _weight_conversions=[
-            WeightRenaming("language_model.model", "language_model"),
-            WeightRenaming("language_model.lm_head", "lm_head"),
-        ],
-    )
-    mapper = build_reverse_name_mapper(model)
-    assert mapper("lm_head") == "lm_head"
-    assert (
-        mapper("language_model.layers.0.self_attn.q_proj")
-        == "language_model.model.layers.0.self_attn.q_proj"
-    )
-
-
 def test_model_without_a_conversion_mapping_is_a_no_op():
     """The empty-mapping early return must stay shape-compatible with its callers.
 

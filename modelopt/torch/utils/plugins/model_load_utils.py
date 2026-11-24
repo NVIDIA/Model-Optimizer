@@ -237,6 +237,42 @@ def _resolve_target(plan: dict, key: str) -> tuple[str, str | None]:
     )
 
 
+def _used_conversions(
+    conversions: list, keys: "Iterable[str]", legacy_renames: dict | None = None
+) -> list:
+    """The ``conversions`` some of ``keys`` matches: what ``from_pretrained`` records.
+
+    Transformers flags a conversion as used (``was_used``) when it matches a key, so resolving the
+    keys has already flagged them. One without ``was_used`` (5.5) flags nothing and records every
+    conversion; the export then reverts renames no key took, and names Gemma3's tied ``lm_head``,
+    which has no checkpoint tensor, ``language_model.model.lm_head``. There the matching is replayed
+    here, as :func:`_resolve_target` resolves a key: ``legacy_renames`` first, then every renaming
+    in turn, then the first converter that matches.
+    """
+    if all(callable(getattr(c, "was_used", None)) for c in conversions):
+        return [c for c in conversions if c.was_used()]
+    if not all(callable(getattr(c, "rename_source_key", None)) for c in conversions):
+        return list(conversions)
+    renamings = [c for c in conversions if not isinstance(c, WeightConverter)]
+    converters = [c for c in conversions if isinstance(c, WeightConverter)]
+    used: set[int] = set()
+    for key in keys:
+        for old, new in (legacy_renames or {}).items():
+            key = re.sub(old, new, key)
+        for renaming in renamings:
+            key, matched = renaming.rename_source_key(key)
+            if matched is not None:
+                used.add(id(renaming))
+        for converter in converters:
+            key, matched = converter.rename_source_key(key)
+            if matched is not None:
+                used.add(id(converter))
+                break
+        if len(used) == len(conversions):
+            break
+    return [c for c in conversions if id(c) in used]
+
+
 def _conversion_plans(model: nn.Module) -> list[dict]:
     """The plans a load of ``model`` may have converted keys with; see :func:`unplaced_source_keys`.
 
@@ -1121,7 +1157,7 @@ def load_pretrained(
     if route is not None:
         model = _load_sharded(route, ckpt_path, load_kwargs)
         # A sharded load finds the unplaced keys while it places the weights.
-        keys = model._modelopt_unplaced_source_keys
+        keys, tensor_files = model._modelopt_unplaced_source_keys, None
     else:
         auto_class = auto_class or AutoModelForCausalLM
         # No collective runs here, so a rank failing alone, placing or loading the model, would
@@ -1148,8 +1184,12 @@ def load_pretrained(
             ):
                 model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
         keys = None
+        # The files from_pretrained opened: ``variant`` is refused, ``subfolder`` is in ckpt_path.
+        tensor_files = checkpoint_tensor_files(ckpt_path)
+        if tensor_files and getattr(model, "_weight_conversions", None):
+            model._weight_conversions = _used_conversions(model._weight_conversions, tensor_files)
     set_distribution_plan(model, plan)
-    unplaced = record_unplaced_source_keys(model, ckpt_path, keys)
+    unplaced = record_unplaced_source_keys(model, ckpt_path, keys, tensor_files=tensor_files)
     if unplaced:
         print_rank_0(
             f"{len(unplaced)} checkpoint tensor(s) the model has no parameter for "
@@ -1594,8 +1634,9 @@ def parallel_load_and_prepare_fsdp2(
     # non_layer_sources). Every tensor in the files the index names, not only the ones it lists, so
     # the unplaced ones fall out of this same pass. A model built from its config ran no
     # conversions of its own, so the stock plan is the only one.
+    tensor_files = checkpoint_tensor_files(resolved_path)
     layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
-        checkpoint_tensor_files(resolved_path),
+        tensor_files,
         [plan] if plan else [],
         model_param_names,
         layer_prefixes,
@@ -1610,12 +1651,11 @@ def parallel_load_and_prepare_fsdp2(
     # it came from. Not a state dict: holding these tensors from load to export would waste the
     # memory this loader exists to save.
     record_unplaced_source_keys(model, resolved_path, unplaced)
-    # What from_pretrained records: the conversions some checkpoint key used, or all of them on a
-    # Transformers without ``was_used``. The export reverts these and would otherwise query the
-    # wrapped class, which has lost them.
-    model._weight_conversions = [
-        c for c in (plan["conversions"] if plan else []) if getattr(c, "was_used", lambda: True)()
-    ]
+    # What from_pretrained records: the conversions some checkpoint key used. The export reverts
+    # these and would otherwise query the wrapped class, which has lost them.
+    model._weight_conversions = (
+        _used_conversions(plan["conversions"], tensor_files, plan["legacy_renames"]) if plan else []
+    )
     _check_every_param_sourced(model, sourced_targets)
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
