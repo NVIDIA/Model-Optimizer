@@ -146,16 +146,28 @@ def validate_hf_tensor_parallelism(model, mesh, plan=None):
     """Validate resolved HF physical ownership before packed staging or native hooks."""
     from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
 
-    modules = dict(model.named_modules())
+    modules = dict(model.named_modules(remove_duplicate=False))
     if plan is None:
         plan = model._expand_parallel_plan(model.tp_plan)
-    parameters = dict(model.named_parameters())
+    parameters = dict(model.named_parameters(remove_duplicate=False))
     aliases = {}
     for full, style in plan.items():
         if full in parameters:
             owner, _, name = full.rpartition(".")
             _validate_parameter_geometry(
                 modules[owner], name, ALL_PARALLEL_STYLES[style], mesh, full, aliases
+            )
+    _validate_hf_plan_aliases(model, plan, modules, parameters)
+
+
+def _validate_hf_plan_aliases(model, plan, modules, parameters):
+    """Refuse planned owner aliases that HF's deduplicated placement cannot resolve."""
+    canonical = {name for name, _ in model.named_modules()}
+    canonical.update(name for name, _ in model.named_parameters())
+    for name in plan:
+        if name not in canonical and (name in modules or name in parameters):
+            raise ValueError(
+                f"Native HF TP does not support placing tied/shared owner alias {name!r}."
             )
 
 
@@ -166,7 +178,7 @@ def _synchronize_validation(context, error):
 
 
 def _expert_partitions(model, plan, context, adopted):
-    modules = dict(model.named_modules())
+    modules = dict(model.named_modules(remove_duplicate=False))
     partitions, global_ids = [], {}
     size, rank = context.expert_mesh.size(), context.expert_mesh.get_local_rank()
     for name, style in plan.items():
@@ -359,7 +371,8 @@ def parallelize_native_transformers(model, context, *, initialize=None):
             dispatch_overrides[name] = strategy
         partitions, global_ids = _expert_partitions(model, ep_plan, context, adopted)
         if not adopted:
-            modules, parameters = dict(model.named_modules()), dict(model.named_parameters())
+            modules = dict(model.named_modules(remove_duplicate=False))
+            parameters = dict(model.named_parameters(remove_duplicate=False))
             aliases = {}
             for plan, mesh, allow_expert_axis in (
                 (tp_plan, context.tensor_mesh, False),
@@ -377,6 +390,7 @@ def parallelize_native_transformers(model, context, *, initialize=None):
                             aliases,
                             allow_expert_axis=allow_expert_axis,
                         )
+            _validate_hf_plan_aliases(model, tp_plan, modules, parameters)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     try:
