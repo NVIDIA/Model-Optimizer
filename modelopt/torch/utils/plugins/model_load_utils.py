@@ -110,6 +110,7 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     indexed_weight_map,
     off_index_safetensors_files,
     read_safetensors_subset,
+    stored_tensor_files,
 )
 
 try:  # where newer transformers keeps it; older releases, under integrations (now a partial shim)
@@ -1157,7 +1158,7 @@ def load_pretrained(
     if route is not None:
         model = _load_sharded(route, ckpt_path, load_kwargs)
         # A sharded load finds the unplaced keys while it places the weights.
-        keys, tensor_files = model._modelopt_unplaced_source_keys, None
+        keys = model._modelopt_unplaced_source_keys
     else:
         auto_class = auto_class or AutoModelForCausalLM
         # No collective runs here, so a rank failing alone, placing or loading the model, would
@@ -1184,12 +1185,18 @@ def load_pretrained(
             ):
                 model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
         keys = None
-        # The files from_pretrained opened: ``variant`` is refused, ``subfolder`` is in ckpt_path.
-        tensor_files = checkpoint_tensor_files(ckpt_path)
-        if tensor_files and getattr(model, "_weight_conversions", None):
-            model._weight_conversions = _used_conversions(model._weight_conversions, tensor_files)
+        # from_pretrained read ckpt_path's safetensors (``variant`` is refused, ``subfolder`` is in
+        # ckpt_path) unless handed its weights another way; unsure what it read, keep its record.
+        read_elsewhere = (
+            kwargs.get("state_dict") is not None
+            or kwargs.get("gguf_file")
+            or kwargs.get("use_safetensors") is False
+        )
+        if not read_elsewhere and getattr(model, "_weight_conversions", None):
+            if stored := stored_tensor_files(ckpt_path):
+                model._weight_conversions = _used_conversions(model._weight_conversions, stored)
     set_distribution_plan(model, plan)
-    unplaced = record_unplaced_source_keys(model, ckpt_path, keys, tensor_files=tensor_files)
+    unplaced = record_unplaced_source_keys(model, ckpt_path, keys)
     if unplaced:
         print_rank_0(
             f"{len(unplaced)} checkpoint tensor(s) the model has no parameter for "
@@ -1631,10 +1638,11 @@ def parallel_load_and_prepare_fsdp2(
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
 
     # Bucket each checkpoint tensor by its target's decoder layer (root params go to
-    # non_layer_sources). Every tensor in the files the index names, not only the ones it lists, so
-    # the unplaced ones fall out of this same pass. A model built from its config ran no
+    # non_layer_sources). Every tensor the files the index names store, not only the ones it lists:
+    # the same map reads them below and records the conversions they used, so what is placed is
+    # read. The unplaced ones fall out of this same pass. A model built from its config ran no
     # conversions of its own, so the stock plan is the only one.
-    tensor_files = checkpoint_tensor_files(resolved_path)
+    tensor_files = stored_tensor_files(resolved_path)
     layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
         tensor_files,
         [plan] if plan else [],
@@ -1662,7 +1670,7 @@ def parallel_load_and_prepare_fsdp2(
 
     owned_layer_indices = _layers_for_rank(len(decoder_layers), world_size, rank)
     owned_layer_state_dicts = _read_owned_layers(
-        resolved_path, weight_map, layer_sources, owned_layer_indices, plan
+        resolved_path, tensor_files, layer_sources, owned_layer_indices, plan
     )
 
     # Smaller broadcast_chunk_size lowers the transient GPU peak (more, smaller collectives).
@@ -1687,7 +1695,7 @@ def parallel_load_and_prepare_fsdp2(
     # TODO: layerwise support.
     non_layer = None
     if rank == 0:
-        non_layer = _read_and_convert(resolved_path, weight_map, set(non_layer_sources), plan)
+        non_layer = _read_and_convert(resolved_path, tensor_files, set(non_layer_sources), plan)
     non_layer = broadcast_state_dict(non_layer, src=0, device=device)
     if cpu_offload:
         non_layer = {k: v.cpu() for k, v in non_layer.items()}
