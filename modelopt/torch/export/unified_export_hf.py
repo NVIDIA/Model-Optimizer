@@ -75,6 +75,11 @@ except ImportError:
     _TRANSFORMERS_MODEL_TYPES = ()
     _TRANSFORMERS_CONFIG_TYPES = ()
 
+try:
+    from transformers.configuration_utils import remap_legacy_layer_types
+except ImportError:  # transformers without the layer type renames has nothing to restore
+    remap_legacy_layer_types = None
+
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
@@ -1857,15 +1862,16 @@ def _restore_source_layer_types(config_data: dict, source: Any) -> None:
 
     transformers renames some layer types on load (``deepseek_sparse_attention`` becomes
     ``indexed_attention`` in 5.18), and runtimes validate against the names the checkpoint ships.
-    Only a list of the same length is restored, so entries a later step trims keep their handling.
+    The source's list is restored only where it is exactly what transformers' remap turns it into,
+    so a list the export edited or trimmed keeps its handling.
     """
     if not isinstance(source, dict):
         return
     source_types = source.get("layer_types")
     if (
-        isinstance(source_types, list)
-        and isinstance(config_data.get("layer_types"), list)
-        and len(source_types) == len(config_data["layer_types"])
+        remap_legacy_layer_types is not None
+        and isinstance(source_types, list)
+        and remap_legacy_layer_types(source_types) == config_data.get("layer_types")
     ):
         config_data["layer_types"] = source_types
     for key, value in config_data.items():

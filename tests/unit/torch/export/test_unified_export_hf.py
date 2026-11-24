@@ -1154,21 +1154,32 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
 
 def test_export_config_keeps_the_source_layer_type_names(tmp_path):
     """transformers 5.18 renames deepseek_sparse_attention to indexed_attention on load; the
-    exported config keeps the spelling of the source checkpoint, which runtimes validate."""
+    exported config keeps the spelling of the source checkpoint, which runtimes validate. A list
+    the export itself changed is not touched."""
+    if unified_export_hf.remap_legacy_layer_types is None:
+        pytest.skip("this transformers has no layer type renames")
     source, export = tmp_path / "source", tmp_path / "export"
     source.mkdir()
     export.mkdir()
     names = ["linear_attention", "deepseek_sparse_attention"]
-    (source / "config.json").write_text(json.dumps({"text_config": {"layer_types": names}}))
-    renamed = {"text_config": {"layer_types": ["linear_attention", "indexed_attention"]}}
-    (export / "config.json").write_text(json.dumps(renamed))
+    edited = ["sliding_attention", "full_attention"]
+    (source / "config.json").write_text(
+        json.dumps({"text_config": {"layer_types": names}, "mtp": {"layer_types": edited}})
+    )
+    exported = {
+        "text_config": {"layer_types": ["linear_attention", "indexed_attention"]},
+        "mtp": {"layer_types": edited[::-1]},
+    }
+    (export / "config.json").write_text(json.dumps(exported))
     model = torch.nn.Module()
     model.config = SimpleNamespace()
     model._modelopt_source_checkpoint = str(source)
 
     _write_hf_export_config(model, None, export)
 
-    assert json.loads((export / "config.json").read_text())["text_config"]["layer_types"] == names
+    written = json.loads((export / "config.json").read_text())
+    assert written["text_config"]["layer_types"] == names
+    assert written["mtp"]["layer_types"] == edited[::-1]
 
 
 def _one_rank_fails_after_the_write_job(rank, size, tmp_dir, failure):
