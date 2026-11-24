@@ -180,7 +180,8 @@ def _refuse_awq_on_a_sharded_fsdp2_model(
     if dist.size() == 1 or not dist.is_fsdp2_model(model):
         return
     methods = [mode.removesuffix("_calibrate") for mode, _ in get_modelike_from_algo_cfg(algorithm)]
-    awq = [method for method in methods if method in ("awq_lite", "awq_full")]
+    # SVDQuant picks its smoothing scales with awq_lite.
+    awq = [method for method in methods if method in ("awq_lite", "awq_full", "svdquant")]
     if awq:
         # For the message only: the FSDP2 shard mesh can be narrower than the run (HSDP, 2D).
         mesh = _get_fsdp2_mesh(next(m for m in model.modules() if isinstance(m, FSDPModule)))

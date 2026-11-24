@@ -2003,27 +2003,6 @@ def awq_lite(
                     "share an input on every step, or a member was not searched."
                 )
                 continue
-            groups.append(members)
-
-        # The groups come from each data-parallel process's own forwards. A group one process
-        # fuses and another does not would leave the processes' copies of its weights with
-        # different scales and low-rank branches, which FSDP2 writes back shard by shard without
-        # noticing.
-        dp_group = helpers[0].module.parallel_state.data_parallel_group if helpers else None
-        group_names = [[m.name for m in members] for members in groups]
-        if dp_group is not None and dp_group.is_initialized():
-            names_per_process = DistributedProcessGroup.get_dist_syncd_obj(
-                group_names, dp_group, lambda objs: objs
-            )
-            if any(names != names_per_process[0] for names in names_per_process):
-                raise RuntimeError(
-                    "SVDQuant fused_group_scale: the data-parallel processes found different "
-                    f"fused groups ({[len(names) for names in names_per_process]} per process), "
-                    "because their forwards pass a shared input to different linears. Calibrate "
-                    "with fused_group_scale=False."
-                )
-
-        for members in groups:
             for m in members:
                 update_best_params(m.module)
             # The mean of the pre_quant_scales as export stores and averages them (weight dtype).
@@ -2031,8 +2010,9 @@ def awq_lite(
             mean = torch.stack([(1.0 / m.best_scale).to(device, dtype) for m in members]).mean(0)
             for m in members:
                 m.best_scale = 1.0 / mean.float()
+            groups.append([m.name for m in members])
         print_rank_0(f"awq_lite: {len(groups)} fused group(s) share their mean pre_quant_scale")
-        return group_names
+        return groups
 
     # Pre-compute the name maps ONCE to avoid O(n^2) complexity in enable_weight_access_and_writeback
     names = module_name_maps(model)

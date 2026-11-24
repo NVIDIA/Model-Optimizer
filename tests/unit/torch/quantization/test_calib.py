@@ -630,32 +630,6 @@ def test_svdquant_fused_group_svd():
                 )
 
 
-class _QKV(nn.Module):
-    def __init__(self, k_reads_a_copy):
-        super().__init__()
-        self.q, self.k, self.v = (nn.Linear(64, 64) for _ in range(3))
-        self.k_reads_a_copy = k_reads_a_copy
-
-    def forward(self, x):
-        return self.q(x) + self.k(x.clone() if self.k_reads_a_copy else x) + self.v(x)
-
-
-def _svdquant_fused_groups_differ_job(rank, size):
-    torch.manual_seed(0)
-    inputs = torch.randn(2, 16, 64) * torch.rand(64) * 10
-    model = _QKV(k_reads_a_copy=rank == 1)  # q/k/v share an input on rank 0, only q/v on rank 1
-    config = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
-    config["algorithm"] = {"method": "svdquant", "fused_group_scale": True}
-    with pytest.raises(RuntimeError, match="different fused groups"):
-        mtq.quantize(model, config, partial(forward_loop, dataloader=[inputs]))
-
-
-def test_svdquant_fused_groups_must_match_across_ranks(cpu_dist_workers):
-    """Ranks that find different fused groups refuse together, instead of each giving its copy of
-    the weights a different scale and low-rank branch."""
-    cpu_dist_workers.run(_svdquant_fused_groups_differ_job)
-
-
 def test_svdquant_fused_group_scale_diffusers():
     diffusers = pytest.importorskip("diffusers")
 
