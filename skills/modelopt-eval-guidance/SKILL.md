@@ -8,8 +8,9 @@ license: Apache-2.0
 
 The evaluation tool owns what values go in the config and how the run goes (protocol, judge, sampling, budget,
 parsers, quantized-variant settings, submit, babysit, recover, MLflow tags, and whether the run is healthy and
-complete). This skill holds only what depends on the quantization workflow: which benchmarks are sensitive,
-whether the baseline is believable, and what the comparison needs from a finished run. It applies to every tool.
+complete). This skill holds what the Day 0 workflow does around the tool: which benchmarks to run, asking for the baseline
+and the quantized evaluation (both go through the tool), the serving record, whether the baseline is believable, and
+what the comparison needs from a finished run. It applies to every tool.
 
 Tool-specific details live in [references/tools/](references/tools/index.md), one file per tool: the skills that
 run it, where its health verdict and settings are, and its MLflow names. Use the skills and the reference of the
