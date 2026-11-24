@@ -464,7 +464,8 @@ def parallelize_native_transformers(model, context, *, initialize=None):
     }
     if not adopted:
         model.config.distributed_config = config
-        metadata["packed"] = prepare_packed_weights_for_tp(model)
+        if context.device_mesh.size() > 1:
+            metadata["packed"] = prepare_packed_weights_for_tp(model)
         if context.pipeline_mesh.size() > 1:
             apply_pipeline_parallelism(model, context.pipeline_mesh)
         if context.tensor_mesh.size() > 1:
