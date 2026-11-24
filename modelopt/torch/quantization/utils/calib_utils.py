@@ -323,7 +323,8 @@ def compute_hessian_inverse(hessian, weight, perc_damp):
     Returns:
         Upper-triangular Cholesky factor of the damped inverse Hessian
         ``[in_features, in_features]``. A Hessian that does not factor at ``perc_damp`` is retried
-        at 10x and 100x the damping, then falls back to the identity matrix.
+        at 10x and 100x the damping, if damping can change it, then falls back to the identity
+        matrix.
     """
     h = hessian.clone()
     # Masks rather than indices, and a factorization that reports failure rather than raises:

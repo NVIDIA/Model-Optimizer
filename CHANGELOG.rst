@@ -53,7 +53,7 @@ Changelog
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 - Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
 - Calibration of a model spread over several GPUs no longer fails with an illegal memory access under ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``: clearing the CUDA cache now waits for every GPU's queued work first.
-- FP8 fake quantization of a tensor on a GPU other than the current one, such as a layer a ``device_map`` placed on another GPU, now runs on that tensor's GPU; it could fail with an illegal memory access.
+- FP8 fake quantization of a tensor on a GPU other than the current one, such as a layer a ``device_map`` placed on another GPU, now launches on that tensor's GPU; it could fail with an illegal memory access. On a host with mixed GPU architectures, the FP8 extension must still be built for that GPU's, as ``TORCH_CUDA_ARCH_LIST`` sets.
 
 *ONNX*
 
