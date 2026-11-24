@@ -44,9 +44,9 @@ class _BypassRunner:
         self.modules = {u.name: student.get_submodule(u.student_path) for u in units}
         self.names = module_name_maps(student)
 
-    def _weight_access(self, name, *, writeback=True):
+    def _weight_access(self, name, *, writeback=True, rollback=False):
         return enable_weight_access_and_writeback(
-            self.modules[name], self.student, self.names, writeback=writeback
+            self.modules[name], self.student, self.names, writeback=writeback, rollback=rollback
         )
 
     def _window(self, batches):

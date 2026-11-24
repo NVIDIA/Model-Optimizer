@@ -19,6 +19,7 @@ import copy
 import inspect
 import math
 from dataclasses import dataclass, fields, is_dataclass, replace
+from itertools import chain
 from typing import Any
 
 import torch
@@ -73,6 +74,16 @@ def has_iq_weights(module):
     )
 
 
+def _ownership_tensors(module, backings):
+    seen = set()
+    for owner in module.modules():
+        for name, tensor in chain(owner._parameters.items(), owner._buffers.items()):
+            if tensor is None or id(tensor) in seen:
+                continue
+            seen.add(id(tensor))
+            yield backings.get((owner, name), tensor) if tensor.is_meta else tensor
+
+
 def validate_unit_ownership(student, teacher, units):
     """Refuse overlapping boundaries, shared owners, and aliases of teacher storage."""
     if not units:
@@ -90,8 +101,17 @@ def validate_unit_ownership(student, teacher, units):
     ):
         raise ValueError("Bypass boundaries overlap; select disjoint owning modules")
     _validate_student_owners(student, paths)
+    backings = {}
+    for root in (student, teacher):
+        if any(t.is_meta for t in chain(root.parameters(), root.buffers())) and any(
+            hasattr(owner, "_hf_hook") for owner in root.modules()
+        ):
+            # Ancestor preload hooks may own the backing for a selected descendant.
+            from modelopt.torch.quantization.plugins.accelerate import _offloaded_tensor_backings
+
+            backings.update(_offloaded_tensor_backings(root))
     teacher_storage = {}
-    for tensor in [*teacher.parameters(), *teacher.buffers()]:
+    for tensor in _ownership_tensors(teacher, backings):
         span = _storage_span(tensor)
         if span is not None:
             key, start, stop = span
@@ -103,11 +123,11 @@ def validate_unit_ownership(student, teacher, units):
             teacher_module = teacher.get_submodule(unit.teacher_path)
         except AttributeError as exc:
             raise ValueError(f"Boundary {unit.name!r} must exist in both models") from exc
-        for tensor in [*teacher_module.parameters(), *teacher_module.buffers()]:
+        for tensor in _ownership_tensors(teacher_module, backings):
             if id(tensor) in teacher_owners:
                 raise ValueError("Teacher Bypass boundaries share ownership")
             teacher_owners.add(id(tensor))
-        for tensor in [*module.parameters(), *module.buffers()]:
+        for tensor in _ownership_tensors(module, backings):
             if id(tensor) in owned:
                 raise ValueError("Student Bypass boundaries share ownership")
             owned.add(id(tensor))

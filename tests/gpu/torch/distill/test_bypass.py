@@ -257,6 +257,12 @@ def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch):
         ("parameter", True),
         ("storage_view", True),
         ("router_weight", True),
+        ("teacher_storage", False),
+        ("teacher_storage", "teacher"),
+        ("teacher_storage", "student"),
+        ("teacher_storage", "both"),
+        ("teacher_storage", "preload_teacher"),
+        ("teacher_storage", "preload_student"),
     ],
 )
 def test_bypass_refuses_selected_state_shared_with_excluded_owners(alias, offload):
@@ -294,6 +300,8 @@ def test_bypass_refuses_selected_state_shared_with_excluded_owners(alias, offloa
         else:
             router.weight_quantizer = expert.weight_quantizer
         selected = "moe"
+    elif alias == "teacher_storage":
+        teacher.mlp.weight = nn.Parameter(student.mlp.weight.detach())
     elif alias == "parameter":
         student.moe.weight = student.mlp.weight
     elif alias == "storage_view":
@@ -304,9 +312,19 @@ def test_bypass_refuses_selected_state_shared_with_excluded_owners(alias, offloa
         student.moe.weight_quantizer = student.mlp.weight_quantizer
     before = copy.deepcopy(student.state_dict())
     teacher_before = copy.deepcopy(teacher.state_dict())
-    if offload:
+    if offload in (True, "student", "both", "preload_student"):
         pytest.importorskip("accelerate").cpu_offload(
-            student, execution_device="cpu", offload_buffers=True
+            student,
+            execution_device="cpu",
+            offload_buffers=True,
+            preload_module_classes=[type(student).__name__] if offload == "preload_student" else [],
+        )
+    if offload in ("teacher", "both", "preload_teacher"):
+        pytest.importorskip("accelerate").cpu_offload(
+            teacher,
+            execution_device="cpu",
+            offload_buffers=True,
+            preload_module_classes=[type(teacher).__name__] if offload == "preload_teacher" else [],
         )
     parameters = dict(student.named_parameters(remove_duplicate=False))
     flags = {name: parameter.requires_grad for name, parameter in parameters.items()}
@@ -322,9 +340,10 @@ def test_bypass_refuses_selected_state_shared_with_excluded_owners(alias, offloa
     } == flags
     with mtq.utils.enable_weight_access_and_writeback(student, student, writeback=False):
         assert all(torch.equal(value, before[name]) for name, value in student.state_dict().items())
-    assert all(
-        torch.equal(value, teacher_before[name]) for name, value in teacher.state_dict().items()
-    )
+    with mtq.utils.enable_weight_access_and_writeback(teacher, teacher, writeback=False):
+        assert all(
+            torch.equal(value, teacher_before[name]) for name, value in teacher.state_dict().items()
+        )
     assert not any("_local_repair_state" in name for name in student.state_dict())
 
 
