@@ -102,22 +102,28 @@ def bypass(
             adapter.context = torch_mesh_context(device_mesh)
     context = getattr(adapter, "context", None)
     runtime = None
-    if context is not None:
-        from ._bypass_runtime import DistributedBypassRuntime
-
-        runtime = DistributedBypassRuntime(context, config)
     error = None
     try:
+        if context is not None:
+            from ._bypass_runtime import DistributedBypassRuntime
+
+            runtime = DistributedBypassRuntime(context, config)
         units = adapter.resolve_units(student, teacher, config)
         plan = plan_iq_repair(
             [student.get_submodule(u.student_path) for u in units], root_model=student
         )
     except Exception as exc:
-        if runtime is None:
+        if context is None:
             raise
         error = f"{type(exc).__name__}: {exc}"
-    if runtime is not None:
-        runtime.synchronize_error(error)
+    if context is not None:
+        from ._bypass_parallel import _all_rank_values
+
+        # Constructor refusals must agree even on ranks that have no runtime yet.
+        errors = sorted({value for value in _all_rank_values(context, error) if value})
+        if errors:
+            raise ValueError("; ".join(errors))
+        assert runtime is not None
         schedules = runtime.gather_values(
             (config.model_dump(), [u.name for u in units], validation_dataloader is not None)
         )
