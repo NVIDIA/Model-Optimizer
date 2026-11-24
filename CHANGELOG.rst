@@ -50,6 +50,7 @@ Changelog
 - ``capture_quantized_weight_export_state`` now works on FSDP2-sharded (DTensor) weights; it raised on them, and could pick another weight's quantizer when local shards were empty.
 - NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
+- Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
 - Applying a finalized AutoQuantize config to a large MoE with one module per expert no longer takes hours: ``mtq.set_quantizer_by_cfg`` no longer walks the whole model for each entry that names a quantizer exactly.
 
 *ONNX*
@@ -57,6 +58,7 @@ Changelog
 - Fix ONNX AutoCast retaining one full-graph activation dump per calibration sample during inference: samples are now folded into the running per-tensor statistics as they arrive, so this retention no longer scales with the number of samples in ``calibration_data``. Loading the input data itself (a JSON input list, or a single NPZ holding multiple samples) still materializes every sample's inputs.
 - ONNX AutoCast now keeps the variance of decomposed RMSNorm and unfused LayerNorm in FP32 for both FP16 and BF16 conversion, so FP16 models converted without calibration data no longer give wrong outputs on execution providers such as TensorRT-RTX. Reconvert affected models.
 - Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
+- Fix blocked INT4 ONNX exports using the wrong dequantization axis for transposed weights, which prevented TensorRT and ONNX Runtime from executing affected models. Re-export affected models.
 
 *Speculative Decoding*
 
