@@ -60,6 +60,9 @@ What should you measure, and how?
 We illustrate these guidelines in practice by comparing two NVFP4 Qwen3.6-35B-A3B checkpoints
 to test whether applying Kahneman–Tversky Optimization (KTO) to the baseline reduces reasoning
 loops while preserving accuracy. See the :doc:`reproducibility notes <reproducibility/index>` for checkpoint details.
+See how we apply these guidelines in practice across a broader set of benchmarks in the
+`KTO tutorial
+<https://github.com/NVIDIA/Model-Optimizer/blob/13ad0ef401ec5e4480abd1b8eb236ccdf50ef802/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/kto/README.md>`__.
 
 Choose a primary improvement metric before inspecting results. Prefer Candidate if it improves that
 metric and meets your non-inferiority criteria for the others. Regressions highlight areas to improve.
@@ -145,6 +148,7 @@ loops, missing answers, and whether it abstains when appropriate.
 |                        | is an example benchmark.                                                   |
 +------------------------+----------------------------------------------------------------------------+
 
+The doomed reasoning loops example below shows how to report rare failures using cap-hit rates.
 Rare failures can make t-based approximations unreliable, so we use paired-bootstrap 95% confidence
 intervals and one-sided paired permutation tests for the rates below.
 The confidence intervals and p-values come from different procedures and need not lead to the
@@ -183,29 +187,6 @@ rate was not established.
    without early stopping, run with the detector off. See the
    `ModelOpt instructions for stopping repeated reasoning
    <https://github.com/NVIDIA/Model-Optimizer/blob/main/skills/modelopt-evaluation/references/doom_loops.md>`__.
-
-Missing final answers
-^^^^^^^^^^^^^^^^^^^^^
-
-The candidate also reduced missing final answers on SciCode and AA-Omniscience (p < 0.001).
-“Yes” means evidence of a lower Candidate missing-answer rate (p < 0.05); “no evidence” means a
-reduction was not established.
-
-+----------------+---------------+---------------+---------------+---------------+---------------+
-| Benchmark      | Baseline      | Candidate     | Difference    | Candidate     | Candidate     |
-|                |               |               | [95% CI], pp  | lower,        | higher,       |
-|                |               |               |               | p-value       | p-value       |
-|                |               |               |               |               | (context)     |
-+================+===============+===============+===============+===============+===============+
-| MMLU-Pro       | 0.05%         | 0.03%         | −0.02 [−0.07, | 0.244 — no    | 0.878         |
-|                | (10/20,000)   | (6/20,000)    | +0.02]        | evidence      |               |
-+----------------+---------------+---------------+---------------+---------------+---------------+
-| SciCode        | 1.31%         | 0.00%         | −1.31 [−1.72, | <0.001 — yes  | 1.000         |
-|                | (77/5,880)    | (0/5,880)     | −0.94]        |               |               |
-+----------------+---------------+---------------+---------------+---------------+---------------+
-| AA-Omniscience | 1.77%         | 0.85%         | −0.92 [−1.38, | <0.001 — yes  | 1.000         |
-|                | (106/6,000)   | (51/6,000)    | −0.48]        |               |               |
-+----------------+---------------+---------------+---------------+---------------+---------------+
 
 Abstention ratio
 ^^^^^^^^^^^^^^^^
