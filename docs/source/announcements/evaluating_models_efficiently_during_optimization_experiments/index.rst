@@ -178,7 +178,9 @@ Measure verbosity
 Compare mean and median completion tokens, including reasoning, to assess how much generation each
 answer requires.
 
-For mean length, we use question-level paired t-tests and t-based 95% confidence intervals.
+For mean length, average each model's completion lengths across repetitions within each question,
+then subtract Baseline's average from Candidate's. We use question-level paired t-tests and t-based
+95% confidence intervals.
 “Yes” means evidence of shorter Candidate completions on average (p < 0.05).
 
 +----------------+-------------+-------------+-------------+-------------+-------------+-------------+

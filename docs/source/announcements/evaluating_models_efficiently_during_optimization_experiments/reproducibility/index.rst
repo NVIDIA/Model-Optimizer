@@ -29,21 +29,14 @@ summaries:
 Statistical methods
 -------------------
 
-For accuracy, cap-hit and missing-final-answer rates, and verbosity, we calculate the difference
-by subtracting Baseline's value from Candidate's. Accuracy and rate changes are in percentage
-points. Verbosity differences are in completion tokens, including reasoning tokens.
+- **SciCode accuracy:** keep all scored subtasks and repetitions from each parent problem together.
+  Resample paired parent problems for the 95% interval and swap model labels for whole parent
+  problems for the one-sided permutation p-values. Weight the estimate by subtask.
 
-- **Accuracy and verbosity (mean completion length):** average each model's repetitions within
-  each question, then subtract Baseline's average from Candidate's for that question.
-
-  - **SciCode accuracy:** keep all scored subtasks and repetitions from each parent problem together.
-    Resample paired parent problems for the 95% interval and swap model labels for whole parent
-    problems for the one-sided permutation p-values. Weight the estimate by subtask.
-
-  - **Verbosity:** across these paired question differences, use a two-sided t-based 95% confidence
-    interval and one-sided paired t-tests for the stated direction. Degrees of freedom equal the
-    number of questions minus one.
-    Median lengths describe individual responses. The verbosity tests compare mean lengths.
+- **Verbosity:** across paired question differences, use a two-sided t-based 95% confidence
+  interval and one-sided paired t-tests for the stated direction. Degrees of freedom equal the
+  number of questions minus one.
+  Median lengths describe individual responses. The verbosity tests compare mean lengths.
 - **Non-inferiority:** test whether Candidate's accuracy loss is smaller than an acceptable margin.
   For differences in pp, the t statistic is ``(mean_difference + margin) / standard_error``, using
   the upper tail of the t distribution. For SciCode, estimate the standard error across parent
