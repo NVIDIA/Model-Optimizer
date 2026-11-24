@@ -36,6 +36,7 @@ from ..._bypass_parallel import (
     _all_rank_values,
     _size,
     prepare_quantizer_partitions,
+    validate_tp_quantizer_aliases,
 )
 
 __all__ = []
@@ -149,11 +150,12 @@ def validate_hf_tensor_parallelism(model, mesh, plan=None):
     if plan is None:
         plan = model._expand_parallel_plan(model.tp_plan)
     parameters = dict(model.named_parameters())
+    aliases = {}
     for full, style in plan.items():
         if full in parameters:
             owner, _, name = full.rpartition(".")
             _validate_parameter_geometry(
-                modules[owner], name, ALL_PARALLEL_STYLES[style], mesh, full
+                modules[owner], name, ALL_PARALLEL_STYLES[style], mesh, full, aliases
             )
 
 
@@ -197,7 +199,9 @@ def _expert_partitions(model, plan, context, adopted):
     return partitions, global_ids
 
 
-def _validate_parameter_geometry(module, name, style, mesh, full_name, *, allow_expert_axis=False):
+def _validate_parameter_geometry(
+    module, name, style, mesh, full_name, aliases=None, *, allow_expert_axis=False
+):
     """Resolve the installed HF style on a storage-free logical parameter."""
     parameter = module._parameters[name]
     native = parameter.get_qtensor() if isinstance(parameter, QTensorWrapper) else None
@@ -246,6 +250,8 @@ def _validate_parameter_geometry(module, name, style, mesh, full_name, *, allow_
             if quantizer.backend not in (None, "ggml"):
                 raise ValueError(f"Backend {quantizer.backend!r} requires a native TP partitioner.")
             validate_native_weight_partition(quantizer, view)
+            if aliases is not None:
+                validate_tp_quantizer_aliases(quantizer, view, aliases)
     activation = getattr(module, input_name, None)
     if isinstance(activation, TensorQuantizer):
         validate_activation_partition(activation, view)
@@ -354,6 +360,7 @@ def parallelize_native_transformers(model, context, *, initialize=None):
         partitions, global_ids = _expert_partitions(model, ep_plan, context, adopted)
         if not adopted:
             modules, parameters = dict(model.named_modules()), dict(model.named_parameters())
+            aliases = {}
             for plan, mesh, allow_expert_axis in (
                 (tp_plan, context.tensor_mesh, False),
                 (ep_plan, context.expert_mesh, True),
@@ -367,6 +374,7 @@ def parallelize_native_transformers(model, context, *, initialize=None):
                             ALL_PARALLEL_STYLES[style],
                             mesh,
                             name,
+                            aliases,
                             allow_expert_axis=allow_expert_axis,
                         )
     except Exception as exc:
