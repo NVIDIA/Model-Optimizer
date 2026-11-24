@@ -274,12 +274,20 @@ def prepare_packed_weights_for_tp(model):
     names = ("_fake_quant", "_enable_pre_quant_scale", "_rotate", "_native_weight_meta")
     try:
         for name, module, quantizer, native, key in candidates:
+            scale = quantizer._scale
+            swizzled = isinstance(native, NVFP4QTensor) and scale.dtype == torch.uint8
+            if swizzled:
+                from .qtensor.nvfp4_tensor import cutlass_fp4_scale_to_modelopt_fp4_scale
+
+                scale = cutlass_fp4_scale_to_modelopt_fp4_scale(
+                    scale, native.metadata["shape"][-2:]
+                )
             master = None
             if key not in masters:
                 master = native.dequantize(
                     dtype=native.metadata["dtype"],
                     block_sizes=quantizer.block_sizes,
-                    scale=quantizer._scale,
+                    scale=scale,
                     double_scale=getattr(quantizer, "_double_scale", None),
                     scale_zeros=getattr(quantizer, "_scale_zeros", None),
                 )
@@ -297,18 +305,12 @@ def prepare_packed_weights_for_tp(model):
                 representations[key] = {
                     "native_metadata": dict(native.metadata),
                     "fake_quant": quantizer.fake_quant,
+                    "enable_pre_quant_scale": quantizer._enable_pre_quant_scale,
+                    "rotate": quantizer._rotate,
                 }
-                if isinstance(native, NVFP4QTensor) and quantizer._scale.dtype == torch.uint8:
-                    from .qtensor.nvfp4_tensor import cutlass_fp4_scale_to_modelopt_fp4_scale
-
+                if swizzled:
                     representations[key]["scale_layout"] = tuple(quantizer._scale.shape)
-                    quantizer._set_buffer(
-                        "_scale",
-                        cutlass_fp4_scale_to_modelopt_fp4_scale(
-                            quantizer._scale,
-                            native.metadata["shape"][-2:],
-                        ),
-                    )
+                    quantizer._set_buffer("_scale", scale)
                 quantizer._fake_quant = True
                 quantizer._enable_pre_quant_scale = False
                 quantizer.disable_rotate()

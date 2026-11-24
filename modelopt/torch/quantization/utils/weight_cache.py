@@ -242,15 +242,22 @@ def _suspend_weight_cache(model: nn.Module):
 
 
 def _pinned_native_value(quantizer, inputs, source):
-    if getattr(quantizer, "_native_weight_meta", None) and not getattr(
-        quantizer, "_local_repair_active", False
+    if (
+        getattr(quantizer, "_native_weight_meta", None)
+        and not getattr(quantizer, "_local_repair_active", False)
+        and quantizer._pass_through_bwd
+        and not getattr(quantizer, "_lsq", False)
+        and not any(p.requires_grad for p in quantizer.parameters())
     ):
         # Deferred: native_weight imports GGML metadata through the quantization package.
         from .native_weight import dequantize_pinned_native, get_pinned_native_weight
 
         native = get_pinned_native_weight(quantizer, source)
         if native is not None:
-            return dequantize_pinned_native(quantizer, native, inputs.dtype).reshape(inputs.shape)
+            value = dequantize_pinned_native(quantizer, native, inputs.dtype)
+            if quantizer.is_static_block_quant:
+                value = quantizer._process_for_blockquant(value)
+            return value.reshape(inputs.shape)
     return None
 
 

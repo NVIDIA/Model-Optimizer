@@ -28,16 +28,16 @@ from ..ggml.common import _cache_base, _input_cache_key, _row_keys
 
 _VALIDATED = weakref.WeakKeyDictionary()
 _SOURCE_DTYPES = {torch.float16: "fp16", torch.bfloat16: "bf16", torch.float32: "fp32"}
-_POLICY_DEFAULTS = {
-    "backend_extra_args": {},
-    "_unsigned": False,
-    "_narrow_range": False,
-    "_fake_quant": True,
-    "_dynamic": False,
-    "_bias": None,
-    "_use_constant_amax": False,
-    "_constant_amax": None,
-}
+_POLICY_FIELDS = (
+    "backend_extra_args",
+    "_unsigned",
+    "_narrow_range",
+    "_fake_quant",
+    "_dynamic",
+    "_bias",
+    "_use_constant_amax",
+    "_constant_amax",
+)
 
 
 def _canonical(value):
@@ -50,8 +50,8 @@ def _canonical(value):
     return value
 
 
-def _format_key(quantizer):
-    return {
+def _format_key(quantizer, source_shape):
+    result = {
         name: _canonical(getattr(quantizer, name, None))
         for name in (
             "_num_bits",
@@ -59,13 +59,26 @@ def _format_key(quantizer):
             "_block_sizes",
             "backend",
             "_rotate",
-            "_rotate_back",
-            "_rotate_block_size",
-            "_rotate_is_fp32",
             "_enable_pre_quant_scale",
-            *_POLICY_DEFAULTS,
+            *_POLICY_FIELDS,
         )
     }
+    blocks = quantizer.block_sizes
+    if blocks and blocks.get("type") != "dynamic":
+        # Static block setup derives axis from the block layout on first forward.
+        # Treat that initialization as equivalent, while retaining later overrides.
+        rank = len(source_shape)
+        axes = {axis % rank: size for axis, size in blocks.items() if isinstance(axis, int)}
+        if any(size is not None for size in axes.values()):
+            derived, offset = [], 0
+            for axis in range(rank):
+                derived.append(offset)
+                offset += 2 if axes.get(axis) is not None else 1
+            if len(axes) == 1 and axes.get(rank - 1) is not None:
+                derived = [0]
+            if not hasattr(quantizer, "_block_reshape_size") or quantizer.axis == tuple(derived):
+                result["_axis"] = {"block_axes": derived}
+    return result
 
 
 def _has_input_transform(quantizer):
@@ -102,7 +115,7 @@ def pin_native_weight(quantizer, native, source):
         "code_shape": tuple(payload.shape),
         "code_dtype": payload.dtype,
         "source_shape": tuple(source.shape),
-        "format": _format_key(quantizer),
+        "format": _format_key(quantizer, source.shape),
         "native_metadata": dict(native.metadata),
     }
     _VALIDATED.pop(quantizer, None)
@@ -125,7 +138,7 @@ def get_pinned_native_weight(quantizer, source):
     ):
         return None
     expected_format = _canonical(meta["format"])
-    if _format_key(quantizer) != expected_format:
+    if _format_key(quantizer, source.shape) != expected_format:
         return None
     key = _input_cache_key(source)
     previous = _VALIDATED.get(quantizer)
