@@ -2672,8 +2672,7 @@ def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
 # fp8 is block FP8; _ckpt_quant_method calls per-tensor FP8 fp8-per-tensor, which the load refuses.
 _EP_SOURCE_FORMATS: frozenset[str | None] = frozenset({None, "fp8"})
 
-# The ep_plan styles the expert-parallel load swaps for its torch_a2a styles. It keeps these and
-# grouped_gemm, and drops any other.
+# The ep_plan styles the expert-parallel load swaps for its torch_a2a styles.
 _EP_STYLE_SWAP = {
     "ep_router": "torch_a2a_router",
     "moe_tp_experts": "torch_a2a_experts",
@@ -2681,6 +2680,9 @@ _EP_STYLE_SWAP = {
     # transformers 5.19+ (its own all-to-all dispatch).
     "ep_dispatch_experts": "torch_a2a_experts",
 }
+# The styles it keeps, dropping any other: these, grouped_gemm, and a norm replicated under the experts
+# that sums its gradient over the expert-parallel group (5.20+ post-expert norms, e.g. Muse Spark).
+_EP_KEPT_STYLES = frozenset({"grouped_gemm", "replicated_with_grad_allreduce", *_EP_STYLE_SWAP})
 
 
 def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
@@ -2709,11 +2711,10 @@ def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
     # The load drops any other style an expert weight takes, so that weight would load whole
     # beside its sharded siblings, and the grouped forward would pair slices of different experts.
     containers = _routed_expert_keys(ep_plan)
-    kept_styles = {"grouped_gemm", *_EP_STYLE_SWAP}
     dropped = sorted(
         name
         for name, style in ep_plan.items()
-        if style not in kept_styles
+        if style not in _EP_KEPT_STYLES
         and name not in containers
         and any(name.startswith(key + ".") for key in containers)
     )
@@ -3083,7 +3084,7 @@ def load_and_prepare_ep(
         )
     world_size, ep_degree, edp = plan.world_size, plan.ep_size, plan.edp
     hub_options = dict(hub_options or {})
-    swap, kept_styles = _EP_STYLE_SWAP, {"grouped_gemm", *_EP_STYLE_SWAP}
+    swap, kept_styles = _EP_STYLE_SWAP, _EP_KEPT_STYLES
     # Each rank checks its own transformers, the config it reads or was handed, and the plan against
     # it: one refusing fails every rank here, before the checkpoint's fetch and the meshes.
     with _refused_together("the expert-parallel load's checks", alone=False):
@@ -3354,8 +3355,8 @@ def load_and_prepare_ep(
             _experts_sharded_over(ep_submesh, distributed_config),
         ):
             if quant_method == "fp8":
-                # Correct transformers' block-fp8 dequant to emit the model dtype: class-wide, which
-                # the guard keeps to this load.
+                # Correct transformers' block-fp8 dequant to emit the model dtype. The patch is
+                # class-wide and never undone, so later block-fp8 loads in this process keep it.
                 _patch_finegrained_fp8_dequant(dtype)
             model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
         model.eval()

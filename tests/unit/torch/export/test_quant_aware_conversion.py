@@ -42,6 +42,7 @@ from modelopt.torch.export.quant_aware_conversion import (
     _assert_experts_pre_expanded,
     _build_reverse_rules,
     _dense_split_rule,
+    _reverse_transform,
     _source_checkpoint_keys,
     _SourceAwareRenamer,
     apply_reverse_rules,
@@ -1455,6 +1456,17 @@ def test_a_codec_converter_decodes_in_place_only_if_it_names_one_module(sources,
         pytest.skip("transformers build has no _IdentityOp")
     rev = types.SimpleNamespace(source_patterns=sources, target_patterns=targets)
     assert quant_aware_conversion._decodes_in_place(rev, [core._IdentityOp()]) is in_place
+
+
+def test_a_reversed_rename_anchors_only_the_sources_that_were_anchored():
+    """transformers 5.21+ moves a source's ``$`` onto its reversed target: it goes back on that
+    pair's source alone, as earlier releases reverse it."""
+    pytest.importorskip("transformers")
+    from transformers.core_model_loading import WeightRenaming
+
+    rev = _reverse_transform(WeightRenaming([r"^a\.x$", r"^b\.y"], ["A.x", "B.y"]))
+    assert list(rev.source_patterns) == ["^A.x$", "^B.y"]
+    assert [p.endswith("$") for p in rev.target_patterns] == [False, False]
 
 
 def test_dense_split_names_each_part_once_through_load_siblings():

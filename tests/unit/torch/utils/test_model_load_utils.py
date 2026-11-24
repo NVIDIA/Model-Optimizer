@@ -110,6 +110,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _convert_keys,
     _ep_aware_caching_allocator_warmup,
     _ep_dense_meta_load,
+    _ep_plan_refusal,
     _experts_sharded_over,
     _fsdp2_shard_dense,
     _hf_keeps_ep_apart,
@@ -3353,6 +3354,18 @@ def test_a_config_the_load_cannot_take_is_refused_before_anything_loads(
     with pytest.raises(error, match=match):
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
     assert ep_world_of_two == []
+
+
+def test_a_post_expert_norm_replicated_under_the_experts_is_kept():
+    """Muse Spark's plan (transformers 5.20+): the norm each expert's output takes is replicated,
+    summing its gradient over the expert-parallel group, so the load keeps it rather than refusing."""
+    plan = {
+        "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+        "layers.*.mlp.experts.down_proj": "grouped_gemm",
+        "layers.*.mlp.experts.post_expert_norm": "replicated_with_grad_allreduce",
+        "layers.*.mlp.experts": "ep_dispatch_experts",
+    }
+    assert _ep_plan_refusal(plan) is None
 
 
 def test_an_ep_size_that_does_not_divide_the_experts_is_refused_before_anything_loads(

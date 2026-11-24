@@ -54,7 +54,7 @@ def _forward(
     mask = attention_mask[:, :1]
     if not attention_mask.is_floating_point():
         return mask.clone()
-    if Version(transformers.__version__) >= Version("5.23"):
+    if Version(transformers.__version__).release >= (5, 23):
         # From 5.23 the reference returns the selection as a bool mask for float masks too.
         return mask == 0
     min_dtype = torch.finfo(attention_mask.dtype).min

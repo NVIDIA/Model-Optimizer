@@ -991,11 +991,14 @@ def _reverse_transform(conv):
     literal ``$``; earlier releases gave ``^lm_head.weight$`` -> ``head.weight``.
     """
     rev = conv.reverse_transform()
-    targets = _as_list(rev.target_patterns)
-    if not any(t.endswith("$") and not t.endswith("\\$") for t in targets):
+    targets, sources = _as_list(rev.target_patterns), _as_list(rev.source_patterns)
+    anchored = [t.endswith("$") and not t.endswith("\\$") for t in targets]
+    if not any(anchored):
         return rev
-    sources = [p if p.endswith("$") else p + "$" for p in _as_list(rev.source_patterns)]
-    targets = [t.removesuffix("$") for t in targets]
+    # Each pair's anchor goes back on its own source; with unpaired lists, on every source.
+    on_source = anchored if len(sources) == len(targets) else [True] * len(sources)
+    sources = [p + "$" if a and not p.endswith("$") else p for p, a in zip(sources, on_source)]
+    targets = [t[:-1] if a else t for t, a in zip(targets, anchored)]
     kwargs = {"operations": list(rev.operations)} if hasattr(rev, "operations") else {}
     return rev.copy(sources, targets, **kwargs)
 
