@@ -33,7 +33,7 @@ from tqdm import tqdm
 from modelopt.torch.opt.hparam import Hparam
 from modelopt.torch.opt.searcher import LPS, BaseSearcher, SearchConfig, SearchStateDict
 from modelopt.torch.utils import print_rank_0
-from modelopt.torch.utils.distributed import is_master, size
+from modelopt.torch.utils.distributed import is_master, recorded_distribution_plan, size
 
 from ._auto_quantize_cost import (
     COST_MODEL_KV_CACHE,
@@ -567,15 +567,55 @@ def _restore_quantizer_state_dict(
 
 
 def _validate_parallel_state(model: nn.Module) -> None:
+    # The expert-parallel plan says which ranks hold the same experts (_validate_distributed_state).
+    plan = recorded_distribution_plan(model)
     for module in model.modules():
         parallel_state = getattr(module, "parallel_state", None)
-        if parallel_state is not None and (
-            parallel_state.tensor_parallel_group.world_size() > 1
-            or parallel_state.expert_model_parallel_group.world_size() > 1
+        if parallel_state is None:
+            continue
+        if parallel_state.tensor_parallel_group.world_size() > 1:
+            raise NotImplementedError(
+                "Distributed KV-cache AutoQuantize supports DP/FSDP2 and EP, not TP."
+            )
+        if parallel_state.expert_model_parallel_group.world_size() > 1 and (
+            plan is None or not plan.is_expert_parallel
         ):
             raise NotImplementedError(
-                "Distributed KV-cache AutoQuantize supports DP/FSDP2, not TP or EP."
+                "Distributed KV-cache AutoQuantize supports EP on a model whose recorded "
+                "distribution plan is expert-parallel, as load_pretrained records one; this "
+                "model's modules carry an expert-parallel group without one."
             )
+
+
+def _split_expert_quantizers(
+    signature: dict[str, Any] | None, experts: set[str]
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """``signature`` without the preceding quantizers named in ``experts``, and theirs alone."""
+    if signature is None or "preceding_quantizers" not in signature:
+        return signature, []
+    preceding = signature["preceding_quantizers"]
+    return (
+        {**signature, "preceding_quantizers": [q for q in preceding if q["name"] not in experts]},
+        [q for q in preceding if q["name"] in experts],
+    )
+
+
+def _expert_quantizer_names(model: nn.Module) -> set[str]:
+    """The quantizers under the routed experts an expert-parallel load shards over the ranks."""
+    experts = {
+        name
+        for name, module in model.named_modules()
+        if (state := getattr(module, "_parallel_state", None)) is not None
+        and state.expert_model_parallel_group.world_size() > 1
+    }
+    if not experts:
+        return set()
+    return {
+        name
+        for name, module in model.named_modules(remove_duplicate=False)
+        if isinstance(module, TensorQuantizer)
+        and any(".".join(name.split(".")[:end]) in experts for end in range(1, name.count(".") + 1))
+    }
 
 
 def _validate_persistent_candidate_scales(
@@ -733,18 +773,31 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         if size() == 1:
             return
         signature["distributed_world_size"] = size()
+        # Each rank of an expert-parallel model holds only its own experts' quantizers: those must
+        # match across the ranks holding the same experts, and everything else across every rank.
+        experts = _expert_quantizer_names(self.model)
+        shared_signature, expert_signature = _split_expert_quantizers(signature, experts)
+        shared_checkpoint, expert_checkpoint = _split_expert_quantizers(
+            self.search_signature, experts
+        )
         state = {
-            "signature": signature,
-            "checkpoint_signature": self.search_signature,
+            "signature": shared_signature,
+            "checkpoint_signature": shared_checkpoint,
             "calibration_complete": self.calibration_complete,
             "layers": self.layers,
             "quantizer_state": _fingerprint_value(self.quantizer_state),
             "target_bits": self._target_bits,
             "checkpoint_enabled": self.config["checkpoint"] is not None,
         }
-        states = [None] * size()
-        dist.all_gather_object(states, state)
-        if any(other != states[0] for other in states):
+        states: list[Any] = [None] * size()
+        dist.all_gather_object(states, (state, (expert_signature, expert_checkpoint)))
+        plan = recorded_distribution_plan(self.model)
+        ep_size = plan.ep_size if plan is not None else 1
+        # The ranks of a column of the (edp, ep) mesh hold the same experts: rank r those of r % ep.
+        if any(
+            other != states[0][0] or other_experts != states[rank % ep_size][1]
+            for rank, (other, other_experts) in enumerate(states)
+        ):
             raise ValueError(
                 "Distributed KV-cache AutoQuantize requires identical search configuration and "
                 "consistent per-rank checkpoint progress. Restore all rank files from the same "

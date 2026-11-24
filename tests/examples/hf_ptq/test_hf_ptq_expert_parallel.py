@@ -295,24 +295,18 @@ def test_a_tensorrt_llm_checkpoint_export_needs_a_single_process(
     ],
     ids=["weights", "then_kv_cache"],
 )
-def test_only_a_kv_cache_search_is_refused_on_the_routes_this_script_adds(
+def test_an_auto_quantize_recipe_runs_on_the_routes_this_script_adds(
     hf_ptq, monkeypatch, torchrun, world_size, env, use_fsdp2, recipe
 ):
     """Every rank scores its own calibration shard and AutoQuantize sums the scores over the ranks,
-    so an AutoQuantize recipe runs on every route. The KV-cache search requires every rank to hold
-    the same quantizers, which an expert-parallel run's experts are not: a recipe with that search
-    is refused before the load, and before the weight search it runs first."""
+    so an AutoQuantize recipe, with a KV-cache search or without, runs on every route."""
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
     args = _args(torchrun(world_size=world_size), use_fsdp2=use_fsdp2, recipe=recipe)
 
-    if env.get("MODELOPT_EP_DEGREE") == "2" and "kv" in recipe:
-        with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize"):
-            hf_ptq.resolve_distribution(args)
-    else:
-        plan = hf_ptq.resolve_distribution(args)[0]
-        assert plan.is_expert_parallel == (env.get("MODELOPT_EP_DEGREE") == "2")
+    plan = hf_ptq.resolve_distribution(args)[0]
+    assert plan.is_expert_parallel == (env.get("MODELOPT_EP_DEGREE") == "2")
 
 
 @pytest.mark.parametrize(

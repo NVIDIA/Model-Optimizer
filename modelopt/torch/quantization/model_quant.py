@@ -786,16 +786,19 @@ def _auto_quantize_kv_cache(
     fixed_quantization_config: dict[str, Any] | str | None,
 ):
     """Run the KV-cache-specific AutoQuantize validation and search lifecycle."""
+    # Before anything converts the model: an expert-parallel plan without its mesh raises here.
     plan = dist.recorded_distribution_plan(model)
-    if plan is not None and plan.is_expert_parallel:
+    ep_mesh = expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
+    # From transformers 5.16 the expert-parallel load leaves the routed experts' weights DTensors.
+    if (
+        dist.size() > 1
+        and dist.is_dtensor_sharded(model)
+        and not dist.is_fsdp2_model(model)
+        and ep_mesh is None
+    ):
         raise NotImplementedError(
-            f"KV-cache AutoQuantize does not support a model whose experts are sharded over "
-            f"{plan.ep_size} ranks yet: its search requires every rank to hold the same "
-            "quantizers, and each rank holds its own experts'. Search the KV-cache formats without "
-            "expert parallelism."
+            "Distributed KV-cache AutoQuantize supports DP/FSDP2 and EP, not TP."
         )
-    if dist.size() > 1 and dist.is_dtensor_sharded(model) and not dist.is_fsdp2_model(model):
-        raise NotImplementedError("Distributed KV-cache AutoQuantize supports DP/FSDP2, not TP.")
     _validate_parallel_state(model)
     if method not in (None, "kl_div"):
         raise ValueError("cost_model='kv_cache' requires method='kl_div'.")
@@ -858,6 +861,9 @@ def _auto_quantize_kv_cache(
     )
     if converted_for_search:
         model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
+        # Quantizer insertion dropped the routed experts' all-to-all forwards, which the search's
+        # calibration and scoring forwards need.
+        dist.reinstall_a2a_forwards(model, ep_mesh)
         set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
     searcher = AutoQuantizeKVSearcher()
     searcher.search(
@@ -1208,8 +1214,7 @@ def auto_quantize(
         :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` loads one -- every
         rank calls ``auto_quantize`` on its own share of the data, and must run the same number of
         calibration and scoring batches. The scores are summed over the ranks, so every rank
-        picks the same formats as one process scoring all their data. KV-cache search does not
-        support expert parallelism yet.
+        picks the same formats as one process scoring all their data.
 
     .. note::
 

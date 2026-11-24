@@ -135,8 +135,9 @@ def _export_problems(export_dir, want):
     """How the checkpoint in ``export_dir`` differs from ``want``, the single-process export's.
 
     Each tensor sits in exactly one shard, the one the index names for it, under a name ``want``
-    has, every expert of every layer among them. Each is byte-identical but the activation scales:
-    those come from bf16 activations computed in another order, so they agree within 2e-2.
+    has, every expert of every layer among them. Each is byte-identical but the activation and
+    KV-cache scales: those come from activations computed in another order, so they agree within
+    2e-2.
     """
     weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]
     got, problems = {}, []
@@ -158,7 +159,7 @@ def _export_problems(export_dir, want):
                 f"{key}: {tensor.dtype} {list(tensor.shape)}, not {expected.dtype} "
                 f"{list(expected.shape)}"
             )
-        elif key.endswith("input_scale"):
+        elif key.endswith(("input_scale", "k_scale", "v_scale")):
             if not (error := _relative_error(tensor, expected)) < 2e-2:
                 problems.append(f"{key}: off by {error:.3g} (relative)")
         elif not torch.equal(_raw_bytes(tensor), _raw_bytes(expected)):
@@ -269,21 +270,54 @@ def _expert_parallel_auto_quantize_and_export_job(rank, size, ckpt_dir, export_d
             num_score_steps=len(batches),
         )[1]
 
+    def kv_cache_search(model, batches):
+        return mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0, "cost_model": "kv_cache"},
+            # Each layer's K/V cast to FP8 with its calibrated scale or a constant one.
+            quantization_formats=[
+                (
+                    {
+                        "quant_cfg": [
+                            {
+                                "quantizer_name": "*[kv]_bmm_quantizer",
+                                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0}
+                                if cast
+                                else {"num_bits": (4, 3)},
+                            }
+                        ],
+                        "effective_bits": 8.0,
+                        "algorithm": None if cast else "max",
+                    },
+                    "cast_fp8" if cast else "calibrated_fp8",
+                )
+                for cast in (False, True)
+            ],
+            data_loader=[b.to(device) for b in batches],
+            forward_step=lambda model, batch: model(input_ids=batch, use_cache=False).logits,
+            num_calib_steps=len(batches),
+            num_score_steps=len(batches),
+            method="kl_div",
+        )[1]
+
     with bounded_collectives(seconds=300):
         # The production load, each rank searching on its own batch; and the whole model in one
-        # process searching on every rank's batch, one per step as the ranks do.
+        # process searching on every rank's batch, one per step as the ranks do. Then the KV-cache
+        # search, as a recipe runs it after the weight search, with each rank holding the weight
+        # quantizers of its own experts.
         model = load_pretrained(ckpt_dir, distribution=plan)
         state = search(model, batches[rank : rank + 1])
+        kv_state = kv_cache_search(model, batches[rank : rank + 1])
         whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.float32).to(device)
         for module in whole.modules():
             module._parallel_state = ParallelState(data_parallel_group=-1)
         whole_state = search(whole, batches)
+        whole_kv_state = kv_cache_search(whole, batches)
 
         problems = []
-        if state["best"]["recipe"] != whole_state["best"]["recipe"]:
-            problems.append(
-                f"picked {state['best']['recipe']}, not {whole_state['best']['recipe']}"
-            )
+        for mine, want in ((state, whole_state), (kv_state, whole_kv_state)):
+            if mine["best"]["recipe"] != want["best"]["recipe"]:
+                problems.append(f"picked {mine['best']['recipe']}, not {want['best']['recipe']}")
         for name, stat in whole_state["candidate_stats"].items():
             mine = state["candidate_stats"][name]
             if (mine["formats"], mine["costs"]) != (stat["formats"], stat["costs"]):
@@ -292,6 +326,14 @@ def _expert_parallel_auto_quantize_and_export_job(rank, size, ckpt_dir, export_d
             error = _relative_error(torch.tensor(mine["scores"]), torch.tensor(stat["scores"]))
             if not error < 1e-2:
                 problems.append(f"{name}: scores off by {error:.3g} (relative)")
+        for layer, stats in whole_kv_state["layers"].items():
+            mine = kv_state["layers"][layer]["scores"]
+            error = _relative_error(
+                torch.tensor([mine[c] for c in stats["scores"]]),
+                torch.tensor(list(stats["scores"].values())),
+            )
+            if not error < 1e-2:
+                problems.append(f"{layer}: KV-cache scores off by {error:.3g} (relative)")
 
         # The mixed-format checkpoint the no-gather writer writes, against the single-process one.
         export_hf_checkpoint(model, dtype=torch.bfloat16, export_dir=export_dir)
@@ -322,10 +364,11 @@ def test_expert_parallel_auto_quantize_and_export_match_the_whole_model(
     """AutoQuantize of the production expert-parallel load -- experts over every rank or half of
     them, dense replicated or FSDP2-sharded -- each rank scoring its own batch, gives the costs,
     scores and formats of the whole model scoring every rank's batch, in float32, where only their
-    order of summation differs. The no-gather writer's mixed-format checkpoint, weights and
-    quantization config, then matches the whole model's single-process export. From transformers
-    5.16 the experts load as DTensors behind forward wrappers quantizer insertion drops; before it,
-    as each rank's plain share behind forward pre-hooks."""
+    order of summation differs; so does the KV-cache search after it. The no-gather writer's
+    mixed-format checkpoint, weights, KV-cache scales and quantization config, then matches the
+    whole model's single-process export. From transformers 5.16 the experts load as DTensors behind
+    forward wrappers quantizer insertion drops; before it, as each rank's plain share behind forward
+    pre-hooks."""
     if Version(transformers.__version__) < Version(moe._EP_MIN_TRANSFORMERS):
         pytest.skip(f"expert parallelism needs transformers >= {moe._EP_MIN_TRANSFORMERS}")
     ep_degree = dist_workers.world_size // ep_share

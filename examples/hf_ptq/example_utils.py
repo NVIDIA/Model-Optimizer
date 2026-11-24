@@ -30,7 +30,7 @@ import torch
 import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
-from autoquant_utils import _auto_quantize_hands_scores_between_runs, _recipe_is_kv_auto_quantize
+from autoquant_utils import _auto_quantize_hands_scores_between_runs
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from safetensors import safe_open
 from transformers import (
@@ -193,12 +193,6 @@ def resolve_distribution(args) -> tuple[DistributionPlan, Any]:
             "but the expert-parallel load runs the routed experts through torch_a2a whatever it "
             "names. Drop it, or quantize without expert parallelism: with --use_fsdp2, or in a "
             "single process."
-        )
-    if plan.is_expert_parallel and _recipe_is_kv_auto_quantize(args.recipe):
-        # Before the load, and before a weight search the recipe runs first.
-        raise NotImplementedError(
-            f"{plan!r}: KV-cache AutoQuantize does not support expert parallelism yet. Quantize "
-            "without expert parallelism: with --use_fsdp2, or in a single process."
         )
     if plan.world_size > 1 and _auto_quantize_hands_scores_between_runs(args):
         # Before the load, rather than where the AutoQuantize stage refuses them after it.

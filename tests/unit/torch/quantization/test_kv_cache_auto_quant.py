@@ -756,7 +756,9 @@ def test_public_kv_autoquant_rejects_invalid_inputs_before_mutation(
         monkeypatch.setattr(model_quant.dist, "is_fsdp2_model", lambda _: False)
     error = NotImplementedError if unsupported_sharding else ValueError
     message = (
-        "supports DP/FSDP2, not TP" if unsupported_sharding else "non-empty quantization_formats"
+        "supports DP/FSDP2 and EP, not TP"
+        if unsupported_sharding
+        else "non-empty quantization_formats"
     )
     with pytest.raises(error, match=message):
         mtq.auto_quantize(
@@ -771,13 +773,20 @@ def test_public_kv_autoquant_rejects_invalid_inputs_before_mutation(
     assert {name: type(module) for name, module in model.named_modules()} == original_types
 
 
-@pytest.mark.parametrize("group", ["tensor_parallel_group", "expert_model_parallel_group"])
-def test_public_kv_autoquant_rejects_tp_ep_before_forward(monkeypatch, group):
+@pytest.mark.parametrize(
+    ("group", "message"),
+    [
+        ("tensor_parallel_group", "supports DP/FSDP2 and EP, not TP"),
+        # Expert parallelism without the expert-parallel plan that says which ranks hold which experts.
+        ("expert_model_parallel_group", "recorded distribution plan is expert-parallel"),
+    ],
+)
+def test_public_kv_autoquant_rejects_tp_ep_before_forward(monkeypatch, group, message):
     model = get_tiny_llama(num_hidden_layers=1)
     original_types = {name: type(module) for name, module in model.named_modules()}
     model.parallel_state = ParallelState()
     monkeypatch.setattr(getattr(model.parallel_state, group), "world_size", lambda: 2)
-    with pytest.raises(NotImplementedError, match="supports DP/FSDP2, not TP or EP"):
+    with pytest.raises(NotImplementedError, match=message):
         mtq.auto_quantize(
             model,
             {"effective_bits": 8.0, "cost_model": "kv_cache"},
