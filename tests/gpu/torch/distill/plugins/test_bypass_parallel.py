@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Native IQ payload placement, mesh adoption and real four-GPU projection checks."""
+"""Native packed TP projections and VJPs, mesh adoption and four-GPU placement checks."""
 
 import copy
 from datetime import timedelta
@@ -21,13 +21,144 @@ from datetime import timedelta
 import pytest
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor, Shard
 from torch.nn import functional as F
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.quantization as mtq
+from modelopt.torch.distill._bypass_parallel import prepare_quantizer_partitions
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.qtensor import FP8QTensor, NVFP4QTensor, QTensorWrapper
+from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
+from modelopt.torch.quantization.utils.native_weight import get_pinned_native_weight
 
 
+def _native_packed_tp_worker(rank, size, format_name, style):
+    # The native HF TP interface is optional and requires Transformers 5.23.
+    from modelopt.torch.distill.plugins.transformers.parallel import (
+        apply_hf_tensor_parallelism,
+        torch_mesh_context,
+        validate_hf_tensor_parallelism,
+    )
+
+    assert size == 2
+    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("tp",))
+    context = torch_mesh_context(mesh)
+    torch.manual_seed(73)
+    model = mtq.quantize(
+        torch.nn.Sequential(torch.nn.Linear(256, 16, bias=False)),
+        {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None},
+    )
+    layer = model[0]
+    quantizer = layer.weight_quantizer
+    if format_name == "fp8":
+        native, scale = FP8QTensor.quantize(layer.weight.detach(), axis=0)
+        double_scale = None
+        attributes = {"num_bits": (4, 3), "axis": 0}
+    else:
+        native, scale, double_scale = NVFP4QTensor.quantize(
+            layer.weight.detach(), 16, try_tensorrt=False
+        )
+        attributes = {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        }
+    quantizer.set_from_attribute_config(
+        QuantizerAttributeConfig(**attributes, fake_quant=False, enable=True)
+    )
+    quantizer._set_buffer("_scale", scale)
+    if double_scale is not None:
+        quantizer._set_buffer("_double_scale", double_scale)
+    layer.weight = QTensorWrapper(native)
+    original_codes = native._quantized_data.contiguous().view(torch.uint8).clone()
+    decoded = native.dequantize(
+        scale=scale, double_scale=double_scale, block_sizes=quantizer.block_sizes
+    )
+    plan = {"0.weight": style, "0": style}
+    validate_hf_tensor_parallelism(model, mesh, plan)
+    prepare_packed_weights_for_tp(model)
+    apply_hf_tensor_parallelism(model, mesh, plan)
+    prepare_quantizer_partitions(model, context)
+
+    dim = 0 if style == "colwise" else 1
+    width = decoded.shape[dim] // size
+    expected_weight = decoded.narrow(dim, rank * width, width)
+    assert isinstance(layer.weight, DTensor)
+    assert layer.weight.device_mesh == mesh
+    assert layer.weight.placements == (Shard(dim),)
+    assert tuple(layer.weight.shape) == (16, 256)
+    assert not layer.weight.requires_grad
+    local = layer.weight.to_local()
+    assert local.shape == expected_weight.shape
+    torch.testing.assert_close(local, expected_weight, rtol=0, atol=0)
+    assert quantizer.is_enabled and quantizer.fake_quant
+    pinned = get_pinned_native_weight(quantizer, local)
+    assert type(pinned) is type(native)
+    assert pinned.metadata["shape"] == tuple(expected_weight.shape)
+    columns_per_byte = 2 if format_name == "nvfp4" else 1
+    physical_codes = original_codes.reshape(16, 256 // columns_per_byte)
+    code_width = width // columns_per_byte if dim == 1 else width
+    expected_codes = physical_codes.narrow(dim, rank * code_width, code_width)
+    assert torch.equal(quantizer._native_weight_codes.flatten(), expected_codes.flatten())
+    torch.testing.assert_close(quantizer(local), expected_weight, rtol=0, atol=0)
+
+    inputs = torch.randn(3, expected_weight.shape[1], requires_grad=True)
+    reference_inputs = inputs.detach().clone().requires_grad_()
+    projection = F.linear(inputs, quantizer(local))
+    reference_projection = F.linear(reference_inputs, expected_weight)
+    torch.testing.assert_close(projection, reference_projection, rtol=0, atol=0)
+    cotangent = torch.randn_like(projection)
+    projection.backward(cotangent)
+    reference_projection.backward(cotangent)
+    torch.testing.assert_close(inputs.grad, reference_inputs.grad, rtol=0, atol=0)
+
+    dense_inputs = torch.randn(3, 256, requires_grad=True)
+    dense_output = F.linear(dense_inputs, decoded)
+    dense_cotangent = torch.randn_like(dense_output)
+    dense_output.backward(dense_cotangent)
+    # HF colwise accepts replicated inputs; rowwise accepts the local input-column shard.
+    model_inputs = (
+        (
+            dense_inputs.detach()
+            if dim == 0
+            else dense_inputs.detach().narrow(1, rank * width, width)
+        )
+        .clone()
+        .requires_grad_()
+    )
+    actual = model(model_inputs)
+    assert not isinstance(actual, DTensor)
+    expected = (
+        dense_output.detach().narrow(1, rank * width, width) if dim == 0 else dense_output.detach()
+    )
+    output_cotangent = (
+        dense_cotangent.narrow(1, rank * width, width) if dim == 0 else dense_cotangent
+    )
+    # Only rowwise forward and colwise input backward reorder sums across ranks.
+    tolerance = {"rtol": 1e-5, "atol": 1e-6}
+    exact = {"rtol": 0, "atol": 0}
+    torch.testing.assert_close(actual, expected, **(exact if dim == 0 else tolerance))
+    actual.backward(output_cotangent)
+    expected_grad = (
+        dense_inputs.grad if dim == 0 else dense_inputs.grad.narrow(1, rank * width, width)
+    )
+    torch.testing.assert_close(
+        model_inputs.grad, expected_grad, **(tolerance if dim == 0 else exact)
+    )
+    assert layer.weight.grad is None
+    assert get_pinned_native_weight(quantizer, layer.weight.to_local()) is not None
+    assert torch.equal(quantizer._native_weight_codes.flatten(), expected_codes.flatten())
+
+
+@pytest.mark.parametrize("format_name", ["fp8", "nvfp4"])
+@pytest.mark.parametrize("style", ["colwise", "rowwise"])
+@pytest.mark.timeout(180)
+def test_native_packed_tp_preserves_codes_projection_and_input_vjp(
+    bypass_cpu_workers, format_name, style
+):
+    pytest.importorskip("transformers", minversion="5.23")
+    bypass_cpu_workers.run(_native_packed_tp_worker, format_name, style)
 
 
 @pytest.mark.timeout(60)
