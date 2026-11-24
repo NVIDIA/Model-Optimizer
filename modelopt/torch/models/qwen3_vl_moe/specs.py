@@ -31,7 +31,7 @@ register(
                 "model.layers",
                 "layers",
             ),
-            batch_packed_documents=False,
+            batch_packed_documents=True,
         ),
         model_type="qwen3_vl_moe",
         min_transformers_version="5.5",

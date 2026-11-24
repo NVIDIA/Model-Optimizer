@@ -33,7 +33,7 @@ register(
                 "model.layers",
                 "layers",
             ),
-            batch_packed_documents=False,
+            batch_packed_documents=True,
         ),
         model_type="minimax_m3_vl",
         min_transformers_version="5.13",

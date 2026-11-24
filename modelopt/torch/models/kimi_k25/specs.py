@@ -41,7 +41,7 @@ register(
                 "model.layers",
                 "layers",
             ),
-            batch_packed_documents=False,
+            batch_packed_documents=True,
         ),
         model_type="kimi_k25",
         # transformers ships Kimi-K2.5 itself from 5.13, so modeling_source stays "transformers": the
