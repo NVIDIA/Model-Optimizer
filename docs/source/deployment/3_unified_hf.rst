@@ -276,9 +276,9 @@ run: vLLM, SGLang, and TensorRT-LLM load unified HF checkpoints generically, so 
 standard ``nn.Linear`` layers with an ``hf_quant_config.json`` will often deploy without any modelopt
 change. Check the serving framework's own model support list first, then try it.
 
-The exact checkpoints behind every ✅ above, including tensor-parallel size and minimum SM
-version, are listed in
-`tests/examples/hf_ptq/test_deploy.py <https://github.com/NVIDIA/Model-Optimizer/blob/main/tests/examples/hf_ptq/test_deploy.py>`__;
+The exact checkpoints behind every ✅ above, including default tensor-parallel size, hardware
+requirements and backend settings, are listed in the per-checkpoint configurations under
+`tests/examples/hf_ptq/deploy_cases/ <https://github.com/NVIDIA/Model-Optimizer/tree/main/tests/examples/hf_ptq/deploy_cases>`__;
 most are published under the
 `NVIDIA Hugging Face organization <https://huggingface.co/nvidia>`_.
 

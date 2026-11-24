@@ -861,10 +861,13 @@ diffusion models — lives in the documentation so there is a single copy to kee
 
 **[Unified HF Checkpoint → Model Support Matrix](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html#model-support-matrix)**
 
-Each entry there is drawn from [`tests/examples/hf_ptq/test_deploy.py`](../../tests/examples/hf_ptq/test_deploy.py),
-which loads the exported checkpoint in each framework and generates from short text prompts. That
-file is also the place to look for the exact checkpoint, tensor-parallel size, and minimum SM
-version behind each entry.
+Each entry there is drawn from the per-checkpoint configurations in
+[`tests/examples/hf_ptq/deploy_cases/`](../../tests/examples/hf_ptq/deploy_cases), which list the
+checkpoint, default tensor-parallel size, hardware requirements and backend settings.
+[`test_deploy.py`](../../tests/examples/hf_ptq/test_deploy.py) consumes those configurations to load
+the checkpoint in each framework and generate from short text prompts. See the
+[test configuration guide](../../tests/examples/README.md#hugging-face-checkpoint-deployment) for
+run overrides.
 
 > *Note: those cases are marked `release` and run out-of-band — no workflow currently passes
 > `--run-release` — and each is a load-and-generate smoke check on the text path. Read the legend in

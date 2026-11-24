@@ -19,6 +19,18 @@ import pytest
 from _test_utils.examples.gpu_lock import gpu_lock
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "deploy_empty_group: no cases for the selected backend")
+
+
+def pytest_collection_modifyitems(config, items):
+    # Empty parameter placeholders are outside an explicit backend selection.
+    deselected = [item for item in items if item.get_closest_marker("deploy_empty_group")]
+    if deselected:
+        items[:] = [item for item in items if not item.get_closest_marker("deploy_empty_group")]
+        config.hook.pytest_deselected(items=deselected)
+
+
 def _hold_gpu(tmp_path_factory, *, shared: bool):
     if "PYTEST_XDIST_WORKER" not in os.environ:  # tests already run one at a time
         yield

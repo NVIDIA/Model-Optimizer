@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4#vllm
+# Image: vllm/vllm-openai:v0.32.0; GB200 TP1 recipe, awaiting GPU validation here.
+test_nemotron:
+  - model_id: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+    tensor_parallel_size: 1
+    mini_sm: 100
+    input_config:
+      prompt: Describe this image briefly.
+      image: ../../data/color-grid.png
+    backends:
+      vllm:
+        engine_kwargs:
+          trust_remote_code: true
+          enable_prefix_caching: true
+          enable_mamba_shared_prefix_checkpoint: true
+          async_scheduling: true
+          # Preserve the checkpoint's mixed FP8/NVFP4 configuration.
+          kernel_config:
+            linear_backend_per_quant:
+              fp8_w8a8: torch
+          compilation_config:
+            pass_config:
+              fuse_attn_quant: true
+            use_inductor_graph_partition: true
+            cudagraph_mode: FULL_AND_PIECEWISE
+          mamba_backend: flashinfer
+          mamba_ssm_cache_dtype: float16
+          enable_mamba_cache_stochastic_rounding: true
+          mamba_cache_philox_rounds: 5
+          mamba_cache_mode: align
+          prefix_match_unit: 16
+          limit_mm_per_prompt:
+            image: 1
+            video: 0
+          # Context, batch and output limits bound this functional workload.
+          max_model_len: 8192
+          max_num_batched_tokens: 8192
+          max_num_seqs: 1
+        sampling_kwargs:
+          temperature: 0
+          max_tokens: 128
+        chat_kwargs:
+          chat_template_kwargs:
+            enable_thinking: false
+      sglang:
+        # Model-card SGLang recipe: lmsysorg/sglang:nemotron3-5-super.
+        engine_kwargs:
+          trust_remote_code: true
+          kv_cache_dtype: fp8_e4m3
+          attention_backend: trtllm_mha
+          mamba_backend: flashinfer
+          # This SGLang image requires FP16 state for stochastic rounding.
+          mamba_ssm_dtype: float16
+          enable_mamba_cache_stochastic_rounding: true
+          mamba_cache_philox_rounds: 5
+          mamba_radix_cache_strategy: extra_buffer
+          context_length: 8192
+          max_running_requests: 1
+        sampling_kwargs:
+          temperature: 0
+          max_new_tokens: 128
+        chat_kwargs:
+          chat_template_kwargs:
+            enable_thinking: false
+      trtllm:
+        # https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4#tensorrt-llm
+        # nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3; data center Blackwell recipe.
+        sm_versions: [100, 103]
+        engine_kwargs:
+          trust_remote_code: true
+          moe_expert_parallel_size: 1
+          enable_chunked_prefill: true
+          disable_overlap_scheduler: false
+          max_batch_size: 1
+          max_num_tokens: 8192
+          max_seq_len: 8192
+          attn_backend: TRTLLM
+          moe_config:
+            backend: TRTLLM
+          kv_cache_config:
+            dtype: fp8
+            tokens_per_block: 32
+            mamba_ssm_cache_dtype: float16
+            mamba_ssm_stochastic_rounding: false
+            free_gpu_memory_fraction: 0.85
+            enable_block_reuse: true
+            mamba_state_config:
+              enable_branch_snapshot: true
+          cuda_graph_config:
+            enable_padding: true
+            batch_sizes: [1]
+        sampling_kwargs:
+          temperature: 0
+          max_tokens: 128
+        chat_kwargs:
+          chat_template_kwargs:
+            enable_thinking: false

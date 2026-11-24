@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+test_qwen:
+  - model_id: nvidia/Qwen3-235B-A22B-Thinking-2507-NVFP4
+    tensor_parallel_size: 8
+    mini_sm: 100
+    backends:
+      trtllm:
+        engine_kwargs:
+          backend: pytorch
+          kv_cache_config:
+            enable_block_reuse: true
+            free_gpu_memory_fraction: 0.8
+            mamba_ssm_cache_dtype: float32
+          enable_attention_dp: false
+          attn_backend: TRTLLM
+          trust_remote_code: true
+          max_batch_size: 8
+        sampling_kwargs:
+          max_tokens: 32
+      vllm:
+        engine_kwargs:
+          quantization: modelopt_fp4
+          trust_remote_code: true
+          max_model_len: 4096
+          kv_cache_dtype: auto
+        sampling_kwargs:
+          temperature: 0.8
+          top_p: 0.9
+      sglang:
+        engine_kwargs:
+          quantization: modelopt_fp4
+          trust_remote_code: true
+          context_length: 4096

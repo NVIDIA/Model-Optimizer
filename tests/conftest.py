@@ -54,6 +54,12 @@ def pytest_addoption(parser):
         default=False,
         help="Run release tests",
     )
+    deploy = parser.getgroup("HF deployment")
+    deploy.addoption(
+        "--deploy-config", help="YAML file containing deployment run/backend overrides"
+    )
+    deploy.addoption("--deploy-tp", type=int, help="Override deployment tensor parallel size")
+    deploy.addoption("--deploy-backend", choices=("vllm", "sglang", "trtllm"))
 
 
 # Default per-test `call` wall-clock cap (seconds) by top-level tests/ subdirectory

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+test_deepseek:
+  - model_id: nvidia/DeepSeek-V4-Pro-NVFP4
+    tensor_parallel_size: 8
+    mini_sm: 100
+    backends:
+      vllm:
+        engine_kwargs:
+          quantization: modelopt_fp4
+          trust_remote_code: true
+          max_model_len: 4096
+          kv_cache_dtype: fp8
+        sampling_kwargs:
+          temperature: 0.8
+          top_p: 0.9
+      sglang:
+        engine_kwargs:
+          quantization: modelopt_fp4
+          trust_remote_code: true
+          context_length: 4096

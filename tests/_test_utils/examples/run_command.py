@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,6 +19,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 import warnings
 from pathlib import Path
 
@@ -43,7 +44,47 @@ _ORPHAN_PIPE_TIMEOUT_S = 30
 _KILLED_PIPE_TIMEOUT_S = 5
 
 
-def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str]:
+class ProcessGroupCleanupError(RuntimeError):
+    """A deployment's workers could not be confirmed stopped before the next case."""
+
+
+def _wait_for_process_group_exit(pgid: int) -> None:
+    """Wait for this unreaped child's Linux process group to have no live members."""
+    deadline = time.monotonic() + _KILLED_PIPE_TIMEOUT_S
+    while True:
+        live = []
+        try:
+            for entry in Path("/proc").iterdir():
+                if not entry.name.isdecimal():
+                    continue
+                try:
+                    if os.getpgid(int(entry.name)) != pgid:
+                        continue
+                    fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                if int(fields[2]) == pgid and fields[0] not in {"Z", "X"}:
+                    live.append(int(entry.name))
+        except OSError as exc:
+            raise ProcessGroupCleanupError(
+                f"Cannot inspect deployment process group {pgid}"
+            ) from exc
+        if not live:
+            return
+        if time.monotonic() >= deadline:
+            raise ProcessGroupCleanupError(
+                f"Deployment process group {pgid} still has live workers after SIGKILL: {live}"
+            )
+        time.sleep(0.02)
+
+
+def _run_capturing(
+    cmd_parts: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    *,
+    cleanup_process_group: bool = False,
+) -> tuple[int, str]:
     """Run a command, streaming and capturing combined stdout/stderr to catch transient errors.
 
     Drained by a reader thread rather than ``subprocess.run``, which waits for EOF: a descendant
@@ -85,25 +126,37 @@ def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tupl
             os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
         else:  # no process groups, so nothing to protect the pid for
             process.wait()
+        reader.join(_ORPHAN_PIPE_TIMEOUT_S)
+
+        if reader.is_alive():
+            warnings.warn(
+                f"{cmd_parts[0]} left descendants holding its output pipe open; killing the process "
+                "group. Output may be truncated."
+            )
+            _kill_process_group()
+            reader.join(_KILLED_PIPE_TIMEOUT_S)
+
+        if cleanup_process_group:
+            # A completed deployment must not retain workers on the next case's GPUs.
+            _kill_process_group()
+            _wait_for_process_group_exit(pgid)
+        returncode = process.wait()
+    except ProcessGroupCleanupError:
+        with contextlib.suppress(Exception):
+            process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)
+        raise
     except BaseException:
         # Interrupted (most likely pytest-timeout) while the command runs: its own process group is
         # not swept up with pytest's, so take the descendants down rather than leak them.
-        _kill_process_group()
-        with contextlib.suppress(Exception):
-            process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)  # reap: WNOWAIT left it waitable
+        try:
+            if process.returncode is None:
+                _kill_process_group()
+                if cleanup_process_group:
+                    _wait_for_process_group_exit(pgid)
+        finally:
+            with contextlib.suppress(Exception):
+                process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)  # reap: WNOWAIT left it waitable
         raise
-    reader.join(_ORPHAN_PIPE_TIMEOUT_S)
-
-    if reader.is_alive():
-        warnings.warn(
-            f"{cmd_parts[0]} left descendants holding its output pipe open; killing the process "
-            "group. Output may be truncated."
-        )
-        _kill_process_group()
-        reader.join(_KILLED_PIPE_TIMEOUT_S)
-
-    returncode = process.wait()
-
     with contextlib.suppress(Exception):
         process.stdout.close()  # type: ignore[union-attr]
     return returncode, "".join(chunks)
