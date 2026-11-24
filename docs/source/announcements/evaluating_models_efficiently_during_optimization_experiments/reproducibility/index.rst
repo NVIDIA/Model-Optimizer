@@ -31,7 +31,8 @@ Statistical methods
 
 - **SciCode accuracy:** keep all scored subtasks and repetitions from each parent problem together.
   Resample paired parent problems for the 95% interval and swap model labels for whole parent
-  problems for the one-sided permutation p-values. Weight the estimate by subtask.
+  problems for the one-sided permutation p-values. Give each subtask equal weight in the mean
+  accuracy difference.
 
 - **Verbosity:** across paired question differences, use a two-sided t-based 95% confidence
   interval and one-sided paired t-tests for the stated direction. Degrees of freedom equal the
