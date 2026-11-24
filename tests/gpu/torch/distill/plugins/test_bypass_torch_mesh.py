@@ -26,11 +26,20 @@ from _test_utils.torch.distributed.utils import bounded_collectives
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    SequentialQuantizer,
+    StaticBlockScaleQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.qtensor import FP8QTensor
 from modelopt.torch.quantization.utils.native_weight import pin_native_weight
+from modelopt.torch.quantization.utils.shared_input import (
+    SharedWeightGlobalAmaxState,
+    iter_shared_quant_states,
+)
 
 
 def _tiny_model(num_hidden_layers=1, *, experts=False):
@@ -644,28 +653,16 @@ def _input_alias_case(rank, size, route, sharing, mesh):
 
 def _torch_mesh_alias_worker(rank, size, route, sharing):
     # Native HF is optional; exercise its actual mesh manager and placement implementation.
-    from transformers.distributed.utils import TransformersDeviceMesh
-
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
     from modelopt.torch.distill.plugins.transformers.parallel import validate_hf_tensor_parallelism
 
     assert size == 2
     planned_module = sharing in ("shared_module", "shared_module_peer", "shared_module_override")
-    group = _mesh_group()
-    mesh = DeviceMesh.from_group(group, "cpu", mesh_dim_names=("tp",))
-    if route in ("native", "native_adopt"):
-        mesh = TransformersDeviceMesh(
-            DeviceMesh(
-                "cpu",
-                torch.arange(size).reshape(1, 1, 1, size),
-                mesh_dim_names=("pp", "dp_replicate", "fsdp", "tp"),
-            ),
-            DeviceMesh(
-                "cpu",
-                torch.arange(size).reshape(1, 1, size, 1),
-                mesh_dim_names=("pp", "dp_replicate", "efsdp", "ep"),
-            ),
-        )
+    mesh = (
+        _native_mesh()
+        if route in ("native", "native_adopt")
+        else DeviceMesh.from_group(_mesh_group(), "cpu", mesh_dim_names=("tp",))
+    )
     if sharing.startswith("input_"):
         return _input_alias_case(rank, size, route, sharing, mesh)
     model = mtq.quantize(
@@ -867,3 +864,147 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
 def test_shared_quantizer_fields_preflight(bypass_cpu_workers, route, sharing):
     pytest.importorskip("transformers", minversion="5.23")
     bypass_cpu_workers.run(_torch_mesh_alias_worker, route, sharing)
+
+
+def _tied_static_weight_worker(rank, size, route, changed):
+    from modelopt.torch.distill._bypass_parallel import prepare_quantizer_partitions
+    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+
+    assert size == 2
+    mesh = (
+        DeviceMesh.from_group(_mesh_group(), "cpu", mesh_dim_names=("tp",))
+        if route == "raw"
+        else _native_mesh()
+    )
+    tokens = torch.tensor([[1, 3, 5, 7]])
+    model = mtq.quantize(
+        _tiny_model(),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                *[
+                    {
+                        "quantizer_name": f"*{name}.weight_quantizer",
+                        "cfg": {
+                            "num_bits": (2, 1),
+                            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                            "enable": True,
+                        },
+                    }
+                    for name in ("gate_proj", "up_proj")
+                ],
+            ],
+            "algorithm": "max",
+        },
+        lambda m: m(tokens),
+    )
+    mlp = model.model.layers[0].mlp
+    first, second = mlp.gate_proj.weight_quantizer, mlp.up_proj.weight_quantizer
+    (owner,) = iter_shared_quant_states(model, SharedWeightGlobalAmaxState)
+    assert all(isinstance(q, StaticBlockScaleQuantizer) and q.is_enabled for q in (first, second))
+    assert first._global_amax is second._global_amax is owner.global_amax
+    assert all("_global_amax" in q._shared_quant_tied_attrs for q in (first, second))
+    scalar = owner.global_amax
+    if changed and rank == 1:
+        # Unsupported owner metadata must refuse before any physical placement.
+        owner.global_amax = owner.global_amax.expand(64, 1).clone()
+        owner.tie_member_quantizers()
+    canonical = owner.global_amax
+    snapshot = _snapshot(model)
+    adapter = TransformersBypassAdapter(mesh)
+    with bounded_collectives(10):
+        if changed:
+            with pytest.raises(ValueError, match="tied"):
+                adapter.parallelize(model)
+            _assert_unchanged(model, snapshot)
+        else:
+            adapter.parallelize(model)
+            assert isinstance(mlp.gate_proj.weight, DTensor)
+            assert first._amax.numel() == second._amax.numel() == 64
+            prepare_quantizer_partitions(model, adapter.context)
+    assert first._global_amax is second._global_amax is owner.global_amax is canonical
+    if changed:
+        owner.global_amax = scalar
+        owner.tie_member_quantizers()
+        with bounded_collectives(10):
+            adapter.parallelize(model)
+        if rank == 1:
+            owner.global_amax = scalar.expand(64, 1).clone()
+            owner.tie_member_quantizers()
+        placed = _snapshot(model)
+        with bounded_collectives(10), pytest.raises(ValueError, match="tied"):
+            prepare_quantizer_partitions(model, adapter.context)
+        _assert_unchanged(model, placed)
+
+
+@pytest.mark.parametrize("route", ["raw", "native"])
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.timeout(180)
+def test_tied_static_weight_placement(bypass_cpu_workers, route, changed):
+    pytest.importorskip("transformers", minversion="5.23")
+    bypass_cpu_workers.run(_tied_static_weight_worker, route, changed)
+
+
+def _activation_state_resume_worker(rank, size):
+    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+
+    assert size == 2
+    mesh = _native_mesh()
+    tokens = torch.tensor([[1, 3, 5, 7]])
+    model = mtq.quantize(
+        _tiny_model(),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*o_proj.input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": -1, "enable": True},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda m: m(tokens),
+    )
+    quantizer = model.model.layers[0].self_attn.o_proj.input_quantizer
+    quantizer.pre_quant_scale = torch.linspace(0.75, 1.25, 32)
+    with bounded_collectives(10), torch.no_grad():
+        TransformersBypassAdapter(mesh).parallelize(model)
+        expected = model(tokens).logits
+    fields = {name: getattr(quantizer, name).clone() for name in ("_amax", "_pre_quant_scale")}
+    assert fields["_amax"].shape == (1, 1, 16)
+    assert quantizer._native_tp_activation_layout == (32, rank, 2, 1)
+    shared = [mto.modelopt_state(model) if rank == 0 else None]
+    dist.broadcast_object_list(shared, src=0)
+    resumed = mto.restore_from_modelopt_state(_tiny_model(), shared[0])
+    restored = resumed.model.layers[0].self_attn.o_proj.input_quantizer
+    # Rank-local tensor checkpoints accompany one shared modelopt property blob.
+    local_state = model.state_dict()
+    with bounded_collectives(10), torch.no_grad():
+        adapter = TransformersBypassAdapter(mesh)
+        adapter.parallelize(
+            resumed, initialize=lambda m: m.load_state_dict(local_state, assign=True)
+        )
+        del resumed._modelopt_bypass_placement
+        adapter.adopt(resumed)
+        torch.testing.assert_close(resumed(tokens).logits, expected, rtol=0, atol=0)
+        placed = _snapshot(resumed)
+        adapter.parallelize(resumed)
+        _assert_unchanged(resumed, placed)
+    for name, value in fields.items():
+        torch.testing.assert_close(getattr(restored, name), value, rtol=0, atol=0)
+    assert restored._native_tp_activation_layout == (32, rank, 2, 1)
+    assert set(restored._native_tp_activation_fields) == set(fields)
+    mode = next(
+        mode
+        for _, mode in shared[0]["modelopt_state_dict"]
+        if "quantizer_state" in mode["metadata"]
+    )
+    state = mode["metadata"]["quantizer_state"]["model.layers.0.self_attn.o_proj.input_quantizer"]
+    assert "_native_tp_activation_layout" not in state
+    assert "_native_tp_activation_fields" not in state
+
+
+@pytest.mark.timeout(180)
+def test_activation_runtime_state_resume(bypass_cpu_workers):
+    pytest.importorskip("transformers", minversion="5.23")
+    bypass_cpu_workers.run(_activation_state_resume_worker)

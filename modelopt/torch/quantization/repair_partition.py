@@ -273,6 +273,9 @@ def native_weight_partition(quantizer, view, source=None):
             "Native TP fields require calibrated thresholds, shard-local dynamic reductions "
             "or pinned native scales."
         )
+    for name in quantizer.__dict__.get("_shared_quant_tied_attrs", ()):
+        if name in fields and fields[name] is not getattr(quantizer, name, None):
+            raise ValueError(f"Native TP cannot partition tied shared quantizer field {name}.")
     layouts = {"global_delta": True, "local_delta": True} if quantizer.backend == "ggml" else {}
     return fields, layouts, bool(blocks) and quantizer.is_static_block_quant
 
