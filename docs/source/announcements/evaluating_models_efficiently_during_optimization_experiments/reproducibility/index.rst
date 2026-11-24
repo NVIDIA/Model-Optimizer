@@ -91,8 +91,8 @@ including reasoning tokens.
   Median lengths describe individual responses. The verbosity tests compare mean lengths.
 - **Non-inferiority:** test whether Candidate's accuracy loss is smaller than an acceptable margin.
   For differences in pp, the t statistic is ``(mean_difference + margin) / standard_error``, using
-  the upper tail and the same degrees of freedom. The guide examines margins of 2, 1, 0.5, and 0.1
-  pp.
+  the upper tail and the same degrees of freedom. The analysis considered margins of 2, 1, 0.5,
+  and 0.1 pp. The article illustrates the 1 pp and 0.5 pp margins.
 - **Cap-hit and missing-final-answer rates:** calculate two-sided 95% paired-bootstrap
   confidence intervals by sampling questions with replacement, keeping each question's repetitions
   and both models together. MMLU-Pro and SciCode use 100,000 resamples; AA uses 50,000, preserving 100
