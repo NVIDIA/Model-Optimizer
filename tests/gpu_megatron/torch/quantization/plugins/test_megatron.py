@@ -2886,3 +2886,49 @@ def test_te_linear_ranges_sync_within_pipeline_stage(
 ):
     """Megatron-Core TELinear syncs ranges over its TP / DP replicas, not across pipeline stages."""
     dist_workers_size_2.run(partial(_test_te_linear_range_sync_helper, tensor_model_parallel_size))
+
+
+@pytest.mark.skipif(not HAS_TE, reason="Transformer Engine attention is required")
+def test_kv_quant_keeps_qkv_layout_consistent(distributed_setup_size_1):
+    """Quantizing only K/V must not change what Transformer Engine attention computes.
+
+    Megatron passes Q, K and V as strided views of one fused QKV buffer. KV-cache
+    quantization replaces only K and V with new contiguous tensors, and TE attention
+    misreads that mix of layouts: wrong outputs, no error.
+    """
+    from megatron.core.transformer.enums import AttnMaskType
+
+    initialize_for_megatron(seed=SEED)
+    heads, groups, head_dim = 4, 1, 64
+    model = get_mcore_gpt_model(
+        num_layers=1,
+        hidden_size=heads * head_dim,
+        num_attention_heads=heads,
+        num_query_groups=groups,
+        transformer_impl="modelopt",
+    ).cuda()
+    mtq.quantize(model, copy.deepcopy(KV_ONLY_FP8_CFG), get_forward(model))
+    model.eval()  # no attention dropout, so the two calls below are comparable
+    core = model.decoder.layers[0].self_attention.core_attention
+    assert core.k_bmm_quantizer.is_enabled and not core.q_bmm_quantizer.is_enabled
+
+    seq, batch = 32, 2
+    fused = torch.randn(
+        seq, batch, (heads + 2 * groups) * head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    q_end, k_end = heads * head_dim, (heads + groups) * head_dim
+    query = fused[..., :q_end].view(seq, batch, heads, head_dim)
+    key = fused[..., q_end:k_end].view(seq, batch, groups, head_dim)
+    value = fused[..., k_end:].view(seq, batch, groups, head_dim)
+    assert not key.is_contiguous()
+
+    with torch.no_grad():
+        from_views = core(query, key, value, None, attn_mask_type=AttnMaskType.causal)
+        from_copies = core(
+            query.contiguous(),
+            key.contiguous(),
+            value.contiguous(),
+            None,
+            attn_mask_type=AttnMaskType.causal,
+        )
+    torch.testing.assert_close(from_views, from_copies, rtol=0, atol=0)
