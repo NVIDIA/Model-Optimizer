@@ -49,6 +49,8 @@ def bypass(
             Otherwise, ``attention_mask`` must be 2D boolean/integer. Floating or
             4D attention masks require an explicit validity mask. Weighted masks
             are unsupported; other metadata does not define the loss mask.
+            The HF adapter additionally derives default validity from ``_packed_seq_ids``:
+            zero denotes padding and positive IDs identify documents. Explicit loss masks win.
         config: A :class:`BypassConfig`, a dict, or None for the established defaults.
         validation_dataloader: Optional held-out batches for finalized-student valid-token MSE.
             Diagnostic failures propagate after committing training updates to the student.
