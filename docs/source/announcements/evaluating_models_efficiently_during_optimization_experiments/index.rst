@@ -322,8 +322,7 @@ Collect as much evaluation data as you need
 
 You may not need the full evaluation budget to detect an improvement or rule out an unacceptable
 regression. The data needed depends on the model pair, metric, acceptable regression margin, and
-statistical target. We illustrate this by estimating how many responses are needed to detect fewer cap hits on
-SciCode and to rule out a 1 pp accuracy loss on MMLU-Pro.
+statistical target.
 
 **How many responses show fewer cap hits on SciCode?**
 
@@ -339,20 +338,8 @@ and plan how many subtasks and repetitions to run.
    :alt: SciCode cap-hit rate evidence excluding the 44 recovery-training subtasks: blue points increase coverage from ten to 294 subtasks with one repetition; green points add repetitions on all 294 subtasks, reaching 5,880 responses per model. Subsets of ten to 150 subtasks observe no cap hits and have no informative bootstrap interval. The lower panel shows permutation p-values.
    :width: 640px
 
-**How many responses rule out a 1 pp accuracy loss on MMLU-Pro?**
-
-We first compare subsets of 50–1,000 questions with one repetition, keeping approximately the same
-subject proportions, then add repetitions on all 1,000 questions. To rule out a 1 pp accuracy loss,
-the non-inferiority test first reached p < 0.05 with one repetition on 750 questions. It first reached
-p < 0.01 at 3,000 responses and p < 0.001 at 12,000 per model among the tested sizes.
-
-The amount of data you need depends on the checkpoints you compare, the claim you want to test,
-and your p-value threshold. A large improvement may be clear with few responses. Use a small
-pilot to plan how many questions and repetitions to run.
-
-.. image:: images/mmlu-accuracy-data-volume.svg
-   :alt: MMLU-Pro paired accuracy differences with t-based 95% confidence intervals. Blue points increase question coverage from 50 to 1,000 with one evaluation each; green points add repetitions on all 1,000 questions up to 20,000 responses per model. The lower panel shows one-sided non-inferiority p-values for a loss below 1 pp, with a dashed line at p = 0.05.
-   :width: 640px
+See the :ref:`data-volume ablations <evaluation-data-volume-ablations>` in the Reproducibility Notes
+for the SciCode analysis and the MMLU-Pro accuracy example.
 
 Test known weaknesses on a focused subset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
