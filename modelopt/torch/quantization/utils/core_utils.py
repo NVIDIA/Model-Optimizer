@@ -652,6 +652,10 @@ def fsdp2_weight_access_and_writeback_context(
     parameters FSDP2 manages are gathered: a DTensor it does not own (an
     expert-parallel weight ``fully_shard`` was told to ignore, say) stays sharded.
 
+    Read-only composite access keeps the enclosing group and every distinct descendant
+    FSDP group materialized together until the body exits. Its peak includes all those
+    full weights; readers needing one-owner residency must open separate owner scopes.
+
     If TP is implemented with DTensor, the weight will be a local tensor of the
     TP DTensor under this context. Failed bodies discard local updates; all ranks still
     redistribute in owner order so peer failure handling can use the process group.

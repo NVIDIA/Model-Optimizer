@@ -76,7 +76,9 @@ def bypass(
             contract cannot be inferred from arbitrary Python output values. Exact native
             HF output declarations are honored. Generic directly distributed owners must
             keep DTensor outputs (use_local_output=False), including local-full owners
-            whose erased output declaration is unavailable.
+            whose erased output declaration is unavailable. Only the selected boundary
+            module itself is checked; distributed descendants remain subject to the
+            composite producer contract above.
 
     For HF PTQ, use
     :meth:`TransformersBypassAdapter.weight_patterns

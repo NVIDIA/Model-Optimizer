@@ -209,6 +209,7 @@ class DistributedBypassRuntime:
         )
         if placement is not None and not isinstance(placement, Replicate) and not partitioned:
             error = f"Unsupported TP boundary target placement {placement}; expected Replicate or last-dimension Shard"
+        # TP=1 has no ownership multiplicity; placement checks degenerate with its reductions.
         if _size(self.context.tensor_mesh) > 1:
             # Streaming replay/backward can communicate: healthy peers must join this
             # flag before any rank rejects its placement or localizes its target/mask.
