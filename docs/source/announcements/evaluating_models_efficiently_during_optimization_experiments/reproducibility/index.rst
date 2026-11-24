@@ -69,11 +69,9 @@ plots as CSV summaries:
   CSV file: :download:`budget-allocation-differences.csv <budget-allocation-differences.csv>`.
 - **SciCode: cap-hit-rate differences at a fixed response budget** — data used in the same ablation.
   CSV file: :download:`budget-allocation-cap-hit-differences.csv <budget-allocation-cap-hit-differences.csv>`.
-- **SciCode: cap-hit rates** — data used in the guide section
-  :ref:`Collect as much evaluation data as you need <evaluation-collect-data>`.
+- **SciCode: cap-hit rates** — data used in the :ref:`data-volume ablations <evaluation-data-volume-ablations>`.
   CSV file: :download:`scicode-cap-data-volume.csv <scicode-cap-data-volume.csv>`.
-- **MMLU-Pro: accuracy regression** — data used in the guide section
-  :ref:`Collect as much evaluation data as you need <evaluation-collect-data>`.
+- **MMLU-Pro: accuracy regression** — data used in the :ref:`data-volume ablations <evaluation-data-volume-ablations>`.
   CSV file: :download:`mmlu-accuracy-data-volume.csv <mmlu-accuracy-data-volume.csv>`.
 
 .. _evaluation-statistical-methods:
@@ -220,6 +218,40 @@ cap-hit-rate reduction relative to Baseline, with lower observed SD.
 .. figure:: ../images/budget-allocation-cap-hit-differences.svg
    :alt: Mean Candidate minus Baseline cap-hit-rate differences on SciCode with plus or minus one observed standard deviation. More subtask coverage gives lower observed SD for the same response budget.
    :width: 720px
+
+.. _evaluation-data-volume-ablations:
+
+Collect as much evaluation data as you need
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**How many responses show fewer cap hits on SciCode?**
+
+After completing all 20 repetitions, we analyzed subsets of the saved responses: first 10–294
+subtasks with one repetition, then additional repetitions on all 294 subtasks. In this retrospective
+comparison, the p-value first fell below 0.05 at 588 responses per model and below 0.001 at 882.
+
+A large drop in cap-hit rate from Baseline to Candidate may be detectable with only a few
+repetitions. Use a small pilot to estimate the size of the difference for your checkpoints
+and plan how many subtasks and repetitions to run.
+
+.. image:: ../images/scicode-cap-data-volume.svg
+   :alt: SciCode cap-hit rate evidence excluding the 44 recovery-training subtasks: blue points increase coverage from ten to 294 subtasks with one repetition; green points add repetitions on all 294 subtasks, reaching 5,880 responses per model. Subsets of ten to 150 subtasks observe no cap hits and have no informative bootstrap interval. The lower panel shows permutation p-values.
+   :width: 640px
+
+**How many responses rule out a 1 pp accuracy loss on MMLU-Pro?**
+
+We first compare subsets of 50–1,000 questions with one repetition, keeping approximately the same
+subject proportions, then add repetitions on all 1,000 questions. To rule out a 1 pp accuracy loss,
+the non-inferiority test first reached p < 0.05 with one repetition on 750 questions. It first reached
+p < 0.01 at 3,000 responses and p < 0.001 at 12,000 per model among the tested sizes.
+
+The amount of data you need depends on the checkpoints you compare, the claim you want to test,
+and your p-value threshold. A large improvement may be clear with few responses. Use a small
+pilot to plan how many questions and repetitions to run.
+
+.. image:: ../images/mmlu-accuracy-data-volume.svg
+   :alt: MMLU-Pro paired accuracy differences with t-based 95% confidence intervals. Blue points increase question coverage from 50 to 1,000 with one evaluation each; green points add repetitions on all 1,000 questions up to 20,000 responses per model. The lower panel shows one-sided non-inferiority p-values for a loss below 1 pp, with a dashed line at p = 0.05.
+   :width: 640px
 
 Reproducibility limits
 ----------------------
