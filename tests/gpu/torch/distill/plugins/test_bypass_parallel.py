@@ -23,21 +23,21 @@ from torch.nn import functional as F
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
-@pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
+@pytest.mark.parametrize("name", [*sorted(IQ_FORMAT_REGISTRY), "q8_0"])
 @pytest.mark.parametrize("dim", [0, 1])
-def test_native_iq_partition_preserves_pinned_projection(name, dim):
+def test_native_partition_preserves_pinned_projection(name, dim):
     from modelopt.torch.quantization.repair_partition import (
         NativeWeightPartition,
         native_weight_partition,
     )
 
     torch.manual_seed(59)
-    fmt = IQ_FORMAT_REGISTRY[name]
+    fmt = GGML_FORMAT_REGISTRY[name]
     weight = torch.randn(4, 512)
     importance = 1 + torch.rand(512) if fmt.weighted else None
     packed, shape = fmt.quantize(
