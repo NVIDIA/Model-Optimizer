@@ -470,3 +470,34 @@ def test_convert_to_f16_falls_back_on_unresolvable_op(weakly_typed_topk_model):
 
     onnx.checker.check_model(converted_model)
     assert any(n.op_type == "TopK" for n in converted_model.graph.node)
+
+
+@pytest.mark.parametrize("use_convert_to_f16", [False, True])
+def test_keep_io_types_with_fp64_io(tmp_path, use_convert_to_f16):
+    """FP64 I/O is converted to FP32 by the sanitizer; keep_io_types=True must not reject that."""
+    x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.DOUBLE, [2, 4])
+    y = onnx.helper.make_tensor_value_info("Y", onnx.TensorProto.DOUBLE, [2, 4])
+    weight = onnx.numpy_helper.from_array(np.eye(4, dtype=np.float32), name="W")
+    nodes = [
+        onnx.helper.make_node("Cast", ["X"], ["x_fp32"], to=onnx.TensorProto.FLOAT, name="cast_in"),
+        onnx.helper.make_node("MatMul", ["x_fp32", "W"], ["mm"], name="matmul"),
+        onnx.helper.make_node("Cast", ["mm"], ["Y"], to=onnx.TensorProto.DOUBLE, name="cast_out"),
+    ]
+    graph = onnx.helper.make_graph(nodes, "fp64_io", [x], [y], [weight])
+    model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 17)])
+    model.ir_version = 10
+
+    if use_convert_to_f16:
+        converted = convert_to_f16(model, keep_io_types=True)
+    else:
+        model_path = tmp_path / "fp64_io.onnx"
+        onnx.save(model, model_path)
+        converted = convert_to_mixed_precision(str(model_path), keep_io_types=True)
+
+    onnx.checker.check_model(converted)
+    for value in [*converted.graph.input, *converted.graph.output]:
+        assert value.type.tensor_type.elem_type == onnx.TensorProto.FLOAT
+
+    x_data = np.arange(8, dtype=np.float32).reshape(2, 4)
+    sess = ort.InferenceSession(converted.SerializeToString(), providers=["CPUExecutionProvider"])
+    np.testing.assert_allclose(sess.run(None, {"X": x_data})[0], x_data, rtol=1e-3)
