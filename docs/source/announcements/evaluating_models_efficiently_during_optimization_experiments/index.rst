@@ -98,7 +98,8 @@ Check for regressions
 
 One-sided tests for improvement do not tell us about possible regression.
 Choose an acceptable accuracy-loss margin for your use case before inspecting results, then
-use a non-inferiority test to assess whether the loss is smaller.
+use a non-inferiority test to assess whether the loss is smaller. See the
+:ref:`non-inferiority calculation <evaluation-statistical-methods>` in the Reproducibility Notes.
 
 The table illustrates two possible margins on SciCode.
 “Yes” means the stated accuracy loss is ruled out (p < 0.05).
@@ -136,12 +137,12 @@ loops, missing answers, and whether it abstains when appropriate.
 
 The doomed reasoning loops example below shows how to report rare failures using cap-hit rates.
 Rare failures can make t-based approximations unreliable, so we use paired-bootstrap 95% confidence
-intervals and one-sided paired permutation tests for the rates below. For SciCode cap hits,
-we keep all subtasks and repetitions from each parent problem together, as in the accuracy
-analysis.
+intervals and one-sided paired permutation tests for the rates below. As in the accuracy
+analysis, both methods account for correlations among subtasks from the same SciCode parent
+problem.
 The confidence intervals and p-values come from different procedures and need not lead to the
-same conclusion. See :ref:`Statistical methods <evaluation-statistical-methods>` in the
-Reproducibility Notes for details.
+same conclusion. See the :ref:`cap-hit rate calculation <evaluation-statistical-methods>` in the
+Reproducibility Notes.
 
 The candidate has fewer cap hits on SciCode (p < 0.001).
 “Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05).
@@ -174,7 +175,8 @@ answer requires.
 
 For mean length, average each model's completion lengths across repetitions within each question,
 then subtract Baseline's average from Candidate's. We use question-level paired t-tests and t-based
-95% confidence intervals.
+95% confidence intervals. See the :ref:`verbosity calculation <evaluation-statistical-methods>`
+in the Reproducibility Notes.
 “Yes” means evidence of shorter Candidate completions on average (p < 0.05).
 
 +----------------+-------------+-------------+-------------+-------------+-------------+-------------+

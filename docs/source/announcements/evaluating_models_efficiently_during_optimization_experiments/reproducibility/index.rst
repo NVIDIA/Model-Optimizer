@@ -41,11 +41,6 @@ Statistical methods
   When question-level differences are independent and a t approximation is suitable, a paired
   t-based confidence interval and a one-sided paired t-test are alternatives.
 
-- **Verbosity:** compare mean completion lengths using the paired difference for each question.
-  Calculate a two-sided t-based 95% confidence interval and run one-sided paired t-tests for the
-  stated direction. Degrees of freedom equal the number of questions minus one.
-  Compute each model's median completion length across all its responses. The verbosity tests
-  compare mean lengths.
 - **Non-inferiority:** test whether Candidate's accuracy loss is smaller than an acceptable margin.
   For differences in pp, the t statistic is ``(mean_difference + margin) / standard_error``, using
   the upper tail of the t distribution. For SciCode, estimate the standard error across parent
@@ -61,6 +56,12 @@ Statistical methods
   Even when failures are rare, swapping the models' results for each question or parent problem
   shows how unusual the observed difference would be if the models behaved the same.
   Computing p-values with the bootstrap would be more complicated.
+
+- **Verbosity:** compare mean completion lengths using the paired difference for each question.
+  Calculate a two-sided t-based 95% confidence interval and run one-sided paired t-tests for the
+  stated direction. Degrees of freedom equal the number of questions minus one.
+  Compute each model's median completion length across all its responses. The verbosity tests
+  compare mean lengths.
 
 The SciCode accuracy and cap-hit tables use 50,000 bootstrap resamples and 50,000 random swap
 patterns with a plus-one correction (seed ``2026111800``). The data-volume example uses the same
