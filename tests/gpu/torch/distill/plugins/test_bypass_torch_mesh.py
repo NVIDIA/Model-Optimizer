@@ -405,6 +405,7 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
     from modelopt.torch.distill.plugins.transformers.parallel import validate_hf_tensor_parallelism
 
     assert size == 2
+    planned_module = sharing in ("shared_module", "shared_module_peer", "shared_module_override")
     group = _mesh_group()
     mesh = DeviceMesh.from_group(group, "cpu", mesh_dim_names=("tp",))
     if route == "native":
@@ -435,12 +436,16 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
         second.weight = first.weight
         assert first is not second
         assert second.weight is first.weight
-    elif sharing in ("shared_module", "module_alias"):
+    elif sharing == "module_alias" or (
+        planned_module and (sharing != "shared_module_peer" or rank == 1)
+    ):
         model.model.layers[0].self_attn.o_proj = first
         second = model.model.layers[0].self_attn.o_proj
         assert second is first
         assert second.weight is first.weight
-    if sharing in ("tied_parameter", "tied_compatible", "shared_module", "module_alias"):
+    if sharing in ("tied_parameter", "tied_compatible", "module_alias") or (
+        planned_module and (sharing != "shared_module_peer" or rank == 1)
+    ):
         second_name = (
             "model.layers.1.self_attn.q_proj.weight"
             if sharing == "tied_compatible"
@@ -469,11 +474,26 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
         )
     shared = first.weight_quantizer._amax
     assert shared.shape == (32, 1)
-    if sharing != "rank_local" or rank == 0:
+    if sharing != "shared_module_peer" and (sharing != "rank_local" or rank == 0):
         second.weight_quantizer._set_buffer("_amax", shared)
+    if sharing == "shared_module_override":
+        from transformers.distributed.configuration_utils import DistributedConfig
+
+        model.config.distributed_config = DistributedConfig(
+            tp_size=2,
+            tp_plan={"model.layers.*.self_attn.o_proj": "colwise"},
+        )
+    if planned_module:
+        # The ordinary unplaced graph works; refusal must precede native parameter replacement.
+        with torch.no_grad():
+            assert model(torch.tensor([[1, 3, 5, 7]])).logits.shape == (1, 4, 32)
     snapshot = _snapshot(model)
     error = None
     adapter = TransformersBypassAdapter(mesh)
+    context_state = [
+        (name, getattr(adapter.context, name), dict(getattr(adapter.context, name)))
+        for name in ("parallel_metadata", "tp_quantizer_layouts")
+    ]
     with bounded_collectives(10):
         try:
             if route == "explicit_plan":
@@ -513,10 +533,16 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
             adapter.parallelize(model)
         _assert_unchanged(model, placed)
     else:
-        _assert_unchanged(model, snapshot)
         assert all(item is not None and item[0] == "ValueError" for item in errors), errors
         assert errors[0] == errors[1], errors
-        if sharing in ("tied_compatible", "module_alias"):
+        _assert_unchanged(model, snapshot)
+        for name, mapping, previous in context_state:
+            assert getattr(adapter.context, name) is mapping
+            assert mapping.keys() == previous.keys()
+            assert all(mapping[key] is value for key, value in previous.items())
+        if sharing in ("tied_compatible", "module_alias") or (
+            planned_module and route != "explicit_plan"
+        ):
             assert "alias" in errors[0][1], errors
             assert (
                 "model.layers.1.self_attn.q_proj.weight"
@@ -540,8 +566,11 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
             "compatible",
             "tied_parameter",
             "tied_compatible",
+            "shared_module",
+            "shared_module_peer",
         )
     ]
+    + [("native", "shared_module_override")]
     + [
         ("explicit_plan", sharing)
         for sharing in (
