@@ -1867,13 +1867,14 @@ def _restore_source_layer_types(config_data: dict, source: Any) -> None:
     """
     if not isinstance(source, dict):
         return
-    source_types = source.get("layer_types")
-    if (
-        remap_legacy_layer_types is not None
-        and isinstance(source_types, list)
-        and remap_legacy_layer_types(source_types) == config_data.get("layer_types")
-    ):
-        config_data["layer_types"] = source_types
+    for key in ("layer_types", "mtp_layer_types"):  # the lists transformers' remap rewrites
+        source_types = source.get(key)
+        if (
+            remap_legacy_layer_types is not None
+            and isinstance(source_types, list)
+            and remap_legacy_layer_types(source_types) == config_data.get(key)
+        ):
+            config_data[key] = source_types
     for key, value in config_data.items():
         if isinstance(value, dict):
             _restore_source_layer_types(value, source.get(key))

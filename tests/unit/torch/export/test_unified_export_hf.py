@@ -1152,23 +1152,34 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
     assert config.text_config.base_model_ep_plan is swapped_plan
 
 
-def test_export_config_keeps_the_source_layer_type_names(tmp_path):
+def test_export_config_keeps_the_source_layer_type_names(tmp_path, monkeypatch):
     """transformers 5.18 renames deepseek_sparse_attention to indexed_attention on load; the
     exported config keeps the spelling of the source checkpoint, which runtimes validate. A list
     the export itself changed is not touched."""
-    if unified_export_hf.remap_legacy_layer_types is None:
-        pytest.skip("this transformers has no layer type renames")
+    monkeypatch.setattr(
+        unified_export_hf,
+        "remap_legacy_layer_types",
+        lambda types: ["indexed_attention" if t == "deepseek_sparse_attention" else t for t in types],
+    )
     source, export = tmp_path / "source", tmp_path / "export"
     source.mkdir()
     export.mkdir()
     names = ["linear_attention", "deepseek_sparse_attention"]
     edited = ["sliding_attention", "full_attention"]
     (source / "config.json").write_text(
-        json.dumps({"text_config": {"layer_types": names}, "mtp": {"layer_types": edited}})
+        json.dumps(
+            {
+                "text_config": {"layer_types": names, "mtp_layer_types": names[1:]},
+                "other": {"layer_types": edited},
+            }
+        )
     )
     exported = {
-        "text_config": {"layer_types": ["linear_attention", "indexed_attention"]},
-        "mtp": {"layer_types": edited[::-1]},
+        "text_config": {
+            "layer_types": ["linear_attention", "indexed_attention"],
+            "mtp_layer_types": ["indexed_attention"],
+        },
+        "other": {"layer_types": edited[::-1]},
     }
     (export / "config.json").write_text(json.dumps(exported))
     model = torch.nn.Module()
@@ -1178,8 +1189,8 @@ def test_export_config_keeps_the_source_layer_type_names(tmp_path):
     _write_hf_export_config(model, None, export)
 
     written = json.loads((export / "config.json").read_text())
-    assert written["text_config"]["layer_types"] == names
-    assert written["mtp"]["layer_types"] == edited[::-1]
+    assert written["text_config"] == {"layer_types": names, "mtp_layer_types": names[1:]}
+    assert written["other"]["layer_types"] == edited[::-1]
 
 
 def _one_rank_fails_after_the_write_job(rank, size, tmp_dir, failure):
