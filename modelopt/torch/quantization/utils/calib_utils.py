@@ -322,8 +322,9 @@ def compute_hessian_inverse(hessian, weight, perc_damp):
 
     Returns:
         Upper-triangular Cholesky factor of the damped inverse Hessian
-        ``[in_features, in_features]``.  Falls back to the identity matrix
-        when the Hessian is not positive definite.
+        ``[in_features, in_features]``. A Hessian that does not factor at ``perc_damp`` is retried
+        at 10x and 100x the damping, if damping can change it, then falls back to the identity
+        matrix.
     """
     h = hessian.clone()
     # Masks rather than indices, and a factorization that reports failure rather than raises:
@@ -333,16 +334,30 @@ def compute_hessian_inverse(hessian, weight, perc_damp):
     h.masked_fill_(dead[None, :], 0)
     diagonal = h.diagonal()
     diagonal.masked_fill_(dead, 1)
-    diagonal.add_(perc_damp * diagonal.mean())
+    mean = diagonal.mean()
+    diagonal.add_(perc_damp * mean)
 
-    # One factorization rather than three: with P the reversal, P H P = L L^T makes R = P L P
-    # upper triangular with H = R R^T, so inv(R) is the upper Cholesky factor of inv(H).
-    factor, info = torch.linalg.cholesky_ex(h.flip(0, 1))
-    eye = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
-    if bool(info != 0):
-        print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
-        return eye
+    # A float32 Cholesky can fail on a Hessian a few outlier channels dominate; the identity would
+    # leave that weight to plain rounding, so first retry at 10x and 100x the damping. Damping
+    # scales perc_damp by the diagonal's mean, so it cannot change a Hessian when either is zero,
+    # as a never-routed expert's diagonal is.
+    for attempt in range(3):
+        # One factorization rather than three: with P the reversal, P H P = L L^T makes R = P L P
+        # upper triangular with H = R R^T, so inv(R) is the upper Cholesky factor of inv(H).
+        factor, info = torch.linalg.cholesky_ex(h.flip(0, 1))
+        if not bool(info != 0):
+            break
+        factor = None  # Free it before the next attempt allocates another.
+        if attempt == 2 or not bool(perc_damp * mean > 0):
+            print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
+            return torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+        diagonal.add_(9 * perc_damp * 10**attempt * mean)
+    if attempt:
+        print_rank_0(f"Hessian factored with damping {perc_damp * 10**attempt:g}")
+    # Free the damped Hessian before the inverse needs two more matrices of its size.
+    del h, diagonal
     factor = factor.flip(0, 1)
+    eye = torch.eye(factor.shape[0], device=factor.device, dtype=factor.dtype)
     return torch.linalg.solve_triangular(factor, eye, upper=True)
 
 
@@ -527,8 +542,9 @@ class GPTQHelper:
             out_features, num_cols = self.weight.shape
             # A width the group size does not divide carries a scale for its padded last group.
             n_blocks = -(-num_cols // quant_block_size)
-            # The quantizer's own FP8 scales, so the fused update rounds onto the same grid. Their FP8
-            # extension launches on the current GPU, which need not hold a layer device_map placed.
+            # The quantizer's own FP8 scales, so the fused update rounds onto the same grid. The FP8
+            # extension guards its launches, but its first call builds it for the current GPU's
+            # architecture, which should be the weight's GPU.
             with torch.cuda.device(self.weight.device):
                 block_scale = triton_kernel.compute_fp4_scales(
                     quantizer.amax, quantizer.global_amax

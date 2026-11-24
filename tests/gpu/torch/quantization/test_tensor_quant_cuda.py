@@ -25,7 +25,7 @@ from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTe
 import modelopt.torch.kernels.quantization.gemm as triton_kernel
 import modelopt.torch.quantization.utils as quant_utils
 from modelopt.torch.quantization import tensor_quant
-from modelopt.torch.quantization.extensions import get_cuda_ext, get_cuda_ext_mx
+from modelopt.torch.quantization.extensions import get_cuda_ext, get_cuda_ext_fp8, get_cuda_ext_mx
 from modelopt.torch.quantization.tensor_quant import mx_format_map
 
 if triton_kernel.IS_AVAILABLE:
@@ -194,6 +194,32 @@ class TestScaledE4M3:
         for factor in (2.0**-30, 2.0**-60):
             scaled = tensor_quant.scaled_e4m3(x * factor, amax * factor, None, 4, 3)
             assert torch.equal(scaled, reference * factor)
+
+    def test_runs_on_the_inputs_gpu(self, need_2_gpus):
+        """A tensor on a GPU other than the current one is cast by a kernel on its own GPU."""
+        # Otherwise scaled_e4m3_impl falls back to eager, and there is no launch to check.
+        extension = get_cuda_ext_fp8()
+        assert extension is not None, "the FP8 extension is unavailable"
+        # A TORCH_CUDA_ARCH_LIST set before the build can leave out a GPU's architecture.
+        for gpu in (0, 1):
+            with torch.cuda.device(gpu):
+                try:
+                    extension.fake_e4m3fy(torch.ones(1, device=gpu), torch.ones((), device=gpu))
+                except RuntimeError as error:
+                    if "no kernel image is available" not in str(error):
+                        raise
+                    pytest.skip(f"the FP8 extension is not built for cuda:{gpu}'s architecture")
+        x = torch.randn(64, 16, device="cuda:1")
+        activities = [torch.profiler.ProfilerActivity.CUDA]
+        with torch.cuda.device(0), torch.profiler.profile(activities=activities) as profile:
+            for amax in (x.abs().amax(), x.abs().amax(dim=1, keepdim=True)):
+                got = tensor_quant.scaled_e4m3_impl(x, amax)
+                assert torch.cuda.current_device() == 0, "the launch did not restore the device"
+                expected = tensor_quant.scaled_e4m3_impl(x.to("cuda:0"), amax.to("cuda:0"))
+                torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
+        # With peer access, a launch from the wrong GPU can still compute the right values.
+        kernels = sorted(e.device_index for e in profile.events() if "e4m3fy" in e.name)
+        assert kernels == [0, 0, 1, 1]
 
 
 class Testfp4:

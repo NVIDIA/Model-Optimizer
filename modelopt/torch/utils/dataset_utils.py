@@ -32,6 +32,7 @@ from tqdm import tqdm
 
 from .distributed import all_reduce, recorded_distribution_plan
 from .logging import print_rank_0, warn_rank_0
+from .perf import clear_cuda_cache
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -1066,7 +1067,7 @@ def _max_batch_size(
                 max_allocated_mem = torch.cuda.max_memory_allocated(gpu)
         return min_gpu_free_mem, max_allocated_mem
 
-    torch.cuda.empty_cache()
+    clear_cuda_cache()
 
     free_mem_before, max_allocated_before = _get_free_gpu_mem()
     is_enc_dec = model_type_is_enc_dec(model)
@@ -1126,7 +1127,7 @@ def _max_batch_size(
                         break
                     except torch.cuda.OutOfMemoryError:  # pragma: no cover - GPU OOM retry path
                         target_data_batch = target_data_batch // 2  # pragma: no cover
-                        torch.cuda.empty_cache()  # pragma: no cover
+                        clear_cuda_cache()  # pragma: no cover
 
     # Regulate the data batch target to be 1, 2, 4, 8, 12, ..., capped at 64
     if target_data_batch < 2:

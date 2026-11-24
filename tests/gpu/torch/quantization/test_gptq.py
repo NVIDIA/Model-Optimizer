@@ -605,9 +605,8 @@ def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus, monkeypatch):
     assert torch.cuda.current_device() == 0
     torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
 
-    # Through GPTQ, whose block scales come from an FP8 extension that launches on the current
-    # GPU. With peer access a launch from the wrong GPU can still compute the right values, so
-    # check which GPU is current as well as the result.
+    # Through GPTQ, whose block scales come from the FP8 extension. It guards its launches, but its
+    # first call builds it for the current GPU's architecture, so the weight's GPU must be current.
     if torch.cuda.get_device_capability(1) < (8, 9):
         pytest.skip("fused GPTQ needs SM89+")
     scale_devices = []
