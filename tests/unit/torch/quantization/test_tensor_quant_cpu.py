@@ -672,8 +672,8 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
 
 @pytest.mark.parametrize(
     ("case_sensitive", "layout"),
-    [(True, "plain"), (True, "shared-layer"), (True, "hidden-quantizer"), (False, "plain")],
-    ids=["subtree", "shared-layer", "hidden-quantizer", "case-insensitive"],
+    [(True, "plain"), (True, "shared-layer"), (True, "custom-traversal"), (False, "plain")],
+    ids=["subtree", "shared-layer", "custom-traversal", "case-insensitive"],
 )
 def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     monkeypatch, case_sensitive, layout
@@ -681,23 +681,27 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     """Entries naming one quantizer each, as a finalized AutoQuantize search's, act as wildcards do."""
     monkeypatch.setattr(quant_conversion, "_CASE_SENSITIVE_NAMES", case_sensitive)
 
-    class HidingSequential(torch.nn.Sequential):
-        hidden = None
+    class FourBitHidingSequential(torch.nn.Sequential):
+        hiding = False
 
         def named_modules(self, *args, **kwargs):
-            # A traversal that leaves out a module the model registers.
+            # A traversal that leaves out 4-bit quantizers, so what it lists changes as entries
+            # apply: all its paths are listed at the first exact entry.
             for name, module in super().named_modules(*args, **kwargs):
-                if name != self.hidden:
+                if not (
+                    self.hiding and isinstance(module, TensorQuantizer) and module.num_bits == 4
+                ):
                     yield name, module
 
     def quantized():
-        model = HidingSequential(*(torch.nn.Linear(4, 4) for _ in range(8)))
+        layers = (torch.nn.Linear(4, 4) for _ in range(8))
+        traversal = layout == "custom-traversal"
+        model = (FourBitHidingSequential if traversal else torch.nn.Sequential)(*layers)
         model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
         if layout == "shared-layer":
             # A second name for the last layer, which named_modules skips.
             model.add_module("8", model[7])
-        elif layout == "hidden-quantizer":
-            model.hidden = "7.weight_quantizer"
+        model.hiding = traversal
         return model
 
     quant_cfg = [{"quantizer_name": "*", "enable": False}]
@@ -724,7 +728,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
                 isinstance(module, TensorQuantizer)
                 and module.get_modelopt_state(properties_only=True),
             )
-            # Every registered module, the hidden one too.
+            # Every registered module, hidden ones too.
             for name, module in torch.nn.Module.named_modules(model)
             if isinstance(module, (TensorQuantizer, SequentialQuantizer))
         }
@@ -744,16 +748,13 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     mtq.set_quantizer_by_cfg(named, quant_cfg)
     monkeypatch.undo()
     assert states(named) == states(walked)
-    if not case_sensitive:
-        # Where fnmatch ignores case, every entry walks the model.
-        assert walks == len(quant_cfg)
-    elif layout != "plain":
-        # named_modules lists other paths than the model registers, so every entry walks the model.
-        assert walks == 1 + len(quant_cfg)
+    if case_sensitive and layout == "plain":
+        # Only the "*" entry walks the model, also after a replacement.
+        assert walks == 1
     else:
-        # The check of the paths named_modules lists, then only the "*" entry, also after a
-        # replacement.
-        assert walks == 2
+        # Every entry walks the model: where fnmatch ignores case, or named_modules can list other
+        # paths than the model registers.
+        assert walks == len(quant_cfg)
 
 
 @pytest.mark.parametrize(

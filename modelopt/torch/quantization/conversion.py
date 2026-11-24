@@ -16,7 +16,6 @@
 """Quantization conversion/restore utilities."""
 
 import fnmatch
-import itertools
 import os
 import re
 import warnings
@@ -284,17 +283,24 @@ _CASE_SENSITIVE_NAMES = os.path.normcase("A") == "A"
 _SINGULAR_QUANTIZER_ATOM_RE = re.compile(r"(?:weight|input)_quantizer$")
 
 
-def _lists_each_registered_path(model: nn.Module) -> bool:
-    """Whether ``named_modules()`` lists exactly the paths ``_modules`` register, in order."""
+def _uses_stock_traversal(model: nn.Module) -> bool:
+    """Whether each module of ``model`` is registered once and keeps ``nn.Module.named_modules``.
 
-    def registered(module, prefix):
-        yield prefix
-        for name, child in module._modules.items():
-            if child is not None:
-                yield from registered(child, f"{prefix}.{name}" if prefix else name)
-
-    listed = (name for name, _ in model.named_modules())
-    return all(a == b for a, b in itertools.zip_longest(registered(model, ""), listed))
+    ``named_modules()`` then lists exactly the paths ``_modules`` register, which a subtree walk
+    follows.
+    """
+    seen = set()
+    stack = [model]
+    while stack:
+        module = stack.pop()
+        # An override can list other paths, and change what it lists as entries apply.
+        if id(module) in seen or (
+            getattr(module.named_modules, "__func__", None) is not nn.Module.named_modules
+        ):
+            return False
+        seen.add(id(module))
+        stack.extend(child for child in module._modules.values() if child is not None)
+    return True
 
 
 def _runs_registration_hooks() -> bool:
@@ -372,11 +378,10 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
     """
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
     # Whether wildcard-free names walk only their subtree, which follows the model's _modules,
-    # decided at the first one: not where fnmatch ignores case, nor where named_modules lists other
-    # paths, or another order, than _modules register (it skips a module's second name; a module
-    # can override it), nor
-    # while PyTorch's global registration hooks are set: replacing a quantizer runs them, and they
-    # can register a module a second time mid-call.
+    # decided at the first one: not where fnmatch ignores case, nor in a model that registers a
+    # module twice, whose second name named_modules skips, or overrides named_modules, nor while
+    # PyTorch's global registration hooks are set: replacing a quantizer runs them, and they can
+    # register a module a second time mid-call.
     subtree = None
     for entry in quant_cfg:
         quantizer_name: str = entry["quantizer_name"]
@@ -397,7 +402,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
             subtree = (
                 _CASE_SENSITIVE_NAMES
                 and not _runs_registration_hooks()
-                and _lists_each_registered_path(quant_model)
+                and _uses_stock_traversal(quant_model)
             )
 
         if cfg is None:
