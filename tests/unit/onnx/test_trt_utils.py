@@ -41,9 +41,15 @@ def _save_model(tmp_path, op_type="MatMul", domain="", nested=False, external=Fa
     node = helper.make_node(op_type, ["x", "weight"], ["y"], domain=domain, name="operation")
     shape = ["batch", 4]
     output = helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)
-    graph = helper.make_graph([node], "body", [], [output])
     if nested:
-        node = helper.make_node("If", ["condition"], ["y"], then_branch=graph, else_branch=graph)
+        # The constant condition selects the standard branch. The other branch still needs inspection.
+        then_branch = helper.make_graph(
+            [helper.make_node("MatMul", ["x", "weight"], ["y"])], "standard_branch", [], [output]
+        )
+        else_branch = helper.make_graph([node], "alternate_branch", [], [output])
+        node = helper.make_node(
+            "If", ["condition"], ["y"], then_branch=then_branch, else_branch=else_branch
+        )
     inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)]
     weight = numpy_helper.from_array(np.eye(4, dtype=np.float32), "weight")
     initializers = [weight]
@@ -88,7 +94,7 @@ def test_load_onnx_model_without_cuda(
 
 
 @pytest.mark.parametrize("domain", ["", "test.plugins"])
-@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("nested", [False, True], ids=["top-level", "inactive-if-branch"])
 def test_load_onnx_model_rejects_registered_plugin(tmp_path, unavailable_tensorrt, domain, nested):
     path = _save_model(tmp_path, op_type="IdentityConv", domain=domain, nested=nested)
     parameter = onnx.defs.OpSchema.FormalParameter
@@ -103,7 +109,7 @@ def test_load_onnx_model_rejects_registered_plugin(tmp_path, unavailable_tensorr
     onnx.defs.register_schema(schema)
     try:
         onnx.checker.check_model(str(path), check_custom_domain=True)
-        with pytest.raises(RuntimeError):
+        with pytest.raises(trt_utils._TensorRTUnavailableError):
             trt_utils.load_onnx_model(str(path))
     finally:
         onnx.defs.deregister_schema(schema.name, schema.since_version, schema.domain)
