@@ -52,6 +52,7 @@ def bypass(
         config: A :class:`BypassConfig`, a dict, or None for the established defaults.
         validation_dataloader: Optional held-out batches for finalized-student valid-token MSE.
             Diagnostic failures propagate after committing training updates to the student.
+            Zero-step preflight skips validation as well as training.
         device_mesh: Caller-owned placement mesh, adopted by supported integrations.
 
     Returns:

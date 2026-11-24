@@ -16,9 +16,12 @@
 """Offline end-to-end public Bypass flows, including real native save/restore."""
 
 import copy
+import json
 import random
+import statistics
 import subprocess
 import sys
+import time
 from collections import OrderedDict
 
 import numpy as np
@@ -550,3 +553,44 @@ def test_distill_quantization_import_order_keeps_trainer_plugin(first):
         ]
     )
     subprocess.run([sys.executable, "-c", code], check=True, timeout=180)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA memory and kernel qualification")
+def test_bypass_cuda_mse_bounds_scratch_and_preserves_masked_vjp(monkeypatch, capsys):
+    from modelopt.torch.distill._bypass_capture import _MSE_CHUNK_ELEMENTS, mse_statistics
+
+    prediction = torch.ones((1, 32768, 4096), device="cuda", dtype=torch.bfloat16)
+    prediction.requires_grad_(True)
+    target = torch.zeros_like(prediction)
+    mask = torch.arange(32768, device="cuda").remainder(2).eq(0).unsqueeze(0)
+    metrics = {"device": torch.cuda.get_device_name(), "shape": list(prediction.shape)}
+    for elements in (1 << 18, _MSE_CHUNK_ELEMENTS["cuda"]):
+        monkeypatch.setitem(_MSE_CHUNK_ELEMENTS, "cuda", elements)
+        times, peaks = [], []
+        for repeat in range(4):
+            prediction.grad = None
+            torch.cuda.synchronize()
+            baseline = torch.cuda.memory_allocated()
+            torch.cuda.reset_peak_memory_stats()
+            start = time.perf_counter()
+            loss, count = mse_statistics(prediction, target, mask)
+            loss.backward()
+            torch.cuda.synchronize()
+            elapsed = time.perf_counter() - start
+            peak = torch.cuda.max_memory_allocated() - baseline
+            if repeat:
+                times.append(elapsed)
+                peaks.append(peak)
+        assert loss.item() == count.item() == prediction.numel() // 2
+        assert torch.all(prediction.grad[:, ::2] == 2)
+        assert torch.all(prediction.grad[:, 1::2] == 0)
+        # One narrow gradient plus chunk-sized FP32 operands; prohibit full FP32 copies.
+        budget = prediction.numel() * prediction.element_size() + 16 * elements + (16 << 20)
+        assert max(peaks) <= budget
+        metrics[str(elements)] = {
+            "median_forward_backward_seconds": statistics.median(times),
+            "extra_peak_allocated_bytes": max(peaks),
+            "extra_budget_bytes": budget,
+        }
+    with capsys.disabled():
+        print("Bypass CUDA MSE metrics: " + json.dumps(metrics, sort_keys=True), flush=True)
