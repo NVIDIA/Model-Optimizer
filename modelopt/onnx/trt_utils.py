@@ -515,11 +515,9 @@ def interpret_trt_plugins_precision_flag(
             if precision not in supported_precisions:
                 logger.warning(f"Precision {precision} is not supported. Skipping.")
             if precision in ["fp16", "fp32"]:
-                custom_ops_to_cast[precision] = {
-                    op_type: {
-                        "inp": list(range(num_inps)),
-                        "out": list(range(num_outs)),
-                    }
+                custom_ops_to_cast.setdefault(precision, {})[op_type] = {
+                    "inp": list(range(num_inps)),
+                    "out": list(range(num_outs)),
                 }
             if precision in ["int8", "fp8"]:
                 if precision != quantize_mode:
@@ -561,9 +559,10 @@ def interpret_trt_plugins_precision_flag(
             for precision in ["fp16", "fp32"]:
                 inp_precision_cast = [i for i, p in enumerate(inp_precision) if p == precision]
                 out_precision_cast = [i for i, p in enumerate(out_precision) if p == precision]
-                if inp_precision_cast:
-                    custom_ops_to_cast[precision] = {
-                        op_type: {"inp": inp_precision_cast, "out": out_precision_cast}
+                if inp_precision_cast or out_precision_cast:
+                    custom_ops_to_cast.setdefault(precision, {})[op_type] = {
+                        "inp": inp_precision_cast,
+                        "out": out_precision_cast,
                     }
 
             # Will add Q/DQ nodes in the requested I/O indices
