@@ -171,13 +171,10 @@ Measure verbosity
 ~~~~~~~~~~~~~~~~~
 
 Compare mean and median completion tokens, including reasoning, to assess how much generation each
-answer requires.
-
-For mean length, average each model's completion lengths across repetitions within each question,
-then subtract Baseline's average from Candidate's. We use question-level paired t-tests and t-based
-95% confidence intervals. See the :ref:`verbosity calculation <evaluation-statistical-methods>`
-in the Reproducibility Notes.
-“Yes” means evidence of shorter Candidate completions on average (p < 0.05).
+answer requires. A paired 95% confidence interval shows how precisely we estimate the difference in mean
+completion length. The one-sided p-value helps assess whether Candidate produces shorter
+completions on average. The table marks p < 0.05 as “yes.” See the
+:ref:`verbosity calculation <evaluation-statistical-methods>` in the Reproducibility Notes.
 
 +----------------+-------------+-------------+-------------+-------------+-------------+-------------+
 | Benchmark      | Baseline:   | Candidate:  | Change:     | Mean change | Candidate   | Candidate   |

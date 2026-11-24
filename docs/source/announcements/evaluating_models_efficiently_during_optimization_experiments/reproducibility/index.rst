@@ -45,6 +45,7 @@ Statistical methods
   For differences in pp, the t statistic is ``(mean_difference + margin) / standard_error``, using
   the upper tail of the t distribution. For SciCode, estimate the standard error across parent
   problems with degrees of freedom equal to the number of parent problems minus one.
+  
 - **Cap-hit rates:** calculate two-sided 95% paired-bootstrap
   confidence intervals by sampling with replacement, using whole parent problems for SciCode
   cap hits. Keep all repetitions and both models together within each sampled group. The
@@ -57,9 +58,11 @@ Statistical methods
   shows how unusual the observed difference would be if the models behaved the same.
   Computing p-values with the bootstrap would be more complicated.
 
-- **Verbosity:** compare mean completion lengths using the paired difference for each question.
-  Calculate a two-sided t-based 95% confidence interval and run one-sided paired t-tests for the
-  stated direction. Degrees of freedom equal the number of questions minus one.
+- **Verbosity:** to compare mean completion lengths, average each model’s response lengths across
+  repetitions within each question, then subtract Baseline’s average from Candidate’s. Use these
+  paired differences to calculate a two-sided t-based 95% confidence interval and run one-sided
+  paired t-tests for the stated direction. Degrees of freedom equal the number of questions minus
+  one.
   Compute each model's median completion length across all its responses. The verbosity tests
   compare mean lengths.
 
