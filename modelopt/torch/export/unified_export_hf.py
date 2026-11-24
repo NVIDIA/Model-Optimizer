@@ -42,6 +42,7 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_off_index_safetensors,
     locate_source_keys,
     off_index_safetensors_files,
+    resolve_checkpoint_file,
     sanitize_hf_config_for_deployment,
 )
 
@@ -1778,7 +1779,10 @@ def _write_hf_export_config(
     original_config = f"{export_dir}/config.json"
     with open(original_config) as file:
         config_data = json.load(file)
-    _restore_source_layer_types(config_data, _source_config_json(model))
+    if remap_legacy_layer_types is not None:
+        # Before the sanitize step: it trims trailing MTP entries from layer_types, and the
+        # restore only matches a list that is still exactly the remap of the source's.
+        _restore_source_layer_types(config_data, _source_config_json(model))
     sanitize_hf_config_for_deployment(config_data, model)
     if quantization_config is not None:
         config_data["quantization_config"] = quantization_config
@@ -1849,12 +1853,31 @@ def _source_checkpoint(model: nn.Module) -> str | None:
 
 
 def _source_config_json(model: nn.Module) -> Any:
-    """The source checkpoint's ``config.json`` as parsed, or ``{}`` if it cannot be read."""
+    """The source checkpoint's ``config.json`` as parsed, or ``{}`` if it cannot be read.
+
+    Read through ``resolve_checkpoint_file``, which keeps the file inside the checkpoint directory
+    and bounds its size.
+    """
     ckpt = _source_checkpoint(model)
-    if ckpt and Path(ckpt, "config.json").is_file():
+    if ckpt:
         with contextlib.suppress(OSError, ValueError):
-            return json.loads(Path(ckpt, "config.json").read_text())
+            return json.loads(resolve_checkpoint_file(Path(ckpt), "config.json").read_text())
     return {}
+
+
+def _remapped_layer_types(layer_types: list) -> list | None:
+    """Transformers' remap of ``layer_types``, or ``None`` when it cannot be applied.
+
+    The remap is a transformers internal, and this runs on the last write of an export, so a
+    changed contract warns and leaves the config as transformers wrote it.
+    """
+    if remap_legacy_layer_types is None or not all(isinstance(t, str) for t in layer_types):
+        return None
+    try:
+        return remap_legacy_layer_types(layer_types)
+    except Exception as exc:
+        warnings.warn(f"Could not restore the source layer_types spelling ({exc}).")
+        return None
 
 
 def _restore_source_layer_types(config_data: dict, source: Any) -> None:
@@ -1869,11 +1892,9 @@ def _restore_source_layer_types(config_data: dict, source: Any) -> None:
         return
     for key in ("layer_types", "mtp_layer_types"):  # the lists transformers' remap rewrites
         source_types = source.get(key)
-        if (
-            remap_legacy_layer_types is not None
-            and isinstance(source_types, list)
-            and remap_legacy_layer_types(source_types) == config_data.get(key)
-        ):
+        if isinstance(source_types, list) and _remapped_layer_types(
+            source_types
+        ) == config_data.get(key):
             config_data[key] = source_types
     for key, value in config_data.items():
         if isinstance(value, dict):

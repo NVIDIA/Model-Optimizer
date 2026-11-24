@@ -1195,6 +1195,38 @@ def test_export_config_keeps_the_source_layer_type_names(tmp_path, monkeypatch):
     assert written["other"]["layer_types"] == edited[::-1]
 
 
+def test_export_config_restores_what_transformers_renamed_on_load(tmp_path):
+    """The real transformers round trip: a source config is loaded and saved, then the export
+    restores its layer type names (a no-op where transformers renames nothing)."""
+    transformers = pytest.importorskip("transformers")
+    if unified_export_hf.remap_legacy_layer_types is None:
+        pytest.skip("this transformers has no layer type renames")
+    names = ["linear_attention", "deepseek_sparse_attention"]
+    source, export = tmp_path / "source", tmp_path / "export"
+    source.mkdir()
+    text = {
+        "model_type": "glm5_next_text",
+        "num_hidden_layers": 2,
+        "layer_types": names,
+        "mlp_layer_types": ["dense", "sparse"],
+    }
+    (source / "config.json").write_text(
+        json.dumps({"model_type": "glm5_next", "text_config": text})
+    )
+    try:
+        config = transformers.AutoConfig.from_pretrained(source)
+    except (KeyError, ValueError):
+        pytest.skip("this transformers has no glm5_next")
+    config.save_pretrained(export)
+    model = torch.nn.Module()
+    model.config = config
+    model._modelopt_source_checkpoint = str(source)
+
+    _write_hf_export_config(model, None, export)
+
+    assert json.loads((export / "config.json").read_text())["text_config"]["layer_types"] == names
+
+
 def _one_rank_fails_after_the_write_job(rank, size, tmp_dir, failure):
     model = torch.nn.Linear(2, 2)
     set_distribution_plan(model, DistributionPlan(size, ep_size=size))
