@@ -431,6 +431,95 @@ def test_expert_parallel_backward_matches_the_whole_model(
     )
 
 
+def _save_tiny_muse_spark(ckpt_dir):
+    """A tiny Muse Spark (transformers 5.20+), whose experts normalize their outputs with a norm its
+    plan replicates over the experts' ranks, summing its gradient there. The norms are random, so
+    they show in the logits and gradients. In float32, as its router has near ties bf16 can flip."""
+    text = {
+        "vocab_size": 160,  # _batches draws below 128, clear of the media tokens
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 16,
+        "moe_intermediate_size": 32,
+        "moe_hidden_size": 64,
+        "num_local_experts": NUM_EXPERTS,
+        "num_experts_per_tok": 2,
+        "sliding_window": 8,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "pad_token_id": 0,
+    }
+    vision = {"num_hidden_layers": 1, "hidden_size": 32, "intermediate_size": 64}
+    audio = {"hidden_sizes": [16] * 4, "depths": [1] * 4, "out_hidden_size": 64}
+    config = transformers.MuseSparkConfig(
+        text_config=text,
+        vision_config={**vision, "num_attention_heads": 2},
+        audio_config=audio,
+        image_token_id=157,
+        video_token_id=158,
+        audio_token_id=159,
+        out_hidden_size=64,
+        projector_hidden_size=64,
+    )
+    torch.manual_seed(0)
+    model = transformers.AutoModelForImageTextToText.from_config(config)
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if "post_expert_norm" in name:
+                param.uniform_(0.5, 1.5)
+    model.save_pretrained(ckpt_dir)
+
+
+def _post_expert_norm_job(rank, size, ckpt_dir):
+    device = torch.device(f"cuda:{rank}")
+    with bounded_collectives(seconds=120):
+        plan = DistributionPlan(size, ep_size=size)
+        model = load_and_prepare_ep(ckpt_dir, plan, freeze=False)
+        whole = transformers.AutoModelForImageTextToText.from_pretrained(
+            ckpt_dir, dtype=torch.float32
+        ).to(device)
+        batches = _batches(size)
+        mine = batches[rank].to(device)
+        out = model(mine, labels=mine)
+        problems = []
+        with torch.no_grad():
+            reference = whole(mine).logits.float()
+        if not torch.allclose(out.logits.float(), reference, atol=1e-3, rtol=1e-3):
+            problems.append("logits differ from the whole model's")
+        out.loss.backward()
+        # The whole model on every rank's batch: each token of the expert-parallel group passes this
+        # rank's copy of the norm.
+        for batch in batches:
+            whole(batch.to(device), labels=batch.to(device)).loss.backward()
+        norms = [name for name, _ in model.named_parameters() if "post_expert_norm" in name]
+        if len(norms) != 2:
+            problems.append(f"post-expert norms: {norms}")
+        for name in norms:
+            param, reference = model.get_parameter(name), whole.get_parameter(name)
+            if not torch.equal(param.detach(), reference.detach()):
+                problems.append(f"{name} is not the whole norm")
+            if not (error := _relative_error(param.grad, reference.grad)) < 1e-3:
+                problems.append(f"{name}: gradient off by {error:.3g} (relative norm)")
+        _fail_together(problems)
+
+
+def test_a_post_expert_norm_stays_whole_and_sums_its_gradient_over_the_experts_ranks(
+    need_2_gpus, dist_workers, tmp_path
+):
+    """Muse Spark's plan replicates each layer's post-expert norm and sums its gradient over the
+    expert-parallel group: the load keeps it whole on every rank, the logits match the whole
+    model's, and its gradient is the whole model's summed over every rank's batch."""
+    if not hasattr(transformers, "MuseSparkConfig"):
+        pytest.skip("Muse Spark, with its post-expert norm, ships in later transformers")
+    if NUM_EXPERTS % dist_workers.world_size:
+        pytest.skip(f"{NUM_EXPERTS} experts do not shard over {dist_workers.world_size} GPUs")
+    _save_tiny_muse_spark(tmp_path)
+    dist_workers.run(_post_expert_norm_job, ckpt_dir=str(tmp_path))
+
+
 def _calibrated_quantizers(model):
     return {
         name: module

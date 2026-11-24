@@ -898,13 +898,14 @@ def _distributed_save_hf_checkpoint_impl(
     def split_experts(sharded: dict, into: dict) -> dict:
         if plan.is_expert_parallel:
             # Only the experts' own weights and scales are split by expert. Any other plain tensor
-            # under a fused-experts module (a fused bias, say) is this rank's own slice under
-            # expert parallelism, which the dense path would take for one tensor every rank holds
-            # whole, writing a single rank's slice with no error.
+            # of a fused-experts module (a fused bias, say) is this rank's own slice under expert
+            # parallelism, which the dense path would take for one tensor every rank holds whole,
+            # writing a single rank's slice with no error. A submodule's (a post-expert norm's) is
+            # whole on every rank: the load shards only the module's own tensors by expert.
             sliced = sorted(
                 k
                 for k, v in sharded.items()
-                if k.startswith(prefix_dots)
+                if any(k.startswith(p) and "." not in k[len(p) :] for p in prefix_dots)
                 and not _is_expert_key(k)
                 and "_quantizer" not in k
                 and not isinstance(v, DTensor)
