@@ -140,7 +140,14 @@ def _unique_batch_worker(rank, size, axis, unequal):
         Lion.step = original_step
     expected_gradients = gradients[:]
     gradients.clear()
-    local = batches[rank::size] if axis == "dp" else batches
+    if axis == "fsdp":
+        from torch.distributed.fsdp import fully_shard
+
+        for model in (student, teacher):
+            fully_shard(model.mlp, mesh=mesh)
+            fully_shard(model.moe, mesh=mesh)
+            fully_shard(model, mesh=mesh)
+    local = batches[rank::size] if axis in ("dp", "fsdp") else batches
     if unequal and rank == 1:
         local = local[:1]
     if unequal:
@@ -162,14 +169,18 @@ def _unique_batch_worker(rank, size, axis, unequal):
             torch.testing.assert_close(a, b, rtol=2e-5, atol=1e-14)
     assert all(norm <= config["max_grad_norm"] for norm in norms)
     for name, value in reference.state_dict().items():
+        actual = student.state_dict()[name]
+        actual = actual.full_tensor() if isinstance(actual, DTensor) else actual
         if value.is_floating_point():
-            torch.testing.assert_close(student.state_dict()[name], value, rtol=0, atol=0)
+            torch.testing.assert_close(actual, value, rtol=0, atol=0)
         else:
-            assert torch.equal(student.state_dict()[name], value), name
+            assert torch.equal(actual, value), name
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.parametrize(("axis", "unequal"), [("dp", False), ("cp", False), ("dp", True)])
+@pytest.mark.parametrize(
+    ("axis", "unequal"), [("dp", False), ("cp", False), ("fsdp", False), ("dp", True)]
+)
 def test_distributed_bypass_matches_unique_batch(bypass_cpu_workers, axis, unequal):
     bypass_cpu_workers.run(_unique_batch_worker, axis, unequal)
 
@@ -210,8 +221,13 @@ def _validation_refusal_worker(rank, size, problem):
         lambda model: model(batch),
     )
     before = copy.deepcopy(student.state_dict())
-    student.fail_lookup = problem == "resolve" and rank == 1
     mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("cp",))
+    recipe = {"num_steps": 1, "global_batch_size": 2, "sequence_length": 4}
+    if problem in ("iterator", "length", "advance", "microbatches"):
+        reference = copy.deepcopy(student)
+        mtd.bypass(reference, copy.deepcopy(teacher), [batch], recipe, device_mesh=mesh)
+        before = copy.deepcopy(reference.state_dict())
+    student.fail_lookup = problem == "resolve" and rank == 1
 
     class Validation:
         def __iter__(self):
@@ -239,7 +255,7 @@ def _validation_refusal_worker(rank, size, problem):
                 student,
                 teacher,
                 Training(),
-                {"num_steps": 1, "global_batch_size": 2, "sequence_length": 4},
+                recipe,
                 validation_dataloader=validation,
                 device_mesh=mesh,
             )
