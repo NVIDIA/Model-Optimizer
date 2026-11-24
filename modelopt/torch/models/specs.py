@@ -371,7 +371,12 @@ class BypassSpec(SpecSection):
     feedforward_names: tuple[str, ...] = ("mlp", "moe", "ffn", "block_sparse_moe")
     """Decoder child names that own ordinary dense or routed feed-forward repair boundaries."""
     isolated_documents: bool = True
-    """Run packed documents independently when recurrence or pooling can cross mask boundaries."""
+    """Preserve independent-document targets across recurrence, pooling and position scaling.
+
+    Attention-only models can also couple tokens through dynamic RoPE or activation
+    quantization. The HF adapter may coalesce documents into padded rows only when
+    both models pass its activation and position policy guards.
+    """
     batch_packed_documents: bool = False
     """Permit independent documents in padded rows when activation and position policies agree."""
     adapter_path: str | None = None

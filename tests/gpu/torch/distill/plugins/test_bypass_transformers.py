@@ -16,6 +16,8 @@
 """Real stable-5.23 text-model Bypass, selection, packing and original-weight prefixes."""
 
 import copy
+import gc
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -335,6 +337,11 @@ def test_modelspec_drives_nemotron_ptq_and_bypass():
     assert changed
     assert all("mixer" in name for name in changed)
     assert all(torch.isfinite(p).all() for p in student.parameters())
+    teacher_ref = weakref.ref(teacher)
+    del teacher
+    gc.collect()
+    assert teacher_ref() is None
+    assert not adapter._providers
 
 
 @pytest.mark.parametrize("frozen_format", ["fp8", "nvfp4"])

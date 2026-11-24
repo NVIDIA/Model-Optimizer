@@ -57,6 +57,12 @@ def bypass(
             Zero-step preflight skips validation as well as training.
         device_mesh: Caller-owned placement mesh, adopted by supported integrations.
 
+    For HF PTQ, use
+    :meth:`TransformersBypassAdapter.weight_patterns
+    <modelopt.torch.distill.plugins.transformers.TransformersBypassAdapter.weight_patterns>`
+    with the same selectors to obtain ordinary ModelOpt ``weight_quantizer`` globs
+    before quantizing the student. These patterns exclude frozen routing gates.
+
     Returns:
         The supplied student, finalized for ordinary ModelOpt save/export. Temporary
         fields, hooks, modes and gradient flags are restored on every exit.

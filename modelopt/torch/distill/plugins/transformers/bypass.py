@@ -80,7 +80,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         """Require the tested integration version only when this adapter is used."""
         _require_transformers()
         self.student = None
-        self._providers = {}
+        self._providers = weakref.WeakKeyDictionary()
         self._model_facts = weakref.WeakKeyDictionary()
 
     def _facts(self, model):
@@ -108,10 +108,10 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         spec = _model_spec(model)
         if spec.adapter_path is None:
             return None
-        if id(model) not in self._providers:
+        if model not in self._providers:
             module, _, attribute = spec.adapter_path.rpartition(".")
-            self._providers[id(model)] = getattr(importlib.import_module(module), attribute)()
-        return self._providers[id(model)]
+            self._providers[model] = getattr(importlib.import_module(module), attribute)()
+        return self._providers[model]
 
     def _decoder_layers(self, model):
         provider = self._provider(model)
@@ -231,7 +231,14 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         return layers, paths
 
     def weight_patterns(self, model, config=None):
-        """Derive ordinary ModelOpt PTQ weight globs from the same selected boundaries."""
+        """Derive ordinary ModelOpt PTQ weight globs from the same selected boundaries.
+
+        Call before PTQ to configure the weights that Bypass will later repair.
+        ``config`` accepts the same module/layer selectors as :func:`bypass`;
+        routing gates are excluded and weights need not already be quantized.
+        Each returned glob can be used as a ``quantizer_name`` in the ordinary
+        ModelOpt ``quant_cfg`` list. The stacked tutorial uses this contract.
+        """
         from modelopt.torch.quantization.repair import _router_paths
 
         from ...config import BypassConfig
