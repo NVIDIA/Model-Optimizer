@@ -270,7 +270,7 @@ eight groups, each with 280 responses per model.
    :width: 720px
 
 The choice of analysis level can depend on the benchmark and metric. See the
-:ref:`ablation plots and analysis <evaluation-accuracy-differences>` in the Reproducibility Notes.
+:ref:`fixed-budget analysis methods <evaluation-fixed-response-budgets>` in the Reproducibility Notes.
 
 .. _evaluation-collect-data:
 
@@ -296,8 +296,7 @@ and plan how many subtasks and repetitions to run.
    :alt: SciCode cap-hit rate evidence excluding the 44 recovery-training subtasks: blue points increase coverage from ten to 294 subtasks with one repetition; green points add repetitions on all 294 subtasks, reaching 2,352 responses per model. The ten-subtask subset has no observed cap hits and no informative bootstrap interval. The lower panel shows permutation p-values.
    :width: 640px
 
-See the :ref:`SciCode data-volume ablation <evaluation-data-volume-ablations>` in the
-Reproducibility Notes.
+See the :ref:`cap-hit p-value calculation <evaluation-pvalue-methods>` in the Reproducibility Notes.
 
 Test known weaknesses on a focused subset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
