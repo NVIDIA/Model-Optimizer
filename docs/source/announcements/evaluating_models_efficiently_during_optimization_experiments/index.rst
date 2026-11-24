@@ -69,7 +69,8 @@ Show where the model improves or worsens
 We first average each model’s correctness across repetitions of each question, then compute
 **Candidate − Baseline** for each question. We calculate a paired 95% confidence interval for
 the mean difference by bootstrapping whole SciCode parent problems, keeping related subtasks
-together. Changes are reported in percentage points (pp), not relative percentages.
+together. This allows subtasks within a problem to be correlated and assumes independence
+across parent problems. Changes are reported in percentage points (pp), not relative percentages.
 
 We use paired question-level tests here to compare models across the domain represented by the
 benchmark. Pairing can reduce variation caused by question difficulty. For standardized reporting on
