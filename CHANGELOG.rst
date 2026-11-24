@@ -15,7 +15,7 @@ Changelog
 
 - ``max``, ``imatrix`` and ``local_hessian`` calibration of ``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` now derive each block's super-block scale from the weights and match each block's output energy (``local_hessian`` under each block's Hessian), in place of fixed per-format scale anchors, which lowered KL divergence in all our tests (by up to half at IQ1) and matches or beats llama.cpp's own imatrix quantizer in most of them. ``gptq`` derives the scale too and gives each output row a gain of one under its Hessian: KL fell on dense MLPs (by up to 40% at IQ1) and ranged from 19% lower to 3% higher on routed MoE experts alone.
 - Add ``context_quant_level`` to KL-divergence AutoQuantize (``method={"method": "kl_div", "context_quant_level": "lowest"}``, or ``method_options: {context_quant_level: lowest}`` in a recipe): each candidate is scored with every other searched layer at its lowest-bit format (an int picks the format by its 0-based index from the lowest), so low-bit budgets go to the layers whose error compounds most once the whole model is quantized. ``"lowest"`` is a good default; a context nearer the target budget measured the same in our tests.
-- AutoQuantize now searches the routed experts of Llama 4 and GPT-OSS, which it previously left unquantized; re-run searches whose checkpoints were saved before this change. Other quantized modules that quantize several named weights, such as grouped MoE experts with ``w1_weight_quantizer``, opt in with ``_auto_quantize_per_weight_quantizers = True``.
+- Quantized modules that quantize several named weights, such as grouped MoE experts with ``w1_weight_quantizer`` and ``w2_weight_quantizer``, can opt in to AutoQuantize with ``_auto_quantize_per_weight_quantizers = True``; each such module is searched as one group at one weight format.
 - GPTQ calibration is 25-35% faster in our MoE-expert and dense-MLP tests, with the GGML IQ formats and with NVFP4 under ``fused: true``. Results change only at round-off.
 
 *Quantization - QAT / QAD*
@@ -46,8 +46,7 @@ Changelog
 *Quantization*
 
 - NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
-- AutoQuantize now counts the ``up_proj`` weights of non-gated fused MoE experts (for example Nemotron-H) in the effective-bits budget; they were previously costed as zero. A resumed search recomputes and saves the costs; resume a checkpoint saved before this change once, without a finalize step, before re-solving or finalizing it offline.
-- GPT-OSS experts now apply a list-config (e.g. W4A8) weight quantizer; they kept using the quantizer present at conversion.
+- AutoQuantize now counts the ``up_proj`` weights of non-gated fused MoE experts (for example Nemotron-H) in the effective-bits budget; they were previously costed as zero. A resumed search recomputes and saves the costs; resume a checkpoint saved before this change once before re-solving or merging it offline.
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 
 *ONNX*

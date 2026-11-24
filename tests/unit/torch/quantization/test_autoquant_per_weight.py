@@ -190,25 +190,6 @@ def test_per_weight_search_invariants(method, bits, tmp_path):
     assert _formats(resumed) == _formats(model)
 
 
-def test_replay_follows_formats_a_searcher_prunes(monkeypatch):
-    searcher = mtq.algorithms.AUTO_QUANTIZE_SEARCHERS["aumann_shapley"]
-    exclude = searcher._exclude_non_finite_candidates
-
-    def int4_diverges(self, no_quant):
-        stats = self.candidate_stats["experts.quant_recipe"]
-        names = [str(recipe).split("(")[0] for recipe in stats["formats"]]
-        stats["raw_scores"][names.index("int4_weight_only")] = float("inf")
-        return exclude(self, no_quant)
-
-    monkeypatch.setattr(searcher, "_exclude_non_finite_candidates", int4_diverges)
-    model, state = _search("aumann_shapley", ["int4_weight_only", "int8"], 9.0)
-    formats = state["candidate_stats"]["experts.quant_recipe"]["formats"]
-    assert not any(str(recipe).startswith("int4_weight_only") for recipe in formats)
-    assert _formats(_replayed(mtq.get_auto_quantize_config(state)), ("experts",)) == _formats(
-        model, ("experts",)
-    )
-
-
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
 def test_per_weight_format_shards_merge_into_the_live_search(method, tmp_path):
     formats = list(_CANDIDATES)
@@ -224,36 +205,54 @@ def test_per_weight_format_shards_merge_into_the_live_search(method, tmp_path):
     assert merged_state["best"]["recipe"] == live["best"]["recipe"]
 
 
-def test_per_weight_modules_replay_every_rule_form_as_scored():
-    named = _deny(
-        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
-        # An enable-only rule keeps the format before it; a rule may target a stage a list config
-        # created.
-        {"quantizer_name": "*w[12]*weight_quantizer", "cfg": [_INT4_W, {"num_bits": 8, "axis": 0}]},
-        {"quantizer_name": "*w1_weight_quantizer", "enable": False},
-        {"quantizer_name": "*w1_weight_quantizer", "enable": True},
-        {"quantizer_name": "*weight_quantizer.1", "cfg": {"num_bits": 8, "axis": None}},
-        # A parent_class rule applies to the module's own quantizers, here a list config over a
-        # list config without reaching its stages.
-        {"quantizer_name": "*input_quantizer", "cfg": [{"num_bits": 8, "axis": None}] * 2},
-        {
-            "quantizer_name": "*input_quantizer",
-            "parent_class": "test.PerWeightExperts",
-            "cfg": [{"num_bits": 8, "axis": None}] * 2,
-        },
-    )
-    _CANDIDATES["named"] = named
+@pytest.mark.parametrize(
+    ("rules", "problem"),
+    [
+        # Which config the toggle enables depends on what ran before it.
+        (
+            [
+                {"quantizer_name": "*weight_quantizer", "cfg": _INT4_W, "enable": False},
+                {"quantizer_name": "*weight_quantizer", "enable": True},
+            ],
+            "without a config",
+        ),
+        (
+            [
+                {"quantizer_name": "*weight_quantizer", "cfg": [_INT4_W, {"num_bits": 8}]},
+                {"quantizer_name": "*weight_quantizer.1", "cfg": {"num_bits": 8, "axis": None}},
+            ],
+            "stages",
+        ),
+        (
+            [
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "parent_class": "test.PerWeightExperts",
+                    "cfg": _INT4_W,
+                }
+            ],
+            "parent_class",
+        ),
+    ],
+    ids=["enable_only_last", "stage_rule", "parent_class"],
+)
+def test_rule_forms_replay_cannot_reproduce_are_refused(rules, problem):
+    _CANDIDATES["unsupported"] = _deny(*rules)
     try:
-        model, state = _search("gradient", ["named"], 8.0)
+        with pytest.raises(ValueError, match=problem):
+            _search("gradient", ["unsupported"], 16.0)
     finally:
-        del _CANDIDATES["named"]
-    replayed = _replayed(mtq.get_auto_quantize_config(state))
-    # Dense replay of such patterns is tracked in #3508.
-    assert _formats(replayed, ("experts",)) == _formats(model, ("experts",))
-    assert [q.is_enabled for q in model.experts.w1_weight_quantizer] == [True, True]
-    assert model.experts.w1_weight_quantizer[1].axis is None
-    assert model.experts.w2_input_quantizer.is_enabled
-    assert isinstance(state["best"]["recipe"]["experts.quant_recipe"], QuantRecipe)
+        del _CANDIDATES["unsupported"]
+
+
+def test_a_candidate_must_set_every_per_weight_quantizer():
+    no_deny_all = {"quant_cfg": [{"quantizer_name": "*weight_quantizer", "cfg": _INT4_W}]}
+    _CANDIDATES["partial"] = no_deny_all
+    try:
+        with pytest.raises(ValueError, match="no rule for"):
+            _search("gradient", ["partial"], 16.0)
+    finally:
+        del _CANDIDATES["partial"]
 
 
 def test_path_rules_of_other_modules_leave_unquantized_per_weight_modules_alone():
@@ -271,19 +270,6 @@ def test_path_rules_of_other_modules_leave_unquantized_per_weight_modules_alone(
     replayed = _replayed(mtq.get_auto_quantize_config(state))
     assert set(_formats(replayed, ("experts",)).values()) == {("disabled",)}
     assert replayed.dense.weight_quantizer.is_enabled
-
-
-def test_a_target_only_resolved_costs_meet_is_searched():
-    # Nominally 16 bits, as its INT4 rule is disabled, but the toggle quantizes the experts.
-    _CANDIDATES["toggled_int4"] = _deny(
-        {"quantizer_name": "*w[12]_weight_quantizer", "cfg": _INT4_W, "enable": False},
-        {"quantizer_name": "*w[12]_weight_quantizer", "enable": True},
-    )
-    try:
-        model, _ = _search("gradient", ["toggled_int4"], 8.0)
-    finally:
-        del _CANDIDATES["toggled_int4"]
-    assert model.experts.w1_weight_quantizer.num_bits == 4
 
 
 def test_per_weight_modules_are_priced_at_their_resolved_weight_format():
@@ -418,3 +404,29 @@ def test_a_recipes_effective_bits_prices_a_named_weight_format():
         for name in ("w1", "w2")
     }
     assert _per_weight_compression(recipe, quantizers) == 8.5 / 16
+
+
+def test_per_weight_modules_replay_from_fresh_quantizers_over_a_list_config_baseline():
+    # The baseline makes every weight quantizer sequential before the replayed entries land.
+    three_stages = [{"num_bits": 8, "axis": 0}, {"num_bits": 8}, {"num_bits": 8, "axis": 0}]
+    baseline = _deny({"quantizer_name": "*weight_quantizer", "cfg": three_stages})
+    data = [torch.randn(2, 4, 16) for _ in range(2)]
+    model, state = mtq.auto_quantize(
+        _Model(),
+        constraints={"effective_bits": 16.0},
+        fixed_quantization_config=baseline,
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["experts"],
+                "quantization_formats": [_CANDIDATES["w4a8"]],
+                "allow_no_quant": False,
+            }
+        ],
+        data_loader=data,
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, batch: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+    replayed = _replayed(mtq.get_auto_quantize_config(state))
+    assert _formats(replayed, ("experts",)) == _formats(model, ("experts",))

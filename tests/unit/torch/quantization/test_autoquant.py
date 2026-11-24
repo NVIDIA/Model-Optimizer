@@ -1156,7 +1156,7 @@ _NESTED = [
     {"quantizer_name": "*weight_quantizer", "cfg": _W4A8},
     {"quantizer_name": "*w[12]_weight_quantizer", "cfg": _W4A8},
 ]
-# Scored at its INT8 stage, but export reads the quantizer by its disabled INT4 stage.
+# A rule for a stage: replay re-applies each quantizer's last rule by name, not its stages.
 _FIRST_STAGE_OFF = [
     {"quantizer_name": "*weight_quantizer", "cfg": _W4A8},
     {"quantizer_name": "*weight_quantizer.0", "enable": False},
@@ -1171,7 +1171,7 @@ _FIRST_STAGE_OFF = [
         (_W1_INT8_W2_FP8, "different formats"),
         (_W1_INPUT_ONLY, "different formats"),
         (_NESTED, "nests their stages"),
-        (_FIRST_STAGE_OFF, "only some stages"),
+        (_FIRST_STAGE_OFF, "rule for the stages"),
     ],
     ids=["partial", "mixed", "same_cost", "one_input", "nested", "first_stage_off"],
 )

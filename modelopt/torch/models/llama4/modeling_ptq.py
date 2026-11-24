@@ -28,9 +28,6 @@ __all__: list[str] = []
 
 
 class _QuantLlama4TextExperts(_TransposedExpertsCalibMixin, QuantModule):
-    # The forward looks its quantizers up by name, so AutoQuantize may swap them.
-    _auto_quantize_per_weight_quantizers = True
-
     def _setup(self):
         self.gate_up_proj_input_quantizer = TensorQuantizer()
         self.gate_up_proj_weight_quantizer = TensorQuantizer()

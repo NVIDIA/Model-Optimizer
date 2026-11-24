@@ -680,7 +680,7 @@ def _run_auto_quantize_recipe(
     fixed_quantize_config = recipe.quantize
     # Off unless given, like the shard flags autoquant_utils reads, for args built without them.
     format_shard = getattr(args, "auto_quantize_format_shard", None)
-    finalized_quant_cfg = _auto_quantize_finalize_config(recipe, args, full_model)
+    finalized_quant_cfg = _auto_quantize_finalize_config(recipe, args)
     if finalized_quant_cfg is not None:
         # The search's scores are saved: calibrate the source weights with the frozen formats.
         mono_quantize(
