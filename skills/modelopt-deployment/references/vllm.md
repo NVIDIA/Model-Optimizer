@@ -89,3 +89,5 @@ lm_eval --model local-completions \
 | OOM on startup | Increase `--tensor-parallel-size` or reduce `--max-model-len` |
 | AWQ checkpoints not loading | AWQ is not supported in vLLM via modelopt path; use FP8 or NVFP4 |
 | Mixed precision not working | Not supported for fakequant |
+| Server rejects the chat template with `unknown statement generation` (seen with Qwen3.8 on the Rust frontend) | The Rust frontend does not support the `{% generation %}` tag: serve with the Python frontend (`VLLM_USE_RUST_FRONTEND=0`) and keep the checkpoint's own template |
+| Engine fails at start with a ZMQ IPC or `AF_UNIX` path error | The socket path under a long `TMPDIR` exceeds the Linux limit (about 107 bytes): give the server a short `TMPDIR` |
