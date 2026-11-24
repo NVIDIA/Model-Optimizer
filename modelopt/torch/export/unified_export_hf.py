@@ -1773,6 +1773,7 @@ def _write_hf_export_config(
     original_config = f"{export_dir}/config.json"
     with open(original_config) as file:
         config_data = json.load(file)
+    _restore_source_layer_types(config_data, _source_config_json(model))
     sanitize_hf_config_for_deployment(config_data, model)
     if quantization_config is not None:
         config_data["quantization_config"] = quantization_config
@@ -1840,6 +1841,36 @@ def _source_checkpoint(model: nn.Module) -> str | None:
         or getattr(getattr(model, "config", None), "_name_or_path", None)
         or None
     )
+
+
+def _source_config_json(model: nn.Module) -> Any:
+    """The source checkpoint's ``config.json`` as parsed, or ``{}`` if it cannot be read."""
+    ckpt = _source_checkpoint(model)
+    if ckpt and Path(ckpt, "config.json").is_file():
+        with contextlib.suppress(OSError, ValueError):
+            return json.loads(Path(ckpt, "config.json").read_text())
+    return {}
+
+
+def _restore_source_layer_types(config_data: dict, source: Any) -> None:
+    """Spell ``layer_types`` as the source ``config.json`` does, in the config and its sub-configs.
+
+    transformers renames some layer types on load (``deepseek_sparse_attention`` becomes
+    ``indexed_attention`` in 5.18), and runtimes validate against the names the checkpoint ships.
+    Only a list of the same length is restored, so entries a later step trims keep their handling.
+    """
+    if not isinstance(source, dict):
+        return
+    source_types = source.get("layer_types")
+    if (
+        isinstance(source_types, list)
+        and isinstance(config_data.get("layer_types"), list)
+        and len(source_types) == len(config_data["layer_types"])
+    ):
+        config_data["layer_types"] = source_types
+    for key, value in config_data.items():
+        if isinstance(value, dict):
+            _restore_source_layer_types(value, source.get(key))
 
 
 def carryable_unplaced_keys(model: nn.Module) -> list[str]:
@@ -2040,11 +2071,7 @@ def _source_distributed_config_attrs(model: nn.Module):
     that cannot be read counts as having none. The run's values come back on exit, since the
     sharded model still reads them (transformers' ``tp_plan`` checks ``distributed_config``).
     """
-    source: Any = {}
-    ckpt = _source_checkpoint(model)
-    if ckpt and Path(ckpt, "config.json").is_file():
-        with contextlib.suppress(OSError, ValueError):
-            source = json.loads(Path(ckpt, "config.json").read_text())
+    source = _source_config_json(model)
 
     _missing = object()
     saved: list[tuple[Any, str, Any]] = []

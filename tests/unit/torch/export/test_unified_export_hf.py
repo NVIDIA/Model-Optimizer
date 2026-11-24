@@ -43,6 +43,7 @@ from modelopt.torch.export.quant_utils import (
     sync_tied_input_amax,
 )
 from modelopt.torch.export.unified_export_hf import (
+    _write_hf_export_config,
     _copy_non_model_files_from_source,
     _fuse_shared_input_modules,
     _resolve_export_dtype,
@@ -1149,6 +1150,25 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
     assert written["text_config"].get("base_model_ep_plan") == source_plan
     assert config.distributed_config is distributed_config
     assert config.text_config.base_model_ep_plan is swapped_plan
+
+
+def test_export_config_keeps_the_source_layer_type_names(tmp_path):
+    """transformers 5.18 renames deepseek_sparse_attention to indexed_attention on load; the
+    exported config keeps the spelling of the source checkpoint, which runtimes validate."""
+    source, export = tmp_path / "source", tmp_path / "export"
+    source.mkdir()
+    export.mkdir()
+    names = ["linear_attention", "deepseek_sparse_attention"]
+    (source / "config.json").write_text(json.dumps({"text_config": {"layer_types": names}}))
+    renamed = {"text_config": {"layer_types": ["linear_attention", "indexed_attention"]}}
+    (export / "config.json").write_text(json.dumps(renamed))
+    model = torch.nn.Module()
+    model.config = SimpleNamespace()
+    model._modelopt_source_checkpoint = str(source)
+
+    _write_hf_export_config(model, None, export)
+
+    assert json.loads((export / "config.json").read_text())["text_config"]["layer_types"] == names
 
 
 def _one_rank_fails_after_the_write_job(rank, size, tmp_dir, failure):
