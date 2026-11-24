@@ -963,15 +963,18 @@ def _iter_use_cache_configs(model: torch.nn.Module) -> Iterator[Any]:
 
 
 @contextmanager
-def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
+def _disable_use_cache(
+    model: torch.nn.Module, *, for_layerwise_capture: bool = False
+) -> Iterator[None]:
     """Set model config ``use_cache`` flags to ``False`` for the duration of the block.
 
     KV caching is unwanted during calibration / memory-probe forward passes:
     it wastes memory, and for hybrid Mamba/attention models (e.g., NemotronH)
     the cache state is mutated in-place and breaks correctness. Step-3.5-Flash
     and Step3.7 read ``use_cache`` directly even when their configs omit it.
-    Only synthesize a missing flag for those configs, including the nested
-    ``text_config``. Restore the original state on exit.
+    Dataset loops and batch-size probes provide this temporary flag on custom
+    configs too. Layerwise capture may see unrelated decoder metadata, so it
+    creates a missing flag only on those Step configs.
     """
     missing = object()
 
@@ -986,9 +989,10 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
     with ExitStack() as stack:
         for config in _iter_use_cache_configs(model):
             prev = getattr(config, "use_cache", missing)
-            if prev is missing and getattr(config, "model_type", None) not in (
-                "step3p5",
-                "step3p7",
+            if (
+                for_layerwise_capture
+                and prev is missing
+                and getattr(config, "model_type", None) not in ("step3p5", "step3p7")
             ):
                 continue
             # An assignment validator may store the new value before raising.
