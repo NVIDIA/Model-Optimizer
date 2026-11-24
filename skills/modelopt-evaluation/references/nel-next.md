@@ -221,6 +221,16 @@ with its own `run_id`, copying the shared `services:` block.
   containing `${` — `experiment_name` included, since the same pass resolves the block. Keep `tracking_uri` as `${MLFLOW_TRACKING_URI}` — cross-server, the inherited name
   makes a same-named experiment here and `modelopt_run_url` is the only route back.
 
+### Output-cap checks
+
+Some task recipes require no configured per-response output cap. For those tasks,
+do not apply a model-card budget or numeric fallback.
+`drop_params` strips request fields only. Check the merged config,
+server overrides, and inherited defaults (including `generation_config.json`) for
+numeric caps. Clear them without changing sampling, stop/EOS, context limits, or
+timeouts. For vLLM, use `--override-generation-config '{"max_new_tokens":null}'`
+where supported.
+
 ## Run (dry-run → canary → full) → push to MLflow
 
 ```bash

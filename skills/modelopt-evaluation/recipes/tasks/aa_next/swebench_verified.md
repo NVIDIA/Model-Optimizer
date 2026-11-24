@@ -5,23 +5,14 @@ run flow). Same harbor/ECS-Fargate flow as Terminal-Bench; the deltas are the
 **OpenHands agent**, a larger problem set, longer timeouts, and a different
 ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 
+Do not configure a per-response output cap for this task. Follow the
+[shared output-cap checks](../../../references/nel-next.md#output-cap-checks).
+
 > **Source of truth:** `configs/benchmarks/swe-bench-verified/bench.yaml` in
 > nvidia-eval-factory-benchmarking (`dl/JoC/competitive_evaluation/…`), with the eval-image
 > pin in `configs/shared/nel_next_containers.yaml` — match its values for a reference run.
 >
 > The sibling `bench_direct.yaml` is a different backend (Gym/opencode) — don't mix its values in.
-
-## Output-token policy
-
-The canonical `drop_params` already strips `max_tokens`/`max_completion_tokens` (table below).
-ModelOpt's SWE-bench Verified / OpenHands protocol keeps **no configured per-response output cap**,
-overriding model-card budgets and fallbacks per [generation-policy precedence](../../../references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
-Preserve that existing stripping; remove numeric output caps from
-merged generation settings, `proxy.extra_body`, solver/agent/LLM kwargs, interceptors and CLI/server overrides.
-Check backend/version defaults and inherited `generation_config.json`; neutralize numeric `max_new_tokens`
-without resetting sampling or stop/EOS settings
-(vLLM: `--override-generation-config '{"max_new_tokens":null}'` where supported). Never substitute a numeric fallback.
-Follow shared guidance for sampling/thinking, context limits and timeouts; record these for baseline/candidate comparison.
 
 ## Task-specific values (canonical `bench.yaml`)
 
