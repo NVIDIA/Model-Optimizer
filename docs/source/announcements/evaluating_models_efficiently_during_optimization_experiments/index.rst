@@ -254,8 +254,11 @@ evaluation speed:
 
 In both approaches, we produce the same aggregate mean score by averaging across all questions
 and repetitions. Using question-level versus repetition-level analysis only changes how uncertainty
-is estimated with confidence intervals. Keep per-question results for more detailed paired
-comparisons across experiments.
+is estimated with confidence intervals.
+
+- **Within an experiment**, use paired analysis when both checkpoints answer the same questions.
+- **Across experiments**, report an aggregate score per checkpoint. Keep per-question results for
+  paired analysis when you can match the question IDs.
 
 Is question-level analysis reliable on real benchmarks compared with repetition-level analysis?
 We compare the two approaches by spending the same response budget on more unique questions or
