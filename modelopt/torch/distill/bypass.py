@@ -69,6 +69,12 @@ def bypass(
     discard the affected model and reload it before reuse. Cleanup failures are
     attached to the primary exception when one is already propagating.
 
+    For HF PTQ, use
+    :meth:`TransformersBypassAdapter.weight_patterns
+    <modelopt.torch.distill.plugins.transformers.TransformersBypassAdapter.weight_patterns>`
+    with the same selectors to obtain ordinary ModelOpt ``weight_quantizer`` globs
+    before quantizing the student. These patterns exclude frozen routing gates.
+
     Returns:
         The supplied student, finalized for ordinary ModelOpt save/export. Temporary
         fields and hooks are removed unless owner restoration fails; caller modes

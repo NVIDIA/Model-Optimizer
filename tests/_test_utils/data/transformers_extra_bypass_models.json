@@ -290,6 +290,15 @@
         "vt_num_attention_heads": 12,
         "vt_num_hidden_layers": 27
       }
+    },
+    "retrieved_date": "2026-11-24",
+    "source_url": "https://huggingface.co/moonshotai/Kimi-K3.1-Pro/resolve/d9e99b0792a5e93b78ea9bea62a68167e36ddd9e/config.json",
+    "sha256": "d95037631e3f23bf527a9f476f25209b231b46853a84877b9c56d5672b8d1202",
+    "config_transformations": {
+      "removed_fields": [
+        "text_config.quantization_config"
+      ],
+      "reason": "Use original-weight tiny test models; sha256 identifies the unmodified source config bytes."
     }
   }
 ]
