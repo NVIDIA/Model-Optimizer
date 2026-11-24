@@ -26,6 +26,10 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.repair_partition import (
+    NativeWeightPartition,
+    native_weight_partition,
+)
 
 
 @pytest.mark.parametrize("name", [*sorted(IQ_FORMAT_REGISTRY), "q8_0"])
@@ -250,3 +254,23 @@ def test_packed_staging_rolls_back_all_modules(monkeypatch, failure):
             pre_scale,
         )
         assert not hasattr(q, "_native_weight_meta")
+
+
+@pytest.mark.parametrize("policy", ["uncalibrated", "constant", "dynamic"])
+def test_native_partition_preserves_threshold_policy(policy):
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=(4, 3),
+            axis=0,
+            use_constant_amax=policy == "constant",
+            type="dynamic" if policy == "dynamic" else "static",
+        )
+    )
+    view = NativeWeightPartition((16, 32), 0, 0, 2)
+    assert getattr(quantizer, "_amax", None) is None
+    if policy == "uncalibrated":
+        with pytest.raises(ValueError, match="require calibrated thresholds"):
+            native_weight_partition(quantizer, view)
+    else:
+        fields, _, _ = native_weight_partition(quantizer, view)
+        assert "_amax" not in fields
