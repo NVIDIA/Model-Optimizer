@@ -474,6 +474,8 @@ def _unique_batch_worker(rank, size, axis, unequal):
     for name, value in reference.state_dict().items():
         actual = student.state_dict()[name]
         actual = actual.full_tensor() if isinstance(actual, DTensor) else actual
+        assert actual.dtype == value.dtype, name
+        actual = actual.to(device=value.device)
         if value.is_floating_point():
             torch.testing.assert_close(actual, value, rtol=0, atol=0)
         else:
