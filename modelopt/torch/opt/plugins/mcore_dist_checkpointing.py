@@ -18,6 +18,7 @@
 # TODO: Add unit tests for this plugin
 import copy
 import os
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -205,15 +206,21 @@ def _load_extra_state_from_sharded_checkpoint(
 def _read_checkpoint_layout(model: torch.nn.Module, checkpoint_name: str | Path, prefix: str):
     """Have a converted model's modules read how the checkpoint laid out their state, loading none."""
     extra_state_dict = _load_sharded_extra_state(model, checkpoint_name, prefix)
+    readers = []
+    for name, module in model.named_modules():
+        state = extra_state_dict.get(f"{name}._extra_state" if name else "_extra_state")
+        read_layout = getattr(module, "modelopt_read_checkpoint_layout", None)
+        if callable(read_layout) and isinstance(state, torch.Tensor) and state.numel():
+            readers.append(partial(read_layout, safe_load(state.detach().cpu().numpy().tobytes())))
 
-    def read_layouts():
-        for name, module in model.named_modules():
-            state = extra_state_dict.get(f"{name}._extra_state" if name else "_extra_state")
-            read_layout = getattr(module, "modelopt_read_checkpoint_layout", None)
-            if callable(read_layout) and isinstance(state, torch.Tensor) and state.numel():
-                read_layout(safe_load(state.detach().cpu().numpy().tobytes()))
+    def check_layouts():
+        for read_layout in readers:
+            read_layout(check_only=True)
 
-    dist.all_reduce("ModelOpt's per-module state", read_layouts, combine=lambda _: None)
+    # Every rank checks first, so a rejection on any rank leaves every module's layout as it was.
+    dist.all_reduce("ModelOpt's per-module state", check_layouts, combine=lambda _: None)
+    for read_layout in readers:
+        read_layout()
 
 
 def restore_sharded_modelopt_state(

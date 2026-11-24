@@ -63,6 +63,7 @@ from ..ggml.common import (
     PINNED_IMPORTANCE_PREFIX,
     PINNED_PAYLOAD_PREFIX,
     check_pin_blocks,
+    pin_names,
     pins_fit,
     resize_pins,
 )
@@ -548,10 +549,11 @@ class _MegatronParallelLinear(_ParallelLinear):
             if isinstance(leaf, TensorQuantizer)
         ]
 
-    def _check_pin_reshard(self, leaves) -> bool:
+    def _check_pin_reshard(self, leaves, legacy: bool) -> bool:
         """Whether ``leaves``' GGML pins were saved at another TP size; raise if they'd load misplaced.
 
-        ``leaves`` pairs each weight with its quantizer, or with the quantizer's saved state.
+        ``leaves`` pairs each weight with its quantizer, or with the quantizer's saved state;
+        ``legacy`` says the pins are in 0.49.0rc0's layout.
         """
         unfit = [
             (weight, quantizer) for weight, quantizer in leaves if not pins_fit(quantizer, weight)
@@ -564,7 +566,7 @@ class _MegatronParallelLinear(_ParallelLinear):
                 "tensor-parallel size. Load the checkpoint at the size it was saved at."
             )
         gated_fc1 = getattr(self, "_modelopt_gated_fc1", False)
-        if gated_fc1 and getattr(self, "_legacy_ggml_pin_layout", False):
+        if gated_fc1 and legacy:
             raise ValueError(
                 "This checkpoint stores the GGML pins of a gated MLP in ModelOpt 0.49.0rc0's "
                 "layout, which can't be loaded at another tensor-parallel size. Load it at the "
@@ -586,21 +588,36 @@ class _MegatronParallelLinear(_ParallelLinear):
     def modelopt_post_restore(self, prefix: str = ""):
         # GGML pins are restored at the saved shard's shape; the sharded load fills this rank's.
         leaves = [(weight, leaf) for weight, leaf, _ in self._weight_quantizer_leaves()]
-        if self._check_pin_reshard(leaves):
+        if self._check_pin_reshard(leaves, getattr(self, "_legacy_ggml_pin_layout", False)):
             for weight, leaf in leaves:
                 resize_pins(leaf, weight)
         super().modelopt_post_restore(prefix=prefix)
 
-    def modelopt_read_checkpoint_layout(self, state: dict):
-        """Read how a checkpoint loaded into this converted module laid out its state."""
-        self._legacy_ggml_pin_layout = "modelopt_swiglu_ggml_pins" not in state
+    def modelopt_read_checkpoint_layout(self, state: dict, check_only: bool = False):
+        """Read how a checkpoint loaded into this converted module laid out its state.
+
+        With ``check_only``, only raise if this module can't load the checkpoint's state.
+        """
+        legacy = "modelopt_swiglu_ggml_pins" not in state
+        if not check_only:
+            self._legacy_ggml_pin_layout = legacy
+            return
         saved = state.get("modelopt_quantizer_state") or {}
-        # Saved per EP rank, as in quant_module_set_extra_state.
-        leaves = [
-            (weight, saved.get(name, saved.get(re.sub(r"(weight_quantizer)\.\d+", r"\1.0", name))))
-            for weight, _, name in self._weight_quantizer_leaves()
-        ]
-        self._check_pin_reshard([(weight, state) for weight, state in leaves if state is not None])
+        leaves = []
+        for weight, leaf, name in self._weight_quantizer_leaves():
+            # Saved per EP rank, as in quant_module_set_extra_state.
+            substate = saved.get(name, saved.get(re.sub(r"(weight_quantizer)\.\d+", r"\1.0", name)))
+            if substate is None:
+                continue
+            # The load only fills the pins this module already has.
+            if not pin_names(substate) <= pin_names(leaf):
+                raise ValueError(
+                    "This checkpoint has GGML pins that this quantized model has no buffers for "
+                    "(e.g. its weights were never pinned), so they wouldn't load. Load it into a "
+                    "model that isn't quantized yet, whose restore creates them."
+                )
+            leaves.append((weight, substate))
+        self._check_pin_reshard(leaves, legacy)
 
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):
         if v.ndim == 4:
@@ -792,6 +809,10 @@ class _QuantMegatronMLP(_MegatronMLP):
         ):
             return False
         return super()._is_swiglu_state(key, sharded_tensor)
+
+    def _forces_singleton_local_shards(self) -> bool:
+        # A shared expert plans its other state as unconverted, with the caller's setting.
+        return not isinstance(self, megatron_shared_experts.SharedExpertMLP)
 
 
 class _RealQuantMegatronParallelLinear(RealQuantLinear):

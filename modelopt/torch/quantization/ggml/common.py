@@ -255,6 +255,15 @@ def _saved_pins(quantizer) -> tuple[dict[str, torch.Size], tuple | None]:
     return shapes, getattr(quantizer, "_slices", None)
 
 
+def pin_names(quantizer) -> set[str]:
+    """The names of ``quantizer``'s pinned buffers, or those of its saved state."""
+    return {
+        name
+        for name in _saved_pins(quantizer)[0]
+        if name.startswith((PINNED_PAYLOAD_PREFIX, PINNED_IMPORTANCE_PREFIX))
+    }
+
+
 def pins_fit(quantizer, weight: torch.Tensor) -> bool:
     """Whether ``quantizer``'s pins, or those of its saved modelopt state, have ``weight``'s shape."""
     shapes, slices = _saved_pins(quantizer)

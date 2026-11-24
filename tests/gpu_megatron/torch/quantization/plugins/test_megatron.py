@@ -2008,6 +2008,11 @@ def _test_shared_expert_checkpoint_from_before_its_registration(tmp_path, rank, 
     params = dict(target.named_parameters())
     for name, param in expected.items():
         assert torch.equal(params[name], param), name
+    # Planned without singleton_local_shards, its weight keeps Megatron's own (unsuffixed) key.
+    shared = target.decoder.layers[0].mlp.shared_experts
+    fc1 = shared.sharded_state_dict("x.", metadata={"singleton_local_shards": False})
+    built = fc1["x.linear_fc1.weight"].build()
+    assert {t.key for t in built} == {"x.linear_fc1.weight"}
 
 
 def test_shared_expert_checkpoint_from_before_its_registration(dist_workers_size_2, tmp_path):
@@ -2128,8 +2133,9 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
         "padded_to_aligned": 192,
     }
     hidden_size = hidden_size.get(case, 64 if case.endswith("_fc2") else 512)
-    # Saved at TP=2 and loaded at TP=1, or the other way around.
+    # Saved at TP=2 and loaded at TP=1, or the other way around, or at the same size.
     save_tp, load_tp = (1, size) if case == "grouped_aligned_fc2" else (size, 1)
+    save_tp, load_tp = (size, size) if case == "unpinned_converted" else (save_tp, load_tp)
     # Only the first of the target's two pipeline stages has pins.
     load_pp = size if case == "rc0_swiglu_pins_one_stage" else 1
 
@@ -2193,9 +2199,11 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
     )
     target = create_model(load_tp, load_pp)
     if case.endswith("_converted"):
-        # Already converted, with its own pins: the restore only reads the checkpoint's layout.
+        # Already converted: the restore only reads the checkpoint's layout. Its own pins, unless
+        # its weights were never pinned.
         mtq.quantize(target, config, get_forward(target))
-        mtq.initialize_qdq_weights(target)
+        if case != "unpinned_converted":
+            mtq.initialize_qdq_weights(target)
     if case == "padded_to_aligned":
         # The saved shards hold more blocks than TP=1 asks for; Megatron's shape check rejects it.
         restore_sharded_modelopt_state([target], tmp_path)
@@ -2205,9 +2213,25 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
     # A rank whose own pins fit raises too, rather than enter the weight load alone.
     error = NotImplementedError if grouped else ValueError
     match = "0.49.0rc0" if rc0 else r"can't be loaded at another"
-    match = "by component" if case == "mamba_in_proj" else match
+    match = {"mamba_in_proj": "by component", "unpinned_converted": "no buffers for"}.get(
+        case, match
+    )
     with pytest.raises(error if rank == 0 else (error, RuntimeError), match=match):
         restore_sharded_modelopt_state([target], tmp_path)
+    if case.endswith("_converted") and case != "unpinned_converted":
+        # The rejected checkpoint changed nothing: saved again, the target reloads as it is.
+        expected = _pinned_effective_weights(target)
+        resaved = tmp_path / "resaved"
+        resaved.mkdir(exist_ok=True)
+        save_distributed_checkpoint(resaved, target)
+        save_sharded_modelopt_state([target], resaved)
+        reloaded = create_model(load_tp, load_pp)
+        restore_sharded_modelopt_state([reloaded], resaved)
+        reloaded = load_distributed_checkpoint(resaved, reloaded)
+        restored = _pinned_effective_weights(reloaded)
+        assert expected and restored.keys() == expected.keys()
+        for name, weight in expected.items():
+            assert torch.equal(restored[name], weight), name
 
 
 @pytest.mark.parametrize(
@@ -2223,6 +2247,7 @@ def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
         "rc0_swiglu_pins_converted",
         "rc0_swiglu_pins_one_stage",
         "mamba_in_proj",
+        "unpinned_converted",
     ],
 )
 def test_ggml_payload_tp_reshard_rejected(dist_workers_size_2, tmp_path, case):
