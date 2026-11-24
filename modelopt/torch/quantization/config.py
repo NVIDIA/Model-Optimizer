@@ -1269,8 +1269,8 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
             "Requires ``fused_group_scale``. Each group export fuses gets one SVD of its "
             "stacked weights (a shared ``lora_a``) instead of one SVD per linear, and after "
             "the final max calibration its members share the group max of their input and "
-            "weight amax. Calibration then leaves each group as export writes it, and export "
-            "keeps it unchanged."
+            "weight amax. Export then keeps these groups as calibrated. It still averages the "
+            "scales of MoE experts that are separate linears, and re-fits their low-rank branches."
         ),
     )
 

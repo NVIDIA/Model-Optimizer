@@ -1979,7 +1979,7 @@ def awq_lite(
         helpers = [m.awq_lite for m in model.modules() if hasattr(m, "awq_lite")]
         by_name = {h.name: h for h in helpers}
         input_to_linear, keys_of = {}, {}
-        for h in helpers:  # model order, so every rank visits the groups in the same order
+        for h in helpers:
             keys_of[h.name] = {
                 tuple(dict.fromkeys(p.name for p in peers)) for peers in h.input_peers
             }
@@ -2437,6 +2437,14 @@ def _top_singular_factors(w, rank, oversample=32):
         return u[:, :rank] * s[:rank], vt[:rank]
     wide = w.shape[0] < w.shape[1]
     a = w.T if wide else w
+    lo, hi = w.aminmax()
+    peak = max(-lo.item(), hi.item())  # a host sync, as eigh's own is
+    if peak > 0 and not 1e-15 < peak < 1e15:
+        # The Gram matrix squares the weight's magnitudes, which float32 would overflow or underflow.
+        # Rescaled only then, as the rescaled copy costs as much memory as the weight.
+        a = a / peak
+    else:
+        peak = 1.0
     matmul = torch.backends.cuda.matmul
     precision = matmul.fp32_precision
     # TF32's 10-bit mantissa, or the 16-bit dtype autocast would run the matmuls in, would swamp the
@@ -2446,7 +2454,7 @@ def _top_singular_factors(w, rank, oversample=32):
         with torch.autocast(w.device.type, enabled=False):
             basis = torch.linalg.eigh(a.T @ a)[1][:, -(rank + oversample) :]
             u, s, yt = torch.linalg.svd(a @ basis, full_matrices=False)
-            u, s, v = u[:, :rank], s[:rank], basis @ yt[:rank].T
+            u, s, v = u[:, :rank], s[:rank] * peak, basis @ yt[:rank].T
     finally:
         matmul.fp32_precision = precision
     return (v * s, u.T) if wide else (u * s, v.T)  # a = U·S·Vᵀ, and w = aᵀ when wide

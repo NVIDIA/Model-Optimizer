@@ -582,21 +582,26 @@ def test_svdquant_fused_group_scale():
     _svdquant_fused_group_scale_case(_SharedInputLLM(), loop, groups, kept=["out"])
 
 
-@pytest.mark.parametrize("autocast", [False, True])
+@pytest.mark.parametrize(
+    ("autocast", "scale"), [(False, 1.0), (True, 1.0), (False, 1e20), (False, 1e-25)]
+)
 @pytest.mark.parametrize(("shape", "rank"), [((128, 48), 4), ((48, 128), 4), ((6, 8), 8)])
-def test_svd_matches_full_svd(shape, rank, autocast):
+def test_svd_matches_full_svd(shape, rank, autocast, scale):
     """The top-rank factors match the full SVD for tall and wide weights, and pad past the rank.
-    Under BF16 autocast too, which would otherwise compute the Gram matrix in BF16."""
+    Under BF16 autocast too, which would otherwise compute the Gram matrix in BF16, and for weights
+    whose squares overflow or underflow float32."""
     torch.manual_seed(0)
     spectrum = torch.logspace(0, -2, min(shape))
     u = torch.linalg.qr(torch.randn(shape[0], min(shape)))[0]
     v = torch.linalg.qr(torch.randn(shape[1], min(shape)))[0]
-    weight = u * spectrum @ v.T
+    weight = u * spectrum @ v.T * scale
     with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
         us, vt = svd(weight, rank)
     assert us.shape == (shape[0], rank) and vt.shape == (rank, shape[1])
     k = min(rank, *shape)
-    torch.testing.assert_close(us @ vt, u[:, :k] * spectrum[:k] @ v[:, :k].T, atol=1e-5, rtol=0)
+    torch.testing.assert_close(
+        us @ vt / scale, u[:, :k] * spectrum[:k] @ v[:, :k].T, atol=1e-5, rtol=0
+    )
     torch.testing.assert_close(vt[:k] @ vt[:k].T, torch.eye(k), atol=1e-5, rtol=0)
 
 

@@ -21,9 +21,10 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from _test_utils.torch.transformers_models import get_tiny_qwen3
+from safetensors.torch import load_file
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.unified_export_hf import requantize_resmooth_fused_llm_layers
+from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
 
 
@@ -132,10 +133,10 @@ def test_nvfp4_awq_clip_picks_the_same_clip_on_every_rank(need_2_gpus, dist_work
     dist_workers.run(_nvfp4_awq_clip_on_every_rank_job)
 
 
-def test_nvfp4_svdquant_fused_groups_export_as_calibrated():
-    """With ``fused_group_scale`` and ``fused_group_svd``, the fusion HF export applies
-    (``requantize_resmooth_fused_llm_layers``, which finds q/k/v and gate/up by its own dummy
-    forward) leaves the calibrated NVFP4 model unchanged."""
+def test_nvfp4_svdquant_fused_groups_export_as_calibrated(tmp_path):
+    """With ``fused_group_scale`` and ``fused_group_svd``, the HF checkpoint holds the calibrated
+    model: export, which finds q/k/v and gate/up by its own dummy forward, keeps their shared
+    low-rank branch, smoothing scale and ranges as calibrated."""
     torch.manual_seed(0)
     model = get_tiny_qwen3().cuda()
     input_ids = torch.randint(0, model.config.vocab_size, (2, 16), device="cuda")
@@ -153,8 +154,25 @@ def test_nvfp4_svdquant_fused_groups_export_as_calibrated():
             lora_a = group[0].weight_quantizer.svdquant_lora_a
             assert all(torch.equal(m.weight_quantizer.svdquant_lora_a, lora_a) for m in group)
 
-    calibrated, logits = copy.deepcopy(model.state_dict()), model(input_ids).logits
-    requantize_resmooth_fused_llm_layers(model)
-    for name, value in model.state_dict().items():
-        assert torch.equal(value, calibrated[name]), name
-    assert torch.equal(model(input_ids).logits, logits)
+    calibrated = {
+        name: {
+            "weight_quantizer._svdquant_lora_a": m.weight_quantizer.svdquant_lora_a.cpu(),
+            "weight_quantizer._svdquant_lora_b": m.weight_quantizer.svdquant_lora_b.cpu(),
+            "pre_quant_scale": m.input_quantizer.pre_quant_scale.cpu(),
+            # NVFP4 stores each per-tensor range as amax / (6 * 448), E2M1's max times E4M3's.
+            "input_scale": m.input_quantizer.amax.float().cpu() / 2688,
+            "weight_scale_2": m.weight_quantizer.amax.float().cpu() / 2688,
+        }
+        for name, m in model.named_modules()
+        if getattr(getattr(m, "weight_quantizer", None), "svdquant_lora_a", None) is not None
+    }
+    export_hf_checkpoint(model, export_dir=tmp_path)
+    saved = {}
+    for path in tmp_path.glob("*.safetensors"):
+        saved.update(load_file(path))
+    for name, tensors in calibrated.items():
+        for key, value in tensors.items():
+            # The two ranges are derived in float32, which export may round differently.
+            exact = key not in ("input_scale", "weight_scale_2")
+            tolerance = {"rtol": 0, "atol": 0} if exact else {}
+            torch.testing.assert_close(saved[f"{name}.{key}"], value, **tolerance, msg=key)
