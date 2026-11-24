@@ -149,9 +149,6 @@ The confidence intervals and p-values come from different procedures and need no
 same conclusion. See :ref:`Statistical methods <evaluation-statistical-methods>` in the
 Reproducibility Notes for details.
 
-Doomed reasoning loops
-^^^^^^^^^^^^^^^^^^^^^^
-
 The candidate has fewer cap hits on SciCode (p < 0.001).
 “Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05).
 
@@ -175,27 +172,6 @@ The candidate has fewer cap hits on SciCode (p < 0.001).
    `ModelOpt instructions for stopping repeated reasoning
    <https://github.com/NVIDIA/Model-Optimizer/blob/main/skills/modelopt-evaluation/references/doom_loops.md>`__.
 
-Abstention ratio
-^^^^^^^^^^^^^^^^
-
-`AA-Omniscience public
-v1 <https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public>`__ distinguishes
-abstention from incorrect guessing. Its ``NOT_ATTEMPTED`` category includes some uncertain guesses.
-We exclude empty final responses.
-
-“Yes” means evidence of a higher Candidate abstention rate among non-correct responses
-(p < 0.05); “no evidence” means an increase was not established.
-
-+---------------+---------------+---------------+---------------+---------------+---------------+
-| Measure       | Baseline      | Candidate     | Difference    | Candidate     | Candidate     |
-|               |               |               | [95% CI], pp  | higher,       | lower,        |
-|               |               |               |               | p-value       | p-value       |
-|               |               |               |               |               | (context)     |
-+===============+===============+===============+===============+===============+===============+
-| Abstention    | 33.30%        | 35.18%        | +1.88 [+0.32, | 0.010 — yes   | 0.990         |
-| ratio         | (1,566/4,703) | (1,653/4,699) | +3.45]        |               |               |
-+---------------+---------------+---------------+---------------+---------------+---------------+
-
 Measure verbosity
 ~~~~~~~~~~~~~~~~~
 
@@ -203,8 +179,7 @@ Compare mean and median completion tokens, including reasoning, to assess how mu
 answer requires.
 
 For mean length, we use question-level paired t-tests and t-based 95% confidence intervals.
-“Yes” means evidence of shorter Candidate completions on average (p < 0.05);
-“no evidence” means a lower mean length was not established.
+“Yes” means evidence of shorter Candidate completions on average (p < 0.05).
 
 +----------------+-------------+-------------+-------------+-------------+-------------+-------------+
 | Benchmark      | Baseline:   | Candidate:  | Change:     | Mean change | Candidate   | Candidate   |
@@ -216,8 +191,6 @@ For mean length, we use question-level paired t-tests and t-based 95% confidence
 |                | 2,993       | 1,803       | −39.8%      | [−4,236,    | yes         |             |
 |                |             |             |             | −2,664]     |             |             |
 +----------------+-------------+-------------+-------------+-------------+-------------+-------------+
-
-The candidate uses fewer tokens on average on SciCode (p < 0.001).
 
 How can you evaluate faster?
 ----------------------------

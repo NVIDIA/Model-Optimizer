@@ -29,10 +29,9 @@ summaries:
 Statistical methods
 -------------------
 
-For accuracy, cap-hit and missing-final-answer rates, abstention ratio, and verbosity, we
-calculate the difference by subtracting Baseline's value from Candidate's. Accuracy, rate, and
-ratio changes are in percentage points. Verbosity differences are in completion tokens,
-including reasoning tokens.
+For accuracy, cap-hit and missing-final-answer rates, and verbosity, we calculate the difference
+by subtracting Baseline's value from Candidate's. Accuracy and rate changes are in percentage
+points. Verbosity differences are in completion tokens, including reasoning tokens.
 
 - **Accuracy and verbosity (mean completion length):** average each model's repetitions within
   each question, then subtract Baseline's average from Candidate's for that question.
@@ -65,10 +64,6 @@ including reasoning tokens.
   The SciCode cap-hit tables use 50,000 bootstrap resamples and 50,000 random swaps with a
   plus-one correction (seed ``2026111800``). The data-volume example uses the same bootstrap
   and exact permutation p-values.
-- **Abstention ratio:** divide total abstentions by total responses not graded
-  correct, pooling all repetitions. The denominator includes incorrect and partial answers,
-  abstentions, and missing answers. Use a domain-stratified paired question bootstrap,
-  recomputing both models’ ratios and their difference in every resample.
 
 Each test uses p < 0.05. We do not make that threshold stricter because other metrics were also
 tested. Reverse-direction p-values provide context only.
@@ -125,12 +120,6 @@ independent question pairs, an
 is another paired option.
 
 For a cap-hit or missing-final-answer comparison, take the tail in the stated direction.
-
-For abstention ratio, swap the models’ complete outcomes within each question, keeping
-all repetitions together. Recompute both ratios from the swapped total counts and calculate
-Candidate − Baseline. Use the upper tail for the “Candidate higher” p-value and the lower tail for
-the context p-value, including ties. We enumerate the joint distribution of differences in
-abstention and non-correct counts to obtain these exact permutation p-values.
 
 **Repetition-level:** for each model and repetition, divide the number of cap hits by 294. Apply a
 `one-sided Welch t-test
