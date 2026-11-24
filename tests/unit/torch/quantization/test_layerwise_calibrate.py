@@ -18,12 +18,14 @@
 import copy
 import json
 from collections import deque
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import (
@@ -31,6 +33,7 @@ from modelopt.torch.quantization.utils.layerwise_calib import (
     _OutsideQuantizerCalibrator,
     _SkipLayer,
 )
+from modelopt.torch.sparsity.weight_sparsity.config import SparseGPTConfig
 from modelopt.torch.utils.dataset_utils import create_forward_loop
 
 
@@ -183,11 +186,29 @@ def test_collector_collects_correct_number_of_inputs(monkeypatch):
         collector._unpatch_all_layers()
 
 
-def test_collector_activations_match_expected(monkeypatch):
+class _CacheDisabledConfig:
+    @property
+    def use_cache(self) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {},
+        SimpleNamespace(text_config={}),
+        ModeloptBaseConfig(),
+        SparseGPTConfig(),
+        _CacheDisabledConfig(),
+    ],
+    ids=["dict", "nested-dict", "pydantic", "sparsegpt", "read-only-disabled"],
+)
+def test_collector_activations_match_expected(monkeypatch, config):
     """First layer should receive the raw input data."""
     _register_test_discoverer(monkeypatch)
     torch.manual_seed(0)
     model = _SimpleTwoLayerModel(dim=8)
+    model.config = config
     collector = LayerActivationCollector(model)
     data = [torch.randn(2, 8)]
 
@@ -265,6 +286,35 @@ def test_collector_cleanup_on_forward_loop_error(monkeypatch):
 
 
 # layerwise_calibrate tests
+@pytest.mark.parametrize("qdq_from_prev", [False, True])
+def test_layerwise_replay_does_not_reuse_qwen_kv_cache(qdq_from_prev):
+    transformers = pytest.importorskip("transformers")
+    config = transformers.Qwen3Config(
+        vocab_size=32,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+    )
+    model = transformers.Qwen3ForCausalLM(config).eval()
+    inputs = {
+        "input_ids": torch.tensor([[5, 6, 7, 8]]),
+        "attention_mask": torch.tensor([[0, 1, 1, 1]]),
+    }
+
+    def calibrate(layer, replay):
+        replay(layer)
+        replay(layer)
+
+    # The full-attention layer runs again to capture inputs for the following layer.
+    layerwise_calibrate(
+        model, lambda m: m(**inputs), calibrate, get_qdq_activations_from_prev_layer=qdq_from_prev
+    )
+    assert model(**inputs).past_key_values is not None
+
+
 def test_layerwise_calib_raises_on_none_forward_loop(monkeypatch):
     _register_test_discoverer(monkeypatch)
     model, data = _make_model_and_data(n_layers=2)
