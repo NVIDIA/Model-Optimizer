@@ -326,6 +326,20 @@ def _runs_registration_hooks() -> bool:
     )
 
 
+def _replaces_a_quantizer(
+    quant_model: nn.Module,
+    name: str,
+    attributes: QuantizerAttributeConfig | list[QuantizerAttributeConfig],
+    parent_class: type[nn.Module] | None,
+) -> bool:
+    # A list replaces a TensorQuantizer with a SequentialQuantizer, and a single config the reverse.
+    return any(
+        isinstance(module, SequentialQuantizer) != isinstance(attributes, list)
+        for module_name, module in _candidate_modules(quant_model, name, True)
+        if _match_quantizer(name, module_name, module, parent_class, quant_model)
+    )
+
+
 def _candidate_modules(
     quant_model: nn.Module, wildcard_or_filter_func: str | Callable, subtree: bool
 ):
@@ -394,9 +408,8 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
     # Whether wildcard-free names walk only their subtree, which follows the model's _modules,
     # decided at the first one: not where fnmatch ignores case, nor where named_modules can list
     # other paths or a calibrator or rotation config of the caller's class can run, nor while
-    # PyTorch's global registration hooks are set: replacing a quantizer runs them, and they can
-    # register a module a second time mid-call. The model's own classes, such as a parent whose
-    # __setattr__ runs as its quantizer is replaced, are trusted not to.
+    # PyTorch's global registration hooks are set: giving a quantizer a buffer runs them, and they
+    # can register a module a second time mid-call.
     subtree = None
     for entry in quant_cfg:
         quantizer_name: str = entry["quantizer_name"]
@@ -448,6 +461,12 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
             ):
                 # The caller's calibrator class runs for each match and can rewire the model, before
                 # this entry's later matches too; the caller's rotation config, in a later entry.
+                subtree = False
+            elif subtree and _replaces_a_quantizer(
+                quant_model, quantizer_name, attributes, parent_class
+            ):
+                # Replacing a quantizer runs its parent's __setattr__, such as a DynamicModule's,
+                # which can rewire the model too.
                 subtree = False
             set_quantizer_attributes_full(
                 quant_model, quantizer_name, attributes, parent_class, _subtree=bool(subtree)

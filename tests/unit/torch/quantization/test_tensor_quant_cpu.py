@@ -731,6 +731,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         quant_cfg.append({"quantizer_name": f"{layer}.weight_quantizer", "cfg": {"num_bits": 4}})
         quant_cfg.append({"quantizer_name": f"{layer}.input_quantizer", "enable": True})
     # Replacing a quantizer with a SequentialQuantizer, and back, changes the names to find.
+    first_replacing = len(quant_cfg)
     quant_cfg.append({"quantizer_name": "2.weight_quantizer", "cfg": [{"num_bits": 4}] * 2})
     quant_cfg.append({"quantizer_name": "2.weight_quantizer.1", "enable": False})
     quant_cfg.append({"quantizer_name": "3.weight_quantizer", "cfg": [{"num_bits": 8}] * 2})
@@ -775,8 +776,8 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     monkeypatch.undo()
     assert states(named) == states(walked)
     if case_sensitive and layout == "plain":
-        # Only the "*" entry walks the model, also after a replacement.
-        assert walks == 1
+        # Only the "*" entry walks the model, and the entries from the first replacement on.
+        assert walks == 1 + len(quant_cfg) - first_replacing
     else:
         # Every entry walks the model: where fnmatch ignores case, or named_modules can list other
         # paths than the model registers.
@@ -784,16 +785,16 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
 
 
 @pytest.mark.parametrize(
-    ("hooked", "nested"),
-    [(False, False), (False, True), (True, False)],
-    ids=["later-entry", "nested-call", "registration-hook"],
+    ("trigger", "nested"),
+    [("calibrator", False), ("calibrator", True), ("hook", False), ("setter", False)],
+    ids=["later-entry", "nested-call", "registration-hook", "parent-setter"],
 )
 def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_layer(
-    hooked, nested
+    trigger, nested
 ):
     """A named entry acts as its wildcard does after code run mid-call shares a layer: a calibrator
-    the caller supplies, for a later entry of that call or in a call the calibrator makes, or a
-    module registration hook, which replacing a quantizer runs."""
+    the caller supplies, for a later entry of that call or in a call the calibrator makes, a buffer
+    registration hook, or the __setattr__ of a parent whose quantizer an entry replaces."""
 
     def configured(weight_quantizer, sub_quantizer):
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
@@ -801,23 +802,38 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
         sub_entry = {"quantizer_name": sub_quantizer, "enable": False}
 
         def share():
-            model[1] = model[0]  # named_modules skips the second name
-            if nested:
-                mtq.set_quantizer_by_cfg(model, [sub_entry])
+            if model[1] is not model[0]:
+                model[1] = model[0]  # named_modules skips the second name
+                if nested:
+                    mtq.set_quantizer_by_cfg(model, [sub_entry])
 
         class SharingCalibrator(MaxCalibrator):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 share()
 
-        def sharing_hook(module, name, submodule):
-            if isinstance(submodule, SequentialQuantizer) and model[1] is not model[0]:
-                share()
+        def sharing_hook(module, name, buffer):
+            share()
 
-        # A list replaces the quantizer with a SequentialQuantizer, under the hook.
-        cfg = [{"num_bits": 4}, {"num_bits": 8}] if hooked else {"calibrator": SharingCalibrator}
-        register = torch.nn.modules.module.register_module_module_registration_hook
-        handle = register(sharing_hook) if hooked else None
+        if trigger == "calibrator":
+            cfg = {"calibrator": SharingCalibrator}
+        elif trigger == "hook":
+            # Pinning amax registers it as a buffer, under the hook.
+            del model[0].weight_quantizer._amax
+            cfg = {"num_bits": 8, "axis": None, "constant_amax": 1.0}
+        else:
+
+            class SharingLinear(type(model[0])):
+                def __setattr__(self, name, value):
+                    super().__setattr__(name, value)
+                    if isinstance(value, SequentialQuantizer):
+                        share()
+
+            model[0].__class__ = SharingLinear
+            # A list replaces the quantizer with a SequentialQuantizer, through the parent.
+            cfg = [{"num_bits": 4}, {"num_bits": 8}]
+        register = torch.nn.modules.module.register_module_buffer_registration_hook
+        handle = register(sharing_hook) if trigger == "hook" else None
         try:
             mtq.set_quantizer_by_cfg(
                 model,
