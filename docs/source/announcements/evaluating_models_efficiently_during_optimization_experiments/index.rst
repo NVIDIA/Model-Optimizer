@@ -246,7 +246,7 @@ After completing all eight repetitions, we analyzed subsets of the saved respons
 increased coverage from 10 to 294 subtasks with one repetition, then added repetitions on all
 294 subtasks. In this retrospective comparison, the p-value first fell below 0.05 at 250
 responses per model and below 0.001 at 882.
-See the :ref:`cap-hit p-value calculation <evaluation-pvalue-methods>` in the Reproducibility Notes.
+See the :ref:`cap-hit p-value calculation <evaluation-scicode-cap-hit-p-values>` in the Reproducibility Notes.
 
 A large drop in cap-hit rate from Baseline to Candidate may be detectable with only a few
 repetitions. Use a small pilot to estimate the size of the difference for your checkpoints

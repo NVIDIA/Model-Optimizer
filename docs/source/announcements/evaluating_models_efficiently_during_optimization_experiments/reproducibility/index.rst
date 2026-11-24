@@ -46,17 +46,35 @@ Statistical methods
   the upper tail of the t distribution. For SciCode, estimate the standard error across parent
   problems with degrees of freedom equal to the number of parent problems minus one.
 
-- **Cap-hit rates:** calculate two-sided 95% paired-bootstrap
-  confidence intervals by sampling with replacement, using whole parent problems for SciCode
-  cap hits. Keep all repetitions and both models together within each sampled group. The
-  interval endpoints are the 2.5th and 97.5th percentiles.
+- **Cap-hit rates:** for each model, divide the number of responses that hit the completion cap
+  by the total number of responses across all subtasks and repetitions.
+
+  Calculate a two-sided 95% paired-bootstrap confidence interval for the rate difference by
+  sampling whole SciCode parent problems with replacement. Keep all repetitions and both models
+  together within each sampled group. The interval endpoints are the 2.5th and 97.5th percentiles.
   If neither model has an observed failure, bootstrapping gives a [0, 0] interval. This does not
   establish that failures cannot occur or that the models have equal failure rates.
 
-  For one-sided p-values, use a :ref:`paired permutation test <evaluation-pvalue-methods>`.
-  Even when failures are rare, swapping the models' results for each question or parent problem
-  shows how unusual the observed difference would be if the models behaved the same.
-  Computing p-values with the bootstrap would be more complicated.
+  .. _evaluation-scicode-cap-hit-p-values:
+
+  **SciCode cap-hit p-values**
+
+  For the one-sided `paired permutation p-values
+  <https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html>`__,
+  swap model labels for whole parent problems and count permuted cap-hit rate differences at least
+  as extreme as the observed difference in the tested direction. For an exact p-value, divide
+  this count by the total number of possible swap patterns.
+
+  Cap hits are rare, so most parent-level differences are zero. The permutation test avoids relying
+  on a t-distribution approximation for these sparse differences. It assumes that the models' results
+  for each parent problem are interchangeable under the null hypothesis.
+
+  The outcomes are binary, but a simple binomial test on pooled responses would ignore question
+  pairing and repetitions within each question. With one response per model and question and
+  independent question pairs, an
+  `exact McNemar test
+  <https://www.statsmodels.org/stable/generated/statsmodels.stats.contingency_tables.mcnemar.html>`__
+  is another paired option.
 
 - **Verbosity:** to compare mean completion lengths, average each model’s response lengths across
   repetitions within each question, then subtract Baseline’s average from Candidate’s. Use these
@@ -92,47 +110,6 @@ We report the mean and sample SD across the group scores. Accuracy means are per
 Candidate minus Baseline differences and all SDs are in percentage points. The means stay
 fixed because every allocation partitions the same saved response pool. Groups can share
 question or repetition IDs, so their observed spread is descriptive.
-
-.. _evaluation-pvalue-methods:
-
-Question-level and repetition-level p-values
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-For the SciCode benchmark, a response scores 1 if it hits the completion cap and 0 otherwise.
-Both methods test whether Candidate has a lower cap-hit rate, using identical responses from
-294 subtasks at each repetition count.
-
-**Question-level:** average each model's cap-hit outcomes across repetitions within each subtask,
-then subtract Baseline's average from Candidate's. Sum these paired differences within each parent
-problem. To calculate the exact `paired permutation p-value
-<https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html>`__ for
-the SciCode cap-hit plot, swap the models' results for each whole parent problem or leave them
-unchanged, keeping all subtasks and repetitions together. The p-value is the fraction of possible
-swaps giving a mean difference across subtasks equal to or lower than the observed difference,
-including ties.
-
-Cap hits are rare, so most parent-level differences are zero. The permutation test avoids relying
-on a t-distribution approximation for these sparse differences. It assumes that the models' results
-for each parent problem are interchangeable under the null hypothesis.
-
-The outcomes are binary, but a simple binomial test on pooled responses would ignore question
-pairing and repetitions within each question. With one response per model and question and
-independent question pairs, an
-`exact McNemar test
-<https://www.statsmodels.org/stable/generated/statsmodels.stats.contingency_tables.mcnemar.html>`__
-is another paired option.
-
-For a cap-hit comparison, take the tail in the stated direction.
-
-**Repetition-level:** for each model and repetition, divide the number of cap hits by 294. Apply a
-`one-sided Welch t-test
-<https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ttest_ind.html>`__
-to the models' per-repetition average scores (cap-hit rates), testing whether Candidate's mean
-is lower than Baseline's.
-The calculation uses each model's sample variance across repetitions and Welch's degrees of
-freedom. It treats runs as independent and allows different variances for the two models.
-At least two repetitions per model are needed to estimate those variances; with very few
-repetitions, the estimates may be unstable.
 
 Reproducibility limits
 ----------------------
