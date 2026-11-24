@@ -16,6 +16,7 @@
 """Native HF plans and overlapping dense/expert mesh ownership."""
 
 import copy
+import re
 
 import torch
 from torch.distributed.tensor import DTensor
@@ -158,7 +159,9 @@ def validate_hf_tensor_parallelism(model, mesh, plan=None):
             _validate_parameter_geometry(
                 modules[owner], name, ALL_PARALLEL_STYLES[style], mesh, full, aliases
             )
-    _validate_hf_plan_aliases(model, plan, modules, parameters)
+    _validate_hf_plan_aliases(
+        model, plan, modules, parameters, rules=model.tp_plan if expanded else None
+    )
     for name in plan:
         if name in parameters:
             continue
@@ -175,15 +178,24 @@ def validate_hf_tensor_parallelism(model, mesh, plan=None):
         )
 
 
-def _validate_hf_plan_aliases(model, plan, modules, parameters):
+def _validate_hf_plan_aliases(model, plan, modules, parameters, *, rules=None):
     """Refuse planned owner aliases that HF's deduplicated placement cannot resolve."""
+    from transformers.distributed.parallel_utils import _get_parameter_plan
+
     canonical = {name for name, _ in model.named_modules()}
     canonical.update(name for name, _ in model.named_parameters())
-    for name in plan:
-        if name not in canonical and (name in modules or name in parameters):
-            raise ValueError(
-                f"Native HF TP does not support placing tied/shared owner alias {name!r}."
-            )
+    for owners, is_weight in ((modules, False), (parameters, True)):
+        for name in owners:
+            if name not in canonical and (
+                name in plan
+                or (
+                    rules is not None
+                    and _get_parameter_plan(name, rules, is_weight=is_weight) is not None
+                )
+            ):
+                raise ValueError(
+                    f"Native HF TP does not support placing tied/shared owner alias {name!r}."
+                )
 
 
 def _synchronize_placement_state(context, *state):
@@ -427,7 +439,14 @@ def parallelize_native_transformers(model, context, *, initialize=None):
                             aliases,
                             allow_expert_axis=allow_expert_axis,
                         )
-            _validate_hf_plan_aliases(model, tp_plan, modules, parameters)
+            # HF retains merged original rules, while expansion drops secondary module owners.
+            tp_rules = model.tp_plan if config.tp_size > 1 else {}
+            if config.ep_size > 1:
+                is_expert = re.compile(
+                    rf"(?:{'|'.join(map(re.escape, model.ep_plan))})(?:\..+)?"
+                ).fullmatch
+                tp_rules = {name: style for name, style in tp_rules.items() if not is_expert(name)}
+            _validate_hf_plan_aliases(model, tp_plan, modules, parameters, rules=tp_rules)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     try:
