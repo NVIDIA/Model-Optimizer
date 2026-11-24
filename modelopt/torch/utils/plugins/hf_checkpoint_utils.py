@@ -432,9 +432,9 @@ def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
 #
 # Since huggingface_hub 1.32, a Xet-backed file (tokenizer.json, weight shards) is stored once per
 # cache, in a store at ``<cache>/blobs`` shared by all repos, and the repo's ``blobs/<etag>`` is a
-# link into it, so that store is a blob root too. Like the hub (its ``utils/_shared_blobs.py``),
-# trust it only when it carries the hub's marker file, not because some ``blobs/`` directory sits
-# above a snapshot-shaped path.
+# link into it. A snapshot entry may land in that store only the way the hub links it, through its
+# own repo's ``blobs/``, and only in a store the hub would use (its ``utils/_shared_blobs.py``): a
+# directory, not a link, that holds the hub's marker file.
 _HF_SHARED_BLOBS_MARKER = ".huggingface-shared-blobs"
 
 
@@ -442,19 +442,38 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _snapshot_blob_roots(source_root: Path) -> list[Path]:
+def _snapshot_blob_root(source_root: Path) -> Path | None:
     if source_root.parent.name != "snapshots":
-        return []
-    repo_dir = source_root.parent.parent
-    blob_roots = [repo_dir / "blobs"] if (repo_dir / "blobs").is_dir() else []
-    if (repo_dir.parent / "blobs" / _HF_SHARED_BLOBS_MARKER).is_file():
-        blob_roots.append(repo_dir.parent / "blobs")
-    return [blob_root.resolve(strict=True) for blob_root in blob_roots]
+        return None
+    blob_root = source_root.parent.parent / "blobs"
+    return blob_root.resolve(strict=True) if blob_root.is_dir() else None
 
 
 def _allowed_source_roots(src_dir: Path) -> list[Path]:
     source_root = src_dir.resolve(strict=True)
-    return [source_root, *_snapshot_blob_roots(source_root)]
+    allowed_roots = [source_root]
+    if blob_root := _snapshot_blob_root(source_root):
+        allowed_roots.append(blob_root)
+    return allowed_roots
+
+
+def _is_shared_store_blob(src_dir: Path, src: Path, resolved_src: Path) -> bool:
+    """Whether ``src`` links to its repo's blob, which links on into the hub's shared store."""
+    source_root = src_dir.resolve(strict=True)
+    if source_root.parent.name != "snapshots":
+        return False
+    repo_dir = source_root.parent.parent
+    store = repo_dir.parent / "blobs"
+    try:
+        is_store = stat.S_ISDIR(store.lstat().st_mode) and stat.S_ISREG(
+            (store / _HF_SHARED_BLOBS_MARKER).lstat().st_mode
+        )
+        repo_blob = Path(os.path.normpath(src.parent.resolve() / os.readlink(src)))
+    except OSError:  # an unreadable store is no store, and a regular file links nowhere
+        return False
+    return (
+        is_store and repo_blob.parent == repo_dir / "blobs" and _is_relative_to(resolved_src, store)
+    )
 
 
 def resolve_checkpoint_file(
@@ -471,7 +490,9 @@ def resolve_checkpoint_file(
         raise ValueError(f"checkpoint source is not a readable regular file: {src}") from exc
     if not resolved_src.is_file():
         raise ValueError(f"checkpoint source must resolve to a regular file: {src}")
-    if not any(_is_relative_to(resolved_src, root) for root in _allowed_source_roots(src_dir)):
+    if not any(
+        _is_relative_to(resolved_src, root) for root in _allowed_source_roots(src_dir)
+    ) and not _is_shared_store_blob(src_dir, src, resolved_src):
         raise ValueError(f"checkpoint source is outside the checkpoint directory: {src}")
     if max_bytes is not None and resolved_src.stat().st_size > max_bytes:
         raise ValueError(f"checkpoint source exceeds the {max_bytes}-byte size limit: {src}")

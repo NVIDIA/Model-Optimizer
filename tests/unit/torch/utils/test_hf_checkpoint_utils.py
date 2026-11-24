@@ -16,6 +16,7 @@
 """Tests for modelopt/torch/utils/plugins/hf_checkpoint_utils.py"""
 
 import json
+import os
 import stat
 import sys
 import warnings
@@ -995,8 +996,8 @@ def test_copy_non_model_files_follows_links_only_within_the_checkpoint(tmp_path)
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
 def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
     """A snapshot links into the repo's ``blobs/``. huggingface_hub >= 1.32 links a Xet-backed blob
-    on into ``<cache>/blobs``, a store shared by every cached repo, which is followed only once the
-    hub's marker file says it is that store."""
+    on into ``<cache>/blobs``, a store shared by every cached repo. A snapshot entry may land there
+    only through its own repo's blob, and only once the hub's marker file says it is that store."""
     repo, store = tmp_path / "models--org--model", tmp_path / "blobs"
     snapshot, blobs = repo / "snapshots" / "abc123", repo / "blobs"
     snapshot.mkdir(parents=True)
@@ -1009,15 +1010,29 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
     (store / "ab" / xet_hash).chmod(0o444)  # the hub keeps store files read-only
     (blobs / "sha-tokenizer").symlink_to(f"../../blobs/ab/{xet_hash}")
     (snapshot / "tokenizer.json").symlink_to("../../blobs/sha-tokenizer")
+    # Not through the repo's blobs/, so not this repo's blob, whatever store file it names.
+    (snapshot / "vocab.json").symlink_to(f"../../../blobs/ab/{xet_hash}")
 
     with pytest.warns(UserWarning, match="outside the checkpoint directory"):
         copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "unmarked")
     assert copied == ["tokenizer_config.json"]
 
     (store / ".huggingface-shared-blobs").write_text("1\n")
-    copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "export")
+    with pytest.warns(UserWarning, match="Skipping vocab.json: .* outside the checkpoint"):
+        copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "export")
 
     assert copied == ["tokenizer.json", "tokenizer_config.json"]
     assert (tmp_path / "export" / "tokenizer.json").read_text() == "{}"
     # Writable, so a tokenizer.save_pretrained() into the export can replace it.
     assert (tmp_path / "export" / "tokenizer.json").stat().st_mode & stat.S_IWUSR
+
+    if os.geteuid() != 0:  # root reads an unreadable store anyway
+        # A snapshot that does not use the store never probes it, so an unreadable one is harmless.
+        (snapshot / "tokenizer.json").unlink()
+        (snapshot / "vocab.json").unlink()
+        store.chmod(0)
+        try:
+            copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "unreadable")
+        finally:
+            store.chmod(0o755)
+        assert copied == ["tokenizer_config.json"]
