@@ -28,6 +28,7 @@ from torch.distributed.tensor import DTensor
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import FP8QTensor
 from modelopt.torch.quantization.utils.native_weight import pin_native_weight
 
@@ -110,11 +111,54 @@ def _snapshot(model):
         for module in model.modules()
         if getattr(module, "_native_weight_meta", None) is not None
     ]
-    return tensors, values, hooks, forwards, markers, config_state, containers, native_meta
+    activation_state = [
+        (
+            module,
+            {
+                name: (hasattr(module, name), getattr(module, name, None))
+                for name in (
+                    "_native_tp_activation_layout",
+                    "_native_tp_activation_fields",
+                    "_quantizer_cache",
+                    "_block_reshape_size",
+                    "_original_shape",
+                    "_padding",
+                    "_slices",
+                )
+            },
+        )
+        for module in model.modules()
+        if isinstance(module, TensorQuantizer)
+    ]
+    return (
+        tensors,
+        values,
+        hooks,
+        forwards,
+        markers,
+        config_state,
+        containers,
+        native_meta,
+        activation_state,
+    )
 
 
 def _assert_unchanged(model, snapshot):
-    tensors, values, hooks, forwards, markers, config_state, containers, native_meta = snapshot
+    (
+        tensors,
+        values,
+        hooks,
+        forwards,
+        markers,
+        config_state,
+        containers,
+        native_meta,
+        activation_state,
+    ) = snapshot
+    for module, state in activation_state:
+        for name, (present, value) in state.items():
+            assert hasattr(module, name) == present
+            assert getattr(module, name, None) is value
     for module, name, container, members in containers:
         assert getattr(module, name) is container
         assert tuple(container) == members
@@ -397,6 +441,207 @@ def test_raw_torch_mesh_validation_is_collective(bypass_cpu_workers, failure):
     bypass_cpu_workers.run(_torch_mesh_validation_worker, failure)
 
 
+def _input_alias_case(rank, size, route, sharing, mesh):
+    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+
+    sequential = "sequential" in sharing
+    colwise = sharing in ("input_sequential_colwise", "input_sequential_colwise_shared")
+    geometry = sharing == "input_geometry"
+    legacy = sharing == "input_legacy_reentry"
+    prepared = sharing == "input_prepared_unplanned" or legacy
+    retained = sharing in ("input_disabled_amax", "input_disabled_amax_single")
+    unplanned = sharing in ("input_unplanned", "input_unplanned_compatible")
+    compatible = sharing in ("input_compatible", "input_field_compatible", "input_geometry")
+    disabled = sharing in (
+        "input_sequential_disabled",
+        "input_sequential_disabled_scale",
+        "input_disabled_scale",
+        "input_disabled_amax",
+        "input_disabled_amax_single",
+    )
+    accept = (
+        compatible
+        or (colwise and sharing != "input_sequential_colwise_shared")
+        or sharing
+        in (
+            "input_sequential_disabled",
+            "input_unplanned_compatible",
+            "input_disabled_amax_single",
+            "input_legacy_reentry",
+        )
+    )
+    tokens = torch.tensor([[1, 3, 5, 7]])
+    first_name = "model.layers.0.self_attn.q_proj"
+    second_name = (
+        "model.layers.0.self_attn.k_proj"
+        if geometry
+        else "model.layers.1.self_attn.o_proj"
+        if compatible
+        else "model.layers.0.self_attn.o_proj"
+    )
+    if (compatible and not geometry) or prepared:
+        first_name = "model.layers.0.self_attn.o_proj"
+    if prepared:
+        second_name = "model.layers.1.self_attn.o_proj"
+    if unplanned:
+        first_name = "lm_head"
+        if sharing == "input_unplanned_compatible":
+            second_name = "model.layers.0.self_attn.q_proj"
+    target = first_name if colwise else second_name
+    model = mtq.quantize(
+        _tiny_model(num_hidden_layers=2),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                *(
+                    [
+                        {
+                            "quantizer_name": f"{target}.input_quantizer",
+                            "cfg": [{"num_bits": 8, "axis": -1}, {"num_bits": 8, "axis": -1}],
+                        }
+                    ]
+                    if sequential
+                    else [
+                        {
+                            "quantizer_name": f"{name}.input_quantizer",
+                            "cfg": {
+                                "num_bits": 8,
+                                "axis": -1 if retained else None,
+                                "enable": True,
+                            },
+                        }
+                        for name in (first_name, second_name)
+                    ]
+                ),
+            ],
+            "algorithm": "max",
+        },
+        lambda m: m(tokens),
+    )
+    first, second = model.get_submodule(first_name), model.get_submodule(second_name)
+    if geometry:
+        assert first.weight.shape == (32, 32) and second.weight.shape == (16, 32)
+        model._tp_plan = dict(model.tp_plan)
+        for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+            model._tp_plan[f"model.layers.*.self_attn.{name}"] = "rowwise_rep"
+    if unplanned or sharing == "input_prepared_unplanned":
+        model._tp_plan = {
+            name: style for name, style in model.tp_plan.items() if not name.startswith("lm_head")
+        }
+        assert "lm_head.weight" not in model._expand_parallel_plan(model.tp_plan)
+    if retained:
+        assert first.input_quantizer._amax.shape == (1, 1, 32)
+    if not sequential and not retained:
+        assert first.input_quantizer._amax.numel() == 1
+        first.input_quantizer.pre_quant_scale = torch.linspace(0.75, 1.25, 32)
+        second.input_quantizer.pre_quant_scale = torch.linspace(0.75, 1.25, 32)
+    if sequential:
+        chain = model.get_submodule(target).input_quantizer
+        assert isinstance(chain, SequentialQuantizer)
+        assert all(member._amax.shape == (1, 1, 32) for member in chain)
+        if sharing == "input_sequential_disabled_scale":
+            chain[0].pre_quant_scale = torch.linspace(0.75, 1.25, 32)
+    if disabled:
+        for module in (first, second):
+            module.input_quantizer.disable()
+    with torch.no_grad():
+        assert model(tokens).logits.shape == (1, 4, 32)
+    if route == "native_adopt" and not prepared:
+        # Simulate external native placement retaining full calibrated input fields.
+        original_inputs = [(module, module.input_quantizer) for module in (first, second)]
+        for module, _ in original_inputs:
+            module.input_quantizer = copy.deepcopy(module.weight_quantizer)
+        with bounded_collectives(10):
+            TransformersBypassAdapter(mesh).parallelize(model)
+        del model._modelopt_bypass_placement
+        for module, quantizer in original_inputs:
+            module.input_quantizer = quantizer
+    if (
+        not sequential
+        and not legacy
+        and sharing != "input_disabled_amax_single"
+        and (sharing != "input_peer" or rank == 1)
+    ):
+        if sharing.startswith("input_field"):
+            second.input_quantizer._set_buffer(
+                "_pre_quant_scale", first.input_quantizer.pre_quant_scale
+            )
+            assert first.input_quantizer is not second.input_quantizer
+        else:
+            second.input_quantizer = first.input_quantizer
+    if sharing == "input_sequential_colwise_shared":
+        second.input_quantizer = first.input_quantizer[0]
+    if sequential and sharing == "input_sequential_peer" and rank == 0:
+        second.input_quantizer.disable()
+    if route != "native_adopt":
+        with torch.no_grad():
+            assert model(tokens).logits.shape == (1, 4, 32)
+    if prepared:
+        with bounded_collectives(10):
+            TransformersBypassAdapter(mesh).parallelize(model)
+        with torch.no_grad():
+            assert model(tokens).logits.shape == (1, 4, 32)
+        assert first.input_quantizer.pre_quant_scale.shape == (16,)
+        if legacy:
+            for module in (first, second):
+                del module.input_quantizer._native_tp_activation_fields
+        else:
+            assert not isinstance(model.lm_head.weight, DTensor)
+            model.lm_head.input_quantizer = first.input_quantizer
+        del model._modelopt_bypass_placement
+    original_scale = getattr(first.input_quantizer, "pre_quant_scale", None)
+    snapshot = _snapshot(model)
+    inputs = [(module, module.input_quantizer) for module in (first, second)]
+    adapter = TransformersBypassAdapter(mesh)
+    adapter.context.parallel_metadata[id(model)] = {"previous": object()}
+    adapter.context.tp_quantizer_layouts[id(model)] = {"previous": object()}
+    context_state = [
+        (name, getattr(adapter.context, name), dict(getattr(adapter.context, name)))
+        for name in ("parallel_metadata", "tp_quantizer_layouts")
+    ]
+    error = None
+    with bounded_collectives(10):
+        try:
+            if route == "native_adopt":
+                adapter.adopt(model)
+            else:
+                adapter.parallelize(model)
+        except Exception as exc:
+            error = (type(exc).__name__, str(exc))
+    errors = [None] * size
+    dist.all_gather_object(errors, error)
+    if accept:
+        assert errors == [None, None], errors
+        if unplanned:
+            assert not isinstance(model.lm_head.weight, DTensor)
+        if legacy:
+            current = dict(model.named_parameters(remove_duplicate=False))
+            current.update(model.named_buffers(remove_duplicate=False))
+            assert all(current[name] is tensor for name, tensor in snapshot[0].items())
+            assert all(module.forward == forward for module, forward in snapshot[3])
+            assert not hasattr(first.input_quantizer, "_native_tp_activation_fields")
+        if compatible:
+            assert first.input_quantizer.pre_quant_scale is second.input_quantizer.pre_quant_scale
+            torch.testing.assert_close(
+                first.input_quantizer.pre_quant_scale,
+                original_scale.narrow(0, rank * 16, 16),
+                rtol=0,
+                atol=0,
+            )
+        with torch.no_grad():
+            assert model(tokens).logits.shape == (1, 4, 32)
+    else:
+        assert all(item is not None and item[0] == "ValueError" for item in errors), errors
+        assert errors[0] == errors[1], errors
+        _assert_unchanged(model, snapshot)
+        for module, quantizer in inputs:
+            assert module.input_quantizer is quantizer
+        for name, mapping, previous in context_state:
+            assert getattr(adapter.context, name) is mapping
+            assert mapping.keys() == previous.keys()
+            assert all(mapping[key] is value for key, value in previous.items())
+
+
 def _torch_mesh_alias_worker(rank, size, route, sharing):
     # Native HF is optional; exercise its actual mesh manager and placement implementation.
     from transformers.distributed.utils import TransformersDeviceMesh
@@ -408,7 +653,7 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
     planned_module = sharing in ("shared_module", "shared_module_peer", "shared_module_override")
     group = _mesh_group()
     mesh = DeviceMesh.from_group(group, "cpu", mesh_dim_names=("tp",))
-    if route == "native":
+    if route in ("native", "native_adopt"):
         mesh = TransformersDeviceMesh(
             DeviceMesh(
                 "cpu",
@@ -421,6 +666,8 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
                 mesh_dim_names=("pp", "dp_replicate", "efsdp", "ep"),
             ),
         )
+    if sharing.startswith("input_"):
+        return _input_alias_case(rank, size, route, sharing, mesh)
     model = mtq.quantize(
         _tiny_model(num_hidden_layers=2),
         {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None},
@@ -570,6 +817,40 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
             "shared_module_peer",
         )
     ]
+    + [
+        (route, sharing)
+        for route in ("raw", "native")
+        for sharing in (
+            "input_incompatible",
+            "input_peer",
+            "input_field",
+            "input_compatible",
+            "input_field_compatible",
+            "input_geometry",
+            "input_sequential",
+            "input_sequential_peer",
+            "input_sequential_colwise",
+            "input_sequential_colwise_shared",
+            "input_sequential_disabled",
+            "input_sequential_disabled_scale",
+            "input_disabled_scale",
+            "input_unplanned",
+            "input_unplanned_compatible",
+        )
+    ]
+    + [
+        ("native_adopt", sharing)
+        for sharing in (
+            "input_incompatible",
+            "input_peer",
+            "input_field",
+            "input_sequential",
+            "input_unplanned",
+            "input_prepared_unplanned",
+            "input_legacy_reentry",
+        )
+    ]
+    + [("native", "input_disabled_amax"), ("native", "input_disabled_amax_single")]
     + [("native", "shared_module_override")]
     + [
         ("explicit_plan", sharing)

@@ -103,17 +103,17 @@ def apply_tp_quantizer_fields(quantizer, fields):
             setattr(quantizer, name, value)
 
 
-def _share_tp_quantizer_fields(quantizer, view, fields, aliases):
+def _share_tp_quantizer_fields(quantizer, view, fields, aliases, *, partitioned_fields=None):
     for name, value in fields.items():
         original = getattr(quantizer, name, None)
         if not isinstance(original, torch.Tensor):
             continue
-        signature = (
-            view
-            if name.startswith("_native_weight_") or value.numel() != original.numel()
-            else None,
-            tuple(value.shape),
+        partitioned = (
+            name in partitioned_fields
+            if partitioned_fields is not None
+            else name.startswith("_native_weight_") or value.numel() != original.numel()
         )
+        signature = (view if partitioned else None, tuple(value.shape))
         previous = aliases.get(id(original))
         if previous is not None:
             if previous[0] != signature:
@@ -152,9 +152,87 @@ def validate_tp_quantizer_aliases(quantizer, view, aliases):
     _share_tp_quantizer_fields(quantizer, view, fields, aliases)
 
 
+@torch.inference_mode(False)
+def plan_tp_input_quantizer_fields(quantizer, view, aliases, *, metadata_only=False):
+    """Include replicated input consumers in the existing physical-field alias plan."""
+    if quantizer is None:
+        return {}
+    rowwise = view is not None and view.dim == 1 and view.size > 1
+    if not isinstance(quantizer, TensorQuantizer):
+        noop = isinstance(quantizer, SequentialQuantizer) and all(
+            isinstance(member, TensorQuantizer)
+            and not member.is_enabled
+            and member.pre_quant_scale is None
+            and not member.rotate_is_enabled
+            and not member.rotate_back_is_enabled
+            for member in quantizer
+        )
+        if rowwise and not noop:
+            raise ValueError("Composite TP inputs require an explicit physical-view adapter.")
+        if isinstance(quantizer, SequentialQuantizer) and not noop:
+            for member in quantizer:
+                plan_tp_input_quantizer_fields(member, None, aliases, metadata_only=metadata_only)
+        return {}
+    probe = quantizer
+    if metadata_only:
+        probe = copy.copy(quantizer)
+        probe._buffers = {
+            name: torch.empty_like(value, device="meta")
+            if isinstance(value, torch.Tensor)
+            else value
+            for name, value in quantizer._buffers.items()
+        }
+    fields = activation_partition(probe, view) if view is not None else {}
+    shared = {
+        name: fields.get(name, getattr(probe, name))
+        for name in ("_amax", "_global_amax", "_pre_quant_scale", "_bias_value")
+        if isinstance(getattr(probe, name, None), torch.Tensor)
+    }
+    # Output rows do not affect input-channel ownership, including strided channel slices.
+    ownership = (view.shape[-1], view.rank, view.size, view.split_factor) if rowwise else None
+    transported = getattr(quantizer, "_native_tp_activation_fields", ())
+    if "_native_tp_activation_layout" in fields:
+        transported = tuple(
+            name for name, value in fields.items() if isinstance(value, torch.Tensor)
+        )
+        fields["_native_tp_activation_fields"] = transported
+    elif getattr(quantizer, "_native_tp_activation_layout", None) is not None and not hasattr(
+        quantizer, "_native_tp_activation_fields"
+    ):
+        # Old plans lack field provenance: retain single-consumer reentry, refuse ambiguous aliases.
+        transported = tuple(
+            name
+            for name, value in shared.items()
+            if value.ndim > 0
+            and not (
+                name == "_amax"
+                and (quantizer.block_sizes or {}).get("type") == "dynamic"
+                and not quantizer.is_mx_format
+            )
+        )
+        ownership = ("legacy", object())
+    if not rowwise and any(name in shared for name in transported):
+        raise ValueError("Replicated inputs cannot consume transported native TP fields.")
+    _share_tp_quantizer_fields(
+        quantizer, ownership, shared, aliases, partitioned_fields=transported
+    )
+    fields.update((name, shared[name]) for name in fields if name in shared)
+    return fields
+
+
+def validate_tp_replicated_inputs(model, placed_inputs, aliases, *, metadata_only=False):
+    """Register independent unplaced input consumers without inventing a physical shard."""
+    for module in model.modules():
+        for _, _, input_name in quantized_weight_bindings(module):
+            if (id(module), input_name) not in placed_inputs:
+                plan_tp_input_quantizer_fields(
+                    getattr(module, input_name, None), None, aliases, metadata_only=metadata_only
+                )
+
+
 def _tp_quantizer_layouts(model):
     """Plan each physical weight's native fields from its actual Torch placement."""
-    plans, aliases = [], {}
+    plans, aliases, placed_inputs = [], {}, set()
 
     def plan(quantizer, view, source):
         fields, layouts, reset = native_weight_partition(quantizer, view, source)
@@ -202,12 +280,14 @@ def _tp_quantizer_layouts(model):
                     source = local[index] if fused else local
                 plan(quantizer, view, source)
             input_quantizer = getattr(module, input_name, None)
-            if isinstance(input_quantizer, TensorQuantizer):
-                fields = activation_partition(input_quantizer, view)
-                if fields:
-                    plans.append(
-                        (input_quantizer, fields, {}, bool(input_quantizer.is_static_block_quant))
-                    )
+            fields = plan_tp_input_quantizer_fields(input_quantizer, view, aliases)
+            placed_inputs.add((id(module), input_name))
+            if fields:
+                assert isinstance(input_quantizer, TensorQuantizer)
+                plans.append(
+                    (input_quantizer, fields, {}, bool(input_quantizer.is_static_block_quant))
+                )
+    validate_tp_replicated_inputs(model, placed_inputs, aliases)
     return plans
 
 
