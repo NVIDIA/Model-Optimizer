@@ -232,11 +232,20 @@ def _resolve_target(plan: dict, key: str) -> tuple[str, str | None]:
 
     No tensors are read. ``source_pattern`` is ``None`` for a plain (non-fused) key.
     """
+    meta_state_dict = plan["meta_state_dict"]
+    original_key = key
     for old, new in plan["legacy_renames"].items():
         key = re.sub(old, new, key)
-    return rename_source_key(
-        key, plan["renamings"], plan["converters"], plan["prefix"], plan["meta_state_dict"]
+    target = rename_source_key(
+        key, plan["renamings"], plan["converters"], plan["prefix"], meta_state_dict
     )
+    # As transformers' own loader does: a key that already names a model parameter but is renamed
+    # away from it keeps its name. The mapping recurses into submodules, so a VLM picks up its text
+    # sub-model's rules (Qwen3.5 on transformers 5.5: ``model.language_model.`` -> ``model.``),
+    # which only apply when that sub-model is loaded on its own.
+    if target[0] not in meta_state_dict and original_key in meta_state_dict:
+        target = rename_source_key(original_key, [], [], plan["prefix"], meta_state_dict)
+    return target
 
 
 # The hook below is installed on Transformers' classes, so process-wide: blocks that overlap in

@@ -59,6 +59,7 @@ from _test_utils.torch.transformers_models import (
     get_tiny_llama,
     get_tiny_qwen3_5_moe_vl,
     get_tiny_qwen3_5_vl,
+    get_tiny_qwen3_5_vl_offline,
     get_tiny_qwen3_moe,
 )
 from packaging.version import Version
@@ -484,6 +485,26 @@ def test_unsourced_parameter_raises(tmp_path, gloo_group):
     _tiny_llava_checkpoint(tmp_path, drop=("model.multi_modal_projector.",))
     with pytest.raises(RuntimeError, match="get no tensor from the checkpoint"):
         _fsdp2_load(tmp_path)
+
+
+def test_vlm_keys_its_text_submodel_renames_away_load_as_named(tmp_path, gloo_group, monkeypatch):
+    """A VLM picks up its text sub-model's prefix rule (``model.language_model.`` -> ``model.``,
+    as Qwen3.5 registers on Transformers 5.5); keys that already name a parameter must keep it."""
+    ref = get_tiny_qwen3_5_vl_offline()
+    ref.save_pretrained(tmp_path)
+    get_mapping = model_load_utils.get_model_conversion_mapping
+
+    def with_text_submodel_rule(model, *args, **kwargs):
+        rule = core_model_loading.WeightRenaming(r"^model.language_model.", r"model.")
+        return [*get_mapping(model, *args, **kwargs), rule]
+
+    monkeypatch.setattr(model_load_utils, "get_model_conversion_mapping", with_text_submodel_rule)
+    model = _fsdp2_load(tmp_path)
+
+    ref_params = dict(ref.named_parameters())
+    for name, param in model.named_parameters():
+        loaded = param.full_tensor() if isinstance(param, DTensor) else param
+        assert torch.equal(loaded.detach(), ref_params[name].detach()), name
 
 
 def test_tied_lm_head_without_stored_tie_map_loads(tmp_path, gloo_group, monkeypatch):
