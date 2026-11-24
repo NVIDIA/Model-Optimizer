@@ -1751,6 +1751,16 @@ def _swiglu_fc1_row_state(model, layer_offset=0):
     return states
 
 
+def _swiglu_marked(model):
+    """The modules whose extra state marks quantizer state saved in Megatron's SwiGLU layout."""
+    return {
+        name
+        for name, module in model.named_modules()
+        if hasattr(module, "modelopt_get_extra_state_callbacks")
+        and "modelopt_swiglu_quantizer_state" in quant_module_get_extra_state(module)
+    }
+
+
 @contextmanager
 def _saving_like_modelopt_0_48(model):
     """Save as ModelOpt 0.48 did: no layout mark, and only LoRA's B in Megatron's SwiGLU layout."""
@@ -1792,6 +1802,9 @@ def _test_swiglu_weight_quantizer_tp_reshard(
     assert not (compress and per_row) or any(
         k.endswith("weight_quantizer._scale") for k in expected
     )
+    # Only a gated linear_fc1 with per-row state saves the SwiGLU layout, and marks it.
+    fc1s = {name for name, _ in source.named_modules() if name.endswith("mlp.linear_fc1")}
+    assert _swiglu_marked(source) == (fc1s if per_row else set())
     with _saving_like_modelopt_0_48(source) if legacy else nullcontext():
         save_distributed_checkpoint(tmp_path, source)
         save_sharded_modelopt_state([source], tmp_path)
@@ -1834,17 +1847,20 @@ def _test_swiglu_weight_quantizer_tp_reshard(
             gate, up = expected[name]
             local = torch.cat([gate.chunk(load_tp)[tp_rank], up.chunk(load_tp)[tp_rank]])
             assert torch.equal(state, local), name
-    # A restored legacy model saves the current layout.
-    saved_keys = []
+    # A restored legacy model saves the current layout: each per-row state as gate and up rows.
+    saved_keys = set()
     for v in target.sharded_state_dict().values():
-        if isinstance(v, ShardedTensorFactory):
-            built = v.build()
-            saved_keys += [
-                getattr(t, "key", "") for t in (built if isinstance(built, list) else [built])
-            ]
-    assert not per_row or any(
-        re.search(r"linear_fc1\.weight_quantizer\.(\d+\.)?_amax_w$", k) for k in saved_keys
-    )
+        built = v.build() if isinstance(v, ShardedTensorFactory) else v
+        saved_keys |= {
+            getattr(t, "key", "") for t in (built if isinstance(built, list) else [built])
+        }
+    for name in stage:
+        assert {f"{name}_w", f"{name}_v"} <= saved_keys, name
+    fc1_state = [k for k in saved_keys if re.search(r"linear_fc1\.weight_quantizer\.", k)]
+    assert fc1_state
+    assert per_row or not any(re.search(r"_[wv]$", k) for k in fc1_state)
+    fc1s = {name for name, _ in target.named_modules() if name.endswith("mlp.linear_fc1")}
+    assert _swiglu_marked(target) == (fc1s if per_row else set())
 
 
 @pytest.mark.parametrize(

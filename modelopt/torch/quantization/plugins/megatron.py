@@ -214,14 +214,32 @@ def quant_module_get_extra_state(self) -> dict:
             quantizer_state[name] = module.get_modelopt_state()
 
     extra_state["modelopt_quantizer_state"] = quantizer_state
-    if not getattr(self, "_legacy_swiglu_quantizer_state", False):
-        # A gated linear_fc1's per-row weight quantizer state is saved in Megatron's SwiGLU layout.
+    if not getattr(self, "_legacy_swiglu_quantizer_state", False) and _saves_swiglu_rows(self):
+        # This gated linear_fc1's per-row weight quantizer state is saved in Megatron's SwiGLU layout.
         extra_state["modelopt_swiglu_quantizer_state"] = True
 
     # Handle real_quantizer_state and q_tensor_state
     extra_state.update(real_quant_module_get_extra_state(self))
 
     return extra_state
+
+
+def _saves_swiglu_rows(module) -> bool:
+    """Whether ``module`` saves weight quantizer state in Megatron's SwiGLU layout.
+
+    That is per-row state of a gated linear_fc1 (see ``_QuantMegatronMLP._is_swiglu_row_state``).
+    """
+    quantizer = getattr(module, "weight_quantizer", None)
+    if not getattr(module, "_modelopt_gated_fc1", False) or quantizer is None:
+        return False
+    rows = module.weight.shape[0]
+    return any(
+        name.rpartition(".")[2] in ("_amax", "_scale")
+        and b.dim() > 0
+        and b.shape[0] >= rows
+        and b.shape[0] % rows == 0
+        for name, b in quantizer.named_buffers()
+    )
 
 
 def real_quant_module_set_extra_state(self, state: Any):
@@ -702,6 +720,11 @@ class _QuantMegatronMLP(_MegatronMLP):
         r".*weight_quantizer\.(\d+\.)*_amax$",
         r".*weight_quantizer\.(\d+\.)*_scale$",
     ]
+
+    def _setup(self):
+        super()._setup()
+        # Lets linear_fc1 mark the layout it saves its state in (see quant_module_get_extra_state).
+        self.linear_fc1._modelopt_gated_fc1 = self.config.gated_linear_unit
 
     def _is_swiglu_state(self, key, sharded_tensor) -> bool:
         # Legacy checkpoints have only the quantizer state in the old layout (e.g. not LoRA's B).
