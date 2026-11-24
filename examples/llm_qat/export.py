@@ -109,6 +109,8 @@ def main(args):
 
         # Save tokenizer
         tokenizer.save_pretrained(export_dir)
+        if is_qlora:
+            tokenizer.save_pretrained(base_model_dir)
 
     except Exception as e:
         warnings.warn(
