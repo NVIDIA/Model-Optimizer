@@ -306,6 +306,7 @@ def _gpt_model_provider(
     transformer_impl="local",
     activation_func="squared_relu",
     pp_size=1,
+    ffn_hidden_size=None,
     # Hybrid mamba MOE parameters
     is_hybrid=False,
     hybrid_layer_pattern=None,
@@ -340,7 +341,7 @@ def _gpt_model_provider(
                 expert_model_parallel_size=ep_size,
                 expert_tensor_parallel_size=etp_size,
                 num_layers=4,
-                ffn_hidden_size=None,
+                ffn_hidden_size=ffn_hidden_size,
                 num_attention_heads=8,
                 activation_func=activation_func,
                 transformer_impl=transformer_impl,
@@ -1732,6 +1733,12 @@ def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wr
 
 
 FP8_PC = mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG
+# linear_fc1's weight amax per input channel, [1, in]: no rows, though saved viewed as [rows, -1].
+FP8_PER_INPUT = copy.deepcopy(FP8_PC)
+FP8_PER_INPUT["quant_cfg"] += [
+    {"quantizer_name": "*weight_quantizer", "enable": False},
+    {"quantizer_name": "*linear_fc1.weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": 1}},
+]
 
 
 def _swiglu_fc1_row_state(model, layer_offset=0):
@@ -1746,7 +1753,7 @@ def _swiglu_fc1_row_state(model, layer_offset=0):
             if hasattr(module, "lora_B"):
                 tensors["lora_B"] = module.lora_B
             for tensor_name, tensor in tensors.items():
-                if tensor.numel() > 1 and tensor.numel() % rows == 0:
+                if tensor.dim() > 0 and tensor.shape[0] >= rows and tensor.shape[0] % rows == 0:
                     states[f"{name}.{tensor_name}"] = tensor.detach().reshape(rows, -1)
     return states
 
@@ -1778,7 +1785,11 @@ def _test_swiglu_weight_quantizer_tp_reshard(
     tmp_path, config, legacy, compress, lora, save_tp, load_tp, load_pp, rank, size, mbridge=False
 ):
     initialize_for_megatron(tensor_model_parallel_size=save_tp, seed=SEED)
-    source = _gpt_model_provider(tp_size=save_tp, hidden_size=512, activation_func="swiglu")
+    # 256 linear_fc1 rows, 128 per TP=2 rank: per input channel, its 512 columns are 4 per row.
+    ffn_hidden_size = 128 if config == FP8_PER_INPUT else None
+    source = _gpt_model_provider(
+        tp_size=save_tp, hidden_size=512, activation_func="swiglu", ffn_hidden_size=ffn_hidden_size
+    )
     mtq.quantize(source, copy.deepcopy(config), get_forward(source))
     if compress:
         # Only linear_fc1: compressed linear_proj scales can't change TP size.
@@ -1795,8 +1806,8 @@ def _test_swiglu_weight_quantizer_tp_reshard(
         shards = [torch.empty_like(state) for _ in range(save_tp)]
         torch.distributed.all_gather(shards, state, group=get_tensor_model_parallel_group())
         expected[name] = [torch.cat([shard.chunk(2)[i] for shard in shards]) for i in range(2)]
-    # FP8 per-tensor amax and scale have no rows; that case checks that saving keeps them replicated.
-    per_row = config != mtq.FP8_DEFAULT_CFG
+    # FP8 per-tensor and per-input-channel state has no rows: saving keeps it under its own key.
+    per_row = config not in (mtq.FP8_DEFAULT_CFG, FP8_PER_INPUT)
     assert expected or not per_row
     # A compressed linear_fc1 keeps its per-row (or per-block) scale.
     assert not (compress and per_row) or any(
@@ -1808,6 +1819,10 @@ def _test_swiglu_weight_quantizer_tp_reshard(
     with _saving_like_modelopt_0_48(source) if legacy else nullcontext():
         save_distributed_checkpoint(tmp_path, source)
         save_sharded_modelopt_state([source], tmp_path)
+        if mbridge:
+            # The checkpoint without its modelopt_state, for a weights-only load.
+            (tmp_path / "weights").mkdir(exist_ok=True)
+            save_distributed_checkpoint(tmp_path / "weights", source)
     torch.distributed.barrier()
     del source
     destroy_model_parallel()
@@ -1815,9 +1830,17 @@ def _test_swiglu_weight_quantizer_tp_reshard(
     initialize_for_megatron(
         tensor_model_parallel_size=load_tp, pipeline_model_parallel_size=load_pp, seed=SEED
     )
-    target = _gpt_model_provider(
-        tp_size=load_tp, hidden_size=512, activation_func="swiglu", pp_size=load_pp
-    )
+
+    def create_target():
+        return _gpt_model_provider(
+            tp_size=load_tp,
+            hidden_size=512,
+            activation_func="swiglu",
+            pp_size=load_pp,
+            ffn_hidden_size=ffn_hidden_size,
+        )
+
+    target = create_target()
     tp_rank = get_tensor_model_parallel_rank()
     layers_per_stage = len(target.decoder.layers)
     offset = get_pipeline_model_parallel_rank() * layers_per_stage
@@ -1827,13 +1850,20 @@ def _test_swiglu_weight_quantizer_tp_reshard(
         if offset <= int(re.search(r"layers\.(\d+)", k)[1]) < offset + layers_per_stage
     }
     # Loaded twice into the same model: the second load reads the checkpoint's layout again.
+    if mbridge:
+        from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
     for i in range(2):
+        if i:
+            # Changed in place, so the checks see what the next load wrote.
+            with torch.no_grad():
+                for state in _swiglu_fc1_row_state(target, layer_offset=offset).values():
+                    state.mul_(2)
         if mbridge:
-            from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
-
             # The second load, into the converted model, loads its weights only.
             (target,) = load_modelopt_megatron_checkpoint(
-                [target], str(tmp_path), restore_modelopt_state=i == 0
+                [target],
+                str(tmp_path / "weights" if i else tmp_path),
+                restore_modelopt_state=i == 0,
             )
         else:
             # Into a converted model, the restore only reads the layout: it loads no state.
@@ -1850,6 +1880,29 @@ def _test_swiglu_weight_quantizer_tp_reshard(
             gate, up = expected[name]
             local = torch.cat([gate.chunk(load_tp)[tp_rank], up.chunk(load_tp)[tp_rank]])
             assert torch.equal(state, local), name
+    if mbridge:
+        # A load that fails once the layout is read leaves the model saving its own values and layout.
+        loaded = _swiglu_fc1_row_state(target, layer_offset=offset)
+        with (
+            patch.object(
+                sys.modules[load_modelopt_megatron_checkpoint.__module__],
+                "_load_model_weights_from_checkpoint",
+                side_effect=RuntimeError("weight load"),
+            ),
+            pytest.raises(RuntimeError, match="weight load"),
+        ):
+            load_modelopt_megatron_checkpoint([target], str(tmp_path / "weights"))
+        resaved = tmp_path / "resaved"
+        resaved.mkdir(exist_ok=True)
+        save_distributed_checkpoint(resaved, target)
+        save_sharded_modelopt_state([target], resaved)
+        reloaded = create_target()
+        restore_sharded_modelopt_state([reloaded], resaved)
+        reloaded = load_distributed_checkpoint(resaved, reloaded)
+        states = _swiglu_fc1_row_state(reloaded, layer_offset=offset)
+        assert states.keys() == loaded.keys()
+        for name, state in states.items():
+            assert torch.equal(state, loaded[name]), name
     # A restored legacy model saves the current layout: each per-row state as gate and up rows.
     saved_keys = set()
     for v in target.sharded_state_dict().values():
@@ -1883,6 +1936,7 @@ def _test_swiglu_weight_quantizer_tp_reshard(
         pytest.param(mtq.INT4_AWQ_CFG, True, True, False, 2, 1, 1, id="int4_awq-compressed-legacy"),
         pytest.param(mtq.W4A8_AWQ_BETA_CFG, True, False, False, 2, 1, 1, id="w4a8_awq-legacy"),
         pytest.param(FP8_PC, True, False, True, 2, 2, 1, id="fp8_per_channel-lora-legacy"),
+        pytest.param(FP8_PER_INPUT, False, False, False, 2, 2, 1, id="fp8_per_input_channel"),
     ],
 )
 def test_swiglu_weight_quantizer_tp_reshard(
@@ -1905,8 +1959,8 @@ def test_swiglu_weight_quantizer_tp_reshard(
 
 
 def test_swiglu_legacy_checkpoint_loads_twice_through_mbridge(dist_workers_size_2, tmp_path):
-    """ModelOpt's Megatron-Bridge loader loads a legacy checkpoint twice into the same model, the
-    second time its weights only."""
+    """ModelOpt's Megatron-Bridge loader loads a legacy TP=2 checkpoint twice into the same TP=1
+    model, the second time its weights only and without its modelopt_state, then fails a load."""
     pytest.importorskip("megatron.bridge")
     dist_workers_size_2.run(
         partial(
@@ -1917,7 +1971,7 @@ def test_swiglu_legacy_checkpoint_loads_twice_through_mbridge(dist_workers_size_
             False,
             False,
             2,
-            2,
+            1,
             1,
             mbridge=True,
         )

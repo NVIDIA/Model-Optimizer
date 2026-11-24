@@ -200,6 +200,14 @@ def _read_checkpoint_layout(model: torch.nn.Module, checkpoint_name: str | Path,
             read_layout(safe_load(state.detach().cpu().numpy().tobytes()))
 
 
+def _forget_checkpoint_layout(model: torch.nn.Module):
+    """Have ``model``'s modules plan their keys in their own layout again, as after a load."""
+    for module in model.modules():
+        forget = getattr(module, "modelopt_forget_checkpoint_layout", None)
+        if callable(forget):
+            forget()
+
+
 def restore_sharded_modelopt_state(
     model: list[torch.nn.Module],
     checkpoint_name: str | Path,

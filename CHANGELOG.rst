@@ -38,7 +38,7 @@ Changelog
 
 **Backward Breaking Changes**
 
-- Megatron checkpoints now save the per-row weight quantizer state (e.g. FP8 per-channel, INT4 AWQ) of a gated (SwiGLU) MLP's ``linear_fc1`` in Megatron's SwiGLU layout, which earlier ModelOpt versions cannot load. Checkpoints saved by earlier versions still load, at any tensor parallelism, into a model that isn't quantized yet, and through ModelOpt's ``restore_sharded_modelopt_state`` and ``load_modelopt_megatron_checkpoint`` into one that is; they are saved in the new layout from then on. Megatron-Bridge's and Megatron-LM's own loaders don't yet read the layout for an already quantized model, so loading such a checkpoint into one there fails with a missing-key error: load it into a model that isn't quantized yet instead.
+- Megatron checkpoints now save a gated (SwiGLU) MLP's ``linear_fc1`` per-row weight quantizer state (e.g. FP8 per-channel, INT4 AWQ) in Megatron's SwiGLU layout, so it reloads on the right rows at another tensor parallelism; earlier ModelOpt versions can't load these checkpoints. Earlier checkpoints still load into a model that isn't quantized yet, or through ModelOpt's ``restore_sharded_modelopt_state`` / ``load_modelopt_megatron_checkpoint``, but Megatron-Bridge's and Megatron-LM's own loaders fail with a missing-key error loading one into an already quantized model, e.g. when resuming a QAD run started before the upgrade.
 
 **Deprecations**
 

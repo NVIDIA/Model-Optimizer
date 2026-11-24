@@ -232,14 +232,20 @@ def _saves_swiglu_rows(module) -> bool:
     quantizer = getattr(module, "weight_quantizer", None)
     if not getattr(module, "_modelopt_gated_fc1", False) or quantizer is None:
         return False
-    rows = module.weight.shape[0]
     return any(
         name.rpartition(".")[2] in ("_amax", "_scale")
-        and b.dim() > 0
-        and b.shape[0] >= rows
-        and b.shape[0] % rows == 0
+        and _has_swiglu_rows(b, module.weight.shape[0])
         for name, b in quantizer.named_buffers()
     )
+
+
+def _has_swiglu_rows(tensor: torch.Tensor, rows: int) -> bool:
+    """Whether ``tensor`` has a gated linear_fc1 weight's ``rows``: gate, then up.
+
+    Each row's blocks may be flattened (e.g. compressed INT4 AWQ's scale); per-tensor or
+    per-column state has no rows.
+    """
+    return tensor.dim() > 0 and tensor.shape[0] >= rows and tensor.shape[0] % rows == 0
 
 
 def real_quant_module_set_extra_state(self, state: Any):
@@ -556,6 +562,11 @@ class _MegatronParallelLinear(_ParallelLinear):
         """Read how a checkpoint loaded into this converted module laid out its state."""
         _read_swiglu_layout(self, state)
 
+    def modelopt_forget_checkpoint_layout(self):
+        """Plan keys in this module's own layout again, as once a checkpoint's tensors load."""
+        self._legacy_swiglu_quantizer_state = False
+        self.__dict__.pop("_legacy_swiglu_tp_ratios", None)
+
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):
         if v.ndim == 4:
             quantizer_state_dict[k] = v.squeeze(1).squeeze(-1)
@@ -628,8 +639,7 @@ class _MegatronParallelLinear(_ParallelLinear):
         # The restore's first load has only the extra state; once the tensors load they are in this
         # rank's layout, so the next save writes the current one.
         if any(k.startswith(prefix) and not k.endswith("_extra_state") for k in state_dict):
-            self._legacy_swiglu_quantizer_state = False
-            self.__dict__.pop("_legacy_swiglu_tp_ratios", None)
+            self.modelopt_forget_checkpoint_layout()
 
 
 @QuantModuleRegistry.register(
@@ -738,10 +748,11 @@ class _QuantMegatronMLP(_MegatronMLP):
             return False
         if "_quantizer." not in key:
             return True
-        # Only per-row quantizer state has gate and up rows; per-tensor state is replicated. Per-block
-        # state may be flattened, as each row's blocks (e.g. compressed INT4 AWQ's scale).
-        shape, rows = sharded_tensor.local_shape, self.linear_fc1.weight.shape[0]
-        return len(shape) > 0 and shape[0] >= rows and shape[0] % rows == 0
+        # Classified by the quantizer's own buffer, as its extra state is marked: the saved view may
+        # be reshaped to rows (e.g. a per-input-channel amax).
+        buffers = dict(self.linear_fc1.named_buffers())
+        tensor = buffers.get(key.rpartition("linear_fc1.")[2], sharded_tensor.data)
+        return _has_swiglu_rows(tensor, self.linear_fc1.weight.shape[0])
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
