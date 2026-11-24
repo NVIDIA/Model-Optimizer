@@ -289,6 +289,14 @@ def _validate_parameter_geometry(
         validate_activation_partition(activation, view)
 
 
+def _restore_parallel_plans(model, original_plans):
+    for name, (owned, plan) in original_plans.items():
+        if owned:
+            setattr(model, name, plan)
+        else:
+            model.__dict__.pop(name, None)
+
+
 def parallelize_native_transformers(model, context, *, initialize=None):
     """Apply explicit native TP/EP plans and prepare repair fields before FSDP2.
 
@@ -425,11 +433,7 @@ def parallelize_native_transformers(model, context, *, initialize=None):
     try:
         _synchronize_validation(context, error)
     except ValueError:
-        for name, (owned, plan) in original_plans.items():
-            if owned:
-                setattr(model, name, plan)
-            else:
-                model.__dict__.pop(name, None)
+        _restore_parallel_plans(model, original_plans)
         raise
     assert plans is not None and partitions is not None and global_ids is not None
     tp_plan, ep_plan, fsdp_plan = plans
@@ -485,11 +489,7 @@ def parallelize_native_transformers(model, context, *, initialize=None):
         if adopted:
             for module, name, quantizers in original_partitions:
                 setattr(module, name, quantizers)
-            for name, (owned, plan) in original_plans.items():
-                if owned:
-                    setattr(model, name, plan)
-                else:
-                    model.__dict__.pop(name, None)
+            _restore_parallel_plans(model, original_plans)
         raise
     if adopted:
         model.config.distributed_config = config
