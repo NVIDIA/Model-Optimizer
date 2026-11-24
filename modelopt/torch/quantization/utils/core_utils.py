@@ -690,6 +690,10 @@ def fsdp2_weight_access_and_writeback_context(
     parameters FSDP2 manages are gathered: a DTensor it does not own (an
     expert-parallel weight ``fully_shard`` was told to ignore, say) stays sharded.
 
+    Read-only composite access keeps the enclosing group and every distinct descendant
+    FSDP group materialized together until the body exits. Its peak includes all those
+    full weights; readers needing one-owner residency must open separate owner scopes.
+
     Gathered TP weights expose their local tensors in this scope; retained native-full TP views
     remain DTensors on the TP mesh.
     Default writable windows whose subtree contains an FSDP2 registration owner coordinate entry,

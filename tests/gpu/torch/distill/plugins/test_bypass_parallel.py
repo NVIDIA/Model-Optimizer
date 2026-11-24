@@ -19,6 +19,7 @@ import copy
 from collections import OrderedDict
 from datetime import timedelta
 from functools import cache
+from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -61,24 +62,33 @@ from modelopt.torch.quantization.repair_partition import prepare_packed_weights_
 from modelopt.torch.quantization.utils.native_weight import get_pinned_native_weight
 
 
-def test_hybrid_fsdp_plan_wraps_only_present_functional_children():
+@pytest.mark.parametrize("family", ["qwen3_next", "qwen3_5_moe"])
+def test_hybrid_fsdp_plan_wraps_only_present_functional_children(family):
     pytest.importorskip("transformers", minversion="5.23")
     from _test_utils.transformers_families import build_model, cases
     from transformers.distributed.configuration_utils import DistributedConfig
 
     from modelopt.torch.distill.plugins.transformers.functional_fsdp import extend_family_fsdp_plan
 
-    record = cases(["qwen3_next"])[0]
+    record = cases([family])[0]
     model = build_model(record, "meta")
     plan = model._resolve_parallel_plans(DistributedConfig(fsdp_size=2))[2]
     original = dict(plan)
     extended = extend_family_fsdp_plan(model, plan)
     modules = dict(model.named_modules())
     children = {name for name in modules if name.endswith("linear_attn.conv1d")}
-    assert children and any(hasattr(block, "self_attn") for block in model.model.layers)
+    assert children and any(hasattr(block, "self_attn") for block in modules.values())
     assert children <= extended.keys() <= modules.keys()
     assert all(extended[name] == "free_full_weight" for name in children)
     assert plan == original
+    # Existing child styles and caller order are load-bearing when nothing is added.
+    complete = dict(reversed(extended.items()))
+    complete[next(iter(children))] = "keep_full_weight"
+    before = tuple(complete.items())
+    assert extend_family_fsdp_plan(model, complete) is complete
+    assert tuple(complete.items()) == before
+    unrelated = {"lm_head": "keep_full_weight", "": "free_full_weight"}
+    assert extend_family_fsdp_plan(model, unrelated) is unrelated
 
 
 @cache
@@ -713,7 +723,7 @@ def test_public_dp_tp_bypass_with_empty_partitioned_lane(data_tensor_cpu_workers
     data_tensor_cpu_workers.run(_public_tp_loss_worker, "dp_tp", 1e-4)
 
 
-def _functional_child_worker(rank, size):
+def _functional_child_worker(rank, size, native):
     # Optional Transformers integration must not gate the generic Torch workers.
     from modelopt.torch.distill.plugins.transformers.functional_fsdp import (
         install_functional_fsdp_calls,
@@ -728,36 +738,98 @@ def _functional_child_worker(rank, size):
             return F.conv1d(inputs, self.conv1d.weight)
 
     torch.manual_seed(702)
-    model = torch.nn.Module()
-    model.config = SimpleNamespace(model_type="qwen3_next")
-    model.model = torch.nn.Module()
-    block = torch.nn.Module()
-    block.linear_attn = FunctionalParent()
-    model.model.layers = torch.nn.ModuleList([block])
-    parent = block.linear_attn
-    reference = copy.deepcopy(parent)
-    inputs = torch.randn(2, 4, 6)
     mesh = _runtime_mesh("fsdp")
-    fully_shard(parent.conv1d, mesh=mesh, reshard_after_forward=True)
+    if native:
+        from _test_utils.transformers_families import build_model, cases
+        from transformers.distributed.configuration_utils import DistributedConfig
+        from transformers.distributed.fsdp import apply_fully_sharded_data_parallelism
+        from transformers.distributed.utils import TransformersDeviceMesh
+
+        from modelopt.torch.distill.plugins.transformers.functional_fsdp import (
+            extend_family_fsdp_plan,
+        )
+
+        model = build_model(cases(["qwen3_next"])[0], "cpu").eval()
+        model.config.distributed_config = DistributedConfig(fsdp_size=size)
+        plan = model._resolve_parallel_plans(model.config.distributed_config)[2]
+        plan = extend_family_fsdp_plan(model, plan)
+        parent = next(
+            block.linear_attn for block in model.model.layers if hasattr(block, "linear_attn")
+        )
+        reference = copy.deepcopy(parent)
+        inputs = torch.randn(1, 4, 256, dtype=next(reference.parameters()).dtype)
+        apply_fully_sharded_data_parallelism(model, TransformersDeviceMesh(mesh, mesh), plan, {})
+        child_group = fully_shard.state(parent.conv1d)._fsdp_param_group
+        decoder = next(
+            block for block in model.model.layers if getattr(block, "linear_attn", None) is parent
+        )
+        outer_group = fully_shard.state(decoder)._fsdp_param_group
+        assert child_group is not outer_group
+        assert {id(p.sharded_param) for p in child_group.fsdp_params}.isdisjoint(
+            id(p.sharded_param) for p in outer_group.fsdp_params
+        )
+    else:
+        model = torch.nn.Module()
+        model.config = SimpleNamespace(model_type="qwen3_next")
+        model.model = torch.nn.Module()
+        block = torch.nn.Module()
+        block.linear_attn = FunctionalParent()
+        model.model.layers = torch.nn.ModuleList([block])
+        parent = block.linear_attn
+        reference = copy.deepcopy(parent)
+        inputs = torch.randn(2, 4, 6)
+        fully_shard(parent.conv1d, mesh=mesh, reshard_after_forward=True)
+    expected_shape = tuple(reference.conv1d.weight.shape)
     install_functional_fsdp_calls(model)
     forward = parent.forward
     install_functional_fsdp_calls(model)
     assert parent.forward is forward
+    reads = []
+    if native:
+        native_module = import_module(type(reference).__module__)
+        conv = native_module.causal_conv1d_fn
+
+        def checked_conv(inputs, weight, *args, **kwargs):
+            assert tuple(weight.shape) == (expected_shape[0], expected_shape[2])
+            reads.append(tuple(weight.shape))
+            return conv(inputs, weight, *args, **kwargs)
+
     with bounded_collectives(10), torch.no_grad():
         for _ in range(2):
-            torch.testing.assert_close(parent(inputs), reference(inputs), rtol=0, atol=0)
+            expected = reference(inputs)
+            if native:
+                # Native parent weights belong to the decoder; enter its actual FSDP forward.
+                with (
+                    patch.object(decoder, "forward", lambda value: parent(value)),
+                    patch.object(native_module, "causal_conv1d_fn", checked_conv),
+                ):
+                    actual = decoder(inputs)
+            else:
+                actual = parent(inputs)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
             weight = parent.conv1d.weight
             assert isinstance(weight, DTensor) and weight.placements == (Shard(0),)
-            assert weight.to_local().shape == (4, 4, 3)
+            assert tuple(weight.to_local().shape) == (
+                expected_shape[0] // size,
+                *expected_shape[1:],
+            )
+    if native:
+        assert len(reads) == 2
     parent.conv1d = fully_shard(copy.deepcopy(reference.conv1d), mesh=mesh)
     with pytest.raises(ValueError):
         install_functional_fsdp_calls(model)
 
 
 @pytest.mark.timeout(180)
-def test_functional_fsdp_child_gathers_weight_and_reshards(bypass_cpu_workers):
+@pytest.mark.parametrize("native", [False, True], ids=["generic", "native-qwen3-next"])
+def test_functional_fsdp_child_gathers_weight_and_reshards(bypass_cpu_workers, native):
     pytest.importorskip("transformers", minversion="5.23")
-    bypass_cpu_workers.run(_functional_child_worker)
+    timeout = bypass_cpu_workers.job_timeout
+    try:
+        bypass_cpu_workers.job_timeout = 120
+        bypass_cpu_workers.run(_functional_child_worker, native)
+    finally:
+        bypass_cpu_workers.job_timeout = timeout
 
 
 class _DocumentTeacher(torch.nn.Module):

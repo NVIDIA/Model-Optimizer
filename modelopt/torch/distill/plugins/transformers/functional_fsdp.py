@@ -44,6 +44,9 @@ def extend_family_fsdp_plan(model, plan):
             name = names[id(block)] + "." + path
             if name in modules and any(name.startswith(owner + ".") for owner in plan):
                 result.setdefault(name, "free_full_weight")
+    if len(result) == len(plan):
+        return plan
+    # Native child groups must wrap before enclosing groups can claim their parameters.
     return dict(sorted(result.items(), key=lambda item: item[0].count("."), reverse=True))
 
 

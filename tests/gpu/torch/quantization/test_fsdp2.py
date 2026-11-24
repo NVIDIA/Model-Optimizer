@@ -16,15 +16,26 @@
 """Test of quantization with FSDP2."""
 
 import copy
+import json
+import time
 from contextlib import contextmanager
+from datetime import timedelta
 from functools import partial
+from importlib.metadata import version
+from pathlib import Path
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from _test_utils.torch.distributed.utils import bounded_collectives, synchronize_state_dict
-from torch.distributed.device_mesh import init_device_mesh
+from _test_utils.torch.distributed.utils import (
+    DistributedWorkerPool,
+    bounded_collectives,
+    default_worker_teardown,
+    get_live_pool,
+    synchronize_state_dict,
+)
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from torch.utils.data import DataLoader
@@ -184,7 +195,7 @@ class _LSQBf16Linear(nn.Module):
 def _test_lsq_bf16_learnable_amax_fsdp2(rank, size):
     torch.manual_seed(1)
     model = _LSQBf16Linear().cuda(rank)
-    inputs = torch.randn(2, 16, device=rank, dtype=torch.bfloat16)
+    inputs = torch.randn(2, 16, device=f"cuda:{rank}", dtype=torch.bfloat16)
     synchronize_state_dict(model)
 
     assert {p.dtype for p in model.parameters()} == {torch.bfloat16}
@@ -730,3 +741,101 @@ def test_iq_plan_checks_execution_device_offload_backing(shared):
             plan_iq_repair([model[0]], root_model=model)
     else:
         plan_iq_repair([model[0]], root_model=model)
+
+
+def _nested_read_cuda_peak_worker(rank, size, output_dir):
+    # This measures the actual shared reader, not an exporter or a downloaded MoE.
+    assert size == 2
+    torch.manual_seed(703)
+    model = nn.Sequential(
+        nn.Linear(2048, 2048, bias=False),
+        nn.Sequential(*[nn.Linear(2048, 2048, bias=False) for _ in range(4)]),
+    ).to(dtype=torch.bfloat16)
+    reference = {name: value.detach().clone() for name, value in model.named_parameters()}
+    model.cuda(rank)
+    group = dist.new_group(timeout=timedelta(seconds=60))
+    mesh = DeviceMesh.from_group(group, "cuda", mesh_dim_names=("fsdp",))
+    owners = [model, *model[1]]
+    for owner in owners[1:]:
+        fully_shard(owner, mesh=mesh, reshard_after_forward=True)
+    fully_shard(model, mesh=mesh, reshard_after_forward=True)
+    with torch.no_grad(), bounded_collectives(60):
+        model(torch.ones(1, 2048, device=f"cuda:{rank}", dtype=torch.bfloat16))
+        for owner in owners:
+            owner.reshard()
+        groups = [fully_shard.state(owner)._fsdp_param_group for owner in owners]
+        assert len({id(group) for group in groups}) == 5
+        originals = {name: id(value) for name, value in model.named_parameters()}
+        assert all(group.is_sharded for group in groups)
+        torch.cuda.synchronize()
+        baseline = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        started = time.perf_counter()
+        with enable_weight_access_and_writeback(model, model, writeback=False):
+            gathered = sum(not group.is_sharded for group in groups)
+            full_bytes = sum(value.numel() * value.element_size() for value in model.parameters())
+            assert gathered == 5 and full_bytes == 40 * 1024**2
+            for name, value in model.named_parameters():
+                assert not isinstance(value, DTensor)
+                assert value.shape == (2048, 2048) and value.dtype == torch.bfloat16
+                torch.testing.assert_close(value.detach().cpu(), reference[name], rtol=0, atol=0)
+        torch.cuda.synchronize()
+        elapsed = time.perf_counter() - started
+        peak = torch.cuda.max_memory_allocated()
+        assert peak - baseline <= 52 * 1024**2
+        assert all(group.is_sharded for group in groups)
+        for name, value in model.named_parameters():
+            assert id(value) == originals[name]
+            assert isinstance(value, DTensor) and value.placements == (Shard(0),)
+            torch.testing.assert_close(
+                value.to_local().cpu(), reference[name].chunk(size)[rank], rtol=0, atol=0
+            )
+    receipt = {
+        "measurement": "nested_fsdp_shared_read",
+        "torch": torch.__version__,
+        "transformers": version("transformers"),
+        "cuda": torch.version.cuda,
+        "device": torch.cuda.get_device_name(rank),
+        "rank": rank,
+        "world": size,
+        "shape": [2048, 2048],
+        "dtype": "bfloat16",
+        "full_groups": gathered,
+        "full_bytes": full_bytes,
+        "persistent_payload_bytes": 20 * 1024**2,
+        "baseline_bytes": baseline,
+        "peak_bytes": peak,
+        "incremental_peak_bytes": peak - baseline,
+        "seconds": elapsed,
+        "lifecycle": "resharded_unchanged",
+        "exporter": False,
+    }
+    Path(output_dir, f"nested-read-{rank}.json").write_text(json.dumps(receipt, sort_keys=True))
+
+
+@pytest.fixture
+def nested_read_workers(_dist_pools):
+    if torch.cuda.device_count() < 2:
+        pytest.skip("Actual nested FSDP read peak requires two CUDA devices")
+    return get_live_pool(
+        _dist_pools,
+        ("nested_read_cuda", 2),
+        lambda: DistributedWorkerPool(
+            world_size=2, backend="nccl", teardown_fn=default_worker_teardown, ready_timeout=120
+        ),
+    )
+
+
+@pytest.mark.timeout(180)
+def test_nested_fsdp2_read_cuda_peak(nested_read_workers, tmp_path, capsys):
+    workers = nested_read_workers
+    timeout = workers.job_timeout
+    try:
+        workers.job_timeout = 120
+        workers.run(_nested_read_cuda_peak_worker, str(tmp_path))
+    finally:
+        workers.job_timeout = timeout
+    # Parent capture is disabled so passing hosted pytest logs retain the measured values.
+    with capsys.disabled():
+        for rank in range(2):
+            print(Path(tmp_path, f"nested-read-{rank}.json").read_text(), flush=True)
