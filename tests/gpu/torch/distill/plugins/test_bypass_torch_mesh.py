@@ -192,6 +192,7 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
     from transformers.distributed.utils import TransformersDeviceMesh
 
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+    from modelopt.torch.distill.plugins.transformers.parallel import validate_hf_tensor_parallelism
 
     assert size == 2
     group = _mesh_group()
@@ -216,10 +217,38 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
     first = model.model.layers[0].self_attn.q_proj
     second = (
         model.model.layers[1].self_attn.q_proj
-        if sharing == "compatible"
+        if sharing in ("compatible", "tied_compatible")
         else model.model.layers[0].self_attn.o_proj
     )
     assert first.weight.shape == second.weight.shape == (32, 32)
+    if sharing in ("tied_parameter", "tied_compatible"):
+        second.weight = first.weight
+        assert first is not second
+        assert second.weight is first.weight
+    elif sharing in ("shared_module", "module_alias"):
+        model.model.layers[0].self_attn.o_proj = first
+        second = model.model.layers[0].self_attn.o_proj
+        assert second is first
+        assert second.weight is first.weight
+    if sharing in ("tied_parameter", "tied_compatible", "shared_module", "module_alias"):
+        second_name = (
+            "model.layers.1.self_attn.q_proj.weight"
+            if sharing == "tied_compatible"
+            else "model.layers.0.self_attn.o_proj.weight"
+        )
+        assert second_name not in dict(model.named_parameters())
+        assert dict(model.named_parameters(remove_duplicate=False))[second_name] is first.weight
+        if sharing in ("tied_parameter", "tied_compatible"):
+            assert second_name in model._expand_parallel_plan(model.tp_plan)
+        else:
+            assert "model.layers.0.self_attn.o_proj" not in dict(model.named_modules())
+    if sharing == "compatible":
+        model.unplanned_alias = first
+        assert model.unplanned_alias is first
+        assert not any(
+            name.startswith("unplanned_alias")
+            for name in model._expand_parallel_plan(model.tp_plan)
+        )
     for layer in (first, second):
         layer.weight_quantizer.set_from_attribute_config(
             QuantizerAttributeConfig(num_bits=8, axis=0, enable=True)
@@ -237,7 +266,16 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
     adapter = TransformersBypassAdapter(mesh)
     with bounded_collectives(10):
         try:
-            adapter.parallelize(model)
+            if route == "explicit_plan":
+                # HF expansion drops shared modules; an explicit plan must still resolve every owner.
+                plan = {"model.layers.0.self_attn.q_proj.weight": "colwise"}
+                if sharing == "module_alias":
+                    plan["model.layers.0.self_attn.o_proj"] = "colwise"
+                else:
+                    plan["model.layers.0.self_attn.o_proj.weight"] = "rowwise"
+                validate_hf_tensor_parallelism(model, mesh, plan)
+            else:
+                adapter.parallelize(model)
         except Exception as exc:
             error = (type(exc).__name__, str(exc))
     errors = [None] * size
@@ -253,14 +291,35 @@ def _torch_mesh_alias_worker(rank, size, route, sharing):
             adapter.parallelize(model)
         _assert_unchanged(model, placed)
     else:
+        _assert_unchanged(model, snapshot)
         assert all(item is not None and item[0] == "ValueError" for item in errors), errors
         assert errors[0] == errors[1], errors
-        assert "incompatible TP layouts" in errors[0][1], errors
-        _assert_unchanged(model, snapshot)
+        if sharing in ("tied_compatible", "module_alias"):
+            assert "alias" in errors[0][1], errors
+            assert (
+                "model.layers.1.self_attn.q_proj.weight"
+                if sharing == "tied_compatible"
+                else "model.layers.0.self_attn.o_proj"
+            ) in errors[0][1], errors
+        else:
+            assert "incompatible TP layouts" in errors[0][1], errors
 
 
-@pytest.mark.parametrize("route", ["raw", "native"])
-@pytest.mark.parametrize("sharing", ["incompatible", "rank_local", "compatible"])
+@pytest.mark.parametrize(
+    ("route", "sharing"),
+    [
+        (route, sharing)
+        for route in ("raw", "native")
+        for sharing in (
+            "incompatible",
+            "rank_local",
+            "compatible",
+            "tied_parameter",
+            "tied_compatible",
+        )
+    ]
+    + [("explicit_plan", "shared_module"), ("explicit_plan", "module_alias")],
+)
 @pytest.mark.timeout(180)
 def test_shared_quantizer_fields_preflight(bypass_cpu_workers, route, sharing):
     pytest.importorskip("transformers", minversion="5.23")
