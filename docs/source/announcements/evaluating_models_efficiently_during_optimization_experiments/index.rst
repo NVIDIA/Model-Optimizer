@@ -195,9 +195,6 @@ For mean length, we use question-level paired t-tests and t-based 95% confidence
 How can you evaluate faster?
 ----------------------------
 
-When reducing question coverage, choose a representative subset before inspecting results and use
-the same question IDs for both models.
-
 .. _evaluation-prioritize-question-coverage:
 .. _evaluation-choose-questions-and-repetitions:
 
@@ -216,8 +213,9 @@ evaluation speed:
   estimate uncertainty across questions. With sufficiently independent questions, this approach can support faster experimentation.
 
 In both approaches, we produce the same aggregate mean score by averaging across all questions
-and repetitions. Using question-level versus repetition-level analysis only changes how uncertainty
-is estimated with confidence intervals.
+and repetitions. Using question-level versus repetition-level analysis only changes how we
+calculate confidence intervals and p-values. What you can compare later depends on the results
+you use:
 
 - **Within an experiment**, use paired analysis when both checkpoints answer the same questions.
 - **Across experiments**, report an aggregate score per checkpoint. Keep per-question results for
@@ -226,7 +224,6 @@ is estimated with confidence intervals.
 Is question-level analysis reliable on real benchmarks compared with repetition-level analysis?
 We compare the two approaches by spending the same response budget on more unique questions or
 more repetitions per question, then measuring how much the resulting scores vary.
-
 On SciCode, more subtasks with fewer repetitions gave more consistent Candidate accuracy
 estimates at the same response budget. The plot shows how much accuracy varied across
 eight groups, each with 280 responses per model.
