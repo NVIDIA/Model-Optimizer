@@ -157,6 +157,8 @@ def document_batches(batch):
 
 def empty_document_batch(batch):
     """Execute a zero-valid token when another distributed rank has more documents."""
+    # A single isolated token has no cross-token attention to preserve. Its explicit
+    # all-invalid loss mask makes caller attention/position metadata unnecessary.
     tokens = batch["input_ids"][:1, :1]
     return {
         "input_ids": tokens,

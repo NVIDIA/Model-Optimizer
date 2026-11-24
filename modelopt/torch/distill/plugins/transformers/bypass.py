@@ -595,11 +595,9 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 delattr(teacher, "forward")
 
     def _synchronize_error(self, error):
-        from ..._bypass_parallel import _all_rank_values
+        from ..._bypass_parallel import _synchronize_error
 
-        errors = sorted({value for value in _all_rank_values(self.context, error) if value})
-        if errors:
-            raise ValueError("; ".join(errors))
+        _synchronize_error(self.context, error)
 
     def _document_teacher(self, teacher, units, document, consume):
         prepared, error = None, None
@@ -609,13 +607,15 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 "valid_mask": _valid_token_mask(document),
             }
         except Exception as exc:
+            if self.context is None or self.context.device_mesh.size() == 1:
+                raise
             error = f"{type(exc).__name__}: {exc}"
         self._synchronize_error(error)
         return super().teacher_microbatch(teacher, units, prepared, consume)
 
     def teacher_microbatch(self, teacher, units, batch, consume):
         """Keep document recurrence faithful and match every rank's forward schedule."""
-        from ..._bypass_parallel import _all_rank_values
+        from ..._bypass_parallel import _all_rank_max
 
         documents, error = [], None
         try:
@@ -629,9 +629,11 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 if self._batch_documents(self.student, student_facts.spec, student_facts.modules):
                     documents = batch_documents(documents, batch["input_ids"].numel())
         except Exception as exc:
+            if self.context is None or self.context.device_mesh.size() == 1:
+                raise
             error = f"{type(exc).__name__}: {exc}"
         self._synchronize_error(error)
-        slots = max(_all_rank_values(self.context, len(documents)))
+        slots = _all_rank_max(self.context, len(documents))
         with bypass_head_context(teacher, units, facts.head, head_paths=facts.head_paths):
             for index in range(slots):
                 document = (
