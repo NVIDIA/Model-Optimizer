@@ -279,6 +279,7 @@ Changelog
 - Require Pydantic 2.5.0 or newer to prevent configuration-schema errors when importing ``modelopt.torch`` with older releases.
 - Require Wonderwords 2.2.0 or newer in the ``hf`` extra to prevent RULER calibration failures during random-word generation with older releases.
 - A legacy dict-format ``quant_cfg`` now applies its ``"default"`` key before the other keys wherever it appears, as before 0.44.
+- Fix FP16/BF16 deployment with TensorRT 11 by encoding the requested precision in the ONNX graph while preserving input/output types. TensorRT 11 implicit low-bit modes, best-mode search and calibration caches require offline conversion or quantization followed by ``stronglyTyped`` deployment.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^

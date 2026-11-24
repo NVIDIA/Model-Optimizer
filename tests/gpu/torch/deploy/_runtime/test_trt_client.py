@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import onnx
 import pytest
 import torch
 from _test_utils.import_helper import skip_if_no_tensorrt, skip_if_no_trtexec
@@ -28,6 +29,7 @@ from _test_utils.torch.vision_models import get_vision_models, process_model_and
 trt = pytest.importorskip("tensorrt")
 
 
+from modelopt.torch._deploy._runtime.tensorrt import engine_builder
 from modelopt.torch._deploy._runtime.trt_client import TRTLocalClient
 from modelopt.torch._deploy.compilation import compile
 
@@ -78,6 +80,56 @@ def _compile_and_profile(model, args, kwargs):
     assert detailed_results is not None
     assert device_model is not None
     compare_outputs(device_model_outputs, torch_model_outputs, rtol=1e-2, atol=1e-1)
+
+
+@pytest.mark.parametrize("precision", ["fp16", "bf16"])
+def test_trt11_precision_graph_and_inference(tmp_path, monkeypatch, precision):
+    if int(trt.__version__.split(".", 1)[0]) < 11:
+        pytest.skip("TensorRT 11 precision migration")
+    if not torch.cuda.is_available():
+        pytest.skip("A CUDA device is required")
+    if precision == "bf16" and not torch.cuda.is_bf16_supported():
+        pytest.skip("BF16 requires a supported GPU")
+    skip_if_no_trtexec()
+    model, args, kwargs = process_model_and_inputs(
+        LeNet5(), (LeNet5.gen_input(batch_size=2),), {}, on_gpu=True
+    )
+    run_trtexec = engine_builder._run_trtexec_with_logging
+    observed = []
+
+    def inspect_and_compile(arguments, cwd=None):
+        path = next(arg.split("=", 1)[1] for arg in arguments if arg.startswith("--onnx="))
+        graph = onnx.load(path)
+        expected_type = {"fp16": onnx.TensorProto.FLOAT16, "bf16": onnx.TensorProto.BFLOAT16}[
+            precision
+        ]
+        floating_weights = [
+            t
+            for t in graph.graph.initializer
+            if t.data_type
+            in (onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16, onnx.TensorProto.BFLOAT16)
+        ]
+        assert floating_weights and all(t.data_type == expected_type for t in floating_weights)
+        assert all(
+            value.type.tensor_type.elem_type == onnx.TensorProto.FLOAT
+            for value in list(graph.graph.input) + list(graph.graph.output)
+        )
+        observed.append(expected_type)
+        return run_trtexec(arguments, cwd=cwd)
+
+    # Observe the temporary graph, then delegate to the real native compiler.
+    monkeypatch.setattr(engine_builder, "_run_trtexec_with_logging", inspect_and_compile)
+    device = compile(
+        model,
+        (*args, kwargs),
+        {**deployment, "precision": precision},
+        compilation_args={"engine_path": tmp_path / "model.engine"},
+    )
+    actual = device(*args, **kwargs)
+    with torch.no_grad():
+        expected = model(*args, **kwargs)
+    assert observed
+    compare_outputs(actual, expected, rtol=1e-2, atol=1e-1)
 
 
 @pytest.mark.parametrize("input_kind", ["static", "static_inferred", "dynamic", "shape_tensor"])

@@ -18,24 +18,31 @@ import os
 import stat
 import sys
 import tempfile
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 from types import ModuleType
 from unittest import mock
 
+import numpy as np
+import onnx
 import pytest
+from onnx import TensorProto, helper, numpy_helper
 
 # Patch mock tensorrt module
 tensorrt = ModuleType("tensorrt")
+tensorrt.__spec__ = ModuleSpec("tensorrt", loader=None)
 tensorrt.Logger = mock.Mock()
 tensorrt.tensorrt = mock.Mock()
 tensorrt.__version__ = "10.10"
 sys.modules["tensorrt"] = tensorrt
 
+from modelopt.torch._deploy._runtime.tensorrt import engine_builder
 from modelopt.torch._deploy._runtime.tensorrt.engine_builder import (
     _default_artifact_dir,
     build_engine,
     profile_engine,
 )
+from modelopt.torch._deploy.utils import OnnxBytes
 
 
 @pytest.fixture
@@ -156,3 +163,81 @@ def test_default_artifact_dir_is_private_and_reused_within_a_process(setup_mocks
     (artifact_dir,) = shared_tmp.iterdir()
     if sys.platform != "win32":  # POSIX file modes
         assert stat.S_IMODE(artifact_dir.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("version", ["10.10", "11.4"])
+@pytest.mark.parametrize("precision", ["fp16", "bf16", "fp32", "stronglyTyped"])
+@pytest.mark.parametrize("external", [False, True])
+def test_build_engine_precision_graph(tmp_path, monkeypatch, version, precision, external):
+    monkeypatch.setattr(tensorrt, "__version__", version)
+    source = tmp_path / "source"
+    source.mkdir()
+    weights = np.random.default_rng(0).normal(size=(32, 32)).astype(np.float32)
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["x", "weight"], ["y"], name="matmul")],
+        "precision",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["batch", 32])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, ["batch", 32])],
+        initializer=[numpy_helper.from_array(weights, "weight")],
+    )
+    path = source / "model.onnx"
+    onnx.save_model(
+        helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)], ir_version=10),
+        path,
+        save_as_external_data=external,
+        all_tensors_to_one_file=True,
+        location="weights.data",
+        size_threshold=0,
+    )
+    original_files = {p.name: p.read_bytes() for p in source.iterdir()}
+    model = OnnxBytes(str(path))
+    original_bytes = dict(model.onnx_model)
+    observed = []
+
+    def compile_graph(arguments, cwd=None):
+        onnx_path = next(arg.split("=", 1)[1] for arg in arguments if arg.startswith("--onnx="))
+        header = onnx.load(onnx_path, load_external_data=False)
+        assert all(
+            onnx.external_data_helper.uses_external_data(t) == external
+            for t in header.graph.initializer
+        )
+        compiled_graph = onnx.load(onnx_path)
+        onnx.checker.check_model(compiled_graph)
+        expected_type = TensorProto.FLOAT
+        if version.startswith("11"):
+            expected_type = {"fp16": TensorProto.FLOAT16, "bf16": TensorProto.BFLOAT16}.get(
+                precision, TensorProto.FLOAT
+            )
+            assert not set(arguments) & {"--fp16", "--bf16", "--fp8", "--int8", "--int4", "--best"}
+        elif precision != "fp32":
+            assert "--" + precision in arguments
+        assert all(t.data_type == expected_type for t in compiled_graph.graph.initializer)
+        for value in list(compiled_graph.graph.input) + list(compiled_graph.graph.output):
+            assert value.type.tensor_type.elem_type == TensorProto.FLOAT
+            assert value.type.tensor_type.shape.dim[0].dim_param == "batch"
+        observed.append(expected_type)
+        engine = next(arg.split("=", 1)[1] for arg in arguments if arg.startswith("--saveEngine="))
+        Path(engine).write_bytes(b"engine_bytes")
+        return 0, b"compiled"
+
+    # Only replace the unavailable native compiler; graph conversion and file handling are real.
+    monkeypatch.setattr(engine_builder, "_run_trtexec_with_logging", compile_graph)
+    engine, output = build_engine(model, trt_mode=precision, output_dir=tmp_path / "artifacts")
+    assert engine is not None and engine.endswith(b"engine_bytes")
+    assert output == b"compiled" and observed
+    assert {p.name: p.read_bytes() for p in source.iterdir()} == original_files
+    assert model.onnx_model == original_bytes
+
+
+@pytest.mark.parametrize(
+    ("precision", "calibration_cache"),
+    [("fp8", None), ("int8", None), ("int4", None), ("best", None), ("fp32", "legacy-cache")],
+)
+def test_trt11_rejects_implicit_precision_before_writing(
+    tmp_path, monkeypatch, precision, calibration_cache
+):
+    monkeypatch.setattr(tensorrt, "__version__", "11.4")
+    output = tmp_path / "artifacts"
+    with pytest.raises(ValueError):
+        build_engine(None, trt_mode=precision, calib_cache=calibration_cache, output_dir=output)
+    assert not output.exists()
