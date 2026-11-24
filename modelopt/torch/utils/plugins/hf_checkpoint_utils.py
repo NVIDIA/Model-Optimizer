@@ -29,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import warnings
 from collections.abc import Callable, Iterable
 from datetime import timedelta
@@ -428,25 +429,32 @@ def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
 # "inside the checkpoint" has to mean the snapshot dir OR that blob root. Getting this wrong
 # in either direction is costly: reject links and no hub checkpoint works, follow them blindly
 # and a checkpoint can name any file on the host.
+#
+# Since huggingface_hub 1.32, a Xet-backed file (tokenizer.json, weight shards) is stored once per
+# cache, in a store at ``<cache>/blobs`` shared by all repos, and the repo's ``blobs/<etag>`` is a
+# link into it, so that store is a blob root too. Like the hub (its ``utils/_shared_blobs.py``),
+# trust it only when it carries the hub's marker file, not because some ``blobs/`` directory sits
+# above a snapshot-shaped path.
+_HF_SHARED_BLOBS_MARKER = ".huggingface-shared-blobs"
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _snapshot_blob_root(source_root: Path) -> Path | None:
+def _snapshot_blob_roots(source_root: Path) -> list[Path]:
     if source_root.parent.name != "snapshots":
-        return None
-    blob_root = source_root.parent.parent / "blobs"
-    return blob_root.resolve(strict=True) if blob_root.is_dir() else None
+        return []
+    repo_dir = source_root.parent.parent
+    blob_roots = [repo_dir / "blobs"] if (repo_dir / "blobs").is_dir() else []
+    if (repo_dir.parent / "blobs" / _HF_SHARED_BLOBS_MARKER).is_file():
+        blob_roots.append(repo_dir.parent / "blobs")
+    return [blob_root.resolve(strict=True) for blob_root in blob_roots]
 
 
 def _allowed_source_roots(src_dir: Path) -> list[Path]:
     source_root = src_dir.resolve(strict=True)
-    allowed_roots = [source_root]
-    if blob_root := _snapshot_blob_root(source_root):
-        allowed_roots.append(blob_root)
-    return allowed_roots
+    return [source_root, *_snapshot_blob_roots(source_root)]
 
 
 def resolve_checkpoint_file(
@@ -723,7 +731,7 @@ def copy_off_index_safetensors(
         #
         # resolve_checkpoint_file already draws that line and is tested against both shapes: it
         # resolves strictly, demands a regular file, and demands the target sit under the
-        # checkpoint dir or its sibling ``blobs/``. max_bytes=None because its default bounds
+        # checkpoint dir or its hub blob stores. max_bytes=None because its default bounds
         # metadata, and these are weight files.
         try:
             source = resolve_checkpoint_file(Path(src), name, max_bytes=None)
@@ -963,7 +971,7 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
     * files under ``export_dir`` when it lies inside ``source``, e.g. an earlier export;
     * files under hidden directories (``.git``, ``.cache``), which are version-control or download
       state rather than part of the checkpoint;
-    * links that resolve outside the checkpoint (or, for a Hub snapshot, its ``blobs/``), and
+    * links that resolve outside the checkpoint (or, for a Hub snapshot, its blob stores), and
       dangling links, each with a warning.
 
     Args:
@@ -998,7 +1006,7 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
         if dst.exists() or dst.is_symlink():
             continue
         # A link is followed only to where a checkpoint file may live -- the checkpoint itself or,
-        # for a Hub snapshot, its blobs/ directory -- or the export could copy any file on the host.
+        # for a Hub snapshot, its blob stores -- or the export could copy any file on the host.
         try:
             resolved = resolve_checkpoint_file(source_dir, rel, max_bytes=None)
         except ValueError as error:
@@ -1007,6 +1015,9 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(resolved, dst)
+            # The hub's shared blob store keeps its files read-only, and copy2 carries that over;
+            # the export's copy must stay writable, e.g. for a tokenizer.save_pretrained() over it.
+            dst.chmod(stat.S_IMODE(dst.stat().st_mode) | stat.S_IWUSR)
         except OSError as error:
             dst.unlink(missing_ok=True)  # or a rerun would keep the partial file
             warnings.warn(f"Failed to copy checkpoint file {rel}: {error}")

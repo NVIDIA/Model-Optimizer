@@ -16,6 +16,7 @@
 """Tests for modelopt/torch/utils/plugins/hf_checkpoint_utils.py"""
 
 import json
+import stat
 import sys
 import warnings
 from pathlib import Path
@@ -993,14 +994,30 @@ def test_copy_non_model_files_follows_links_only_within_the_checkpoint(tmp_path)
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
 def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
-    repo = tmp_path / "models--org--model"
+    """A snapshot links into the repo's ``blobs/``. huggingface_hub >= 1.32 links a Xet-backed blob
+    on into ``<cache>/blobs``, a store shared by every cached repo, which is followed only once the
+    hub's marker file says it is that store."""
+    repo, store = tmp_path / "models--org--model", tmp_path / "blobs"
     snapshot, blobs = repo / "snapshots" / "abc123", repo / "blobs"
     snapshot.mkdir(parents=True)
     blobs.mkdir()
-    (blobs / "sha-tokenizer").write_text("{}")
+    (blobs / "sha-config").write_text("{}")
+    (snapshot / "tokenizer_config.json").symlink_to("../../blobs/sha-config")
+    xet_hash = "ab" * 32
+    (store / "ab").mkdir(parents=True)
+    (store / "ab" / xet_hash).write_text("{}")
+    (store / "ab" / xet_hash).chmod(0o444)  # the hub keeps store files read-only
+    (blobs / "sha-tokenizer").symlink_to(f"../../blobs/ab/{xet_hash}")
     (snapshot / "tokenizer.json").symlink_to("../../blobs/sha-tokenizer")
 
+    with pytest.warns(UserWarning, match="outside the checkpoint directory"):
+        copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "unmarked")
+    assert copied == ["tokenizer_config.json"]
+
+    (store / ".huggingface-shared-blobs").write_text("1\n")
     copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "export")
 
-    assert copied == ["tokenizer.json"]
+    assert copied == ["tokenizer.json", "tokenizer_config.json"]
     assert (tmp_path / "export" / "tokenizer.json").read_text() == "{}"
+    # Writable, so a tokenizer.save_pretrained() into the export can replace it.
+    assert (tmp_path / "export" / "tokenizer.json").stat().st_mode & stat.S_IWUSR
