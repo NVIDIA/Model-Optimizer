@@ -4,28 +4,9 @@ Analyze output logs from a pipeline run launched via `launch.py` or `slurm.py`, 
 produce a pass/fail summary across all tasks. For a deep dive into one failing task,
 go to `triage.md` instead.
 
-## Step 0 — Find the experiment
+## Step 1 — Collect task logs
 
-The default job directory is `experiments/` relative to the launcher root, or
-wherever `--job-dir` was pointed.
-
-```bash
-ls -td experiments/cicd/cicd_* | head -10
-```
-
-If no experiments exist, ask the user for the directory.
-
-## Step 1 — Read all task logs
-
-Each experiment has one subdirectory per task. Log filenames vary by launch mode
-(Slurm writes `sbatch_*.out`, local Docker writes `*.log`), so match log files
-generally and read the tail of each in a single Bash call — errors surface at the end:
-
-```bash
-find experiments/<exp_id>/ -type f \( -name '*.out' -o -name '*.log' \) | sort | while read -r f; do
-  echo "=== $f ==="; tail -200 "$f"; echo
-done
-```
+Use [shared log access](common-log-access.md) with 200 lines per log.
 
 ## Step 2 — Analyze
 
