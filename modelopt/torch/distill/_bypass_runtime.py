@@ -64,6 +64,7 @@ class DistributedBypassRuntime:
         self.flags, self.names, self.layouts = {}, None, {}
         self.feature_units, self.boundary_modes = set(), {}
         self.context_modes = set()
+        self.boundaries = {}
 
     def gather_values(self, value):
         return _all_rank_values(self.context, value)
@@ -80,6 +81,15 @@ class DistributedBypassRuntime:
         if self.layouts is None:
             self.layouts = prepare_quantizer_partitions(student, self.context)
         for unit in units:
+            self.boundaries[unit.name] = [
+                (
+                    model.get_submodule(path),
+                    self.context.parallel_metadata.get(id(model), {})
+                    .get("tp_outputs", {})
+                    .get(path),
+                )
+                for model, path in ((teacher, unit.teacher_path), (student, unit.student_path))
+            ]
             module = student.get_submodule(unit.student_path)
             self.owners[module] = _get_enclosing_fsdp_module(module, student, self.names)
         if not any(isinstance(module, FSDPModule) for module in student.modules()):
@@ -168,18 +178,37 @@ class DistributedBypassRuntime:
 
     def record(self, unit, record, *, native_context=False):
         target = record.target
-        partitioned, error = False, None
-        if isinstance(target, DTensor):
+        placement, error = None, None
+        tensor_target = isinstance(target, DTensor)
+        if tensor_target:
             axes = target.device_mesh.mesh_dim_names or ()
             placement = target.placements[axes.index("tp")] if "tp" in axes else None
-            partitioned = (
-                isinstance(placement, Shard) and placement.dim % target.ndim == target.ndim - 1
-            )
-            if placement is not None and not isinstance(placement, Replicate) and not partitioned:
-                error = (
-                    f"Unsupported TP boundary target placement {placement}; "
-                    "expected Replicate or last-dimension Shard"
+        for index, (module, declared) in enumerate(self.boundaries.get(unit.name, ())):
+            if isinstance(declared, str):
+                error = declared
+                continue
+            if not tensor_target and declared is None:
+                if getattr(module, "_distribute_module_applied", False):
+                    error = (
+                        "Plain TP boundary output from a directly distributed owner; "
+                        "use_local_output=False is required"
+                    )
+                declared = Replicate()  # Ordinary/composite plain outputs promise full replicas.
+            if declared is not None:
+                if not tensor_target and index == 0:
+                    placement = declared
+                same = (
+                    declared.dim % target.ndim == placement.dim % target.ndim
+                    if isinstance(declared, Shard) and isinstance(placement, Shard)
+                    else declared == (placement or Replicate())
                 )
+                if not same:
+                    error = "TP boundary output declaration conflicts with target ownership"
+        partitioned = (
+            isinstance(placement, Shard) and placement.dim % target.ndim == target.ndim - 1
+        )
+        if placement is not None and not isinstance(placement, Replicate) and not partitioned:
+            error = f"Unsupported TP boundary target placement {placement}; expected Replicate or last-dimension Shard"
         if _size(self.context.tensor_mesh) > 1:
             # Streaming replay/backward can communicate: healthy peers must join this
             # flag before any rank rejects its placement or localizes its target/mask.

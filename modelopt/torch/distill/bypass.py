@@ -78,6 +78,12 @@ def bypass(
             described above; use a data-lane sampler, rather than sharding across TP/CP.
             TP DTensor boundary targets must be Replicate or sharded along the final
             feature dimension; token/batch shards and partial sums refuse before replay.
+            Plain ordinary/composite TP outputs promise full replicated targets; custom
+            local-shard/partial composites must preserve DTensor placement. This producer
+            contract cannot be inferred from arbitrary Python output values. Exact native
+            HF output declarations are honored. Generic directly distributed owners must
+            keep DTensor outputs (use_local_output=False), including local-full owners
+            whose erased output declaration is unavailable.
 
     Finalization commits boundaries in order. Any failure during finalization may
     leave earlier boundaries committed; reload a saved checkpoint before retrying.
