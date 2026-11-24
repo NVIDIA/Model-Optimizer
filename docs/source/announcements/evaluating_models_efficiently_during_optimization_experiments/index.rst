@@ -248,6 +248,7 @@ After completing all eight repetitions, we analyzed subsets of the saved respons
 increased coverage from 10 to 294 subtasks with one repetition, then added repetitions on all
 294 subtasks. In this retrospective comparison, the p-value first fell below 0.05 at 250
 responses per model and below 0.001 at 882.
+See the :ref:`cap-hit p-value calculation <evaluation-pvalue-methods>` in the Reproducibility Notes.
 
 A large drop in cap-hit rate from Baseline to Candidate may be detectable with only a few
 repetitions. Use a small pilot to estimate the size of the difference for your checkpoints
@@ -256,8 +257,6 @@ and plan how many subtasks and repetitions to run.
 .. image:: images/scicode-cap-data-volume.svg
    :alt: SciCode cap-hit rate evidence excluding the 44 recovery-training subtasks: blue points increase coverage from ten to 294 subtasks with one repetition; green points add repetitions on all 294 subtasks, reaching 2,352 responses per model. The ten-subtask subset has no observed cap hits and no informative bootstrap interval. The lower panel shows permutation p-values.
    :width: 640px
-
-See the :ref:`cap-hit p-value calculation <evaluation-pvalue-methods>` in the Reproducibility Notes.
 
 Test known weaknesses on a focused subset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -268,6 +267,8 @@ for validation. The focused evaluation used those 11 subtasks × 8 repetitions (
 model), compared with 294 subtasks × 8 repetitions (2,352 responses per model) in the broader
 evaluation. As intended, Baseline’s cap-hit rate was higher on the focused subset
 (10.23%, compared with 1.53% in the broader evaluation).
+Use it for a quick check of known weaknesses, then evaluate broader accuracy and reliability
+separately.
 
 “Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05).
 
@@ -281,9 +282,6 @@ evaluation. As intended, Baseline’s cap-hit rate was higher on the focused sub
 |                | (9/88)        |               | [−14.77,      |               |               |
 |                |               |               | −5.68]        |               |               |
 +----------------+---------------+---------------+---------------+---------------+---------------+
-
-The focused held-out subset detects fewer candidate cap hits with 88 responses per model. Use it
-for a quick check of known weaknesses, then evaluate broader accuracy and reliability separately.
 
 .. toctree::
    :hidden:
