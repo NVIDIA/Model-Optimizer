@@ -57,14 +57,9 @@ examples <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/llm_eval/
 What should you measure, and how?
 ---------------------------------
 
-We compare two NVFP4 Qwen3.6-35B-A3B checkpoints. Baseline underwent `post-training quantization
-(PTQ) and quantization-aware distillation
-(QAD) <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md>`__.
-Even when benchmark accuracy stays stable, quantization may increase verbosity. In the worst
-cases, the extra verbosity takes the form of doomed reasoning loops. Candidate was trained
-directly from Baseline using Kahneman–Tversky Optimization (KTO), which learns from desirable and
-undesirable responses, aiming to reduce those loops while preserving accuracy. We use MMLU-Pro, SciCode and
-AA-Omniscience to illustrate these evaluation guidelines. See the :doc:`reproducibility notes <reproducibility/index>`.
+We illustrate these guidelines in practice by comparing two NVFP4 Qwen3.6-35B-A3B checkpoints
+to test whether applying Kahneman–Tversky Optimization (KTO) to the baseline reduces reasoning
+loops while preserving accuracy. See the :doc:`reproducibility notes <reproducibility/index>` for checkpoint details.
 
 Choose a primary improvement metric before inspecting results. Prefer Candidate if it improves that
 metric and meets your non-inferiority criteria for the others. Regressions highlight areas to improve.
