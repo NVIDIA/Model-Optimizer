@@ -15,6 +15,7 @@
 
 """Actual caller mesh ownership and native quantizer field placement."""
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -102,29 +103,62 @@ def apply_tp_quantizer_fields(quantizer, fields):
             setattr(quantizer, name, value)
 
 
+def _share_tp_quantizer_fields(quantizer, view, fields, aliases):
+    for name, value in fields.items():
+        original = getattr(quantizer, name, None)
+        if not isinstance(original, torch.Tensor):
+            continue
+        signature = (
+            view
+            if name.startswith("_native_weight_") or value.numel() != original.numel()
+            else None,
+            tuple(value.shape),
+        )
+        previous = aliases.get(id(original))
+        if previous is not None:
+            if previous[0] != signature:
+                raise ValueError("Shared native fields have incompatible TP layouts.")
+            fields[name] = previous[1]
+        else:
+            aliases[id(original)] = (signature, value)
+
+
+@torch.inference_mode(False)
+def validate_tp_quantizer_aliases(quantizer, view, aliases):
+    """Check original field aliases against storage-free native ownership plans."""
+    probe = copy.copy(quantizer)
+    for attribute in ("_buffers", "_parameters"):
+        setattr(
+            probe,
+            attribute,
+            {
+                name: torch.empty_like(value, device="meta")
+                if isinstance(value, torch.Tensor)
+                else value
+                for name, value in getattr(quantizer, attribute).items()
+            },
+        )
+    probe._fake_quant = True
+    fields, _, _ = native_weight_partition(probe, view)
+    meta = getattr(quantizer, "_native_weight_meta", None)
+    if meta is not None and tuple(meta["source_shape"]) != view.local_shape:
+        # Pinned fields always carry the full ownership view in their alias signature.
+        # Comparing their aliases needs no code decoding or source fingerprint reads.
+        fields.update(
+            (name, value)
+            for name, value in probe._buffers.items()
+            if name.startswith("_native_weight_")
+        )
+    _share_tp_quantizer_fields(quantizer, view, fields, aliases)
+
+
 def _tp_quantizer_layouts(model):
     """Plan each physical weight's native fields from its actual Torch placement."""
     plans, aliases = [], {}
 
     def plan(quantizer, view, source):
         fields, layouts, reset = native_weight_partition(quantizer, view, source)
-        for name, value in fields.items():
-            original = getattr(quantizer, name, None)
-            if not isinstance(original, torch.Tensor):
-                continue
-            signature = (
-                view
-                if name.startswith("_native_weight_") or value.numel() != original.numel()
-                else None,
-                tuple(value.shape),
-            )
-            previous = aliases.get(id(original))
-            if previous is not None:
-                if previous[0] != signature:
-                    raise ValueError("Shared native fields have incompatible TP layouts.")
-                fields[name] = previous[1]
-            else:
-                aliases[id(original)] = (signature, value)
+        _share_tp_quantizer_fields(quantizer, view, fields, aliases)
         plans.append((quantizer, fields, layouts, reset))
 
     for module in model.modules():
