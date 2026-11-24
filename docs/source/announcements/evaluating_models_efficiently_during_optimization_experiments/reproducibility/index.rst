@@ -2,7 +2,7 @@ Reproducibility notes
 =====================
 
 We use evaluation data from the `KTO tutorial <https://github.com/NVIDIA/Model-Optimizer/blob/13ad0ef401ec5e4480abd1b8eb236ccdf50ef802/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/kto/README.md#experiments-and-results>`__
-for the comparisons and budget analyses in the :doc:`evaluation article <../index>`.
+for the examples in the :doc:`evaluation article <../index>`.
 See its
 `reproducibility instructions <https://github.com/NVIDIA/Model-Optimizer/blob/13ad0ef401ec5e4480abd1b8eb236ccdf50ef802/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/kto/reproducibility/README.md>`__
 for the checkpoints, subtask split, and evaluation settings.

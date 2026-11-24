@@ -128,7 +128,7 @@ loops, missing answers, and whether it abstains when appropriate.
 +------------------------+----------------------------------------------------------------------------+
 | Abstention ratio       | Count an abstention when the final response is non-empty and the judge     |
 |                        | grades it ``NOT_ATTEMPTED`` using AA-Omniscience’s rubric.                 |
-|                        | Report **abstentions / (all responses − correct responses)** alongside     |
+|                        | Report abstentions / (all responses − correct responses) alongside         |
 |                        | accuracy. The denominator includes abstentions, incorrect and partial      |
 |                        | answers, and missing answers.                                              |
 |                        | `AA-Omniscience <https://artificialanalysis.ai/evaluations/omniscience>`__ |
