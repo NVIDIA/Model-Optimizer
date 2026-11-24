@@ -28,6 +28,7 @@ from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
 )
+from packaging.version import Version
 from safetensors.torch import save_file
 
 import modelopt.torch.quantization as mtq
@@ -1154,8 +1155,9 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
 
 def test_export_config_keeps_the_source_layer_type_names(tmp_path, monkeypatch):
     """transformers 5.18 renames deepseek_sparse_attention to indexed_attention on load; the
-    exported config keeps the spelling of the source checkpoint, which runtimes validate. A list
-    the export itself changed is not touched."""
+    exported config keeps the spelling of the source checkpoint, which runtimes validate. Lists the
+    export changed, or that sit outside the live config nodes, are not touched."""
+    transformers = pytest.importorskip("transformers")
     monkeypatch.setattr(
         unified_export_hf,
         "remap_legacy_layer_types",
@@ -1167,40 +1169,48 @@ def test_export_config_keeps_the_source_layer_type_names(tmp_path, monkeypatch):
     source.mkdir()
     export.mkdir()
     names = ["linear_attention", "deepseek_sparse_attention"]
+    renamed = ["linear_attention", "indexed_attention"]
     edited = ["sliding_attention", "full_attention"]
     (source / "config.json").write_text(
         json.dumps(
             {
                 "text_config": {"layer_types": names, "mtp_layer_types": names[1:]},
-                "other": {"layer_types": edited},
+                "edited": {"layer_types": edited},
+                "metadata": {"layer_types": names},
+                "cleared": {"layer_types": ["bad", 1]},
             }
         )
     )
     exported = {
-        "text_config": {
-            "layer_types": ["linear_attention", "indexed_attention"],
-            "mtp_layer_types": ["indexed_attention"],
-        },
-        "other": {"layer_types": edited[::-1]},
+        "text_config": {"layer_types": renamed, "mtp_layer_types": ["indexed_attention"]},
+        "edited": {"layer_types": edited[::-1]},
+        "metadata": {"layer_types": renamed},  # a caller's own edit of plain metadata
+        "cleared": {},
     }
     (export / "config.json").write_text(json.dumps(exported))
+    config = transformers.PretrainedConfig()
+    for key in ("text_config", "edited", "cleared"):
+        setattr(config, key, transformers.PretrainedConfig())
+    config.metadata = {"layer_types": renamed}
     model = torch.nn.Module()
-    model.config = SimpleNamespace()
+    model.config = config
     model._modelopt_source_checkpoint = str(source)
 
     _write_hf_export_config(model, None, export)
 
     written = json.loads((export / "config.json").read_text())
     assert written["text_config"] == {"layer_types": names, "mtp_layer_types": names[1:]}
-    assert written["other"]["layer_types"] == edited[::-1]
+    assert written["edited"]["layer_types"] == edited[::-1]
+    assert written["metadata"]["layer_types"] == renamed
+    assert written["cleared"] == {}
 
 
 def test_export_config_restores_what_transformers_renamed_on_load(tmp_path):
-    """The real transformers round trip: a source config is loaded and saved, then the export
-    restores its layer type names (a no-op where transformers renames nothing)."""
+    """The real transformers round trip on the version that renames (5.18): a source config is
+    loaded and saved, and the export restores its layer type names."""
     transformers = pytest.importorskip("transformers")
-    if unified_export_hf.remap_legacy_layer_types is None:
-        pytest.skip("this transformers has no layer type renames")
+    if Version(transformers.__version__) < Version("5.18"):
+        pytest.skip("this transformers does not rename deepseek_sparse_attention")
     names = ["linear_attention", "deepseek_sparse_attention"]
     source, export = tmp_path / "source", tmp_path / "export"
     source.mkdir()
@@ -1213,11 +1223,10 @@ def test_export_config_restores_what_transformers_renamed_on_load(tmp_path):
     (source / "config.json").write_text(
         json.dumps({"model_type": "glm5_next", "text_config": text})
     )
-    try:
-        config = transformers.AutoConfig.from_pretrained(source)
-    except (KeyError, ValueError):
-        pytest.skip("this transformers has no glm5_next")
+    config = transformers.AutoConfig.from_pretrained(source)
     config.save_pretrained(export)
+    saved = json.loads((export / "config.json").read_text())["text_config"]["layer_types"]
+    assert saved == ["linear_attention", "indexed_attention"]
     model = torch.nn.Module()
     model.config = config
     model._modelopt_source_checkpoint = str(source)
@@ -1225,6 +1234,20 @@ def test_export_config_restores_what_transformers_renamed_on_load(tmp_path):
     _write_hf_export_config(model, None, export)
 
     assert json.loads((export / "config.json").read_text())["text_config"]["layer_types"] == names
+
+
+def test_source_config_is_read_from_a_hub_snapshot_subfolder(tmp_path):
+    """A subfolder checkpoint's config.json links into the repo's blobs/, outside the subfolder."""
+    snapshot = tmp_path / "models--org--m" / "snapshots" / "rev"
+    (snapshot / "sub").mkdir(parents=True)
+    blobs = tmp_path / "models--org--m" / "blobs"
+    blobs.mkdir()
+    (blobs / "sha").write_text(json.dumps({"layer_types": ["a"]}))
+    (snapshot / "sub" / "config.json").symlink_to("../../../blobs/sha")
+    model = torch.nn.Module()
+    model._modelopt_source_checkpoint = str(snapshot / "sub")
+
+    assert unified_export_hf._source_config_json(model) == {"layer_types": ["a"]}
 
 
 def _one_rank_fails_after_the_write_job(rank, size, tmp_dir, failure):

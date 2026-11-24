@@ -1782,7 +1782,9 @@ def _write_hf_export_config(
     if remap_legacy_layer_types is not None:
         # Before the sanitize step: it trims trailing MTP entries from layer_types, and the
         # restore only matches a list that is still exactly the remap of the source's.
-        _restore_source_layer_types(config_data, _source_config_json(model))
+        _restore_source_layer_types(
+            config_data, _source_config_json(model), getattr(model, "config", None)
+        )
     sanitize_hf_config_for_deployment(config_data, model)
     if quantization_config is not None:
         config_data["quantization_config"] = quantization_config
@@ -1856,12 +1858,20 @@ def _source_config_json(model: nn.Module) -> Any:
     """The source checkpoint's ``config.json`` as parsed, or ``{}`` if it cannot be read.
 
     Read through ``resolve_checkpoint_file``, which keeps the file inside the checkpoint directory
-    and bounds its size.
+    and bounds its size. A Hub snapshot's files link into the repo's ``blobs/``, also for a
+    ``subfolder`` checkpoint, so the snapshot is the directory the read is contained in.
     """
     ckpt = _source_checkpoint(model)
-    if ckpt:
-        with contextlib.suppress(OSError, ValueError):
-            return json.loads(resolve_checkpoint_file(Path(ckpt), "config.json").read_text())
+    if not ckpt:
+        return {}
+    root, name = Path(ckpt), Path("config.json")
+    for parent in root.parents:
+        if parent.parent.name == "snapshots":
+            root, name = parent, root.relative_to(parent) / name
+            break
+    # RuntimeError: a symlink loop on Python < 3.13, and the RecursionError of a deeply nested file.
+    with contextlib.suppress(OSError, ValueError, RuntimeError):
+        return json.loads(resolve_checkpoint_file(root, name).read_text())
     return {}
 
 
@@ -1880,25 +1890,27 @@ def _remapped_layer_types(layer_types: list) -> list | None:
         return None
 
 
-def _restore_source_layer_types(config_data: dict, source: Any) -> None:
+def _restore_source_layer_types(config_data: dict, source: Any, config: Any) -> None:
     """Spell ``layer_types`` as the source ``config.json`` does, in the config and its sub-configs.
 
     transformers renames some layer types on load (``deepseek_sparse_attention`` becomes
     ``indexed_attention`` in 5.18), and runtimes validate against the names the checkpoint ships.
     The source's list is restored only where it is exactly what transformers' remap turns it into,
-    so a list the export edited or trimmed keeps its handling.
+    so a list the export edited or trimmed keeps its handling. Only the live config nodes are
+    followed, not any dict that happens to sit in the file.
     """
     if not isinstance(source, dict):
         return
     for key in ("layer_types", "mtp_layer_types"):  # the lists transformers' remap rewrites
         source_types = source.get(key)
-        if isinstance(source_types, list) and _remapped_layer_types(
-            source_types
-        ) == config_data.get(key):
+        remapped = _remapped_layer_types(source_types) if isinstance(source_types, list) else None
+        if remapped is not None and remapped == config_data.get(key):
             config_data[key] = source_types
-    for key, value in config_data.items():
-        if isinstance(value, dict):
-            _restore_source_layer_types(value, source.get(key))
+    for key, sub_config in getattr(config, "__dict__", {}).items():
+        if isinstance(sub_config, _TRANSFORMERS_CONFIG_TYPES) and isinstance(
+            config_data.get(key), dict
+        ):
+            _restore_source_layer_types(config_data[key], source.get(key), sub_config)
 
 
 def carryable_unplaced_keys(model: nn.Module) -> list[str]:
