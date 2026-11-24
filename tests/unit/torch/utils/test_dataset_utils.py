@@ -302,9 +302,10 @@ def test_disable_use_cache_with_existing_attr(prev_value):
 
 
 def test_disable_use_cache_without_existing_attr():
-    """Config that lacks `use_cache`: set to False inside, attribute removed on exit (no leak)."""
+    """Step-3.5 reads a missing cache flag directly; do not leak it after calibration."""
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
+    model.config.model_type = "step3p5"
     assert not hasattr(model.config, "use_cache")
 
     with _disable_use_cache(model):
@@ -318,6 +319,7 @@ def test_disable_use_cache_with_nested_text_config_existing_attr(prev_value):
     """Nested text config `use_cache` is disabled and restored."""
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
+    model.config.model_type = "step3p7"
     model.config.text_config = _Config()
     model.config.text_config.use_cache = prev_value
 
@@ -333,7 +335,9 @@ def test_disable_use_cache_with_nested_text_config_without_existing_attr():
     """Nested text config `use_cache` is removed if it was added by the context."""
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
+    model.config.model_type = "step3p7"
     model.config.text_config = _Config()
+    model.config.text_config.model_type = "step3p5"
 
     with _disable_use_cache(model):
         assert model.config.use_cache is False

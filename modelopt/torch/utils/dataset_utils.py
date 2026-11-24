@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-from pydantic import BaseModel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
@@ -970,10 +969,9 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
     KV caching is unwanted during calibration / memory-probe forward passes:
     it wastes memory, and for hybrid Mamba/attention models (e.g., NemotronH)
     the cache state is mutated in-place and breaks correctness. Step-3.5-Flash
-    reads ``self.config.use_cache`` even when its config omits the flag, so
-    temporarily add it on writable configs. Step3.7 keeps the language config nested
-    under ``text_config``; that config object is handled the same way. The
-    prior value is restored on exit if one existed.
+    and Step3.7 read ``use_cache`` directly even when their configs omit it.
+    Only synthesize a missing flag for those configs, including the nested
+    ``text_config``. Restore the original state on exit.
     """
     missing = object()
 
@@ -988,25 +986,15 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
     with ExitStack() as stack:
         for config in _iter_use_cache_configs(model):
             prev = getattr(config, "use_cache", missing)
-            if (
-                prev is missing
-                and isinstance(config, BaseModel)
-                and "use_cache" not in type(config).model_fields
-                and (
-                    config.model_config.get("extra") != "allow" or config.model_config.get("frozen")
-                )
+            if prev is missing and getattr(config, "model_type", None) not in (
+                "step3p5",
+                "step3p7",
             ):
-                continue  # This schema cannot accept a temporary cache flag.
+                continue
             # An assignment validator may store the new value before raising.
             stack.callback(restore, config, prev)
-            if prev is False:
-                continue
-            try:
+            if prev is not False:
                 config.use_cache = False
-            except AttributeError:
-                # Ignore only metadata objects (e.g. dicts) that expose no cache flag.
-                if prev is not missing or hasattr(config, "use_cache"):
-                    raise
         yield
 
 

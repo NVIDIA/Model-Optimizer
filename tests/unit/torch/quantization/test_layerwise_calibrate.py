@@ -33,6 +33,7 @@ from modelopt.torch.quantization.utils.layerwise_calib import (
     _OutsideQuantizerCalibrator,
     _SkipLayer,
 )
+from modelopt.torch.sparsity.weight_sparsity.config import SparseGPTConfig
 from modelopt.torch.utils.dataset_utils import create_forward_loop
 
 
@@ -193,8 +194,14 @@ class _CacheDisabledConfig:
 
 @pytest.mark.parametrize(
     "config",
-    [{}, SimpleNamespace(text_config={}), ModeloptBaseConfig(), _CacheDisabledConfig()],
-    ids=["dict", "nested-dict", "pydantic", "read-only-disabled"],
+    [
+        {},
+        SimpleNamespace(text_config={}),
+        ModeloptBaseConfig(),
+        SparseGPTConfig(),
+        _CacheDisabledConfig(),
+    ],
+    ids=["dict", "nested-dict", "pydantic", "sparsegpt", "read-only-disabled"],
 )
 def test_collector_activations_match_expected(monkeypatch, config):
     """First layer should receive the raw input data."""
