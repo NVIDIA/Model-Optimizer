@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from core import GlobalVariables, SandboxPipeline, SandboxTask2
 
 _COMMON = Path(__file__).resolve().parents[1] / "common"
 _STREAMING_DFLASH2 = (
@@ -95,24 +96,36 @@ def test_invalid_config_fails_with_a_result(tmp_path, env, reason):
 
 
 def test_smoke_only_rerun_keeps_the_original_verdict(tmp_path):
-    """The example's documented rerun reads an earlier export but must not touch its verdict.
+    """The example's documented rerun reads an earlier export but writes its own verdict.
 
-    The script deletes SMOKE_JSON before it starts, so a failed rerun writing there would
-    erase the earlier experiment's PASS.
+    The script deletes SMOKE_JSON before it starts, so a failed rerun writing into the
+    earlier experiment would erase that experiment's PASS.
     """
-    pipeline = yaml.safe_load(_STREAMING_DFLASH2.read_text())["pipeline"]
-    global_vars = {**pipeline["global_vars"], "output_dir": "/cicd/earlier/dflash2"}
-    env = {}
-    for item in pipeline["task_2"]["environment"]:
-        for key, value in item.items():
-            value = re.sub(r"<<global_vars\.(\w+)>>", lambda m: global_vars[m.group(1)], value)
-            # The rerun's own /scratchspace and the /cicd view of earlier experiments.
-            env[key] = re.sub(r"^/(scratchspace|cicd)\b", lambda m: str(tmp_path / m[1]), value)
-    original = tmp_path / "cicd/earlier/dflash2/smoke_check.json"
-    original.parent.mkdir(parents=True)
-    original.write_text('{"pass": true}')
+    example = yaml.safe_load(_STREAMING_DFLASH2.read_text())["pipeline"]
+    task_2 = example["task_2"]
+    pipeline = SandboxPipeline(
+        task_2=SandboxTask2(script=task_2["script"], environment=task_2["environment"]),
+        global_vars=GlobalVariables(
+            **{**example["global_vars"], "output_dir": "/cicd/earlier/dflash2"}
+        ),
+    )
+    # build_slurm_executor() mounts <job_dir>/cicd/<experiment> as /scratchspace and
+    # <job_dir>/cicd as /cicd; "rerun" is this experiment, "earlier" the one it reads.
+    cicd = tmp_path / "job" / "cicd"
+    mounts = {"/scratchspace": cicd / "rerun", "/cicd": cicd}
+    env = {
+        key: re.sub(r"^/(scratchspace|cicd)\b", lambda m: str(mounts[m[0]]), value)
+        for item in pipeline.tasks[0].environment
+        for key, value in item.items()
+    }
+    earlier_verdict = cicd / "earlier" / "smoke_check.json"  # its own /scratchspace
+    earlier_verdict.parent.mkdir(parents=True)
+    earlier_verdict.write_text('{"pass": true}')
 
-    proc, result = _run(tmp_path, **{**env, "NUM_SPEC_TOKENS": "x"})  # fails before vLLM
+    proc, _ = _run(tmp_path, **{**env, "NUM_SPEC_TOKENS": "x"})  # fails before vLLM
     assert proc.returncode == 1
+    assert earlier_verdict.read_text() == '{"pass": true}'
+    result = json.loads((cicd / "rerun" / "smoke_check.json").read_text())
     assert result["stage"] == "invalid_config"
-    assert original.read_text() == '{"pass": true}'
+    assert result["pass"] is False
+    assert result["draft"] == str(cicd / "earlier" / "dflash2" / "export")

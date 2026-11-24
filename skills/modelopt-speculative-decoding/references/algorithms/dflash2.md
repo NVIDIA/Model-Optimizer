@@ -109,7 +109,7 @@ actually uses:
 | Mode | Export lands in | Further evidence |
 | --- | --- | --- |
 | Online | `<training.output_dir>/exported-checkpoint-{<step>,final}` | training progress only |
-| Streaming | `<global_vars.output_dir>/export` (`/scratchspace/dflash2/export`) | task_2's acceptance length against `MIN_ACCEPTANCE_LENGTH` |
+| Streaming | task_1's export (task table above) | task_2's verdict, `/scratchspace/smoke_check.json`: `pass`, and `mean_acceptance_length` against `MIN_ACCEPTANCE_LENGTH` |
 
 ## Quality gate
 
