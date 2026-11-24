@@ -284,35 +284,41 @@ _SINGULAR_QUANTIZER_ATOM_RE = re.compile(r"(?:weight|input)_quantizer$")
 
 
 def _of_callers_class(obj: Any) -> bool:
-    # An entry sets a quantizer's calibrator's axis and copies its rotation config to disable it:
-    # code the caller defines there can rewire the model.
+    # An entry configures a quantizer, sets its calibrator's axis and copies its rotation config to
+    # disable it: code the caller defines there can rewire the model.
     return type(obj).__module__.partition(".")[0] not in ("builtins", "modelopt")
 
 
 def _allows_subtree_walk(model: nn.Module) -> bool:
     """Whether a subtree walk of ``model`` finds what ``named_modules()`` lists, entry after entry.
 
-    It does where each module is registered once, under a nonempty name with no dot, and keeps
-    ``nn.Module.named_modules``, which then lists exactly the paths a subtree walk follows, and
-    where no quantizer holds a calibrator or rotation config of the caller's class.
+    It does where each module is registered once, under a nonempty name with no dot or final
+    newline, in a dict, and keeps ``nn.Module.named_modules``, which then lists exactly the paths a
+    subtree walk follows, and where no quantizer, nor its calibrator or rotation config, is of the
+    caller's class.
     """
     seen = set()
     stack = [model]
     while stack:
         module = stack.pop()
-        # An override can list other paths, and change what it lists as entries apply.
-        if id(module) in seen or (
+        # named_modules lists a module equal to one it has listed once, as a set does; an override
+        # can list other paths, and change what it lists as entries apply.
+        if module in seen or (
             getattr(module.named_modules, "__func__", None) is not nn.Module.named_modules
         ):
             return False
-        if isinstance(module, TensorQuantizer) and any(
-            _of_callers_class(getattr(module, attr, None)) for attr in ("_calibrator", "_rotate")
+        if isinstance(module, (TensorQuantizer, SequentialQuantizer)) and (
+            _of_callers_class(module)
+            or any(_of_callers_class(getattr(module, a, None)) for a in ("_calibrator", "_rotate"))
         ):
             return False
-        # setattr, unlike add_module, registers any name, which named_modules joins as is.
-        if any(not name or "." in name for name in module._modules):
+        # TorchScript's module dict has no get(). setattr, unlike add_module, registers any name,
+        # which named_modules joins as is, and the name regexes' $ also matches before a final "\n".
+        if not isinstance(module._modules, dict) or any(
+            not name or "." in name or name.endswith("\n") for name in module._modules
+        ):
             return False
-        seen.add(id(module))
+        seen.add(module)
         stack.extend(child for child in module._modules.values() if child is not None)
     return True
 
@@ -407,9 +413,9 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
     # Whether wildcard-free names walk only their subtree, which follows the model's _modules,
     # decided at the first one: not where fnmatch ignores case, nor where named_modules can list
-    # other paths or a calibrator or rotation config of the caller's class can run, nor while
-    # PyTorch's global registration hooks are set: giving a quantizer a buffer runs them, and they
-    # can register a module a second time mid-call.
+    # other paths or a quantizer, calibrator or rotation config of the caller's class can run, nor
+    # while PyTorch's global registration hooks are set: giving a quantizer a buffer runs them, and
+    # they can register a module a second time mid-call.
     subtree = None
     for entry in quant_cfg:
         quantizer_name: str = entry["quantizer_name"]
@@ -432,6 +438,10 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                 and not _runs_registration_hooks()
                 and _allows_subtree_walk(quant_model)
             )
+        if subtree and parent_class is not None:
+            # Matching it runs the __getattr__ of the modules on a match's path, such as a
+            # DynamicModule's, which can rewire the model.
+            subtree = False
 
         if cfg is None:
             # No cfg: only toggle the enable state, leave all other attributes unchanged.

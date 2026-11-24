@@ -678,6 +678,9 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         (True, "dotted-name"),
         (True, "empty-name"),
         (True, "custom-traversal"),
+        (True, "equal-modules"),
+        (True, "newline-name"),
+        (True, "scripted"),
         (False, "plain"),
     ],
     ids=[
@@ -686,6 +689,9 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         "dotted-name",
         "empty-name",
         "custom-traversal",
+        "equal-modules",
+        "newline-name",
+        "scripted",
         "case-insensitive",
     ],
 )
@@ -707,6 +713,17 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
                 ):
                     yield name, module
 
+    class EqualHolder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight_quantizer = TensorQuantizer()
+
+        def __eq__(self, other):
+            return isinstance(other, EqualHolder)
+
+        def __hash__(self):
+            return 0
+
     def quantized():
         layers = (torch.nn.Linear(4, 4) for _ in range(8))
         traversal = layout == "custom-traversal"
@@ -723,6 +740,19 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
             holder = torch.nn.Module()
             holder.weight_quantizer = TensorQuantizer()
             setattr(model, "", holder)
+        elif layout == "equal-modules":
+            # Two modules that compare equal, the second of which named_modules skips.
+            model.add_module("8", EqualHolder())
+            model.add_module("9", EqualHolder())
+        elif layout == "newline-name":
+            # Or a name ending in a newline, which normalizing a fused-experts name keeps.
+            experts = torch.nn.Module()
+            experts.weight_quantizers = torch.nn.Module()
+            setattr(experts.weight_quantizers, "0\n", TensorQuantizer())
+            model.add_module("8", experts)
+        elif layout == "scripted":
+            # TorchScript keeps its children in a dict of its own.
+            model.add_module("8", torch.jit.script(torch.nn.Linear(4, 4)))
         model.hiding = traversal
         return model
 
@@ -742,6 +772,10 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         quant_cfg.append({"quantizer_name": "8.weight_quantizer", "enable": True})
     elif layout == "empty-name":
         quant_cfg.append({"quantizer_name": "weight_quantizer", "enable": True})
+    elif layout == "equal-modules":
+        quant_cfg.append({"quantizer_name": "9.weight_quantizer", "enable": False})
+    elif layout == "newline-name":
+        quant_cfg.append({"quantizer_name": "8.weight_quantizer\n", "enable": True})
     # The same names as one-character wildcards, matched by walking the model.
     walked_cfg = [quant_cfg[0]] + [
         {**entry, "quantizer_name": f"[{entry['quantizer_name'][0]}]{entry['quantizer_name'][1:]}"}
@@ -755,8 +789,8 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
                 isinstance(module, TensorQuantizer)
                 and module.get_modelopt_state(properties_only=True),
             )
-            # Every registered module, hidden ones too.
-            for name, module in torch.nn.Module.named_modules(model)
+            # Every registered module, hidden and skipped ones too.
+            for name, module in torch.nn.Module.named_modules(model, remove_duplicate=False)
             if isinstance(module, (TensorQuantizer, SequentialQuantizer))
         }
 
@@ -780,21 +814,36 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         assert walks == 1 + len(quant_cfg) - first_replacing
     else:
         # Every entry walks the model: where fnmatch ignores case, or named_modules can list other
-        # paths than the model registers.
+        # paths than the model registers, or the model keeps them out of a plain dict.
         assert walks == len(quant_cfg)
 
 
 @pytest.mark.parametrize(
     ("trigger", "nested"),
-    [("calibrator", False), ("calibrator", True), ("hook", False), ("setter", False)],
-    ids=["later-entry", "nested-call", "registration-hook", "parent-setter"],
+    [
+        ("calibrator", False),
+        ("calibrator", True),
+        ("hook", False),
+        ("setter", False),
+        ("quantizer", False),
+        ("getter", False),
+    ],
+    ids=[
+        "later-entry",
+        "nested-call",
+        "registration-hook",
+        "parent-setter",
+        "quantizer-class",
+        "parent-getter",
+    ],
 )
 def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_layer(
     trigger, nested
 ):
     """A named entry acts as its wildcard does after code run mid-call shares a layer: a calibrator
     the caller supplies, for a later entry of that call or in a call the calibrator makes, a buffer
-    registration hook, or the __setattr__ of a parent whose quantizer an entry replaces."""
+    registration hook, the __setattr__ of a parent whose quantizer an entry replaces, a quantizer of
+    the caller's class, or the __getattr__ a parent_class entry runs to find a match's parent."""
 
     def configured(weight_quantizer, sub_quantizer):
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
@@ -815,12 +864,32 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
         def sharing_hook(module, name, buffer):
             share()
 
+        class SharingQuantizer(TensorQuantizer):
+            def set_from_attribute_config(self, *args, **kwargs):
+                super().set_from_attribute_config(*args, **kwargs)
+                share()
+
+        class SharingSequential(torch.nn.Sequential):
+            def __getattr__(self, name):
+                if name == "0":
+                    share()
+                return super().__getattr__(name)
+
+        entry = {"quantizer_name": weight_quantizer}
         if trigger == "calibrator":
             cfg = {"calibrator": SharingCalibrator}
         elif trigger == "hook":
             # Pinning amax registers it as a buffer, under the hook.
             del model[0].weight_quantizer._amax
             cfg = {"num_bits": 8, "axis": None, "constant_amax": 1.0}
+        elif trigger == "quantizer":
+            model[0].weight_quantizer.__class__ = SharingQuantizer
+            cfg = {"num_bits": 4}
+        elif trigger == "getter":
+            # get_submodule looks the parent up through the model's __getattr__.
+            model.__class__ = SharingSequential
+            entry["parent_class"] = "nn.Linear"
+            cfg = {"num_bits": 4}
         else:
 
             class SharingLinear(type(model[0])):
@@ -837,8 +906,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
         try:
             mtq.set_quantizer_by_cfg(
                 model,
-                [{"quantizer_name": weight_quantizer, "cfg": cfg}]
-                + ([] if nested else [sub_entry]),
+                [{**entry, "cfg": cfg}] + ([] if nested else [sub_entry]),
             )
         finally:
             if handle is not None:
