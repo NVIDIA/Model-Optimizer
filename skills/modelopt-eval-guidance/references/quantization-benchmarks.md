@@ -49,7 +49,9 @@ the full suite.
 - **Do not lower repeat or sample counts** for quantization comparisons: fewer repeats let noise mask real regressions.
   The values are the tool's benchmark configuration.
 - **Judge and user-simulator endpoints** (AA-LCR, HLE, AA-Omniscience, Tau2-Bench Telecom) must stay fixed
-  across the baseline and quantized runs.
+  across the baseline and quantized runs. A judge that is retired or replaced
+  makes earlier scores from the old judge unusable as a baseline: rerun both sides with the new judge, and treat the
+  result as a new baseline, not as comparable to scores from the old one.
 - **MRCR traps:** the KV-cache
   dtype must follow each checkpoint's `kv_cache_quant_algo` (`hf_quant_config.json`) instead of being pinned,
   because forcing it onto an uncalibrated checkpoint applies a quantization it was never calibrated for; and

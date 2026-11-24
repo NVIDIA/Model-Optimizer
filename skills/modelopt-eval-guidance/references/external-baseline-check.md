@@ -44,8 +44,8 @@ If any task fails, do not report the quantized evaluation as successful and do
 not apply the candidate-delta gate to that baseline. If the tool has a score-triage skill (its reference names
 it), use it for the investigation; this check only decides whether the baseline is credible. Investigate disabled
 reasoning/thinking, reasoning parser or adapter handling, prompt/chat-template
-differences, sampling or token-budget differences, benchmark version or metric,
-incomplete samples, and serving failures. Rerun a corrected baseline, validate
+differences, sampling or token-budget differences, benchmark version, dataset revision or question set,
+judge, metric, incomplete samples, and serving failures. Rerun a corrected baseline, validate
 it, and repeat this check before comparing the candidate.
 
 For score harvesting, use the score field the evaluation tool defines for the benchmark (its reference says where;
