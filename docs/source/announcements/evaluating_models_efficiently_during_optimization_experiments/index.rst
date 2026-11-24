@@ -107,8 +107,7 @@ Choose an acceptable accuracy-loss margin for your use case before inspecting re
 use a non-inferiority test to assess whether the loss is smaller.
 
 The table illustrates two possible margins on SciCode.
-“Yes” means the stated accuracy loss is ruled out (p < 0.05). “No evidence” means it has
-not been ruled out.
+“Yes” means the stated accuracy loss is ruled out (p < 0.05).
 
 ============================ ===================
 Rule out an accuracy loss of SciCode p-value
@@ -154,8 +153,7 @@ Doomed reasoning loops
 ^^^^^^^^^^^^^^^^^^^^^^
 
 The candidate has fewer cap hits on SciCode (p < 0.001).
-“Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05); “no evidence” means a lower
-rate was not established.
+“Yes” means evidence of a lower Candidate cap-hit rate (p < 0.05).
 
 +----------------+---------------+---------------+---------------+---------------+---------------+
 | Benchmark      | Baseline cap  | Candidate cap | Difference    | Candidate     | Candidate     |
@@ -197,11 +195,6 @@ We exclude empty final responses.
 | Abstention    | 33.30%        | 35.18%        | +1.88 [+0.32, | 0.010 — yes   | 0.990         |
 | ratio         | (1,566/4,703) | (1,653/4,699) | +3.45]        |               |               |
 +---------------+---------------+---------------+---------------+---------------+---------------+
-
-Candidate has a higher abstention ratio (p = 0.010).
-
-Compare outcomes on the same questions to check whether Candidate abstains where Baseline answers
-correctly or incorrectly.
 
 Measure verbosity
 ~~~~~~~~~~~~~~~~~
