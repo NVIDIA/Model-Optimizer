@@ -28,6 +28,8 @@ from torch.utils._pytree import tree_map
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
 from modelopt.torch.quantization.repair import _iq_quantizer, _router_paths, _storage_span
 
+_MSE_CHUNK_ELEMENTS = {"cpu": 1 << 18, "cuda": 1 << 24}
+
 
 @dataclass(frozen=True)
 class BypassUnit:
@@ -100,7 +102,6 @@ def validate_unit_ownership(student, teacher, units):
         for b in paths[:i]
     ):
         raise ValueError("Bypass boundaries overlap; select disjoint owning modules")
-    _validate_student_owners(student, paths)
     backings = {}
     for root in (student, teacher):
         if any(t.is_meta for t in chain(root.parameters(), root.buffers())) and any(
@@ -110,6 +111,7 @@ def validate_unit_ownership(student, teacher, units):
             from modelopt.torch.quantization.plugins.accelerate import _offloaded_tensor_backings
 
             backings.update(_offloaded_tensor_backings(root))
+    _validate_student_owners(student, paths, backings)
     teacher_storage = {}
     for tensor in _ownership_tensors(teacher, backings):
         span = _storage_span(tensor)
@@ -138,7 +140,7 @@ def validate_unit_ownership(student, teacher, units):
                     raise ValueError("Student Bypass state aliases teacher storage")
 
 
-def _validate_student_owners(student, paths):
+def _validate_student_owners(student, paths, backings):
     modules, tensors, storage = {}, {}, {}
     for path, module in student.named_modules(remove_duplicate=False):
         selected = any(not root or path == root or path.startswith(root + ".") for root in paths)
@@ -147,9 +149,11 @@ def _validate_student_owners(student, paths):
             if previous is not None and (selected or previous):
                 raise ValueError("Selected Bypass state shares a quantizer owner")
             modules[id(module)] = selected
-        for tensor in (*module._parameters.values(), *module._buffers.values()):
+        for name, tensor in chain(module._parameters.items(), module._buffers.items()):
             if tensor is None:
                 continue
+            if tensor.is_meta:
+                tensor = backings.get((module, name), tensor)
             previous = tensors.get(id(tensor))
             if previous is not None and (selected or previous):
                 raise ValueError("Selected Bypass state shares a tensor owner")
@@ -194,7 +198,8 @@ class _MaskedMSE(torch.autograd.Function):
         left, right = prediction.reshape(-1, features), target.reshape(-1, features)
         valid = None if mask is None else mask.reshape(-1, 1)
         total = prediction.new_zeros((), dtype=torch.float32)
-        rows = max(1, 262144 // features)
+        chunk_elements = _MSE_CHUNK_ELEMENTS.get(prediction.device.type, _MSE_CHUNK_ELEMENTS["cpu"])
+        rows = max(1, chunk_elements // features)
         for start in range(0, len(left), rows):
             part = slice(start, start + rows)
             difference = left[part].float() - right[part].float()
@@ -211,7 +216,8 @@ class _MaskedMSE(torch.autograd.Function):
         valid = None if mask is None else mask.reshape(-1, 1)
         dp = torch.empty_like(left) if ctx.needs_input_grad[0] else None
         dt = torch.empty_like(right) if ctx.needs_input_grad[1] else None
-        rows = max(1, 262144 // features)
+        chunk_elements = _MSE_CHUNK_ELEMENTS.get(prediction.device.type, _MSE_CHUNK_ELEMENTS["cpu"])
+        rows = max(1, chunk_elements // features)
         for start in range(0, len(left), rows):
             part = slice(start, start + rows)
             difference = (left[part].float() - right[part].float()).mul_(2 * gradient)

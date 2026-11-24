@@ -263,6 +263,8 @@ def test_bypass_normalizes_valid_elements_over_the_whole_update(monkeypatch):
         ("teacher_storage", "both"),
         ("teacher_storage", "preload_teacher"),
         ("teacher_storage", "preload_student"),
+        ("buffer", False),
+        ("buffer", True),
     ],
 )
 def test_bypass_refuses_selected_state_shared_with_excluded_owners(alias, offload):
@@ -300,6 +302,10 @@ def test_bypass_refuses_selected_state_shared_with_excluded_owners(alias, offloa
         else:
             router.weight_quantizer = expert.weight_quantizer
         selected = "moe"
+    elif alias == "buffer":
+        control = torch.ones(4)
+        student.mlp.register_buffer("shared_control", control)
+        student.moe.register_buffer("shared_control", control)
     elif alias == "teacher_storage":
         teacher.mlp.weight = nn.Parameter(student.mlp.weight.detach())
     elif alias == "parameter":
