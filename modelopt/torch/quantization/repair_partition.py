@@ -46,6 +46,18 @@ class NativeWeightPartition:
     split_factor: int = 1
 
     def __post_init__(self):
+        if (
+            len(self.shape) != 2
+            or any(width <= 0 for width in self.shape)
+            or self.dim not in (0, 1)
+            or self.size <= 0
+            or self.split_factor <= 0
+            or not 0 <= self.rank < self.size
+        ):
+            raise ValueError(
+                "Native TP fields require a positive matrix, axis 0 or 1, positive partition "
+                "counts and a rank within the partition group."
+            )
         if self.shape[self.dim] % (self.size * self.split_factor):
             raise ValueError("Native TP fields require evenly divided physical weight partitions.")
 
