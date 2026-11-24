@@ -20,6 +20,7 @@ from collections import OrderedDict
 from datetime import timedelta
 from functools import cache
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -38,7 +39,12 @@ from torch.nn import functional as F
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.quantization as mtq
-from modelopt.torch.distill._bypass_capture import BypassUnit, CaptureRecord, mse_statistics
+from modelopt.torch.distill._bypass_capture import (
+    BypassUnit,
+    CaptureRecord,
+    ModuleBypassAdapter,
+    mse_statistics,
+)
 from modelopt.torch.distill._bypass_optimizer import Lion
 from modelopt.torch.distill._bypass_parallel import (
     BypassMeshContext,
@@ -103,9 +109,94 @@ def _data_tensor_mesh():
     )
 
 
-def _replicated_field_worker(rank, size, expert):
+def _measurement_metadata_worker(rank, size, path):
+    """Catch per-boundary collectives and healthy-path object serialization on real Gloo."""
+    mesh = _runtime_mesh("tp")
+    config = mtd.BypassConfig(global_batch_size=2, micro_batch_size=1, sequence_length=4)
+    runtime = DistributedBypassRuntime(torch_mesh_context(mesh), config)
+    model = torch.nn.Identity()
+    runner = _BypassRunner(model, model, [], None, config, ModuleBypassAdapter(), runtime)
+    batch = torch.ones(2, 4, 8)
+    reductions, objects, transfers = [], [], []
+    reduce, gather, tolist = dist.all_reduce, dist.all_gather_object, torch.Tensor.tolist
+
+    def observed_reduce(value, *args, **kwargs):
+        if not value.is_floating_point():
+            reductions.append(value.numel())
+        return reduce(value, *args, **kwargs)
+
+    def observed_gather(*args, **kwargs):
+        objects.append(True)
+        return gather(*args, **kwargs)
+
+    def observed_tolist(value, *args, **kwargs):
+        if value.dtype == torch.int32:
+            transfers.append(value.numel())
+        return tolist(value, *args, **kwargs)
+
+    with (
+        bounded_collectives(10),
+        patch.object(dist, "all_reduce", observed_reduce),
+        patch.object(dist, "all_gather_object", observed_gather),
+        patch.object(torch.Tensor, "tolist", observed_tolist),
+    ):
+        if path == "boundaries":
+            units = [BypassUnit(name, "", "") for name in ("one", "two", "three")]
+            for unit in units:
+                runtime.record(unit, CaptureRecord((), {}, batch))
+            for _ in range(2):
+                statistics = {unit.name: [torch.tensor(12.0), torch.tensor(6)] for unit in units}
+                actual = runtime.reduce_statistics(statistics, list(statistics))
+                assert all(error == 12 and count == 6 for error, count in actual.values())
+            assert reductions.count(6) == 2, reductions
+            assert transfers == [6, 6]
+            assert not objects
+            # Placement changes must still refuse after successful measurements, including
+            # peer disagreement and a locally mixed full/sharded record history.
+            runtime.boundary_modes["one"] = 2 if rank else 1
+            with pytest.raises(ValueError, match="TP boundary loss ownership"):
+                runtime.reduce_statistics(statistics, list(statistics))
+            runtime.boundary_modes["one"] = 3
+            with pytest.raises(ValueError, match="TP boundary loss ownership"):
+                runtime.reduce_statistics(statistics, list(statistics))
+        elif path == "window":
+            assert runner._window(iter([batch]))[0] is batch
+            assert not objects
+            # Equal sample totals with different microbatch schedules still refuse.
+            batches = [batch] if rank == 0 else [batch[:1], batch[1:]]
+            config.micro_batch_size = 2
+            with pytest.raises(ValueError, match="unequal microbatch schedules"):
+                runner._window(iter(batches))
+            assert not objects
+        else:
+            validated = list(runner._validation_batches([batch]))
+            assert len(validated) == 1 and validated[0] is batch
+            assert not objects
+            with pytest.raises(ValueError, match="unequal validation schedules"):
+                list(runner._validation_batches([batch] if rank == 0 else []))
+            assert not objects
+
+            def broken_reader():
+                if rank:
+                    raise OSError("held-out read failed")
+                yield batch
+
+            with pytest.raises(ValueError, match="held-out read failed"):
+                list(runner._validation_batches(broken_reader()))
+            assert objects  # Message exchange is reserved for actual reader failures.
+
+
+@pytest.mark.parametrize("path", ["boundaries", "window", "validation"])
+@pytest.mark.timeout(180)
+def test_measurement_metadata_uses_batched_integer_collectives(bypass_cpu_workers, path):
+    bypass_cpu_workers.run(_measurement_metadata_worker, path)
+
+
+def _replicated_field_worker(rank, size, expert, full_boundary=False):
     torch.manual_seed(701)
     inputs = [torch.randn(1, 3, 256) * scale for scale in (0.5, 2.0)]
+    if full_boundary:
+        inputs = [inputs[0]] * size  # Full-loss TP boundaries consume identical samples.
     teacher = torch.nn.Linear(256, 16, bias=False)
     student = mtq.quantize(
         copy.deepcopy(teacher),
@@ -133,20 +224,29 @@ def _replicated_field_worker(rank, size, expert):
     policy, expected_policy = IQRepairPolicy(), IQRepairPolicy()
     try:
         fields, expected_fields = policy.prepare(student), expected_policy.prepare(reference)
+        if full_boundary:
+            # Explicit False declares native partial VJPs, not unknown full-loss replicas.
+            runtime.layouts = {
+                id(binding.quantizer): dict.fromkeys(dict(state.named_parameters()), False)
+                for binding, state, _, _ in policy.adapters
+            }
         runtime.register(student, policy)
         runtime.validate_gradient_schedules({"mlp": fields})
-        # These are disjoint feature-loss contributions, not different full TP batches.
-        runtime.record(
-            BypassUnit("mlp", "", ""),
-            CaptureRecord(
-                (), {}, DTensor.from_local(teacher(inputs[rank]).detach(), mesh, [Shard(-1)])
-            ),
-        )
-        losses = [F.mse_loss(reference(x), teacher(x).detach(), reduction="sum") for x in inputs]
-        sum(losses).backward()
-        F.mse_loss(
-            student(inputs[rank]), teacher(inputs[rank]).detach(), reduction="sum"
-        ).backward()
+        # Native partial VJPs must sum even when the boundary target is a full replica.
+        target = teacher(inputs[rank]).detach()
+        if not full_boundary:
+            target = DTensor.from_local(target, mesh, [Shard(-1)])
+        runtime.record(BypassUnit("mlp", "", ""), CaptureRecord((), {}, target))
+
+        def contribution(model, x, owner):
+            prediction, target = model(x), teacher(x).detach()
+            if full_boundary:
+                prediction = prediction.chunk(size, dim=-1)[owner]
+                target = target.chunk(size, dim=-1)[owner]
+            return F.mse_loss(prediction, target, reduction="sum")
+
+        sum(contribution(reference, x, owner) for owner, x in enumerate(inputs)).backward()
+        contribution(student, inputs[rank], rank).backward()
         # Each rank contributes a different real native-field VJP.
         assert any(not torch.allclose(p.grad, q.grad) for p, q in zip(fields, expected_fields))
         runtime.reduce_gradients(fields)
@@ -168,10 +268,16 @@ def _replicated_field_worker(rank, size, expert):
         expected_policy.close()
 
 
-@pytest.mark.parametrize("expert", [False, True])
+@pytest.mark.parametrize(
+    ("expert", "full_boundary"),
+    [(False, False), (True, False), (False, True)],
+    ids=["dense-partial", "expert-partial", "explicit-false-full-boundary"],
+)
 @pytest.mark.timeout(180)
-def test_replicated_native_fields_reduce_once_and_match_reference(bypass_cpu_workers, expert):
-    bypass_cpu_workers.run(_replicated_field_worker, expert)
+def test_replicated_native_fields_reduce_once_and_match_reference(
+    bypass_cpu_workers, expert, full_boundary
+):
+    bypass_cpu_workers.run(_replicated_field_worker, expert, full_boundary)
 
 
 class _TPBoundary(torch.nn.Module):

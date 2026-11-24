@@ -125,6 +125,7 @@ def _all_rank_values(context, value):
 
 
 def _all_rank_max(context, value):
+    """Reduce an integer scalar or packed integer sequence without object serialization."""
     if not dist.is_initialized() or context is None or _size(context.device_mesh) == 1:
         return value
     group = _model_group(context)
@@ -132,7 +133,7 @@ def _all_rank_max(context, value):
     device = torch.device("cuda" if dist.get_backend(group) == "nccl" else "cpu")
     maximum = torch.tensor(value, dtype=torch.int64, device=device)
     dist.all_reduce(maximum, op=dist.ReduceOp.MAX, group=group)
-    return maximum.item()
+    return maximum.tolist() if maximum.ndim else maximum.item()
 
 
 def _synchronize_error(context, error):
