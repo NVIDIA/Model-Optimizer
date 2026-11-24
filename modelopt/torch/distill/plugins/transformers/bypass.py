@@ -249,9 +249,14 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         for path in paths:
             owner = model.get_submodule(path)
             routers = _router_paths(owner)
+            # fnmatch's '*' crosses module separators; ancestor globs can re-enable routers.
             for relative, module in owner.named_modules():
                 if any(
-                    relative == router or relative.startswith(router + ".") for router in routers
+                    not relative
+                    or relative == router
+                    or relative.startswith(router + ".")
+                    or router.startswith(relative + ".")
+                    for router in routers
                 ):
                     continue
                 if any(parameter.ndim >= 2 for parameter in module.parameters(recurse=False)):
@@ -453,14 +458,31 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             return False
         # Unknown activation transforms or dynamic position scaling may couple rows.
         # PTQ converts modules in place; inspect live quantizer state on the cached owners.
-        for module in (
+        owners = tuple(
             model.modules() if modules is None else (reference() for reference in modules)
-        ):
+        )
+        quantizers = {
+            id(module): module for module in owners if isinstance(module, TensorQuantizer)
+        }
+        weights = set()
+        for module in owners:
             if isinstance(module, QuantModule):
-                for name in ("input_quantizer", "output_quantizer"):
-                    quantizer = getattr(module, name, None)
-                    if isinstance(quantizer, TensorQuantizer) and quantizer.is_enabled:
-                        return False
+                weights.update(
+                    id(quantizer)
+                    for container in module.iter_weight_quantizers_for_calibration()
+                    for quantizer in container.modules()
+                )
+                # In-place PTQ can add quantizers after the owner scan was cached.
+                quantizers.update(
+                    (id(child), child)
+                    for child in module.modules()
+                    if isinstance(child, TensorQuantizer)
+                )
+        if any(
+            identity not in weights and quantizer.is_enabled
+            for identity, quantizer in quantizers.items()
+        ):
+            return False
         config = getattr(model, "config", None)
         getter = getattr(config, "get_text_config", None)
         config = getter() if callable(getter) else config
