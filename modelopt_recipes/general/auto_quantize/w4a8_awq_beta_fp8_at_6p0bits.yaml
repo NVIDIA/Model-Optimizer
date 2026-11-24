@@ -36,10 +36,11 @@ auto_quantize:
   auto_quantize_method: gradient
   score_size: 128
 
-  # Base (model-agnostic) non-quantizable layers, spliced from the shared unit. Arch-specific
-  # models use a recipe under model_type/<model>/auto_quantize/ that appends to this set.
   disabled_layers:
     - $import: base_disabled_layers
+    # TRT-LLM's Qwen3.5 loader cannot load a W4A8 AWQ output head.
+    - "lm_head"
+    - "*.lm_head"
 
   # Base (model-agnostic) cost-excluded layers, spliced from the shared unit: VL vision
   # towers / MTP are kept out of the effective-bits denominator. No-op on non-VL models.

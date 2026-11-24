@@ -50,6 +50,7 @@ Changelog
 - NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 - Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
+- The ``general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits`` recipe now leaves the language-model output head unquantized. Rerun the recipe from the original weights for Qwen3.5 checkpoints that failed to load in TensorRT-LLM with an LM-head size mismatch.
 
 *ONNX*
 

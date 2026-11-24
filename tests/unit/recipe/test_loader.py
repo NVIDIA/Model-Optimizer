@@ -2728,6 +2728,11 @@ def test_load_recipe_autoquantize_builtin_general(recipe_path):
     assert len(recipe.auto_quantize.candidate_formats) >= 2
     assert recipe.auto_quantize.auto_quantize_method in ("gradient", "kl_div")
     assert "*output_layer*" in recipe.auto_quantize.disabled_layers
+    if recipe_path == "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits":
+        disabled = recipe.auto_quantize.disabled_layers
+        for head in ("lm_head", "language_model.lm_head"):
+            assert any(fnmatch(head, pattern) for pattern in disabled)
+        assert not any(fnmatch("model.layers.0.mlp.down_proj", pattern) for pattern in disabled)
     if recipe.auto_quantize.constraints.cost_model == "kv_cache":
         assert "*mtp*" in recipe.auto_quantize.disabled_layers
         assert recipe.auto_quantize.cost_excluded_layers == []
