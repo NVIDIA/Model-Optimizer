@@ -16,9 +16,12 @@
 """Native payload partitions and frozen-weight staging with CPU reference codecs."""
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
+from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 from torch.nn import functional as F
 
 import modelopt.torch.quantization as mtq
@@ -26,10 +29,14 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.qtensor import FP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.repair_partition import (
     NativeWeightPartition,
+    native_tp_weight_view,
     native_weight_partition,
+    validate_native_weight_partition,
 )
+from modelopt.torch.quantization.utils.native_weight import pin_native_weight
 
 
 @pytest.mark.parametrize("name", [*sorted(IQ_FORMAT_REGISTRY), "q8_0"])
@@ -298,3 +305,92 @@ def test_dynamic_partition_requires_local_threshold_reductions(axis, dim):
         )
     assert quantizer.state_dict().keys() == before.keys()
     assert all(torch.equal(value, before[name]) for name, value in quantizer.state_dict().items())
+
+
+@pytest.mark.parametrize("format_name", ["fp8", "nvfp4"])
+@pytest.mark.parametrize("dim", [0, 1])
+@pytest.mark.parametrize("failure", [None, "missing_codes", "incomplete_row", "wrong_shape"])
+def test_native_partition_preflight_uses_only_metadata(format_name, dim, failure):
+    weight = torch.randn(8, 32)
+    if format_name == "fp8":
+        native, scale = FP8QTensor.quantize(weight, axis=0)
+        attributes = {"num_bits": (4, 3), "axis": 0}
+        double_scale = None
+    else:
+        native, scale, double_scale = NVFP4QTensor.quantize(weight, 16, try_tensorrt=False)
+        attributes = {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        }
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(**attributes, fake_quant=False))
+    quantizer._set_buffer("_scale", scale)
+    if double_scale is not None:
+        quantizer._set_buffer("_double_scale", double_scale)
+    source = native.dequantize(
+        scale=scale, double_scale=double_scale, block_sizes=quantizer.block_sizes
+    )
+    pin_native_weight(quantizer, native, source)
+    quantizer.to("meta")
+    if failure == "missing_codes":
+        del quantizer._native_weight_codes
+    elif failure == "incomplete_row":
+        quantizer._native_weight_codes = quantizer._native_weight_codes.flatten()[:1]
+    elif failure == "wrong_shape":
+        quantizer._native_weight_meta["source_shape"] = (6, 32)
+    buffers = dict(quantizer.named_buffers())
+    parameters = dict(quantizer.named_parameters())
+    metadata = copy.deepcopy(quantizer._native_weight_meta)
+    view = NativeWeightPartition((8, 32), dim, 1, 2)
+    if failure is None:
+        validate_native_weight_partition(quantizer, view)
+    else:
+        with pytest.raises(ValueError):
+            validate_native_weight_partition(quantizer, view)
+    assert quantizer._native_weight_meta == metadata
+    assert not quantizer.fake_quant
+    assert quantizer._buffers.keys() == buffers.keys()
+    assert all(quantizer._buffers[name] is value for name, value in buffers.items())
+    assert quantizer._parameters.keys() == parameters.keys()
+    assert all(quantizer._parameters[name] is value for name, value in parameters.items())
+
+
+@pytest.mark.parametrize(
+    ("name", "shape", "placement", "allow_expert_axis", "expected"),
+    [
+        ("weight", (8, 32), Shard(0), False, ((4, 32), [(4, 4)])),
+        ("weight", (8, 32), Shard(-1), False, ((8, 16), [(16, 16)])),
+        ("gate_up_proj", (3, 8, 32), Shard(1), False, ((4, 32), [(4, 4)])),
+        ("down_proj", (3, 8, 32), Shard(2), False, ((8, 16), [(16, 16)])),
+        (
+            "gate_up_proj",
+            (3, 8, 32),
+            _StridedShard(1, split_factor=2),
+            False,
+            ((4, 32), [(2, 2), (6, 2)]),
+        ),
+        ("gate_up_proj", (3, 8, 32), Shard(0), True, None),
+        ("weight", (8, 32), Replicate(), False, None),
+        ("weight", (3, 8, 32), Shard(1), False, ValueError),
+        ("gate_up_proj", (3, 8, 32), Shard(0), False, ValueError),
+        ("gate_up_proj", (3, 8, 32), _StridedShard(0, split_factor=2), True, ValueError),
+        ("weight", (6, 32), _StridedShard(0, split_factor=2), False, ValueError),
+    ],
+)
+def test_native_tp_view_respects_physical_weight_ownership(
+    name, shape, placement, allow_expert_axis, expected
+):
+    # Geometry resolution needs only mesh metadata, without initializing collectives.
+    mesh = SimpleNamespace(get_local_rank=lambda: 1, size=lambda: 2)
+    if expected is ValueError:
+        with pytest.raises(ValueError):
+            native_tp_weight_view(name, shape, placement, mesh, allow_expert_axis=allow_expert_axis)
+    else:
+        view = native_tp_weight_view(
+            name, shape, placement, mesh, allow_expert_axis=allow_expert_axis
+        )
+        if expected is None:
+            assert view is None
+        else:
+            local_shape, intervals = expected
+            assert view.local_shape == local_shape
+            assert view.intervals() == intervals
