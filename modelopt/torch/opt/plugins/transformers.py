@@ -31,10 +31,13 @@ from typing import Any
 import torch
 import torch.nn as nn
 import transformers
+from packaging.version import Version
 from transformers import HfArgumentParser, PreTrainedModel, Trainer, TrainerCallback
 from transformers import modeling_utils as tf_modeling_utils
+from transformers.conversion_mapping import get_model_conversion_mapping
+from transformers.core_model_loading import WeightConverter, WeightRenaming, rename_source_key
 
-from modelopt.torch.utils import print_rank_0, report_memory
+from modelopt.torch.utils import get_unwrapped_name, print_rank_0, report_memory
 
 from ..conversion import ModeloptStateManager, load_modelopt_state
 from .huggingface import (
@@ -169,6 +172,50 @@ def _legacy_tied_weights_keys_as_dict(model: nn.Module):
                 del module._tied_weights_keys
 
 
+def _revert_weight_conversion(model, state_dict):
+    """Revert transformers' load-time weight conversions except on state that modules keep out.
+
+    Before 5.21 (huggingface/transformers#49548), transformers matches a converted weight's name
+    anywhere in a key, so it also catches state named after the weight, such as the quantizers of
+    fused MoE experts (``experts.gate_up_proj_weight_quantizers.0._amax``), and fails to convert it.
+    A module names such submodules in ``_modelopt_unconverted_submodules()``; their state is saved
+    under its in-memory names. This can go once ModelOpt requires transformers 5.21.
+    """
+    revert = tf_modeling_utils._modelopt_cache["revert_weight_conversion"]
+    prefixes = tuple(
+        # State-dict keys drop the names of wrappers such as activation checkpointing's.
+        f"{get_unwrapped_name(name)}.{submodule}."
+        for name, module in model.named_modules()
+        if hasattr(module, "_modelopt_unconverted_submodules")
+        for submodule in module._modelopt_unconverted_submodules()
+    )
+    kept = {key: value for key, value in state_dict.items() if key.startswith(prefixes)}
+    if not kept:
+        return revert(model, state_dict)
+    _warn_if_loading_converts(model, kept)
+    other = {key: value for key, value in state_dict.items() if key not in kept}
+    return {**revert(model, other), **kept}
+
+
+def _warn_if_loading_converts(model, state_dict):
+    """Warn if ``from_pretrained`` would convert, and so fail to load, this unconverted state.
+
+    Each key is renamed as a fresh load of the checkpoint renames it: through the model's whole
+    conversion mapping, with transformers' own renaming order and scopes.
+    """
+    conversions = get_model_conversion_mapping(model)
+    renamings = [c for c in conversions if isinstance(c, WeightRenaming)]
+    converters = [c for c in conversions if isinstance(c, WeightConverter)]
+    caught = [key for key in state_dict if rename_source_key(key, renamings, converters)[1]]
+    if caught:
+        warnings.warn(
+            f"from_pretrained cannot load this checkpoint with transformers {transformers.__version__}:"
+            f" its weight conversion also matches {len(caught)} saved tensors, such as {caught[0]!r}."
+            " transformers 5.21 and later load it; or save and restore the model with mto.save and"
+            " mto.restore."
+        )
+
+
 def _save_pretrained_with_checks(self, save_directory, *args, **kwargs):
     if getattr(self, "_tp_size", None) is not None and ModeloptStateManager.is_converted(self):
         raise NotImplementedError(
@@ -196,12 +243,15 @@ pretrained_model_patch_methods = [
     ("save_pretrained", _save_pretrained_with_checks),
 ]
 
+modeling_utils_patch_methods: list[tuple[str, Any]] = [
+    ("_load_state_dict_into_zero3_model", _load_params_and_buffers_into_zero3_model)
+]
+if Version(transformers.__version__) < Version("5.21"):
+    # Installed once, for every save: per-save swaps of this global would race between threads.
+    modeling_utils_patch_methods.append(("revert_weight_conversion", _revert_weight_conversion))
+
 register_for_patching("transformers", PreTrainedModel, pretrained_model_patch_methods)
-register_for_patching(
-    "transformers",
-    tf_modeling_utils,
-    [("_load_state_dict_into_zero3_model", _load_params_and_buffers_into_zero3_model)],
-)
+register_for_patching("transformers", tf_modeling_utils, modeling_utils_patch_methods)
 
 
 @dataclasses.dataclass

@@ -21,7 +21,7 @@ import os
 import random
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -963,36 +963,43 @@ def _iter_use_cache_configs(model: torch.nn.Module) -> Iterator[Any]:
 
 
 @contextmanager
-def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
+def _disable_use_cache(
+    model: torch.nn.Module, *, for_layerwise_capture: bool = False
+) -> Iterator[None]:
     """Set model config ``use_cache`` flags to ``False`` for the duration of the block.
 
     KV caching is unwanted during calibration / memory-probe forward passes:
     it wastes memory, and for hybrid Mamba/attention models (e.g., NemotronH)
-    the cache state is mutated in-place and breaks correctness. Setting
-    ``use_cache`` unconditionally (rather than only when it was already
-    present) also sidesteps configs that never assign the attribute at all
-    — e.g., ``Step3p5Config`` from stepfun-ai/Step-3.5-Flash — where forward
-    code that reads ``self.config.use_cache`` would otherwise raise
-    ``AttributeError``. Step3.7 keeps the relevant language config nested
-    under ``text_config``; that config object is handled the same way. The
-    prior value is restored on exit if one existed.
+    the cache state is mutated in-place and breaks correctness. Step-3.5-Flash
+    and Step3.7 read ``use_cache`` directly even when their configs omit it.
+    Dataset loops and batch-size probes provide this temporary flag on custom
+    configs too. Layerwise capture may see unrelated decoder metadata, so it
+    creates a missing flag only on those Step configs.
     """
-    states = []
-    for config in _iter_use_cache_configs(model):
-        had_attr = hasattr(config, "use_cache")
-        prev = config.use_cache if had_attr else None
-        config.use_cache = False
-        states.append((config, had_attr, prev))
+    missing = object()
 
-    try:
+    def restore(config, prev):
+        if getattr(config, "use_cache", missing) is prev:
+            return
+        if prev is missing:
+            delattr(config, "use_cache")
+        else:
+            config.use_cache = prev
+
+    with ExitStack() as stack:
+        for config in _iter_use_cache_configs(model):
+            prev = getattr(config, "use_cache", missing)
+            if (
+                for_layerwise_capture
+                and prev is missing
+                and getattr(config, "model_type", None) not in ("step3p5", "step3p7")
+            ):
+                continue
+            # An assignment validator may store the new value before raising.
+            stack.callback(restore, config, prev)
+            if prev is not False:
+                config.use_cache = False
         yield
-    finally:
-        for config, had_attr, prev in reversed(states):
-            if had_attr:
-                config.use_cache = prev
-            else:
-                with suppress(AttributeError):
-                    delattr(config, "use_cache")
 
 
 def get_max_batch_size(
