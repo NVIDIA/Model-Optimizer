@@ -80,18 +80,20 @@ def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys):
             fused_levels = decode_iq_levels(state.packed, name, shape)
             torch.testing.assert_close(fused_levels, levels.reshape(shape), rtol=0, atol=0)
             measure = shape == (2048, 4096)
-            for tokens in (8,) if measure else (7, 0):
-                x = (
-                    torch.randn(tokens, shape[1] * 2, device="cuda", dtype=dtype)[:, ::2]
-                    .detach()
-                    .requires_grad_(input_grad)
-                )
+            for tokens in (8, 1024) if measure else (7, 0):
+                x = torch.randn(tokens, shape[1] * 2, device="cuda", dtype=dtype)[:, ::2]
+                if measure and tokens == 1024:
+                    x = x.contiguous()
+                x = x.detach().requires_grad_(input_grad)
                 bias = torch.randn(shape[0], device="cuda", dtype=dtype, requires_grad=True)
                 steps = state.projected_steps().detach().requires_grad_(True)
                 if not measure and tokens == 7:
                     for wrong_shape in (steps.t(), steps.reshape(shape[0], -1)):
                         with pytest.raises(ValueError):
                             iq_linear(x, state.packed, wrong_shape, name, shape, bias)
+                    for wrong_dtype in (torch.float16, torch.bfloat16):
+                        with pytest.raises(ValueError):
+                            iq_linear(x, state.packed, steps.to(wrong_dtype), name, shape, bias)
                 upstream = torch.randn(tokens, shape[0], device="cuda", dtype=dtype)
                 parameters = [steps, bias, *([x] if input_grad else [])]
                 saved = []
@@ -124,6 +126,7 @@ def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys):
                                     "dtype": str(dtype),
                                     "shape": shape,
                                     "tokens": tokens,
+                                    "input_contiguous": x.is_contiguous(),
                                     "packed_bytes": state.packed.numel()
                                     * state.packed.element_size(),
                                     "baseline_bytes": baseline,
