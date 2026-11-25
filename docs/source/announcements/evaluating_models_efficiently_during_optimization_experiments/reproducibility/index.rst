@@ -40,10 +40,12 @@ Statistical methods
   When question-level differences are independent and a t approximation is suitable, a paired
   t-based confidence interval and a one-sided paired t-test are alternatives.
 
-- **Non-inferiority:** test whether Candidate's accuracy loss is smaller than an acceptable margin.
-  For differences in pp, the t statistic is ``(mean_difference + margin) / standard_error``, using
-  the upper tail of the t distribution. For SciCode, estimate the standard error across parent
-  problems with degrees of freedom equal to the number of parent problems minus one.
+- **Non-inferiority:** use a one-sided t-test to assess whether Candidate's accuracy loss is
+  smaller than an acceptable margin. Use the same mean paired accuracy difference as above and
+  estimate its standard error by grouping subtasks by parent problem. With all three quantities
+  in pp, the t statistic is ``(mean_difference + margin) / standard_error``. Calculate the p-value
+  from the upper tail of the t distribution with degrees of freedom equal to the number of parent
+  problems minus one.
 
 - **Cap-hit rates:** for each model, divide the number of responses that hit the completion cap
   by the total number of responses across all subtasks and repetitions.
