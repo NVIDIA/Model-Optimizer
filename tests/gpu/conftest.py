@@ -70,9 +70,10 @@ def bypass_cpu_workers(request, _dist_pools):
 
 
 @pytest.fixture
-def native_workers(_dist_pools):
-    if torch.cuda.device_count() < 4:
-        pytest.skip("Native overlapping TP/FSDP/EP projection checks require four GPUs")
+def native_workers(_dist_pools, request):
+    size = getattr(request, "param", 4)
+    if torch.cuda.device_count() < size:
+        pytest.skip(f"Native owner checks require {size} GPUs")
     from _test_utils.torch.distributed.utils import (
         DistributedWorkerPool,
         default_worker_teardown,
@@ -81,8 +82,8 @@ def native_workers(_dist_pools):
 
     return get_live_pool(
         _dist_pools,
-        4,
+        size,
         lambda: DistributedWorkerPool(
-            world_size=4, backend="nccl", teardown_fn=default_worker_teardown
+            world_size=size, backend="nccl", teardown_fn=default_worker_teardown
         ),
     )
