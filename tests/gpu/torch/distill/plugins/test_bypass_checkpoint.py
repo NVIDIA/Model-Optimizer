@@ -307,6 +307,21 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
 
 
 def _distributed_resume_worker(rank, size, directory, failure=None):
+    threads = torch.get_num_threads()
+    try:
+        # Per-rank thread pools oversubscribe this small CPU quantization workload.
+        torch.set_num_threads(1)
+        print(
+            f"CPU checkpoint worker rank={rank} threads={torch.get_num_threads()} "
+            f"previous_threads={threads}",
+            flush=True,
+        )
+        _distributed_resume_case(rank, size, directory, failure)
+    finally:
+        torch.set_num_threads(threads)
+
+
+def _distributed_resume_case(rank, size, directory, failure):
     from torch.distributed.device_mesh import init_device_mesh
 
     initial, teacher, batches = bypass_problem()
