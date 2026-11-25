@@ -29,6 +29,7 @@ jobs:
     with:
       files: |
         .github/actions/**
+        .github/scripts/fsdp2_measurement.py
         .github/workflows/_pr_gate.yml
         .github/workflows/gpu_tests.yml
         modelopt/**
