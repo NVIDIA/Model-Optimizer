@@ -22,6 +22,7 @@ import random
 import shutil
 import uuid
 from collections.abc import Sequence
+from contextlib import nullcontext
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,12 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 from torch.utils._pytree import tree_map
+
+from modelopt.torch.quantization.utils.core_utils import (
+    enable_weight_access_and_writeback,
+    module_name_maps,
+    requires_weight_materialization,
+)
 
 __all__ = ["BypassCheckpoint"]
 
@@ -63,23 +70,89 @@ def _tensor_hash(digest, value):
 
 def _model_hash(model):
     digest = hashlib.sha256()
-    for name, value in model.state_dict(keep_vars=True).items():
-        if isinstance(value, torch.Tensor):
-            digest.update(str((name, tuple(value.shape), value.dtype)).encode())
-            _tensor_hash(digest, value)
-        else:
-            digest.update(json.dumps([name, value], sort_keys=True, default=str).encode())
-    for name, module in model.named_modules():
-        native = getattr(module, "_native_weight_meta", None)
-        if native is not None:
-            digest.update(name.encode())
-            digest.update(_batch_hash(_semantic_config(native)).encode())
-        if hasattr(module, "num_bits") and hasattr(module, "backend"):
-            digest.update(str((name, module.extra_repr())).encode())
-    config = getattr(model, "config", None)
-    if callable(getattr(config, "to_dict", None)):
-        digest.update(b"model_config:")
-        digest.update(json.dumps(_semantic_config(config), sort_keys=True).encode())
+    names = module_name_maps(model)
+
+    def visit(name, module):
+        # Resident DTensors retain their rank-local identity; do not gather them.
+        # Accelerate access is limited to this registering owner and its quantizers,
+        # with recursive hashing inside the window before placement is restored.
+        materialize = any(
+            value is not None and value.is_meta
+            for value in (*module._parameters.values(), *module._buffers.values())
+        )
+        if materialize and (
+            not requires_weight_materialization(module, model, names)
+            or any(
+                value is not None and value.is_meta
+                for child in module.modules()
+                if child is not module
+                for value in child._parameters.values()
+            )
+        ):
+            # The canonical context walks descendants; do not silently onload a
+            # frozen model under a composite/ancestor preload owner.
+            raise ValueError(
+                "Checkpoint identity requires individually accessible offload weight owners; "
+                "composite/ancestor preload ownership is unsupported."
+            )
+        context = (
+            enable_weight_access_and_writeback(module, model, names, writeback=False)
+            if materialize
+            else nullcontext()
+        )
+        with context:
+            # Own state only: state_dict() here would traverse offloaded descendants
+            # before their access windows and retain a full model of stale meta refs.
+            state = {}
+            module._save_to_state_dict(state, prefix="", keep_vars=True)
+            for local_name, value in state.items():
+                digest.update(str((name, local_name)).encode())
+                if isinstance(value, torch.Tensor):
+                    digest.update(str((tuple(value.shape), value.dtype)).encode())
+                    _tensor_hash(digest, value)
+                else:
+                    digest.update(_batch_hash(_semantic_config(value)).encode())
+            # Ordinary options are not always present in extra_repr (e.g. MHA
+            # num_heads). Bind public scalars without serializing arbitrary objects.
+            scalar = (str, int, float, bool, torch.dtype, type(None))
+            options = {
+                key: value
+                for key, value in vars(module).items()
+                if not key.startswith("_")
+                and key not in {"training", "name_or_path", "transformers_version"}
+                and (
+                    isinstance(value, scalar)
+                    or (
+                        isinstance(value, (tuple, list))
+                        and all(isinstance(item, scalar) for item in value)
+                    )
+                )
+            }
+            # Existing semantic protocols cover custom execution state. Original
+            # Python implementations and external state must remain unchanged.
+            digest.update(
+                _batch_hash(
+                    [
+                        name,
+                        f"{type(module).__module__}.{type(module).__qualname__}",
+                        module.extra_repr(),
+                        _semantic_config(options),
+                    ]
+                ).encode()
+            )
+            native = getattr(module, "_native_weight_meta", None)
+            if native is not None:
+                digest.update(_batch_hash(_semantic_config(native)).encode())
+            config = getattr(module, "config", None)
+            if isinstance(config, dict) or callable(getattr(config, "to_dict", None)):
+                digest.update(b"module_config:")
+                digest.update(_batch_hash(_semantic_config(config)).encode())
+            # _modules retains registration order and shared-module paths.
+            for child_name, child in module._modules.items():
+                if child is not None:
+                    visit(f"{name}.{child_name}" if name else child_name, child)
+
+    visit("", model)
     return digest.hexdigest()
 
 
