@@ -205,8 +205,6 @@ def repair_grouped_weight(weight, quantizers):
 
 def repair_grouped_linear(quantizers, inputs, offsets, bias=None, *, is_transposed=False):
     """Try compatible native expert banks; heterogeneous/frozen banks keep their forward."""
-    from torch.distributed.tensor import DTensor
-
     states: list[IQScaleState] = []
     for quantizer in quantizers:
         state = getattr(quantizer, "_local_repair_state", None)
@@ -356,8 +354,6 @@ class IQScaleState(nn.Module):
 
     def linear(self, inputs, bias=None):
         """Use packed GEMM only in a numerically and empirically qualified regime."""
-        from torch.distributed.tensor import DTensor
-
         if (
             self.codec_shape != self.weight_shape
             or isinstance(inputs, DTensor)
