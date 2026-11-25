@@ -40,7 +40,7 @@ def _apply(
     levels,
     scales,
     output,
-    n: tl.constexpr,
+    n,
     group: tl.constexpr,
     block: tl.constexpr,
 ):
@@ -112,7 +112,7 @@ def _decode_iq(
     packed,
     grid,
     output,
-    n: tl.constexpr,
+    n,
     kind: tl.constexpr,
     block_bytes: tl.constexpr,
     block: tl.constexpr,
@@ -209,6 +209,6 @@ def apply_block_scales(levels, scales, dtype):
     Autograd retains integer levels and reduces scale gradients directly. Native
     code selection and scale-field projection remain owned by the format adapter.
     """
-    if levels.device != scales.device:
-        raise ValueError("Integer levels and block scales must share a device.")
+    if not levels.is_cuda or levels.device != scales.device:
+        raise ValueError("Integer levels and block scales must share a CUDA device.")
     return _BlockScales.apply(levels, scales, dtype)

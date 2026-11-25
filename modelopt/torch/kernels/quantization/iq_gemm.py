@@ -166,7 +166,8 @@ def _scale_backward(
     index = n[:, None].to(tl.int64) * K + k[None, :]
     valid = (n[:, None] < N) & (k[None, :] < K)
     levels = iq_levels(P, GRID, index, valid, KIND, BYTES).to(tl.float32)
-    # Match materialized F.linear's rounded dW before the scale reduction.
+    # Preserve native F.linear autograd parity: round dW to the compute dtype
+    # before the FP32 reduction into projected scale gradients.
     values = acc.to(X.dtype.element_ty).to(tl.float32) * levels
     reduced = tl.sum(tl.reshape(values, (BN, BK // GROUP, GROUP)), 2)
     groups = tl.program_id(1) * (BK // GROUP) + tl.arange(0, BK // GROUP)
@@ -242,8 +243,9 @@ class _IQLinear(torch.autograd.Function):
 def iq_linear(inputs, packed, steps, format_name, weight_shape, bias=None):
     """Apply a native GGML matrix without expanding weights or saving a full dW.
 
-    ``steps`` are the differentiable projected native fields, in flattened
-    row-major scale-group order. Packed codes remain immutable.
+    ``steps`` are differentiable native fields in row-major block/group order,
+    shaped ``(prod(weight_shape) // block_size, block_size // int8_group_size)``.
+    Packed codes remain immutable.
     """
     fmt = IQ_FORMAT_REGISTRY[format_name]
     shape = tuple(weight_shape)
@@ -263,10 +265,9 @@ def iq_linear(inputs, packed, steps, format_name, weight_shape, bias=None):
         )
     _, block_bytes = iq_metadata(packed.device, format_name)
     group = fmt.int8_group_size
-    if packed.numel() != math.prod(
-        shape
-    ) // fmt.block_size * block_bytes or steps.numel() * group != math.prod(shape):
-        raise ValueError("Packed bytes/scale groups do not match the IQ matrix.")
+    blocks = math.prod(shape) // fmt.block_size
+    if packed.numel() != blocks * block_bytes or steps.shape != (blocks, fmt.block_size // group):
+        raise ValueError("Packed bytes/native scale geometry do not match the IQ matrix.")
     if bias is not None:
         if bias.shape != (shape[0],) or bias.device != inputs.device or bias.dtype != inputs.dtype:
             raise ValueError(
