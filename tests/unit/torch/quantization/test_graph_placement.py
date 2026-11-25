@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import pytest
+import torch
+
+pytest.importorskip("onnxruntime")
+pytest.importorskip("onnxscript")
+
+from _test_utils.onnx.lib_test_models import build_se_residual_model
+
+import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.nn import TensorQuantizer
+
+aten = torch.ops.aten
+
+
+def test_quantize_graph_shares_quantizers():
+    model, example = build_se_residual_model()
+
+    graph_module = mtq.quantize_graph(
+        model, mtq.INT8_DEFAULT_CFG, (example,), lambda m: m(example), log_level="WARNING"
+    )
+
+    quantizer_nodes = [
+        node
+        for node in graph_module.graph.nodes
+        if node.op == "call_module"
+        and isinstance(graph_module.get_submodule(node.target), TensorQuantizer)
+    ]
+    readers = [{user.target for user in node.users} for node in quantizer_nodes]
+    # One quantizer feeds the residual add and the next conv, another the pooling and the SE multiply.
+    assert {aten.add.Tensor, aten.conv2d.default} in readers
+    assert {aten.mean.dim, aten.mul.Tensor} in readers
+    assert all(readers)
+    for node in quantizer_nodes:
+        quantizer = graph_module.get_submodule(node.target)
+        assert quantizer.is_enabled and quantizer.amax is not None, node.target
+    assert {"3.conv1.input_quantizer", "3.conv1.weight_quantizer"} <= {
+        node.target for node in quantizer_nodes
+    }
+    torch.testing.assert_close(graph_module(example), model(example), rtol=0.1, atol=0.1)

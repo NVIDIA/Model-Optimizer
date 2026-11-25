@@ -17,32 +17,15 @@ import io
 
 import onnx
 import torch
-import torch.nn.functional as F
-from torch import nn
+from _test_utils.onnx.lib_test_models import build_se_residual_model
 
 from modelopt.onnx.quantization.placement import find_qdq_placement
 
 
-class _SEResidualBlock(nn.Module):
-    def __init__(self, channels=16):
-        super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.se1 = nn.Conv2d(channels, 4, 1)
-        self.se2 = nn.Conv2d(4, channels, 1)
-
-    def forward(self, x):
-        y = self.conv2(F.silu(self.conv1(x)))
-        scale = torch.sigmoid(self.se2(F.silu(self.se1(F.adaptive_avg_pool2d(y, 1)))))
-        return F.relu(y * scale + x)
-
-
 def test_find_qdq_placement_shares_quantizers():
-    model = nn.Sequential(
-        nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(), _SEResidualBlock(), _SEResidualBlock()
-    ).eval()
+    model, example = build_se_residual_model()
     buffer = io.BytesIO()
-    torch.onnx.export(model, (torch.randn(1, 3, 32, 32),), buffer, dynamo=False, opset_version=17)
+    torch.onnx.export(model, (example,), buffer, dynamo=False, opset_version=17)
     onnx_model = onnx.load_from_string(buffer.getvalue())
 
     placement = find_qdq_placement(onnx_model, log_level="WARNING")

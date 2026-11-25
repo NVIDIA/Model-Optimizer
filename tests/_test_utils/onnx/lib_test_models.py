@@ -236,6 +236,33 @@ def build_resnet_block_with_downsample(
     return nn.Sequential(*feat_layers), input_tensor
 
 
+class SEResidualBlock(nn.Module):
+    """Residual block with squeeze-and-excitation, as in EfficientNet."""
+
+    def __init__(self, channels=16):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.se1 = nn.Conv2d(channels, 4, 1)
+        self.se2 = nn.Conv2d(4, channels, 1)
+
+    def forward(self, x):
+        silu = torch.nn.functional.silu
+        y = self.conv2(silu(self.bn1(self.conv1(x))))
+        pooled = torch.nn.functional.adaptive_avg_pool2d(y, 1)
+        scale = torch.sigmoid(self.se2(silu(self.se1(pooled))))
+        return torch.relu(y * scale + x)
+
+
+def build_se_residual_model():
+    """A stem conv followed by two squeeze-and-excitation residual blocks, with an example input."""
+    model = nn.Sequential(
+        nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(), SEResidualBlock(), SEResidualBlock()
+    )
+    return model.eval(), torch.randn(1, 3, 32, 32)
+
+
 def find_init(onnx_model: onnx.ModelProto, init_name: str) -> np.ndarray:
     ret = None
     for init in onnx_model.graph.initializer:
