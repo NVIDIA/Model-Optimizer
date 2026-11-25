@@ -199,8 +199,14 @@ class HFDSparkModel(HFDFlashModel):
         valid_count = flat_weights.sum() + 1e-6
 
         if valid_count <= 1.0:
-            # The confidence head is not behind final_logits.
-            loss = self._draft_zero_loss(flat_final.device, through=(flat_final, confidence_logits))
+            # The confidence head is not behind final_logits, and at weight 0 no rank's loss
+            # reaches it: a gradient here alone would change this rank's reduce-scatter.
+            trained_confidence = (
+                confidence_logits if self.dflash_confidence_head_alpha > 0 else None
+            )
+            loss = self._draft_zero_loss(
+                flat_final.device, through=(flat_final, trained_confidence)
+            )
             metrics = {"ce_loss": 0.0, "l1_loss": 0.0, "confidence_loss": 0.0, "base_accuracy": 0.0}
             return loss, 0.0, metrics
 
@@ -332,10 +338,12 @@ class HFDSparkModel(HFDFlashModel):
         )
         n_blocks = anchor_positions.shape[1]
 
-        if n_blocks == 0 or not block_keep_mask.any():
+        if n_blocks == 0:
+            # Only dflash_num_anchors=0, alike on every rank: there is no block to draft.
             return ModelOutput(loss=self._draft_zero_loss(device), logits=None, train_acc=[[0.0]])
 
-        # 4. Build draft inputs (inherited helpers).
+        # 4. Build draft inputs (inherited helpers). A batch with no kept block still runs the
+        # draft, for a zero loss through its outputs: FSDP2 units' collectives span every rank.
         noise_embedding = self._build_noise_embedding(
             input_ids, anchor_positions, block_keep_mask, n_blocks
         )

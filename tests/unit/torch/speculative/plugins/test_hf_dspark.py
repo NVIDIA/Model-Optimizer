@@ -985,7 +985,7 @@ class TestDdpGradientCoverage:
         ]
 
     def test_batch_with_no_valid_anchor(self):
-        """Nothing is a training target, so forward() returns before building the draft."""
+        """Nothing is a training target, but the draft still runs for its zero loss."""
         model = self._model()
         torch.manual_seed(0)
         input_ids = torch.randint(1, model.dflash_config.vocab_size, (2, SEQ_LEN))

@@ -796,7 +796,8 @@ class HFDFlashModel(DFlashModel):
                     "through= holds no draft output; the parameters cannot stand in for one "
                     "once the draft has run."
                 )
-            return sum(out.sum() * 0.0 for out in outputs)
+            # An fp16 sum can overflow to inf, and inf * 0 is NaN.
+            return sum(out.sum(dtype=torch.float32) * 0.0 for out in outputs)
         return sum(
             (p.reshape(-1)[0] * 0.0 for p in self.dflash_module.parameters() if p.requires_grad),
             torch.zeros((), device=device),
@@ -1041,8 +1042,8 @@ class HFDFlashModel(DFlashModel):
         )
         n_blocks = anchor_positions.shape[1]
 
-        if n_blocks == 0 or not block_keep_mask.any():
-            # An all-masked answer-only batch: nothing to train, but DDP still reduces.
+        if n_blocks == 0:
+            # Only dflash_num_anchors=0, alike on every rank: there is no block to draft.
             # draft_metrics is empty rather than absent: the forward's output carries the
             # key on every step, so a reader never has to ask whether this was such a batch.
             return ModelOutput(
@@ -1052,7 +1053,8 @@ class HFDFlashModel(DFlashModel):
                 draft_metrics={},
             )
 
-        # 4. Build draft inputs
+        # 4. Build draft inputs. A batch with no kept block still runs the draft, for a zero
+        # loss through its outputs: an FSDP2 draft unit's collectives span every rank.
         noise_embedding = self._build_noise_embedding(
             input_ids, anchor_positions, block_keep_mask, n_blocks
         )
