@@ -236,18 +236,11 @@ def region_pattern_autotuning_workflow(
         QDQAutotuner instance after autotuning
     """
     output_dir_is_temp = output_dir is None
-    if not output_dir:
-        output_dir = Path(tempfile.mkdtemp())
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    logs_dir = output_dir / "logs"
-    logs_dir.mkdir(exist_ok=True)
-    models_dir = output_dir / "region_models"
-    models_dir.mkdir(exist_ok=True)
-
-    if state_file is None:
-        state_file = str(output_dir / "autotuner_state.yaml")
-    state_path = Path(state_file)
+    state_path = (
+        Path(state_file)
+        if state_file is not None
+        else (output_dir / "autotuner_state.yaml" if output_dir is not None else None)
+    )
 
     if isinstance(model_or_path, str):
         logger.info(f"Loading model: {model_or_path}")
@@ -279,7 +272,7 @@ def region_pattern_autotuning_workflow(
     autotuner = QDQAutotuner(model)
     autotuner.initialize(config, pattern_cache)
 
-    if state_path.exists():
+    if state_path is not None and state_path.exists():
         logger.info(f"Resuming from checkpoint: {state_path}")
         autotuner.load_state(str(state_path))
         if model_transform is None and autotuner.config.default_quant_type != quant_type:
@@ -314,6 +307,18 @@ def region_pattern_autotuning_workflow(
             logger.info("Pattern import complete")
         else:
             logger.warning(f"QDQ baseline not found: {qdq_baseline_model}")
+
+    if output_dir is None:
+        output_dir = Path(tempfile.mkdtemp())
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = output_dir / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    models_dir = output_dir / "region_models"
+    models_dir.mkdir(exist_ok=True)
+
+    if state_path is None:
+        state_path = output_dir / "autotuner_state.yaml"
 
     regions = autotuner.regions
     logger.info(f"Ready to profile {len(regions)} regions")

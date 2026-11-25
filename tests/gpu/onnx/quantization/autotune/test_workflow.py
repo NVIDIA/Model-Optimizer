@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 import os
 import shutil
 import tempfile
@@ -21,7 +20,6 @@ from pathlib import Path
 
 import onnx
 import pytest
-import torch
 from _test_utils.import_helper import skip_if_no_tensorrt, skip_if_no_trtexec
 from _test_utils.onnx.quantization.autotune import models as _test_models
 
@@ -95,29 +93,40 @@ def test_export_quantized_model(use_trtexec, simple_conv_model):
             shutil.rmtree(output_dir)
 
 
-@pytest.mark.parametrize(("saved_type", "requested_type"), [("int8", "fp8"), ("fp8", "int8")])
+@pytest.mark.parametrize(
+    ("saved_type", "requested_type", "explicit_output_dir"),
+    [("int8", "fp8", True), ("fp8", "int8", False)],
+)
 def test_workflow_rejects_incompatible_quant_type(
-    tmp_path, simple_conv_model, saved_type, requested_type
+    monkeypatch, tmp_path, simple_conv_model, saved_type, requested_type, explicit_output_dir
 ):
     """A checkpoint must not silently override the workflow's requested quantization type."""
-    pytest.importorskip("tensorrt")
-    if not torch.cuda.is_available():
-        pytest.skip("A CUDA device is required for the real baseline benchmark")
-    benchmark = init_benchmark_instance(use_trtexec=False, warmup_runs=1, timing_runs=2)
-    assert benchmark is not None
-    baseline = benchmark.run(simple_conv_model.SerializeToString())
-    assert math.isfinite(baseline) and baseline > 0
     autotuner = QDQAutotuner(simple_conv_model)
     autotuner.initialize(Config(default_quant_type=saved_type))
-    autotuner.submit(baseline)
+    autotuner.submit(1.0)
     state = tmp_path / "autotuner_state.yaml"
     autotuner.save_state(str(state))
     before = state.read_bytes()
     source = tmp_path / "source.onnx"
     onnx.save(simple_conv_model, source)
-    with pytest.raises(ValueError):
+    mkdtemp_calls = []
+    real_mkdtemp = tempfile.mkdtemp
+    monkeypatch.setattr(
+        tempfile, "mkdtemp", lambda *a, **kw: mkdtemp_calls.append(1) or real_mkdtemp(*a, **kw)
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"Checkpoint quant_type={saved_type} does not match requested quant_type={requested_type}",
+    ):
         region_pattern_autotuning_workflow(
-            str(source), tmp_path, num_schemes_per_region=1, quant_type=requested_type
+            str(source),
+            tmp_path if explicit_output_dir else None,
+            state_file=None if explicit_output_dir else str(state),
+            num_schemes_per_region=1,
+            quant_type=requested_type,
         )
+
     assert state.read_bytes() == before
-    assert not (tmp_path / "optimized_final.onnx").exists()
+    assert set(tmp_path.iterdir()) == {state, source}
+    assert not mkdtemp_calls
