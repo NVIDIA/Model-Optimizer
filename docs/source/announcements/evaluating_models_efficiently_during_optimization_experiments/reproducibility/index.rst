@@ -42,23 +42,24 @@ Statistical methods
   If neither model has an observed failure, bootstrapping gives a [0, 0] interval. This does not
   establish that failures cannot occur or that the models have equal failure rates.
 
-  .. _evaluation-scicode-cap-hit-p-values:
+- .. _evaluation-scicode-cap-hit-p-values:
 
-  - **SciCode cap-hit p-values**
+  **SciCode cap-hit p-values**
 
-    For the one-sided `paired permutation p-values
-    <https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html>`__,
-    swap model labels for whole parent problems and count permuted cap-hit rate differences at least
-    as extreme as the observed difference in the tested direction. For an exact p-value, divide
-    this count by the total number of possible swap patterns.Cap hits are rare, so most subtask differences are zero. 
-    The permutation test avoids relying on a t-distribution approximation for these sparse differences.
+  For the one-sided `paired permutation p-values
+  <https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html>`__,
+  swap model labels for whole parent problems and count permuted cap-hit rate differences at least
+  as extreme as the observed difference in the tested direction. For an exact p-value, divide
+  this count by the total number of possible swap patterns.
+  Cap hits are rare, so most subtask differences are zero. The permutation test avoids relying
+  on a t-distribution approximation for these sparse differences.
 
-    The outcomes are binary, but a simple binomial test on pooled responses would ignore question
-    pairing and repetitions within each question. With one response per model and question and
-    independent question pairs, an
-    `exact McNemar test
-    <https://www.statsmodels.org/stable/generated/statsmodels.stats.contingency_tables.mcnemar.html>`__
-    is another paired option.
+  The outcomes are binary, but a simple binomial test on pooled responses would ignore question
+  pairing and repetitions within each question. With one response per model and question and
+  independent question pairs, an
+  `exact McNemar test
+  <https://www.statsmodels.org/stable/generated/statsmodels.stats.contingency_tables.mcnemar.html>`__
+  is another paired option.
 
 - **Verbosity:** to compare mean completion lengths, average each model’s response lengths across
   repetitions within each question, then subtract Baseline’s average from Candidate’s. Use these
