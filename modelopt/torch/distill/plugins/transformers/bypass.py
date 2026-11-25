@@ -62,6 +62,20 @@ def _model_spec(model):
     return BypassSpec()
 
 
+def _document_dependent_positions(model):
+    config = getattr(model, "config", None)
+    getter = getattr(config, "get_text_config", None)
+    config = getter() if callable(getter) else config
+    pending = [getattr(config, name, None) for name in ("rope_scaling", "rope_parameters")]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if value.get("rope_type", value.get("type")) in ("dynamic", "longrope"):
+                return True
+            pending.extend(value.values())
+    return False
+
+
 @dataclass(frozen=True)
 class _ReplayFacts:
     spec: BypassSpec
@@ -610,17 +624,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             for identity, quantizer in quantizers.items()
         ):
             return False
-        config = getattr(model, "config", None)
-        getter = getattr(config, "get_text_config", None)
-        config = getter() if callable(getter) else config
-        pending = [getattr(config, name, None) for name in ("rope_scaling", "rope_parameters")]
-        while pending:
-            value = pending.pop()
-            if isinstance(value, dict):
-                if value.get("rope_type", value.get("type")) in ("dynamic", "longrope"):
-                    return False
-                pending.extend(value.values())
-        return True
+        return not _document_dependent_positions(model)
 
     def forward_teacher(self, teacher, args, kwargs):
         """Run the native text task, retaining outer hooks for wrapped text models."""
@@ -656,6 +660,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 or config._attn_implementation != "sdpa"
                 or next(model.parameters()).dtype not in (torch.float16, torch.bfloat16)
                 or requires_full_context_activations(model)
+                or _document_dependent_positions(model)
             ):
                 raise ValueError("This model requires faithful full-context execution")
         supported = {

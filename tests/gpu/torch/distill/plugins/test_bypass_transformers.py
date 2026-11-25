@@ -26,6 +26,15 @@ from torch import nn
 
 pytest.importorskip("transformers", minversion="5.23")
 
+from transformers import (
+    LlamaConfig,
+    LlamaForCausalLM,
+    Qwen3Config,
+    Qwen3ForCausalLM,
+    Qwen3MoeConfig,
+    Qwen3MoeForCausalLM,
+)
+
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -34,6 +43,71 @@ from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapte
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
+
+
+@pytest.mark.parametrize("side", ["teacher", "student"])
+@pytest.mark.parametrize(
+    ("family", "attention"),
+    [
+        ("llama", "default"),
+        ("llama", "dynamic"),
+        ("llama", "longrope"),
+        ("qwen3", "default"),
+        ("qwen3", "sliding"),
+        ("qwen3_moe", "default"),
+        ("qwen3_moe", "sliding"),
+    ],
+)
+def test_native_cp_refuses_document_dependent_attention(family, attention, side):
+    config_cls, model_cls = {
+        "llama": (LlamaConfig, LlamaForCausalLM),
+        "qwen3": (Qwen3Config, Qwen3ForCausalLM),
+        "qwen3_moe": (Qwen3MoeConfig, Qwen3MoeForCausalLM),
+    }[family]
+    kwargs = {
+        "vocab_size": 32,
+        "hidden_size": 16,
+        "intermediate_size": 32,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 8,
+        "max_position_embeddings": 4,
+        "use_cache": False,
+    }
+    if family == "qwen3_moe":
+        kwargs.update(moe_intermediate_size=16, num_experts=2, num_experts_per_tok=1)
+    policy = {}
+    if attention == "dynamic":
+        policy["rope_parameters"] = {"rope_type": "dynamic", "factor": 2.0}
+    elif attention == "longrope":
+        policy["rope_parameters"] = {
+            "rope_type": "longrope",
+            "factor": 2.0,
+            "original_max_position_embeddings": 4,
+            "short_factor": [1.0] * 4,
+            "long_factor": [2.0] * 4,
+        }
+    elif attention == "sliding":
+        # Let HF realize the layer policy, including Qwen3's max_window_layers rule.
+        policy.update(use_sliding_window=True, sliding_window=2)
+        if family == "qwen3":
+            policy["max_window_layers"] = 0
+    teacher_config = config_cls(**kwargs, **(policy if side == "teacher" else {}))
+    student_config = config_cls(**kwargs, **(policy if side == "student" else {}))
+    for config in (teacher_config, student_config):
+        config._attn_implementation = "sdpa"
+    teacher = model_cls(teacher_config).to(torch.bfloat16).eval()
+    adapter = TransformersBypassAdapter()
+    adapter.student = model_cls(student_config).to(torch.bfloat16).eval()
+    batch = {"input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]])}
+    if attention != "default":
+        with pytest.raises(ValueError):
+            adapter._cp_inputs(teacher, batch)
+    else:
+        tokens, positions = adapter._cp_inputs(teacher, batch)
+        torch.testing.assert_close(tokens, batch["input_ids"])
+        torch.testing.assert_close(positions, torch.arange(8).unsqueeze(0))
 
 
 def test_teacher_replay_caches_model_scans_without_changing_targets():
