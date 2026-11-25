@@ -28,6 +28,7 @@ from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
 )
+from packaging.version import Version
 from safetensors.torch import load_file, save_file
 from torch.distributed.fsdp import fully_shard
 
@@ -51,6 +52,7 @@ from modelopt.torch.export.unified_export_hf import (
     _resolve_export_dtype,
     _source_checkpoint,
     _write_base_config,
+    _write_hf_export_config,
     collect_shared_input_modules,
     export_hf_checkpoint,
     read_unplaced_weights,
@@ -1153,6 +1155,39 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
     assert written["text_config"].get("base_model_ep_plan") == source_plan
     assert config.distributed_config is distributed_config
     assert config.text_config.base_model_ep_plan is swapped_plan
+
+
+def test_export_config_restores_what_transformers_renamed_on_load(tmp_path):
+    """transformers 5.18 renames deepseek_sparse_attention to indexed_attention when it loads a
+    config; the export keeps the names the source checkpoint ships, which runtimes validate."""
+    transformers = pytest.importorskip("transformers")
+    if Version(transformers.__version__) < Version("5.18"):
+        pytest.skip("this transformers does not rename deepseek_sparse_attention")
+    names = ["linear_attention", "deepseek_sparse_attention"]
+    text = {
+        "model_type": "glm5_next_text",
+        "num_hidden_layers": 2,
+        "layer_types": names,
+        "mlp_layer_types": ["dense", "sparse"],
+    }
+    source, export = tmp_path / "source", tmp_path / "export"
+    source.mkdir()
+    (source / "config.json").write_text(
+        json.dumps({"model_type": "glm5_next", "text_config": text})
+    )
+    config = transformers.AutoConfig.from_pretrained(source)
+    config.save_pretrained(export)
+    assert json.loads((export / "config.json").read_text())["text_config"]["layer_types"] == [
+        "linear_attention",
+        "indexed_attention",
+    ]
+    model = torch.nn.Module()
+    model.config = config
+    model._modelopt_source_checkpoint = str(source)
+
+    _write_hf_export_config(model, None, export)
+
+    assert json.loads((export / "config.json").read_text())["text_config"]["layer_types"] == names
 
 
 def _one_rank_fails_after_the_write_job(rank, size, tmp_dir, failure):

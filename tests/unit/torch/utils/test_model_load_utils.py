@@ -31,6 +31,7 @@ import json
 import math
 import os
 import sys
+import threading
 import warnings
 from contextlib import ExitStack, contextmanager, nullcontext
 from types import SimpleNamespace
@@ -86,13 +87,20 @@ from transformers import (
     T5Config,
     WhisperConfig,
 )
-from transformers.core_model_loading import Concatenate, MergeModulelist, WeightConverter
+from transformers.conversion_mapping import get_model_conversion_mapping
+from transformers.core_model_loading import (
+    Concatenate,
+    MergeModulelist,
+    WeightConverter,
+    WeightTransform,
+)
 from transformers.distributed import DistributedConfig
 
 import modelopt.torch.models.hf as models_hf
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 import modelopt.torch.utils.moe as moe
+from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
 from modelopt.torch.export.unified_export_hf import _llm_dummy_forward
 from modelopt.torch.models import _onfly_decompress, get_spec
 from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
@@ -289,7 +297,7 @@ _PUBLISHED_LAYOUT = {
 }
 
 
-def _tiny_llava_checkpoint(path, drop=()):
+def _tiny_llava_checkpoint(path, drop=(), tie=False):
     text = LlamaConfig(
         vocab_size=64,
         hidden_size=32,
@@ -297,7 +305,7 @@ def _tiny_llava_checkpoint(path, drop=()):
         num_hidden_layers=2,
         num_attention_heads=4,
         num_key_value_heads=2,
-        tie_word_embeddings=False,
+        tie_word_embeddings=tie,
     )
     vision = CLIPVisionConfig(
         hidden_size=16,
@@ -308,6 +316,7 @@ def _tiny_llava_checkpoint(path, drop=()):
         patch_size=14,
     )
     config = LlavaConfig(text_config=text, vision_config=vision, image_token_index=63)
+    config.tie_word_embeddings = tie
     config.architectures = ["LlavaForConditionalGeneration"]
     config.dtype = torch.float32  # the meta build defaults to bfloat16 otherwise
     torch.manual_seed(0)
@@ -362,6 +371,113 @@ def test_published_layout_vlm_loads_every_weight(tmp_path, gloo_group):
     assert isinstance(model.model.multi_modal_projector, FSDPModule)
     # The export reverses exactly the renamings the load ran, as after from_pretrained.
     assert model._weight_conversions, "renamings the published layout needs were not recorded"
+
+
+def _as_on_transformers_5_5(monkeypatch):
+    """Loads as a Transformers without ``was_used`` (5.5) does: the loader finds no ``was_used``,
+    and ``from_pretrained`` records every conversion. Returns the class to load by."""
+    monkeypatch.setattr(model_load_utils, "_tracks_used_conversions", lambda: False)
+    # A newer from_pretrained keeps the conversions was_used names: all of them here.
+    monkeypatch.setattr(WeightTransform, "was_used", lambda self: True, raising=False)
+    return LlavaForConditionalGeneration
+
+
+@pytest.mark.parametrize("loader", ["fsdp2", "whole"])
+def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monkeypatch, loader):
+    """A load records only the conversions it converted a key with, on every Transformers version.
+
+    Each load meets a tied ``lm_head`` it doesn't convert: FSDP2 a copy of it its index leaves out,
+    which it places but never reads, and a head bias with no parameter, which it only carries over;
+    the whole-model load (as on 5.5, without ``was_used``) no head tensor at all. Recorded anyway,
+    the head's rename renames ``lm_head`` in the export (to ``language_model.model.lm_head`` for
+    Gemma3). The whole-model load also reads a projector its index leaves out, and keeps its rename.
+    """
+    fsdp2 = loader == "fsdp2"
+    ref = _tiny_llava_checkpoint(tmp_path, drop=() if fsdp2 else ("lm_head.",), tie=True)
+    state = load_file(str(tmp_path / "model.safetensors"))
+    (tmp_path / "model.safetensors").unlink()
+    if fsdp2:
+        state["language_model.lm_head.bias"] = torch.zeros(64)
+        off_index = {"language_model.lm_head.weight"}
+    else:
+        off_index = {k for k in state if k.startswith("multi_modal_projector.")}
+    shard = "model-00001-of-00001.safetensors"
+    save_file(state, str(tmp_path / shard), metadata={"format": "pt"})
+    index = {"metadata": {}, "weight_map": {k: shard for k in state if k not in off_index}}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+    if fsdp2:
+        request.getfixturevalue("gloo_group")
+        model = _fsdp2_load(tmp_path)
+        assert model._modelopt_unplaced_source_keys == ["language_model.lm_head.bias"]
+        head = model.lm_head.weight
+        head = head.full_tensor() if isinstance(head, DTensor) else head
+        assert torch.equal(head.detach(), ref.get_input_embeddings().weight.detach())
+    else:
+        model = load_pretrained(str(tmp_path), _as_on_transformers_5_5(monkeypatch))
+        ref_projector = ref.model.multi_modal_projector
+        for name, param in model.model.multi_modal_projector.named_parameters():
+            assert torch.equal(param, ref_projector.get_parameter(name)), name
+
+    to_source = build_reverse_name_mapper(model)
+    recorded, model._weight_conversions = (
+        model._weight_conversions,
+        get_model_conversion_mapping(ref),
+    )
+    every = build_reverse_name_mapper(model)  # every conversion, as recorded before
+    model._weight_conversions = recorded
+    assert to_source("lm_head") == "lm_head"
+    assert every("lm_head") != "lm_head"
+    language = "model.language_model.layers.0.mlp"
+    assert to_source(language) == every(language)
+    # 5.5's Llava mapping has no projector rename; where there is one, the load ran it.
+    projector = "model.multi_modal_projector.linear_1"
+    renamed = every(projector) != projector
+    assert to_source(projector) == ("multi_modal_projector.linear_1" if renamed else projector)
+
+
+def test_overlapping_loads_each_keep_their_hooks(tmp_path, monkeypatch):
+    """Without ``was_used`` (5.5) a load installs process-wide hooks: model preparation (such as
+    Nemotron-H's) and the conversion hook. One that ends first must not take them from one that
+    is still loading."""
+    _tiny_llava_checkpoint(tmp_path, drop=("lm_head.",), tie=True)
+    loader = _as_on_transformers_5_5(monkeypatch)
+    stock = vars(WeightTransform)["rename_source_key"]
+    active, mine, seen = {"hook": None}, {}, {}
+    b_preparing, a_done = threading.Event(), threading.Event()
+
+    @contextmanager
+    def prepare(*args, **kwargs):  # swaps a process-wide hook in and back, as Nemotron-H's does
+        saved, active["hook"] = active["hook"], mine.setdefault(threading.get_ident(), object())
+        if threading.current_thread() is not threading.main_thread():
+            b_preparing.set()
+        try:
+            yield
+        finally:
+            active["hook"] = saved
+
+    models = []
+    other = threading.Thread(target=lambda: models.append(load_pretrained(str(tmp_path), Probe)))
+
+    class Probe:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            if threading.current_thread() is threading.main_thread():  # A, mid-load, starts B
+                other.start()
+                b_preparing.wait(0.2)  # B waits for A; unserialized, it would be preparing by now
+            else:
+                a_done.wait(5)
+            seen[threading.get_ident()] = active["hook"] is mine[threading.get_ident()]
+            return loader.from_pretrained(*args, **kwargs)
+
+    monkeypatch.setattr(models_hf, "prepare_model_for_loading", prepare)
+    models.append(load_pretrained(str(tmp_path), Probe))
+    a_done.set()
+    other.join(30)
+    assert len(models) == 2 and all(seen.values()) and len(seen) == 2
+    assert active["hook"] is None
+    assert vars(WeightTransform)["rename_source_key"] is stock
+    for model in models:
+        assert build_reverse_name_mapper(model)("lm_head") == "lm_head"
 
 
 def test_unsourced_parameter_raises(tmp_path, gloo_group):
