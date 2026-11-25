@@ -32,6 +32,7 @@ from modelopt.torch.models import (
     match_moe_block,
     match_moe_model,
 )
+from modelopt.torch.quantization.nn import QuantLinearConvBase
 
 
 def get_experts_list(
@@ -86,8 +87,6 @@ def is_layernorm(module: nn.Module) -> bool:
 
 def is_quantlinear(module: nn.Module) -> bool:
     """Returns whether the module is a quantized linear layer."""
-    from modelopt.torch.quantization.nn import QuantLinearConvBase
-
     name = type(module).__name__
     return (
         (
