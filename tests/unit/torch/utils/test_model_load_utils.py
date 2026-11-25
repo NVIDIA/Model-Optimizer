@@ -435,6 +435,66 @@ def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monke
     assert to_source(projector) == ("multi_modal_projector.linear_1" if renamed else projector)
 
 
+@pytest.mark.parametrize("indexed", ["language_model.model.", "model.language_model."])
+def test_fsdp2_takes_the_source_from_pretrained_takes(tmp_path, gloo_group, indexed):
+    """Two keys of a shard name one parameter, with different values; only one is indexed. Both
+    loaders read the shard whole, and Transformers loads the key first in its order, not the
+    indexed one; FSDP2 loads that same key and doesn't overwrite it with the other."""
+    _tiny_llava_checkpoint(tmp_path)
+    state = load_file(str(tmp_path / "model.safetensors"))
+    (tmp_path / "model.safetensors").unlink()
+    leaf = "layers.0.mlp.up_proj.weight"
+    for value, prefix in enumerate(("language_model.model.", "model.language_model.")):
+        state[prefix + leaf] = torch.full_like(state[f"language_model.model.{leaf}"], value)
+    shard = "model-00001-of-00001.safetensors"
+    save_file(state, str(tmp_path / shard), metadata={"format": "pt"})
+    other = next(p for p in ("language_model.model.", "model.language_model.") if p != indexed)
+    index = {"metadata": {}, "weight_map": {k: shard for k in state if k != other + leaf}}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+
+    expected = LlavaForConditionalGeneration.from_pretrained(str(tmp_path)).get_parameter(
+        f"model.language_model.{leaf}"
+    )
+    loaded = _fsdp2_load(tmp_path).get_parameter(f"model.language_model.{leaf}")
+    loaded = loaded.full_tensor() if isinstance(loaded, DTensor) else loaded
+    assert torch.equal(loaded.detach(), expected.detach())
+    assert torch.equal(loaded.detach(), torch.zeros_like(loaded))  # the first key, either way
+
+
+def test_a_key_for_a_non_persistent_buffer_neither_loads_nor_renames_the_export(
+    tmp_path, gloo_group, monkeypatch
+):
+    """A non-persistent buffer is no state-dict entry, so Transformers loads nothing into it. A
+    key that renames onto one is not read, not carried over (it names the model's own tensor), and
+    doesn't record its rename, which the export would otherwise apply to the projector's weights."""
+    _tiny_llava_checkpoint(tmp_path)
+    state = load_file(str(tmp_path / "model.safetensors"))
+    state["legacy_projector.scratch"] = torch.ones(2)
+    save_file(state, str(tmp_path / "model.safetensors"), metadata={"format": "pt"})
+    get_mapping = model_load_utils.get_model_conversion_mapping
+    rule = core_model_loading.WeightRenaming(r"^legacy_projector\.", "model.multi_modal_projector.")
+    monkeypatch.setattr(
+        model_load_utils,
+        "get_model_conversion_mapping",
+        lambda model, *args, **kwargs: [*get_mapping(model, *args, **kwargs), rule],
+    )
+    build = model_load_utils.build_meta_causal_lm
+
+    def build_with_scratch(*args, **kwargs):
+        model = build(*args, **kwargs)
+        model.model.multi_modal_projector.register_buffer(
+            "scratch", torch.zeros(2), persistent=False
+        )
+        return model
+
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", build_with_scratch)
+    model = _fsdp2_load(tmp_path)
+
+    assert torch.equal(model.model.multi_modal_projector.scratch, torch.zeros(2))
+    assert "legacy_projector.scratch" not in model._modelopt_unplaced_source_keys
+    assert all(c is not rule for c in model._weight_conversions)
+
+
 def test_overlapping_loads_each_keep_their_hooks(tmp_path, monkeypatch):
     """Without ``was_used`` (5.5) a load installs process-wide hooks: model preparation (such as
     Nemotron-H's) and the conversion hook. One that ends first must not take them from one that
