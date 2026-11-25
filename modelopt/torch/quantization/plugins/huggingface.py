@@ -842,6 +842,13 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     def _first_proj_weight_quantizers_attr(self) -> str:
         return f"{self._first_proj_attr}_weight_quantizers"
 
+    def _modelopt_unconverted_submodules(self) -> tuple[str, ...]:
+        """The quantizers: ModelOpt's ``save_pretrained`` keeps their state out of weight conversion.
+
+        They are named after the fused weights, which transformers before 5.21 mistakes them for.
+        """
+        return _get_fused_experts_quantizer_attr_names(self)
+
     def _get_expert_idx_from_first_proj(self, weight: torch.Tensor) -> int:
         """Recover expert index from the first-projection weight slice's storage offset.
 

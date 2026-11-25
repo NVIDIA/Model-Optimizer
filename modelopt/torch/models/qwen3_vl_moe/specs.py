@@ -20,7 +20,7 @@ from ..specs import ModelSpec, MoESpec, register
 __all__: list[str] = []
 
 # Qwen3VLMoeTextExperts is fused on every supported transformers: 3-D gate_up_proj and
-# down_proj parameters (transposed before 5.12, standard layout from 5.12 on), so there is no
+# down_proj parameters in the standard (num_experts, out_dim, in_dim) layout, so there is no
 # (gate, up) pair left to fuse and no per-expert grouping for export.
 register(
     ModelSpec(
