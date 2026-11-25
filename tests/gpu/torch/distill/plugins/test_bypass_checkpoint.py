@@ -345,7 +345,8 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
             actual["data_position"]["loader_state"]["sparse_position"],
             torch.tensor([4]).to_sparse(),
         )
-        assert "prefix_hashes" not in actual["data_position"]
+        assert "prefix_sha256" not in actual["data_position"]
+        assert "next_batch_hash" not in actual["data_position"]
     else:
         assert actual["data_position"]["next_batch_hash"] == _batch_hash(batches[4])
     assert all("_local_repair_state" not in name for name in resumed.state_dict())
