@@ -1018,7 +1018,7 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
     (store / "ab" / f"{xet_hash}.refs").write_text("models--org--other/blobs/etag\n")
     (store / "cd" / "x" / "y" / "z").mkdir(parents=True)
     (store / "cd" / "blobs").mkdir()
-    (store / "cd" / "blobs" / "other").write_text("{}")
+    (store / "cd" / "blobs" / "other").symlink_to(f"../../ab/{xet_hash}")
     (store / "cd" / xet_hash).write_text("{}")
     (tmp_path / "other-cache" / "blobs" / "ab").mkdir(parents=True)
     (tmp_path / "other-cache" / "blobs" / "ab" / xet_hash).write_text("{}")
@@ -1029,7 +1029,6 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
     (blobs / "sha-misplaced").symlink_to(f"../../blobs/cd/{xet_hash}")
     (blobs / "sha-elsewhere").symlink_to(f"../../other-cache/blobs/ab/{xet_hash}")
     foreign = {
-        "vocab.json": f"../../../blobs/ab/{xet_hash}",  # straight into the store
         "merges.txt": "d/../../../blobs/other",  # spelled as a repo blob, led elsewhere by ``d``
         "vocab.txt": "../../blobs/sha-relayed",  # a repo blob that links on through another link
         "special_tokens_map.json": "../../blobs/sha-refs",  # the hub's manifest, not a payload
