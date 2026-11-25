@@ -25,9 +25,11 @@ regressions (e.g. a new example pointing at a missing wrapper).
 
 import glob
 import os
+from pathlib import Path
 
 import pytest
 import yaml
+from modelopt_launcher.workflow import load_workflow
 
 _LAUNCHER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _EXAMPLES = sorted(
@@ -51,6 +53,9 @@ def _tasks(cfg):
     """Yield (name, task_dict) for a single-task or job_name+pipeline example."""
     if not isinstance(cfg, dict):
         return
+    if cfg.get("api_version") == "modelopt/v2":
+        yield from cfg["tasks"].items()
+        return
     pipeline = cfg.get("pipeline")
     if isinstance(pipeline, dict):
         for key, val in pipeline.items():
@@ -68,11 +73,25 @@ def test_examples_present():
 @pytest.mark.parametrize(
     "path", _EXAMPLES, ids=[os.path.relpath(p, _LAUNCHER_DIR) for p in _EXAMPLES]
 )
-def test_example_yaml_valid(path):
+def test_example_yaml_valid(path, tmp_path):
     """Each example parses and every task has a valid script/factory/args shape."""
     with open(path) as f:
         cfg = yaml.safe_load(f)
     assert isinstance(cfg, (dict, list)), f"{path}: top-level YAML is not a mapping/list"
+    versioned = isinstance(cfg, dict) and cfg.get("api_version") == "modelopt/v2"
+    if versioned:
+        # Profiles supply optional services; compilation performs no external I/O.
+        profile = tmp_path / "profile.yaml"
+        profile.write_text(
+            yaml.safe_dump(
+                {
+                    "executor": "slurm",
+                    "artifact_store": str(tmp_path / "artifacts"),
+                    "tracking_uri": "sqlite:///" + str(tmp_path / "tracking.db"),
+                }
+            )
+        )
+        load_workflow(path, profile)
 
     for name, task in _tasks(cfg):
         script = task.get("script")
@@ -85,7 +104,7 @@ def test_example_yaml_valid(path):
 
         # nemo-run's --yaml CLI layer rejects multi-line override values, so an
         # inline command must stay single-line (use a folded scalar `>-`).
-        if inline:
+        if inline and not versioned:
             assert "\n" not in inline.strip(), (
                 f"{path}:{name}: `inline` must be single-line (use folded `>-`, chain with `&&`)"
             )
@@ -98,6 +117,14 @@ def test_example_yaml_valid(path):
                 assert os.path.exists(os.path.join(_LAUNCHER_DIR, first_token)), (
                     f"{path}:{name}: script not found: {first_token}"
                 )
+
+        if inline:
+            # Inline v2 tasks can compose the same wrappers as script tasks.
+            for word in inline.split():
+                if word.startswith("common/"):
+                    assert (Path(_LAUNCHER_DIR) / word).is_file(), (
+                        f"{path}:{name}: script not found: {word}"
+                    )
 
         slurm_config = task.get("slurm_config")
         if slurm_config is not None:

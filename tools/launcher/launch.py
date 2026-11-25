@@ -33,10 +33,14 @@ import getpass
 import glob
 import os
 import subprocess  # nosec B404 - required for explicit git clean command; no shell is used.
+import sys
+import tempfile
 import warnings
+from pathlib import Path
 
 import modelopt_launcher as _pkg
 import nemo_run as run
+import yaml
 from modelopt_launcher.core import (
     SandboxPipeline,
     get_default_env,
@@ -45,6 +49,7 @@ from modelopt_launcher.core import (
     set_slurm_config_type,
 )
 from modelopt_launcher.slurm_config import SlurmConfig, slurm_factory
+from modelopt_launcher.workflow import workflow_cli
 
 set_slurm_config_type(SlurmConfig)
 register_factory("slurm_factory", slurm_factory)
@@ -151,7 +156,7 @@ def launch(
         warnings.warn("NEMORUN_HOME is not set. Defaulting to current working directory.")
     run.config.set_nemorun_home(os.environ.get("NEMORUN_HOME", os.getcwd()))
 
-    if hf_local is not None:
+    if hf_local is not None and (pipeline is None or not any(task.name for task in pipeline.tasks)):
         job_dir = os.path.join(os.getcwd(), "local_experiments")
 
     job_table = {}
@@ -177,9 +182,53 @@ def launch(
     )
 
 
+def _input_yaml_arguments(argv, directory):
+    """Keep path-keyed mappings opaque to NeMo-Run's dotted YAML argument parser."""
+    result = list(argv)
+    for index, argument in enumerate(argv):
+        prefix = ""
+        if index and argv[index - 1] == "--yaml":
+            path = argument
+        elif argument.startswith("--yaml="):
+            prefix, path = "--yaml=", argument.removeprefix("--yaml=")
+        elif argument.startswith("pipeline=@"):
+            prefix, path = "pipeline=@", argument.removeprefix("pipeline=@")
+        else:
+            continue
+        config = yaml.safe_load(Path(path).read_text())
+        if not isinstance(config, dict):
+            continue
+        pipeline = config.get("pipeline", config)
+        if not isinstance(pipeline, dict) or not isinstance(pipeline.get("inputs"), dict):
+            continue
+        # A literal dictionary is parsed as one argument, preserving '/' and '.' in keys.
+        pipeline["inputs"] = repr(pipeline["inputs"])
+        normalized = Path(directory) / f"workflow-{index}.yaml"
+        normalized.write_text(yaml.safe_dump(config, sort_keys=False))
+        result[index] = prefix + str(normalized)
+    return result
+
+
 def main() -> None:
     """Console script entry point for the ``modelopt-launcher`` command."""
-    run.cli.main(launch)
+    original = sys.argv
+    for index, argument in enumerate(original):
+        path = None
+        if argument == "--yaml" and index + 1 < len(original):
+            path = original[index + 1]
+        elif argument.startswith("--yaml="):
+            path = argument.removeprefix("--yaml=")
+        if path:
+            config = yaml.safe_load(Path(path).read_text())
+            if isinstance(config, dict) and "api_version" in config:
+                workflow_cli(original[1:], launch)
+                return
+    with tempfile.TemporaryDirectory(prefix="modelopt-launcher-") as directory:
+        try:
+            sys.argv = _input_yaml_arguments(original, directory)
+            run.cli.main(launch)
+        finally:
+            sys.argv = original
 
 
 if __name__ == "__main__":

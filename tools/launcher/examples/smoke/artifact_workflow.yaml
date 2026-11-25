@@ -1,0 +1,66 @@
+api_version: modelopt/v2
+name: artifact_workflow_smoke
+parameters:
+  value: 7
+  output_ref: demo/checkpoint
+  output_version: smoke-v1
+  model_name: demo-checkpoint
+  barrier_timeout_seconds: 15
+tasks:
+  produce:
+    inline: python common/smoke/workflow_v2.py produce
+    environment:
+      SYNTHETIC_VALUE: "${parameters.value}"
+    outputs:
+      checkpoint:
+        path: model/checkpoint.json
+        env: RESULT
+      model:
+        path: model
+        kind: checkpoint
+        publish:
+          ref: "${parameters.output_ref}"
+          version: "${parameters.output_version}"
+          model_name: "${parameters.model_name}"
+          metadata:
+            description: Synthetic launcher fixture; not trained model weights
+  accuracy:
+    inline: python common/smoke/workflow_v2.py accuracy
+    environment:
+      WORKFLOW_BARRIER_TIMEOUT_SECONDS: "${parameters.barrier_timeout_seconds}"
+    inputs:
+      /inputs/model:
+        from: produce.model
+        env: MODEL_INPUT
+    outputs:
+      metrics:
+        path: metrics.json
+        env: RESULT
+  speed:
+    inline: python common/smoke/workflow_v2.py speed
+    environment:
+      WORKFLOW_BARRIER_TIMEOUT_SECONDS: "${parameters.barrier_timeout_seconds}"
+    inputs:
+      /inputs/model:
+        from: produce.model
+        env: MODEL_INPUT
+    outputs:
+      metrics:
+        path: metrics.json
+        env: RESULT
+  report:
+    inline: python common/smoke/workflow_v2.py report
+    inputs:
+      /inputs/accuracy:
+        from: accuracy.metrics
+        env: ACCURACY_INPUT
+      /inputs/speed:
+        from: speed.metrics
+        env: SPEED_INPUT
+    outputs:
+      summary:
+        path: summary.json
+        env: RESULT
+outputs:
+  summary:
+    from: report.summary

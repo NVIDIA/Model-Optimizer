@@ -61,6 +61,7 @@ tools/launcher/
 | Guide | Description |
 |-------|-------------|
 | [Configuration](docs/configuration.md) | YAML formats, CLI overrides, flags, `hf_local` |
+| [Workflow v2](docs/workflow_v2.md) | Named tasks, portable inputs, published outputs; includes Qwen3-8B HF PTQ |
 | [Architecture](docs/architecture.md) | Shared core, factory system, typed tasks, mount mechanism |
 | [Testing](docs/testing.md) | Running tests locally and in CI |
 | [Claude Code](docs/claude_code.md) | Submit, monitor, diagnose workflows |
