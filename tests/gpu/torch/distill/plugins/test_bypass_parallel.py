@@ -2448,6 +2448,7 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
     assert student._modelopt_bypass_execution["context_parallel_modes"] == [
         "replicated_full_context" if fallback else "native_sdpa"
     ]
+    assert student._modelopt_bypass_execution["projection_calls_local"]["materialized"] > 0
     block_errors = []
     validity_receipt = None
     if qualification:

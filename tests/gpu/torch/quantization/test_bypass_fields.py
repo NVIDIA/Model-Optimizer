@@ -35,7 +35,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight, pinned_packed_weight
 from modelopt.torch.quantization.repair import IQRepairPolicy, plan_iq_repair
-from modelopt.torch.quantization.repair_formats import _ReplayScales
+from modelopt.torch.quantization.repair_formats import _packed_projection_qualified, _ReplayScales
 from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
 
 
@@ -586,27 +586,31 @@ def test_iq_repair_requires_local_expert_dtensor_ownership():
 
 
 @pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.timeout(180)
-def test_grouped_iq_projection_matches_uneven_native_experts(name):
+def test_grouped_iq_projection_matches_uneven_native_experts(name, dtype):
     pytest.importorskip("triton")
     from modelopt.torch.kernels.quantization.iq_grouped_gemm import iq_grouped_linear
 
     if not torch.cuda.is_available():
         pytest.skip("Native grouped IQ projections require CUDA")
     torch.manual_seed(107)
-    model = nn.ModuleList([nn.Linear(512, 13, bias=False).cuda().bfloat16() for _ in range(3)])
+    model = nn.ModuleList([nn.Linear(512, 13, bias=False).cuda().to(dtype) for _ in range(3)])
     mtq.quantize(model, _config([_iq("*weight_quantizer", name)]), None)
     policy = IQRepairPolicy()
     try:
         policy.prepare(model)
         states = [m.weight_quantizer._local_repair_state for m in model]
         packeds = [s.packed for s in states]
+        original_codes = [p.clone() for p in packeds]
         pointers = torch.tensor([p.data_ptr() for p in packeds], device="cuda", dtype=torch.int64)
         for counts in ((5, 0, 3), (0, 0, 0)):
             ends = torch.tensor(counts, device="cuda", dtype=torch.int32).cumsum(0)
             # An unowned EP tail must stay zero in both autograd directions.
-            x = torch.randn(
-                sum(counts) + 2, 512, device="cuda", dtype=torch.bfloat16, requires_grad=True
+            x = (
+                torch.randn(sum(counts) + 2, 1024, device="cuda", dtype=dtype)[:, ::2]
+                .detach()
+                .requires_grad_(True)
             )
             steps = torch.stack([s.projected_steps() for s in states]).detach().requires_grad_(True)
             bias = torch.randn(3, 13, device="cuda", dtype=x.dtype, requires_grad=True)
@@ -644,6 +648,8 @@ def test_grouped_iq_projection_matches_uneven_native_experts(name):
             )
             for a, b in zip(observed, oracle, strict=True):
                 torch.testing.assert_close(a, b, rtol=0.01, atol=0.015)
+        for packed, original in zip(packeds, original_codes, strict=True):
+            torch.testing.assert_close(packed, original, rtol=0, atol=0)
     finally:
         policy.close()
 
@@ -684,9 +690,9 @@ def test_automatic_packed_projection_matches_native_fields(name):
 
 @pytest.mark.parametrize("name", ["iq1_m", "iq2_xxs"])
 @pytest.mark.timeout(180)
-def test_automatic_grouped_projection_preserves_native_fields(name):
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 3):
-        pytest.skip("Automatic packed qualification is specific to GB300")
+def test_automatic_grouped_projection_preserves_native_fields(name, capsys, monkeypatch):
+    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
+        pytest.skip("Grouped packed qualification requires BF16 CUDA support")
     from transformers.integrations.moe import _grouped_linear
 
     from modelopt.torch.quantization.repair_formats import repair_grouped_linear
@@ -700,25 +706,77 @@ def test_automatic_grouped_projection_preserves_native_fields(name):
         quantizers = [m.weight_quantizer for m in bank]
         x = torch.randn(8, 4096, device="cuda", dtype=torch.bfloat16, requires_grad=True)
         ends = torch.tensor([5, 5, 8, 8], device="cuda", dtype=torch.int32)
+        production_qualified = _packed_projection_qualified(x, name, (2048, 4096))
+        eligibility_override = not production_qualified
+        if eligibility_override:
+            # Exercise real kernels on CI hardware; automatic production policy stays GB300-only.
+            monkeypatch.setattr(
+                "modelopt.torch.quantization.repair_formats._packed_projection_qualified",
+                lambda *args: True,
+            )
+        states = [q._local_repair_state for q in quantizers]
+        assert all(state.projection_counts == {} for state in states)
+        original_codes = [state.packed.clone() for state in states]
+        upstream = torch.randn(8, 2048, device=x.device, dtype=x.dtype) / (8 * 2048)
+        warmup = repair_grouped_linear(quantizers, x, ends)
+        assert warmup is not None
+        warmup_grad = torch.autograd.grad(warmup, [x, *fields], upstream)
+        del warmup, warmup_grad
+        torch.cuda.synchronize()
+        baseline = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        started = time.perf_counter()
         actual = repair_grouped_linear(quantizers, x, ends)
         assert actual is not None
+        observed = torch.autograd.grad(actual, [x, *fields], upstream)
+        torch.cuda.synchronize()
+        seconds = time.perf_counter() - started
+        peak = torch.cuda.max_memory_allocated()
+        with capsys.disabled():
+            print(
+                json.dumps(
+                    {
+                        "path": "packed_grouped",
+                        "device_name": torch.cuda.get_device_name(x.device),
+                        "device_capability": torch.cuda.get_device_capability(x.device),
+                        "production_qualified": production_qualified,
+                        "eligibility_override": eligibility_override,
+                        "format": name,
+                        "dtype": str(x.dtype),
+                        "experts": len(states),
+                        "tokens": x.shape[0],
+                        "weight_shape": states[0].weight_shape,
+                        "packed_bytes": sum(
+                            state.packed.numel() * state.packed.element_size() for state in states
+                        ),
+                        "baseline_bytes": baseline,
+                        "peak_bytes": peak,
+                        "incremental_bytes": peak - baseline,
+                        "seconds": seconds,
+                        "input_contiguous": x.is_contiguous(),
+                        "layout": "expert-sorted endpoints [5,5,8,8]; four independent packed owners",
+                    },
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
         expected = _grouped_linear(
             x, torch.stack([q(m.weight) for q, m in zip(quantizers, bank, strict=True)]), ends
         )
         torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015)
-        upstream = torch.randn_like(expected) / expected.numel()
-        observed = torch.autograd.grad(actual, [x, *fields], upstream)
         oracle = torch.autograd.grad(expected, [x, *fields], upstream)
         for a, b in zip(observed, oracle, strict=True):
             error = (a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-20)
             assert error < 5e-4, error.item()
         first = quantizers[0]._local_repair_state
-        assert first.projection_counts["packed_grouped"] == 1
+        assert first.projection_counts["packed_grouped"] == 2
         pointers = first._grouped_pointers[1]
         with torch.no_grad():
             repair_grouped_linear(quantizers, x, ends)
         assert first._grouped_pointers[1] is pointers
         assert pointers.numel() == 4 and not pointers.requires_grad
+        for state, original in zip(states, original_codes, strict=True):
+            torch.testing.assert_close(state.packed, original, rtol=0, atol=0)
     finally:
         policy.close()
 

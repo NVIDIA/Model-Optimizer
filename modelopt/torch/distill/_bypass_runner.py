@@ -408,6 +408,12 @@ class _BypassRunner:
                 ):
                     self._save_checkpoint(train_dataloader, step, window[0], devices)
                 window.clear()
+            projection_calls = {}
+            for policy in self.policies.values():
+                for _, state, _, _ in policy.adapters:
+                    for path, count in state.projection_counts.items():
+                        projection_calls[path] = projection_calls.get(path, 0) + count
+            _LOG.info("Bypass projection calls on this owner: %s", projection_calls)
             for name, policy in self.policies.items():
                 if self.runtime is None:
                     policy.finalize_(weight_access=partial(self._weight_access, name))
@@ -424,6 +430,7 @@ class _BypassRunner:
                     "context_parallel_modes": sorted(self.runtime.context_modes),
                     "data_lanes": self.runtime.context.dp_size,
                     "local_batch_size": self.runtime.local_batch_size,
+                    "projection_calls_local": projection_calls,
                 }
                 _LOG.info("Bypass execution: %s", self.student._modelopt_bypass_execution)
             return self.student

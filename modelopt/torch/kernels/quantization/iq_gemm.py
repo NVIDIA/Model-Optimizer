@@ -28,6 +28,7 @@ from .repair import iq_levels, iq_metadata
 __all__ = ["iq_linear"]
 
 _TILE_M, _TILE_N, _TILE_K, _SCALE_TILE_N = 32, 32, 64, 16
+_BIAS_TILE_N = 1024
 
 
 @triton.jit
@@ -225,11 +226,11 @@ class _IQLinear(torch.autograd.Function):
         m = gradient.shape[0]
         db = None
         if ctx.has_bias and ctx.needs_input_grad[5]:
-            # Bound native reduction workspace before allocating the other VJPs.
+            # Bound native reduction scratch by output columns; release it before the other VJPs.
             db = (
                 gradient.sum(0)
-                if n <= 1024
-                else torch.cat([columns.sum(0) for columns in gradient.split(1024, dim=1)])
+                if n <= _BIAS_TILE_N
+                else torch.cat([columns.sum(0) for columns in gradient.split(_BIAS_TILE_N, dim=1)])
             )
         dx, ds = None, None
         if ctx.needs_input_grad[0]:
