@@ -21,6 +21,8 @@ import json
 import random
 import shutil
 import time
+from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -31,7 +33,9 @@ from _test_utils.torch.distributed.utils import bounded_collectives
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.distill._bypass_capture import ModuleBypassAdapter
 from modelopt.torch.distill._bypass_checkpoint import _batch_hash, _model_hash, _rng_state
+from modelopt.torch.distill._bypass_optimizer import Lion
 from modelopt.torch.quantization.qtensor import FP8QTensor, QTensorWrapper
 from modelopt.torch.quantization.utils.native_weight import pin_native_weight
 
@@ -278,9 +282,7 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
     torch.testing.assert_close(reloaded(batches[0]), reference(batches[0]), rtol=0, atol=0)
 
 
-def _distributed_resume_worker(rank, size, directory):
-    from pathlib import Path
-
+def _distributed_resume_worker(rank, size, directory, failure=None):
     from torch.distributed.device_mesh import init_device_mesh
 
     initial, teacher, batches = bypass_problem()
@@ -311,6 +313,47 @@ def _distributed_resume_worker(rank, size, directory):
             {**recipe, "checkpoint_dir": str(root / "resumed")},
             device_mesh=mesh,
         )
+    if failure is not None:
+        candidate = copy.deepcopy(initial)
+        before = copy.deepcopy(candidate.state_dict())
+        caller_rng = _rng_state([])
+        failed = False
+        if failure == "priming_transfer":
+            target, name = torch.Tensor, "to"
+        elif failure == "priming_validation":
+            target, name = ModuleBypassAdapter, "validate_batch"
+        elif failure == "optimizer_restore":
+            target, name = Lion, "load_state_dict"
+        else:
+            target, name = torch, "set_rng_state"
+        original = getattr(target, name)
+
+        def fail_local(*args, **kwargs):
+            nonlocal failed
+            priming = failure != "priming_transfer" or (
+                len(args) == 2 and args[1] == "cpu" and args[0].shape == local[0].shape
+            )
+            if rank == 1 and priming and not failed:
+                failed = True
+                raise torch.OutOfMemoryError("Simulated rank-local resume allocation failure")
+            return original(*args, **kwargs)
+
+        # Only the unavailable rank-local device failure is injected; resume stays real.
+        with (
+            bounded_collectives(10),
+            mock.patch.object(target, name, fail_local),
+            pytest.raises(ValueError),
+        ):
+            mtd.bypass(
+                candidate,
+                copy.deepcopy(teacher),
+                _RandomCursor(local),
+                {**recipe, "resume_from": str(root / "resumed")},
+                device_mesh=mesh,
+            )
+        _equal(candidate.state_dict(), before)
+        _equal(_rng_state([]), caller_rng)
+        return
     with bounded_collectives(10), pytest.raises(ValueError):
         mtd.bypass(
             copy.deepcopy(initial),
@@ -344,9 +387,17 @@ def _distributed_resume_worker(rank, size, directory):
         )
 
 
+@pytest.mark.parametrize(
+    "failure", [None, "priming_transfer", "priming_validation", "optimizer_restore", "rng_restore"]
+)
 @pytest.mark.timeout(180)
-def test_distributed_resume_commits_every_owner(bypass_cpu_workers, tmp_path):
-    bypass_cpu_workers.run(_distributed_resume_worker, str(tmp_path))
+def test_distributed_resume_commits_every_owner(bypass_cpu_workers, tmp_path, failure):
+    timeout, grace = bypass_cpu_workers.job_timeout, bypass_cpu_workers.failure_grace
+    try:
+        bypass_cpu_workers.job_timeout, bypass_cpu_workers.failure_grace = 60, 2
+        bypass_cpu_workers.run(_distributed_resume_worker, str(tmp_path), failure)
+    finally:
+        bypass_cpu_workers.job_timeout, bypass_cpu_workers.failure_grace = timeout, grace
 
 
 class _NativeInterrupted(list):
@@ -431,8 +482,6 @@ def _native_checkpoint_problem(rank, size):
 
 
 def _native_resume_worker(rank, size, directory):
-    from pathlib import Path
-
     root = Path(directory)
     torch.cuda.set_device(rank)
     probe = mtq.quantize(
