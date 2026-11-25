@@ -15,6 +15,8 @@
 
 """Shared validation for GGML-compatible block quantizers."""
 
+import contextlib
+import contextvars
 import itertools
 import math
 import weakref
@@ -27,6 +29,7 @@ import torch
 from torch.optim.optimizer import register_optimizer_step_post_hook
 
 from ..extensions import get_cuda_ext_ggml
+from .scale_fields import NativeScaleSpec
 
 GGML_BLOCK_SIZE = 256
 _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
@@ -450,6 +453,18 @@ class GGMLFormat:
     # back into ``[blocks, block_bytes]`` payload rows.
     scale_fit: ScaleFit | None = None
     replace_payload_scales: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
+
+    scale_spec: NativeScaleSpec | None = None
+
+    # Native IQ fields: 32 grid entries and auxiliary values per block (format-native axes),
+    # [blocks, choice_groups] local scales, and [blocks] shared scales. Optional without GSQ.
+    pack_fields: (
+        Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None
+    ) = None
+    unpack_fields: (
+        Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]
+        | None
+    ) = None
 
     def __post_init__(self):
         if (self.scale_fit is None) != (self.replace_payload_scales is None):
@@ -996,13 +1011,20 @@ def _energy_factors(
 
 def leading_fp16_scales(blocks: torch.Tensor) -> torch.Tensor:
     """The FP16 super-block scale in the first two bytes of each ``[blocks, block_bytes]`` row."""
-    return blocks[:, :2].contiguous().view(torch.float16).reshape(-1)
+    # contiguous() can retain an odd storage offset for a single block.
+    return (
+        blocks[:, :2].clone(memory_format=torch.contiguous_format).view(torch.float16).reshape(-1)
+    )
 
 
 def with_leading_fp16_scales(blocks: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     """``[blocks, block_bytes]`` rows with their leading FP16 super-block scales replaced."""
+    scales = scales.to(torch.float16).contiguous()
+    # contiguous() can preserve a singleton's non-unit stride.
+    if scales.stride(-1) != 1:
+        scales = scales.clone(memory_format=torch.contiguous_format)
     replaced = blocks.clone()
-    replaced[:, :2] = scales.to(torch.float16).contiguous().view(torch.uint8).reshape(-1, 2)
+    replaced[:, :2] = scales.view(torch.uint8).reshape(-1, 2)
     return replaced
 
 
@@ -1025,7 +1047,11 @@ def super_block_scales(
             f"scales must hold one float16 value per block ({len(blocks)}), got "
             f"{scales.dtype} {tuple(scales.shape)}"
         )
-    return scales.reshape(-1).to(blocks.device)
+    scales = scales.reshape(-1).to(blocks.device)
+    checked = _ENCODE_INPUTS_CHECKED.get()
+    if not checked and not (torch.isfinite(scales) & (scales >= 0)).all():
+        raise ValueError("scales must be finite and non-negative")
+    return scales
 
 
 def dequantize_blocks(
@@ -1102,6 +1128,31 @@ def floored_second_moments(second_moments: torch.Tensor | None) -> torch.Tensor 
     return second_moments.clamp_min(_IMPORTANCE_FLOOR * mean)
 
 
+# Set by checked_encode_inputs: the encodes inside take their importance, choices and scales as
+# checked.
+_ENCODE_INPUTS_CHECKED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_ENCODE_INPUTS_CHECKED", default=False
+)
+
+
+@contextlib.contextmanager
+def checked_encode_inputs(importance: torch.Tensor | None = None):
+    """Encode inside without checking each encode's importance, choices and scales again.
+
+    Each check reads a reduction back from the GPU, which stalls the host until all queued work is
+    done. GPTQ's group loop and the choice search encode many times, each with a slice of one
+    importance vector, and choices and scales derived inside the loop; ``importance`` is checked
+    here, once.
+    """
+    if importance is not None and not (torch.isfinite(importance) & (importance >= 0)).all():
+        raise ValueError("importance must be finite and non-negative")
+    token = _ENCODE_INPUTS_CHECKED.set(True)
+    try:
+        yield
+    finally:
+        _ENCODE_INPUTS_CHECKED.reset(token)
+
+
 def importance_blocks(
     importance: torch.Tensor | None, weight: torch.Tensor, format_name: str
 ) -> torch.Tensor | None:
@@ -1117,7 +1168,8 @@ def importance_blocks(
             f"{importance.dtype} {tuple(importance.shape)}"
         )
     importance = importance.to(device=weight.device, dtype=torch.float32)
-    if not (torch.isfinite(importance) & (importance >= 0)).all():
+    checked = _ENCODE_INPUTS_CHECKED.get()
+    if not checked and not (torch.isfinite(importance) & (importance >= 0)).all():
         raise ValueError(f"{format_name} importance must be finite and non-negative")
     return importance.reshape(-1, GGML_BLOCK_SIZE)
 
@@ -1147,7 +1199,8 @@ def choice_blocks(
             f"{choices.dtype} {tuple(choices.shape)}"
         )
     choices = choices.to(device=weight.device, dtype=torch.int64).reshape(-1, groups)
-    if not ((choices >= 0) & (choices < num_choices)).all():
+    checked = _ENCODE_INPUTS_CHECKED.get()
+    if not checked and not ((choices >= 0) & (choices < num_choices)).all():
         raise ValueError(f"{format_name} choices must lie in [0, {num_choices})")
     return choices
 

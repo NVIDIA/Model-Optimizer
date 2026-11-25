@@ -23,6 +23,8 @@ from modelopt.torch.opt.dynamic import DynamicModule
 class EagleModel(DynamicModule):
     """Base Eagle Model."""
 
+    _supported_loss_types = ("soft_target_ce",)
+
     def _setup(self):
         self._register_temp_attribute("eagle_module", None)
 
@@ -38,6 +40,8 @@ class EagleModel(DynamicModule):
         self.eagle_report_acc = config.eagle_report_acc
         self.eagle_reuse_base_decoder = config.eagle_reuse_base_decoder
         self.eagle_loss_decay_factor = config.eagle_loss_decay_factor
+        self.eagle_loss_type = config.eagle_loss_type
+        self.eagle_lk_eta = config.eagle_lk_eta
         self.eagle_decoder_type = config.eagle_decoder_type
         self.eagle_ttt_steps = config.eagle_ttt_steps
         self.eagle_mix_hidden_states = config.eagle_mix_hidden_states

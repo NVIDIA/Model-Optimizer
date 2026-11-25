@@ -517,7 +517,9 @@ class LayerActivationCollector:
 
         info = layer._layerwise_calib
         try:
-            forward_loop(self.model)
+            # Replaying a captured KV cache would append the same tokens to it again.
+            with _disable_use_cache(self.model, for_layerwise_capture=True):
+                forward_loop(self.model)
         except Exception:
             # Reset the current layer so subsequent calls don't see stale state.
             info.mode = "original"

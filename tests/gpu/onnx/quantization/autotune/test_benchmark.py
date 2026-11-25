@@ -90,6 +90,9 @@ def _make_buffers(size=4):
     device_out = torch.ones(size, device="cuda") * 2.0
     inputs = [{"host": host_in, "device": device_in, "name": "x"}]
     outputs = [{"host": host_out, "device": device_out, "name": "y"}]
+    # The fills above run on the default stream, but the benchmark copies on its own stream.
+    # Wait for them, or a late fill can overwrite the copied data.
+    torch.cuda.synchronize()
     return inputs, outputs
 
 
