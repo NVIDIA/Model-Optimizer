@@ -186,6 +186,7 @@ def test_default_artifact_dir_is_private_and_reused_within_a_process(setup_mocks
                 "initializer_output",
                 "weight_output",
                 "overridable_weight",
+                "overridable_mixed",
             ],
         )
     ],
@@ -211,9 +212,12 @@ def test_build_engine_precision_graph(tmp_path, monkeypatch, version, precision,
         graph.output.append(helper.make_tensor_value_info("constant", TensorProto.FLOAT, [32, 32]))
     elif layout == "weight_output":
         graph.output.append(helper.make_tensor_value_info("weight", TensorProto.FLOAT, [32, 32]))
-    elif layout == "overridable_weight":
+    elif layout in ("overridable_weight", "overridable_mixed"):
         graph.input.append(helper.make_tensor_value_info("weight", TensorProto.FLOAT, [32, 32]))
         graph.output.append(graph.input[-1])
+        if layout == "overridable_mixed":
+            graph.node.append(helper.make_node("Celu", ["weight"], ["high"], name="celu"))
+            graph.output.append(helper.make_tensor_value_info("high", TensorProto.FLOAT, [32, 32]))
     original_io = [value.SerializeToString() for value in (*graph.input, *graph.output)]
     path = source / "model.onnx"
     onnx.save_model(
@@ -247,7 +251,7 @@ def test_build_engine_precision_graph(tmp_path, monkeypatch, version, precision,
         elif precision != "fp32":
             assert "--" + precision in arguments
         matmul = next(node for node in compiled_graph.graph.node if node.op_type == "MatMul")
-        if layout == "overridable_weight":
+        if layout in ("overridable_weight", "overridable_mixed"):
             cast = next(
                 node for node in compiled_graph.graph.node if matmul.input[1] in node.output
             )
@@ -264,7 +268,12 @@ def test_build_engine_precision_graph(tmp_path, monkeypatch, version, precision,
             value.SerializeToString()
             for value in (*compiled_graph.graph.input, *compiled_graph.graph.output)
         ] == original_io
-        if layout in ("initializer_output", "weight_output", "overridable_weight"):
+        if layout in (
+            "initializer_output",
+            "weight_output",
+            "overridable_weight",
+            "overridable_mixed",
+        ):
             name = "constant" if layout == "initializer_output" else "weight"
             constant = next(t for t in compiled_graph.graph.initializer if t.name == name)
             np.testing.assert_array_equal(numpy_helper.to_array(constant), weights)
@@ -297,17 +306,19 @@ def test_trt11_rejects_implicit_precision_before_writing(
 
 
 @pytest.mark.parametrize(
-    ("precision", "plugin_type", "output_type"),
+    ("precision", "plugin_type", "output_type", "overridable"),
     [
-        ("fp16", TensorProto.FLOAT, TensorProto.FLOAT),
-        ("bf16", TensorProto.FLOAT, TensorProto.FLOAT),
-        ("fp16", TensorProto.FLOAT16, TensorProto.FLOAT16),
-        ("fp16", TensorProto.FLOAT, TensorProto.FLOAT16),
-        ("bf16", TensorProto.FLOAT, TensorProto.FLOAT16),
+        ("fp16", TensorProto.FLOAT, TensorProto.FLOAT, False),
+        ("bf16", TensorProto.FLOAT, TensorProto.FLOAT, False),
+        ("fp16", TensorProto.FLOAT16, TensorProto.FLOAT16, False),
+        ("fp16", TensorProto.FLOAT, TensorProto.FLOAT16, False),
+        ("bf16", TensorProto.FLOAT, TensorProto.FLOAT16, False),
+        ("fp16", TensorProto.FLOAT, TensorProto.FLOAT16, True),
+        ("bf16", TensorProto.FLOAT, TensorProto.FLOAT16, True),
     ],
 )
 def test_trt11_preserves_plugin_precision(
-    tmp_path, monkeypatch, precision, plugin_type, output_type
+    tmp_path, monkeypatch, precision, plugin_type, output_type, overridable
 ):
     monkeypatch.setattr(tensorrt, "__version__", "11.4")
 
@@ -333,6 +344,9 @@ def test_trt11_preserves_plugin_precision(
         ],
         value_info=[helper.make_tensor_value_info("p", output_type, [1, 4])],
     )
+    if overridable:
+        graph.input.append(helper.make_tensor_value_info("weight", plugin_type, [4, 4]))
+    original_io = [v.SerializeToString() for v in (*graph.input, *graph.output)]
     path = tmp_path / "plugin.onnx"
     onnx.save_model(
         helper.make_model(
@@ -355,10 +369,14 @@ def test_trt11_preserves_plugin_precision(
         plugin = next(node for node in model.graph.node if node.op_type == "FloatPlugin")
         assert types[plugin.input[0]] == plugin_type
         assert types[plugin.output[0]] == output_type
-        assert (
-            model.graph.initializer[0].data_type
-            == {"fp16": TensorProto.FLOAT16, "bf16": TensorProto.BFLOAT16}[precision]
+        assert model.graph.initializer[0].data_type == (
+            plugin_type
+            if overridable
+            else {"fp16": TensorProto.FLOAT16, "bf16": TensorProto.BFLOAT16}[precision]
         )
+        assert [
+            v.SerializeToString() for v in (*model.graph.input, *model.graph.output)
+        ] == original_io
         onnx.checker.check_model(model)
         observed.append(True)
         return _write_engine_like_trtexec(arguments)

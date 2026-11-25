@@ -463,6 +463,7 @@ class PrecisionConverter:
                     return shape
             return None
 
+        inputs = list(model.graph.input)
         graph = gs.import_onnx(model)
         traversed_tensors = []
 
@@ -590,7 +591,10 @@ class PrecisionConverter:
             # Propagate tensor types to the children nodes (until another Cast or Q node is met)
             _propagate_cast_type_through_nodes(node, np_type)
 
-        return onnx_utils.export_onnx(graph)
+        model = onnx_utils.export_onnx(graph)
+        model.graph.ClearField("input")
+        model.graph.input.extend(inputs)
+        return model
 
     def _restore_original_io_metadata(self) -> None:
         """Preserve complete public I/O metadata when keep_io_types=True."""
@@ -1610,6 +1614,16 @@ class PrecisionConverter:
                     cast_node = producer_nodes[0]
                     assert cast_node.op_type == "Cast"
                     original_name = cast_node.input[0]
+                    cast_producer_nodes = onnx_utils.get_producer_nodes(self.model, original_name)
+                    if not cast_producer_nodes and onnx_utils._is_same_type_cast(
+                        self.model, cast_node
+                    ):
+                        # Inputs and initializers cannot be renamed as node-produced intermediates.
+                        output.name = original_name
+                        onnx_utils._bypass_cast_node(self.model, cast_node)
+                        self.model.graph.node.remove(cast_node)
+                        modified = True
+                        continue
                     pre_cast_name = original_name + "_pre_cast"
                     output.name = original_name
                     # Update all consumers of the original (pre-cast) output to use the pre-cast name
@@ -1627,9 +1641,6 @@ class PrecisionConverter:
                                 node.input[i] = original_name
                                 # do not break, can use the same tensor for multiple node inputs
                     # Update all producers of the original output to use the original name
-                    cast_producer_nodes = onnx_utils.get_producer_nodes(
-                        self.model, cast_node.input[0]
-                    )
                     for node in cast_producer_nodes:
                         for i, node_output in enumerate(node.output):
                             if node_output == original_name:
