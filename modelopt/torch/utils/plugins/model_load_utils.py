@@ -25,6 +25,7 @@ import math
 import os
 import re
 import sys
+import threading
 import warnings
 from collections import defaultdict
 from contextlib import contextmanager
@@ -62,6 +63,7 @@ from transformers import (
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import (
     WeightConverter,
+    WeightTransform,
     build_glob_alternation,
     dot_natural_key,
     rename_source_key,
@@ -235,6 +237,73 @@ def _resolve_target(plan: dict, key: str) -> tuple[str, str | None]:
     return rename_source_key(
         key, plan["renamings"], plan["converters"], plan["prefix"], plan["meta_state_dict"]
     )
+
+
+# The hook below is installed on Transformers' classes, so process-wide: blocks that overlap in
+# time take turns, or one restoring the methods would drop the hook another still counts on. A load
+# that needs it also holds this across prepare_model_for_loading, whose hooks are process-wide too.
+_CONVERSION_HOOK_LOCK = threading.RLock()
+
+
+def _tracks_used_conversions() -> bool:
+    """Whether Transformers records which conversions a load used (``was_used``) by itself."""
+    return callable(getattr(WeightTransform, "was_used", None))
+
+
+@contextmanager
+def _flagging_used_conversions(defer_to_was_used: bool = True):
+    """Flag each conversion as a key in the block is matched with it, as ``was_used`` does.
+
+    Transformers keeps the record of a load's conversions to those some key matched
+    (``was_used``), and the export reverts that record. One without ``was_used`` (5.5) keeps every
+    conversion, and the export then reverts renames no key took: Gemma3's tied ``lm_head``, which
+    its checkpoint has no tensor for, comes out as ``language_model.model.lm_head``. There the flag
+    is set here, where Transformers matches each key, so the load's own matching decides it,
+    whatever files and keys it read.
+
+    Yields the conversions matched in the block, by id, or ``None`` when Transformers keeps
+    ``was_used`` itself and ``defer_to_was_used``; :func:`_used_conversions` reads either.
+    """
+    if defer_to_was_used and _tracks_used_conversions():
+        yield None
+        return
+    with _CONVERSION_HOOK_LOCK:
+        # Holding each keeps its id from going to a later object while the record is filtered.
+        matched: dict[int, WeightTransform] = {}
+        classes, pending = [], [WeightTransform]
+        while pending:
+            cls = pending.pop()
+            pending.extend(cls.__subclasses__())
+            if "rename_source_key" in vars(cls):
+                classes.append(cls)
+
+        def flagging(rename):
+            def rename_source_key(self, source_key):
+                renamed, source_pattern = rename(self, source_key)
+                if source_pattern is not None:
+                    matched[id(self)] = self
+                return renamed, source_pattern
+
+            return rename_source_key
+
+        originals = {cls: vars(cls)["rename_source_key"] for cls in classes}
+        try:
+            for cls, rename in originals.items():
+                cls.rename_source_key = flagging(rename)
+            yield matched
+        finally:
+            for cls, rename in originals.items():
+                cls.rename_source_key = rename
+
+
+def _used_conversions(conversions: list, matched: dict | None) -> list:
+    """The ``conversions`` a load matched a key with.
+
+    ``matched`` is what :func:`_flagging_used_conversions` yielded for the load.
+    """
+    if matched is None:
+        return [c for c in conversions if c.was_used()]
+    return [c for c in conversions if id(c) in matched]
 
 
 def _conversion_plans(model: nn.Module) -> list[dict]:
@@ -1143,11 +1212,18 @@ def load_pretrained(
                     stacklevel=2,
                 )
             whole = None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class
-            with prepare_model_for_loading(
-                model_type, ckpt_path, trust_remote_code, model_class=whole
+            with (
+                contextlib.nullcontext() if _tracks_used_conversions() else _CONVERSION_HOOK_LOCK,
+                prepare_model_for_loading(
+                    model_type, ckpt_path, trust_remote_code, model_class=whole
+                ),
+                _flagging_used_conversions() as matched,
             ):
                 model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
         keys = None
+        if matched is not None and getattr(model, "_weight_conversions", None):
+            # A Transformers without was_used kept every conversion; keep the ones the load used.
+            model._weight_conversions = _used_conversions(model._weight_conversions, matched)
     set_distribution_plan(model, plan)
     unplaced = record_unplaced_source_keys(model, ckpt_path, keys)
     if unplaced:
@@ -1610,12 +1686,19 @@ def parallel_load_and_prepare_fsdp2(
     # it came from. Not a state dict: holding these tensors from load to export would waste the
     # memory this loader exists to save.
     record_unplaced_source_keys(model, resolved_path, unplaced)
-    # What from_pretrained records: the conversions some checkpoint key used, or all of them on a
-    # Transformers without ``was_used``. The export reverts these and would otherwise query the
-    # wrapped class, which has lost them.
-    model._weight_conversions = [
-        c for c in (plan["conversions"] if plan else []) if getattr(c, "was_used", lambda: True)()
-    ]
+    # What from_pretrained records: the conversions some checkpoint key used. The export reverts
+    # these and would otherwise query the wrapped class, which has lost them. They are matched over
+    # exactly the keys the reads below convert -- placed and in weight_map, which is what
+    # read_safetensors_subset selects from -- so a rename only an unread key matches, such as one
+    # with no parameter that is only carried over, doesn't rename the export. Transformers'
+    # was_used isn't used even where it exists: the placement pass above set it for every key.
+    model._weight_conversions = []
+    if plan:
+        with _flagging_used_conversions(defer_to_was_used=False) as matched:
+            for key in chain(non_layer_sources, *layer_sources.values()):
+                if key in weight_map:
+                    _resolve_target(plan, key)
+        model._weight_conversions = _used_conversions(plan["conversions"], matched)
     _check_every_param_sourced(model, sourced_targets)
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
