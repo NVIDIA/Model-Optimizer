@@ -17,9 +17,11 @@
 
 import copy
 from collections import OrderedDict
+from contextlib import ExitStack
 from datetime import timedelta
 from functools import cache
 from importlib import import_module
+from inspect import unwrap
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -788,7 +790,7 @@ def _functional_child_worker(rank, size, route):
     reads = []
     if native:
         native_module = import_module(type(reference).__module__)
-        conv = native_module.causal_conv1d_fn
+        conv = unwrap(native_module.causal_conv1d_fn)
 
         def checked_conv(inputs, weight, *args, **kwargs):
             assert tuple(weight.shape) == (expected_shape[0], expected_shape[2])
@@ -796,7 +798,18 @@ def _functional_child_worker(rank, size, route):
             reads.append(tuple(weight.shape))
             return conv(inputs, weight, *args, **kwargs)
 
-    with bounded_collectives(10), torch.no_grad():
+    with ExitStack() as stack, bounded_collectives(10), torch.no_grad():
+        if native:
+            # CPU ownership/lifecycle needs native CPU math, independent of installed CUDA kernels.
+            for name in (
+                "causal_conv1d_fn",
+                "causal_conv1d_update",
+                "torch_chunk_gated_delta_rule",
+                "torch_recurrent_gated_delta_rule",
+            ):
+                stack.enter_context(
+                    patch.object(native_module, name, unwrap(getattr(native_module, name)))
+                )
         for _ in range(2):
             expected = reference(inputs)
             if native:
