@@ -612,6 +612,7 @@ def _native_resume_worker(rank, size, directory):
 @pytest.mark.parametrize("native_workers", [2, 4], indirect=True, ids=["fsdp2", "fsdp2_tp2_ep4"])
 @pytest.mark.timeout(300)
 def test_native_resume_with_empty_owners_and_frozen_nvfp4(native_workers, tmp_path, capsys):
+    pytest.importorskip("transformers", minversion="5.23")
     native_workers.run(_native_resume_worker, str(tmp_path))
     with capsys.disabled():
         for rank in range(native_workers.world_size):
