@@ -457,23 +457,34 @@ def _allowed_source_roots(src_dir: Path) -> list[Path]:
     return allowed_roots
 
 
+def _link_target(link: Path) -> Path:
+    """Where the symlink ``link`` points: its directories resolved, its last part not followed."""
+    target = link.parent / os.readlink(link)
+    return target.parent.resolve(strict=True) / target.name
+
+
 def _is_shared_store_blob(src_dir: Path, src: Path, resolved_src: Path) -> bool:
-    """Whether ``src`` links to its repo's blob, which links on into the hub's shared store."""
+    """Whether ``src`` links to its repo's blob, which links straight into the hub's shared store."""
     source_root = src_dir.resolve(strict=True)
     if source_root.parent.name != "snapshots":
         return False
     repo_dir = source_root.parent.parent
     store = repo_dir.parent / "blobs"
     try:
-        is_store = stat.S_ISDIR(store.lstat().st_mode) and stat.S_ISREG(
-            (store / _HF_SHARED_BLOBS_MARKER).lstat().st_mode
+        if not (
+            stat.S_ISDIR(store.lstat().st_mode)
+            and stat.S_ISREG((store / _HF_SHARED_BLOBS_MARKER).lstat().st_mode)
+        ):
+            return False
+        # Both hops as the filesystem takes them, not as the link text spells them.
+        repo_blob = _link_target(src)
+        return (
+            repo_blob.parent == (repo_dir / "blobs").resolve(strict=True)
+            and _link_target(repo_blob) == resolved_src
+            and _is_relative_to(resolved_src, store)
         )
-        repo_blob = Path(os.path.normpath(src.parent.resolve() / os.readlink(src)))
     except OSError:  # an unreadable store is no store, and a regular file links nowhere
         return False
-    return (
-        is_store and repo_blob.parent == repo_dir / "blobs" and _is_relative_to(resolved_src, store)
-    )
 
 
 def resolve_checkpoint_file(

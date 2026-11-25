@@ -50,6 +50,7 @@ Changelog
 - NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 - Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
+- Fix Hugging Face exports missing ``tokenizer.json`` and other large source files of a model downloaded with ``huggingface_hub`` 1.32 or later, which keeps such files in a blob store shared across its cache, and the Kimi-K3 and DeepSeek-V4 NVFP4 converters failing on such a model. Copy the missing files from the source checkpoint into affected exports (or re-export them), and rerun failed conversions.
 
 *ONNX*
 
@@ -233,7 +234,6 @@ Changelog
 - Fix NVFP4 fake quantization (e.g. ``NVFP4_DEFAULT_CFG``) with Triton 3.9, as in the PyTorch 26.11 container, on GPUs with compute capability 8.9 or newer: it failed with ``NotImplementedError: Block pointers have been removed in favor of the tensor descriptor API``.
 - Fix the Hugging Face export of a quantized Wan VAE (``AutoencoderKLWan``), which declared NVFP4 or FP8 in its ``quantization_config`` but saved its ``Conv3d`` weights unquantized: NVFP4 weights are now packed with their scales, other formats raise an error, and ``examples/diffusers`` quantizes only the decoder convolutions that text-to-video calibration runs. Re-quantize affected VAEs with the updated example: a VAE restored with ``--restore-from`` from an older example checkpoint keeps its uncalibrated encoder quantizers, and exporting it now raises.
 - The Hugging Face export of a diffusers model now raises an error, instead of writing a checkpoint without ``input_scale``, when a component's static input quantizers (e.g. NVFP4 or FP8) were never calibrated, as with Wan 2.2's ``transformer_2`` calibrated with ``--n-steps 1``. Calibrate with enough denoising steps to run every quantized component and re-export.
-- Fix Hugging Face exports missing ``tokenizer.json`` and other large source files of a model downloaded with ``huggingface_hub`` 1.32 or later, which keeps such files in a blob store shared across its cache, and the Kimi-K3 and DeepSeek-V4 NVFP4 converters failing on such a model. Copy the missing files from the source checkpoint into affected exports (or re-export them), and rerun failed conversions.
 
 *ONNX*
 

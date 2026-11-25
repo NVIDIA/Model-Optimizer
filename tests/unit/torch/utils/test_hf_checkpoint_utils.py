@@ -1010,15 +1010,26 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
     (store / "ab" / xet_hash).chmod(0o444)  # the hub keeps store files read-only
     (blobs / "sha-tokenizer").symlink_to(f"../../blobs/ab/{xet_hash}")
     (snapshot / "tokenizer.json").symlink_to("../../blobs/sha-tokenizer")
-    # Not through the repo's blobs/, so not this repo's blob, whatever store file it names.
+    # Not through the repo's blobs/, so not this repo's blob, whatever store file it names: one link
+    # goes straight into the store, the other is spelled as a repo blob but its symlinked directory
+    # leads the filesystem to another store file.
     (snapshot / "vocab.json").symlink_to(f"../../../blobs/ab/{xet_hash}")
+    (store / "cd" / "x" / "y" / "z").mkdir(parents=True)
+    (store / "cd" / "blobs").mkdir()
+    (store / "cd" / "blobs" / "other").write_text("{}")
+    (snapshot / "d").symlink_to("../../../blobs/cd/x/y/z")
+    (snapshot / "merges.txt").symlink_to("d/../../../blobs/other")
+    # A repo blob the hub would have linked straight into the store, not through another link.
+    (repo / "relay").symlink_to(f"../blobs/ab/{xet_hash}")
+    (blobs / "sha-relayed").symlink_to("../relay")
+    (snapshot / "vocab.txt").symlink_to("../../blobs/sha-relayed")
 
     with pytest.warns(UserWarning, match="outside the checkpoint directory"):
         copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "unmarked")
     assert copied == ["tokenizer_config.json"]
 
     (store / ".huggingface-shared-blobs").write_text("1\n")
-    with pytest.warns(UserWarning, match="Skipping vocab.json: .* outside the checkpoint"):
+    with pytest.warns(UserWarning, match="outside the checkpoint directory"):
         copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "export")
 
     assert copied == ["tokenizer.json", "tokenizer_config.json"]
@@ -1028,8 +1039,8 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
 
     if os.geteuid() != 0:  # root reads an unreadable store anyway
         # A snapshot that does not use the store never probes it, so an unreadable one is harmless.
-        (snapshot / "tokenizer.json").unlink()
-        (snapshot / "vocab.json").unlink()
+        for name in ("tokenizer.json", "vocab.json", "merges.txt", "d", "vocab.txt"):
+            (snapshot / name).unlink()
         store.chmod(0)
         try:
             copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "unreadable")
