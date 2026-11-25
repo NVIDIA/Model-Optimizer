@@ -474,6 +474,7 @@ def test_w4a8_awq_recipe_large_head(autoquant_utils, tmp_path, decoder_only):
         head_dim=32,
         num_key_value_heads=4,
         layer_types=["full_attention"],
+        use_cache=False,  # Transformers 5.5 expects a linear-attention layer in a Qwen3.5 cache.
     ).eval()
     head = model.lm_head.weight.detach().clone()
     decoder_weights = {
