@@ -24,30 +24,10 @@ from torch.distributed.fsdp import FSDPModule, register_fsdp_forward_method
 
 from .bypass import TransformersBypassAdapter, _model_spec
 
-__all__ = ["extend_family_fsdp_plan", "install_functional_fsdp_calls"]
+__all__ = ["install_functional_fsdp_calls"]
 
 _CALL_METHOD = "_modelopt_functional_fsdp_call"
 _BINDINGS = "_modelopt_functional_fsdp_children"
-
-
-def extend_family_fsdp_plan(model, plan):
-    """Separate declared called children from an already selected precision owner."""
-    family = _model_spec(model)
-    if not family.functional_children:
-        return plan
-    result = dict(plan)
-    modules = dict(model.named_modules())
-    names = {id(module): name for name, module in modules.items()}
-    layers = TransformersBypassAdapter()._decoder_layers(model)
-    for block in layers.values() if isinstance(layers, nn.ModuleDict) else layers:
-        for path in family.functional_children:
-            name = names[id(block)] + "." + path
-            if name in modules and any(name.startswith(owner + ".") for owner in plan):
-                result.setdefault(name, "free_full_weight")
-    if len(result) == len(plan):
-        return plan
-    # Native child groups must wrap before enclosing groups can claim their parameters.
-    return dict(sorted(result.items(), key=lambda item: item[0].count("."), reverse=True))
 
 
 def _call_parent(self, forward, *args, **kwargs):
@@ -77,10 +57,12 @@ def _wrap_parent(parent, children):
 
 
 def install_functional_fsdp_calls(model):
-    """Execute native parent math through its declared children's FSDP forward methods.
+    """Enter functional children already separated by native/caller FSDP placement.
 
     Install after native FSDP setup. Tensor arguments reach FSDP unchanged, so its
     normal input policy, resharding and backward hooks apply during unit replay too.
+    Construct/copy reference models before parallelization: installed closures retain
+    module references and do not support deepcopy of the parallelized model.
     """
     family = _model_spec(model)
     if not family.functional_children:

@@ -62,35 +62,6 @@ from modelopt.torch.quantization.repair_partition import prepare_packed_weights_
 from modelopt.torch.quantization.utils.native_weight import get_pinned_native_weight
 
 
-@pytest.mark.parametrize("family", ["qwen3_next", "qwen3_5_moe"])
-def test_hybrid_fsdp_plan_wraps_only_present_functional_children(family):
-    pytest.importorskip("transformers", minversion="5.23")
-    from _test_utils.transformers_families import build_model, cases
-    from transformers.distributed.configuration_utils import DistributedConfig
-
-    from modelopt.torch.distill.plugins.transformers.functional_fsdp import extend_family_fsdp_plan
-
-    record = cases([family])[0]
-    model = build_model(record, "meta")
-    plan = model._resolve_parallel_plans(DistributedConfig(fsdp_size=2))[2]
-    original = dict(plan)
-    extended = extend_family_fsdp_plan(model, plan)
-    modules = dict(model.named_modules())
-    children = {name for name in modules if name.endswith("linear_attn.conv1d")}
-    assert children and any(hasattr(block, "self_attn") for block in modules.values())
-    assert children <= extended.keys() <= modules.keys()
-    assert all(extended[name] == "free_full_weight" for name in children)
-    assert plan == original
-    # Existing child styles and caller order are load-bearing when nothing is added.
-    complete = dict(reversed(extended.items()))
-    complete[next(iter(children))] = "keep_full_weight"
-    before = tuple(complete.items())
-    assert extend_family_fsdp_plan(model, complete) is complete
-    assert tuple(complete.items()) == before
-    unrelated = {"lm_head": "keep_full_weight", "": "free_full_weight"}
-    assert extend_family_fsdp_plan(model, unrelated) is unrelated
-
-
 @cache
 def _runtime_mesh(axis):
     # Reuse bounded groups until persistent-worker teardown, including native tensor collectives.
@@ -723,7 +694,8 @@ def test_public_dp_tp_bypass_with_empty_partitioned_lane(data_tensor_cpu_workers
     data_tensor_cpu_workers.run(_public_tp_loss_worker, "dp_tp", 1e-4)
 
 
-def _functional_child_worker(rank, size, native):
+def _functional_child_worker(rank, size, route):
+    native = route != "generic"
     # Optional Transformers integration must not gate the generic Torch workers.
     from modelopt.torch.distill.plugins.transformers.functional_fsdp import (
         install_functional_fsdp_calls,
@@ -742,32 +714,58 @@ def _functional_child_worker(rank, size, native):
     if native:
         from _test_utils.transformers_families import build_model, cases
         from transformers.distributed.configuration_utils import DistributedConfig
-        from transformers.distributed.fsdp import apply_fully_sharded_data_parallelism
         from transformers.distributed.utils import TransformersDeviceMesh
 
-        from modelopt.torch.distill.plugins.transformers.functional_fsdp import (
-            extend_family_fsdp_plan,
-        )
+        from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
+        local = _singleton_mesh(rank).get_group()
+        groups = [local, mesh.get_group(), local]
+        ranks = torch.arange(size).reshape(1, size, 1)
+        manager = TransformersDeviceMesh(
+            DeviceMesh.from_group(groups, "cpu", ranks, mesh_dim_names=("pp", "fsdp", "tp")),
+            DeviceMesh.from_group(groups, "cpu", ranks, mesh_dim_names=("pp", "efsdp", "ep")),
+        )
         model = build_model(cases(["qwen3_next"])[0], "cpu").eval()
-        model.config.distributed_config = DistributedConfig(fsdp_size=size)
-        plan = model._resolve_parallel_plans(model.config.distributed_config)[2]
-        plan = extend_family_fsdp_plan(model, plan)
-        parent = next(
-            block.linear_attn for block in model.model.layers if hasattr(block, "linear_attn")
+        decoder = next(block for block in model.model.layers if hasattr(block, "linear_attn"))
+        parent = decoder.linear_attn
+        path = next(name for name, module in model.named_modules() if module is parent.conv1d)
+        config = DistributedConfig(
+            fsdp_size=size,
+            **(
+                {"fsdp_plan": {"model.layers.*.linear_attn.conv1d": "free_full_weight"}}
+                if route == "native-adopted"
+                else {}
+            ),
         )
+        model.config.distributed_config = config
+        plan = model._resolve_parallel_plans(config)[2]
         reference = copy.deepcopy(parent)
+        original_forward = parent.__dict__.get("forward")
         inputs = torch.randn(1, 4, 256, dtype=next(reference.parameters()).dtype)
-        apply_fully_sharded_data_parallelism(model, TransformersDeviceMesh(mesh, mesh), plan, {})
-        child_group = fully_shard.state(parent.conv1d)._fsdp_param_group
-        decoder = next(
-            block for block in model.model.layers if getattr(block, "linear_attn", None) is parent
-        )
+        adapter = TransformersBypassAdapter(manager)
+        if route == "native-adopted":
+            assert plan[path] == "free_full_weight"
+            # HF places the model; no ModelOpt saved placement exists before fresh adoption.
+            model.maybe_distribute_model(model, config, manager)
+            assert not hasattr(model, "_modelopt_bypass_placement")
+            assert parent.__dict__.get("forward") is original_forward
+            adapter.adopt(model)
+        else:
+            assert path not in plan
+            adapter.parallelize(model)
+        retained = adapter.context.parallel_metadata[id(model)]["plans"]["fsdp"]
+        assert tuple(retained.items()) == tuple(plan.items())
         outer_group = fully_shard.state(decoder)._fsdp_param_group
-        assert child_group is not outer_group
-        assert {id(p.sharded_param) for p in child_group.fsdp_params}.isdisjoint(
-            id(p.sharded_param) for p in outer_group.fsdp_params
-        )
+        if route == "native-default":
+            assert not isinstance(parent.conv1d, torch.distributed.fsdp.FSDPModule)
+            assert parent.__dict__.get("forward") is original_forward
+            assert any(p._module_info.module is parent.conv1d for p in outer_group.fsdp_params)
+        else:
+            child_group = fully_shard.state(parent.conv1d)._fsdp_param_group
+            assert child_group is not outer_group
+            assert {id(p.sharded_param) for p in child_group.fsdp_params}.isdisjoint(
+                id(p.sharded_param) for p in outer_group.fsdp_params
+            )
     else:
         model = torch.nn.Module()
         model.config = SimpleNamespace(model_type="qwen3_next")
@@ -783,7 +781,10 @@ def _functional_child_worker(rank, size, native):
     install_functional_fsdp_calls(model)
     forward = parent.forward
     install_functional_fsdp_calls(model)
-    assert parent.forward is forward
+    if route == "native-default":
+        assert parent.__dict__.get("forward") is original_forward
+    else:
+        assert parent.forward is forward
     reads = []
     if native:
         native_module = import_module(type(reference).__module__)
@@ -791,6 +792,7 @@ def _functional_child_worker(rank, size, native):
 
         def checked_conv(inputs, weight, *args, **kwargs):
             assert tuple(weight.shape) == (expected_shape[0], expected_shape[2])
+            torch.testing.assert_close(weight, reference.conv1d.weight.squeeze(1), rtol=0, atol=0)
             reads.append(tuple(weight.shape))
             return conv(inputs, weight, *args, **kwargs)
 
@@ -815,19 +817,20 @@ def _functional_child_worker(rank, size, native):
             )
     if native:
         assert len(reads) == 2
-    parent.conv1d = fully_shard(copy.deepcopy(reference.conv1d), mesh=mesh)
-    with pytest.raises(ValueError):
-        install_functional_fsdp_calls(model)
+    if route != "native-default":
+        parent.conv1d = fully_shard(copy.deepcopy(reference.conv1d), mesh=mesh)
+        with pytest.raises(ValueError):
+            install_functional_fsdp_calls(model)
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.parametrize("native", [False, True], ids=["generic", "native-qwen3-next"])
-def test_functional_fsdp_child_gathers_weight_and_reshards(bypass_cpu_workers, native):
+@pytest.mark.parametrize("route", ["generic", "native-default", "native-adopted"])
+def test_functional_fsdp_child_gathers_weight_and_reshards(bypass_cpu_workers, route):
     pytest.importorskip("transformers", minversion="5.23")
     timeout = bypass_cpu_workers.job_timeout
     try:
         bypass_cpu_workers.job_timeout = 120
-        bypass_cpu_workers.run(_functional_child_worker, native)
+        bypass_cpu_workers.run(_functional_child_worker, route)
     finally:
         bypass_cpu_workers.job_timeout = timeout
 
