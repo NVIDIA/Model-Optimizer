@@ -1727,3 +1727,58 @@ class TestTeacherLogits:
         ).loss.backward()
         assert len(seen) == 2, seen  # the draft's logits, then the KD teacher rows
         assert (bsz, SEQ_LEN, hidden) not in seen, seen
+
+
+class TestDetachTargetHidden:
+    """``dflash_detach_target_hidden`` must sever the draft->base gradient path.
+
+    The draft objective reaches the base only through the hidden states the draft module
+    reads. An RL setup co-trains a policy and a drafter and needs the policy to keep
+    updating on its own objective while the drafter cannot perturb it, so this has to cut
+    the graph rather than scale a loss -- a loss weight can always be set back.
+    """
+
+    @staticmethod
+    def _base_grad_norm_from_draft_loss(detach: bool):
+        """Backprop a function of the draft input alone; return the base's grad norm."""
+        torch.manual_seed(0)
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        config["dflash_detach_target_hidden"] = detach
+        config["dflash_freeze_base_model"] = False  # base must be trainable either way
+        mtsp.convert(model, [("dflash", config)])
+        model.train()
+
+        input_ids = torch.randint(1, model.config.vocab_size, (2, 16))
+        base_out = model.model(input_ids, output_hidden_states=True)
+        target_hidden = model._target_hidden(base_out.hidden_states)
+
+        # Multiply by a leaf parameter so backward() is well-defined in BOTH arms: a fully
+        # detached tensor has no grad_fn, and calling backward() straight on it raises
+        # rather than reporting the zero gradient the test is actually looking for.
+        probe = torch.nn.Parameter(torch.ones_like(target_hidden, dtype=torch.float32))
+        model.zero_grad(set_to_none=True)
+        (target_hidden.float() * probe).sum().backward()
+        assert probe.grad is not None, "probe got no gradient -- backward did not run"
+
+        total = 0.0
+        for p in model.model.parameters():
+            if p.grad is not None:
+                total += p.grad.float().pow(2).sum().item()
+        return total**0.5, target_hidden
+
+    def test_detached_hidden_sends_no_gradient_to_the_base(self):
+        norm, hidden = self._base_grad_norm_from_draft_loss(detach=True)
+        assert not hidden.requires_grad, "detached hidden should not carry grad_fn"
+        assert norm == 0.0, f"base received gradient through a detached tensor (norm {norm})"
+
+    def test_default_leaves_the_gradient_path_intact(self):
+        """Guards the default: this flag must not silently change existing training."""
+        norm, hidden = self._base_grad_norm_from_draft_loss(detach=False)
+        assert hidden.requires_grad
+        assert norm > 0.0, "base got no gradient with the flag off -- the test proves nothing"
+
+    def test_flag_defaults_to_false(self):
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        assert model.dflash_detach_target_hidden is False
