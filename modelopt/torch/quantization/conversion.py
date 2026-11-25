@@ -572,8 +572,13 @@ def _candidate_modules(
         parent = parent._modules.get(atom)
         if parent is None:
             return
-    for child_name, child in parent._modules.items():
-        if child is not None and child_name in (atoms[head], atoms[head] + "s"):
+    names = (atoms[head], atoms[head] + "s")
+    if all(child_name in parent._modules for child_name in names):
+        # Both registered: offer them in registration order, as the full walk lists them.
+        names = tuple(child_name for child_name in parent._modules if child_name in names)
+    for child_name in names:
+        child = parent._modules.get(child_name)
+        if child is not None:
             yield from child.named_modules(prefix=".".join([*atoms[:head], child_name]))
 
 
@@ -618,10 +623,11 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
     # dispatcher are set: configuring a quantizer runs them, and they can rewire the model mid-call.
     # Code run from elsewhere, such as a warnings or logging handler, a finalizer, another thread, a
     # patched function or a custom op kernel, must not rewire it.
-    # Only modelopt's own entries are counted: an entry of the caller's class can run its own code
-    # as it is read, which must see the entries before it applied, so it is read in order below.
+    # Only the names modelopt's own entries store are counted: reading an entry of the caller's
+    # class can run its code, and reading a missing name raises, which must happen in order below,
+    # after the entries before it have applied.
     exact_entries = sum(
-        type(entry) is QuantizerCfgEntry and _is_exact(entry["quantizer_name"])
+        type(entry) is QuantizerCfgEntry and _is_exact(vars(entry).get("quantizer_name"))
         for entry in quant_cfg
     )
     subtree = None if exact_entries >= _EXACT_ENTRIES_FOR_CHECK else False

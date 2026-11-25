@@ -1160,11 +1160,21 @@ def test_set_quantizer_by_cfg_reads_an_entry_without_its_getattr():
     assert not model[0].weight_quantizer.is_enabled
 
 
-def test_set_quantizer_by_cfg_reads_each_entry_after_the_entries_before_it():
-    """An entry of the caller's own class is read once the entries before it have applied, as
-    before: counting a call's named entries reads only modelopt's own."""
+@pytest.mark.parametrize("late", ["caller-class", "no-name"])
+def test_set_quantizer_by_cfg_reads_each_entry_after_the_entries_before_it(late):
+    """An entry of the caller's own class, or one with no stored name, is read once the entries
+    before it have applied, as before: counting a call's named entries reads only the names
+    modelopt's own entries store."""
     model = torch.nn.Sequential(torch.nn.Linear(4, 4))
     model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+    first = {"quantizer_name": "*input_quantizer", "enable": False}
+
+    if late == "no-name":
+        entry = QuantizerCfgEntry.model_construct(cfg=None, enable=False, parent_class=None)
+        with pytest.raises(KeyError):
+            mtq.set_quantizer_by_cfg(model, [first, entry])
+        assert not model[0].input_quantizer.is_enabled
+        return
 
     class Late(QuantizerCfgEntry):
         def __getitem__(self, key):
@@ -1175,11 +1185,7 @@ def test_set_quantizer_by_cfg_reads_each_entry_after_the_entries_before_it():
             return super().__getitem__(key)
 
     mtq.set_quantizer_by_cfg(
-        model,
-        [
-            {"quantizer_name": "*input_quantizer", "enable": False},
-            Late(quantizer_name="0.weight_quantizer", enable=False),
-        ],
+        model, [first, Late(quantizer_name="0.weight_quantizer", enable=False)]
     )
     assert not model[0].weight_quantizer.is_enabled
 
@@ -1256,7 +1262,8 @@ def test_set_quantizer_by_cfg_walks_a_model_the_check_cannot_read():
             mtq.set_quantizer_by_cfg(model, [{"quantizer_name": weight_quantizer, "enable": False}])
         return model[0].weight_quantizer.is_enabled
 
-    assert configured("0.weight_quantizer") == configured("[0].weight_quantizer")
+    assert configured("0.weight_quantizer") is False
+    assert configured("[0].weight_quantizer") is False
 
 
 @pytest.mark.parametrize("below", [1, 0], ids=["below", "at"])
@@ -1471,6 +1478,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
         finally:
             if handle is not None:
                 handle.remove()
+        assert model[1] is model[0]  # the trigger ran
         # The states compare every attribute a quantizer holds.
         vars(model[0].weight_quantizer).pop("set_from_attribute_config", None)
         return {
@@ -1481,6 +1489,20 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
 
     walked = configured("[0].weight_quantizer", "[1].weight_quantizer")
     assert configured("0.weight_quantizer", "1.weight_quantizer") == walked
+
+
+def test_set_quantizer_by_cfg_offers_a_quantizer_and_its_plural_in_walk_order():
+    """Where a module holds both a quantizer and a list of them under its plural name, a named
+    entry is offered both in the order the full walk lists them; a name whose path is missing is
+    offered nothing, as the full walk matches nothing."""
+    model = torch.nn.Module()
+    model.weight_quantizers = torch.nn.ModuleList([TensorQuantizer()])
+    model.weight_quantizer = TensorQuantizer()
+    offered = quant_conversion._candidate_modules(model, "weight_quantizer", subtree=True)
+    assert [name for name, _ in offered] == [
+        name for name, _ in model.named_modules() if name.startswith("weight_quantizer")
+    ]
+    assert not list(quant_conversion._candidate_modules(model, "a.weight_quantizer", subtree=True))
 
 
 @pytest.mark.usefixtures("check_at_the_first_named_entry")
