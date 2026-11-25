@@ -278,10 +278,18 @@ def test_trt11_rejects_implicit_precision_before_writing(
 
 
 @pytest.mark.parametrize(
-    ("precision", "plugin_type"),
-    [("fp16", TensorProto.FLOAT), ("bf16", TensorProto.FLOAT), ("fp16", TensorProto.FLOAT16)],
+    ("precision", "plugin_type", "output_type"),
+    [
+        ("fp16", TensorProto.FLOAT, TensorProto.FLOAT),
+        ("bf16", TensorProto.FLOAT, TensorProto.FLOAT),
+        ("fp16", TensorProto.FLOAT16, TensorProto.FLOAT16),
+        ("fp16", TensorProto.FLOAT, TensorProto.FLOAT16),
+        ("bf16", TensorProto.FLOAT, TensorProto.FLOAT16),
+    ],
 )
-def test_trt11_preserves_plugin_precision(tmp_path, monkeypatch, precision, plugin_type):
+def test_trt11_preserves_plugin_precision(
+    tmp_path, monkeypatch, precision, plugin_type, output_type
+):
     monkeypatch.setattr(tensorrt, "__version__", "11.4")
 
     def discover_plugin(self):
@@ -292,7 +300,8 @@ def test_trt11_preserves_plugin_precision(tmp_path, monkeypatch, precision, plug
     graph = helper.make_graph(
         [
             helper.make_node("FloatPlugin", ["x"], ["p"], domain="test.plugins", name="plugin"),
-            helper.make_node("MatMul", ["p", "weight"], ["y"], name="matmul"),
+            helper.make_node("Cast", ["p"], ["p_cast"], to=plugin_type, name="plugin_output_cast"),
+            helper.make_node("MatMul", ["p_cast", "weight"], ["y"], name="matmul"),
         ],
         "plugin_precision",
         [helper.make_tensor_value_info("x", plugin_type, [1, 4])],
@@ -303,7 +312,7 @@ def test_trt11_preserves_plugin_precision(tmp_path, monkeypatch, precision, plug
                 "weight",
             )
         ],
-        value_info=[helper.make_tensor_value_info("p", plugin_type, [1, 4])],
+        value_info=[helper.make_tensor_value_info("p", output_type, [1, 4])],
     )
     path = tmp_path / "plugin.onnx"
     onnx.save_model(
@@ -325,7 +334,8 @@ def test_trt11_preserves_plugin_precision(tmp_path, monkeypatch, precision, plug
             for v in (*model.graph.input, *model.graph.output, *model.graph.value_info)
         }
         plugin = next(node for node in model.graph.node if node.op_type == "FloatPlugin")
-        assert all(types[name] == plugin_type for name in (*plugin.input, *plugin.output))
+        assert types[plugin.input[0]] == plugin_type
+        assert types[plugin.output[0]] == output_type
         assert (
             model.graph.initializer[0].data_type
             == {"fp16": TensorProto.FLOAT16, "bf16": TensorProto.BFLOAT16}[precision]

@@ -329,7 +329,7 @@ def convert_to_f16(
         if node.op_type in (sanitizer.custom_ops or ())
         and not any(
             tensor_types.get(name) in (onnx.TensorProto.FLOAT16, onnx.TensorProto.BFLOAT16)
-            for name in (*node.input, *node.output)
+            for name in node.input
         )
     }
     high_precision_nodes = [

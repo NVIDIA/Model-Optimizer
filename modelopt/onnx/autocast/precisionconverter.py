@@ -136,6 +136,7 @@ class PrecisionConverter:
             np.inf if init_conversion_max_bytes is None else init_conversion_max_bytes
         )
         self.custom_ops = custom_ops
+        self._high_precision_nodes: set[str] = set()
         if low_precision_type not in ["fp16", "bf16"]:
             raise ValueError(f"Unsupported precision type: {low_precision_type}")
 
@@ -213,6 +214,7 @@ class PrecisionConverter:
         high_precision_nodes, low_precision_nodes = self._filter_unsupported_op_types(
             high_precision_nodes, low_precision_nodes
         )
+        self._high_precision_nodes = set(high_precision_nodes)
 
         # We remove any existing casts to FP16/BF16/FP32, as we will be adding our own
         self._remove_preexisting_casts()
@@ -509,6 +511,12 @@ class PrecisionConverter:
 
             # Search children nodes
             for child_node in out.outputs:
+                # Preserve the declared outputs of custom nodes kept in high precision.
+                if (
+                    child_node.op in self.custom_ops
+                    and child_node.name in self._high_precision_nodes
+                ):
+                    continue
                 for child_out in child_node.outputs:
                     # Continue if the type is already correct
                     if child_out.dtype and child_out.dtype == np_type:
