@@ -24,6 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
+from modelopt.torch.quantization.utils import reduce_amax
 from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX
 
 from ..common.nvfp4_quant import nvfp4_scalar_quant
@@ -191,17 +192,23 @@ def fp4_dequantize(
 
 
 _STATIC_FP4_BLOCKS_PER_PROGRAM = 64
+# fake_e4m3fy's ZERO_AMAX_THRESHOLD (448 / FLT_MAX).
+_FP8_ZERO_AMAX_THRESHOLD: tl.constexpr = tl.constexpr(448.0 / 3.4028234663852886e38)
 
 
 @triton.jit
 def static_blockwise_fp4_fake_quant_kernel(
     x_ptr,  # [NUM_FP4_BLOCKS * BLOCK_SIZE]
     y_ptr,  # [NUM_FP4_BLOCKS * BLOCK_SIZE]
-    scale_ptr,  # [NUM_FP4_BLOCKS]
+    amax_ptr,  # [NUM_FP4_BLOCKS], the final scales when not SCALES_FROM_AMAX
+    global_amax_ptr,  # scalar, read only when QUANTIZE_BLOCK_SCALES
+    fp8_max_ratio,  # E4M3_MAX / fp8_max_for_normalization
     NUM_FP4_BLOCKS,
     BLOCK_SIZE: tl.constexpr,
     BLOCKS_PER_PROGRAM: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
+    QUANTIZE_BLOCK_SCALES: tl.constexpr,
+    SCALES_FROM_AMAX: tl.constexpr,
 ):
     # int64 offsets: stacked MoE weights can exceed 2**31 elements.
     pid = tl.program_id(axis=0).to(tl.int64)
@@ -209,7 +216,21 @@ def static_blockwise_fp4_fake_quant_kernel(
     block_mask = block_idx < NUM_FP4_BLOCKS
     idx = block_idx[:, None] * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[None, :]
 
-    scale = tl.load(scale_ptr + block_idx, mask=block_mask, other=0.0).to(tl.float32)
+    # compute_fp4_scales in-kernel, bit-exact: torch divides by a scalar as a multiply by its fp32
+    # reciprocal, fake_e4m3fy divides tensors with IEEE div (Triton's `/` is approximate).
+    amax = tl.load(amax_ptr + block_idx, mask=block_mask, other=0.0).to(tl.float32)
+    if SCALES_FROM_AMAX:
+        scale = amax * (1.0 / 6.0)
+    else:
+        scale = amax
+    if QUANTIZE_BLOCK_SCALES and SCALES_FROM_AMAX:
+        global_amax = tl.load(global_amax_ptr).to(tl.float32)
+        scale_amax = global_amax * fp8_max_ratio * (1.0 / 6.0)
+        scale_amax = tl.where(scale_amax <= _FP8_ZERO_AMAX_THRESHOLD, 1.0, scale_amax)
+        fp8_scale = tl.math.div_rn(448.0, scale_amax)
+        scale = (scale * fp8_scale).to(tl.float8e4nv).to(tl.float32) * tl.math.div_rn(
+            1.0, fp8_scale
+        )
     x = tl.load(x_ptr + idx, mask=block_mask[:, None], other=0.0).to(tl.float32)
 
     x_quant = nvfp4_scalar_quant(x, scale[:, None], BLOCK_SIZE)
@@ -242,7 +263,6 @@ def compute_fp4_scales(
 
     if quantize_block_scales:
         from modelopt.torch.quantization.tensor_quant import scaled_e4m3_impl
-        from modelopt.torch.quantization.utils import reduce_amax
 
         if global_amax is None:
             global_amax = reduce_amax(amax, axis=None, keepdims=False, squeeze_scalar=True)
@@ -291,16 +311,20 @@ def static_blockwise_fp4_fake_quant(
     if out_dtype is None:
         out_dtype = x.dtype
 
-    scale = compute_fp4_scales(
-        amax,
-        global_amax,
-        quantize_block_scales,
-        fp8_max_for_normalization=fp8_max_for_normalization,
-    )
+    # tl.float8e4nv needs SM89+; older GPUs quantize the block scales on the host side.
+    sm89 = torch.cuda.get_device_capability(x.device) >= (8, 9)
+    scales_from_amax = not quantize_block_scales or sm89
+    if scales_from_amax:
+        amax_flat = amax.contiguous().view(NUM_FP4_BLOCKS)
+        if quantize_block_scales and global_amax is None:
+            global_amax = reduce_amax(amax.float(), axis=None, keepdims=False, squeeze_scalar=True)
+    else:
+        amax_flat = compute_fp4_scales(
+            amax, global_amax, fp8_max_for_normalization=fp8_max_for_normalization
+        ).reshape(NUM_FP4_BLOCKS)
 
     x_flat = x.contiguous().view(-1)
     y_flat = torch.empty_like(x_flat, dtype=out_dtype)
-    scale_flat = scale.contiguous().view(NUM_FP4_BLOCKS)
 
     tl_out_dtype = _torch_dtype_to_tl(out_dtype)
 
@@ -310,11 +334,15 @@ def static_blockwise_fp4_fake_quant(
         static_blockwise_fp4_fake_quant_kernel[grid](
             x_flat,
             y_flat,
-            scale_flat,
+            amax_flat,
+            global_amax if quantize_block_scales and scales_from_amax else amax_flat,
+            E4M3_MAX / fp8_max_for_normalization,
             NUM_FP4_BLOCKS,
             BLOCK_SIZE,
             BLOCKS_PER_PROGRAM=_STATIC_FP4_BLOCKS_PER_PROGRAM,
             OUT_DTYPE=tl_out_dtype,
+            QUANTIZE_BLOCK_SCALES=quantize_block_scales,
+            SCALES_FROM_AMAX=scales_from_amax,
         )
 
     return y_flat.view(original_shape)
