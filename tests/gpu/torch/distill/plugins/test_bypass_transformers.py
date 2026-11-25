@@ -43,6 +43,83 @@ from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapte
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
+
+
+@pytest.fixture
+def native_cp_models():
+    config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        use_cache=False,
+    )
+    config._attn_implementation = "sdpa"
+    teacher = LlamaForCausalLM(config).to(torch.bfloat16).eval()
+    adapter = TransformersBypassAdapter()
+    adapter.student = copy.deepcopy(teacher)
+    return teacher, adapter
+
+
+@pytest.mark.parametrize("validity", ["default", "all", "partial", "zero", "override"])
+def test_native_cp_preserves_effective_loss_validity(native_cp_models, validity):
+    teacher, adapter = native_cp_models
+    batch = {"input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7]])}
+    if validity != "default":
+        batch["loss_mask"] = torch.tensor(
+            [[0, 0, 1, 1, 1, 1, 1]] if validity == "partial" else [[0] * 7]
+        )
+        if validity == "all":
+            batch["loss_mask"].fill_(1)
+        elif validity == "override":
+            batch["valid_mask"] = torch.ones_like(batch["input_ids"], dtype=torch.bool)
+    if validity in ("partial", "zero"):
+        with pytest.raises(ValueError):
+            adapter._cp_inputs(teacher, batch)
+    else:
+        tokens, positions = adapter._cp_inputs(teacher, batch)
+        torch.testing.assert_close(tokens, batch["input_ids"])
+        torch.testing.assert_close(positions, torch.arange(7).unsqueeze(0))
+
+
+@pytest.mark.parametrize("side", ["teacher", "student"])
+@pytest.mark.parametrize("state", ["active_p", "disabled_p", "calibration_p", "kv_only"])
+def test_native_cp_refuses_alternate_p_attention(native_cp_models, side, state):
+    teacher, adapter = native_cp_models
+    model = teacher if side == "teacher" else adapter.student
+    attention = _QuantAttention.convert(model.model.layers[0].self_attn)
+    for name in ("q", "k", "v", "p"):
+        getattr(attention, f"{name}_bmm_quantizer").disable()
+    quantizer = attention.p_bmm_quantizer
+    quantizer.num_bits = (4, 3)
+    quantizer.block_sizes = None
+    quantizer.amax = torch.tensor(3.0)
+    if state not in ("disabled_p", "kv_only"):
+        quantizer.enable()
+        assert attention._p_qdq_mode() == "fp8"
+        if state == "calibration_p":
+            quantizer.disable_quant()
+            quantizer.enable_calib()
+    elif state == "kv_only":
+        for name in ("k", "v"):
+            kv = getattr(attention, f"{name}_bmm_quantizer")
+            kv.num_bits = (4, 3)
+            kv.block_sizes = None
+            kv.amax = torch.tensor(3.0)
+            kv.enable()
+    batch = {"input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7]])}
+    if state == "active_p":
+        assert quantizer.is_enabled and quantizer._if_quant
+        with pytest.raises(ValueError):
+            adapter._cp_inputs(teacher, batch)
+    else:
+        tokens, positions = adapter._cp_inputs(teacher, batch)
+        torch.testing.assert_close(tokens, batch["input_ids"])
+        torch.testing.assert_close(positions, torch.arange(7).unsqueeze(0))
 
 
 @pytest.mark.parametrize("side", ["teacher", "student"])
