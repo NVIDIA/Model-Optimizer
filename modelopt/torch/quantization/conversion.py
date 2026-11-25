@@ -16,16 +16,21 @@
 """Quantization conversion/restore utilities."""
 
 import fnmatch
+import functools
 import os
 import re
 import warnings
+import weakref
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any, cast
 
+import torch
 import torch.nn as nn
+from torch.overrides import _get_current_function_mode_stack
+from torch.utils._device import DeviceContext
+from torch.utils._python_dispatch import _get_current_dispatch_mode_stack
 
-from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.conversion import ApplyModeError, ModelLikeModule, ModeloptStateManager
 from modelopt.torch.opt.dynamic import _DMRegistryCls
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
@@ -282,69 +287,160 @@ _WILDCARD_RE = re.compile(r"[*?[]")
 # fnmatch compares names after os.path.normcase, which ignores case on Windows.
 _CASE_SENSITIVE_NAMES = os.path.normcase("A") == "A"
 _SINGULAR_QUANTIZER_ATOM_RE = re.compile(r"(?:weight|input)_quantizer$")
+# Values whose use runs no other code; nothing follows a weak reference, such as a weight cache's.
+_PLAIN_TYPES = frozenset(
+    {type(None), bool, int, float, str, torch.dtype, torch.device, torch.Size, weakref.ref}
+)
+_CONTAINER_TYPES = frozenset({dict, list, tuple, set, frozenset, slice})
+# What named_modules compares and hashes a module with, the walks look its attributes and children
+# up with, and isinstance reads its class with: a module class other than nn.Module defining one of
+# these runs its own code there.
+_LOOKUP_NAMES = ("__eq__", "__hash__", "__getattribute__", "__class__", "_modules", "named_modules")
+# Quantizer state the check skips: nn.Module's hook registries and the forward wrapper and hook
+# that accelerate's offloading installs, which configuring a quantizer never runs, its children,
+# which the walk checks in turn, and its calibrator, which configuring it only replaces or sets the
+# axis of, so that only the calibrator's class counts.
+_UNSCANNED_QUANTIZER_STATE = frozenset(k for k in vars(nn.Module()) if "hook" in k) | {
+    "_modules",
+    "forward",
+    "_old_forward",
+    "_hf_hook",
+    "_calibrator",
+}
+# A call checks the model at its eighth exact entry, the earlier ones walking the model: the check
+# costs about as much as a few walks.
+_EXACT_ENTRIES_BEFORE_CHECK = 8
 
 
-def _of_callers_class(obj: Any) -> bool:
-    # An entry configures a quantizer, sets its calibrator's axis and copies its rotation config to
-    # disable it: code the caller defines there can rewire the model.
-    return type(obj).__module__.partition(".")[0] not in ("builtins", "modelopt")
+def _of_modelopt(obj: Any) -> bool:
+    return type(obj).__module__.partition(".")[0] == "modelopt"
+
+
+@functools.cache
+def _modelopt_state_names(kind: type) -> tuple[str, ...] | None:
+    # A modelopt object's __dict__ and slots, pydantic's per-instance state among them.
+    if kind.__module__.partition(".")[0] != "modelopt":
+        return None
+    slots = (c.__dict__.get("__slots__", ()) for c in kind.__mro__)
+    names = {"__dict__"}.union(*(((s,) if isinstance(s, str) else s) for s in slots))
+    return tuple(names - {"__weakref__"})
 
 
 def _runs_callers_code(obj: Any) -> bool:
-    # Applying an entry that holds a calibrator class or function, or an object of the caller's
-    # class, such as a config subclass whose model_copy() or items() an entry calls, runs it.
-    if _of_callers_class(obj) or callable(obj):
-        return True
-    if isinstance(obj, ModeloptBaseConfig):
-        obj = obj.__dict__
-    if isinstance(obj, dict):
-        return any(_runs_callers_code(k) or _runs_callers_code(v) for k, v in obj.items())
-    return isinstance(obj, (list, tuple)) and any(_runs_callers_code(x) for x in obj)
+    """Whether ``set_quantizer_by_cfg`` can run the caller's code as it uses ``obj``.
+
+    Applying an entry, and configuring a quantizer, copies, compares, reads and replaces config
+    values and quantizer state, which runs the code of anything within them but plain values,
+    builtin containers, plain tensors and modelopt objects, such as a config or a calibrator: a
+    class or function, an object of the caller's class or of a PyTorch one, such as a tensor
+    subclass, or a builtin wrapper such as a mapping proxy over the caller's mapping. What a tensor
+    or a modelopt object holds, in its attributes, slots (pydantic's state among them) or items,
+    counts too.
+    """
+    seen: dict[int, Any] = {}  # by id, holding each object so that its id stays unique
+    stack = [obj]
+    while stack:
+        obj = stack.pop()
+        kind: type = type(obj)
+        if kind in _PLAIN_TYPES or id(obj) in seen:
+            continue
+        seen[id(obj)] = obj
+        if kind in _CONTAINER_TYPES:
+            if kind is dict:
+                stack.extend(obj.keys())
+                stack.extend(obj.values())
+            else:
+                stack.extend((obj.start, obj.stop, obj.step) if kind is slice else obj)
+        elif kind in (torch.Tensor, nn.Parameter):
+            stack.append(vars(obj))
+        else:
+            names = _modelopt_state_names(kind)
+            if names is None:
+                return True
+            stack.extend(getattr(obj, name, None) for name in names)
+            if isinstance(obj, (dict, tuple, list, set, frozenset)):
+                stack.append(tuple(obj.items() if isinstance(obj, dict) else obj))
+    return False
 
 
 def _allows_subtree_walk(model: nn.Module) -> bool:
     """Whether a subtree walk of ``model`` finds what ``named_modules()`` lists, entry after entry.
 
-    It does where each module is registered once, keeps ``object``'s equality and hash, is under a
-    nonempty name with no dot or final newline, in a dict, and keeps ``nn.Module.named_modules``,
-    which then lists exactly the paths a subtree walk follows, and where no quantizer, nor its
-    calibrator or rotation config, is of the caller's class.
+    It does where each module is registered once, under a nonempty plain-string name with no dot or
+    final newline, in a dict, and keeps ``nn.Module``'s lookups (``named_modules``, ``_modules``)
+    and ``object``'s attribute lookup, ``__class__``, equality and hash, which then list exactly the
+    paths a subtree walk follows, and where every quantizer is a modelopt quantizer, holding only
+    such quantizers or state that cannot run the caller's code.
     """
     seen = set()
+    classes: dict[type, tuple[bool, bool]] = {}  # whether a class redefines a lookup, is modelopt's
     stack = [model]
     while stack:
         module = stack.pop()
+        kind = type(module)
+        if kind not in classes:
+            classes[kind] = (
+                any(
+                    name in vars(c)
+                    for c in kind.__mro__
+                    if c not in (nn.Module, object)
+                    for name in _LOOKUP_NAMES
+                ),
+                _of_modelopt(module),
+            )
+        redefines_lookups, of_modelopt = classes[kind]
+        state = vars(module)
+        children = state.get("_modules")
         # named_modules skips a module equal to one it has listed, as a set does, which a class's
-        # own equality or hash can base on state the entries change; an override of named_modules
-        # can list other paths, and change what it lists as entries apply.
+        # own equality or hash can base on state the entries change; a class's own lookups run as
+        # the walks look modules up, and its or the instance's named_modules can list other paths.
         if (
-            any("__eq__" in vars(c) or "__hash__" in vars(c) for c in type(module).__mro__[:-1])
+            redefines_lookups
+            or type(state) is not dict
+            or "named_modules" in state
             or module in seen
-            or getattr(module.named_modules, "__func__", None) is not nn.Module.named_modules
         ):
             return False
+        # TorchScript's module dict has no get(), and a dict subclass's runs its own code, as does a
+        # str subclass's hash. setattr, unlike add_module, registers any name, which named_modules
+        # joins as is, and the name regexes' $ also matches before a final "\n".
+        if type(children) is not dict or any(
+            type(name) is not str or not name or "." in name or name.endswith("\n")
+            for name in children
+        ):
+            return False
+        calibrator = state.get("_calibrator")
         if isinstance(module, (TensorQuantizer, SequentialQuantizer)) and (
-            _of_callers_class(module)
-            or any(_of_callers_class(getattr(module, a, None)) for a in ("_calibrator", "_rotate"))
-        ):
-            return False
-        # TorchScript's module dict has no get(). setattr, unlike add_module, registers any name,
-        # which named_modules joins as is, and the name regexes' $ also matches before a final "\n".
-        if not isinstance(module._modules, dict) or any(
-            not name or "." in name or name.endswith("\n") for name in module._modules
+            not of_modelopt
+            or (calibrator is not None and not _of_modelopt(calibrator))
+            or _runs_callers_code(
+                [v for k, v in state.items() if k not in _UNSCANNED_QUANTIZER_STATE]
+            )
+            # A SequentialQuantizer configures its members.
+            or not all(
+                member is None or issubclass(type(member), (TensorQuantizer, SequentialQuantizer))
+                for member in children.values()
+            )
         ):
             return False
         seen.add(module)
-        stack.extend(child for child in module._modules.values() if child is not None)
+        stack.extend(child for child in children.values() if child is not None)
     return True
 
 
-def _runs_registration_hooks() -> bool:
+def _runs_global_hooks() -> bool:
     # A replaced quantizer, or one given a buffer or parameter, runs PyTorch's global registration
-    # hooks.
-    return any(
-        getattr(nn.modules.module, f"_global_{kind}_registration_hooks", None)
-        for kind in ("module", "parameter", "buffer")
+    # hooks, and a quantizer's tensor operations run the active torch function and dispatch modes,
+    # PyTorch's own among them, which can call back into the caller's code, and the Python
+    # dispatcher's kernels. A device context only sets where new tensors go.
+    modes = (*_get_current_function_mode_stack(), *_get_current_dispatch_mode_stack())
+    return (
+        any(
+            getattr(nn.modules.module, f"_global_{kind}_registration_hooks", None)
+            for kind in ("module", "parameter", "buffer")
+        )
+        or any(type(mode) is not DeviceContext for mode in modes)
+        or torch._C._dispatch_tls_is_dispatch_key_included(torch._C.DispatchKey.PythonDispatcher)
     )
 
 
@@ -428,11 +524,14 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
     """
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
     # Whether wildcard-free names walk only their subtree, which follows the model's _modules,
-    # decided at the first one: not where fnmatch ignores case, nor where named_modules can list
-    # other paths or a quantizer, calibrator or rotation config of the caller's class can run, nor
-    # while PyTorch's global registration hooks are set: giving a quantizer a buffer runs them, and
-    # they can register a module a second time mid-call.
+    # decided at the call's eighth one: not where fnmatch ignores case, nor where named_modules can
+    # list other paths or a quantizer can run the caller's code, nor while PyTorch's global
+    # registration hooks, a mode other than a device context, or the Python dispatcher are set:
+    # configuring a quantizer runs them, and they can rewire the model mid-call. Code run from
+    # elsewhere, such as a warnings or logging handler, a finalizer, another thread, a patched
+    # function or a custom op kernel, must not rewire it.
     subtree = None
+    exact_entries = 0
     for entry in quant_cfg:
         if _runs_callers_code(entry):
             # It runs as the entry applies, between its matches too, and can rewire the model, so
@@ -453,11 +552,18 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
         else:
             parent_class = None
         if subtree is None and not _WILDCARD_RE.search(quantizer_name):
-            subtree = (
-                _CASE_SENSITIVE_NAMES
-                and not _runs_registration_hooks()
-                and _allows_subtree_walk(quant_model)
-            )
+            exact_entries += 1
+        if subtree is None and exact_entries == _EXACT_ENTRIES_BEFORE_CHECK:
+            try:
+                subtree = (
+                    _CASE_SENSITIVE_NAMES
+                    and not _runs_global_hooks()
+                    and _allows_subtree_walk(quant_model)
+                )
+            except Exception:
+                # A model the check cannot read, such as one holding a non-module child, is walked
+                # whole, which raises as it reaches that child, after the entry's earlier matches.
+                subtree = False
         if subtree and parent_class is not None:
             # Matching it runs the __getattr__ of the modules on a match's path, such as a
             # DynamicModule's, which can rewire the model.

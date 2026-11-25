@@ -15,12 +15,21 @@
 
 """Tests of tensor quantization function and module."""
 
+import contextlib
+import weakref
+from types import MappingProxyType, SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
 import yaml
 from _test_utils.torch.quantization.models import SimpleLinear
 from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTester
+from torch._dispatch.python import enable_python_dispatcher
+from torch.nn.utils import parametrize
+from torch.overrides import TorchFunctionMode
+from torch.utils._python_dispatch import TorchDispatchMode
+from torch.utils.flop_counter import FlopCounterMode
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.conversion as quant_conversion
@@ -29,6 +38,7 @@ from modelopt.torch.quantization import QuantModuleRegistry, tensor_quant
 from modelopt.torch.quantization.calib import MaxCalibrator
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, RotateConfig
 from modelopt.torch.quantization.conversion import create_and_replace_svdquant_linear_on_the_fly
+from modelopt.torch.quantization.ggml.common import _CacheKey
 from modelopt.torch.quantization.nn import (
     SequentialQuantizer,
     TensorQuantizer,
@@ -674,26 +684,62 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
     ("case_sensitive", "layout"),
     [
         (True, "plain"),
+        (True, "cached-weight"),
         (True, "shared-layer"),
         (True, "dotted-name"),
         (True, "empty-name"),
         (True, "custom-traversal"),
         (True, "equal-modules"),
         (True, "changing-equality"),
+        (True, "attribute-lookup"),
+        (True, "class-property"),
+        (True, "bound-traversal"),
         (True, "newline-name"),
         (True, "scripted"),
+        (True, "served-modules"),
+        (True, "modules-property"),
+        (True, "dict-subclass"),
+        (True, "state-subclass"),
+        (True, "str-name"),
+        (True, "foreign-member"),
+        (True, "parametrized"),
+        (True, "tensor-attribute"),
+        (True, "held-tuple"),
+        (True, "offload-hooks"),
+        (True, "calibrator-state"),
+        (True, "device-context"),
+        (True, "torch-mode"),
+        (True, "python-dispatcher"),
         (False, "plain"),
     ],
     ids=[
         "subtree",
+        "cached-weight",
         "shared-layer",
         "dotted-name",
         "empty-name",
         "custom-traversal",
         "equal-modules",
         "changing-equality",
+        "attribute-lookup",
+        "class-property",
+        "bound-traversal",
         "newline-name",
         "scripted",
+        "served-modules",
+        "modules-property",
+        "dict-subclass",
+        "state-subclass",
+        "str-name",
+        "foreign-member",
+        "parametrized",
+        "tensor-attribute",
+        "held-tuple",
+        "offload-hooks",
+        "calibrator-state",
+        "device-context",
+        "torch-mode",
+        "python-dispatcher",
         "case-insensitive",
     ],
 )
@@ -731,12 +777,54 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         def __hash__(self):
             return 0
 
+    class LookupHolder(torch.nn.Module):
+        def __getattribute__(self, name):
+            return super().__getattribute__(name)
+
+    class ClassHolder(torch.nn.Module):
+        @property
+        def __class__(self):
+            return ClassHolder
+
+    class ServedHolder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.__dict__["_served"] = self.__dict__.pop("_modules")
+
+        def __getattr__(self, name):
+            if name == "_modules":
+                return self.__dict__["_served"]
+            return super().__getattr__(name)
+
+    class ModulesHolder(torch.nn.Module):
+        @property
+        def _modules(self):
+            return self.__dict__["_modules"]
+
+        @_modules.setter
+        def _modules(self, value):
+            self.__dict__["_modules"] = value
+
+    class ForeignMember(torch.nn.Module):
+        def set_from_attribute_config(self, attribute_cfg):
+            pass
+
+    contexts = {
+        "device-context": lambda: torch.device("cpu"),
+        "torch-mode": lambda: FlopCounterMode(display=False),
+        "python-dispatcher": enable_python_dispatcher,
+    }
+    context = contexts.get(layout, contextlib.nullcontext)
+
     def quantized():
         layers = (torch.nn.Linear(4, 4) for _ in range(8))
         traversal = layout == "custom-traversal"
         model = (FourBitHidingSequential if traversal else torch.nn.Sequential)(*layers)
         model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
-        if layout == "shared-layer":
+        if layout == "cached-weight":
+            # A weak reference, as a GGML quantizer's packed-weight cache holds, keeps the subtree walk.
+            model[0].weight_quantizer._quantizer_cache = weakref.ref(model[0].weight)
+        elif layout == "shared-layer":
             # A second name for the last layer, which named_modules skips.
             model.add_module("8", model[7])
         elif layout == "dotted-name":
@@ -755,6 +843,20 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
             # Or that come to compare equal once an entry makes the first one's quantizer 4-bit.
             model.add_module("8", EqualHolder())
             model.add_module("9", EqualHolder(num_bits=4))
+        elif layout == "attribute-lookup":
+            # A class's own attribute lookup runs as the walks look its modules up, and its own
+            # __class__ as isinstance checks them.
+            model.add_module("8", LookupHolder())
+        elif layout == "class-property":
+            model.add_module("8", ClassHolder())
+        elif layout == "bound-traversal":
+            # Or an instance whose named_modules lists another module's paths, here without the
+            # "inner" level.
+            holder = torch.nn.Module()
+            holder.inner = torch.nn.Module()
+            holder.inner.weight_quantizer = TensorQuantizer()
+            holder.named_modules = holder.inner.named_modules
+            model.add_module("8", holder)
         elif layout == "newline-name":
             # Or a name ending in a newline, which normalizing a fused-experts name keeps.
             experts = torch.nn.Module()
@@ -764,6 +866,47 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         elif layout == "scripted":
             # TorchScript keeps its children in a dict of its own.
             model.add_module("8", torch.jit.script(torch.nn.Linear(4, 4)))
+        elif layout == "served-modules":
+            # Or a class serves them, or looks them up, through code of its own.
+            model.add_module("8", ServedHolder())
+        elif layout == "modules-property":
+            model.add_module("8", ModulesHolder())
+        elif layout == "dict-subclass":
+            model.add_module("8", torch.nn.Module())
+            model[8].__dict__["_modules"] = type("Modules", (dict,), {})()
+        elif layout == "state-subclass":
+            model.add_module("8", torch.nn.Module())
+            model[8].__dict__ = type("State", (dict,), {})(model[8].__dict__)
+        elif layout == "str-name":
+            # A name's own hash and equality run as the subtree walk looks it up.
+            model.add_module("8", torch.nn.Module())
+            model[8]._modules[type("Name", (str,), {})("weight_quantizer")] = TensorQuantizer()
+        elif layout == "foreign-member":
+            # A SequentialQuantizer configures its members, here one of the caller's class.
+            model.add_module("8", torch.nn.Module())
+            model[8].weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+            model[8].weight_quantizer[1] = ForeignMember()
+        elif layout == "parametrized":
+            # A parametrization runs the caller's module as the quantizer reads its amax.
+            parametrize.register_parametrization(
+                model[7].weight_quantizer, "_amax", torch.nn.Identity()
+            )
+        elif layout == "tensor-attribute":
+            # Code can read what a tensor holds.
+            model[7].weight_quantizer._amax.read = print
+        elif layout == "held-tuple":
+            # Or a modelopt tuple holds.
+            model[7].weight_quantizer._quantizer_cache = _CacheKey(
+                print, (), (), torch.float32, torch.device("cpu"), 0
+            )
+        elif layout == "offload-hooks":
+            # Accelerate's offloading wraps forward, which configuring a quantizer never runs.
+            model[0].weight_quantizer._hf_hook = SimpleNamespace(offload=True)
+            model[0].weight_quantizer._old_forward = len
+            model[0].weight_quantizer.forward = print
+        elif layout == "calibrator-state":
+            # Configuring a quantizer only replaces its calibrator or sets its axis.
+            model[7].weight_quantizer._calibrator._quant_func = print
         model.hiding = traversal
         return model
 
@@ -774,6 +917,9 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     if layout == "changing-equality":
         quant_cfg.append({"quantizer_name": "8.weight_quantizer", "cfg": {"num_bits": 4}})
         quant_cfg.append({"quantizer_name": "9.weight_quantizer", "enable": True})
+    elif layout == "bound-traversal":
+        # The name the delegated named_modules lists, which the holder's _modules lack.
+        quant_cfg.append({"quantizer_name": "8.weight_quantizer", "enable": True})
     # Replacing a quantizer with a SequentialQuantizer, and back, changes the names to find.
     first_replacing = len(quant_cfg)
     quant_cfg.append({"quantizer_name": "2.weight_quantizer", "cfg": [{"num_bits": 4}] * 2})
@@ -799,7 +945,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     def states(model):
         return {
             name: (
-                type(module),
+                type(module).__name__,
                 isinstance(module, TensorQuantizer)
                 and module.get_modelopt_state(properties_only=True),
             )
@@ -809,7 +955,8 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         }
 
     walked = quantized()
-    mtq.set_quantizer_by_cfg(walked, walked_cfg)
+    with context():
+        mtq.set_quantizer_by_cfg(walked, walked_cfg)
     named = quantized()
     walks = 0
     named_modules = torch.nn.Module.named_modules
@@ -820,18 +967,46 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         return named_modules(self, *args, **kwargs)
 
     monkeypatch.setattr(torch.nn.Module, "named_modules", count_walks)
-    mtq.set_quantizer_by_cfg(named, quant_cfg)
+    with context():
+        mtq.set_quantizer_by_cfg(named, quant_cfg)
     monkeypatch.undo()
     assert states(named) == states(walked)
-    if case_sensitive and layout == "plain":
-        # Only the "*" entry walks the model, and the entries from the first replacement on.
-        assert walks == 1 + len(quant_cfg) - first_replacing
+    fast = ("plain", "cached-weight", "offload-hooks", "calibrator-state", "device-context")
+    if case_sensitive and layout in fast:
+        # Only the "*" entry walks the model, the named entries before the one the model is checked
+        # at, and the entries from the first replacement on.
+        before_check = quant_conversion._EXACT_ENTRIES_BEFORE_CHECK - 1
+        assert walks == 1 + before_check + len(quant_cfg) - first_replacing
     else:
         # Every entry walks the model: where fnmatch ignores case, or named_modules can list other
-        # paths than the model registers, or the model keeps them out of a plain dict.
+        # paths than the model registers, or the model keeps them out of a plain dict, or a
+        # quantizer, or a mode or the Python dispatcher, can run the caller's code.
         assert walks == len(quant_cfg)
 
 
+@pytest.mark.usefixtures("check_at_the_first_named_entry")
+def test_set_quantizer_by_cfg_walks_a_model_the_check_cannot_read():
+    """A named entry acts as its wildcard does on a model holding a non-module child: both apply
+    the entry's earlier matches, then fail as named_modules reaches that child."""
+
+    def configured(weight_quantizer):
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
+        model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+        model._modules["2"] = object()
+        with pytest.raises(AttributeError):
+            mtq.set_quantizer_by_cfg(model, [{"quantizer_name": weight_quantizer, "enable": False}])
+        return model[0].weight_quantizer.is_enabled
+
+    assert configured("0.weight_quantizer") == configured("[0].weight_quantizer")
+
+
+@pytest.fixture
+def check_at_the_first_named_entry(monkeypatch):
+    # These calls name one or two quantizers.
+    monkeypatch.setattr(quant_conversion, "_EXACT_ENTRIES_BEFORE_CHECK", 1)
+
+
+@pytest.mark.usefixtures("check_at_the_first_named_entry")
 @pytest.mark.parametrize(
     ("trigger", "nested"),
     [
@@ -842,6 +1017,12 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         ("quantizer", False),
         ("getter", False),
         ("config", False),
+        ("wrapped", False),
+        ("fields", False),
+        ("method", False),
+        ("tensor", False),
+        ("function-mode", False),
+        ("dispatch-mode", False),
     ],
     ids=[
         "later-entry",
@@ -851,6 +1032,12 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         "quantizer-class",
         "parent-getter",
         "config-class",
+        "wrapped-value",
+        "fields-set",
+        "instance-method",
+        "tensor-subclass",
+        "function-mode",
+        "dispatch-mode",
     ],
 )
 def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_layer(
@@ -859,8 +1046,9 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
     """A named entry acts as its wildcard does after code run mid-call shares a layer: a calibrator
     the caller supplies, for a later entry of that call or in a call the calibrator makes, a buffer
     registration hook, the __setattr__ of a parent whose quantizer an entry replaces, a quantizer of
-    the caller's class, the __getattr__ a parent_class entry runs to find a match's parent, or an
-    attribute config of the caller's class."""
+    the caller's class, the __getattr__ a parent_class entry runs to find a match's parent, an
+    attribute config of the caller's class, a value wrapped in a builtin or kept in pydantic's
+    fields set, a method or tensor subclass a quantizer holds, or a torch function or dispatch mode."""
 
     def configured(weight_quantizer, sub_quantizer):
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
@@ -897,14 +1085,64 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
                 share()
                 return super().model_copy(*args, **kwargs)
 
+        class SharingDict(dict):
+            def __len__(self):
+                share()
+                return super().__len__()
+
+        class SharingSet(set):
+            def __copy__(self):
+                share()
+                return set(self)
+
+        class SharingTensor(torch.Tensor):
+            @classmethod
+            def __torch_function__(cls, func, types, args=(), kwargs=None):
+                share()
+                return super().__torch_function__(func, types, args, kwargs or {})
+
+        class SharingFunctionMode(TorchFunctionMode):
+            def __torch_function__(self, func, types, args=(), kwargs=None):
+                share()
+                return func(*args, **(kwargs or {}))
+
+        class SharingDispatchMode(TorchDispatchMode):
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                share()
+                return func(*args, **(kwargs or {}))
+
         entry = {"quantizer_name": weight_quantizer}
         if trigger == "calibrator":
             # The calibrator as a class, or as a constructor tuple.
             cfg = {"calibrator": SharingCalibrator if nested else (SharingCalibrator, (), {})}
-        elif trigger == "hook":
-            # Pinning amax registers it as a buffer, under the hook.
+        elif trigger in ("hook", "function-mode", "dispatch-mode"):
+            # Pinning amax registers it as a buffer, under the hook, with tensor operations.
             del model[0].weight_quantizer._amax
             cfg = {"num_bits": 8, "axis": None, "constant_amax": 1.0}
+        elif trigger == "tensor":
+            # Pinning amax copies it into the buffer the quantizer holds.
+            model[0].weight_quantizer._amax = torch.tensor(1.0).as_subclass(SharingTensor)
+            cfg = {"num_bits": 8, "axis": None, "constant_amax": 1.0}
+        elif trigger == "wrapped":
+            # Unvalidated, so the proxy stays, and the quantizer reads its length.
+            cfg = QuantizerAttributeConfig.model_construct(
+                num_bits=4, backend_extra_args=MappingProxyType(SharingDict())
+            )
+        elif trigger == "fields":
+            # model_copy() copies the fields set.
+            cfg = QuantizerAttributeConfig.model_construct(
+                _fields_set=SharingSet({"num_bits"}), num_bits=4
+            )
+        elif trigger == "method":
+            quantizer = model[0].weight_quantizer
+            configure = quantizer.set_from_attribute_config
+
+            def sharing_configure(*args, **kwargs):
+                configure(*args, **kwargs)
+                share()
+
+            quantizer.set_from_attribute_config = sharing_configure
+            cfg = {"num_bits": 4}
         elif trigger == "quantizer":
             model[0].weight_quantizer.__class__ = SharingQuantizer
             cfg = {"num_bits": 4}
@@ -928,14 +1166,18 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
             cfg = [{"num_bits": 4}, {"num_bits": 8}]
         register = torch.nn.modules.module.register_module_buffer_registration_hook
         handle = register(sharing_hook) if trigger == "hook" else None
+        mode = {"function-mode": SharingFunctionMode, "dispatch-mode": SharingDispatchMode}
         try:
-            mtq.set_quantizer_by_cfg(
-                model,
-                [{**entry, "cfg": cfg}] + ([] if nested else [sub_entry]),
-            )
+            with mode[trigger]() if trigger in mode else contextlib.nullcontext():
+                mtq.set_quantizer_by_cfg(
+                    model,
+                    [{**entry, "cfg": cfg}] + ([] if nested else [sub_entry]),
+                )
         finally:
             if handle is not None:
                 handle.remove()
+        # The states compare every attribute a quantizer holds.
+        vars(model[0].weight_quantizer).pop("set_from_attribute_config", None)
         return {
             name: module.get_modelopt_state(properties_only=True)
             for name, module in model.named_modules()
@@ -946,6 +1188,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
     assert configured("0.weight_quantizer", "1.weight_quantizer") == walked
 
 
+@pytest.mark.usefixtures("check_at_the_first_named_entry")
 def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_aliases_a_later_match():
     """A named entry acts as its wildcard does when the calibrator it builds puts a quantizer the
     walk has passed in the place of one of the entry's later matches."""
@@ -972,6 +1215,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_aliases_
     assert configured("weight_quantizer") == configured("[w]eight_quantizer")
 
 
+@pytest.mark.usefixtures("check_at_the_first_named_entry")
 @pytest.mark.parametrize(
     ("kind", "same_call"),
     [("calibrator", False), ("rotation", False), ("rotation", True)],
