@@ -20,12 +20,14 @@ import json
 import math
 from hashlib import sha256
 
+import numpy as np
 import pulp
 import pytest
 
 from modelopt.torch.sparsity.attention_sparsity.calibration import (
     assess_mask_reuse_benchmark_gates,
     mask_reuse_compact,
+    mask_reuse_solver,
 )
 from modelopt.torch.sparsity.attention_sparsity.calibration.checkpoint_manifest import (
     create_checkpoint_manifest,
@@ -38,6 +40,7 @@ from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_compact i
 )
 from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_solver import (
     MaskReuseSolverConfig,
+    MaskReuseSolverError,
 )
 
 _FIT = {
@@ -535,3 +538,96 @@ def test_benchmark_replays_sub_ulp_winner_and_gates_quality(tmp_path):
     assert not unmet["calibration_report"]["overall"]["bmm1_skip_objective"][
         "all_context_buckets_met"
     ]
+
+
+def _layered_captures(checkpoint_sha256, seed, heads=3):
+    """Two anchors with two reuse layers each: random tiles and dropped mass that grow with the target."""
+    rng = np.random.default_rng(seed)
+    captures = []
+    for split, prompt in (*(("calibration", f"cal-{i}") for i in range(3)), ("heldout", "held-0")):
+        tiles = rng.integers(4, 9, size=(2, heads))
+        anchor = rng.uniform(0.001, 0.01, size=(2, heads))
+        reuse = rng.uniform(0.001, 0.05, size=(4, heads, heads))
+        for target in (0.5, 0.7):
+            capture = _capture(split, prompt, target, checkpoint_sha256)
+            geometry = {"q_tokens": 512, "kv_tokens": 512, "q_start_tokens": 0}
+            log2 = math.log2(1.0) + target * math.log2(math.e) - math.log2(512)
+            capture["invocation"].update(
+                sample_length=512,
+                expected_geometry=geometry,
+                threshold_log2_hex=log2.hex(),
+                threshold_lambda_hex=(2.0**log2).hex(),
+            )
+            capture.update(geometry=geometry, global_num_heads=heads, eligible_tiles=10)
+            capture["anchor_stats_by_layer"] = {
+                str(3 * i): {
+                    "retained_tiles": tiles[i].tolist(),
+                    "dropped_mass": anchor[i].tolist(),
+                }
+                for i in range(2)
+            }
+            capture["consumer_layers"] = {
+                str(layer): {"anchor_layer": 3 * (i // 2), "dropped_mass": reuse[i].tolist()}
+                for i, layer in enumerate((1, 2, 4, 5))
+            }
+            captures.append(capture)
+            tiles = tiles - rng.integers(0, 3, size=tiles.shape)
+            anchor = anchor + rng.uniform(0, 0.01, size=anchor.shape)
+            reuse = reuse + rng.uniform(0, 0.05, size=reuse.shape)
+    return captures
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_reduced_refit_keeps_the_optimum_and_bounds_an_unresolved_run(tmp_path, monkeypatch, seed):
+    pytest.importorskip("highspy")
+    checkpoint = _checkpoint(tmp_path)
+    path = tmp_path / "layered.jsonl"
+    digest = _write_payload(path, _layered_captures(checkpoint.sha256, seed))
+    kwargs = {
+        "vanilla_calibration": _FIT,
+        "topology": {"anchors": [0, 3], "nearest": {str(k): 3 * (k // 3) for k in range(6)}},
+        "checkpoint_manifest": checkpoint,
+        "evidence": _evidence(digest),
+        "reuse_dropped_mass_report_threshold": 0.02,
+        "target_bmm1_skip_ratio": 0.3,
+    }
+
+    def refit():
+        return calibrate_compact_mask_reuse_policy(path, **kwargs)["calibration_report"][
+            "by_bucket"
+        ][0]
+
+    def risk(row):
+        return row["risk_selection_objective"][
+            "worst_development_prompt_model_wide_total_dropped_mass"
+        ]
+
+    def cost(row):
+        return next(
+            t["combined_tile_cost"]
+            for t in row["target_sparsity_frontier"]
+            if t["target_sparsity"] == row["selected_target_sparsity"]
+        )
+
+    reduced = refit()
+    with monkeypatch.context() as patch:
+        patch.setattr(mask_reuse_compact, "_PRICE_REDUCTION", False)
+        full = refit()
+    # Both answers are the cheapest policy within the same risk tolerance.
+    for row in (reduced, full):
+        assert row["selection_result"]["status"] == "within_tolerance"
+    assert risk(reduced) == pytest.approx(risk(full), abs=1e-7)
+    assert (reduced["selected_target_sparsity"], cost(reduced)) == (
+        full["selected_target_sparsity"],
+        cost(full),
+    )
+
+    def unresolved(self, problem, expression, phase):
+        raise MaskReuseSolverError(f"unresolved calibration solve in {phase}", self.records)
+
+    monkeypatch.setattr(mask_reuse_solver._SolverSession, "minimize", unresolved)
+    # No solve finishes, yet the priced policy meets the target and its bound holds.
+    outcome = (timed_out := refit())["selection_result"]
+    assert outcome["status"] == "feasible"
+    assert timed_out["bmm1_skip_objective"]["target_met"]
+    assert outcome["risk_lower_bound"] <= risk(full) <= outcome["risk_upper_bound"] + 1e-7

@@ -50,6 +50,17 @@ __all__: list[str] = []
 
 # Reported bounds give up this relative margin to floating-point summation.
 _BOUND_RELATIVE_MARGIN = 1e-12
+# Omit variables that no policy within the risk limit can use. The integer program
+# keeps its optimum; only its size changes. HiGHS only: the bundled CBC can crash on
+# the small infeasible programs this creates.
+_PRICE_REDUCTION = True
+_PRICE_ROUNDS = 400
+_LAYOUT_PRICE_ROUNDS = 120
+_LAYOUT_SWEEPS = 4
+# Shares of one solver stage: the search for a starting policy near the bound, and
+# the attempt to prove an optimum that the bound already shows is within tolerance.
+_DIVE_SHARE = 0.25
+_EXACT_SHARE = 0.1
 
 
 @dataclass(frozen=True)
