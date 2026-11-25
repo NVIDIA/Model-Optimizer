@@ -996,8 +996,9 @@ def test_copy_non_model_files_follows_links_only_within_the_checkpoint(tmp_path)
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
 def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
     """A snapshot links into the repo's ``blobs/``. huggingface_hub >= 1.32 links a Xet-backed blob
-    on into ``<cache>/blobs``, a store shared by every cached repo. A snapshot entry may land there
-    only through its own repo's blob, and only once the hub's marker file says it is that store."""
+    on into ``<cache>/blobs/<hash[:2]>/<hash>``, a store shared by every cached repo. A snapshot entry
+    may land there only the way the hub links it, and only once the hub's marker says it is that
+    store."""
     repo, store = tmp_path / "models--org--model", tmp_path / "blobs"
     snapshot, blobs = repo / "snapshots" / "abc123", repo / "blobs"
     snapshot.mkdir(parents=True)
@@ -1010,19 +1011,24 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
     (store / "ab" / xet_hash).chmod(0o444)  # the hub keeps store files read-only
     (blobs / "sha-tokenizer").symlink_to(f"../../blobs/ab/{xet_hash}")
     (snapshot / "tokenizer.json").symlink_to("../../blobs/sha-tokenizer")
-    # Not through the repo's blobs/, so not this repo's blob, whatever store file it names: one link
-    # goes straight into the store, the other is spelled as a repo blob but its symlinked directory
-    # leads the filesystem to another store file.
-    (snapshot / "vocab.json").symlink_to(f"../../../blobs/ab/{xet_hash}")
+
+    # Links the hub would not make, each landing on a file in the store.
+    (store / "ab" / "not-a-hash").write_text("{}")
     (store / "cd" / "x" / "y" / "z").mkdir(parents=True)
     (store / "cd" / "blobs").mkdir()
     (store / "cd" / "blobs" / "other").write_text("{}")
     (snapshot / "d").symlink_to("../../../blobs/cd/x/y/z")
-    (snapshot / "merges.txt").symlink_to("d/../../../blobs/other")
-    # A repo blob the hub would have linked straight into the store, not through another link.
     (repo / "relay").symlink_to(f"../blobs/ab/{xet_hash}")
     (blobs / "sha-relayed").symlink_to("../relay")
-    (snapshot / "vocab.txt").symlink_to("../../blobs/sha-relayed")
+    (blobs / "sha-plain").symlink_to("../../blobs/ab/not-a-hash")
+    foreign = {
+        "vocab.json": f"../../../blobs/ab/{xet_hash}",  # straight into the store
+        "merges.txt": "d/../../../blobs/other",  # spelled as a repo blob, led elsewhere by ``d``
+        "vocab.txt": "../../blobs/sha-relayed",  # a repo blob that links on through another link
+        "special_tokens_map.json": "../../blobs/sha-plain",  # a store file the hub did not store
+    }
+    for name, target in foreign.items():
+        (snapshot / name).symlink_to(target)
 
     with pytest.warns(UserWarning, match="outside the checkpoint directory"):
         copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "unmarked")
@@ -1037,9 +1043,18 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
     # Writable, so a tokenizer.save_pretrained() into the export can replace it.
     assert (tmp_path / "export" / "tokenizer.json").stat().st_mode & stat.S_IWUSR
 
+    # A repo whose blobs/ is a link reaches the store through another repo's blobs, not its own.
+    other_snapshot = tmp_path / "models--org--other" / "snapshots" / "abc123"
+    other_snapshot.mkdir(parents=True)
+    (other_snapshot.parent.parent / "blobs").symlink_to("../models--org--model/blobs")
+    (other_snapshot / "tokenizer.json").symlink_to("../../blobs/sha-tokenizer")
+    with pytest.warns(UserWarning, match="outside the checkpoint directory"):
+        copied = hf_checkpoint_utils.copy_non_model_files(other_snapshot, tmp_path / "redirected")
+    assert copied == []
+
     if os.geteuid() != 0:  # root reads an unreadable store anyway
         # A snapshot that does not use the store never probes it, so an unreadable one is harmless.
-        for name in ("tokenizer.json", "vocab.json", "merges.txt", "d", "vocab.txt"):
+        for name in ["tokenizer.json", "d", *foreign]:
             (snapshot / name).unlink()
         store.chmod(0)
         try:

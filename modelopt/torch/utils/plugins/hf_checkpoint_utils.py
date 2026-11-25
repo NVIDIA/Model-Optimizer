@@ -433,9 +433,10 @@ def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
 # Since huggingface_hub 1.32, a Xet-backed file (tokenizer.json, weight shards) is stored once per
 # cache, in a store at ``<cache>/blobs`` shared by all repos, and the repo's ``blobs/<etag>`` is a
 # link into it. A snapshot entry may land in that store only the way the hub links it, through its
-# own repo's ``blobs/``, and only in a store the hub would use (its ``utils/_shared_blobs.py``): a
-# directory, not a link, that holds the hub's marker file.
+# own repo's ``blobs/``, and only on a file the hub stored there (its ``utils/_shared_blobs.py``):
+# ``<store>/<hash[:2]>/<hash>``, in a store marked as the hub's, with no directory on the way a link.
 _HF_SHARED_BLOBS_MARKER = ".huggingface-shared-blobs"
+_XET_HASH = re.compile(r"[0-9a-f]{64}")
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
@@ -468,20 +469,20 @@ def _is_shared_store_blob(src_dir: Path, src: Path, resolved_src: Path) -> bool:
     source_root = src_dir.resolve(strict=True)
     if source_root.parent.name != "snapshots":
         return False
-    repo_dir = source_root.parent.parent
-    store = repo_dir.parent / "blobs"
+    repo_blobs = source_root.parent.parent / "blobs"
+    store = repo_blobs.parent.parent / "blobs"
     try:
-        if not (
-            stat.S_ISDIR(store.lstat().st_mode)
-            and stat.S_ISREG((store / _HF_SHARED_BLOBS_MARKER).lstat().st_mode)
-        ):
+        if not stat.S_ISREG((store / _HF_SHARED_BLOBS_MARKER).lstat().st_mode):
             return False
-        # Both hops as the filesystem takes them, not as the link text spells them.
+        # Both hops as the filesystem takes them, not as the link text spells them. Matching them
+        # against paths spelled under the resolved snapshot also refuses a blobs/ that is a link.
         repo_blob = _link_target(src)
         return (
-            repo_blob.parent == (repo_dir / "blobs").resolve(strict=True)
+            repo_blob.parent == repo_blobs
             and _link_target(repo_blob) == resolved_src
-            and _is_relative_to(resolved_src, store)
+            and resolved_src.parent.parent == store
+            and _XET_HASH.fullmatch(resolved_src.name) is not None
+            and resolved_src.parent.name == resolved_src.name[:2]
         )
     except OSError:  # an unreadable store is no store, and a regular file links nowhere
         return False
