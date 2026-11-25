@@ -1541,8 +1541,20 @@ def test_gpt_oss_mxfp4_experts_export_as_openai_releases_them(tmp_path, request,
             [{"quantizer_name": "*layers.1.mlp*weight_quantizer", "enable": False}],
             r"every layer's experts .* \['model.layers.1.mlp.experts'\]",
         ),
+        (
+            [
+                {
+                    "quantizer_name": "*mlp.experts*weight_quantizer",
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (8, 0)},
+                    },
+                }
+            ],
+            "holds 32-element blocks, not 16",
+        ),
     ],
-    ids=["kv-cache", "unquantized-layer"],
+    ids=["kv-cache", "unquantized-layer", "16-element-blocks"],
 )
 @pytest.mark.parametrize("entry", ["export_hf_checkpoint", "_export_transformers_checkpoint"])
 def test_gpt_oss_mxfp4_experts_export_refuses_what_openai_layout_cannot_describe(

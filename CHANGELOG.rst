@@ -51,7 +51,7 @@ Changelog
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 - Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
 - With ``mto.enable_huggingface_checkpointing()`` and transformers before 5.21, ``save_pretrained`` no longer fails on Hugging Face MoE models with quantized fused experts, and ``from_pretrained`` restores them. A Qwen3-VL-MoE checkpoint does not load on those versions, so save and restore the live model with ``mto.save`` and ``mto.restore`` instead.
-- Unified HF export now writes GPT-OSS experts quantized with weight-only MXFP4 (``general/ptq/mxfp4_mlp_weight_only``) as ``openai/gpt-oss-*`` store them, which vLLM, SGLang and TensorRT-LLM serve; re-export affected checkpoints. An export that also quantizes other modules, e.g. the KV cache, or leaves some layers' experts unquantized is refused: quantize the experts alone (with ``hf_ptq.py``, pass ``--kv_cache_qformat none``).
+- Unified HF export now writes GPT-OSS experts quantized with weight-only MXFP4 (``general/ptq/mxfp4_mlp_weight_only``) as ``openai/gpt-oss-*`` store them, which vLLM, SGLang and TensorRT-LLM serve; re-export affected checkpoints. An export that also quantizes other modules, e.g. the KV cache, or leaves some layers' experts unquantized is refused: quantize with that recipe, which quantizes the experts alone.
 
 *ONNX*
 
