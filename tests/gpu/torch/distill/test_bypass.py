@@ -566,6 +566,16 @@ def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_p
         {**config, "checkpoint_dir": str(tmp_path / "reference")},
     )
 
+    class BufferOnlyComposite(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("scale", torch.tensor(1.25))
+            self.child = nn.Identity()
+            self.child.register_buffer("offset", torch.tensor(0.125))
+
+        def forward(self, hidden_states):
+            return hidden_states * self.scale + self.child.offset
+
     def fresh_pair(label, changed=None, *, preload=False):
         student, teacher = copy.deepcopy(initial), copy.deepcopy(target)
         if changed is not None:
@@ -573,12 +583,15 @@ def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_p
             with torch.no_grad():
                 root.head.weight.add_(0.001)  # Frozen and outside selected mlp.
         for role, root in (("student", student), ("teacher", teacher)):
-            if preload:
+            if preload == "buffers":
+                root.add_module("buffer_only", BufferOnlyComposite())
+            elif preload:
                 root.register_parameter("root_weight", nn.Parameter(torch.ones(())))
+            preload_class = BufferOnlyComposite if preload == "buffers" else type(root)
             access = {
                 "execution_device": "cpu",
                 "offload_buffers": True,
-                "preload_module_classes": [type(root).__name__] if preload else None,
+                "preload_module_classes": [preload_class.__name__] if preload else None,
             }
             if offload == "cpu":
                 accelerate.cpu_offload(root, **access)
@@ -679,12 +692,8 @@ def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_p
     assert_exact_state(resumed(batches[0]), reference(batches[0]))
     assert_exact_state(teacher(batches[0]), target(batches[0]))
 
-    # A root preload hook would materialize the whole frozen model in one window.
-    # Refuse this unsupported ownership instead of violating bounded layer access.
-    composite, composite_teacher = fresh_pair("preload", preload=True)
-    before = caller_state(composite, composite_teacher)
-    outputs = [root(batches[0]).detach().clone() for root in (composite, composite_teacher)]
-
+    # Composite preload hooks must refuse before onloading descendants, whether
+    # their independent state consists of parameters or only persistent buffers.
     class PreflightCursor(list):
         started = False
 
@@ -692,19 +701,28 @@ def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_p
             self.started = True
             return super().__iter__()
 
-    data = PreflightCursor(batches)
-    with pytest.raises(ValueError):
-        mtd.bypass(
-            composite,
-            composite_teacher,
-            data,
-            {**config, "checkpoint_dir": str(tmp_path / "preload-checkpoint")},
-        )
-    assert not data.started  # Refuse during identity, before priming/training.
-    assert_caller_state((composite, composite_teacher), before)
-    assert_exact_state(_rng_state([]), caller_rng)
-    for root, output in zip((composite, composite_teacher), outputs, strict=True):
-        assert_exact_state(root(batches[0]), output)
+    for preload in (True, "buffers"):
+        composite, composite_teacher = fresh_pair(f"preload-{preload}", preload=preload)
+        if preload == "buffers":
+            for root in (composite, composite_teacher):
+                owner = root.buffer_only
+                assert not list(owner.parameters())
+                assert owner.scale.is_meta and owner.child.offset.is_meta
+        before = caller_state(composite, composite_teacher)
+        outputs = [root(batches[0]).detach().clone() for root in (composite, composite_teacher)]
+        data = PreflightCursor(batches)
+        with pytest.raises(ValueError):
+            mtd.bypass(
+                composite,
+                composite_teacher,
+                data,
+                {**config, "checkpoint_dir": str(tmp_path / f"preload-{preload}-checkpoint")},
+            )
+        assert not data.started  # Refuse during identity, before priming/training.
+        assert_caller_state((composite, composite_teacher), before)
+        assert_exact_state(_rng_state([]), caller_rng)
+        for root, output in zip((composite, composite_teacher), outputs, strict=True):
+            assert_exact_state(root(batches[0]), output)
 
 
 @pytest.mark.timeout(240)
