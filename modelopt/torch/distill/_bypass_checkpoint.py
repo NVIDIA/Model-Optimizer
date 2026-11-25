@@ -443,11 +443,11 @@ class BypassCheckpoint(_CheckpointRanks):
                 stream.flush()
                 os.fsync(stream.fileno())
             # Use the actual safe reader before committing arbitrary caller state.
-            # Meta mapping checks the whole payload without allocating its tensors.
+            # Meta mapping avoids tensor allocation when supported; the CPU
+            # reader is authoritative when meta cannot rebuild the payload.
             try:
                 torch.load(shard, map_location="meta", weights_only=True)
-            except NotImplementedError:
-                # Some safe native tensors (e.g. sparse) cannot rebuild on meta.
+            except Exception:
                 torch.load(shard, map_location="cpu", weights_only=True)
             receipt = {"step": step, "identity": self.identity, "sha256": _file_hash(shard)}
             _write_json(pending / f"rank-{self.rank}.json", receipt)
