@@ -294,23 +294,33 @@ class PrecisionConverter:
                 exclude_consumers=exclude_consumers,
                 tensor_to_consumers=tensor_to_consumers,
                 tensor_to_producers=tensor_to_producers,
-                force_real_cast=any(
-                    producer.name in custom_nodes
-                    for producer in tensor_to_producers.get(tensor_name, ())
-                ),
             )
 
         # Add cast nodes for "cast_down" tensors
+        cast_down_excluded = (
+            [
+                *high_precision_nodes,
+                *(
+                    node.name
+                    for node in self.model.graph.node
+                    if node.op_type == "Cast"
+                    and onnx_utils.get_cast_to_type(node) == self.high_precision_type.onnx_type
+                ),
+            ]
+            if self.keep_io_types
+            else high_precision_nodes
+        )
         for tensor_name in cast_down_tensors:
             self._add_cast(
                 tensor_name,
                 self.low_precision_type,
-                exclude_consumers=high_precision_nodes,
+                exclude_consumers=cast_down_excluded,
                 tensor_to_consumers=tensor_to_consumers,
                 tensor_to_producers=tensor_to_producers,
             )
 
         # Fixed plugin interfaces need per-input types rather than a uniform FP32 boundary.
+        current_types = onnx_utils._build_tensor_type_map(self.model) if custom_inputs else {}
         custom_casts = (
             {
                 (node.input[0], onnx_utils.get_cast_to_type(node)): node.output[0]
@@ -322,10 +332,18 @@ class PrecisionConverter:
         )
         for node, index, dtype in custom_inputs:
             name = node.input[index]
+            if current_types.get(name) == dtype and name not in self.initializer_map:
+                continue
             if (name, dtype) not in custom_casts:
                 precision = self._precision_type_from_onnx_type(dtype)
                 assert precision is not None
-                self._add_cast(name, precision, tensor_to_consumers={}, force_real_cast=True)
+                self._add_cast(
+                    name,
+                    precision,
+                    exclude_consumers=[n.name for n in tensor_to_consumers.get(name, ())],
+                    tensor_to_consumers=tensor_to_consumers,
+                    tensor_to_producers=tensor_to_producers,
+                )
                 custom_casts[name, dtype] = f"{name}_cast_to_{precision.str_short}"
             node.input[index] = custom_casts[name, dtype]
 
@@ -1474,7 +1492,6 @@ class PrecisionConverter:
         exclude_consumers: list[str] = [],
         tensor_to_consumers: dict[str, list[onnx.NodeProto]] | None = None,
         tensor_to_producers: dict[str, list[onnx.NodeProto]] | None = None,
-        force_real_cast: bool = False,
     ) -> None:
         """Adds a cast operation on a tensor and reconnects its consumers.
 
@@ -1486,7 +1503,6 @@ class PrecisionConverter:
                 If not provided, the map will be computed on the fly.
             tensor_to_producers: Optional pre-computed map of tensor names to their producer nodes.
                 If not provided, the map will be computed on the fly.
-            force_real_cast: Preserve per-consumer types even for empty tensors.
 
         NOTE: It is up to the user to ensure that the tensor_to_consumers and tensor_to_producers
         maps are up to date before calling this function. Consecutive casts in the graph will break
@@ -1502,7 +1518,27 @@ class PrecisionConverter:
             and tensor_name in self.original_network_io
             and cast_to.onnx_type != self.original_network_io[tensor_name]
         )
-        if not force_real_cast and self._is_empty_tensor(tensor_name) and not must_preserve_io_type:
+        can_fake_cast_empty = (
+            self._is_empty_tensor(tensor_name)
+            and not must_preserve_io_type
+            and not any(
+                n.name in exclude_consumers
+                for n in (
+                    onnx_utils.get_consumer_nodes(self.model, tensor_name)
+                    if tensor_to_consumers is None
+                    else tensor_to_consumers.get(tensor_name, [])
+                )
+            )
+            and not any(
+                p.op_type in (self.custom_ops or ()) and p.name in self._high_precision_nodes
+                for p in (
+                    onnx_utils.get_producer_nodes(self.model, tensor_name)
+                    if tensor_to_producers is None
+                    else tensor_to_producers.get(tensor_name, [])
+                )
+            )
+        )
+        if can_fake_cast_empty:
             logger.debug(f"Fake-casting empty tensor: {tensor_name}")
             if tensor_name in self.value_info_map:
                 tensor_info = self.value_info_map[tensor_name]
