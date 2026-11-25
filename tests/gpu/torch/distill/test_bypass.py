@@ -36,6 +36,7 @@ from torch import nn
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.distill._bypass_capture import mse_statistics
 from modelopt.torch.distill._bypass_checkpoint import _rng_state
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
@@ -575,6 +576,34 @@ def test_native_valid_token_mse_bounds_saved_state():
         observed = torch.autograd.grad(actual, prediction)[0]
         torch.testing.assert_close(observed, expected, rtol=0, atol=0)
         assert (prediction.shape, torch.float32) not in saved
+
+    for dtype, value in ((torch.bfloat16, 1.0001), (torch.float16, 40000.0)):
+        for prediction_grad in (False, True):
+            for valid in (
+                None,
+                torch.tensor([[True, False]], device="cuda"),
+                torch.zeros((1, 2), device="cuda", dtype=torch.bool),
+            ):
+                prediction = torch.zeros((1, 2, 4), device="cuda", dtype=dtype)[..., ::2]
+                prediction.requires_grad_(prediction_grad)
+                target = torch.full((1, 2, 4), value, device="cuda", dtype=torch.float32)[..., ::2]
+                target.requires_grad_(True)
+                reference_prediction = prediction.detach().float().requires_grad_(True)
+                reference_target = target.detach().clone().requires_grad_(True)
+                difference = reference_prediction - reference_target
+                if valid is not None:
+                    difference = torch.where(valid[..., None], difference, 0)
+                oracle = difference.square().sum()
+                expected = torch.autograd.grad(oracle, (reference_prediction, reference_target))
+                actual, count = mse_statistics(prediction, target, valid)
+                torch.testing.assert_close(actual, oracle, rtol=1e-6, atol=0)
+                assert count == (target.numel() if valid is None else valid.sum() * 2)
+                inputs = (prediction, target) if prediction_grad else (target,)
+                observed = torch.autograd.grad(actual, inputs)
+                assert torch.isfinite(observed[-1]).all()
+                torch.testing.assert_close(observed[-1], expected[1], rtol=0, atol=0)
+                if prediction_grad:
+                    torch.testing.assert_close(observed[0], expected[0].to(dtype), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("offload", ["cpu", "disk"])

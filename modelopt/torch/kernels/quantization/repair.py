@@ -49,7 +49,19 @@ def _mse(P, T, MASK, SUM, N, FEATURES: tl.constexpr, MASKED: tl.constexpr):
 
 
 @triton.jit
-def _mse_backward(P, T, MASK, G, DP, N, FEATURES: tl.constexpr, MASKED: tl.constexpr):
+def _mse_backward(
+    P,
+    T,
+    MASK,
+    G,
+    DP,
+    DT,
+    N,
+    FEATURES: tl.constexpr,
+    MASKED: tl.constexpr,
+    NEED_DP: tl.constexpr,
+    NEED_DT: tl.constexpr,
+):
     index = tl.program_id(0).to(tl.int64) * 1024 + tl.arange(0, 1024)
     active = index < N
     if MASKED:
@@ -58,7 +70,10 @@ def _mse_backward(P, T, MASK, G, DP, N, FEATURES: tl.constexpr, MASKED: tl.const
         tl.float32
     )
     value = difference * (2 * tl.load(G).to(tl.float32))
-    tl.store(DP + index, value, index < N)
+    if NEED_DP:
+        tl.store(DP + index, value, index < N)
+    if NEED_DT:
+        tl.store(DT + index, -value, index < N)
 
 
 class _MaskedMSE(torch.autograd.Function):
@@ -87,7 +102,8 @@ class _MaskedMSE(torch.autograd.Function):
     @staticmethod
     def backward(ctx, gradient):
         prediction, target, mask = ctx.saved_tensors
-        dp = torch.empty_like(prediction)
+        dp = torch.empty_like(prediction) if ctx.needs_input_grad[0] else None
+        dt = torch.empty_like(target) if ctx.needs_input_grad[1] else None
         if prediction.numel():
             _mse_backward[(triton.cdiv(prediction.numel(), 1024),)](
                 prediction,
@@ -95,12 +111,15 @@ class _MaskedMSE(torch.autograd.Function):
                 mask,
                 gradient,
                 dp,
+                dt,
                 prediction.numel(),
                 ctx.features,
                 mask is not None,
+                dp is not None,
+                dt is not None,
                 enable_fp_fusion=False,
             )
-        return dp, -dp.to(target.dtype) if ctx.needs_input_grad[1] else None, None, None
+        return dp, dt, None, None
 
 
 def masked_mse_sum(prediction, target, mask=None, features=1):
