@@ -91,6 +91,12 @@ def committed_checkpoint(root, *, size=1, rank=0):
 def assert_exact_state(actual, expected):
     if isinstance(expected, torch.Tensor):
         assert actual.shape == expected.shape and actual.dtype == expected.dtype
+        assert actual.layout == expected.layout
+        if expected.layout == torch.sparse_coo:
+            assert actual.is_coalesced() == expected.is_coalesced()
+            assert_exact_state(actual._indices(), expected._indices())
+            assert_exact_state(actual._values(), expected._values())
+            return
         assert torch.equal(
             actual.contiguous().reshape(-1).view(torch.uint8),
             expected.contiguous().reshape(-1).view(torch.uint8),

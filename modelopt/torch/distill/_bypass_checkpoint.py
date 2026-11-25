@@ -17,9 +17,11 @@
 
 import hashlib
 import json
+import logging
 import os
 import random
 import shutil
+import time
 import uuid
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -33,6 +35,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 from torch.utils._pytree import tree_map
 
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.core_utils import (
     enable_weight_access_and_writeback,
     module_name_maps,
@@ -40,6 +43,8 @@ from modelopt.torch.quantization.utils.core_utils import (
 )
 
 __all__ = ["BypassCheckpoint"]
+
+_LOG = logging.getLogger(__name__)
 
 
 def _file_hash(path):
@@ -61,7 +66,7 @@ def _tensor_hash(digest, value):
         value = native._quantized_data
     value = value.detach()
     if value.numel() * value.element_size() <= 8 * 1024 * 1024:
-        digest.update(value.contiguous().reshape(-1).view(torch.uint8).cpu().numpy().tobytes())
+        digest.update(memoryview(value.contiguous().reshape(-1).view(torch.uint8).cpu().numpy()))
         return
     rows = max(1, (8 * 1024 * 1024) // (value[0].numel() * value.element_size()))
     for chunk in value.split(rows, dim=0):
@@ -80,9 +85,6 @@ def _model_hash(model):
             value is not None and value.is_meta
             for value in (*module._parameters.values(), *module._buffers.values())
         )
-        if materialize:
-            from modelopt.torch.quantization.nn import TensorQuantizer
-
         if materialize and (
             not requires_weight_materialization(module, model, names)
             or any(
@@ -221,12 +223,19 @@ def _batch_hash(batch):
     return digest.hexdigest()
 
 
-def _data_identity(loader):
+def _data_identity(loader, max_batches):
     if isinstance(loader, Sequence):
-        digest = hashlib.sha256(str(len(loader)).encode())
-        for index in range(len(loader)):
+        length = len(loader)
+        count = min(length, max_batches)
+        digest = hashlib.sha256(str(length).encode())
+        for index in range(count):
             digest.update(_batch_hash(loader[index]).encode())
-        return {"kind": "sequence", "length": len(loader), "sha256": digest.hexdigest()}
+        return {
+            "kind": "sequence",
+            "length": length,
+            "prefix_batches": count,
+            "sha256": digest.hexdigest(),
+        }
     if (
         callable(getattr(loader, "state_dict", None))
         and callable(getattr(loader, "load_state_dict", None))
@@ -332,14 +341,26 @@ class BypassCheckpoint(_CheckpointRanks):
         self.identity = None
         error = None
         try:
+            model_identities = {}
+            for role, model in (("student", student), ("teacher", teacher)):
+                _LOG.info("Bypass checkpoint: reading all %s model bytes for identity", role)
+                started = time.perf_counter()
+                model_identities[role] = _model_hash(model)
+                _LOG.info(
+                    "Bypass checkpoint: %s identity completed in %.3f seconds",
+                    role,
+                    time.perf_counter() - started,
+                )
+            batch_size = config.global_batch_size if runtime is None else runtime.local_batch_size
             self.identity = {
-                "student": _model_hash(student),
-                "teacher": _model_hash(teacher),
+                **model_identities,
                 "config": config.model_dump(
                     exclude={"checkpoint_dir", "resume_from", "checkpoint_interval"}
                 ),
                 "topology": runtime.checkpoint_topology() if runtime is not None else None,
-                "data": _data_identity(dataloader),
+                # Positive batches consume at most one item per sample; include
+                # the priming window even for zero updates, and one saved lookahead.
+                "data": _data_identity(dataloader, max(1, config.num_steps) * batch_size + 1),
                 "runtime": {
                     "bypass_recipe": 1,
                     "torch": str(torch.__version__),
@@ -414,12 +435,20 @@ class BypassCheckpoint(_CheckpointRanks):
         name = self._coordinate(begin)
         pending = root / (".pending-" + name)
         shard = pending / f"rank-{self.rank}.pt"
+        temporary = root / (".latest-" + name)
         receipt = None
         try:
             with shard.open("wb") as stream:
                 torch.save(state, stream)
                 stream.flush()
                 os.fsync(stream.fileno())
+            # Use the actual safe reader before committing arbitrary caller state.
+            # Meta mapping checks the whole payload without allocating its tensors.
+            try:
+                torch.load(shard, map_location="meta", weights_only=True)
+            except NotImplementedError:
+                # Some safe native tensors (e.g. sparse) cannot rebuild on meta.
+                torch.load(shard, map_location="cpu", weights_only=True)
             receipt = {"step": step, "identity": self.identity, "sha256": _file_hash(shard)}
             _write_json(pending / f"rank-{self.rank}.json", receipt)
             _sync_directory(pending)
@@ -429,9 +458,12 @@ class BypassCheckpoint(_CheckpointRanks):
         errors = [value["error"] for value in receipts if "error" in value]
 
         def discard_pending():
-            if pending.exists():
-                shutil.rmtree(pending)
-                _sync_directory(root)
+            current = (root / "latest").read_text().strip() if (root / "latest").is_file() else None
+            for path in (pending, root / name if current != name else None):
+                if path is not None and path.exists():
+                    shutil.rmtree(path)
+            temporary.unlink(missing_ok=True)
+            _sync_directory(root)
 
         if errors:
             self._coordinate(discard_pending)
@@ -458,7 +490,6 @@ class BypassCheckpoint(_CheckpointRanks):
             os.replace(pending, root / name)
             _sync_directory(root)
             previous = (root / "latest").read_text().strip() if (root / "latest").exists() else None
-            temporary = root / (".latest-" + uuid.uuid4().hex)
             with temporary.open("w") as stream:
                 stream.write(name + "\n")
                 stream.flush()
