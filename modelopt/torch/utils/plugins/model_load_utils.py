@@ -42,7 +42,7 @@ from huggingface_hub import snapshot_download
 from packaging.version import parse
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Container, Iterable
 from safetensors.torch import safe_open
 from torch.distributed import device_mesh
 from torch.distributed.checkpoint import HuggingFaceStorageReader
@@ -531,6 +531,7 @@ def _broadcast_load_group(
 
 def _group_sources_by_layer(
     ckpt_keys: "Iterable[str]",
+    indexed: "Container[str]",
     plans: list[dict],
     model_param_names: set[str],
     layer_prefixes: list[str],
@@ -543,6 +544,10 @@ def _group_sources_by_layer(
     has no home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the
     export can copy them through: PTQ never touches them, but the exported checkpoint is still
     expected to contain them. ``targets`` holds the parameter names some key loads into.
+
+    Only keys the index lists (``indexed``) are bucketed, as only those are read. One only a shard's
+    header has is unplaced if its target isn't in the model, and otherwise left out: it supplies no
+    parameter, so one no indexed key supplies is reported as unsourced rather than left unloaded.
     """
     layer_sources: dict[int, list[str]] = {i: [] for i in range(len(layer_prefixes))}
     non_layer_sources: list[str] = []
@@ -552,6 +557,8 @@ def _group_sources_by_layer(
         target = _target_param(plans, ckpt_key, model_param_names)
         if target is None:
             unplaced.append(ckpt_key)
+            continue
+        if ckpt_key not in indexed:
             continue
         targets.add(target)
         for i, prefix in enumerate(layer_prefixes):
@@ -1693,6 +1700,7 @@ def parallel_load_and_prepare_fsdp2(
     # conversions of its own, so the stock plan is the only one.
     layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
         checkpoint_tensor_files(resolved_path),
+        weight_map,
         [plan] if plan else [],
         model_param_names,
         layer_prefixes,
@@ -1709,7 +1717,7 @@ def parallel_load_and_prepare_fsdp2(
     record_unplaced_source_keys(model, resolved_path, unplaced)
     # What from_pretrained records: the conversions some checkpoint key used. The export reverts
     # these and would otherwise query the wrapped class, which has lost them. They are matched over
-    # exactly the keys the reads below convert -- placed and in weight_map, which is what
+    # exactly the keys the reads below convert -- the bucketed ones, all in weight_map, which is what
     # read_safetensors_subset selects from -- so a rename only an unread key matches, such as one
     # with no parameter that is only carried over, doesn't rename the export. Transformers'
     # was_used isn't used even where it exists: the placement pass above set it for every key. Nor
@@ -1721,7 +1729,6 @@ def parallel_load_and_prepare_fsdp2(
         used = {
             id(conversion)
             for key in chain(non_layer_sources, *layer_sources.values())
-            if key in weight_map
             for conversion in _resolve_target(plan, key)[2]
         }
         model._weight_conversions = [c for c in plan["conversions"] if id(c) in used]

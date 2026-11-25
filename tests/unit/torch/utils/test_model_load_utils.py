@@ -487,15 +487,22 @@ def test_unsourced_parameter_raises(tmp_path, gloo_group):
         _fsdp2_load(tmp_path)
 
 
-def test_vlm_keys_its_text_submodel_renames_away_load_as_named(tmp_path, gloo_group, monkeypatch):
+@pytest.mark.parametrize("off_index", [(), ("model.language_model.norm.weight",)])
+def test_vlm_keys_its_text_submodel_renames_away_load_as_named(
+    tmp_path, gloo_group, monkeypatch, off_index
+):
     """A VLM picks up its text sub-model's prefix rule (``model.language_model.`` -> ``model.``,
     as Qwen3.5 registers on Transformers 5.5); keys that already name a parameter must keep it,
-    and the export must not revert the rule none of them loaded through."""
+    and the export must not revert the rule none of them loaded through. A key the index omits is
+    not read, so a parameter only it would supply is reported missing, not left unloaded."""
     ref = get_tiny_qwen3_5_vl_offline()
     # The model's own names, not what save_pretrained's reverse mapping would store.
     state = {n: t.clone().contiguous() for n, t in ref.state_dict().items()}
     assert any(n.startswith("model.language_model.layers.") for n in state)
-    save_file(state, str(tmp_path / "model.safetensors"), metadata={"format": "pt"})
+    shard = "model-00001-of-00001.safetensors"
+    save_file(state, str(tmp_path / shard), metadata={"format": "pt"})
+    index = {"metadata": {}, "weight_map": {k: shard for k in state if k not in off_index}}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
     (tmp_path / "config.json").write_text(json.dumps(ref.config.to_dict()))
     get_mapping = model_load_utils.get_model_conversion_mapping
     rule = core_model_loading.WeightRenaming(r"^model.language_model.", r"model.")
@@ -504,6 +511,10 @@ def test_vlm_keys_its_text_submodel_renames_away_load_as_named(tmp_path, gloo_gr
         return [*get_mapping(model, *args, **kwargs), rule]
 
     monkeypatch.setattr(model_load_utils, "get_model_conversion_mapping", with_text_submodel_rule)
+    if off_index:
+        with pytest.raises(RuntimeError, match=off_index[0]):
+            _fsdp2_load(tmp_path)
+        return
     model = _fsdp2_load(tmp_path)
 
     ref_params = dict(ref.named_parameters())
