@@ -550,6 +550,8 @@ def test_public_bypass_preserves_caller_state_and_seeds_initial_reader(fail, tea
 @pytest.mark.timeout(180)
 def test_native_valid_token_mse_bounds_saved_state(noncurrent):
     pytest.importorskip("triton")
+    from modelopt.torch.kernels.quantization.repair import masked_mse_sum
+
     if noncurrent and torch.cuda.device_count() < 2:
         pytest.skip("Noncurrent loss dispatch requires two CUDA devices")
     if not torch.cuda.is_available():
@@ -621,6 +623,39 @@ def test_native_valid_token_mse_bounds_saved_state(noncurrent):
     assert loss == count == 0
     for gradient in torch.autograd.grad(loss, (prediction, target)):
         assert gradient.shape == prediction.shape and gradient.numel() == 0
+    assert torch.cuda.current_device() == current
+
+    prediction = torch.zeros(2, 3, device=device, dtype=torch.bfloat16)
+    target = torch.zeros_like(prediction, dtype=torch.float32)
+    mask = torch.ones(2, device=device, dtype=torch.bool)
+    for wrong_prediction, wrong_target, wrong_mask in (
+        (torch.zeros(2, 3), target, mask),
+        (prediction, torch.zeros(2, 3), mask),
+        (prediction, target[:, :2], mask),
+        (prediction, target, torch.ones(2, dtype=torch.bool)),
+    ):
+        with pytest.raises(ValueError):
+            masked_mse_sum(wrong_prediction, wrong_target, wrong_mask, 3)
+    with pytest.raises(ValueError):
+        masked_mse_sum(prediction, target, mask[:1], 3)
+    for features in (0, -1, 1.5):
+        with pytest.raises(ValueError):
+            masked_mse_sum(prediction, target, mask, features)
+    # Unused mask entries and empty feature payloads retain their existing safe behavior.
+    with torch.cuda.device(device):
+        assert (
+            masked_mse_sum(prediction, target, torch.ones(4, device=device, dtype=torch.bool), 3)
+            == 0
+        )
+    if torch.cuda.device_count() >= 2:
+        other = torch.device("cuda", (device.index + 1) % torch.cuda.device_count())
+        other_target = torch.zeros_like(target, device=other)
+        with pytest.raises(ValueError):
+            masked_mse_sum(prediction, other_target, mask, 3)
+        with pytest.raises(ValueError):
+            masked_mse_sum(prediction, target, torch.ones(2, device=other, dtype=torch.bool), 3)
+        with pytest.raises(ValueError):
+            mse_statistics(prediction, other_target)
     assert torch.cuda.current_device() == current
 
 

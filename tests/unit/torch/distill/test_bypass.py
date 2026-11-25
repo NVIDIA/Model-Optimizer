@@ -72,6 +72,15 @@ def test_masked_mse_keeps_narrow_saved_activations_and_fp32_vjp(monkeypatch, chu
     assert loss == count == 0
     for gradient in torch.autograd.grad(loss, (prediction, target)):
         assert gradient.shape == prediction.shape and gradient.numel() == 0
+    try:
+        # The native CUDA helper is optional for the CPU loss fallback.
+        from modelopt.torch.kernels.quantization.repair import masked_mse_sum
+    except ImportError as exc:
+        if not (exc.name or "").startswith("triton"):
+            raise
+    else:
+        with pytest.raises(ValueError):
+            masked_mse_sum(prediction, target)
 
 
 def test_packed_attention_refuses_backends_without_block_masks():
