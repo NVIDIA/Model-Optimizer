@@ -293,14 +293,6 @@ def _per_weight_compression(recipe: "QuantRecipe", quantizers: dict[str, nn.Modu
     # or that the weight lacks (e.g. an output quantizer), leaves it unquantized alike.
     projections: dict[str, dict[str, list[TensorQuantizer]]] = {}
     for attr, value in quantizers.items():
-        if isinstance(value, SequentialQuantizer) and any(
-            isinstance(stage, SequentialQuantizer) for stage in value
-        ):
-            # Its replay could not rebuild such a quantizer, nor would export read it.
-            raise ValueError(
-                f"AutoQuantize candidate {recipe} applies a list config over another list config "
-                f"to {attr}, which nests their stages; give each quantizer one list config."
-            )
         for role in ("input_quantizer", "weight_quantizer", "output_quantizer"):
             if attr.endswith(role):
                 projection = projections.setdefault(attr.removesuffix(role), {})
@@ -338,21 +330,37 @@ def _cfg_to_dict(v):
     return v
 
 
+def _stage_count(*quant_cfgs) -> int:
+    """The most stages any list config in ``quant_cfgs`` gives a quantizer (one without any)."""
+    return max(
+        [
+            len(rule["cfg"])
+            for quant_cfg in quant_cfgs
+            for rule in mtq_config.normalize_quant_cfg_list(quant_cfg)
+            if isinstance(rule["cfg"], list)
+        ],
+        default=1,
+    )
+
+
 def _per_weight_settings(
     recipe: "QuantRecipe", attrs: Sequence[str], module: nn.Module | None = None
 ) -> dict[str, tuple[Any, bool]]:
     """Each quantizer's ``(cfg, enable)`` under ``recipe``: its last rule by module-relative name.
 
-    Replaying these reproduces what the search applied when each quantizer's last rule is a full
-    config or a disable, which no earlier rule can change. Given the ``module``, refuse candidates
-    whose rules do not reduce to that: a ``parent_class`` rule for its class, or rules addressing
-    a sequential quantizer's stages (#3508 tracks replaying any rule form). Without it, as on
+    Replaying these on fresh quantizers reproduces what the search applied when one config rule at
+    most sets each quantizer and its last rule is that config or a disable: no other rule leaves
+    state behind (e.g. a ``constant_amax``). Given the ``module``, refuse candidates whose rules do
+    not reduce to that, including a ``parent_class`` rule for its class or rules addressing a
+    sequential quantizer's stages (#3508 tracks replaying any rule form). Without it, as on
     replay, ``parent_class`` rules are skipped: the search refused any that applied.
     """
     rules = mtq_config.normalize_quant_cfg_list(recipe.config.quant_cfg)
+    stages = range(_stage_count(rules))
     settings = {}
     for attr in attrs:
         last = None
+        configs = 0
         for rule in rules:
             pattern = rule["quantizer_name"]
             if fnmatch.fnmatch(attr, pattern):
@@ -362,13 +370,16 @@ def _per_weight_settings(
                         continue
                     problem = f"applies a parent_class rule to {attr}"
                     break
+                configs += rule["cfg"] is not None
                 last = rule
-            elif any(fnmatch.fnmatch(f"{attr}.{stage}", pattern) for stage in range(3)):
+            elif any(fnmatch.fnmatch(f"{attr}.{stage}", pattern) for stage in stages):
                 problem = f"has a rule for the stages of {attr}"
                 break
         else:
             if last is None:
                 problem = f"has no rule for {attr}"
+            elif configs > 1:
+                problem = f"configures {attr} with more than one rule"
             elif last["cfg"] is None and last["enable"]:
                 problem = f"enables {attr} without a config as its last rule"
             else:
@@ -376,8 +387,8 @@ def _per_weight_settings(
                 continue
         raise ValueError(
             f"AutoQuantize candidate {recipe} {problem}. Per-weight modules are searched with "
-            "rules that set each quantizer by its module-relative name, the last one a config or "
-            "a disable."
+            "rules that set each quantizer by its module-relative name, with one config at most "
+            "and the last rule that config or a disable."
         )
     return settings
 
@@ -3018,12 +3029,16 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False, algo
     )
     # Per-weight modules' quantizers and their stages, searched or fixed: the search applied a
     # recipe only to its own group, so none of its rules may reach them through a global entry.
+    stages = _stage_count(
+        *(recipe.config.quant_cfg for recipe in best_recipe.values()),
+        *((fixed_quantization_config or {}).get("quant_cfg", []),),
+    )
     per_weight_names = [
-        f"{module_name}.{attr}{stage}"
+        f"{module_name}.{attr}{suffix}"
         for stat in search_state["candidate_stats"].values()
         for module_name in stat.get("per_weight_modules", ())
         for attr in _get_replay_quantizer_attrs(stat, module_name)
-        for stage in ("", ".0", ".1", ".2")
+        for suffix in ("", *(f".{stage}" for stage in range(stages)))
     ]
     # Track global (non per-module) recipe entries.  Last recipe wins for each pattern.
     global_entries: dict[str, dict] = {}

@@ -99,13 +99,12 @@ def _get_module_weight_numel(module: nn.Module) -> int:
     """Return the parameter count for a module's quantizable weights.
 
     Standard quantized linear modules have a single ``weight`` parameter. Modules that quantize
-    several named weights, such as fused MoE experts, count each of them.
+    several named weights, such as fused MoE experts, count each of them, and only those: a
+    weight without a quantizer is not searched.
     """
-    weight = getattr(module, "weight", None)
-    return (0 if weight is None else weight.numel()) + sum(
-        param.numel()
-        for name in weight_attr_names(module)
-        if name != "weight" and (param := getattr(module, name, None)) is not None
+    names = list(weight_attr_names(module)) or ["weight"]
+    return sum(
+        param.numel() for name in names if (param := getattr(module, name, None)) is not None
     )
 
 

@@ -1150,7 +1150,7 @@ _W1_INPUT_ONLY = [
 ]
 
 
-# A list config over a list config nests stages, which neither replay nor export can rebuild.
+# Two configs for one quantizer: replay applies only the last.
 _W4A8 = [{"num_bits": 4, "block_sizes": {-1: 16}}, {"num_bits": 8, "axis": 0}]
 _NESTED = [
     {"quantizer_name": "*weight_quantizer", "cfg": _W4A8},
@@ -1170,7 +1170,7 @@ _FIRST_STAGE_OFF = [
         (_W1_INT8_W2_INT4, "different formats"),
         (_W1_INT8_W2_FP8, "different formats"),
         (_W1_INPUT_ONLY, "different formats"),
-        (_NESTED, "nests their stages"),
+        (_NESTED, "more than one rule"),
         (_FIRST_STAGE_OFF, "rule for the stages"),
     ],
     ids=["partial", "mixed", "same_cost", "one_input", "nested", "first_stage_off"],

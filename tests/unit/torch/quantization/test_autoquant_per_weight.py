@@ -233,8 +233,26 @@ def test_per_weight_format_shards_merge_into_the_live_search(method, tmp_path):
             ],
             "parent_class",
         ),
+        # The first config's constant amax outlives the second, which replay alone applies.
+        (
+            [
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": 8, "constant_amax": 1.0},
+                },
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            ],
+            "more than one rule",
+        ),
+        (
+            [
+                {"quantizer_name": "*weight_quantizer", "cfg": [{"num_bits": 8}] * 3 + [_INT4_W]},
+                {"quantizer_name": "*weight_quantizer.3", "enable": False},
+            ],
+            "stages",
+        ),
     ],
-    ids=["enable_only_last", "stage_rule", "parent_class"],
+    ids=["enable_only_last", "stage_rule", "parent_class", "two_configs", "fourth_stage"],
 )
 def test_rule_forms_replay_cannot_reproduce_are_refused(rules, problem):
     _CANDIDATES["unsupported"] = _deny(*rules)
@@ -273,9 +291,9 @@ def test_path_rules_of_other_modules_leave_unquantized_per_weight_modules_alone(
 
 
 def test_per_weight_modules_are_priced_at_their_resolved_weight_format():
-    # The named rule overrides the recipe's 4-bit default: the experts hold, and cost, 8 bits.
+    # The recipe's 4 bits name only a plain weight_quantizer: the experts hold, and cost, 8 bits.
     int4_with_int8_experts = _deny(
-        {"quantizer_name": "*weight_quantizer", "cfg": _INT4_W},
+        {"quantizer_name": "weight_quantizer", "cfg": _INT4_W},
         {"quantizer_name": "*w[12]_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
     )
     _CANDIDATES["int4_int8_experts"] = int4_with_int8_experts
@@ -430,3 +448,32 @@ def test_per_weight_modules_replay_from_fresh_quantizers_over_a_list_config_base
     )
     replayed = _replayed(mtq.get_auto_quantize_config(state))
     assert _formats(replayed, ("experts",)) == _formats(model, ("experts",))
+
+
+class _ExpertsWithUnquantizedWeight(_Experts):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(64, 64))  # e.g. a router; never quantized
+
+
+def test_a_weight_without_a_quantizer_is_not_costed():
+    QuantModuleRegistry.register({_ExpertsWithUnquantizedWeight: "test.UnquantizedWeight"})(
+        _QuantExperts
+    )
+    try:
+        model = torch.nn.Sequential(_ExpertsWithUnquantizedWeight())
+        _, state = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 16.0},
+            quantization_formats=[(copy.deepcopy(_CANDIDATES["int8"]), "int8")],
+            data_loader=[torch.randn(2, 4, 16) for _ in range(2)],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, batch: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+        )
+    finally:
+        QuantModuleRegistry.unregister(_ExpertsWithUnquantizedWeight)
+    experts = model[0]
+    stats = state["candidate_stats"]["0.quant_recipe"]
+    assert stats["uncompressed_cost"] == experts.w1.numel() + experts.w2.numel()
