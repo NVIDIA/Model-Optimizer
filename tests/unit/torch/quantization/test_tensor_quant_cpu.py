@@ -765,8 +765,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
 ):
     """Entries naming one quantizer each, as a finalized AutoQuantize search's, act as wildcards do."""
     monkeypatch.setattr(quant_conversion, "_CASE_SENSITIVE_NAMES", case_sensitive)
-    check_at = 8  # the named entry the model is checked at
-    monkeypatch.setattr(quant_conversion, "_EXACT_ENTRIES_BEFORE_CHECK", check_at)
+    monkeypatch.setattr(quant_conversion, "_EXACT_ENTRIES_FOR_CHECK", 1)
 
     class FourBitHidingSequential(torch.nn.Sequential):
         hiding = False
@@ -1098,11 +1097,9 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         "late-wildcard",
     )
     if case_sensitive and layout in fast:
-        # Only the "*" entry walks the model, the named entries before the one the model is checked
-        # at, and the entries from the first replacement on.
-        before_check = check_at - 1
+        # Only the "*" entry walks the model, and the entries from the first replacement on.
         late_walks = 3 if layout == "late-wildcard" else 0
-        assert walks == 1 + before_check + late_walks + len(quant_cfg) - first_replacing
+        assert walks == 1 + late_walks + len(quant_cfg) - first_replacing
     else:
         # Every entry walks the model: where fnmatch ignores case, or named_modules can list other
         # paths than the model registers, or the model keeps them out of a plain dict, or a
@@ -1238,10 +1235,30 @@ def test_set_quantizer_by_cfg_walks_a_model_the_check_cannot_read():
     assert configured("0.weight_quantizer") == configured("[0].weight_quantizer")
 
 
+@pytest.mark.parametrize("below", [1, 0], ids=["below", "at"])
+def test_set_quantizer_by_cfg_checks_the_model_only_for_enough_named_entries(monkeypatch, below):
+    """A call checks the model, at its first named entry, only when it names enough quantizers to
+    repay the check; one with fewer walks the model for each, as before."""
+    monkeypatch.setattr(quant_conversion, "_CASE_SENSITIVE_NAMES", True)
+    checks = []
+    check = quant_conversion._allows_subtree_walk
+    monkeypatch.setattr(
+        quant_conversion, "_allows_subtree_walk", lambda model: checks.append(model) or check(model)
+    )
+    named = quant_conversion._EXACT_ENTRIES_FOR_CHECK - below
+    model = torch.nn.Sequential(*(torch.nn.Linear(2, 2) for _ in range(named)))
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(1, 2)))
+    checks.clear()
+    quant_cfg = [{"quantizer_name": f"{i}.weight_quantizer", "enable": False} for i in range(named)]
+    mtq.set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": True}, *quant_cfg])
+    assert len(checks) == (not below)
+    assert not any(layer.weight_quantizer.is_enabled for layer in model)
+
+
 @pytest.fixture
 def check_at_the_first_named_entry(monkeypatch):
     # These calls name one or two quantizers, in lowercase, which fnmatch matches alike everywhere.
-    monkeypatch.setattr(quant_conversion, "_EXACT_ENTRIES_BEFORE_CHECK", 1)
+    monkeypatch.setattr(quant_conversion, "_EXACT_ENTRIES_FOR_CHECK", 1)
     monkeypatch.setattr(quant_conversion, "_CASE_SENSITIVE_NAMES", True)
 
 

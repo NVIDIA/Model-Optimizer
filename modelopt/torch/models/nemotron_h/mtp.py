@@ -303,6 +303,12 @@ def prepare_for_loading(checkpoint_path: str, trust_remote_code: bool, *, model_
     layout = _get_mtp_layout(local_path)
     config_path = local_path / "config.json"
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    if not trust_remote_code and _has_puzzle_language_model(config):
+        # transformers' own Omni class cannot hold its layers' differing expert counts.
+        raise ValueError(
+            "A nemotron_h_puzzle language model (Nemotron 3.5 Bolt) loads only through its "
+            "checkpoint's own code: pass --trust_remote_code (trust_remote_code=True)."
+        )
     with (
         _puzzle_renames(config),
         _mtp_construction(checkpoint_path, trust_remote_code, model_class, layout, config),

@@ -543,6 +543,18 @@ def test_calibration_removes_capture_hook_on_error(tiny_checkpoint, failure):
     assert not language_model.model.norm_f._forward_pre_hooks
 
 
+def test_puzzle_omni_needs_its_checkpoint_code(tmp_path):
+    """Without remote code, a puzzle Omni checkpoint is refused before any model is built."""
+    (tmp_path / "config.json").write_text(
+        json.dumps({"llm_config": {"model_type": "nemotron_h_puzzle"}})
+    )
+    with (
+        pytest.raises(ValueError, match="--trust_remote_code"),
+        adapter.prepare_for_loading(str(tmp_path), trust_remote_code=False),
+    ):
+        pass
+
+
 def test_puzzle_omni_loads_and_saves_its_checkpoint_names(tmp_path, monkeypatch):
     """A puzzle Omni checkpoint (Nemotron 3.5 Bolt) loads in its own code and keeps its names."""
     (tmp_path / "config.json").write_text(

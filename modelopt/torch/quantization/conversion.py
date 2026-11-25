@@ -319,9 +319,9 @@ _UNSCANNED_QUANTIZER_STATE = frozenset(k for k in vars(nn.Module()) if "hook" in
     "_hf_hook",
     "_calibrator",
 }
-# A call checks the model at its 32nd exact entry, the earlier ones walking the model: on a model
-# of mostly quantizers, the check costs a few dozen walks.
-_EXACT_ENTRIES_BEFORE_CHECK = 32
+# A call checks the model, at its first exact entry, only when it holds this many: on a model of
+# mostly quantizers the check costs a few dozen walks, which fewer named entries would not repay.
+_EXACT_ENTRIES_FOR_CHECK = 64
 # The names of the state the scan reads, for each modelopt class it met.
 _MODELOPT_STATE_NAMES: dict[type, tuple[str, ...]] = {}
 
@@ -358,6 +358,10 @@ def _modelopt_state_names(kind: type) -> tuple[str, ...] | None:
         found = {"__dict__"}.union(*(((s,) if isinstance(s, str) else s) for s in slots))
         names = _MODELOPT_STATE_NAMES[kind] = tuple(found - {"__weakref__"})
     return names
+
+
+def _is_exact(quantizer_name: Any) -> bool:
+    return type(quantizer_name) is str and not _WILDCARD_RE.search(quantizer_name)
 
 
 def _is_plain_state(state: Any) -> bool:
@@ -607,14 +611,14 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
     """
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
     # Whether wildcard-free names walk only their subtree, which follows the model's _modules,
-    # decided at the call's 32nd one: not where fnmatch ignores case, nor where named_modules can
-    # list other paths or a quantizer can run the caller's code, nor while PyTorch's global
-    # registration hooks, a mode other than a device context, or the Python dispatcher are set:
-    # configuring a quantizer runs them, and they can rewire the model mid-call. Code run from
-    # elsewhere, such as a warnings or logging handler, a finalizer, another thread, a patched
-    # function or a custom op kernel, must not rewire it.
-    subtree = None
-    exact_entries = 0
+    # decided at the first one of a call with enough of them: not where fnmatch ignores case, nor
+    # where named_modules can list other paths or a quantizer can run the caller's code, nor while
+    # PyTorch's global registration hooks, a mode other than a device context, or the Python
+    # dispatcher are set: configuring a quantizer runs them, and they can rewire the model mid-call.
+    # Code run from elsewhere, such as a warnings or logging handler, a finalizer, another thread, a
+    # patched function or a custom op kernel, must not rewire it.
+    exact_entries = sum(_is_exact(entry["quantizer_name"]) for entry in quant_cfg)
+    subtree = None if exact_entries >= _EXACT_ENTRIES_FOR_CHECK else False
     scanned: dict[int, Any] = {}
     for entry in quant_cfg:
         quantizer_name: str = entry["quantizer_name"]
@@ -631,10 +635,8 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                 ) from None
         else:
             parent_class = None
-        exact = type(quantizer_name) is str and not _WILDCARD_RE.search(quantizer_name)
+        exact = _is_exact(quantizer_name)
         if subtree is None and exact:
-            exact_entries += 1
-        if subtree is None and exact_entries == _EXACT_ENTRIES_BEFORE_CHECK:
             try:
                 subtree = (
                     _CASE_SENSITIVE_NAMES
@@ -684,8 +686,8 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                 and _replaces_a_quantizer(quant_model, quantizer_name, attributes, parent_class)
             ):
                 subtree = False
-            if set_quantizer_attributes_full(
-                quant_model, quantizer_name, attributes, parent_class, _subtree=bool(subtree)
+            if _set_quantizer_attributes_full(
+                quant_model, quantizer_name, attributes, parent_class, subtree=bool(subtree)
             ):
                 subtree = False
 
@@ -751,9 +753,7 @@ def set_quantizer_attributes_full(
     wildcard_or_filter_func: str | Callable,
     attributes: QuantizerAttributeConfig | list[QuantizerAttributeConfig],
     parent_class: type[nn.Module] | None = None,
-    *,
-    _subtree: bool = False,
-) -> bool:
+):
     """Set quantizer attributes by wildcard or filter function, fully overwriting existing attributes.
 
     Unlike :func:`set_quantizer_attributes_partial`, this function requires a complete
@@ -781,10 +781,19 @@ def set_quantizer_attributes_full(
         parent_class: (Optional) Restrict matching to quantizers whose immediate parent module is
             an instance of this class. If ``None``, all quantizers matching
             ``wildcard_or_filter_func`` are adjusted.
-
-    Returns:
-        Whether it replaced a quantizer, between a ``TensorQuantizer`` and a ``SequentialQuantizer``.
     """
+    _set_quantizer_attributes_full(quant_model, wildcard_or_filter_func, attributes, parent_class)
+
+
+def _set_quantizer_attributes_full(
+    quant_model: nn.Module,
+    wildcard_or_filter_func: str | Callable,
+    attributes: QuantizerAttributeConfig | list[QuantizerAttributeConfig],
+    parent_class: type[nn.Module] | None = None,
+    subtree: bool = False,
+) -> bool:
+    # set_quantizer_attributes_full, walking only an exact name's subtree when told to, and
+    # returning whether it replaced a quantizer, between a TensorQuantizer and a SequentialQuantizer.
     if not isinstance(attributes, (QuantizerAttributeConfig, list)):
         raise ValueError(
             f"Invalid type for attributes: {type(attributes)}, "
@@ -797,7 +806,7 @@ def set_quantizer_attributes_full(
             "All elements in attributes list must be of type QuantizerAttributeConfig."
         )
     replaced = False
-    for name, module in _candidate_modules(quant_model, wildcard_or_filter_func, _subtree):
+    for name, module in _candidate_modules(quant_model, wildcard_or_filter_func, subtree):
         if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):
             if isinstance(attributes, list):
                 if not isinstance(module, SequentialQuantizer):
