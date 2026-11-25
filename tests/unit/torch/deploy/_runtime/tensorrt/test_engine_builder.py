@@ -318,6 +318,10 @@ def test_trt11_rejects_implicit_precision_before_writing(
         ("fp16", (TensorProto.FLOAT16,), TensorProto.FLOAT, "default"),
     ]
     + [
+        (precision, (TensorProto.FLOAT,), TensorProto.FLOAT16, "output_consumer")
+        for precision in ["fp16", "bf16"]
+    ]
+    + [
         (precision, (TensorProto.FLOAT, input_type), TensorProto.FLOAT16, "default")
         for precision, input_type in product(
             ["fp16", "bf16"], [TensorProto.FLOAT16, TensorProto.BFLOAT16]
@@ -375,6 +379,14 @@ def test_trt11_preserves_plugin_precision(
             ]
         )
         graph.output.append(helper.make_tensor_value_info("high", TensorProto.FLOAT, shape))
+    if layout == "output_consumer":
+        graph.node.extend(
+            [
+                helper.make_node("Cast", ["p"], ["p_as_float"], to=TensorProto.FLOAT),
+                helper.make_node("Celu", ["p_as_float"], ["high"], name="celu"),
+            ]
+        )
+        graph.output.append(helper.make_tensor_value_info("high", TensorProto.FLOAT, [1, 4]))
     original_io = [v.SerializeToString() for v in (*graph.input, *graph.output)]
     path = tmp_path / "plugin.onnx"
     onnx.save_model(
@@ -397,7 +409,7 @@ def test_trt11_preserves_plugin_precision(
         }
         plugin = next(node for node in model.graph.node if node.op_type == "FloatPlugin")
         assert [types[name] for name in plugin.input] == list(plugin_types)
-        if len(plugin_types) > 1:
+        if len(plugin_types) > 1 or layout == "output_consumer":
             celu = next(node for node in model.graph.node if node.op_type == "Celu")
             assert types[celu.input[0]] == TensorProto.FLOAT
         assert types[plugin.output[0]] == output_type

@@ -294,6 +294,10 @@ class PrecisionConverter:
                 exclude_consumers=exclude_consumers,
                 tensor_to_consumers=tensor_to_consumers,
                 tensor_to_producers=tensor_to_producers,
+                force_real_cast=any(
+                    producer.name in custom_nodes
+                    for producer in tensor_to_producers.get(tensor_name, ())
+                ),
             )
 
         # Add cast nodes for "cast_down" tensors
@@ -771,6 +775,14 @@ class PrecisionConverter:
         network_inputs = [input.name for input in self.model.graph.input]
         network_outputs = [output.name for output in self.model.graph.output]
         for node in high_precision_nodes:
+            # Fixed custom outputs may be low precision even when their consumers require FP32.
+            if node.op_type in (self.custom_ops or ()):
+                cast_to_fp32.extend(
+                    output
+                    for output in node.output
+                    if onnx_utils._get_tensor_type_by_name(self.model, output)
+                    in (onnx.TensorProto.FLOAT16, onnx.TensorProto.BFLOAT16)
+                )
             # Add cast up for network inputs
             cast_to_fp32.extend([input for input in node.input if input in network_inputs])
             # Add cast down for network outputs
