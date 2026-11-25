@@ -620,32 +620,71 @@ def test_grouped_iq_projection_matches_uneven_native_experts(name, dtype):
         policy.close()
 
 
+@pytest.mark.parametrize("noncurrent", [False, True], ids=["current", "noncurrent"])
 @pytest.mark.parametrize("name", ["iq1_m", "iq2_xxs"])
 @pytest.mark.timeout(180)
-def test_automatic_packed_projection_matches_native_fields(name):
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 3):
-        pytest.skip("Automatic packed qualification is specific to GB300")
+def test_automatic_packed_projection_matches_native_fields(name, noncurrent, monkeypatch, capsys):
+    if noncurrent and torch.cuda.device_count() < 2:
+        pytest.skip("Noncurrent dense dispatch requires two CUDA devices")
+    if not torch.cuda.is_available():
+        pytest.skip("Packed qualification requires CUDA")
+    current = torch.cuda.current_device()
+    device = torch.device("cuda", (current + int(noncurrent)) % torch.cuda.device_count())
+    with torch.cuda.device(device):
+        if not torch.cuda.is_bf16_supported():
+            pytest.skip("Packed qualification requires BF16 CUDA support")
     torch.manual_seed(127)
-    model = nn.Linear(4096, 2048, bias=True).cuda().bfloat16()
+    model = nn.Linear(4096, 2048, bias=True).to(device=device, dtype=torch.bfloat16)
     mtq.quantize(model, _config([_iq("*weight_quantizer", name)]), None)
     policy = IQRepairPolicy()
     try:
         fields = policy.prepare(model)
         state = model.weight_quantizer._local_repair_state
-        x = torch.randn(8, 4096, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-        actual = model(x)
+        x = torch.randn(8, 4096, device=device, dtype=torch.bfloat16, requires_grad=True)
+        production_qualified = _packed_projection_qualified(x, name, state.weight_shape)
+        eligibility_override = not production_qualified
+        with monkeypatch.context() as context:
+            if eligibility_override:
+                # Scope the override to the fixed small-token caller, preserving the fallback below.
+                context.setattr(
+                    "modelopt.torch.quantization.repair_formats._packed_projection_qualified",
+                    lambda *args: True,
+                )
+            actual = model(x)
+        assert torch.cuda.current_device() == current
         assert state.projection_counts == {"packed_dense": 1}
-        expected = F.linear(x, state(model.weight), model.bias)
+        with torch.cuda.device(device):
+            expected = F.linear(x, state(model.weight), model.bias)
         torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015)
         upstream = torch.randn_like(expected) / expected.numel()
         observed = torch.autograd.grad(actual, [x, *fields], upstream)
+        assert torch.cuda.current_device() == current
         oracle = torch.autograd.grad(expected, [x, *fields], upstream)
         for a, b in zip(observed, oracle, strict=True):
             error = (a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-20)
             assert error < 5e-4, error.item()
+        with capsys.disabled():
+            print(
+                json.dumps(
+                    {
+                        "path": "packed_dense",
+                        "format": name,
+                        "device_name": torch.cuda.get_device_name(device),
+                        "device_capability": torch.cuda.get_device_capability(device),
+                        "input_device": str(device),
+                        "caller_current_device": current,
+                        "noncurrent_device": noncurrent,
+                        "production_qualified": production_qualified,
+                        "eligibility_override": eligibility_override,
+                    },
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
         # The long-context path must keep the faster materialized GEMM.
         with torch.no_grad():
-            model(torch.zeros(32768, 4096, device="cuda", dtype=torch.bfloat16))
+            model(torch.zeros(32768, 4096, device=device, dtype=torch.bfloat16))
+        assert torch.cuda.current_device() == current
         assert state.projection_counts == {"packed_dense": 1, "materialized": 2}
         assert not any(
             t.shape == model.weight.shape and t.is_floating_point() for t in state.buffers()
@@ -654,24 +693,39 @@ def test_automatic_packed_projection_matches_native_fields(name):
         policy.close()
 
 
+@pytest.mark.parametrize("noncurrent", [False, True], ids=["current", "noncurrent"])
 @pytest.mark.parametrize("name", ["iq1_m", "iq2_xxs"])
 @pytest.mark.timeout(180)
-def test_automatic_grouped_projection_preserves_native_fields(name, capsys, monkeypatch):
-    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
-        pytest.skip("Grouped packed qualification requires BF16 CUDA support")
+def test_automatic_grouped_projection_preserves_native_fields(
+    name, capsys, monkeypatch, noncurrent
+):
+    if noncurrent and torch.cuda.device_count() < 2:
+        pytest.skip("Noncurrent grouped dispatch requires two CUDA devices")
+    if not torch.cuda.is_available():
+        pytest.skip("Grouped packed qualification requires CUDA")
+    current = torch.cuda.current_device()
+    device = torch.device("cuda", (current + int(noncurrent)) % torch.cuda.device_count())
+    with torch.cuda.device(device):
+        if not torch.cuda.is_bf16_supported():
+            pytest.skip("Grouped packed qualification requires BF16 CUDA support")
     from transformers.integrations.moe import _grouped_linear
 
     from modelopt.torch.quantization.repair_formats import repair_grouped_linear
 
     torch.manual_seed(131)
-    bank = nn.ModuleList([nn.Linear(4096, 2048, bias=False).cuda().bfloat16() for _ in range(4)])
+    bank = nn.ModuleList(
+        [
+            nn.Linear(4096, 2048, bias=False).to(device=device, dtype=torch.bfloat16)
+            for _ in range(4)
+        ]
+    )
     mtq.quantize(bank, _config([_iq("*weight_quantizer", name)]), None)
     policy = IQRepairPolicy()
     try:
         fields = policy.prepare(bank)
         quantizers = [m.weight_quantizer for m in bank]
-        x = torch.randn(8, 4096, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-        ends = torch.tensor([5, 5, 8, 8], device="cuda", dtype=torch.int32)
+        x = torch.randn(8, 4096, device=device, dtype=torch.bfloat16, requires_grad=True)
+        ends = torch.tensor([5, 5, 8, 8], device=device, dtype=torch.int32)
         production_qualified = _packed_projection_qualified(x, name, (2048, 4096))
         eligibility_override = not production_qualified
         if eligibility_override:
@@ -685,25 +739,32 @@ def test_automatic_grouped_projection_preserves_native_fields(name, capsys, monk
         original_codes = [state.packed.clone() for state in states]
         upstream = torch.randn(8, 2048, device=x.device, dtype=x.dtype) / (8 * 2048)
         warmup = repair_grouped_linear(quantizers, x, ends)
+        assert torch.cuda.current_device() == current
         assert warmup is not None
         warmup_grad = torch.autograd.grad(warmup, [x, *fields], upstream)
+        assert torch.cuda.current_device() == current
         del warmup, warmup_grad
-        torch.cuda.synchronize()
-        baseline = torch.cuda.memory_allocated()
-        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize(device)
+        baseline = torch.cuda.memory_allocated(device)
+        torch.cuda.reset_peak_memory_stats(device)
         started = time.perf_counter()
         actual = repair_grouped_linear(quantizers, x, ends)
+        assert torch.cuda.current_device() == current
         assert actual is not None
         observed = torch.autograd.grad(actual, [x, *fields], upstream)
-        torch.cuda.synchronize()
+        assert torch.cuda.current_device() == current
+        torch.cuda.synchronize(device)
         seconds = time.perf_counter() - started
-        peak = torch.cuda.max_memory_allocated()
+        peak = torch.cuda.max_memory_allocated(device)
         with capsys.disabled():
             print(
                 json.dumps(
                     {
                         "path": "packed_grouped",
                         "device_name": torch.cuda.get_device_name(x.device),
+                        "input_device": str(x.device),
+                        "caller_current_device": current,
+                        "noncurrent_device": noncurrent,
                         "device_capability": torch.cuda.get_device_capability(x.device),
                         "production_qualified": production_qualified,
                         "eligibility_override": eligibility_override,
@@ -726,11 +787,12 @@ def test_automatic_grouped_projection_preserves_native_fields(name, capsys, monk
                 ),
                 flush=True,
             )
-        expected = _grouped_linear(
-            x, torch.stack([q(m.weight) for q, m in zip(quantizers, bank, strict=True)]), ends
-        )
+        with torch.cuda.device(device):
+            expected = _grouped_linear(
+                x, torch.stack([q(m.weight) for q, m in zip(quantizers, bank, strict=True)]), ends
+            )
+            oracle = torch.autograd.grad(expected, [x, *fields], upstream)
         torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015)
-        oracle = torch.autograd.grad(expected, [x, *fields], upstream)
         for a, b in zip(observed, oracle, strict=True):
             error = (a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-20)
             assert error < 5e-4, error.item()
@@ -739,6 +801,7 @@ def test_automatic_grouped_projection_preserves_native_fields(name, capsys, monk
         pointers = first._grouped_pointers[1]
         with torch.no_grad():
             repair_grouped_linear(quantizers, x, ends)
+        assert torch.cuda.current_device() == current
         assert first._grouped_pointers[1] is pointers
         assert pointers.numel() == 4 and not pointers.requires_grad
         for state, original in zip(states, original_codes, strict=True):
