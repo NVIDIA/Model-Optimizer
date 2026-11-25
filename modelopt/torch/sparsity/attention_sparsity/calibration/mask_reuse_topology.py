@@ -136,8 +136,10 @@ _MOST_WORK = "most_work"
 _PRICE_ROUNDS = 400
 _LAYOUT_PRICE_ROUNDS = 120
 _LAYOUT_SWEEPS = 4
-# Share of one solver stage spent searching for a starting policy near the bound.
+# Shares of one solver stage: the search for a starting policy near the bound, and
+# the attempt to prove an optimum that the bound already shows is within tolerance.
 _DIVE_SHARE = 0.25
+_EXACT_SHARE = 0.1
 
 
 def _prompt_risk_vector(values, count: int) -> Sequence[float]:
@@ -1933,9 +1935,10 @@ def _selection_pass(
                         if met is False:
                             proof = probed
                     if observed is not None or met is not False:
-                        near = math.inf
+                        near = limit = math.inf
                         if values in priced:
-                            near = priced[values].bound + 0.5 * float(risk_tolerance) * risk_scale
+                            limit = priced[values].bound + float(risk_tolerance) * risk_scale
+                            near = 0.5 * (priced[values].bound + limit)
 
                         def risk():
                             return (
@@ -1948,8 +1951,13 @@ def _selection_pass(
                             # A policy close to the bound usually exists among the
                             # options priced within the tolerance of it.
                             dive(reduction(values, near, observed), near)
+                        if risk() <= limit < math.inf:
+                            # The bound already shows this policy is within the tolerance
+                            # of the optimum. Proving the optimum itself is worth a short
+                            # attempt, not the time the cost pass needs.
+                            stage = session.stage(_EXACT_SHARE * remaining / stages_left)
                         met = solve(
-                            None if observed is None else reduction(values, risk(), observed)
+                            None if observed is None else reduction(values, risk(), observed), stage
                         )
             except (MaskReuseSolverFailure, MaskReuseAllocationPause):
                 raise
@@ -2021,31 +2029,44 @@ def _selection_pass(
     if feasible:
         best = min(s.risk_objective for s in feasible.values())
         ceiling = best + risk_tolerance
-        eligible = [
-            v
-            for v in tuples
-            if rows[v]["feasible"] is not False
-            and (
-                rows[v]["risk"].get("dual_bound") is None
-                or rows[v]["risk"]["dual_bound"]
-                <= float(ceiling) * risk_scale + NATIVE_FEASIBILITY_TOLERANCE
-            )
-        ]
-        for i, values in enumerate(eligible):
-            run(values, "cost", len(eligible) - i, ceiling)
-        values, selected = min(
-            ((v, s) for v, s in feasible.items() if s.risk_objective <= ceiling),
-            key=lambda item: (item[1].combined_tile_cost, item[0]),
-        )
+
+        def within(limit):
+            return [
+                v
+                for v in tuples
+                if rows[v]["feasible"] is not False
+                and (
+                    rows[v]["risk"].get("dual_bound") is None
+                    or rows[v]["risk"]["dual_bound"]
+                    <= float(limit) * risk_scale + NATIVE_FEASIBILITY_TOLERANCE
+                )
+            ]
+
         bounds = [row["risk"].get("dual_bound") for row in frontier if row["feasible"] is not False]
         lower = (
             min(min(bounds) / risk_scale, float(best))
             if all(v is not None for v in bounds)
             else None
         )
+        certificate = None
+        if all(rows[v]["risk"].get("finished") for v in within(ceiling)):
+            certificate = "optimum"
+        elif lower is not None and best <= Fraction(lower) + risk_tolerance:
+            # The optimum is not proved, but it cannot be below the bound. Measure the
+            # tolerance from the bound, so every policy at or below the ceiling is
+            # still within the tolerance of the optimum.
+            certificate = "lower_bound"
+            ceiling = Fraction(lower) + risk_tolerance
+        eligible = within(ceiling)
+        for i, values in enumerate(eligible):
+            run(values, "cost", len(eligible) - i, ceiling)
+        values, selected = min(
+            ((v, s) for v, s in feasible.items() if s.risk_objective <= ceiling),
+            key=lambda item: (item[1].combined_tile_cost, item[0]),
+        )
         complete = (
-            lower is not None
-            and all(rows[v]["risk"].get("finished") for v in eligible)
+            certificate is not None
+            and lower is not None
             and selected.risk_objective
             <= Fraction(float(lower))
             + risk_tolerance
@@ -2061,6 +2082,7 @@ def _selection_pass(
                 complete = False
         rows[values]["selection_outcome"] = {
             "status": "within_tolerance" if complete else "feasible",
+            "risk_certificate": certificate,
             "risk_lower_bound": None if lower is None else lower / heads,
             "risk_upper_bound": float(best / heads),
             "risk_ceiling": float(ceiling / heads),
