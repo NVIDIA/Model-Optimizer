@@ -35,7 +35,7 @@ from modelopt.torch.quantization.utils.numeric_utils import (
     mxfp4_to_nvfp4_global_amax,
     mxfp4_to_nvfp4_per_block_amax,
 )
-from modelopt.torch.utils.plugins.hf_checkpoint_utils import resolve_checkpoint_file
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import _copy_writable, resolve_checkpoint_file
 
 __all__ = [
     "build_w13_amax_overrides",
@@ -176,7 +176,7 @@ def link_or_copy(src: Path, dst: Path) -> None:
     # A link to a read-only file, like those in the hub's shared blob store, would be read-only too,
     # and a write through it would change the file that every cached repo shares.
     if not src.stat().st_mode & stat.S_IWUSR:
-        shutil.copyfile(src, dst)
+        _copy_writable(src, dst)
         return
     try:
         os.link(src, dst)

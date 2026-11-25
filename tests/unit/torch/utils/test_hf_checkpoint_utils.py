@@ -1015,15 +1015,18 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
     (snapshot / "tokenizer.json").symlink_to("../../blobs/sha-tokenizer")
 
     # Links the hub would not make, each landing on a file it did not store for this repo.
+    foreign_hash = "ef" * 32
+    (store / "ef").mkdir()
+    (store / "ef" / foreign_hash).write_text("{}")
     (store / "ab" / f"{xet_hash}.refs").write_text("models--org--other/blobs/etag\n")
     (store / "cd" / "x" / "y" / "z").mkdir(parents=True)
     (store / "cd" / "blobs").mkdir()
-    (store / "cd" / "blobs" / "other").symlink_to(f"../../ab/{xet_hash}")
+    (store / "cd" / "blobs" / "other").symlink_to(f"../../ef/{foreign_hash}")
     (store / "cd" / xet_hash).write_text("{}")
     (tmp_path / "other-cache" / "blobs" / "ab").mkdir(parents=True)
     (tmp_path / "other-cache" / "blobs" / "ab" / xet_hash).write_text("{}")
     (snapshot / "d").symlink_to("../../../blobs/cd/x/y/z")
-    (repo / "relay").symlink_to(f"../blobs/ab/{xet_hash}")
+    (repo / "relay").symlink_to(f"../blobs/ef/{foreign_hash}")
     (blobs / "sha-relayed").symlink_to("../relay")
     (blobs / "sha-refs").symlink_to(f"../../blobs/ab/{xet_hash}.refs")
     (blobs / "sha-misplaced").symlink_to(f"../../blobs/cd/{xet_hash}")
