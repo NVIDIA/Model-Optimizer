@@ -15,11 +15,14 @@
 
 """Tests for local Hessian-weighted MSE calibration (CPU)."""
 
+import copy
 import warnings
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.models import SimpleConv, SimpleLinear
 
 import modelopt.torch.quantization as mtq
@@ -27,19 +30,28 @@ from modelopt.torch.quantization import calib
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import (
     _FP8_SWEEP_CALIBRATOR_REGISTRY,
+    _grouped_linear_slices,
     _LocalHessianAccumulator,
     _make_weight_mse_calibrator,
     _register_fp8_sweep_calibrator,
     _warn_if_block_size_mismatch,
     local_hessian_calibrate,
+    lsq,
     mse_calibrate,
 )
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    GroupedQuantizer,
+    QuantModule,
+    SequentialQuantizer,
+    StaticBlockScaleQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _QUANT_FUNCTIONAL_BACKENDS,
     register_quant_backend,
 )
 from modelopt.torch.quantization.utils import calib_utils
+from modelopt.torch.utils.distributed import ParallelState
 
 # Weight-only INT8 per-channel; calibration is re-run explicitly per test.
 INT8_WEIGHT_CFG = {
@@ -259,3 +271,258 @@ class TestMakeWeightMseCalibratorErrorFunc:
                 q, 0.1, 0.25, 4.0, fp8_scale_sweep=True, error_func=lambda x, xq: x
             )
         assert cal is None
+
+
+class _RawTEGroupedLinear(nn.Module):
+    """Unquantized CPU stand-in with ``TEGroupedLinear``'s weight0..N and ``m_splits`` layout."""
+
+    def __init__(self, num_gemms: int, in_features: int, out_features: int):
+        super().__init__()
+        self.num_gemms = num_gemms
+        for i in range(num_gemms):
+            self.register_parameter(
+                f"weight{i}", nn.Parameter(torch.randn(out_features, in_features))
+            )
+
+
+class _QuantFakeTEGroupedLinear(QuantModule):
+    """Quantized CPU stand-in matching ``_QuantTEGroupedLinear``'s attribute and forward contract."""
+
+    def _setup(self):
+        self.input_quantizer = TensorQuantizer()
+        self.weight_quantizer = GroupedQuantizer(
+            *(TensorQuantizer() for _ in range(self.num_gemms))
+        )
+        self.output_quantizer = TensorQuantizer()
+        self.output_quantizer.disable()
+
+    def iter_weights_for_calibration(self):
+        for i in range(self.num_gemms):
+            yield getattr(self, f"weight{i}"), self.weight_quantizer[i]
+
+    def forward(self, inp: torch.Tensor, m_splits):
+        inp = self.input_quantizer(inp)
+        splits = m_splits.tolist() if isinstance(m_splits, torch.Tensor) else list(m_splits)
+        chunks = torch.split(inp.reshape(-1, inp.shape[-1]), splits)
+        outs = [
+            nn.functional.linear(chunk, self.weight_quantizer[i](getattr(self, f"weight{i}")))
+            for i, chunk in enumerate(chunks)
+        ]
+        return self.output_quantizer(torch.cat(outs, dim=0))
+
+
+class _HybridDenseAndGroupedModel(nn.Module):
+    """Minimal dense + TEGroupedLinear model for CPU LSQ/local_hessian and DP sync tests."""
+
+    def __init__(self, num_gemms: int = 3, hidden: int = 16, expert_parallel_state=None):
+        super().__init__()
+        self.dense = mtq.nn.QuantLinear(hidden, hidden, bias=False)
+        raw = _RawTEGroupedLinear(num_gemms, hidden, hidden)
+        if expert_parallel_state is not None:
+            raw._parallel_state = expert_parallel_state
+        self.experts = _QuantFakeTEGroupedLinear.convert(raw)
+
+    def forward(self, x: torch.Tensor, m_splits, use_kwargs: bool = False):
+        h = self.dense(x)
+        if use_kwargs:
+            return self.experts(h, m_splits=m_splits)
+        return self.experts(h, m_splits)
+
+
+_STATIC_INT4_QUANT_CFG = [
+    {"quantizer_name": "*", "enable": False},
+    {
+        "quantizer_name": "*weight_quantizer",
+        "cfg": {"num_bits": 4, "block_sizes": {-1: 16, "type": "static"}},
+    },
+]
+
+
+class TestLocalHessianTEGroupedLinear:
+    def test_captures_per_expert_hessians_and_refines_lsq(self):
+        """TEGroupedLinear splits inputs by m_splits per expert instead of falling back to MSE."""
+        torch.manual_seed(0)
+        model_lh = _HybridDenseAndGroupedModel(num_gemms=3, hidden=16)
+        model_mse = copy.deepcopy(model_lh)
+
+        # Expert 0 gets skewed rows via list m_splits; expert 1 gets different skew via tensor
+        # m_splits (and kwargs); expert 2 receives 0 tokens across all batches.
+        x0 = torch.randn(5, 16)
+        x0[:3, 0] *= 40.0
+        x0[3:, 1] *= 40.0
+        x1 = torch.randn(4, 16)
+        x1[:, 2] *= 40.0
+        x_empty = torch.empty(0, 16)
+
+        def forward_loop(m):
+            m(x0, [3, 2, 0])
+            m(x1, torch.tensor([0, 4, 0]), use_kwargs=True)
+            m(x_empty, [0, 0, 0])
+
+        lh_cfg = {
+            "quant_cfg": _STATIC_INT4_QUANT_CFG,
+            "algorithm": {
+                "method": "lsq",
+                "scale_algorithm": {
+                    "method": "local_hessian",
+                    "fp8_scale_sweep": False,
+                    "debug": True,
+                },
+            },
+        }
+        mse_cfg = {
+            "quant_cfg": _STATIC_INT4_QUANT_CFG,
+            "algorithm": {
+                "method": "lsq",
+                "scale_algorithm": {"method": "mse", "fp8_scale_sweep": False},
+            },
+        }
+        mtq.quantize(model_lh, lh_cfg, forward_loop=forward_loop)
+        mtq.quantize(model_mse, mse_cfg, forward_loop=forward_loop)
+
+        accs = model_lh._local_hessian_accumulators
+        wqs = model_lh.experts.weight_quantizer
+        assert accs[id(wqs[0])].num_samples == 3
+        assert accs[id(wqs[1])].num_samples == 6
+        assert id(wqs[2]) not in accs  # unrouted expert allocates no Hessian
+
+        # Verify each routed expert's Hessian matches its exact routed hidden activations.
+        with torch.no_grad():
+            h0 = model_lh.dense.weight_quantizer
+            assert isinstance(h0, StaticBlockScaleQuantizer) and h0._lsq
+            dense_h0 = nn.functional.linear(x0, model_lh.dense.weight)
+            dense_h1 = nn.functional.linear(x1, model_lh.dense.weight)
+            e0_in = dense_h0[:3]
+            e1_in = torch.cat([dense_h0[3:], dense_h1], dim=0)
+            torch.testing.assert_close(
+                accs[id(wqs[0])].hessian_per_block, (e0_in.T @ e0_in).unsqueeze(0)
+            )
+            torch.testing.assert_close(
+                accs[id(wqs[1])].hessian_per_block, (e1_in.T @ e1_in).unsqueeze(0)
+            )
+
+        # Routed experts refine LSQ _amax_post differently from plain MSE; unrouted matches MSE.
+        wqs_mse = model_mse.experts.weight_quantizer
+        assert all(q._lsq for q in wqs)
+        assert any(not torch.allclose(wqs[i]._amax_post, wqs_mse[i]._amax_post) for i in (0, 1))
+        assert torch.equal(wqs[2]._amax_post, wqs_mse[2]._amax_post)
+
+    @pytest.mark.parametrize(
+        "bad_splits",
+        [[2, 2], [-1, 3, 2], [2, 3, 2], torch.tensor([[2, 2, 2]])],
+        ids=["wrong-len", "negative", "exceeds-rows", "not-1d"],
+    )
+    def test_grouped_linear_slices_rejects_invalid_m_splits(self, bad_splits):
+        assert list(_grouped_linear_slices([2, 0, 3], 3, 6)) == [(0, 0, 2), (2, 2, 5)]
+        with pytest.raises(RuntimeError):
+            list(_grouped_linear_slices(bad_splits, 3, 6))
+
+
+def _dp_local_hessian_lsq_job(rank, size):
+    """Multi-rank DP Hessian sync for dense + TEGroupedLinear under LSQ, plus opt-out & EP cases."""
+    assert size == 2
+    # Distinct per-rank calibration inputs and asymmetric MoE routing:
+    # - Expert 0: routed on both ranks with different token counts (3 vs 5) and opposite skew.
+    # - Expert 1: routed ONLY on rank 0 (0 tokens on rank 1) -> must not deadlock and must match.
+    # - Expert 2: routed on neither rank -> skipped on both ranks without Hessian allocation.
+    torch.manual_seed(123)
+    x_r0 = torch.randn(7, 16)
+    x_r0[:3, 0] *= 50.0
+    x_r0[3:, 4] *= 50.0
+    splits_r0 = [3, 4, 0]
+
+    x_r1 = torch.randn(5, 16)
+    x_r1[:, 8] *= 50.0
+    splits_r1 = [5, 0, 0]
+
+    local_x, local_splits = (x_r0, splits_r0) if rank == 0 else (x_r1, splits_r1)
+
+    def make_model(expert_ps=None):
+        torch.manual_seed(0)
+        return _HybridDenseAndGroupedModel(num_gemms=3, hidden=16, expert_parallel_state=expert_ps)
+
+    def run_lsq_lh(model, batches, distributed_sync=True):
+        mtq.set_quantizer_by_cfg(model, _STATIC_INT4_QUANT_CFG)
+        lsq(
+            model,
+            forward_loop=lambda m: [m(x, sp) for x, sp in batches],
+            scale_algorithm={
+                "method": "local_hessian",
+                "distributed_sync": distributed_sync,
+                "fp8_scale_sweep": False,
+                "debug": True,
+            },
+        )
+        return model
+
+    # 1. Synced DP run vs pooled single-rank reference (inside bounded_collectives to fail fast).
+    with bounded_collectives():
+        dp_model = run_lsq_lh(make_model(), [(local_x, local_splits)], distributed_sync=True)
+
+    ref_model = run_lsq_lh(
+        make_model(), [(x_r0, splits_r0), (x_r1, splits_r1)], distributed_sync=False
+    )
+
+    # Every weight's synced Hessian, sample count, and initial LSQ _amax_post/_amax_pre must match
+    # both across DP ranks and with the pooled single-rank reference.
+    dp_accs = dp_model._local_hessian_accumulators
+    ref_accs = ref_model._local_hessian_accumulators
+    pairs = [
+        ("dense", dp_model.dense.weight_quantizer, ref_model.dense.weight_quantizer, 12),
+        (
+            "expert0",
+            dp_model.experts.weight_quantizer[0],
+            ref_model.experts.weight_quantizer[0],
+            8,
+        ),
+        (
+            "expert1",
+            dp_model.experts.weight_quantizer[1],
+            ref_model.experts.weight_quantizer[1],
+            4,
+        ),
+        (
+            "expert2",
+            dp_model.experts.weight_quantizer[2],
+            ref_model.experts.weight_quantizer[2],
+            0,
+        ),
+    ]
+    for label, q_dp, q_ref, expected_samples in pairs:
+        if expected_samples > 0:
+            assert dp_accs[id(q_dp)].num_samples == expected_samples, label
+            torch.testing.assert_close(
+                dp_accs[id(q_dp)].normalized_hessian(),
+                ref_accs[id(q_ref)].normalized_hessian(),
+                msg=label,
+            )
+        else:
+            assert id(q_dp) not in dp_accs, label
+        # Peer rank comparison: broadcast rank 0's _amax_post/_amax_pre and require exact equality.
+        for attr in ("_amax_post", "_amax_pre"):
+            local_t = getattr(q_dp, attr).detach().clone()
+            r0_t = local_t.clone()
+            dist.broadcast(r0_t, src=0)
+            assert torch.equal(local_t, r0_t), f"{label}.{attr} diverged across DP ranks"
+            assert torch.equal(local_t, getattr(q_ref, attr)), f"{label}.{attr} != pooled ref"
+
+    # 2. distributed_sync=False keeps rank-local Hessians (so ranks diverge as expected).
+    nosync_model = run_lsq_lh(make_model(), [(local_x, local_splits)], distributed_sync=False)
+    e1_q = nosync_model.experts.weight_quantizer[1]
+    assert (id(e1_q) in nosync_model._local_hessian_accumulators) == (rank == 0)
+
+    # 3. EP-sharded experts (data_parallel_group=-1, expert_model_parallel_group=None) must NOT
+    # merge Hessians across EP ranks (different ranks own different experts).
+    ep_ps = ParallelState(data_parallel_group=-1, expert_model_parallel_group=None)
+    with bounded_collectives():
+        ep_model = run_lsq_lh(make_model(ep_ps), [(local_x, local_splits)], distributed_sync=True)
+    ep_accs = ep_model._local_hessian_accumulators
+    assert ep_accs[id(ep_model.dense.weight_quantizer)].num_samples == 12  # dense still DP-synced
+    assert ep_accs[id(ep_model.experts.weight_quantizer[0])].num_samples == (3 if rank == 0 else 5)
+    assert (id(ep_model.experts.weight_quantizer[1]) in ep_accs) == (rank == 0)
+
+
+class TestLocalHessianDistributedSync:
+    def test_dp_sync_matches_pooled_hessian_and_agrees_on_lsq_amax(self, cpu_dist_workers):
+        """DP sync merges per-block Hessians (incl. sparse TEGroupedLinear experts) and unifies LSQ."""
+        cpu_dist_workers.run(_dp_local_hessian_lsq_job)
