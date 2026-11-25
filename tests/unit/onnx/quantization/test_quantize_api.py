@@ -276,6 +276,39 @@ def test_fp8_autotune_subthreshold_result_uses_precision_matched_fallback(monkey
     assert selected.graph.output[0].type.tensor_type.elem_type == TensorProto.FLOAT
 
 
+@pytest.mark.parametrize(
+    ("passes", "concat_elimination"), [(["concat_elimination"], True), ([], False)]
+)
+def test_autotune_follows_concat_elimination_pass(
+    monkeypatch, tmp_path, passes, concat_elimination
+):
+    monkeypatch.setattr(trt_utils, "TRT_PYTHON_AVAILABLE", False)
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+    onnx_path = tmp_path / "model.onnx"
+    export_as_onnx(SimpleMLP(), torch.randn(2, 16, 16), onnx_filename=str(onnx_path), opset=19)
+    captured = {}
+
+    class _StopAfterAutotuneError(Exception):
+        pass
+
+    def fake_find_nodes(*args, **kwargs):
+        captured.update(kwargs)
+        raise _StopAfterAutotuneError
+
+    monkeypatch.setattr(quantize_module, "_find_nodes_to_quantize_autotune", fake_find_nodes)
+
+    with pytest.raises(_StopAfterAutotuneError):
+        moq.quantize(
+            str(onnx_path),
+            output_path=str(tmp_path / "out.onnx"),
+            quantize_mode="int8",
+            calibration_eps=["cpu"],
+            autotune=True,
+            passes=passes,
+        )
+    assert captured["concat_elimination"] is concat_elimination
+
+
 def test_quantize_infers_input_profiles_after_ep_support_update(monkeypatch, tmp_path):
     quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
     onnx_path = tmp_path / "model.onnx"

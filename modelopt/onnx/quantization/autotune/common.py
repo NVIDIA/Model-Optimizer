@@ -813,6 +813,9 @@ class Config:
       every requantization boundary (see export_utils.build_activation_scales) rather than
       default_q_scale everywhere, which leaves no rescale for TensorRT to perform
       (default: True).
+    - concat_elimination: Share one activation scale across a Concat's quantized inputs and
+      output, as the concat_elimination quantization pass does; set it to match the passes
+      the final quantization runs (default: True).
     - default_q_zero_point: Zero-point for Q/DQ; 0 for int8, 128 for uint8 (default: 0).
     - default_quant_type: Quantization type; "int8" (default) or "fp8".
     - default_dq_dtype: Dtype for DequantizeLinear output; "float32" (default) or "float16".
@@ -854,3 +857,4 @@ class Config:
 
     # Candidate scale assignment (after the existing fields to keep positional order)
     use_varied_activation_scales: bool = True
+    concat_elimination: bool = True

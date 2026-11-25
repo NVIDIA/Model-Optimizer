@@ -207,3 +207,18 @@ def test_workflow_transforms_every_benchmark_export(monkeypatch, tmp_path):
     autotuner.pattern_cache.add_pattern_schemes.assert_called_once_with(stale_pattern)
     assert autotuner.profiled_patterns == []
     assert autotuner.config.default_quant_type == "fp8"
+
+
+@pytest.mark.parametrize("concat_elimination", [True, False])
+def test_workflow_passes_concat_elimination_to_config(monkeypatch, tmp_path, concat_elimination):
+    autotuner = Mock(regions=[], baseline_latency_ms=None)
+    autotuner.export_onnx.return_value = onnx.ModelProto().SerializeToString()
+    monkeypatch.setattr(workflows, "QDQAutotuner", lambda model: autotuner)
+    monkeypatch.setattr(workflows, "benchmark_onnx_model", lambda *args, **kwargs: 1.0)
+
+    workflows.region_pattern_autotuning_workflow(
+        onnx.ModelProto(), output_dir=tmp_path, concat_elimination=concat_elimination
+    )
+
+    config = autotuner.initialize.call_args.args[0]
+    assert config.concat_elimination is concat_elimination

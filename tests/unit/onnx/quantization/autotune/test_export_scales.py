@@ -349,6 +349,27 @@ def test_concats_sharing_an_input_leave_their_output_rearrange_chains():
     assert groups["f"] != groups["cat1"]
 
 
+def test_concat_keeps_separate_scales_without_concat_elimination(model):
+    points = _points(model, [("conv2", 0, "p1"), ("conv3", 0, "cat")])
+    scales = _activation_scales(export_qdq_onnx(model, points, Config(concat_elimination=False)))
+    assert scales["p1"] != scales["cat"]
+
+
+def test_rearrange_chains_join_concat_members_without_concat_elimination():
+    """Without the pass no Concat group forms, so Concat members keep their rearrange chains."""
+    shape = [1, 4, 4, 4]
+    nodes = [
+        helper.make_node("Transpose", ["a"], ["b"], name="transpose1", perm=[0, 1, 3, 2]),
+        helper.make_node("Concat", ["b", "d"], ["cat"], name="concat1", axis=1),
+        helper.make_node("Transpose", ["cat"], ["f"], name="transpose2", perm=[0, 1, 3, 2]),
+    ]
+    graph = _graph(nodes, {"a": shape, "d": shape}, {"f": [1, 8, 4, 4]})
+    groups = build_scale_group_map(graph, {"a", "b", "d", "cat", "f"}, concat_elimination=False)
+    assert groups["a"] == groups["b"]
+    assert groups["cat"] == groups["f"]
+    assert len({groups["b"], groups["d"], groups["cat"]}) == 3
+
+
 def test_flag_off_restores_the_uniform_scale(model):
     points = _points(model, [("pool1", 0, "r1"), ("conv2", 0, "p1"), ("conv3", 0, "cat")])
     config = Config(use_varied_activation_scales=False)

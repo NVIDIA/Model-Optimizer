@@ -217,14 +217,16 @@ def _hashed_scale(key: str) -> float:
     return float(np.exp(np.log(low) + (np.log(high) - np.log(low)) * digest / 0xFFFFFFFF))
 
 
-def build_scale_group_map(graph: gs.Graph, quantized_tensors: set[str]) -> dict[str, str]:
+def build_scale_group_map(
+    graph: gs.Graph, quantized_tensors: set[str], *, concat_elimination: bool = True
+) -> dict[str, str]:
     """Map each quantized tensor to the representative of its scale group.
 
     Tensors in one group get one scale, as they do in the quantized model:
 
     * The quantized inputs and the output of a Concat whose output is quantized, which the
-      ``concat_elimination`` pass unifies. Unquantized inputs stay out: merging a boundary
-      the quantized model keeps would drop a requantization it performs.
+      ``concat_elimination`` pass unifies, when that pass runs. Unquantized inputs stay out:
+      merging a boundary the quantized model keeps would drop a requantization it performs.
     * Tensors joined by rearranging ops, including chains of such ops through tensors this
       candidate leaves unquantized, since they hold the same values. A member of a Concat group
       stays out and takes the group's scale instead, except the output of a group formed by one
@@ -236,13 +238,16 @@ def build_scale_group_map(graph: gs.Graph, quantized_tensors: set[str]) -> dict[
     Args:
         graph: Graph the candidate is built from.
         quantized_tensors: Names of the (activation) tensors that receive Q/DQ.
+        concat_elimination: Whether the final quantization runs the concat_elimination pass.
 
     Returns:
         Mapping from every name in ``quantized_tensors`` to its group representative, which
         is the tensor itself when it shares a scale with nothing.
     """
+    # Without the pass no Concat group forms, so no tensor counts as a Concat member.
+    is_concat_member = quantized_tensors.__contains__ if concat_elimination else lambda _: False
     representatives = group_scale_sharing_tensors(
-        graph, quantized_tensors.__contains__, through_rearrange_ops=True
+        graph, is_concat_member, through_rearrange_ops=True
     )
     return {name: representatives.get(name, name) for name in quantized_tensors}
 
@@ -369,7 +374,9 @@ def insert_qdq_at_tensors(
             for ip in resolved_insertion_points
             if not isinstance(tensor_map.get(ip.tensor_name), gs.Constant)
         }
-        scale_group_map = build_scale_group_map(graph, quantized_activations)
+        scale_group_map = build_scale_group_map(
+            graph, quantized_activations, concat_elimination=config.concat_elimination
+        )
         activation_scales = build_activation_scales(
             quantized_activations,
             scale_group_map,
