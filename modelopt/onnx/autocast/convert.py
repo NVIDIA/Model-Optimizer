@@ -323,20 +323,22 @@ def convert_to_f16(
     )
     node_name_rule = DisabledNodeNameRegexRule(nodes_to_exclude or [])
     tensor_types = onnx_utils._build_tensor_type_map(model) if sanitizer.custom_ops else {}
-    fp32_custom_nodes = {
+    fixed_custom_nodes = {
         node.name
         for node in model.graph.node
         if node.op_type in (sanitizer.custom_ops or ())
-        and not any(
-            tensor_types.get(name) in (onnx.TensorProto.FLOAT16, onnx.TensorProto.BFLOAT16)
-            for name in node.input
+        and any(
+            tensor_types.get(name)
+            in (onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16, onnx.TensorProto.BFLOAT16)
+            and tensor_types[name] != precision_converter.low_precision_type.onnx_type
+            for name in (*node.input, *node.output)
         )
     }
     high_precision_nodes = [
         node.name
         for node in model.graph.node
         if node.op_type in op_block_list
-        or node.name in fp32_custom_nodes
+        or node.name in fixed_custom_nodes
         or node_name_rule.check(node)
     ]
     high_precision_node_set = set(high_precision_nodes)

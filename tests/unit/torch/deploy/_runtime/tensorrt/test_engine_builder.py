@@ -306,20 +306,33 @@ def test_trt11_rejects_implicit_precision_before_writing(
 
 
 @pytest.mark.parametrize(
-    ("precision", "plugin_type", "output_type", "overridable"),
+    ("precision", "plugin_types", "output_type", "layout"),
     [
-        ("fp16", TensorProto.FLOAT, TensorProto.FLOAT, False),
-        ("bf16", TensorProto.FLOAT, TensorProto.FLOAT, False),
-        ("fp16", TensorProto.FLOAT16, TensorProto.FLOAT16, False),
-        ("fp16", TensorProto.FLOAT, TensorProto.FLOAT16, False),
-        ("bf16", TensorProto.FLOAT, TensorProto.FLOAT16, False),
-        ("fp16", TensorProto.FLOAT, TensorProto.FLOAT16, True),
-        ("bf16", TensorProto.FLOAT, TensorProto.FLOAT16, True),
+        ("fp16", (TensorProto.FLOAT,), TensorProto.FLOAT, "default"),
+        ("bf16", (TensorProto.FLOAT,), TensorProto.FLOAT, "default"),
+        ("fp16", (TensorProto.FLOAT16,), TensorProto.FLOAT16, "default"),
+        ("fp16", (TensorProto.FLOAT,), TensorProto.FLOAT16, "default"),
+        ("bf16", (TensorProto.FLOAT,), TensorProto.FLOAT16, "default"),
+        ("fp16", (TensorProto.FLOAT,), TensorProto.FLOAT16, "overridable"),
+        ("bf16", (TensorProto.FLOAT,), TensorProto.FLOAT16, "overridable"),
+        ("fp16", (TensorProto.FLOAT16,), TensorProto.FLOAT, "default"),
+    ]
+    + [
+        (precision, (TensorProto.FLOAT, input_type), TensorProto.FLOAT16, "default")
+        for precision, input_type in product(
+            ["fp16", "bf16"], [TensorProto.FLOAT16, TensorProto.BFLOAT16]
+        )
+    ]
+    + [
+        (precision, (TensorProto.FLOAT, TensorProto.FLOAT16), TensorProto.FLOAT16, layout)
+        for precision, layout in product(["fp16", "bf16"], ["aliased", "empty"])
     ],
 )
 def test_trt11_preserves_plugin_precision(
-    tmp_path, monkeypatch, precision, plugin_type, output_type, overridable
+    tmp_path, monkeypatch, precision, plugin_types, output_type, layout
 ):
+    plugin_type = plugin_types[0]
+    overridable = layout in ("overridable", "aliased")
     monkeypatch.setattr(tensorrt, "__version__", "11.4")
 
     def discover_plugin(self):
@@ -346,6 +359,22 @@ def test_trt11_preserves_plugin_precision(
     )
     if overridable:
         graph.input.append(helper.make_tensor_value_info("weight", plugin_type, [4, 4]))
+    if len(plugin_types) > 1:
+        shape = [0, 4] if layout == "empty" else [1, 4]
+        graph.node[0].input.append("half_input")
+        if layout == "aliased":
+            graph.node.insert(
+                0, helper.make_node("Cast", ["x"], ["half_input"], to=plugin_types[1])
+            )
+        else:
+            graph.input.append(helper.make_tensor_value_info("half_input", plugin_types[1], shape))
+        graph.node.extend(
+            [
+                helper.make_node("Cast", ["half_input"], ["half_as_float"], to=TensorProto.FLOAT),
+                helper.make_node("Celu", ["half_as_float"], ["high"], name="celu"),
+            ]
+        )
+        graph.output.append(helper.make_tensor_value_info("high", TensorProto.FLOAT, shape))
     original_io = [v.SerializeToString() for v in (*graph.input, *graph.output)]
     path = tmp_path / "plugin.onnx"
     onnx.save_model(
@@ -367,7 +396,10 @@ def test_trt11_preserves_plugin_precision(
             for v in (*model.graph.input, *model.graph.output, *model.graph.value_info)
         }
         plugin = next(node for node in model.graph.node if node.op_type == "FloatPlugin")
-        assert types[plugin.input[0]] == plugin_type
+        assert [types[name] for name in plugin.input] == list(plugin_types)
+        if len(plugin_types) > 1:
+            celu = next(node for node in model.graph.node if node.op_type == "Celu")
+            assert types[celu.input[0]] == TensorProto.FLOAT
         assert types[plugin.output[0]] == output_type
         assert model.graph.initializer[0].data_type == (
             plugin_type

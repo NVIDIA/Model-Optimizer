@@ -215,6 +215,29 @@ class PrecisionConverter:
             high_precision_nodes, low_precision_nodes
         )
         self._high_precision_nodes = set(high_precision_nodes)
+        custom_nodes = (
+            {
+                node.name
+                for node in self.model.graph.node
+                if node.op_type in (self.custom_ops or ())
+                and node.name in self._high_precision_nodes
+            }
+            if self.custom_ops
+            else set()
+        )
+        tensor_types = onnx_utils._build_tensor_type_map(self.model) if self.custom_ops else {}
+        custom_inputs = (
+            [
+                (node, index, tensor_types[name])
+                for node in self.model.graph.node
+                if node.name in custom_nodes
+                for index, name in enumerate(node.input)
+                if tensor_types.get(name)
+                in (onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16, onnx.TensorProto.BFLOAT16)
+            ]
+            if custom_nodes
+            else []
+        )
 
         # We remove any existing casts to FP16/BF16/FP32, as we will be adding our own
         self._remove_preexisting_casts()
@@ -250,14 +273,20 @@ class PrecisionConverter:
                 tensor_to_producers[output].append(node)
 
         # Add cast nodes for "cast_up" tensors
+        cast_up_excluded = (
+            [*low_precision_nodes, *custom_nodes] if custom_nodes else low_precision_nodes
+        )
         for tensor_name in cast_up_tensors:
-            exclude_consumers = low_precision_nodes
+            exclude_consumers = cast_up_excluded
             if tensor_name in fp32_input_to_low_precision_node:
                 # For the low precision nodes that take a FP32 input, we don't exclude it from
                 # casting up so that the input can be converted to FP32 as expected.
                 exclude_consumers = list(
-                    set(low_precision_nodes)
-                    - {n.name for n in fp32_input_to_low_precision_node[tensor_name]}
+                    (
+                        set(low_precision_nodes)
+                        - {n.name for n in fp32_input_to_low_precision_node[tensor_name]}
+                    )
+                    | custom_nodes
                 )
             self._add_cast(
                 tensor_name,
@@ -276,6 +305,25 @@ class PrecisionConverter:
                 tensor_to_consumers=tensor_to_consumers,
                 tensor_to_producers=tensor_to_producers,
             )
+
+        # Fixed plugin interfaces need per-input types rather than a uniform FP32 boundary.
+        custom_casts = (
+            {
+                (node.input[0], onnx_utils.get_cast_to_type(node)): node.output[0]
+                for node in self.model.graph.node
+                if node.op_type == "Cast"
+            }
+            if custom_inputs
+            else {}
+        )
+        for node, index, dtype in custom_inputs:
+            name = node.input[index]
+            if (name, dtype) not in custom_casts:
+                precision = self._precision_type_from_onnx_type(dtype)
+                assert precision is not None
+                self._add_cast(name, precision, tensor_to_consumers={}, force_real_cast=True)
+                custom_casts[name, dtype] = f"{name}_cast_to_{precision.str_short}"
+            node.input[index] = custom_casts[name, dtype]
 
         # Convert initializers to correct precision according to the consumer nodes (main graph + subgraphs)
         self._convert_initializers_recursive(
@@ -591,7 +639,7 @@ class PrecisionConverter:
             # Propagate tensor types to the children nodes (until another Cast or Q node is met)
             _propagate_cast_type_through_nodes(node, np_type)
 
-        model = onnx_utils.export_onnx(graph)
+        model = onnx_utils.export_onnx(graph.toposort())
         model.graph.ClearField("input")
         model.graph.input.extend(inputs)
         return model
@@ -1413,6 +1461,7 @@ class PrecisionConverter:
         exclude_consumers: list[str] = [],
         tensor_to_consumers: dict[str, list[onnx.NodeProto]] | None = None,
         tensor_to_producers: dict[str, list[onnx.NodeProto]] | None = None,
+        force_real_cast: bool = False,
     ) -> None:
         """Adds a cast operation on a tensor and reconnects its consumers.
 
@@ -1424,6 +1473,7 @@ class PrecisionConverter:
                 If not provided, the map will be computed on the fly.
             tensor_to_producers: Optional pre-computed map of tensor names to their producer nodes.
                 If not provided, the map will be computed on the fly.
+            force_real_cast: Preserve per-consumer types even for empty tensors.
 
         NOTE: It is up to the user to ensure that the tensor_to_consumers and tensor_to_producers
         maps are up to date before calling this function. Consecutive casts in the graph will break
@@ -1439,7 +1489,7 @@ class PrecisionConverter:
             and tensor_name in self.original_network_io
             and cast_to.onnx_type != self.original_network_io[tensor_name]
         )
-        if self._is_empty_tensor(tensor_name) and not must_preserve_io_type:
+        if not force_real_cast and self._is_empty_tensor(tensor_name) and not must_preserve_io_type:
             logger.debug(f"Fake-casting empty tensor: {tensor_name}")
             if tensor_name in self.value_info_map:
                 tensor_info = self.value_info_map[tensor_name]
