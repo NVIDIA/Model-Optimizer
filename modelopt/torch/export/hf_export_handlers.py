@@ -527,6 +527,8 @@ def _export_mxfp4_release_experts(module: nn.Module, dtype: torch.dtype) -> None
         packed[weight_name] = torch.cat(codes), torch.cat(scales)
     for weight_name, (codes, scales) in packed.items():
         blocks = codes.reshape(*scales.shape, -1)
-        delattr(module, weight_name)
+        # Not delattr: on a quantized module that also drops the weight's fake quantization,
+        # which the offload and FSDP2 exports' restore of the weight does not bring back.
+        del module._parameters[weight_name]
         module.register_buffer(f"{weight_name}_blocks", blocks)
         module.register_buffer(f"{weight_name}_scales", scales)
