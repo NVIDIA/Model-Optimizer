@@ -127,6 +127,17 @@ def _refuse_unsupported_distributed_calibration(
     anything changes, so the caller seeds the experts' ``ParallelState`` before quantizing, as the
     expert-parallel load does; their quantized modules are checked again before they calibrate.
     """
+    # Whatever the model's layout: each process would search the shared scales, and find the groups
+    # to share them, on its own data and forwards.
+    if dist.is_distributed_run() and any(
+        mode == "svdquant_calibrate" and options.get("fused_group_scale")
+        for mode, options in get_modelike_from_algo_cfg(algorithm)
+    ):
+        raise NotImplementedError(
+            f"SVDQuant's fused_group_scale is not supported in a run of {dist.size()} processes: "
+            "each would pick its own smoothing scales and fused groups. Calibrate in a single "
+            "process, or without fused_group_scale."
+        )
     plan = dist.recorded_distribution_plan(model)
     if plan is None or plan.world_size == 1:
         return

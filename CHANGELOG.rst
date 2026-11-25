@@ -18,7 +18,7 @@ Changelog
 - GPTQ calibration is 25-35% faster in our MoE-expert and dense-MLP tests, with the GGML IQ formats and with NVFP4 under ``fused: true``. Results change only at round-off.
 - GPTQ now defaults to ``fused=True``, running the fused Triton update for static NVFP4 weights on SM89+ (4/6 scaling and other formats keep the unfused loop). Set ``fused: false`` to restore the previous behavior.
 - Add ``fused_group_scale`` and ``fused_group_svd`` to SVDQuant (``algorithm: {method: svdquant, fused_group_scale: true, fused_group_svd: true}``). They calibrate the layers that Hugging Face export fuses (q/k/v and gate/up, and Q/K/V in diffusers attention blocks) with the smoothing scale, low-rank branch and ranges that export writes, so export keeps these layers as calibrated instead of rewriting them; MoE experts that are separate linears are still averaged together at export.
-- SVDQuant calibration is up to 4x faster on large models: its low-rank factors now come from an eigendecomposition instead of a full SVD. Results change only at BF16 round-off.
+- SVDQuant calibration is up to 4x faster on large models: its low-rank factors now come from an eigendecomposition, with a full SVD only for weights whose spectrum it cannot resolve. On the Qwen3 weights measured, results changed only at BF16 round-off.
 
 *Quantization - QAT / QAD*
 

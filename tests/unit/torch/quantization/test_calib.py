@@ -36,6 +36,7 @@ from modelopt.torch.quantization.model_calib import (
     svd,
 )
 from modelopt.torch.quantization.nn import QuantLinear, TensorQuantizer
+from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
 
@@ -583,15 +584,24 @@ def test_svdquant_fused_group_scale():
 
 
 @pytest.mark.parametrize(
-    ("autocast", "scale"), [(False, 1.0), (True, 1.0), (False, 1e20), (False, 1e-25)]
+    ("autocast", "scale", "lead"),
+    [
+        (False, 1.0, 1.0),
+        (True, 1.0, 1.0),
+        (False, 1e20, 1.0),
+        (False, 1e-25, 1.0),
+        (False, 1.0, 1e3),
+    ],
 )
 @pytest.mark.parametrize(("shape", "rank"), [((128, 48), 4), ((48, 128), 4), ((6, 8), 8)])
-def test_svd_matches_full_svd(shape, rank, autocast, scale):
+def test_svd_matches_full_svd(shape, rank, autocast, scale, lead):
     """The top-rank factors match the full SVD for tall and wide weights, and pad past the rank.
-    Under BF16 autocast too, which would otherwise compute the Gram matrix in BF16, and for weights
-    whose squares overflow or underflow float32."""
+    Under BF16 autocast too, which would otherwise compute the Gram matrix in BF16; for weights
+    whose squares overflow or underflow float32; and when the first singular value is ``lead``
+    times larger, which leaves the Gram matrix unable to resolve the others."""
     torch.manual_seed(0)
     spectrum = torch.logspace(0, -2, min(shape))
+    spectrum[0] *= lead
     u = torch.linalg.qr(torch.randn(shape[0], min(shape)))[0]
     v = torch.linalg.qr(torch.randn(shape[1], min(shape)))[0]
     weight = u * spectrum @ v.T * scale
@@ -599,8 +609,9 @@ def test_svd_matches_full_svd(shape, rank, autocast, scale):
         us, vt = svd(weight, rank)
     assert us.shape == (shape[0], rank) and vt.shape == (rank, shape[1])
     k = min(rank, *shape)
+    atol = 1e-5 if lead == 1 else 3e-4  # a full float32 SVD's own error grows with s_1
     torch.testing.assert_close(
-        us @ vt / scale, u[:, :k] * spectrum[:k] @ v[:, :k].T, atol=1e-5, rtol=0
+        us @ vt / scale, u[:, :k] * spectrum[:k] @ v[:, :k].T, atol=atol, rtol=0
     )
     torch.testing.assert_close(vt[:k] @ vt[:k].T, torch.eye(k), atol=1e-5, rtol=0)
 
@@ -633,6 +644,43 @@ def test_svdquant_fused_group_svd():
                 assert torch.equal(
                     getattr(m.input_quantizer, attr), getattr(first.input_quantizer, attr)
                 )
+
+
+def test_svdquant_fused_group_scale_needs_one_forward():
+    """Linears that read the same tensor only in different forwards never ran together, so they
+    keep their own scales."""
+
+    class _TwoBranches(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p, self.r = nn.Linear(64, 64), nn.Linear(64, 64)
+
+        def forward(self, x, branch):
+            return getattr(self, branch)(x)
+
+    torch.manual_seed(0)
+    inputs = torch.randn(2, 16, 64) * torch.rand(64) * 10
+
+    def loop(model):  # the same tensor object in both forwards
+        model(inputs, "p")
+        model(inputs, "r")
+
+    _svdquant_fused_group_scale_case(_TwoBranches(), loop, groups={}, kept=["p", "r"])
+
+
+def _svdquant_fused_group_scale_in_a_distributed_run_job(rank, size):
+    model = _SharedInputLLM()  # neither FSDP2 nor a recorded distribution plan
+    config = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
+    config["algorithm"] = {"method": "svdquant", "fused_group_scale": True}
+    with pytest.raises(NotImplementedError, match=f"run of {size} processes"):
+        mtq.quantize(model, config, lambda m: m(torch.randn(2, 16, 64)))
+    assert not is_quantized(model)
+
+
+def test_svdquant_fused_group_scale_is_refused_in_a_distributed_run(cpu_dist_workers):
+    """Each process would search the shared scales and find the groups on its own data, whatever
+    the model's layout: every process refuses alike, before the model changes."""
+    cpu_dist_workers.run(_svdquant_fused_group_scale_in_a_distributed_run_job)
 
 
 def test_svdquant_fused_group_scale_diffusers():

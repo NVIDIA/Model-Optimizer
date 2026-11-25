@@ -18,6 +18,7 @@
 import fnmatch
 import itertools
 import math
+import re
 import sys
 import time
 import warnings
@@ -2029,7 +2030,17 @@ def awq_lite(
     # Lets enable stats collection
     # This will collect amax for input_quantizers and KV quantizers during the caching mode forward pass
     enable_stats_collection(model)
-    forward_loop(model)
+    # A tensor passed again in a later forward does not join its readers there to this one's.
+    new_forward = (
+        model.register_forward_pre_hook(lambda *_: shared_inputs.clear())
+        if fused_group_scale
+        else None
+    )
+    try:
+        forward_loop(model)
+    finally:
+        if new_forward is not None:
+            new_forward.remove()
 
     # Load the amax values collected during the caching mode forward pass
     # This will also perform distributed amax sync for input_quantizers
@@ -2430,11 +2441,16 @@ def _top_singular_factors(w, rank, oversample=32):
     The symmetric eigensolver is 6-20x faster than the SVD solvers on GPU at 1024-4096 columns. Its top
     ``rank + oversample`` eigenvectors span the top singular subspace, and a small SVD of ``w`` projected
     onto them (Rayleigh-Ritz) gives the singular triplets. On Qwen3 SVDQuant weights, the rank-``rank``
-    residual is closer to a float64 SVD's than a full float32 SVD's is.
+    residual is closer to a float64 SVD's than a full float32 SVD's is. A weight whose spectrum the Gram
+    matrix cannot resolve takes the full SVD instead.
     """
-    if rank + oversample >= min(w.shape):
+
+    def full_svd():
         u, s, vt = torch.linalg.svd(w, full_matrices=False)
         return u[:, :rank] * s[:rank], vt[:rank]
+
+    if rank + oversample >= min(w.shape):
+        return full_svd()
     wide = w.shape[0] < w.shape[1]
     a = w.T if wide else w
     lo, hi = w.aminmax()
@@ -2454,9 +2470,15 @@ def _top_singular_factors(w, rank, oversample=32):
         with torch.autocast(w.device.type, enabled=False):
             basis = torch.linalg.eigh(a.T @ a)[1][:, -(rank + oversample) :]
             u, s, yt = torch.linalg.svd(a @ basis, full_matrices=False)
-            u, s, v = u[:, :rank], s[:rank] * peak, basis @ yt[:rank].T
+            v = basis @ yt[:rank].T
     finally:
         matmul.fp32_precision = precision
+    # The Gram matrix resolves the k-th direction only to about eps·(s_1/s_k)² of its size. Past 1e-4,
+    # no longer far below BF16's rounding of the factors, the full SVD is taken instead (in float32,
+    # when s_rank < 0.035·s_1). Ritz values only underestimate s_rank, so the check errs that way.
+    if s[rank - 1] < s[0] * (torch.finfo(s.dtype).eps / 1e-4) ** 0.5:
+        return full_svd()
+    u, s = u[:, :rank], s[:rank] * peak
     return (v * s, u.T) if wide else (u * s, v.T)  # a = U·S·Vᵀ, and w = aᵀ when wide
 
 
@@ -2522,6 +2544,21 @@ def svdquant(
             module.weight.data.sub_(lora_b @ vt)
             module.weight_quantizer.reset_amax()
             module.input_quantizer.reset_amax()
+
+    if fused_group_scale:
+        # Export's rule for experts that are separate linears (requantize_resmooth_fused_llm_layers)
+        experts = [
+            name
+            for name, module in model.named_modules()
+            if is_quantized_linear(module) and re.search(r"experts?\.\d+\.", name)
+        ]
+        if experts:
+            warn_rank_0(
+                "fused_group_scale gives fused groups of dense layers the scale and low-rank branch "
+                f"export writes. MoE experts that are separate linears (e.g. {experts[0]}) are not "
+                "covered: export still averages their scales across experts and re-fits their "
+                "low-rank branches."
+            )
 
     create_and_replace_svdquant_linear_on_the_fly(model=model)
 

@@ -1258,7 +1258,9 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
             "The linears that export fuses (q/k/v and gate/up for LLMs, each attention block's "
             "Q/K/V for diffusers models) get the mean of their searched ``pre_quant_scale`` "
             "before the SVD and the final max calibration, instead of only at export. The "
-            "activation ranges are then measured under the scale that is exported."
+            "activation ranges are then measured under the scale that is exported. MoE experts "
+            "that are separate linears are not covered: export still averages their scales "
+            "across experts. Supported only when calibrating in a single process."
         ),
     )
 
