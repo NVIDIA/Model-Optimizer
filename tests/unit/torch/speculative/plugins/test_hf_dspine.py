@@ -132,8 +132,8 @@ def test_train_step_and_generate():
     out = model(input_ids=input_ids, attention_mask=torch.ones_like(input_ids), labels=input_ids)
 
     assert torch.isfinite(out.loss)
-    assert out.train_acc == [[out.dspine_metrics["accuracy"]]]
-    assert out.dspine_metrics["teacher_forcing"] == 0.5
+    assert out.train_acc == [[out.draft_metrics["accuracy"].item()]]
+    assert out.draft_metrics["teacher_forcing"].item() == 0.5
     out.loss.backward()
     trainable = {n: p for n, p in model.named_parameters() if p.requires_grad}
     assert any("selected_prefix_bridge" in n for n in trainable)
@@ -196,7 +196,8 @@ def test_objective_is_chunk_invariant(monkeypatch):
         out = model(input_ids=input_ids, labels=input_ids)
         out.loss.backward()
         grads = [p.grad.clone() for p in model.parameters() if p.requires_grad]
-        results.append((out.loss.detach(), grads, out.dspine_metrics))
+        metrics = {name: value.item() for name, value in out.draft_metrics.items()}
+        results.append((out.loss.detach(), grads, metrics))
     (loss_a, grads_a, metrics_a), (loss_b, grads_b, metrics_b) = results
     torch.testing.assert_close(loss_a, loss_b)
     for grad_a, grad_b in zip(grads_a, grads_b):

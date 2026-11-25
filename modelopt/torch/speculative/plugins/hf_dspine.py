@@ -66,7 +66,8 @@ from torch.utils.checkpoint import checkpoint
 from transformers import PreTrainedModel, TrainerCallback
 
 from ..dflash.conversion import DSpineDMRegistry
-from .hf_dflash import HFDFlashModel, _block_position_weights, _block_targets, _block_tokens
+from .dflash_losses import LossOutput, _block_position_weights, _block_targets, _block_tokens
+from .hf_dflash import HFDFlashModel
 from .modeling_dspine import DSpineModule
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,6 @@ class HFDSpineModel(HFDFlashModel):
             config.dflash_dspine_teacher_forcing_zero_fraction
         )
         self._training_progress = None
-        self._dspine_metrics = None
 
     @property
     def _needs_base_logits(self) -> bool:
@@ -187,28 +187,19 @@ class HFDSpineModel(HFDFlashModel):
         decay = (zero - step / max(total_steps, 1)) / (zero - hold)
         return beta, self.dflash_dspine_teacher_forcing_probability * min(max(decay, 0.0), 1.0)
 
-    def forward(self, *args, **kwargs):
-        """Run the DFlash training forward and attach the DSpine metrics."""
-        self._dspine_metrics = None
-        outputs = super().forward(*args, **kwargs)
-        if self._dspine_metrics is not None:
-            outputs["dspine_metrics"] = self._dspine_metrics
-            self._dspine_metrics = None
-        return outputs
-
     def _draft_loss(
         self,
         input_ids,
+        loss_mask,
         anchor_positions,
         block_keep_mask,
-        loss_mask,
         base_outputs,
         *,
         noise_embedding,
         position_ids,
         attention_mask,
-    ):
-        """Run the DSpine draft and its objective; returns ``(loss, refined accuracy)``."""
+    ) -> LossOutput:
+        """Run the DSpine draft and its objective; the accuracy is the refined pick's."""
         alignment_beta, teacher_forcing = self._schedule()
         bsz, n_blocks = anchor_positions.shape
         block_size = self.dflash_block_size
@@ -300,11 +291,9 @@ class HFDSpineModel(HFDFlashModel):
                 "alignment": alignment_sum / weight_sum,
                 "candidate_coverage": hits / n_valid,
             }
-            # One device sync for every scalar instead of one per value.
-            values = torch.stack(list(metrics.values())).tolist()
-        self._dspine_metrics = dict(zip(metrics, values))
-        self._dspine_metrics.update(alignment_beta=alignment_beta, teacher_forcing=teacher_forcing)
-        return loss, self._dspine_metrics["accuracy"]
+            metrics["alignment_beta"] = loss.new_tensor(alignment_beta)
+            metrics["teacher_forcing"] = loss.new_tensor(teacher_forcing)
+        return LossOutput(loss, metrics["accuracy"], metrics)
 
     def _objective_chunk(
         self,

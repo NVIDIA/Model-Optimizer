@@ -15,7 +15,6 @@
 
 """Support quantization for huggingface layers."""
 
-import importlib
 import inspect
 import logging
 import warnings
@@ -38,6 +37,7 @@ from modelopt.torch.kernels.common.attention import (
     validate_triton_attention_envelope,
 )
 from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
+from modelopt.torch.models import import_model_modules
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState, recorded_distribution_plan
@@ -841,6 +841,13 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     @property
     def _first_proj_weight_quantizers_attr(self) -> str:
         return f"{self._first_proj_attr}_weight_quantizers"
+
+    def _modelopt_unconverted_submodules(self) -> tuple[str, ...]:
+        """The quantizers: ModelOpt's ``save_pretrained`` keeps their state out of weight conversion.
+
+        They are named after the fused weights, which transformers before 5.21 mistakes them for.
+        """
+        return _get_fused_experts_quantizer_attr_names(self)
 
     def _get_expert_idx_from_first_proj(self, weight: torch.Tensor) -> int:
         """Recover expert index from the first-projection weight slice's storage offset.
@@ -2008,20 +2015,11 @@ AutoQuantizeGradientSearcher.register_custom_support(
 )
 
 # Model-specific PTQ support lives with its model in
-# ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import. It is
-# imported here: after the generic wrappers and wrapper lists it builds on are defined, and
-# before the homogeneous decoder discoverer below, since the first matching discoverer wins
-# and a model's own (Nemotron-H's) is the more specific one.
-for _model_type in (
-    "falcon",
-    "gpt_oss",
-    "llama4",
-    "nemotron_h",
-    "step3p5",
-    "step3p7",
-    "t5",
-):
-    importlib.import_module(f"modelopt.torch.models.{_model_type}.modeling_ptq")
+# ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import. Every
+# model's is imported here: after the generic wrappers and wrapper lists it builds on are
+# defined, and before the homogeneous decoder discoverer below, since the first matching
+# discoverer wins and a model's own is the more specific one.
+import_model_modules("modeling_ptq")
 
 LayerActivationCollector.register_decoder_layer_support(
     is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers

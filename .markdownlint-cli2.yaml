@@ -17,3 +17,6 @@ config:
 ignores:
   - "skills/modelopt-launching-evals/**"
   - "skills/modelopt-accessing-mlflow/**"
+  # Generated NVSkills publication artifacts; preserve upstream formatting.
+  - "skills/*/skill-card.md"
+  - "skills/*/BENCHMARK.md"
