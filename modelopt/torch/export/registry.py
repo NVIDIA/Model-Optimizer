@@ -95,15 +95,40 @@ class ExportFormat:
     """A format of :mod:`~modelopt.torch.export.quant_format`, such as ``w4a16_nvfp4``."""
 
     block_size: int = 0
-    """The number of weights per scale block, or 0 for a format without blocks."""
+    """The number of weights per scale block, the ``group_size`` of the quantization config, which
+    a blocked format such as ``w4a16_nvfp4`` requires; 0 for a format without blocks."""
 
     def __post_init__(self) -> None:
         if not isinstance(self.quantization_format, str) or not self.quantization_format:
             raise ValueError(
                 f"quantization_format must name a format, got {self.quantization_format!r}"
             )
-        if not isinstance(self.block_size, int) or self.block_size < 0:
+        if (
+            isinstance(self.block_size, bool)
+            or not isinstance(self.block_size, int)
+            or self.block_size < 0
+        ):
             raise ValueError(f"block_size must be an int >= 0, got {self.block_size!r}")
+        # Check the declaration against the config entry that export writes for it, which also
+        # checks the block size of a GGML format. quant_utils imports this module.
+        from .quant_utils import process_layer_quant_config
+
+        config = process_layer_quant_config(
+            {
+                "layer.quantization": self.quantization_format,
+                "layer.awq_block_size": self.block_size,
+            }
+        )
+        # A name that export does not know passes through to the quant_algo unchanged.
+        if config["quant_algo"] == self.quantization_format:
+            raise ValueError(
+                f"{self.quantization_format!r} is not a format that export writes a config for"
+            )
+        if ("group_size" in config) != (self.block_size > 0):
+            raise ValueError(
+                f"block_size must be {'> 0' if 'group_size' in config else '0'} for "
+                f"{self.quantization_format}, got {self.block_size}"
+            )
 
 
 class _ExportHandlerRegistryCls:
@@ -215,7 +240,10 @@ class _ExportModuleRegistryCls(_ExportHandlerRegistryCls):
         quantizes with a ``num_bits`` of its own, such as a string, which tells export nothing of
         how to store them, so that it raises ``NotImplementedError: Unsupported quantizer``. The
         declared format covers the whole module, its input quantization included: ``w4a16_nvfp4``
-        for NVFP4 weights with unquantized inputs, ``nvfp4`` with NVFP4 inputs.
+        for NVFP4 weights with unquantized inputs, ``nvfp4`` with NVFP4 inputs, and, as format
+        detection gives, ``nvfp4_awq`` for either when the input quantizer holds an AWQ
+        ``pre_quant_scale``: export decides from an AWQ format whether to fold that scale and unify
+        it across the layers that share an input.
 
         The handler writes the packed weight and every scale of the format, the input scale
         included. Export itself writes the input quantizer's ``pre_quant_scale``. The handler
@@ -228,8 +256,10 @@ class _ExportModuleRegistryCls(_ExportHandlerRegistryCls):
         unit's weight-update window and fused experts kept fused, or raise.
 
         ``export_hf_vllm_fq_checkpoint``, which writes the weights the backend fake-quantizes,
-        reads the declared format and does not call the handler. The exporters that pack weights
-        with the built-in math, such as the Megatron export, raise for these modules.
+        reads the declared format and does not call the handler. It folds a fake-quant
+        ``TensorQuantizer`` into the weight and raises for any other weight quantizer of these
+        modules, such as a ``SequentialQuantizer``. The exporters that pack weights with the
+        built-in math, such as the Megatron export, raise for these modules.
 
         Usage::
 

@@ -58,6 +58,7 @@ from modelopt.torch.export.registry import ExportFormat, ExportModuleRegistry
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.nn import register_quant_backend, unregister_quant_backend
+from modelopt.torch.quantization.qtensor import NVFP4QTensor
 
 BACKEND = "toy_backend"
 MLP_LINEARS = [
@@ -222,6 +223,55 @@ def test_exports_in_the_declared_format_with_its_handler(
     assert state_dict["model.layers.0.self_attn.q_proj.weight"].dtype == torch.bfloat16
 
 
+def _nvfp4_fake_quant(inputs: torch.Tensor, quantizer) -> torch.Tensor:
+    """Weight-only NVFP4 fake quantization, in blocks of NVFP4_BLOCK_SIZE weights."""
+    qtensor, scale, scale_2 = NVFP4QTensor.quantize(inputs, NVFP4_BLOCK_SIZE)
+    return qtensor.dequantize(scale=scale, double_scale=scale_2, block_sizes={-1: NVFP4_BLOCK_SIZE})
+
+
+def test_the_exported_weights_decode_to_the_backend_weights_by_the_config(tmp_path):
+    register_quant_backend(BACKEND, _nvfp4_fake_quant)
+    try:
+        model = _quantize(get_tiny_llama())
+        expected = {
+            name: (module.weight.detach().clone(), module.weight_quantizer(module.weight).detach())
+            for name, module in model.named_modules()
+            if _has_toy_weights(module)
+        }
+
+        @ExportModuleRegistry.register(
+            predicate=_has_toy_weights,
+            prepend=True,
+            export_format=ExportFormat(
+                quantization_format=QUANTIZATION_W4A16_NVFP4, block_size=NVFP4_BLOCK_SIZE
+            ),
+        )
+        def _export_nvfp4_linear(name, module, ctx):
+            qtensor, scale, scale_2 = NVFP4QTensor.quantize(
+                module.weight.detach(), NVFP4_BLOCK_SIZE
+            )
+            module.weight = nn.Parameter(qtensor._quantized_data, requires_grad=False)
+            module.register_buffer("weight_scale", scale)
+            module.register_buffer("weight_scale_2", scale_2)
+
+        export_hf_checkpoint(model, export_dir=tmp_path)
+    finally:
+        unregister_quant_backend(BACKEND)
+
+    state_dict = load_file(tmp_path / "model.safetensors")
+    quantization = json.loads((tmp_path / "hf_quant_config.json").read_text())["quantization"]
+    assert quantization["quant_algo"] == "W4A16_NVFP4"
+    assert sorted(expected) == sorted(MLP_LINEARS)
+    for name, (weight, fake_quantized) in expected.items():
+        assert not torch.equal(fake_quantized, weight)
+        decoded = NVFP4QTensor(weight.shape, weight.dtype, state_dict[f"{name}.weight"]).dequantize(
+            scale=state_dict[f"{name}.weight_scale"],
+            double_scale=state_dict[f"{name}.weight_scale_2"],
+            block_sizes={-1: quantization["group_size"]},
+        )
+        assert torch.equal(decoded, fake_quantized)
+
+
 @pytest.mark.parametrize(
     ("quantization_format", "quant_algo"),
     [(QUANTIZATION_NVFP4, "NVFP4"), (QUANTIZATION_W4A16_NVFP4, "W4A16_NVFP4")],
@@ -314,6 +364,17 @@ def test_the_declared_format_must_be_an_export_format():
             {"quantization_format": QUANTIZATION_W4A16_NVFP4, "block_size": -1},
             "block_size must be an int >= 0",
         ),
+        (
+            {"quantization_format": QUANTIZATION_W4A16_NVFP4, "block_size": True},
+            "block_size must be an int >= 0",
+        ),
+        (
+            {"quantization_format": "w4a16_nvpf4", "block_size": NVFP4_BLOCK_SIZE},
+            "not a format that export writes a config for",
+        ),
+        ({"quantization_format": QUANTIZATION_W4A16_NVFP4}, "block_size must be > 0"),
+        ({"quantization_format": QUANTIZATION_FP8, "block_size": 128}, "block_size must be 0"),
+        ({"quantization_format": QUANTIZATION_Q8_0, "block_size": 16}, "requires block size 32"),
     ],
 )
 def test_an_export_format_refuses_invalid_fields(fields, error):
@@ -349,6 +410,37 @@ def test_vllm_export_writes_the_backend_weights_and_keeps_activation_quantizatio
     modelopt_state = torch.load(tmp_path / "vllm_fq_modelopt_state.pth", weights_only=False)
     for name in MLP_LINEARS:
         assert modelopt_state["modelopt_state_weights"][f"{name}.input_quantizer"]["_amax"] > 0
+
+
+@pytest.mark.parametrize("weight_quantizer", ["SequentialQuantizer", "TensorQuantizer"])
+def test_vllm_export_refuses_a_declared_weight_it_cannot_fold(
+    toy_backend, weight_quantizer, tmp_path
+):
+    sequential = weight_quantizer == "SequentialQuantizer"
+    model = _quantize(get_tiny_llama(), cfg=[TOY_CFG, TOY_CFG] if sequential else TOY_CFG)
+    quantized = {
+        name: module
+        for name, module in model.named_modules()
+        if getattr(module, "weight_quantizer", None) is not None
+        and module.weight_quantizer.is_enabled
+    }
+    if not sequential:
+        # A real-quant weight quantizer, which the export does not apply to the weight either.
+        for module in quantized.values():
+            module.weight_quantizer._fake_quant = False
+    weights = {name: module.weight.detach().clone() for name, module in quantized.items()}
+    _declare(
+        lambda module: module in quantized.values(), QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE
+    )
+
+    with pytest.raises(NotImplementedError, match=f"cannot fold the {weight_quantizer}"):
+        EXPORTERS["export_hf_vllm_fq_checkpoint"](model, tmp_path)
+    # It refuses before changing the model.
+    assert sorted(quantized) == sorted(MLP_LINEARS)
+    for name, module in quantized.items():
+        assert module.weight_quantizer.is_enabled
+        assert torch.equal(module.weight, weights[name])
+    assert not any(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize(
