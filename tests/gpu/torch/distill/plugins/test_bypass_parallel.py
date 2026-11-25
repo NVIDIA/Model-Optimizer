@@ -16,12 +16,17 @@
 """Native packed TP projections and VJPs, mesh adoption and four-GPU placement checks."""
 
 import copy
+import hashlib
+import json
+import os
 from collections import OrderedDict
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from functools import cache
 from importlib import import_module
+from importlib.metadata import version
 from inspect import unwrap
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -57,6 +62,7 @@ from modelopt.torch.distill._bypass_parallel import (
 from modelopt.torch.distill._bypass_runner import _BypassRunner
 from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor import FP8QTensor, NVFP4QTensor, QTensorWrapper
 from modelopt.torch.quantization.repair import IQRepairPolicy, plan_iq_repair
@@ -1896,12 +1902,112 @@ def test_native_ep_transport_policy_reaches_hf_dispatcher(bypass_cpu_workers):
     bypass_cpu_workers.run(_native_ep_transport_policy_worker)
 
 
-def _context_worker(rank, size, fallback):
+@contextmanager
+def _native_attention_calls(native):
+    counts = {"forward": 0, "backward": 0}
+
+    def observe(function, direction):
+        def delegated(*args, **kwargs):
+            result = function(*args, **kwargs)
+            counts[direction] += 1
+            return result
+
+        return delegated
+
+    # The real handler resolves these functions at dispatch time. Count completed ring calls.
+    with ExitStack() as stack:
+        for backend in ("flash", "efficient", "cudnn"):
+            for suffix, direction in (("", "forward"), ("_backward", "backward")):
+                name = f"_scaled_dot_product_ring_{backend}_attention{suffix}"
+                stack.enter_context(
+                    patch.object(native, name, observe(getattr(native, name), direction))
+                )
+        yield counts
+
+
+def _context_relative_error(actual, expected):
+    assert actual.shape == expected.shape
+    assert torch.isfinite(actual).all() and torch.isfinite(expected).all()
+    assert expected.norm() > 0 and actual.norm() > 0
+    error = ((actual.float() - expected.float()).norm() / expected.float().norm()).item()
+    assert error < 0.03, error
+    return error
+
+
+def _context_sdpa_probe(mesh, length, native):
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    from modelopt.torch.distill.plugins.transformers.context_parallel import CPSequenceLayout
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    layout = CPSequenceLayout(mesh, length, device=device)
+    generator = torch.Generator(device=device).manual_seed(719)
+    qkv = [torch.randn(1, 2, length, 64, device=device, generator=generator) for _ in range(3)]
+    upstream = torch.randn(1, 2, length, 64, device=device, generator=generator)
+    # Independent FP32 full-context math oracle: no layout, DTensor, or ring dispatcher.
+    expected_inputs = [x.clone().requires_grad_() for x in qkv]
+    with sdpa_kernel(SDPBackend.MATH):
+        expected = F.scaled_dot_product_attention(*expected_inputs, is_causal=True)
+        expected_gradients = torch.autograd.grad(
+            expected, expected_inputs, upstream, retain_graph=True
+        )
+        owned = torch.zeros(length, device=device, dtype=torch.bool)
+        indices = layout.local_indices[layout.local_indices < length]
+        owned[indices] = True
+        partial_gradients = torch.autograd.grad(
+            expected, expected_inputs, upstream * owned[None, None, :, None]
+        )
+    inputs = [layout.shard(x.to(torch.bfloat16), 2).detach().requires_grad_() for x in qkv]
+    with _native_attention_calls(native) as calls, layout.attention():
+        actual = F.scaled_dot_product_attention(*inputs, is_causal=True)
+        # Sharding zero-pads the cotangent, so padded future queries contribute no loss.
+        actual.backward(layout.shard(upstream.to(torch.bfloat16), 2))
+    assert calls["forward"] > 0 and calls["backward"] > 0, calls
+    valid = layout.local_indices < length
+    errors = {
+        "output": _context_relative_error(
+            actual.detach()[:, :, valid].float(), layout.shard(expected.detach(), 2)[:, :, valid]
+        )
+    }
+    for name, value, gradient in zip(("q", "k", "v"), inputs, expected_gradients, strict=True):
+        errors[name] = _context_relative_error(
+            value.grad[:, :, valid].float(), layout.shard(gradient, 2)[:, :, valid]
+        )
+    # Each K/V shard must include loss contributions from queries owned by its peer.
+    remote = {}
+    for name, full, partial in zip(
+        ("k", "v"), expected_gradients[1:], partial_gradients[1:], strict=True
+    ):
+        remote[name] = layout.shard(full - partial, 2)[:, :, valid].norm().item()
+        assert remote[name] > 0
+    return {"calls": calls, "errors": errors, "remote_kv_vjp_norm": remote}
+
+
+@contextmanager
+def _context_block_observations(model, records):
+    def observe(module, args, kwargs, output):
+        if not torch.is_grad_enabled():
+            return
+        value = args[0] if args else kwargs["hidden_states"]
+        assert value.requires_grad
+        record = {"output": (output[0] if isinstance(output, tuple) else output).detach()}
+        records.append(record)
+        value.register_hook(lambda gradient: record.update(input_vjp=gradient.detach().clone()))
+
+    handle = model.model.layers[0].register_forward_hook(observe, with_kwargs=True)
+    try:
+        yield
+    finally:
+        handle.remove()
+
+
+def _context_worker(rank, size, fallback, output_dir=None, source=None):
     from torch.distributed.device_mesh import init_device_mesh
-    from transformers import LlamaConfig, LlamaForCausalLM
+    from transformers import LlamaConfig, LlamaForCausalLM, Qwen3Config, Qwen3ForCausalLM
 
     from modelopt.torch.distill._bypass_optimizer import Lion
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+    from modelopt.torch.distill.plugins.transformers.context_parallel import CPSequenceLayout
     from modelopt.torch.quantization.ggml.scale_fields import (
         decode_scale_fields,
         replace_scale_fields,
@@ -1910,22 +2016,59 @@ def _context_worker(rank, size, fallback):
     torch.cuda.set_device(rank)
     torch.manual_seed(71)
     device = torch.device("cuda", rank)
-    config = LlamaConfig(
+    qualification = output_dir is not None
+    case = fallback if qualification else ("mask" if fallback else "native")
+    fallback = case != "native"
+    assert size >= 2 and size % 2 == 0
+    if not qualification:
+        assert size == 4
+    dp_size, length = size // 2, 7 if qualification else 8
+    global_batch = 2 * dp_size
+    mesh = init_device_mesh("cuda", (dp_size, 2), mesh_dim_names=("dp", "cp"))
+    assert mesh["cp"].size() == 2 and mesh["dp"].size() == dp_size
+    if qualification and torch.cuda.device_count() == 2:
+        assert (dp_size, mesh["cp"].size()) == (1, 2)
+    native = import_module("torch.distributed.tensor.experimental._context_parallel._attention")
+    probe = (
+        _context_sdpa_probe(mesh["cp"], length, native) if qualification and not fallback else None
+    )
+    # Keep model initialization and batches independent of the diagnostic probe's work.
+    model_config, model_class = (
+        (Qwen3Config, Qwen3ForCausalLM) if case == "sliding" else (LlamaConfig, LlamaForCausalLM)
+    )
+    policy = {}
+    if case == "dynamic":
+        policy = {
+            "max_position_embeddings": 4,
+            "rope_parameters": {"rope_type": "dynamic", "factor": 2.0},
+        }
+    elif case == "sliding":
+        policy = {"use_sliding_window": True, "sliding_window": 2, "max_window_layers": 0}
+    config = model_config(
         vocab_size=32,
         hidden_size=256,
         intermediate_size=256,
         num_hidden_layers=1,
         num_attention_heads=4,
         num_key_value_heads=2,
+        head_dim=64,
         use_cache=False,
+        **policy,
     )
     config._attn_implementation = "sdpa"
-    teacher = LlamaForCausalLM(config).to(device=device, dtype=torch.bfloat16).eval()
-    batches = [{"input_ids": torch.randint(3, 32, (1, 8), device=device)} for _ in range(8)]
-    if fallback:
+    teacher = model_class(config).to(device=device, dtype=torch.bfloat16).eval()
+    if case == "sliding":
+        assert "sliding_attention" in teacher.config.layer_types
+    batches = [
+        {"input_ids": torch.randint(3, 32, (1, length), device=device)}
+        for _ in range(2 * global_batch)
+    ]
+    if case == "mask":
         for batch in batches:
-            batch["attention_mask"] = torch.ones(1, 1, 8, 8, dtype=torch.bool, device=device).tril()
-            batch["valid_mask"] = torch.ones(1, 8, dtype=torch.bool, device=device)
+            batch["attention_mask"] = torch.ones(
+                1, 1, length, length, dtype=torch.bool, device=device
+            ).tril()
+            batch["valid_mask"] = torch.ones(1, length, dtype=torch.bool, device=device)
     student = mtq.quantize(
         copy.deepcopy(teacher),
         {
@@ -1942,14 +2085,22 @@ def _context_worker(rank, size, fallback):
     )
     recipe = {
         "num_steps": 2,
-        "global_batch_size": 4,
-        "sequence_length": 8,
+        "global_batch_size": global_batch,
+        "sequence_length": length,
         "scheduler": "constant",
         "warmup_fraction": 0,
     }
+    if qualification:
+        recipe["modules"] = ["model.layers.0"]
     reference = copy.deepcopy(student)
+    original_codes = {
+        name: module._ggml_pinned_iq2_s.clone()
+        for name, module in student.named_modules()
+        if isinstance(module, TensorQuantizer) and module.backend == "ggml"
+    }
     single = init_device_mesh("cuda", (size, 1), mesh_dim_names=("owners", "dp"))["dp"]
     gradients = []
+    expected_records, actual_records = [], []
     original_step = Lion.step
 
     def observed_step(optimizer, closure=None):
@@ -1964,35 +2115,68 @@ def _context_worker(rank, size, fallback):
 
     Lion.step = observed_step
     try:
-        mtd.bypass(reference, copy.deepcopy(teacher), batches, recipe, device_mesh=single)
+        with ExitStack() as stack:
+            if qualification:
+                stack.enter_context(_context_block_observations(reference, expected_records))
+            mtd.bypass(reference, copy.deepcopy(teacher), batches, recipe, device_mesh=single)
     finally:
         Lion.step = original_step
     expected_gradients = gradients[:]
     gradients.clear()
-    mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("dp", "cp"))
     adapter = TransformersBypassAdapter(mesh)
     adapter.parallelize(student)
     adapter.parallelize(teacher)
-    local = [
-        batches[step * 4 + index]
+    local_indices = [
+        step * global_batch + index
         for step in range(2)
-        for index in range(mesh["dp"].get_local_rank(), 4, 2)
+        for index in range(mesh["dp"].get_local_rank(), global_batch, dp_size)
     ]
+    local = [batches[index] for index in local_indices]
     Lion.step = observed_step
     try:
-        mtd.bypass(student, teacher, local, recipe, device_mesh=mesh)
+        with ExitStack() as stack:
+            calls = stack.enter_context(_native_attention_calls(native))
+            if qualification:
+                stack.enter_context(_context_block_observations(student, actual_records))
+            mtd.bypass(student, teacher, local, recipe, device_mesh=mesh)
     finally:
         Lion.step = original_step
     # BF16 dW rounds before each CP owner's sum; native attention also changes
     # its reduction tree. Validate the actual normalized VJP, rather than
     # demanding bitwise scale updates after Lion amplifies a near-zero sign.
+    assert len(gradients) == len(expected_gradients) == 2
+    scale_errors = []
     for actual, expected in zip(gradients, expected_gradients, strict=True):
+        assert actual and expected
         for a, b in zip(actual, expected, strict=True):
-            relative_error = (a - b).norm() / b.norm().clamp_min(1e-20)
-            assert relative_error < 0.03, relative_error.item()
+            scale_errors.append(_context_relative_error(a, b))
     assert student._modelopt_bypass_execution["context_parallel_modes"] == [
         "replicated_full_context" if fallback else "native_sdpa"
     ]
+    block_errors = []
+    if qualification:
+        if fallback:
+            assert calls == {"forward": 0, "backward": 0}, calls
+        else:
+            assert calls["forward"] > 0 and calls["backward"] > 0, calls
+        assert len(expected_records) == len(batches)
+        assert len(actual_records) == len(local_indices)
+        layout = CPSequenceLayout(mesh["cp"], length, device=device)
+        for actual, index in zip(actual_records, local_indices, strict=True):
+            expected = expected_records[index]
+            if fallback:
+                # Replicated replay differentiates disjoint query losses; recover the full VJP.
+                actual["input_vjp"] = actual["input_vjp"].float()
+                dist.all_reduce(actual["input_vjp"], group=mesh["cp"].get_group())
+            errors = {}
+            for field in ("output", "input_vjp"):
+                a, b = actual[field].float(), expected[field].float()
+                if not fallback:
+                    valid = layout.local_indices < length
+                    a, b = a[:, valid], layout.shard(b, 1)[:, valid]
+                errors[field] = _context_relative_error(a, b)
+            block_errors.append(errors)
+    decoded_errors = []
     for name, module in student.named_modules():
         if isinstance(module, TensorQuantizer) and module.backend == "ggml":
             fmt = IQ_FORMAT_REGISTRY["iq2_s"]
@@ -2002,13 +2186,57 @@ def _context_worker(rank, size, fallback):
             assert torch.equal(
                 replace_scale_fields(actual, fmt, global_scale, local_scale), expected
             )
+            global_scale, local_scale, _ = decode_scale_fields(original_codes[name], fmt)
+            assert torch.equal(
+                replace_scale_fields(actual, fmt, global_scale, local_scale), original_codes[name]
+            )
             shape = torch.tensor((actual.shape[0], actual.shape[1] * fmt.block_size))
+            a = fmt.dequantize(actual, shape, dtype=torch.float32)
+            b = fmt.dequantize(expected, shape, dtype=torch.float32)
+            decoded_errors.append(((a - b).norm() / b.norm()).item())
             torch.testing.assert_close(
-                fmt.dequantize(actual, shape, dtype=torch.float32),
-                fmt.dequantize(expected, shape, dtype=torch.float32),
+                a,
+                b,
                 rtol=0.006,
                 atol=1e-6,
             )
+    assert decoded_errors
+    if qualification:
+        receipt = {
+            **source,
+            "rank": rank,
+            "world": size,
+            "dp": dp_size,
+            "cp": mesh["cp"].size(),
+            "dp_rank": mesh["dp"].get_local_rank(),
+            "cp_rank": mesh["cp"].get_local_rank(),
+            "visible_gpus": torch.cuda.device_count(),
+            "gpu": torch.cuda.get_device_name(rank),
+            "cuda": torch.version.cuda,
+            "torch": torch.__version__,
+            "transformers": version("transformers"),
+            "native_attention_sha256": hashlib.sha256(
+                Path(native.__file__).read_bytes()
+            ).hexdigest(),
+            "case": case,
+            "valid_length": length,
+            "padded_length": layout.padded_length if not fallback else length,
+            "valid_local_tokens": int((layout.local_indices < length).sum())
+            if not fallback
+            else length,
+            "training_ring_calls": calls,
+            "fallback_replays": len(actual_records) if fallback else 0,
+            "probe": probe,
+            "block_errors": block_errors,
+            "scale_vjp_relative_errors": scale_errors,
+            "decoded_weight_relative_errors": decoded_errors,
+            "immutable_codes": True,
+            "reference": "singleton_full_context_masked_sse_two_updates",
+            "execution": student._modelopt_bypass_execution,
+        }
+        Path(output_dir, f"context-{case}-{rank}.json").write_text(
+            json.dumps(receipt, sort_keys=True)
+        )
 
 
 @pytest.mark.parametrize("fallback", [False, True])
@@ -2025,4 +2253,47 @@ def test_native_context_and_replicated_fallback_match_reference(native_workers, 
             pytest.skip("Native CP needs Torch's scoped module-wrapper attention API")
         if not hasattr(native, "_ContextParallel"):
             pytest.skip("Native CP needs Torch's scoped module-wrapper attention API")
-    native_workers.run(_context_worker, fallback)
+    timeout = native_workers.job_timeout
+    try:
+        native_workers.job_timeout = 240
+        native_workers.run(_context_worker, fallback)
+    finally:
+        native_workers.job_timeout = timeout
+
+
+@pytest.mark.parametrize("case", ["native", "mask", "dynamic", "sliding"])
+@pytest.mark.timeout(300)
+def test_context_attention_and_policy_fallback_qualification(
+    need_2_gpus, dist_workers, tmp_path, capsys, case
+):
+    pytest.importorskip("transformers", minversion="5.23")
+    native = pytest.importorskip(
+        "torch.distributed.tensor.experimental._context_parallel._attention"
+    )
+    if not hasattr(native, "_ContextParallel"):
+        pytest.skip("Native CP needs Torch's scoped module-wrapper attention API")
+    root = Path(__file__).resolve().parents[5]
+    paths = [
+        "modelopt/torch/distill/plugins/transformers/bypass.py",
+        "modelopt/torch/distill/plugins/transformers/context_parallel.py",
+        "modelopt/torch/distill/_bypass_runtime.py",
+        "tests/gpu/torch/distill/plugins/test_bypass_parallel.py",
+    ]
+    source = {
+        "event_sha": os.environ.get("GITHUB_SHA"),
+        "event": os.environ.get("GITHUB_EVENT_NAME"),
+        "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "ref": os.environ.get("GITHUB_REF"),
+        "source_sha256": {
+            path: hashlib.sha256((root / path).read_bytes()).hexdigest() for path in paths
+        },
+    }
+    timeout = dist_workers.job_timeout
+    try:
+        dist_workers.job_timeout = 240
+        dist_workers.run(_context_worker, case, str(tmp_path), source)
+    finally:
+        dist_workers.job_timeout = timeout
+    with capsys.disabled():
+        for rank in range(torch.cuda.device_count()):
+            print(Path(tmp_path, f"context-{case}-{rank}.json").read_text(), flush=True)
