@@ -190,7 +190,7 @@ def test_construction_preserves_native_module_and_validates_before_mutation(devi
 
 
 def _reference(model, batch):
-    """Compute EAGLE-aligned losses with explicit history sampling and native attention."""
+    """Compute native losses with prediction alignment and cached EAGLE rounds."""
     cfg = model.mtp_config
     tokens = batch["input_ids"]
     hidden = batch["base_model_outputs"]["base_model_hidden_states"]
@@ -237,13 +237,16 @@ def _reference(model, batch):
                 teacher.softmax(-1)[:, depth + 1 :], student, loss_mask
             )
         losses.append(loss * cfg.mtp_loss_decay_factor**depth)
-        state = state.roll(1, 1)
+        aligned_state = torch.zeros_like(state)
+        aligned_state[:, 1:] = state[:, :-1]
         if cfg.mtp_mix_hidden_states:
-            history.append(state)
+            history.append(aligned_state)
             choices = torch.randint(len(history), tokens.shape)
             state = torch.stack(history)[
                 choices, torch.arange(tokens.shape[0])[:, None], torch.arange(tokens.shape[1])
             ]
+        else:
+            state = aligned_state
     return sum(losses), teacher
 
 

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for cached EAGLE training-time attention masks."""
+"""Tests for EAGLE training losses and attention boundaries."""
 
 from copy import deepcopy
 
@@ -93,6 +93,39 @@ def test_eagle_loss_vocabulary_compatibility(loss_type, vocabulary):
     output.loss.backward()
     assert any(p.grad is not None for p in model.eagle_module.parameters())
     assert model._base_model_lm_head.weight.grad is None
+
+
+@pytest.mark.parametrize("mix_mode", ["uniform_layer_sample", "sparse_replace", None])
+def test_rounds_do_not_expose_future_tokens(mix_mode):
+    model = get_tiny_llama(dtype=torch.float32)
+    config = deepcopy(EAGLE3_DEFAULT_CFG["config"])
+    config["eagle_architecture_config"].update(
+        intermediate_size=32, num_attention_heads=4, num_key_value_heads=2, head_dim=8
+    )
+    config.update(
+        eagle_ttt_steps=5,
+        eagle_use_torch_compile=False,
+        eagle_mix_hidden_states=mix_mode is not None,
+        eagle_mix_hidden_states_mode=mix_mode or "uniform_layer_sample",
+    )
+    mtsp.convert(model, mode=[("eagle", config)])
+    model.train()
+    rounds = []
+    handle = model.eagle_module.register_forward_hook(
+        lambda _module, _inputs, outputs: rounds.append(outputs[0].detach().clone())
+    )
+    tokens = torch.arange(12).unsqueeze(0) % model.config.vocab_size
+    torch.manual_seed(0)
+    model(input_ids=tokens)
+    expected = rounds[:]
+    rounds.clear()
+    tokens[:, -2:] = (tokens[:, -2:] + 1) % model.config.vocab_size
+    torch.manual_seed(0)
+    model(input_ids=tokens)
+    handle.remove()
+    # The changed suffix lies beyond every compared query's input context.
+    for depth, (actual, reference) in enumerate(zip(rounds, expected)):
+        torch.testing.assert_close(actual[:, depth:-3], reference[:, depth:-3], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("context_change", ["dtype", "device"])
