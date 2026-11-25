@@ -70,7 +70,7 @@ def _native_scale_kernels(tensor):
     try:
         # Triton is optional for the materialized replay fallback.
         from modelopt.torch.kernels.quantization import repair
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
         if not (exc.name or "").startswith("triton"):
             raise
         return None
@@ -92,7 +92,6 @@ class IQScaleState(nn.Module):
             else self.weight_shape
         )
         self.field_prefix = field_prefix
-        self.projection_counts = {}
         packed = (
             self.format.pack(processed_weight, quantizer)
             .detach()
@@ -144,7 +143,9 @@ class IQScaleState(nn.Module):
 
     def forward(self, inputs):
         """Replay native fields; inputs supplies only metadata such as shape and dtype."""
-        kernels = _native_scale_kernels(inputs)
+        steps = self.projected_steps()
+        # Kernel pointers come from state, independent of the metadata tensor's device.
+        kernels = _native_scale_kernels(self.packed) if self.packed.device == steps.device else None
         if kernels is not None and self.name not in kernels.SUPPORTED_FORMATS:
             kernels = None
         with torch.no_grad():
@@ -152,7 +153,6 @@ class IQScaleState(nn.Module):
                 levels = kernels.decode_iq_levels(self.packed, self.name, self.codec_shape)
             else:
                 levels, _ = self.format.decode_int8(self.packed, torch.tensor(self.codec_shape))
-        steps = self.projected_steps()
         if kernels is not None:
             return kernels.apply_block_scales(levels, steps, inputs.dtype).reshape(inputs.shape)
         levels = levels.reshape(-1, steps.shape[-1], self.format.int8_group_size)
