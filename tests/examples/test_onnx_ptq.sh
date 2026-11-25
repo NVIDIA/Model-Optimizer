@@ -75,10 +75,14 @@ batch_size=1
 # Define quantization modes and base modes
 base_modes=("fp16")
 if [ $cuda_capability -ge 89 ]; then
-    quant_modes=("fp8" "int8" "int8_iq")
+    quant_modes=("fp8" "int8")
 else
     echo "CUDA capability is less than 89, skipping fp8 mode!"
-    quant_modes=("int8" "int8_iq")
+    quant_modes=("int8")
+fi
+trt_major=$(python -c 'import tensorrt; print(tensorrt.__version__.split(".")[0])')
+if [ "$trt_major" -lt 11 ]; then
+    quant_modes+=("int8_iq")
 fi
 all_modes=("${base_modes[@]}" "${quant_modes[@]}")
 

@@ -609,6 +609,9 @@ def duplicate_shared_constants(onnx_model: onnx.ModelProto) -> tuple[onnx.ModelP
         for input_name in node.input:
             if input_name in use_counts:
                 use_counts[input_name] += 1
+    for output in graph.output:
+        if output.name in use_counts:
+            use_counts[output.name] += 1
 
     shared_names = {name for name, count in use_counts.items() if count > 1}
     if not shared_names:

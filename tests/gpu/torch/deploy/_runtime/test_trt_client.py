@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
 import onnx
 import pytest
 import torch
@@ -30,8 +31,10 @@ trt = pytest.importorskip("tensorrt")
 
 
 from modelopt.torch._deploy._runtime.tensorrt import engine_builder
+from modelopt.torch._deploy._runtime.tensorrt.constants import SHA_256_HASH_LENGTH
 from modelopt.torch._deploy._runtime.trt_client import TRTLocalClient
 from modelopt.torch._deploy.compilation import compile
+from modelopt.torch._deploy.utils import OnnxBytes
 
 deployment = {
     "runtime": "TRT",
@@ -130,6 +133,71 @@ def test_trt11_precision_graph_and_inference(tmp_path, monkeypatch, precision):
         expected = model(*args, **kwargs)
     assert observed
     compare_outputs(actual, expected, rtol=1e-2, atol=1e-1)
+
+
+@pytest.mark.parametrize("precision", ["fp16", "bf16"])
+@pytest.mark.parametrize("layout", ["unnamed", "input_output", "initializer_output"])
+def test_trt11_public_outputs(tmp_path, monkeypatch, precision, layout):
+    if int(trt.__version__.split(".", 1)[0]) < 11:
+        pytest.skip("TensorRT 11 precision migration")
+    skip_if_no_trtexec()
+    helper, tensor = onnx.helper, onnx.TensorProto
+    weight = np.eye(4, dtype=np.float32)
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["x", "weight"], ["y"])],
+        "public_outputs",
+        [helper.make_tensor_value_info("x", tensor.FLOAT, [1, 4])],
+        [helper.make_tensor_value_info("y", tensor.FLOAT, [1, 4])],
+        initializer=[onnx.numpy_helper.from_array(weight, "weight")],
+    )
+    if layout == "input_output":
+        graph.output.append(graph.input[0])
+    elif layout == "initializer_output":
+        graph.initializer.append(onnx.numpy_helper.from_array(weight, "constant"))
+        graph.output.append(helper.make_tensor_value_info("constant", tensor.FLOAT, [4, 4]))
+    path = tmp_path / "model.onnx"
+    onnx.save_model(
+        helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)], ir_version=10), path
+    )
+    run_trtexec = engine_builder._run_trtexec_with_logging
+
+    def inspect_and_compile(arguments, cwd=None):
+        converted_path = next(
+            arg.split("=", 1)[1] for arg in arguments if arg.startswith("--onnx=")
+        )
+        converted = onnx.load(converted_path)
+        assert (
+            next(t for t in converted.graph.initializer if t.name == "weight").data_type
+            == {
+                "fp16": tensor.FLOAT16,
+                "bf16": tensor.BFLOAT16,
+            }[precision]
+        )
+        return run_trtexec(arguments, cwd=cwd)
+
+    monkeypatch.setattr(engine_builder, "_run_trtexec_with_logging", inspect_and_compile)
+    engine, log = engine_builder.build_engine(
+        OnnxBytes(str(path)), trt_mode=precision, output_dir=tmp_path / "artifacts"
+    )
+    assert engine is not None, log
+    runtime = trt.Runtime(trt.Logger(trt.Logger.ERROR))
+    shapes = {
+        value.name: [dim.dim_value for dim in value.type.tensor_type.shape.dim]
+        for value in (*graph.input, *graph.output)
+    }
+    session = TRTLocalClient.TRTSession(
+        engine[SHA_256_HASH_LENGTH:], runtime, torch.cuda.Stream(), "cuda", shapes
+    )
+    x = torch.arange(4, device="cuda", dtype=torch.float32).reshape(1, 4)
+    outputs = session.run([x])
+    expected = [x]
+    if layout == "input_output":
+        expected.append(x)
+    elif layout == "initializer_output":
+        expected.append(torch.tensor(weight, device="cuda"))
+    assert len(outputs) == len(expected)
+    for actual, reference in zip(outputs, expected):
+        torch.testing.assert_close(actual, reference)
 
 
 @pytest.mark.parametrize("input_kind", ["static", "static_inferred", "dynamic", "shape_tensor"])

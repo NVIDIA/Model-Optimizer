@@ -19,6 +19,7 @@ import stat
 import sys
 import tempfile
 from importlib.machinery import ModuleSpec
+from itertools import product
 from pathlib import Path
 from types import ModuleType
 from unittest import mock
@@ -27,6 +28,8 @@ import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+
+from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 
 # Patch mock tensorrt module
 tensorrt = ModuleType("tensorrt")
@@ -165,10 +168,22 @@ def test_default_artifact_dir_is_private_and_reused_within_a_process(setup_mocks
         assert stat.S_IMODE(artifact_dir.stat().st_mode) == 0o700
 
 
-@pytest.mark.parametrize("version", ["10.10", "11.4"])
-@pytest.mark.parametrize("precision", ["fp16", "bf16", "fp32", "stronglyTyped"])
-@pytest.mark.parametrize("external", [False, True])
-def test_build_engine_precision_graph(tmp_path, monkeypatch, version, precision, external):
+@pytest.mark.parametrize(
+    ("version", "precision", "external", "layout"),
+    [
+        (*case, "named")
+        for case in product(
+            ["10.10", "11.4"], ["fp16", "bf16", "fp32", "stronglyTyped"], [False, True]
+        )
+    ]
+    + [
+        ("11.4", precision, True, layout)
+        for precision, layout in product(
+            ["fp16", "bf16"], ["unnamed", "input_output", "initializer_output", "weight_output"]
+        )
+    ],
+)
+def test_build_engine_precision_graph(tmp_path, monkeypatch, version, precision, external, layout):
     monkeypatch.setattr(tensorrt, "__version__", version)
     source = tmp_path / "source"
     source.mkdir()
@@ -180,6 +195,16 @@ def test_build_engine_precision_graph(tmp_path, monkeypatch, version, precision,
         [helper.make_tensor_value_info("y", TensorProto.FLOAT, ["batch", 32])],
         initializer=[numpy_helper.from_array(weights, "weight")],
     )
+    if layout == "unnamed":
+        graph.node[0].name = ""
+    elif layout == "input_output":
+        graph.output.append(graph.input[0])
+    elif layout == "initializer_output":
+        graph.initializer.append(numpy_helper.from_array(weights, "constant"))
+        graph.output.append(helper.make_tensor_value_info("constant", TensorProto.FLOAT, [32, 32]))
+    elif layout == "weight_output":
+        graph.output.append(helper.make_tensor_value_info("weight", TensorProto.FLOAT, [32, 32]))
+    original_io = [value.SerializeToString() for value in (*graph.input, *graph.output)]
     path = source / "model.onnx"
     onnx.save_model(
         helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)], ir_version=10),
@@ -211,10 +236,19 @@ def test_build_engine_precision_graph(tmp_path, monkeypatch, version, precision,
             assert not set(arguments) & {"--fp16", "--bf16", "--fp8", "--int8", "--int4", "--best"}
         elif precision != "fp32":
             assert "--" + precision in arguments
-        assert all(t.data_type == expected_type for t in compiled_graph.graph.initializer)
-        for value in list(compiled_graph.graph.input) + list(compiled_graph.graph.output):
-            assert value.type.tensor_type.elem_type == TensorProto.FLOAT
-            assert value.type.tensor_type.shape.dim[0].dim_param == "batch"
+        matmul = next(node for node in compiled_graph.graph.node if node.op_type == "MatMul")
+        assert (
+            next(t for t in compiled_graph.graph.initializer if t.name == matmul.input[1]).data_type
+            == expected_type
+        )
+        assert [
+            value.SerializeToString()
+            for value in (*compiled_graph.graph.input, *compiled_graph.graph.output)
+        ] == original_io
+        if layout in ("initializer_output", "weight_output"):
+            name = "constant" if layout == "initializer_output" else "weight"
+            constant = next(t for t in compiled_graph.graph.initializer if t.name == name)
+            np.testing.assert_array_equal(numpy_helper.to_array(constant), weights)
         observed.append(expected_type)
         engine = next(arg.split("=", 1)[1] for arg in arguments if arg.startswith("--saveEngine="))
         Path(engine).write_bytes(b"engine_bytes")
@@ -241,3 +275,68 @@ def test_trt11_rejects_implicit_precision_before_writing(
     with pytest.raises(ValueError):
         build_engine(None, trt_mode=precision, calib_cache=calibration_cache, output_dir=output)
     assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("precision", "plugin_type"),
+    [("fp16", TensorProto.FLOAT), ("bf16", TensorProto.FLOAT), ("fp16", TensorProto.FLOAT16)],
+)
+def test_trt11_preserves_plugin_precision(tmp_path, monkeypatch, precision, plugin_type):
+    monkeypatch.setattr(tensorrt, "__version__", "11.4")
+
+    def discover_plugin(self):
+        self.custom_ops = {"FloatPlugin"}
+
+    # Discovery requires native TensorRT; conversion and boundary casts remain real.
+    monkeypatch.setattr(GraphSanitizer, "find_custom_nodes", discover_plugin)
+    graph = helper.make_graph(
+        [
+            helper.make_node("FloatPlugin", ["x"], ["p"], domain="test.plugins", name="plugin"),
+            helper.make_node("MatMul", ["p", "weight"], ["y"], name="matmul"),
+        ],
+        "plugin_precision",
+        [helper.make_tensor_value_info("x", plugin_type, [1, 4])],
+        [helper.make_tensor_value_info("y", plugin_type, [1, 4])],
+        initializer=[
+            numpy_helper.from_array(
+                np.eye(4, dtype=np.float32 if plugin_type == TensorProto.FLOAT else np.float16),
+                "weight",
+            )
+        ],
+        value_info=[helper.make_tensor_value_info("p", plugin_type, [1, 4])],
+    )
+    path = tmp_path / "plugin.onnx"
+    onnx.save_model(
+        helper.make_model(
+            graph,
+            opset_imports=[helper.make_opsetid("", 22), helper.make_opsetid("test.plugins", 1)],
+            ir_version=10,
+        ),
+        path,
+    )
+    source = path.read_bytes()
+    observed = []
+
+    def compile_graph(arguments, cwd=None):
+        path = next(arg.split("=", 1)[1] for arg in arguments if arg.startswith("--onnx="))
+        model = onnx.load(path)
+        types = {
+            v.name: v.type.tensor_type.elem_type
+            for v in (*model.graph.input, *model.graph.output, *model.graph.value_info)
+        }
+        plugin = next(node for node in model.graph.node if node.op_type == "FloatPlugin")
+        assert all(types[name] == plugin_type for name in (*plugin.input, *plugin.output))
+        assert (
+            model.graph.initializer[0].data_type
+            == {"fp16": TensorProto.FLOAT16, "bf16": TensorProto.BFLOAT16}[precision]
+        )
+        onnx.checker.check_model(model)
+        observed.append(True)
+        return _write_engine_like_trtexec(arguments)
+
+    monkeypatch.setattr(engine_builder, "_run_trtexec_with_logging", compile_graph)
+    engine, _ = build_engine(
+        OnnxBytes(str(path)), trt_mode=precision, output_dir=tmp_path / "artifacts"
+    )
+    assert engine is not None and observed
+    assert path.read_bytes() == source

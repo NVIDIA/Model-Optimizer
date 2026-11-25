@@ -157,8 +157,13 @@ def clear_types_and_shapes_recursive(
             for vi in g.value_info:
                 _clear(vi, clear_shape=clear_shapes)
 
+        initializers = {initializer.name: initializer for initializer in g.initializer}
         for out in g.output:
-            _clear(out, clear_shapes)
+            if out.name in initializers:
+                # ONNX shape inference does not re-derive initializer-backed output types.
+                out.type.tensor_type.elem_type = initializers[out.name].data_type
+            else:
+                _clear(out, clear_shapes)
 
     walk_subgraphs_recursive(graph, _clear_callback, is_subgraph=is_subgraph)
 

@@ -306,6 +306,7 @@ def convert_to_f16(
     # as an exception (triggering infer_types' standalone type-inference fallback) instead of
     # silently leaving tensors untyped, which would break later type lookups.
     model = onnx_utils.infer_types(model, use_standalone_type_inference, strict_mode=True)
+    onnx_utils.name_onnx_nodes(model.graph)
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
     precision_converter = PrecisionConverter(
@@ -321,10 +322,22 @@ def convert_to_f16(
         original_network_io_metadata=original_network_io_metadata,
     )
     node_name_rule = DisabledNodeNameRegexRule(nodes_to_exclude or [])
+    tensor_types = onnx_utils._build_tensor_type_map(model) if sanitizer.custom_ops else {}
+    fp32_custom_nodes = {
+        node.name
+        for node in model.graph.node
+        if node.op_type in (sanitizer.custom_ops or ())
+        and not any(
+            tensor_types.get(name) in (onnx.TensorProto.FLOAT16, onnx.TensorProto.BFLOAT16)
+            for name in (*node.input, *node.output)
+        )
+    }
     high_precision_nodes = [
         node.name
         for node in model.graph.node
-        if node.op_type in op_block_list or node_name_rule.check(node)
+        if node.op_type in op_block_list
+        or node.name in fp32_custom_nodes
+        or node_name_rule.check(node)
     ]
     high_precision_node_set = set(high_precision_nodes)
     low_precision_nodes = [

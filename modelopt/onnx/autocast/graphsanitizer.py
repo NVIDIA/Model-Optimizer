@@ -161,9 +161,14 @@ class GraphSanitizer:
 
     def remove_disconnected_outputs(self) -> None:
         """Remove disconnected outputs from the model."""
+        source_names = {
+            value.name for value in (*self.model.graph.input, *self.model.graph.initializer)
+        }
         tensors_to_remove = []
         for tensor in self.model.graph.output:
-            if not onnx_utils.get_producer_nodes(self.model, tensor.name):
+            if tensor.name not in source_names and not onnx_utils.get_producer_nodes(
+                self.model, tensor.name
+            ):
                 tensors_to_remove.append(tensor)
                 logger.debug(f"Found disconnected output: {tensor.name}")
 

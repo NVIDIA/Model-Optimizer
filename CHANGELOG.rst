@@ -55,6 +55,7 @@ Changelog
 - Fix ONNX AutoCast retaining one full-graph activation dump per calibration sample during inference: samples are now folded into the running per-tensor statistics as they arrive, so this retention no longer scales with the number of samples in ``calibration_data``. Loading the input data itself (a JSON input list, or a single NPZ holding multiple samples) still materializes every sample's inputs.
 - ONNX AutoCast now keeps the variance of decomposed RMSNorm and unfused LayerNorm in FP32 for both FP16 and BF16 conversion, so FP16 models converted without calibration data no longer give wrong outputs on execution providers such as TensorRT-RTX. Reconvert affected models.
 - Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
+- Fix FP16/BF16 deployment with TensorRT 11 by encoding the requested precision in the ONNX graph while preserving input/output types. TensorRT 11 implicit low-bit modes, best-mode search and calibration caches require offline conversion or quantization followed by ``stronglyTyped`` deployment.
 
 *Speculative Decoding*
 
@@ -279,7 +280,6 @@ Changelog
 - Require Pydantic 2.5.0 or newer to prevent configuration-schema errors when importing ``modelopt.torch`` with older releases.
 - Require Wonderwords 2.2.0 or newer in the ``hf`` extra to prevent RULER calibration failures during random-word generation with older releases.
 - A legacy dict-format ``quant_cfg`` now applies its ``"default"`` key before the other keys wherever it appears, as before 0.44.
-- Fix FP16/BF16 deployment with TensorRT 11 by encoding the requested precision in the ONNX graph while preserving input/output types. TensorRT 11 implicit low-bit modes, best-mode search and calibration caches require offline conversion or quantization followed by ``stronglyTyped`` deployment.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^
