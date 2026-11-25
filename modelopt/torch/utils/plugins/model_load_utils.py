@@ -42,7 +42,7 @@ from huggingface_hub import snapshot_download
 from packaging.version import parse
 
 if TYPE_CHECKING:
-    from collections.abc import Container, Iterable
+    from collections.abc import Iterable
 from safetensors.torch import safe_open
 from torch.distributed import device_mesh
 from torch.distributed.checkpoint import HuggingFaceStorageReader
@@ -531,48 +531,28 @@ def _broadcast_load_group(
 
 def _group_sources_by_layer(
     ckpt_keys: "Iterable[str]",
-    indexed: "Container[str]",
-    plan: dict | None,
-    model_names: set[str],
-    loadable: set[str],
+    plans: list[dict],
+    model_param_names: set[str],
     layer_prefixes: list[str],
 ) -> tuple[dict[int, list[str]], list[str], list[str], set[str]]:
-    """Bucket the checkpoint keys the load reads by the decoder layer their converted target lives in.
-
-    Keys are placed as Transformers' own loader places them (``convert_and_load_state_dict_in_model``):
-    only into a name of ``model.state_dict()`` (``loadable``; not a non-persistent buffer), and a
-    target a key fills one to one takes its first key only, while a converter's target takes every
-    key it fuses. "First" is Transformers' key order (``dot_natural_key``), except that every key
-    the index lists (``indexed``) comes before one only a shard's header has: a header-only tensor
-    fills a target no indexed key does, and never replaces the indexed tensor FSDP2 always loaded.
+    """Bucket checkpoint keys by the decoder layer their converted target lives in.
 
     Returns ``(layer_sources, non_layer_sources, unplaced, targets)``: ``layer_sources[i]`` holds
     the keys targeting decoder layer ``i``, ``non_layer_sources`` holds root (embed/lm_head/norm)
-    keys, and ``unplaced`` NAMES the keys whose target isn't in the model (``model_names``) --
-    weights the built model has no home for (an MTP head, an auxiliary tower). The names are kept,
-    not just counted, so the export can copy them through: PTQ never touches them, but the exported
-    checkpoint is still expected to contain them. ``targets`` holds the names some key loads into.
-    A key left out -- a later source of a one-to-one target, or one for a non-persistent buffer --
-    is in none of these: it is not read, and, naming the model's own tensor, not carried.
+    keys, and ``unplaced`` NAMES the keys whose target isn't in the model -- weights the built model
+    has no home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the
+    export can copy them through: PTQ never touches them, but the exported checkpoint is still
+    expected to contain them. ``targets`` holds the parameter names some key loads into.
     """
     layer_sources: dict[int, list[str]] = {i: [] for i in range(len(layer_prefixes))}
     non_layer_sources: list[str] = []
     unplaced: list[str] = []
     targets: set[str] = set()
-    one_to_one: dict[str, bool] = {}  # target -> whether its first key fills it one to one
-    for ckpt_key in sorted(ckpt_keys, key=lambda k: (k not in indexed, dot_natural_key(k))):
-        target, source_pattern, _ = (
-            _resolve_target(plan, ckpt_key) if plan else (ckpt_key, None, [])
-        )
-        if target not in model_names:
+    for ckpt_key in ckpt_keys:
+        target = _target_param(plans, ckpt_key, model_param_names)
+        if target is None:
             unplaced.append(ckpt_key)
             continue
-        # The first key's load of a target stands, as in Transformers: a one-to-one target ignores
-        # every later key, a converter's ignores a later one-to-one key.
-        claimed = one_to_one.get(target)
-        if target not in loadable or claimed or (claimed is not None and source_pattern is None):
-            continue
-        one_to_one[target] = source_pattern is None
         targets.add(target)
         for i, prefix in enumerate(layer_prefixes):
             if target.startswith(prefix):
@@ -1698,32 +1678,24 @@ def parallel_load_and_prepare_fsdp2(
     # class that transformers treats as custom code, dropping that class's renamings (a VLM's
     # ``model.layers`` -> ``model.language_model.layers``). Parameter names are unchanged by it.
     plan = _conversion_plan(model)
-    loadable = set(plan["meta_state_dict"] if plan else model.state_dict())
 
     # fsdp2_wrap shards each decoder layer + the root (embed/lm_head/norm sharded, not replicated).
     decoder_layers = fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
     module_to_name = {m: n for n, m in model.named_modules()}
     layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
 
-    # Keys converting to no name of the model are aux weights (e.g. an MTP head) we carry over.
-    # Every name of a tied parameter counts, as in unplaced_source_keys. A key loads only into a
-    # name the state dict has, which Transformers loads into: a non-persistent buffer is not one.
-    model_names = {
-        n
-        for n, _ in chain(
-            model.named_parameters(remove_duplicate=False),
-            model.named_buffers(remove_duplicate=False),
-        )
-    }
+    # Valid targets; keys converting to anything else are aux weights (e.g. an MTP head) we skip.
+    model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
 
     # Bucket each checkpoint tensor by its target's decoder layer (root params go to
-    # non_layer_sources). Every tensor in the files the index names, not only the ones it lists:
-    # from_pretrained loads all of them, so the reads below take the same map, and the unplaced
-    # ones fall out of this same pass. A model built from its config ran no conversions of its
-    # own, so the stock plan is the only one.
-    tensor_files = checkpoint_tensor_files(resolved_path)
+    # non_layer_sources). Every tensor in the files the index names, not only the ones it lists, so
+    # the unplaced ones fall out of this same pass. A model built from its config ran no
+    # conversions of its own, so the stock plan is the only one.
     layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
-        tensor_files, weight_map, plan, model_names, loadable, layer_prefixes
+        checkpoint_tensor_files(resolved_path),
+        [plan] if plan else [],
+        model_param_names,
+        layer_prefixes,
     )
     if unplaced:
         logger.debug(
@@ -1736,9 +1708,10 @@ def parallel_load_and_prepare_fsdp2(
     # memory this loader exists to save.
     record_unplaced_source_keys(model, resolved_path, unplaced)
     # What from_pretrained records: the conversions some checkpoint key used. The export reverts
-    # these and would otherwise query the wrapped class, which has lost them. They are taken from
-    # exactly the keys the reads below convert, the placed ones, so a rename only a key with no
-    # parameter matches, which is only carried over, doesn't rename the export. Transformers'
+    # these and would otherwise query the wrapped class, which has lost them. They are matched over
+    # exactly the keys the reads below convert -- placed and in weight_map, which is what
+    # read_safetensors_subset selects from -- so a rename only an unread key matches, such as one
+    # with no parameter that is only carried over, doesn't rename the export. Transformers'
     # was_used isn't used even where it exists: the placement pass above set it for every key. Nor
     # is a hook on each rule's matching: a key that already names a parameter keeps that name even
     # where a rule matched it (a VLM's text sub-model rule), so only the rules that named the target
@@ -1748,6 +1721,7 @@ def parallel_load_and_prepare_fsdp2(
         used = {
             id(conversion)
             for key in chain(non_layer_sources, *layer_sources.values())
+            if key in weight_map
             for conversion in _resolve_target(plan, key)[2]
         }
         model._weight_conversions = [c for c in plan["conversions"] if id(c) in used]
@@ -1757,7 +1731,7 @@ def parallel_load_and_prepare_fsdp2(
 
     owned_layer_indices = _layers_for_rank(len(decoder_layers), world_size, rank)
     owned_layer_state_dicts = _read_owned_layers(
-        resolved_path, tensor_files, layer_sources, owned_layer_indices, plan
+        resolved_path, weight_map, layer_sources, owned_layer_indices, plan
     )
 
     # Smaller broadcast_chunk_size lowers the transient GPU peak (more, smaller collectives).
@@ -1782,7 +1756,7 @@ def parallel_load_and_prepare_fsdp2(
     # TODO: layerwise support.
     non_layer = None
     if rank == 0:
-        non_layer = _read_and_convert(resolved_path, tensor_files, set(non_layer_sources), plan)
+        non_layer = _read_and_convert(resolved_path, weight_map, set(non_layer_sources), plan)
     non_layer = broadcast_state_dict(non_layer, src=0, device=device)
     if cpu_offload:
         non_layer = {k: v.cpu() for k, v in non_layer.items()}

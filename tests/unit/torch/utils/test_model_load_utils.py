@@ -387,19 +387,21 @@ def _as_on_transformers_5_5(monkeypatch):
 def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monkeypatch, loader):
     """A load records only the conversions it converted a key with, on every Transformers version.
 
-    Each load meets a tied ``lm_head`` with no tensor of its own (the whole-model load as on 5.5,
-    without ``was_used``), and FSDP2 also a head bias with no parameter, which it only carries over.
-    Recorded anyway, the head's rename renames ``lm_head`` in the export (to
-    ``language_model.model.lm_head`` for Gemma3). Both loads also read a projector its index leaves
-    out, as from_pretrained reads every tensor of a shard it opens, and keep its rename.
+    Each load meets a tied ``lm_head`` it doesn't convert: FSDP2 a copy of it its index leaves out,
+    which it places but never reads, and a head bias with no parameter, which it only carries over;
+    the whole-model load (as on 5.5, without ``was_used``) no head tensor at all. Recorded anyway,
+    the head's rename renames ``lm_head`` in the export (to ``language_model.model.lm_head`` for
+    Gemma3). The whole-model load also reads a projector its index leaves out, and keeps its rename.
     """
     fsdp2 = loader == "fsdp2"
-    ref = _tiny_llava_checkpoint(tmp_path, drop=("lm_head.",), tie=True)
+    ref = _tiny_llava_checkpoint(tmp_path, drop=() if fsdp2 else ("lm_head.",), tie=True)
     state = load_file(str(tmp_path / "model.safetensors"))
     (tmp_path / "model.safetensors").unlink()
     if fsdp2:
         state["language_model.lm_head.bias"] = torch.zeros(64)
-    off_index = {k for k in state if k.startswith("multi_modal_projector.")}
+        off_index = {"language_model.lm_head.weight"}
+    else:
+        off_index = {k for k in state if k.startswith("multi_modal_projector.")}
     shard = "model-00001-of-00001.safetensors"
     save_file(state, str(tmp_path / shard), metadata={"format": "pt"})
     index = {"metadata": {}, "weight_map": {k: shard for k in state if k not in off_index}}
@@ -413,10 +415,9 @@ def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monke
         assert torch.equal(head.detach(), ref.get_input_embeddings().weight.detach())
     else:
         model = load_pretrained(str(tmp_path), _as_on_transformers_5_5(monkeypatch))
-    ref_projector = ref.model.multi_modal_projector
-    for name, param in model.model.multi_modal_projector.named_parameters():
-        param = param.full_tensor() if isinstance(param, DTensor) else param
-        assert torch.equal(param.detach(), ref_projector.get_parameter(name).detach()), name
+        ref_projector = ref.model.multi_modal_projector
+        for name, param in model.model.multi_modal_projector.named_parameters():
+            assert torch.equal(param, ref_projector.get_parameter(name)), name
 
     to_source = build_reverse_name_mapper(model)
     recorded, model._weight_conversions = (
@@ -433,63 +434,6 @@ def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monke
     projector = "model.multi_modal_projector.linear_1"
     renamed = every(projector) != projector
     assert to_source(projector) == ("multi_modal_projector.linear_1" if renamed else projector)
-
-
-@pytest.mark.parametrize("indexed", ["language_model.model.", "model.language_model."])
-def test_an_indexed_source_is_not_replaced_by_a_header_only_one(tmp_path, gloo_group, indexed):
-    """Two keys of a shard name one parameter, with different values, and the index lists one.
-    FSDP2 reads the shard whole, but loads the indexed tensor, as it did when it read the index
-    alone, whichever of the two comes first in Transformers' key order."""
-    _tiny_llava_checkpoint(tmp_path)
-    state = load_file(str(tmp_path / "model.safetensors"))
-    (tmp_path / "model.safetensors").unlink()
-    leaf = "layers.0.mlp.up_proj.weight"
-    spellings = ("language_model.model.", "model.language_model.")
-    for value, prefix in enumerate(spellings):
-        state[prefix + leaf] = torch.full_like(state[f"language_model.model.{leaf}"], value)
-    shard = "model-00001-of-00001.safetensors"
-    save_file(state, str(tmp_path / shard), metadata={"format": "pt"})
-    other = next(p for p in spellings if p != indexed)
-    index = {"metadata": {}, "weight_map": {k: shard for k in state if k != other + leaf}}
-    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
-
-    loaded = _fsdp2_load(tmp_path).get_parameter(f"model.language_model.{leaf}")
-    loaded = loaded.full_tensor() if isinstance(loaded, DTensor) else loaded
-    assert torch.equal(loaded.detach(), torch.full_like(loaded, spellings.index(indexed)))
-
-
-def test_a_key_for_a_non_persistent_buffer_neither_loads_nor_renames_the_export(
-    tmp_path, gloo_group, monkeypatch
-):
-    """A non-persistent buffer is no state-dict entry, so Transformers loads nothing into it. A
-    key that renames onto one is not read, not carried over (it names the model's own tensor), and
-    doesn't record its rename, which the export would otherwise apply to the projector's weights."""
-    _tiny_llava_checkpoint(tmp_path)
-    state = load_file(str(tmp_path / "model.safetensors"))
-    state["legacy_projector.scratch"] = torch.ones(2)
-    save_file(state, str(tmp_path / "model.safetensors"), metadata={"format": "pt"})
-    get_mapping = model_load_utils.get_model_conversion_mapping
-    rule = core_model_loading.WeightRenaming(r"^legacy_projector\.", "model.multi_modal_projector.")
-    monkeypatch.setattr(
-        model_load_utils,
-        "get_model_conversion_mapping",
-        lambda model, *args, **kwargs: [*get_mapping(model, *args, **kwargs), rule],
-    )
-    build = model_load_utils.build_meta_causal_lm
-
-    def build_with_scratch(*args, **kwargs):
-        model = build(*args, **kwargs)
-        model.model.multi_modal_projector.register_buffer(
-            "scratch", torch.zeros(2), persistent=False
-        )
-        return model
-
-    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", build_with_scratch)
-    model = _fsdp2_load(tmp_path)
-
-    assert torch.equal(model.model.multi_modal_projector.scratch, torch.zeros(2))
-    assert "legacy_projector.scratch" not in model._modelopt_unplaced_source_keys
-    assert all(c is not rule for c in model._weight_conversions)
 
 
 def test_overlapping_loads_each_keep_their_hooks(tmp_path, monkeypatch):
