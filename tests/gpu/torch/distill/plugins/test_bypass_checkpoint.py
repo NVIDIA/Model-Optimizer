@@ -16,18 +16,24 @@
 """Real interrupted/resumed Bypass updates, committed files and finalized reload."""
 
 import copy
+import gc
 import json
 import random
 import shutil
+import time
 
 import numpy as np
 import pytest
 import torch
 from _test_utils.bypass import bypass_problem
+from _test_utils.torch.distributed.utils import bounded_collectives
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
-from modelopt.torch.distill._bypass_checkpoint import _batch_hash, _rng_state
+import modelopt.torch.quantization as mtq
+from modelopt.torch.distill._bypass_checkpoint import _batch_hash, _model_hash, _rng_state
+from modelopt.torch.quantization.qtensor import FP8QTensor, QTensorWrapper
+from modelopt.torch.quantization.utils.native_weight import pin_native_weight
 
 
 class _Interrupted(list):
@@ -57,8 +63,9 @@ class _WrongNextCursor(_RandomCursor):
 
 
 class _StatefulCursor:
-    def __init__(self, batches, *, interrupted=False):
+    def __init__(self, batches, *, interrupted=False, snapshot_failure=False):
         self.batches, self.position, self.interrupted = batches, 0, interrupted
+        self.snapshot_failure = snapshot_failure
         self.data_identity = [_batch_hash(batch) for batch in batches]
 
     def __iter__(self):
@@ -77,6 +84,8 @@ class _StatefulCursor:
         return batch
 
     def state_dict(self):
+        if self.snapshot_failure:
+            raise OSError("Simulated data-cursor snapshot failure")
         return {"position": self.position}
 
     def load_state_dict(self, state):
@@ -92,7 +101,11 @@ def _committed(root, *, size=1, rank=0):
 
 def _equal(actual, expected):
     if isinstance(expected, torch.Tensor):
-        assert torch.equal(actual, expected)
+        assert actual.shape == expected.shape and actual.dtype == expected.dtype
+        assert torch.equal(
+            actual.contiguous().reshape(-1).view(torch.uint8),
+            expected.contiguous().reshape(-1).view(torch.uint8),
+        )
     elif isinstance(expected, dict):
         assert actual.keys() == expected.keys()
         for key in expected:
@@ -109,6 +122,22 @@ def _equal(actual, expected):
 def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
     initial, teacher, batches = bypass_problem()
 
+    def fresh_student():
+        model = copy.deepcopy(initial)
+        native, scale = FP8QTensor.quantize(model.head.weight.detach(), axis=0)
+        quantizer = model.head.weight_quantizer
+        quantizer.set_from_attribute_config(
+            mtq.QuantizerAttributeConfig(num_bits=(4, 3), axis=0, fake_quant=stateful)
+        )
+        quantizer._set_buffer("_scale", scale)
+        if stateful:
+            model.head.weight.data.copy_(native.dequantize(scale=scale))
+            pin_native_weight(quantizer, native, model.head.weight)
+        else:
+            mtq.compress(model, config={"compress": {"default": False, "*head*": True}})
+            assert isinstance(model.head.weight, QTensorWrapper)
+        return model
+
     def cursor(data, *, interrupted=False):
         if stateful:
             return _StatefulCursor(data, interrupted=interrupted)
@@ -121,14 +150,14 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
         "warmup_fraction": 0.25,
         "checkpoint_interval": 2,
     }
-    reference = copy.deepcopy(initial)
+    reference = fresh_student()
     mtd.bypass(
         reference,
         copy.deepcopy(teacher),
         cursor(batches),
         {**recipe, "checkpoint_dir": str(tmp_path / "reference")},
     )
-    interrupted = copy.deepcopy(initial)
+    interrupted = fresh_student()
     with pytest.raises(OSError):
         mtd.bypass(
             interrupted,
@@ -152,11 +181,29 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
         if index == 2:
             with torch.no_grad():
                 target.head.weight.add_(0.001)
-        refused = copy.deepcopy(initial)
+        refused = fresh_student()
         before = copy.deepcopy(refused.state_dict())
         with pytest.raises(ValueError):
             mtd.bypass(refused, target, data, {**recipe, "resume_from": str(source)})
         _equal(refused.state_dict(), before)
+
+    refused = fresh_student()
+    metadata = (
+        refused.head.weight_quantizer._native_weight_meta["native_metadata"]
+        if stateful
+        else refused.head.weight.metadata
+    )
+    metadata["dtype"] = torch.float64
+    before = copy.deepcopy(refused.state_dict())
+    with pytest.raises(ValueError):
+        mtd.bypass(
+            refused,
+            copy.deepcopy(teacher),
+            cursor(batches),
+            {**recipe, "resume_from": str(generation)},
+        )
+    _equal(refused.state_dict(), before)
+    assert metadata["dtype"] == torch.float64
 
     def failed_write(*args, **kwargs):
         raise OSError("Simulated checkpoint disk failure")
@@ -165,7 +212,7 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
         patch.setattr(torch, "save", failed_write)
         with pytest.raises(ValueError):
             mtd.bypass(
-                copy.deepcopy(initial),
+                fresh_student(),
                 copy.deepcopy(teacher),
                 cursor(batches),
                 {
@@ -177,7 +224,7 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
     assert _committed(tmp_path / "resumed")[0] == generation
     assert not list((tmp_path / "resumed").glob(".pending-step-*"))
     assert incomplete.exists()  # Never delete a different writer's uncommitted directory.
-    resumed = copy.deepcopy(initial)
+    resumed = fresh_student()
     random.seed(203)
     np.random.seed(203)
     caller_rng = _rng_state([])
@@ -200,7 +247,7 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
     _equal(resumed.state_dict(), reference.state_dict())
     with pytest.raises(ValueError):
         mtd.bypass(
-            copy.deepcopy(initial),
+            fresh_student(),
             copy.deepcopy(teacher),
             cursor(batches),
             {**recipe, "checkpoint_dir": str(tmp_path / "resumed")},
@@ -217,7 +264,7 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
     assert all("_local_repair_state" not in name for name in resumed.state_dict())
     relocated = tmp_path / "relocated"
     shutil.copytree(final_generation, relocated)
-    restored = copy.deepcopy(initial)
+    restored = fresh_student()
     mtd.bypass(
         restored,
         copy.deepcopy(teacher),
@@ -264,6 +311,15 @@ def _distributed_resume_worker(rank, size, directory):
             {**recipe, "checkpoint_dir": str(root / "resumed")},
             device_mesh=mesh,
         )
+    with bounded_collectives(10), pytest.raises(ValueError):
+        mtd.bypass(
+            copy.deepcopy(initial),
+            copy.deepcopy(teacher),
+            _StatefulCursor(local, snapshot_failure=rank == 1),
+            {**recipe, "checkpoint_dir": str(root / "snapshot-failure")},
+            device_mesh=mesh,
+        )
+    assert not (root / "snapshot-failure" / "latest").exists()
     resumed = copy.deepcopy(initial)
     mtd.bypass(
         resumed,
@@ -305,7 +361,7 @@ class _NativeInterrupted(list):
             yield batch
 
 
-def _native_checkpoint_problem(rank):
+def _native_checkpoint_problem(rank, size):
     from _test_utils.transformers_families import build_model, cases
     from torch.distributed.device_mesh import init_device_mesh
     from transformers.distributed.utils import TransformersDeviceMesh
@@ -353,9 +409,13 @@ def _native_checkpoint_problem(rank):
         lambda m: m(**batches[0]),
     )
     manager = TransformersDeviceMesh(
-        init_device_mesh("cuda", (1, 1, 2, 2), mesh_dim_names=("pp", "dp_replicate", "fsdp", "tp")),
         init_device_mesh(
-            "cuda", (1, 1, 1, 4), mesh_dim_names=("pp", "dp_replicate", "efsdp", "ep")
+            "cuda", (1, 1, 2, size // 2), mesh_dim_names=("pp", "dp_replicate", "fsdp", "tp")
+        ),
+        init_device_mesh(
+            "cuda",
+            (1, 1, 2, 1) if size == 2 else (1, 1, 1, 4),
+            mesh_dim_names=("pp", "dp_replicate", "efsdp", "ep"),
         ),
     )
     adapter = TransformersBypassAdapter(manager)
@@ -374,6 +434,49 @@ def _native_resume_worker(rank, size, directory):
     from pathlib import Path
 
     root = Path(directory)
+    torch.cuda.set_device(rank)
+    probe = mtq.quantize(
+        torch.nn.Sequential(
+            torch.nn.Linear(4096, 4096, bias=False, device=f"cuda:{rank}", dtype=torch.bfloat16)
+        ),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": 0}},
+            ],
+            "algorithm": None,
+        },
+    )
+    mtq.compress(probe)
+    assert isinstance(probe[0].weight, QTensorWrapper)
+    physical_bytes = sum(
+        value.numel() * value.element_size() for value in (*probe.parameters(), *probe.buffers())
+    )
+    torch.cuda.synchronize(rank)
+    baseline = torch.cuda.memory_allocated(rank)
+    torch.cuda.reset_peak_memory_stats(rank)
+    started = time.perf_counter()
+    identity = _model_hash(probe)
+    torch.cuda.synchronize(rank)
+    elapsed = time.perf_counter() - started
+    peak = torch.cuda.max_memory_allocated(rank) - baseline
+    (root / f"native-identity-{rank}.json").write_text(
+        json.dumps(
+            {
+                "native_checkpoint_identity": {
+                    "rank": rank,
+                    "shape": [4096, 4096],
+                    "physical_bytes": physical_bytes,
+                    "incremental_peak_bytes": peak,
+                    "seconds": elapsed,
+                    "hash_length": len(identity),
+                }
+            }
+        )
+    )
+    assert peak <= 10 * 1024**2  # Existing 8-MiB hash chunks plus 2 MiB allocator slack.
+    del probe
+    gc.collect()
     recipe = {
         "num_steps": 2,
         "global_batch_size": 8,
@@ -381,7 +484,7 @@ def _native_resume_worker(rank, size, directory):
         "warmup_fraction": 0.5,
         "checkpoint_interval": 1,
     }
-    reference, teacher, local, mesh = _native_checkpoint_problem(rank)
+    reference, teacher, local, mesh = _native_checkpoint_problem(rank, size)
     mtd.bypass(
         reference,
         teacher,
@@ -389,7 +492,7 @@ def _native_resume_worker(rank, size, directory):
         {**recipe, "checkpoint_dir": str(root / "reference")},
         device_mesh=mesh,
     )
-    student, teacher, local, mesh = _native_checkpoint_problem(rank)
+    student, teacher, local, mesh = _native_checkpoint_problem(rank, size)
     with pytest.raises(ValueError):
         mtd.bypass(
             student,
@@ -398,7 +501,7 @@ def _native_resume_worker(rank, size, directory):
             {**recipe, "checkpoint_dir": str(root / "resumed")},
             device_mesh=mesh,
         )
-    student, teacher, local, mesh = _native_checkpoint_problem(rank)
+    student, teacher, local, mesh = _native_checkpoint_problem(rank, size)
     mtd.bypass(
         student,
         teacher,
@@ -408,6 +511,8 @@ def _native_resume_worker(rank, size, directory):
     )
     _, expected = _committed(root / "reference", size=size, rank=rank)
     _, actual = _committed(root / "resumed", size=size, rank=rank)
+    assert expected["fields"]
+    assert any(value.count_nonzero() for value in expected["fields"].values())
     for key in ("fields", "optimizers", "rng_state", "data_position"):
         _equal(actual[key], expected[key])
     for name, module in student.named_modules():
@@ -416,6 +521,10 @@ def _native_resume_worker(rank, size, directory):
             _equal(module.state_dict(), reference_module.state_dict())
 
 
+@pytest.mark.parametrize("native_workers", [2, 4], indirect=True, ids=["fsdp2", "fsdp2_tp2_ep4"])
 @pytest.mark.timeout(300)
-def test_native_resume_with_empty_owners_and_frozen_nvfp4(native_workers, tmp_path):
+def test_native_resume_with_empty_owners_and_frozen_nvfp4(native_workers, tmp_path, capsys):
     native_workers.run(_native_resume_worker, str(tmp_path))
+    with capsys.disabled():
+        for rank in range(native_workers.world_size):
+            print((tmp_path / f"native-identity-{rank}.json").read_text(), flush=True)
