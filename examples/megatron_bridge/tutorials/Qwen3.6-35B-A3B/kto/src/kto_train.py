@@ -62,12 +62,7 @@ def main():
     checkpoint = cfg["checkpointing"]["pretrained_checkpoint"]
     # Check for saved ModelOpt state and give the workers an absolute path.
     checkpoint["path"] = str(validate_checkpoint(Path(checkpoint["path"])))
-    # - Megatron Bridge QAD saves only Qwen's language weights. The default NeMo RL
-    #   worker builds the full VLM, so the custom worker builds only the language model.
-    # - The default worker looks for ModelOpt state under iter_0000000. The custom
-    #   worker uses the supplied QAD iteration directory, such as iter_0000500.
-    # - The VLM wrapper normally computes rotary positions. The custom worker calls
-    #   the language model directly, so it repeats each text position across three axes.
+    # NeMo RL expects the full Qwen VLM, so use a custom worker to load the language-only QAD checkpoint.
     register_qwen36_worker()
 
     config = MasterConfig(**cfg)
