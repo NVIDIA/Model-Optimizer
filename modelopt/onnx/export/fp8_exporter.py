@@ -25,6 +25,7 @@ import torch
 from onnx_graphsurgeon.ir.tensor import LazyValues
 
 from modelopt.onnx.logging_config import logger
+from modelopt.onnx.utils import export_onnx
 
 from .base_exporter import ONNXQuantExporter
 
@@ -164,7 +165,7 @@ class FP8QuantExporter(ONNXQuantExporter):
             logger.info(f"Folded {n_t_folded} weight Transpose nodes during weight compression")
         print(f"fp8 qdq replaced with only dq completed in {end_time - start_time}s.")
 
-        return gs.export_onnx(graph)
+        return export_onnx(graph)
 
     @staticmethod
     def _quantize_conv_weights_to_fp8(graph: gs.Graph) -> int:
@@ -209,7 +210,7 @@ class FP8QuantExporter(ONNXQuantExporter):
             scale_val = (amax / _FP8_E4M3_MAX).item()
             scale_data = np.array(scale_val, dtype=weight_input.values.dtype)
             # Round up so normalizing by the serialized scale stays within the FP8 range.
-            if scale_data < scale_val:
+            if float(scale_data) < scale_val:
                 np.nextafter(
                     scale_data,
                     np.array(np.inf, dtype=scale_data.dtype),
@@ -517,4 +518,4 @@ class FP8QuantExporter(ONNXQuantExporter):
             )
 
         graph.cleanup().toposort()
-        return gs.export_onnx(graph)
+        return export_onnx(graph)

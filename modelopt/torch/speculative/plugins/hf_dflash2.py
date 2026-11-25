@@ -29,9 +29,11 @@ Selector supervision (following the SGLang/SpecForge reference):
 - Take the backbone's top-k candidates per block position.
 - Score each candidate against its *teacher-forced* predecessor token, so the
   positions train in parallel exactly as the backbone does.
-- When the gold token is missing from the top-k, substitute it into the last
-  candidate slot. Without this the selector sees no positive class on the hard
-  positions and never learns those edges.
+- Supervise only the strict top-k, the candidate set serving builds. A gold token
+  outside it is a backbone recall miss, not a selector example, and carries no
+  selector gradient.
+- Weight each position as the backbone loss does (decay or D-PACE) and divide by the
+  backbone's weight sum, misses included.
 """
 
 import torch
@@ -39,7 +41,9 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import DFlash2DMRegistry
-from .hf_dflash import HFDFlashModel, _block_targets, _block_tokens
+from ..losses import _lk_lambda_loss
+from .dflash_losses import LossContext, LossOutput, _block_tokens
+from .hf_dflash import HFDFlashModel
 from .modeling_dflash2 import DFlash2Module
 
 __all__ = ["HFDFlash2Model"]
@@ -83,22 +87,6 @@ class HFDFlash2Model(HFDFlashModel):
                 "optimizes a soft target instead. Set dflash_self_logit_distillation=false, "
                 "or dflash_lk_loss_type='ce' to keep distillation."
             )
-        self._selector_metrics = None
-
-    def forward(self, *args, **kwargs):
-        """Run the DFlash training forward and attach the candidate-selector metrics.
-
-        The variant is the objective, so the pipeline above it is inherited verbatim;
-        this only carries out what ``_compute_loss`` produced. Without it
-        ``selector_coverage`` -- the only signal distinguishing a selector that is
-        choosing from one being handed the gold token -- never reaches the logs.
-        """
-        self._selector_metrics = None
-        outputs = super().forward(*args, **kwargs)
-        if self._selector_metrics is not None:
-            outputs["selector_metrics"] = self._selector_metrics
-            self._selector_metrics = None
-        return outputs
 
     def get_exporter(self):
         """Get the exporter for the DFlash2 draft model."""
@@ -106,7 +94,9 @@ class HFDFlash2Model(HFDFlashModel):
 
         return DFlash2Exporter(self)
 
-    def _selector_loss(self, logits, target_ids, hidden, predecessor_ids, weight_mask):
+    def _selector_loss(
+        self, logits, target_ids, hidden, predecessor_ids, supervised_mask, loss_weights, weight_sum
+    ):
         """Cross-entropy over the selector's candidate set, and its top-1 accuracy.
 
         Args:
@@ -114,7 +104,10 @@ class HFDFlash2Model(HFDFlashModel):
             target_ids: Gold token ids ``[B, N, block_size]``.
             hidden: Backbone hidden states ``[B, N, block_size, H]``.
             predecessor_ids: Teacher-forced predecessor ids ``[B, N, block_size]``.
-            weight_mask: Per-position loss weights ``[B, N, block_size]``.
+            supervised_mask: The positions the backbone loss supervises, unweighted
+                ``[B, N, block_size]``.
+            loss_weights: The backbone loss's per-position weights ``[B, N, block_size]``.
+            weight_sum: The backbone loss's denominator, the sum of ``loss_weights``.
 
         Returns:
             ``(loss, accuracy, coverage)`` — coverage is the fraction of supervised
@@ -130,7 +123,7 @@ class HFDFlash2Model(HFDFlashModel):
         # token the backbone did not propose is a backbone recall failure, not a
         # selector classification example: substituting it in would teach the selector
         # to override the unary ranking on a set it will never be shown. Those
-        # positions carry no selector gradient and leave the denominator instead.
+        # positions carry no selector gradient.
         gold_matches = candidate_ids == target_ids.unsqueeze(-1)
         gold_in_topk = gold_matches.any(dim=-1)
         gold_slot = gold_matches.long().argmax(dim=-1)
@@ -139,31 +132,32 @@ class HFDFlash2Model(HFDFlashModel):
             candidate_ids, unary_logits, hidden, predecessor_ids
         )
 
-        covered = weight_mask * gold_in_topk.to(weight_mask.dtype)
-        flat_weights = covered.reshape(-1)
-        denominator = flat_weights.sum() + 1e-6
+        in_topk = gold_in_topk.to(loss_weights.dtype)
         per_token = F.cross_entropy(
             selector_logits.float().reshape(-1, top_k),
             gold_slot.reshape(-1),
             reduction="none",
         )
-        loss = (per_token * flat_weights).sum() / denominator
+        # The backbone's denominator, misses included: dividing by the covered positions
+        # alone would scale the term up whenever backbone recall drops.
+        loss = (per_token * (loss_weights * in_topk).reshape(-1)).sum() / weight_sum
 
         with torch.no_grad():
+            covered = (supervised_mask * in_topk).reshape(-1)
             chosen = selector_logits.argmax(dim=-1).reshape(-1)
-            accuracy = (
-                (chosen == gold_slot.reshape(-1)).float() * flat_weights
-            ).sum() / denominator
+            accuracy = ((chosen == gold_slot.reshape(-1)).float() * covered).sum() / (
+                covered.sum() + 1e-6
+            )
             # Coverage keeps the full supervised mask as its denominator: it measures
             # how often the selector was given a solvable problem at all.
             # clamp, not an epsilon: a fully covered batch must read exactly 1.0.
-            supervised = weight_mask.reshape(-1).sum()
-            coverage = flat_weights.sum() / supervised.clamp(min=1.0)
+            supervised = supervised_mask.reshape(-1).sum()
+            coverage = covered.sum() / supervised.clamp(min=1.0)
         # Detached tensors, not Python scalars: .item() would force a CPU-GPU sync on
         # every training step. The trainer converts them at the logging boundary.
         return loss, accuracy.detach(), coverage.detach()
 
-    def _lk_loss(self, terms):
+    def _lk_loss(self, ctx: LossContext) -> torch.Tensor:
         """Re-weight the block objective between cross-entropy and acceptance.
 
         Both terms are read off the same per-position cross-entropy the backbone loss
@@ -181,69 +175,42 @@ class HFDFlash2Model(HFDFlashModel):
         The blend weight is detached, so it reshapes the objective without adding a
         gradient path of its own.
         """
-        ce, weights, weight_sum = terms.ce_per_token, terms.weights, terms.weight_sum
-        assert ce is not None, (
-            "the KD path produced no per-position cross-entropy, so q(gold) is "
-            "unavailable and the blend would silently fall back to it; modify() is "
-            "supposed to have rejected this combination at convert time"
-        )
+        ce, weights, weight_sum = ctx.ce("final"), ctx.weights.view(-1), ctx.weight_sum
         gold_probability = torch.exp(-ce)
-        tv_loss = ((1.0 - gold_probability) * weights).sum() / weight_sum
         if self.dflash_lk_loss_type == "tv":
-            return tv_loss
+            return ((1.0 - gold_probability) * weights).sum() / weight_sum
 
-        ce_loss = (ce * weights).sum() / weight_sum
-        mask = terms.supervised_mask
+        mask = ctx.targets.mask.view(-1)
         acceptance = (gold_probability.detach() * mask).sum() / (mask.sum() + 1e-6)
-        ce_share = self.dflash_lk_ce_scale * torch.exp(-self.dflash_lk_ce_decay * acceptance)
-        return ce_share * ce_loss + (1.0 - ce_share) * tv_loss
+        return _lk_lambda_loss(
+            ce,
+            gold_probability,
+            weights,
+            weight_sum,
+            eta=self.dflash_lk_ce_decay,
+            scale=self.dflash_lk_ce_scale,
+            mean_acceptance=acceptance,
+        )
 
-    def _compute_loss(
-        self,
-        logits,
-        input_ids,
-        anchor_positions,
-        block_keep_mask,
-        loss_mask,
-        *,
-        draft_hidden=None,
-        base_outputs=None,
-    ):
+    def _compute_loss(self, ctx: LossContext) -> LossOutput:
         """Backbone DFlash loss plus the candidate-selector cross-entropy.
 
-        Reuses ``HFDFlashModel._compute_loss`` for the backbone term, then rebuilds
-        the same target/weight alignment for the selector term. Reported accuracy
-        stays the backbone's top-1, so DFlash and DFlash2 runs remain comparable;
-        the selector's own accuracy is logged separately.
+        Reported accuracy stays the backbone's top-1, so DFlash and DFlash2 runs remain
+        comparable; the selector's own accuracy and coverage are added to the metrics.
         """
-        loss, accuracy, terms = super()._compute_loss(
-            logits,
-            input_ids,
-            anchor_positions,
-            block_keep_mask,
-            loss_mask,
-            draft_hidden=draft_hidden,
-            base_outputs=base_outputs,
-            return_terms=True,
-        )
+        out = super()._compute_loss(ctx)
+        loss = out.loss
         if self.dflash_lk_loss_type != "ce":
-            loss = self._lk_loss(terms)
-        if self.dflash_selector_loss_alpha <= 0 or draft_hidden is None:
-            return loss, accuracy
+            loss = self._lk_loss(ctx)
+        if self.dflash_selector_loss_alpha <= 0:
+            return out._replace(loss=loss)
 
-        bsz = input_ids.shape[0]
+        batch, targets = ctx.batch, ctx.targets
+        bsz, n_blocks = batch.anchors.shape
         block_size = self.dflash_block_size
-        n_blocks = anchor_positions.shape[1]
-
-        # The backbone's supervision mask, without its position weighting (decay/D-PACE):
-        # that shapes *where* the backbone spends capacity, while the selector should learn
-        # every position's transition equally.
-        targets = _block_targets(
-            input_ids, anchor_positions, block_keep_mask, loss_mask, block_size, self._label_shift
-        )
 
         # Teacher-forced predecessor of block position k is the real token at anchor+k-1.
-        # Only offsets 1..block_size-1 are supervised (the mask zeroes slot 0), so the
+        # Only offsets 1..block_size-1 are supervised (the backbone's mask zeroes slot 0), so the
         # first supervised position, k=1, has the anchor's own token as its predecessor.
         # Slot 0's entry here resolves to anchor-1 and never contributes.
         #
@@ -251,18 +218,25 @@ class HFDFlash2Model(HFDFlashModel):
         # from the anchor token, so ITS position 0 corresponds to block offset 1. A caller
         # that hands greedy_path the full 0..block_size-1 candidate set is off by one.
         predecessor_ids = _block_tokens(
-            input_ids, anchor_positions, block_size, self._label_shift - 1
+            batch.input_ids, batch.anchors, block_size, self._label_shift - 1
         )
 
+        # The backbone's own mask and position weights: a block position's choice only
+        # matters if every earlier one was accepted, which decay / D-PACE model.
         selector_loss, selector_accuracy, selector_coverage = self._selector_loss(
-            logits.reshape(bsz, n_blocks, block_size, -1),
+            ctx.logits.backbone,
             targets.token_ids,
-            draft_hidden.reshape(bsz, n_blocks, block_size, -1),
+            batch.hidden.reshape(bsz, n_blocks, block_size, -1),
             predecessor_ids,
             targets.mask,
+            ctx.weights,
+            ctx.weight_sum,
         )
-        self._selector_metrics = {
+        metrics = {
+            **out.metrics,
             "selector_accuracy": selector_accuracy,
             "selector_coverage": selector_coverage,
         }
-        return loss + self.dflash_selector_loss_alpha * selector_loss, accuracy
+        return LossOutput(
+            loss + self.dflash_selector_loss_alpha * selector_loss, out.accuracy, metrics
+        )

@@ -1029,6 +1029,11 @@ class LocalHessianCalibConfig(
     - ``dw = weight - quantized_weight`` (weight reconstruction error per block)
     - ``H = X @ X.T`` is the local Hessian computed from input activations X
 
+    GGML IQ weights have no amax to search. Instead, each 256-weight block's local scales (and, for
+    IQ1_S, deltas) are picked by this loss over the block's 256 x 256 Hessian, while their
+    codebook search keeps imatrix's weighting. The weight is left unchanged and its codes are pinned
+    to the quantizer, as with imatrix, which this replaces; ``block_size`` and the amax-search
+    options do not apply to them. Until QAD changes a block, it keeps the codes this search picked.
     """
 
     _mutates_weights: ClassVar[bool] = False
@@ -1084,6 +1089,15 @@ class LocalHessianCalibConfig(
         default=False,
         title="Debug mode.",
         description="If True, module's local Hessian metadata will be kept as a module attribute.",
+    )
+
+    perc_damp: float = ModeloptField(
+        default=0.3,
+        ge=0.0,
+        title="Hessian damping for GGML IQ weights.",
+        description="GGML IQ weights pick their local scales by ``H + perc_damp * mean(diag(H)) * I``. "
+        "Undamped, the full Hessian overfits the calibration data at these bit widths, as GPTQ's "
+        "does. Unused by the amax search of other formats.",
     )
 
 
@@ -1266,10 +1280,11 @@ class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
         of the group_size used in the quantization.""",
     )
     fused: bool = ModeloptField(
-        default=False,
+        default=True,
         title="Use fused Triton kernel for GPTQ.",
         description="""When True, use a fused Triton kernel that combines quantization and
-        per-column error propagation into one launch per GPTQ block.""",
+        per-column error propagation into one launch per GPTQ block. Applies to static NVFP4
+        weights without 4/6 scaling on SM89+; other cases use the unfused loop.""",
     )
     importance_weighted: bool = ModeloptField(
         default=False,
@@ -1277,6 +1292,15 @@ class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
         description="""When True, formats whose codebook search takes a per-input-column importance
         (the GGML IQ1 and IQ2 formats) weight it by the square root of the Hessian diagonal,
         llama.cpp's imatrix statistic. Other formats ignore it.""",
+    )
+    local_hessian_scales: bool = ModeloptField(
+        default=False,
+        title="Pick each block's local scales by the GPTQ-compensated block Hessian.",
+        description="""When True, formats with per-group choices (the GGML IQ1 and IQ2 local
+        scales) pick them, block by block, by the layer-output error GPTQ incurs for that block
+        once the later columns compensate -- as ``local_hessian`` does with the plain block
+        Hessian -- instead of by the (importance-weighted) squared error. Other formats ignore
+        it.""",
     )
 
 
@@ -1536,7 +1560,11 @@ def normalize_quant_cfg_list(
     # Legacy flat-dict format: {"*": {...}, "*weight_quantizer": {...}} → list of single-key dicts.
     if isinstance(v, Mapping):
         _warn_legacy()
-        v = [{k: val} for k, val in v.items()]
+        # Legacy "default" was applied before every other key, wherever it appeared in the dict.
+        legacy_entries = [{k: val} for k, val in v.items() if k != "default"]
+        if "default" in v:
+            legacy_entries.insert(0, {"default": v["default"]})
+        v = legacy_entries
     elif not isinstance(v, Sequence) or isinstance(v, (str, bytes)):
         raise ValueError(
             f"quant_cfg must be a sequence of entries (or a legacy flat mapping), got "

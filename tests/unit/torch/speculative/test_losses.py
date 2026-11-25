@@ -1,0 +1,184 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Paper-reference coverage for LK lambda values, gradients and retained memory."""
+
+import pytest
+import torch
+
+from modelopt.torch.speculative.losses import (
+    _masked_soft_target_cross_entropy,
+    masked_lk_lambda_loss,
+)
+
+
+def _reference(teacher, student, mask, eta):
+    valid = mask != 0
+    teacher, student, mask = teacher[valid], student[valid], mask[valid]
+    p = teacher.detach().float().log_softmax(-1).exp()
+    teacher = teacher.detach().float()
+    log_p_conditional = teacher.log_softmax(-1)
+    log_q = student.float().log_softmax(-1)
+    q = log_q.exp()
+    overlap = torch.where(q < p, q, p).sum(-1)
+    p_conditional = log_p_conditional.exp()
+    kl = torch.special.xlogy(p_conditional, p_conditional).sum(-1) - (p_conditional * log_q).sum(-1)
+    count = mask.sum() if mask.any() else 1
+    blend = torch.exp(-eta * (overlap * mask).sum() / count).detach()
+    return ((blend * kl + (1 - blend) * (1 - overlap)) * mask).sum() / count
+
+
+@pytest.mark.parametrize("eta", [0.0, 3.0])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "random",
+        "identical",
+        "empty_mask",
+        "extreme",
+        "zero_probability",
+        "masked_zero_student_probability",
+        "masked_nonfinite_teacher",
+        "masked_nonfinite_student",
+        "fractional_weights",
+        "chunked",
+    ],
+)
+def test_lk_loss_matches_reference_and_only_differentiates_student(eta, case):
+    torch.manual_seed(17)
+    sequence_length = 2051 if case == "chunked" else 5
+    teacher = torch.randn(2, sequence_length + 1, 11)[:, 1:]
+    if case in ("zero_probability", "empty_mask"):
+        teacher[..., 2] = -torch.inf
+    student = torch.randn(2, sequence_length + 1, 11)[:, 1:]
+    if case == "identical":
+        student = teacher.detach().clone()
+    elif case == "extreme":
+        student *= 1000
+    mask = torch.tensor([[0, 1, 1, 0, 1], [1, 0, 1, 1, 0]], dtype=torch.float32)
+    if case == "chunked":
+        mask = mask.repeat(1, (sequence_length + 4) // 5)[:, :sequence_length]
+        # Unequal chunk acceptance and weights must still use one microbatch-wide blend.
+        student[:, 1024:2048] *= 7
+        mask[:, :1024] *= 0.03
+        mask[:, 2048:] = 0
+    if case == "empty_mask":
+        mask.zero_()
+    elif case == "fractional_weights":
+        mask *= torch.linspace(0.01, 0.09, mask.numel()).reshape_as(mask)
+    if case in ("empty_mask", "masked_zero_student_probability"):
+        student[..., 0].masked_fill_(mask == 0, -torch.inf)
+    if case in ("empty_mask", "masked_nonfinite_teacher", "chunked"):
+        teacher.masked_fill_((mask == 0).unsqueeze(-1), -torch.inf)
+        teacher[0, 0] = torch.nan
+    if case in ("empty_mask", "masked_nonfinite_student", "chunked"):
+        student.masked_fill_((mask == 0).unsqueeze(-1), -torch.inf)
+        student[0, 0] = torch.inf
+    teacher.requires_grad_()
+    student = student.requires_grad_()
+    original_teacher = teacher.detach().clone()
+    reference_student = student.detach().clone().requires_grad_()
+    expected = _reference(teacher, reference_student, mask, eta)
+    actual = masked_lk_lambda_loss(teacher, student, mask, eta=eta)
+    assert torch.isfinite(actual)
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+    (actual * 1.7).backward()
+    (expected * 1.7).backward()
+    torch.testing.assert_close(teacher, original_teacher, equal_nan=True)
+    torch.testing.assert_close(student, reference_student, equal_nan=True)
+    assert torch.isfinite(student.grad).all()
+    torch.testing.assert_close(student.grad, reference_student.grad, atol=1e-6, rtol=1e-5)
+    assert teacher.grad is None
+    assert torch.count_nonzero(student.grad[mask == 0]) == 0
+    if case in ("empty_mask", "identical"):
+        torch.testing.assert_close(actual, torch.zeros_like(actual), atol=1e-6, rtol=0)
+
+
+@pytest.mark.parametrize("mask_weight", [0.0, 1.0])
+def test_lk_identical_zero_probabilities_have_zero_loss_and_gradients(mask_weight):
+    teacher = torch.tensor([[[0.0, -torch.inf, 0.0]]], requires_grad=True)
+    student = teacher.detach().clone().requires_grad_()
+    loss = masked_lk_lambda_loss(teacher, student, torch.full((1, 1), mask_weight))
+    torch.testing.assert_close(loss, torch.zeros_like(loss), atol=0, rtol=0)
+    loss.backward()
+    torch.testing.assert_close(student.grad, torch.zeros_like(student), atol=0, rtol=0)
+    assert teacher.grad is None
+
+
+def test_lk_rejects_reduced_vocabulary():
+    teacher = torch.tensor([[[0.0, -torch.inf]]])
+    student = torch.zeros(1, 1, 1, requires_grad=True)
+    with pytest.raises(ValueError):
+        masked_lk_lambda_loss(teacher, student, torch.ones(1, 1))
+    assert student.grad is None
+
+
+def test_lk_probability_ties_match_reference_subgradient():
+    teacher = torch.tensor([[[0.25, 0.25, 0.5]]]).log()
+    student = torch.tensor([[[0.25, 0.5, 0.25]]]).log().requires_grad_()
+    reference_student = student.detach().clone().requires_grad_()
+    mask = torch.ones(1, 1)
+    masked_lk_lambda_loss(teacher, student, mask).backward()
+    _reference(teacher, reference_student, mask, 3.0).backward()
+    torch.testing.assert_close(student.grad, reference_student.grad)
+
+
+@pytest.mark.parametrize("vocab_size", [64, 1024])
+def test_lk_retains_only_inputs_and_compact_statistics(vocab_size):
+    teacher = torch.randn(2, 5, vocab_size)
+    student = torch.randn_like(teacher, requires_grad=True)
+    saved = []
+
+    def pack(tensor):
+        saved.append(tensor)
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
+        loss = masked_lk_lambda_loss(teacher, student, torch.ones(2, 5))
+    inputs = {teacher.data_ptr(), student.data_ptr()}
+    assert all(t.data_ptr() in inputs or t.numel() <= 10 for t in saved)
+    loss.backward()
+
+
+@pytest.mark.parametrize("case", ["finite", "zero_target", "mixed_mask", "empty_mask"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_soft_target_ce_matches_original_eagle_values_and_gradients(case, dtype):
+    teacher = torch.tensor([[[0.25, 0.75, 0.0], [1.0, 0.0, 0.0], [0.0, 0.5, 0.5]]], dtype=dtype)
+    if case == "finite":
+        teacher = (teacher + 0.25) / 1.75
+    student = torch.tensor([[[0.2, -0.3, 1.1], [0.0, -2.0, -3.0], [0.4, -0.2, 0.7]]], dtype=dtype)
+    mask = torch.tensor([[1.0, 0.5, 0.25, 1.0]])
+    if case == "mixed_mask":
+        mask[0, 2] = 0
+    elif case == "empty_mask":
+        mask.zero_()
+    teacher.requires_grad_()
+    student.requires_grad_()
+    reference_teacher = teacher.detach().clone().requires_grad_()
+    reference_student = student.detach().clone().requires_grad_()
+    # Original HFEagleModel._eagle_loss arithmetic, including base-LoRA teacher gradients.
+    reference_mask = mask[:, : student.shape[1], None]
+    expected = -torch.sum(
+        torch.sum(
+            reference_mask * reference_teacher * torch.log_softmax(reference_student, dim=2), 2
+        )
+    ) / (reference_mask.sum() + 1e-5)
+
+    loss = _masked_soft_target_cross_entropy(teacher, student, mask)
+    torch.testing.assert_close(loss, expected, rtol=0, atol=0)
+    expected.backward()
+    loss.backward()
+    torch.testing.assert_close(student.grad, reference_student.grad, rtol=0, atol=0)
+    torch.testing.assert_close(teacher.grad, reference_teacher.grad, rtol=0, atol=0)

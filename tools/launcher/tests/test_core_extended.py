@@ -24,7 +24,10 @@ Coverage:
       detach flag, version report
 """
 
+import json
 import os
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import core
@@ -34,6 +37,7 @@ from core import (
     SandboxPipeline,
     SandboxTask,
     SandboxTask0,
+    SandboxTask1,
     _git_info,
     create_task_from_yaml,
     get_default_env,
@@ -212,8 +216,12 @@ class TestRunJobsExtended:
     """Extended run_jobs tests for env merging, test_level, and detach."""
 
     @patch("core.run.Experiment")
+    @pytest.mark.parametrize("remote", [False, True])
+    @patch("core.build_slurm_executor")
     @patch("core.build_docker_executor")
-    def test_environment_list_merged_to_env(self, mock_docker, mock_exp, tmp_path):
+    def test_environment_list_merged_to_env(
+        self, mock_docker, mock_slurm, mock_exp, tmp_path, monkeypatch, remote
+    ):
         """List-of-dicts environment is merged into task_env."""
         mock_exp_inst = MagicMock()
         mock_exp_inst._id = "exp_env"
@@ -222,19 +230,23 @@ class TestRunJobsExtended:
         mock_exp.return_value = mock_exp_inst
         mock_docker.return_value = MagicMock()
 
+        monkeypatch.setenv("MLFLOW_RUN_ID", "ambient-metric-run")
+        monkeypatch.setenv("PENSIEVE_MLFLOW_RUN_ID", "lifecycle-run")
         slurm_env, local_env = get_default_env()
 
         t0 = SandboxTask0(
             script="test.sh",
             slurm_config=MagicMock(),
-            environment=[{"A": "1"}, {"B": "2"}],
+            environment=[{"A": "1"}, {"B": "2"}, {"MLFLOW_RUN_ID": "task-metric-run"}],
         )
-        pipeline = SandboxPipeline(task_0=t0)
+        pipeline = SandboxPipeline(
+            task_0=t0, task_1=SandboxTask1(script="next.sh", slurm_config=MagicMock())
+        )
 
         with patch("core.run.Script") as mock_script:
             run_jobs(
                 job_table={"job": pipeline},
-                hf_local="/tmp/hf",
+                hf_local=None if remote else "/tmp/hf",
                 user="u",
                 identity=None,
                 job_dir=str(tmp_path),
@@ -243,11 +255,15 @@ class TestRunJobsExtended:
                 default_local_env=local_env,
                 base_dir=str(tmp_path),
             )
-            # Script called with merged env
-            call_kwargs = mock_script.call_args[1]
-            assert "A" in call_kwargs["env"]
-            assert "B" in call_kwargs["env"]
-            assert call_kwargs["env"]["A"] == "1"
+            first, second = [call.kwargs["env"] for call in mock_script.call_args_list]
+            assert first["A"] == "1" and first["B"] == "2"
+            assert first["MLFLOW_RUN_ID"] == "task-metric-run"
+            assert second["MLFLOW_RUN_ID"] == "ambient-metric-run"
+            assert (
+                first["PENSIEVE_MLFLOW_RUN_ID"]
+                == second["PENSIEVE_MLFLOW_RUN_ID"]
+                == "lifecycle-run"
+            )
 
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")
@@ -486,3 +502,105 @@ class TestRunJobsExtended:
         assert inline.rstrip().endswith("bash run.sh --flag value")
         # Wrapped inline: no separate script/args kwargs.
         assert "args" not in call_kwargs or not call_kwargs.get("args")
+
+
+@pytest.mark.parametrize(
+    ("remote", "state"),
+    [
+        (remote, state)
+        for remote in (False, True)
+        for state in ("ready", "waiting", "overlapping_mount")
+    ]
+    + [(True, "srun_override")]
+    + [(False, state) for state in ("missing", "symlink_escape", "bad_json")],
+)
+def test_declared_assets_gate_submission_and_pin_mounts(tmp_path, monkeypatch, remote, state):
+    """Only ready inputs reach submission, using pinned mounts and recorded provenance."""
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "hf-local"
+    snapshot = root / ".snapshots" / "version1"
+    snapshot.mkdir(parents=True)
+    if state == "missing":
+        snapshot.rmdir()
+    elif state == "symlink_escape":
+        snapshot.rmdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        snapshot.symlink_to(outside, target_is_directory=True)
+    provider = tmp_path / "provider.py"
+    provider.write_text(
+        "import json, sys\nrequest = json.load(sys.stdin)\n"
+        "assert request['assets'] == ['Org/Model@v1']\n"
+        f"assert request['host'] == {('login.example.com' if remote else None)!r}\n"
+        f"assert request['hf_local'] == {str(root)!r}\n"
+        "print("
+        + repr(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "waiting" if state == "waiting" else "ready",
+                    "assets": [{"name": "Org/Model", "path": str(snapshot), "version": "v1"}],
+                }
+            )
+        )
+        + ")\n"
+    )
+    if state == "bad_json":
+        provider.write_text(
+            "import sys\nprint('not JSON')\nprint('provider failure', file=sys.stderr)\n"
+        )
+    config = SlurmConfig(
+        host="login.example.com",
+        local=not remote,
+        container_mounts=[f"{root}:/hf-local"] if remote else [],
+    )
+    if state == "overlapping_mount":
+        config.container_mounts.append("/unrelated:/hf-local/Org/Model/weights")
+    if state == "srun_override":
+        config.srun_args = ["--container-mounts=/unrelated:/hf-local"]
+    pipeline = SandboxPipeline(
+        task_0=SandboxTask0(script="test.sh", slurm_config=config),
+        assets=["Org/Model@v1"],
+        asset_resolver=[sys.executable, str(provider)],
+    )
+    executor = MagicMock()
+    executor.volumes = [f"{root}:/hf-local"]
+    executor.container_mounts = [f"{root}:/hf-local"]
+    with (
+        patch("core.run.Experiment") as factory,
+        patch("core.build_docker_executor", return_value=executor),
+        patch("core.build_slurm_executor", return_value=executor),
+    ):
+        factory.return_value._id = "asset_test"
+        if state != "ready":
+            with pytest.raises(ValueError) as error:
+                run_jobs(
+                    {"job": pipeline},
+                    None if remote else str(root),
+                    "u",
+                    None,
+                    str(tmp_path),
+                    None,
+                    {},
+                    {},
+                    base_dir=str(tmp_path),
+                )
+            factory.assert_not_called()
+            if state == "bad_json":
+                assert "provider failure" in str(error.value)
+            return
+        run_jobs(
+            {"job": pipeline},
+            None if remote else str(root),
+            "u",
+            None,
+            str(tmp_path),
+            None,
+            {},
+            {},
+            base_dir=str(tmp_path),
+        )
+        mounts = executor.container_mounts if remote else executor.volumes
+        assert f"{snapshot}:/hf-local/Org/Model:ro" in mounts
+        metadata = json.loads(Path("experiments/cicd/asset_test/metadata.json").read_text())
+        assert metadata["assets"][0]["resolved"][0]["version"] == "v1"

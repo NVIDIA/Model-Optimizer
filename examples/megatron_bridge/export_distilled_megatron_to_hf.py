@@ -265,8 +265,6 @@ def get_args() -> argparse.Namespace:
 
     args = parser.parse_args()
     resolve_mlflow_args(args, parser, DISTILL_EXPORT)
-    print_args(masked_args(args))
-
     return args
 
 
@@ -349,9 +347,10 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    dist.setup()
     args = get_args()
+    dist.setup()
     try:
+        print_args(masked_args(args))
         # Entered inside the try: opening the run is fatal by design, and the peers of a rank
         # that exits without dist.abort() stay blocked on the first collective.
         with mlflow_run(args, DISTILL_EXPORT):

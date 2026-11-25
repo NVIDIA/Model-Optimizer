@@ -46,6 +46,7 @@ from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 
+import modelopt.torch.kernels.quantization.gemm as triton_kernel
 from modelopt.torch.utils import (
     get_available_gpu_memory,
     get_process_gpus,
@@ -53,6 +54,8 @@ from modelopt.torch.utils import (
     warn_rank_0,
 )
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
+
+from .numeric_utils import E4M3_MAX, fp8_max_for_normalization
 
 # A GPU takes a new Hessian only if enough memory stays available after it for the calibration
 # forward that follows. Until GPTQ has measured that forward on the GPU, keep this share free.
@@ -128,12 +131,21 @@ def _update_room(helper, weight, block_size) -> int:
     dtype-conversion temporary (a projection much wider than its input makes the weight the larger
     part); the block's errors and up to four temporaries of a group no wider than the block, each
     as large as the weight when the input is no wider than a block; and the codec's tables and
-    scratch, about 35 MiB on a GPU's first update.
+    scratch, about 35 MiB on a GPU's first update. Logging the error afterwards holds the original
+    in its own dtype and up to five float32 weight-sized tensors: the result, the original, the
+    error and two products. Through both, a GGML format that keeps its scales holds the unrounded
+    weight in its own dtype, counted for every format. On top comes the helper's own scratch
+    (:meth:`GPTQHelper.update_scratch`), such as a search over each block's local scales.
     """
     columns = weight.shape[-1]
     rows = weight.numel() // columns
     block = min(block_size, columns)
-    return 2**26 + 4 * (8 * helper.hessian.numel() + rows * (2 * columns + 5 * block))
+    weights = 4 * rows * (2 * columns + 5 * block)
+    if helper.log_mse:
+        weights = max(weights, (5 * 4 + weight.element_size()) * weight.numel())
+    unrounded = weight.element_size() * weight.numel()
+    scratch = helper.update_scratch(weight)
+    return 2**26 + 32 * helper.hessian.numel() + weights + unrounded + scratch
 
 
 def update_expert_weights(work, block_size, perc_damp):
@@ -314,22 +326,24 @@ def compute_hessian_inverse(hessian, weight, perc_damp):
         when the Hessian is not positive definite.
     """
     h = hessian.clone()
-    zero_cols = torch.nonzero(weight.eq(0).all(dim=0)).unsqueeze(-1)
+    # Masks rather than indices, and a factorization that reports failure rather than raises:
+    # neither stalls the host on the GPU, so the solve syncs once, to check the factorization.
+    dead = weight.eq(0).all(dim=0)
+    h.masked_fill_(dead[:, None], 0)
+    h.masked_fill_(dead[None, :], 0)
+    diagonal = h.diagonal()
+    diagonal.masked_fill_(dead, 1)
+    diagonal.add_(perc_damp * diagonal.mean())
 
-    h[zero_cols, :] = 0
-    h[:, zero_cols] = 0
-    h[zero_cols, zero_cols] = 1
-
-    damp = perc_damp * torch.mean(torch.diag(h))
-    diag_indices = torch.arange(h.shape[0], device=h.device)
-    h[diag_indices, diag_indices] += damp
-
-    try:
-        h = torch.cholesky_inverse(torch.linalg.cholesky(h))
-        return torch.linalg.cholesky(h, upper=True)
-    except (RuntimeError, torch.linalg.LinAlgError):
+    # One factorization rather than three: with P the reversal, P H P = L L^T makes R = P L P
+    # upper triangular with H = R R^T, so inv(R) is the upper Cholesky factor of inv(H).
+    factor, info = torch.linalg.cholesky_ex(h.flip(0, 1))
+    eye = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+    if bool(info != 0):
         print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
-        return torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+        return eye
+    factor = factor.flip(0, 1)
+    return torch.linalg.solve_triangular(factor, eye, upper=True)
 
 
 class GPTQHelper:
@@ -359,6 +373,7 @@ class GPTQHelper:
         weight=None,
         log_mse=True,
         hessian_input_dtype="float32",
+        local_hessian_scales=False,
     ):
         """Initialize GPTQHelper with module state and Hessian storage.
 
@@ -372,6 +387,7 @@ class GPTQHelper:
         self.name = name
         self.fused = fused
         self.importance_weighted = importance_weighted
+        self.local_hessian_scales = local_hessian_scales
         self.hessian_input_dtype = getattr(torch, hessian_input_dtype)
         self._weight_quantizer = weight_quantizer
         self.log_mse = log_mse
@@ -459,6 +475,10 @@ class GPTQHelper:
         """
         return False
 
+    def update_scratch(self, weight) -> int:
+        """Bytes the update of ``weight`` holds beyond the GPTQ solve's, such as a format's search."""
+        return 0
+
     def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run GPTQ blockwise weight update on this helper's weight.
 
@@ -490,9 +510,8 @@ class GPTQHelper:
     def _blockwise_update(self, block_size):
         """Column-wise GPTQ update.
 
-        When ``self.fused`` is True and the weight quantizer is an
-        ``NVFP4StaticQuantizer``, uses :func:`gptq_blockwise_update_fused_scalar`
-        (a fused Triton kernel).  Otherwise falls back to
+        When ``self.fused`` is True and :meth:`_fused_supported` holds, uses
+        :func:`gptq_blockwise_update_fused_scalar` (a fused Triton kernel).  Otherwise falls back to
         :func:`gptq_blockwise_update` (unfused column-by-column loop).
         """
         assert self.weight is not None and self.h_inv is not None, (
@@ -500,23 +519,48 @@ class GPTQHelper:
         )
         quantizer = self.weight_quantizer
 
-        if self.fused and getattr(quantizer, "_is_nvfp4_static_quantizer", False):
+        if self.fused and self._fused_supported(quantizer, self.weight):
             block_sizes = quantizer.block_sizes
+            # The kernel looks up each column's scale by absolute index, so GPTQ blocks need not
+            # align with quantizer groups.
             quant_block_size = block_sizes.get(-1) or block_sizes.get(1)
-            if quant_block_size is not None and block_size % quant_block_size != 0:
-                raise ValueError(
-                    f"GPTQ block_size ({block_size}) must be divisible by the quantizer"
-                    f" group_size ({quant_block_size})"
-                )
             out_features, num_cols = self.weight.shape
-            n_blocks = num_cols // quant_block_size
-            block_amax = quantizer.amax.reshape(out_features, n_blocks).float()
-            global_scale = quantizer.global_amax.float().item() / (6.0 * 448.0)
+            # A width the group size does not divide carries a scale for its padded last group.
+            n_blocks = -(-num_cols // quant_block_size)
+            # The quantizer's own FP8 scales, so the fused update rounds onto the same grid. Their FP8
+            # extension launches on the current GPU, which need not hold a layer device_map placed.
+            with torch.cuda.device(self.weight.device):
+                block_scale = triton_kernel.compute_fp4_scales(
+                    quantizer.amax, quantizer.global_amax
+                )
             gptq_blockwise_update_fused_scalar(
-                self.weight, block_amax, global_scale, self.h_inv, block_size, quant_block_size
+                self.weight,
+                block_scale.reshape(out_features, n_blocks),
+                self.h_inv,
+                block_size,
+                quant_block_size,
             )
         else:
             gptq_blockwise_update(self.weight, self.h_inv, block_size, quantizer)
+
+    def _fused_supported(self, quantizer, weight):
+        # The fused kernel stands in for the quantizer's forward with a plain static QDQ over
+        # last-dim groups, so anything else that forward does (pre-quant scale, rotation, LSQ,
+        # 2-D blocks) takes the unfused loop. It also needs FP8 Triton casts (SM89+) and the
+        # default FP8 scale range (no 4/6). The promotion marker outlives a later config that changes
+        # the format, so the current format is checked too.
+        return (
+            getattr(quantizer, "_is_nvfp4_static_quantizer", False)
+            and quantizer.is_nvfp4_static
+            and {k for k in quantizer.block_sizes if isinstance(k, int)} in ({-1}, {1})
+            and quantizer.pre_quant_scale is None
+            and not quantizer.rotate_is_enabled
+            and not quantizer._lsq
+            and fp8_max_for_normalization(quantizer) == E4M3_MAX
+            and triton_kernel.IS_AVAILABLE
+            and weight.is_cuda
+            and torch.cuda.get_device_capability(weight.device) >= (8, 9)
+        )
 
     def _print_mse_error(self, hessian, weight):
         """Log Hessian-weighted relative MSE between ``self.weight`` and original ``weight``."""
@@ -565,20 +609,19 @@ def gptq_blockwise_update(weight, h_inv, block_size, quantize_fn):
         weight[:, block_end:].addmm_(errs, h_inv[block_start:block_end, block_end:], alpha=-1)
 
 
-def gptq_blockwise_update_fused_scalar(
-    weight, block_amax, global_scale, h_inv, block_size, quant_block_size
-):
+def gptq_blockwise_update_fused_scalar(weight, block_scale, h_inv, block_size, quant_block_size):
     """Fused GPTQ blockwise update for NVFP4 scalar quantization.
 
-    Uses a fused Triton kernel that combines scale computation, quantization,
-    and per-column error propagation into one launch per GPTQ block, avoiding
-    the Python-level per-column loop in :func:`gptq_blockwise_update`.
+    Uses a fused Triton kernel that combines quantization and per-column error propagation
+    into one launch per GPTQ block, avoiding the Python-level per-column loop in
+    :func:`gptq_blockwise_update`.
 
     Args:
         weight: Weight tensor ``[out_features, in_features]``, modified **in-place**
             with fake-quantized values.
-        block_amax: Per-block amax values ``[out_features, n_amax_blocks]``.
-        global_scale: Pre-computed ``global_amax / (6.0 * 448.0)`` (scalar).
+        block_scale: FP8-quantized per-block scales ``[out_features, n_scale_blocks]``, as
+            :func:`compute_fp4_scales <modelopt.torch.kernels.quantization.gemm.compute_fp4_scales>`
+            returns them.
         h_inv: Upper-triangular Cholesky factor of the damped inverse Hessian
             ``[in_features, in_features]``.
         block_size: Number of columns to process per GPTQ block.
@@ -591,8 +634,7 @@ def gptq_blockwise_update_fused_scalar(
         be = min(bs + block_size, num_cols)
         qw, err = gptq_fused_block_scalar(
             weight[:, bs:be].clone().contiguous(),
-            block_amax,
-            global_scale,
+            block_scale,
             h_inv[bs:be, bs:be].contiguous(),
             quant_block_size,
             bs,
@@ -615,26 +657,32 @@ def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
     _GPTQ_HELPER_REGISTRY[backend] = factory
 
 
-class ImatrixEncoder:
-    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
-
-    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
-    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
-    """
+class _WeightEncoder:
+    """An encoder a one-pass calibration hands each weight whose quantizer it accepts."""
 
     def accepts(self, quantizer) -> bool:
         """Whether this encoder handles ``quantizer``; decided before calibration runs."""
         raise NotImplementedError
 
     def validate(self, weight: torch.Tensor, quantizer) -> None:
-        """Raise if :meth:`encode` would refuse ``weight``; checked before calibration runs."""
+        """Raise if ``encode`` would refuse ``weight``; checked before calibration runs."""
+
+
+class ImatrixEncoder(_WeightEncoder):
+    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
+
+    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
+    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
+    """
 
     def encode(
         self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
     ) -> torch.Tensor:
-        """Return ``weight`` fake-quantized by ``quantizer``, weighted by ``second_moments``.
+        """Encode ``weight`` weighted by ``second_moments`` and return the weight to keep.
 
-        ``second_moments`` is ``None`` when no calibration input reached the weight.
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``second_moments`` is ``None`` when no calibration input
+        reached the weight.
         """
         raise NotImplementedError
 
@@ -649,3 +697,38 @@ def register_imatrix_encoder(backend: str, encoder: ImatrixEncoder) -> None:
     ``weight_quantizer.backend`` has a registered encoder.
     """
     _IMATRIX_ENCODER_REGISTRY[backend] = encoder
+
+
+class LocalHessianEncoder(_WeightEncoder):
+    """Encodes a weight once, its search guided by its inputs' local Hessian.
+
+    :func:`modelopt.torch.quantization.model_calib.local_hessian_calibrate` collects ``E[x x^T]``
+    over each ``block_size`` input columns of every weight whose quantizer an encoder accepts, then
+    calls :meth:`encode` with it instead of searching an amax.
+    """
+
+    block_size: int
+
+    def encode(
+        self, weight: torch.Tensor, quantizer, hessian: torch.Tensor | None, perc_damp: float
+    ) -> torch.Tensor:
+        """Encode ``weight`` guided by ``hessian`` and return the weight to keep.
+
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``hessian`` is ``[in_features // block_size, block_size,
+        block_size]``, or ``None`` when no calibration input reached the weight. ``perc_damp`` is
+        the fraction of its mean diagonal to add to its diagonal where the encoder scores by it.
+        """
+        raise NotImplementedError
+
+
+_LOCAL_HESSIAN_ENCODER_REGISTRY: dict[str, LocalHessianEncoder] = {}
+
+
+def register_local_hessian_encoder(backend: str, encoder: LocalHessianEncoder) -> None:
+    """Register the :class:`LocalHessianEncoder` for a quantizer backend.
+
+    :func:`modelopt.torch.quantization.model_calib.local_hessian_calibrate` encodes the weights
+    whose ``weight_quantizer.backend`` has one, and searches an amax for the rest.
+    """
+    _LOCAL_HESSIAN_ENCODER_REGISTRY[backend] = encoder

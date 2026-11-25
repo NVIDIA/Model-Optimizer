@@ -15,6 +15,7 @@
 
 from functools import partial
 
+import pytest
 import torch
 import transformers
 from _test_utils.torch.megatron.models import get_mcore_hybrid_model
@@ -94,7 +95,8 @@ def _test_nemotron_h_export_import(tmp_path, model_dir, rank, size):
     # Import the exported checkpoint back into a fresh mcore model
     # (megatron is already initialized from the first build).
     imported = _build_mcore_nemotron_h(config, size, initialize=False)
-    import_mcore_gpt_from_hf(imported, str(export_dir))
+    with pytest.warns(DeprecationWarning):
+        import_mcore_gpt_from_hf(imported, str(export_dir))
 
 
 def test_nemotron_h_export_import(dist_workers_size_1, tmp_path):

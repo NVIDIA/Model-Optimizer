@@ -16,17 +16,20 @@
 """Offline coverage for the Hugging Face AutoQuantize example helpers."""
 
 import importlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import get_tiny_llama
+from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3_5_vl_offline
+from safetensors.torch import load_file
 from transformers import WhisperConfig, WhisperForConditionalGeneration
 
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
+from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils.dataset_utils import get_max_batch_size
 
@@ -446,6 +449,8 @@ def test_autoquant_label_free_recipe_calls_mtq(
     def fake_auto_quantize(model, **kwargs):
         captured.update(kwargs)
         assert torch.equal(kwargs["forward_step"](model, batch), batch["input_ids"] + 1)
+        # Layerwise calibration of a candidate stops the forward early and returns no output.
+        assert kwargs["forward_step"](lambda **_: None, batch) is None
         return model, {}
 
     monkeypatch.setattr(autoquant_utils.mtq, "auto_quantize", fake_auto_quantize)
@@ -457,6 +462,55 @@ def test_autoquant_label_free_recipe_calls_mtq(
     assert "method_options" not in captured
     assert (captured["loss_func"] is None) is loss_func_is_none
     assert captured["constraints"]["effective_bits"] == 5.4
+
+
+@pytest.mark.parametrize("decoder_only", [False, True], ids=["general", "qwen3_5"])
+def test_w4a8_awq_recipe_large_head(autoquant_utils, tmp_path, decoder_only):
+    model = get_tiny_qwen3_5_vl_offline(
+        vocab_size=4096,
+        hidden_size=128,
+        intermediate_size=512,
+        num_hidden_layers=1,
+        head_dim=32,
+        num_key_value_heads=4,
+        layer_types=["full_attention"],
+        use_cache=False,  # Transformers 5.5 expects a linear-attention layer in a Qwen3.5 cache.
+    ).eval()
+    head = model.lm_head.weight.detach().clone()
+    decoder_weights = {
+        f"{name}.weight": module.weight.numel()
+        for name, module in model.named_modules()
+        if name.startswith("model.language_model.layers.") and isinstance(module, torch.nn.Linear)
+    }
+    assert 0 < sum(decoder_weights.values()) < head.numel()
+    recipe_name = "w4a8_awq_beta_fp8_at_6p0bits"
+    path = (
+        f"model_type/qwen3_5/auto_quantize/{recipe_name}-decoder_only"
+        if decoder_only
+        else f"general/auto_quantize/{recipe_name}"
+    )
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=False,
+        batch_size=1,
+        kv_cache_qformat="none",
+    )
+    ids = torch.arange(16, 32).unsqueeze(0)
+    model = autoquant_utils.auto_quantize(
+        args, model, [{"input_ids": ids, "labels": ids}], load_recipe(path).auto_quantize
+    )
+    export_hf_checkpoint(model, export_dir=tmp_path)
+    weights = load_file(tmp_path / "model.safetensors")
+    if decoder_only:
+        torch.testing.assert_close(weights["lm_head.weight"], head, rtol=0, atol=0)
+        quant = json.loads((tmp_path / "hf_quant_config.json").read_text())["quantization"]
+        assert "lm_head" not in quant.get("quantized_layers", {})
+        assert "lm_head" in quant["exclude_modules"]
+    else:
+        decoder_weights["lm_head.weight"] = head.numel()
+    packed_bits = sum(weights[key].nbytes * 8 for key in decoder_weights)
+    assert packed_bits / sum(decoder_weights.values()) <= 6.0
 
 
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(autoquant_utils):

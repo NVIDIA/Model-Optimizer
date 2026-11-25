@@ -17,7 +17,7 @@
 
 Single source of truth for FP4 decision-boundary rounding.  Used by:
   - ``../gemm/fp4_kernel.py``         (standalone blockwise fake quant)
-  - ``../gemm/fp4_kernel_hopper.py``  (Hopper block-pointer variant)
+  - ``../gemm/fp4_kernel_hopper.py``  (2D-tiled variant, compute >= 8.9)
   - ``../gemm/gptq_fused_kernel.py``  (fused GPTQ scalar path)
   - ``../attention/bmm2_qdq.py``      (P/V operand qdq in the attention BMM2 kernel)
 
@@ -30,11 +30,24 @@ from triton.language.extra.cuda import libdevice
 
 
 @triton.jit
-def fp4_round_magnitude(abs_scaled):
-    """Round ``|x| / scale`` to the nearest FP4 (E2M1) magnitude.
+def fp4_normalize_magnitude(x_abs, scale):
+    """Express ``|x|`` in units of a positive ``scale`` for ``fp4_round_magnitude``.
 
-    Works with any tensor shape — the caller is responsible for computing
-    ``abs_scaled = |x| / scale`` beforehand.
+    Multiplies by the correctly rounded reciprocal, as the export packer
+    (``NVFP4QTensor.quantize``) does, so packed weights reproduce the fake quant: Triton
+    lowers fp32 ``/`` to approximate division, which can pick a different E2M1 code at a
+    rounding boundary. The clamp keeps the reciprocal of a tiny scale finite, so zeros stay
+    zero.
+    """
+    return x_abs * tl.minimum(libdevice.rcp_rn(scale), 3.4028234663852886e38)
+
+
+@triton.jit
+def fp4_round_magnitude(abs_scaled):
+    """Round a scale-normalized magnitude to the nearest FP4 (E2M1) magnitude.
+
+    Works with any tensor shape — the caller is responsible for normalizing
+    ``abs_scaled`` with ``fp4_normalize_magnitude`` beforehand.
 
     Returns:
         Tensor of same shape as *abs_scaled* with values in
@@ -71,8 +84,9 @@ def nvfp4_scalar_quant(
 ):
     """NVFP4 scalar fake quantization for a group of elements sharing one scale.
 
-    Quantizes each element independently: divide by scale, round to nearest
-    FP4 (E2M1) value via ``fp4_round_magnitude``, multiply by scale.
+    Quantizes each element independently: multiply by the correctly rounded
+    reciprocal of scale, round to nearest FP4 (E2M1) value via
+    ``fp4_round_magnitude``, multiply by scale.
     A zero scale produces an all-zero block.
 
     All ops are element-wise, so any shape works with a broadcastable
@@ -94,7 +108,7 @@ def nvfp4_scalar_quant(
         1.0,
         scale,
     )
-    abs_scaled = x_abs / scale_safe
+    abs_scaled = fp4_normalize_magnitude(x_abs, scale_safe)
     q_val = fp4_round_magnitude(abs_scaled)
     x_rescaled = q_val * scale_safe
     x_quant = tl.where(x >= 0, x_rescaled, -x_rescaled)
@@ -120,7 +134,9 @@ def fp8_quantize_scale(block_amax, global_scale):
         FP8-quantized per-block scale(s), same shape as ``block_amax``.
     """
     FP8_E4M3_MAX: tl.constexpr = 448.0
-    scale_in_fp8_range = block_amax / (6.0 * global_scale)
+    # Correctly rounded, as the export packer computes it: approximate division can round to a
+    # different FP8 block scale.
+    scale_in_fp8_range = libdevice.div_rn(block_amax, 6.0 * global_scale)
     scale_saturated = tl.minimum(scale_in_fp8_range, FP8_E4M3_MAX)
     return scale_saturated.to(tl.float8e4nv).to(tl.float32) * global_scale
 

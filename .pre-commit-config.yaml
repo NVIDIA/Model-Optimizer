@@ -73,7 +73,7 @@ repos:
         name: sync .claude/skills/ symlinks from plugin skills
         entry: bash tools/precommit/sync_claude_skills.sh
         language: system
-        files: ^plugins/modelopt/skills/
+        files: ^skills/
         pass_filenames: false
 
       - id: check-launcher-yaml
@@ -81,6 +81,12 @@ repos:
         entry: uv run --frozen --extra dev python tools/precommit/check_launcher_yaml.py
         language: system
         files: ^(tools/launcher/examples/.*\.yaml|tools/precommit/check_launcher_yaml\.py)$
+
+      - id: check-env-knobs
+        name: read MODELOPT_* environment variables only through modelopt/env.py
+        entry: python3 tools/precommit/check_env_knobs.py
+        language: system
+        files: ^(modelopt|examples)/.*\.py$
 
   # Instructions to change license file if ever needed:
   # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
@@ -120,6 +126,7 @@ repos:
               modelopt/torch/quantization/plugins/attention.py|
               modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|
               modelopt/torch/speculative/eagle/utils.py|
+              modelopt/torch/speculative/plugins/dflash_losses.py|
               modelopt/torch/speculative/plugins/hf_domino.py|
               modelopt/torch/speculative/plugins/modeling_domino.py|
               modelopt/torch/speculative/plugins/hf_dflash.py|

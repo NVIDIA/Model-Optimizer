@@ -47,7 +47,7 @@ def fp4_fake_quant_kernel(
     NUM_FP4_BLOCKS: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
 ):
-    """Applies FP4 fake quantization using block pointers for memory addressing.
+    """Applies FP4 fake quantization to one ``(TILE_M, TILE_N)`` tile.
 
     Each run of ``ROWS_PER_SCALE`` rows uses its own global scale: all ``M`` rows share one for a
     single tensor, and each slice of a stacked tensor (e.g. one expert) has its own.
@@ -55,33 +55,21 @@ def fp4_fake_quant_kernel(
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
 
-    row_start = pid_m * TILE_M
-    col_start = pid_n * TILE_N
+    offs_m = pid_m * TILE_M + tl.arange(0, TILE_M)
+    offs_n = pid_n * TILE_N + tl.arange(0, TILE_N)
+    # Plain masked pointers, not tl.make_block_ptr: Triton 3.9 removed block pointers.
+    # int64 row offsets keep addresses valid past 2**31 elements (e.g. stacked expert weights).
+    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    x_ptrs = x_ptr + offs_m[:, None].to(tl.int64) * stride_xm + offs_n[None, :] * stride_xn
+    y_ptrs = y_ptr + offs_m[:, None].to(tl.int64) * stride_ym + offs_n[None, :] * stride_yn
 
-    x_block_ptr = tl.make_block_ptr(
-        base=x_ptr,
-        shape=(M, N),
-        strides=(stride_xm, stride_xn),
-        offsets=(row_start, col_start),
-        block_shape=(TILE_M, TILE_N),
-        order=(1, 0),
-    )
-    y_block_ptr = tl.make_block_ptr(
-        base=y_ptr,
-        shape=(M, N),
-        strides=(stride_ym, stride_yn),
-        offsets=(row_start, col_start),
-        block_shape=(TILE_M, TILE_N),
-        order=(1, 0),
-    )
-
-    rows = tl.minimum(row_start + tl.arange(0, TILE_M), M - 1)  # padding rows reuse the last one
+    rows = tl.minimum(offs_m, M - 1)  # padding rows reuse the last one
     global_scale = tl.load(global_scale_ptr + rows // ROWS_PER_SCALE).to(tl.float32)
     global_scale = tl.reshape(global_scale, (TILE_M, 1, 1))
     global_scale_valid = (global_scale > 0.0) & (global_scale < float("inf"))  # False for NaN
     global_scale_safe = tl.where(global_scale_valid, global_scale, 1.0)
 
-    tile = tl.load(x_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+    tile = tl.load(x_ptrs, mask=mask, other=0.0).to(tl.float32)
 
     tile_reshaped = tl.reshape(tile, (TILE_M, NUM_FP4_BLOCKS, BLOCK_SIZE))
     block_max = tl.max(tl.abs(tile_reshaped), axis=2, keep_dims=True)
@@ -93,7 +81,7 @@ def fp4_fake_quant_kernel(
     x_quant = nvfp4_scalar_quant(tile_reshaped, block_max_quant, BLOCK_SIZE)
     tile_quant = tl.reshape(x_quant, (TILE_M, TILE_N))
 
-    tl.store(y_block_ptr, tile_quant.to(OUT_DTYPE), boundary_check=(0, 1))
+    tl.store(y_ptrs, tile_quant.to(OUT_DTYPE), mask=mask)
 
 
 def fp4_fake_quant_block(
@@ -105,7 +93,7 @@ def fp4_fake_quant_block(
     num_warps: int | None = None,
     num_stages: int | None = None,
 ) -> torch.Tensor:
-    """FP4 fake quantization implementation using block-pointer tiling.
+    """FP4 fake quantization implementation using 2D tiling.
 
     Args:
         x (torch.Tensor): Input tensor of shape ``(M, N)`` or higher.

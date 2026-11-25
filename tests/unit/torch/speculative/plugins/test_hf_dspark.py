@@ -36,8 +36,9 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
+from modelopt.torch.speculative.plugins.dflash_losses import _tvd_chunk
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
-from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel, _tvd_chunk, _tvd_per_token
+from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
 from modelopt.torch.speculative.plugins.modeling_dflash import (
     DFlashBaseModelOutput,
     DFlashModule,
@@ -60,6 +61,7 @@ def _get_dspark_config(
     confidence_alpha=0.0,
     block_size=BLOCK_SIZE,
     num_layers=NUM_DRAFT_LAYERS,
+    markov_rank=MARKOV_RANK,
 ):
     """Create a DSpark config for testing (dflash mode + projector_type=dspark)."""
     config = deepcopy(DFLASH_DEFAULT_CFG["config"])
@@ -71,11 +73,10 @@ def _get_dspark_config(
     config["dflash_architecture_config"] = {
         "num_hidden_layers": num_layers,
         "projector_type": "dspark",
-        "markov_rank": MARKOV_RANK,
+        "markov_rank": markov_rank,
         "markov_head_type": head_type,
         "use_confidence_head": use_confidence_head,
         "pure_draft_prefix_len": 1,
-        "shift_label": True,
     }
     return config
 
@@ -270,7 +271,9 @@ class TestDSparkSwa:
 class TestDSparkExporter:
     """Test vanilla serving exports and the native gated/recurrent formats."""
 
-    def _export(self, tmp_path, head_type="vanilla", use_confidence_head=False):
+    def _export(
+        self, tmp_path, head_type="vanilla", use_confidence_head=False, markov_rank=MARKOV_RANK
+    ):
         model = get_tiny_llama(num_hidden_layers=4)
         mtsp.convert(
             model,
@@ -278,7 +281,9 @@ class TestDSparkExporter:
                 (
                     "dflash",
                     _get_dspark_config(
-                        head_type=head_type, use_confidence_head=use_confidence_head
+                        head_type=head_type,
+                        use_confidence_head=use_confidence_head,
+                        markov_rank=markov_rank,
                     ),
                 )
             ],
@@ -312,8 +317,12 @@ class TestDSparkExporter:
     @pytest.mark.parametrize("use_confidence_head", [False, True])
     def test_export_config_has_dspark_fields(self, tmp_path, head_type, use_confidence_head):
         """Vanilla exports select the runtime and preserve the trained head settings."""
+        # DSparkModule casts markov_rank to int; vLLM sizes its Markov table from the export.
         export_dir = self._export(
-            tmp_path, head_type=head_type, use_confidence_head=use_confidence_head
+            tmp_path,
+            head_type=head_type,
+            use_confidence_head=use_confidence_head,
+            markov_rank=float(MARKOV_RANK),
         )
         with open(export_dir / "config.json") as f:
             cfg = json.load(f)
@@ -323,6 +332,7 @@ class TestDSparkExporter:
         dc = cfg["dflash_config"]
         assert dc["projector_type"] == "dspark"
         assert dc["markov_rank"] == MARKOV_RANK
+        assert type(dc["markov_rank"]) is int
         assert dc["markov_head_type"] == head_type.lower()
         assert dc["use_confidence_head"] is use_confidence_head
         assert dc["shift_label"] is True
@@ -331,6 +341,7 @@ class TestDSparkExporter:
         if vanilla:
             assert cfg["model_type"] == "qwen3"
             assert cfg["markov_rank"] == MARKOV_RANK
+            assert type(cfg["markov_rank"]) is int
             assert cfg["sample_from_anchor"] is True
             assert cfg["enable_confidence_head"] is use_confidence_head
             assert cfg["confidence_head_with_markov"] is use_confidence_head
@@ -892,68 +903,6 @@ class TestExplicitTargetLayerIds:
         with open(tmp_path / "exp" / "config.json") as f:
             cfg = json.load(f)
         assert cfg["dflash_config"]["target_layer_ids"] == [0, 7]
-
-
-class TestTvdPerTokenChunking:
-    """``_tvd_per_token`` must be chunk-size-invariant, and must chunk via ``split``.
-
-    Calls the helper directly: the model fixtures never reach a second chunk.
-    """
-
-    @staticmethod
-    def _run(chunk_size, n=12, vocab=32):
-        """Forward + backward through ``_tvd_per_token`` from a fixed seed."""
-        torch.manual_seed(0)
-        final = torch.randn(n, vocab, requires_grad=True)
-        teacher = torch.randn(n, vocab)
-        out = _tvd_per_token(final, teacher, chunk_size=chunk_size)
-        # Weight the rows unequally, so a cat that reassembles the chunks in the wrong
-        # order cannot cancel out in the reduction.
-        (out * torch.arange(1, n + 1, dtype=out.dtype)).sum().backward()
-        return out.detach(), final.grad.detach()
-
-    # 12 rows: 5 and 7 leave a ragged last chunk (5+5+2, 7+5); 13 and 1024 exceed n.
-    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 7, 11, 12, 13, 1024])
-    def test_chunk_size_invariant(self, chunk_size):
-        ref_out, ref_grad = self._run(12)  # one chunk == the unchunked reference
-        out, grad = self._run(chunk_size)
-        assert torch.equal(out, ref_out), f"TVD value changed at chunk_size={chunk_size}"
-        assert torch.equal(grad, ref_grad), f"TVD grad changed at chunk_size={chunk_size}"
-
-    def test_chunks_via_split_not_slice(self):
-        """Pin the split itself: slicing gives identical values, only the graph differs."""
-        final = torch.randn(8, 4, requires_grad=True)
-        teacher = torch.randn(8, 4)
-        out = _tvd_per_token(final, teacher, chunk_size=2)
-
-        # `alive` keeps visited nodes referenced: `.next_functions` returns fresh wrappers,
-        # and a freed wrapper's id() can be reused, which would truncate the walk.
-        seen, visited, alive, stack = set(), set(), [], [out.grad_fn]
-        while stack:
-            fn = stack.pop()
-            if fn is None or id(fn) in visited:
-                continue
-            visited.add(id(fn))
-            alive.append(fn)
-            seen.add(type(fn).__name__)
-            stack.extend(nxt for nxt, _ in fn.next_functions)
-
-        assert any(name.startswith("SplitBackward") for name in seen), (
-            f"expected a SplitBackward node in the graph, saw: {sorted(seen)}"
-        )
-        assert not any(name.startswith("SliceBackward") for name in seen), (
-            f"chunking regressed to per-chunk slicing, saw: {sorted(seen)}"
-        )
-
-    def test_no_grad_path_matches_grad_path(self):
-        """The ``requires_grad=False`` branch skips checkpointing; values must not move."""
-        torch.manual_seed(0)
-        final = torch.randn(12, 32)
-        teacher = torch.randn(12, 32)
-        with torch.no_grad():
-            plain = _tvd_per_token(final, teacher, chunk_size=5)
-        grad_out = _tvd_per_token(final.requires_grad_(True), teacher, chunk_size=5)
-        assert torch.equal(plain, grad_out.detach())
 
 
 def _draft_args(model, n_blocks=2, bsz=1):

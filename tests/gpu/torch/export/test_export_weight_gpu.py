@@ -45,10 +45,12 @@ from modelopt.torch.export.quantized_weight_export import (
     select_quantized_weight_export_state,
 )
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.model_calib import max_calibrate
 from modelopt.torch.quantization.nn.modules.quant_module import QuantModule, QuantModuleRegistry
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
-from modelopt.torch.quantization.qtensor import MXFP4QTensor
+from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
 from modelopt.torch.quantization.tensor_quant import QUANT_DESC_8BIT_PER_TENSOR
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
@@ -147,6 +149,10 @@ def test_export_per_block_quantized_weight():
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
 
 
+_W4A16_MXFP4_CFG = copy.deepcopy(mtq.MXFP4_DEFAULT_CFG)
+_W4A16_MXFP4_CFG["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
+
+
 @pytest.mark.parametrize(
     "quant_cfg",
     [
@@ -156,6 +162,7 @@ def test_export_per_block_quantized_weight():
         mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
         mtq.MXFP8_DEFAULT_CFG,
         mtq.MXFP4_DEFAULT_CFG,
+        _W4A16_MXFP4_CFG,
         mtq.W4A8_MXFP4_FP8_CFG,
         mtq.W4A8_NVFP4_FP8_CFG,
     ],
@@ -325,6 +332,45 @@ def test_export_compressed_nvfp4_weight():
     stripped = postprocess_state_dict(compressed.state_dict(), 1.0, None)
     assert not any(key.endswith("weight_quantizer._double_scale") for key in stripped)
     assert not any(key.endswith("weight_quantizer._scale") for key in stripped)
+
+
+# |w| / scale lands exactly on an E2M1 rounding boundary, where fp32 division and multiplication by
+# the reciprocal round to different codes: q_lower to -1.5 (code 11), k_upper to 2.0 (high nibble 4).
+@pytest.mark.skipif(
+    not tensor_quant._nvfp4_triton_kernel_enabled(), reason="needs the Triton NVFP4 fake quant"
+)
+@pytest.mark.parametrize(
+    ("block_max", "boundary_column", "boundary_value", "expected_byte"),
+    [
+        pytest.param(0.057861328125, 10, -0.01611328125, 11, id="q_lower"),
+        pytest.param(0.07666015625, 15, 0.021484375, 64, id="k_upper"),
+    ],
+)
+def test_nvfp4_packing_matches_fake_quant_at_e2m1_boundaries(
+    block_max, boundary_column, boundary_value, expected_byte
+):
+    weights = torch.zeros((16, 16), device="cuda", dtype=torch.bfloat16)
+    weights[0, 0] = 0.34375
+    weights[1, 0] = block_max
+    weights[1, boundary_column] = boundary_value
+    config = next(
+        entry["cfg"]
+        for entry in mtq.NVFP4_DEFAULT_CFG["quant_cfg"]
+        if entry["quantizer_name"] == "*weight_quantizer"
+    )
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(**copy.deepcopy(config))).cuda()
+    max_calibrate(quantizer, lambda calibrated: calibrated(weights))
+    fake_quant = quantizer(weights)
+
+    global_scale = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(quantizer)
+    block_scale, _ = NVFP4QTensor.get_weights_scaling_factor(weights, 16, global_scale)
+    packed = to_quantized_weight(weights, block_scale, QUANTIZATION_NVFP4, global_scale, 16)
+    dequantized = NVFP4QTensor(weights.shape, weights.dtype, packed).dequantize(
+        scale=block_scale, double_scale=global_scale, block_sizes={-1: 16}
+    )
+
+    assert packed[1, boundary_column // 2].item() == expected_byte
+    torch.testing.assert_close(dequantized, fake_quant, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("both_constant", [False, True])
