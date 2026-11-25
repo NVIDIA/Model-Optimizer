@@ -58,7 +58,6 @@ Changelog
 - ONNX AutoCast now keeps the variance of decomposed RMSNorm and unfused LayerNorm in FP32 for both FP16 and BF16 conversion, so FP16 models converted without calibration data no longer give wrong outputs on execution providers such as TensorRT-RTX. Reconvert affected models.
 - Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
 - Fix blocked INT4 ONNX exports using the wrong dequantization axis for transposed weights, which prevented TensorRT and ONNX Runtime from executing affected models. Re-export affected models.
-- Fix FP16/BF16 deployment with TensorRT 11 by encoding the requested precision in the ONNX graph while preserving input/output types. TensorRT 11 implicit low-bit modes, best-mode search and calibration caches require offline conversion or quantization followed by ``stronglyTyped`` deployment.
 
 *Speculative Decoding*
 
@@ -251,6 +250,7 @@ Changelog
 - Fix BF16-to-FP8 ONNX export with ``ml_dtypes`` 0.7.0 producing NaN FP8 weights for very small convolution weights.
 - Fix AutoCast turning FP64 initializers and ``Constant`` values that exceed the FP32 range into infinities. They are now clamped to the largest FP32 value and the affected tensor is named in a warning.
 - Fix AutoCast flipping the sign of an initializer value too small for the target precision; such values now keep their sign.
+- Fix FP16/BF16 deployment with TensorRT 11 by encoding the requested precision in the ONNX graph while preserving input/output types. TensorRT 11 implicit low-bit modes, best-mode search and calibration caches require offline conversion or quantization followed by ``stronglyTyped`` deployment.
 
 *Speculative Decoding*
 
