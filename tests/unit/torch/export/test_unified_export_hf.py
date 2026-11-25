@@ -28,9 +28,11 @@ from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
 )
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.export import distributed_writer, unified_export_hf
 from modelopt.torch.export.model_utils import (
     TiedWeightMap,
@@ -53,6 +55,7 @@ from modelopt.torch.export.unified_export_hf import (
     read_unplaced_weights,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.qtensor import MXFP4QTensor
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
@@ -1400,6 +1403,7 @@ def test_an_expert_parallel_export_it_cannot_write_is_refused_before_folding(
 
 def _tiny_gpt_oss():
     """A tiny GPT-OSS whose expert in and out dims differ, so a transposed layout cannot pass."""
+    # Local import: it imports transformers, an optional dependency its callers importorskip.
     from _test_utils.torch.transformers_models import get_tiny_gpt_oss
 
     return get_tiny_gpt_oss(
@@ -1408,8 +1412,6 @@ def _tiny_gpt_oss():
 
 
 def _quantize_experts_mxfp4(model, extra_quant_cfg=()):
-    from modelopt.recipe import load_recipe
-
     config = load_recipe("general/ptq/mxfp4_mlp_weight_only").quantize.model_dump()
     config["quant_cfg"] = [*config["quant_cfg"], *extra_quant_cfg]
     return mtq.quantize(model, config)
@@ -1422,11 +1424,7 @@ def test_gpt_oss_mxfp4_experts_export_as_openai_releases_them(tmp_path, request,
     pytest.importorskip("transformers")
     # Local imports: optional dependencies, guarded by the importorskip above.
     from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-    from safetensors.torch import load_file
-    from torch.distributed.fsdp import fully_shard
     from transformers import AutoConfig, AutoModelForCausalLM, Mxfp4Config
-
-    from modelopt.torch.quantization.qtensor import MXFP4QTensor
 
     model = _tiny_gpt_oss()
     expected = {}
@@ -1455,6 +1453,8 @@ def test_gpt_oss_mxfp4_experts_export_as_openai_releases_them(tmp_path, request,
         fully_shard(model, mesh=mesh)
         set_distribution_plan(model, DistributionPlan(1, dense="fsdp"))
     export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    (export_dir / "hf_quant_config.json").write_text("{}")  # an earlier export's
     export_hf_checkpoint(_quantize_experts_mxfp4(model), export_dir=export_dir)
 
     assert not (export_dir / "hf_quant_config.json").exists()
@@ -1490,16 +1490,30 @@ def test_gpt_oss_mxfp4_experts_export_as_openai_releases_them(tmp_path, request,
         )
 
 
-def test_gpt_oss_mxfp4_experts_export_refuses_other_quantized_modules(tmp_path):
-    """OpenAI's MXFP4 layout cannot describe an FP8 KV cache, so the export refuses it unwritten."""
+@pytest.mark.parametrize(
+    ("extra_quant_cfg", "refusal"),
+    [
+        (
+            [{"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}}],
+            "cannot carry other quantized modules",
+        ),
+        (
+            [{"quantizer_name": "*layers.1.mlp*weight_quantizer", "enable": False}],
+            r"every layer's experts .* \['model.layers.1.mlp.experts'\]",
+        ),
+    ],
+    ids=["kv-cache", "unquantized-layer"],
+)
+def test_gpt_oss_mxfp4_experts_export_refuses_what_openai_layout_cannot_describe(
+    tmp_path, extra_quant_cfg, refusal
+):
+    """OpenAI's MXFP4 config cannot describe an FP8 KV cache, nor one layer's experts left in BF16,
+    so the export refuses both unwritten."""
     pytest.importorskip("transformers")
-    model = _quantize_experts_mxfp4(
-        _tiny_gpt_oss(),
-        [{"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}}],
-    )
+    model = _quantize_experts_mxfp4(_tiny_gpt_oss(), extra_quant_cfg)
     before = {k: v.clone() for k, v in model.state_dict().items()}
 
-    with pytest.raises(NotImplementedError, match="cannot carry other quantized modules"):
+    with pytest.raises(NotImplementedError, match=refusal):
         export_hf_checkpoint(model, export_dir=tmp_path)
 
     after = model.state_dict()
