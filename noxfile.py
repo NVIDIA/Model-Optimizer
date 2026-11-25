@@ -214,9 +214,7 @@ def _install_built_from_source(session, *names):
     session.run("python", "-m", "pip", "install", *wheels)
 
 
-# Container: nvcr.io/nvidia/pytorch:26.07-py3 or later with CUDA 13
-@nox.session(venv_backend="none")
-def gpu(session):
+def _install_gpu_dependencies(session):
     _install_built_from_source(session, "fast_hadamard_transform")
     session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
     _install_built_from_source(session, "mamba_ssm", "causal_conv1d")
@@ -227,7 +225,26 @@ def gpu(session):
     # freeze a partial wheelhouse under the cache key.
     with open(os.path.join(_wheelhouse(), ".complete"), "w"):
         pass
+
+
+# Container: nvcr.io/nvidia/pytorch:26.07-py3 or later with CUDA 13
+@nox.session(venv_backend="none")
+def gpu(session):
+    _install_gpu_dependencies(session)
     session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
+
+
+@nox.session(venv_backend="none")
+def gpu_fsdp2_measurement(session):
+    """Exactly two actual FSDP2 CUDA measurements; never a full-suite substitute."""
+    if session.posargs:
+        session.error("FSDP2 measurement selectors are fixed; positional arguments are forbidden")
+    script = ".github/scripts/fsdp2_measurement.py"
+    session.run("python", script, "preflight")
+    _install_gpu_dependencies(session)
+    session.run(
+        "python", script, "run", os.path.join(os.environ["RUNNER_TEMP"], "fsdp2-measurement")
+    )
 
 
 @nox.session(venv_backend="none")
