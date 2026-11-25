@@ -16,6 +16,7 @@
 """Tests of tensor quantization function and module."""
 
 import contextlib
+import sys
 import weakref
 from types import MappingProxyType, SimpleNamespace
 
@@ -709,6 +710,7 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         (True, "calibrator-setattr"),
         (True, "class-metaclass"),
         (True, "late-wildcard"),
+        (True, "patched-traversal"),
         (True, "str-name"),
         (True, "foreign-member"),
         (True, "parametrized"),
@@ -744,6 +746,7 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         "calibrator-setattr",
         "class-metaclass",
         "late-wildcard",
+        "patched-traversal",
         "str-name",
         "foreign-member",
         "parametrized",
@@ -868,7 +871,25 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         def set_from_attribute_config(self, attribute_cfg):
             pass
 
+    stock_named_modules = torch.nn.Module.named_modules
+
+    @contextlib.contextmanager
+    def root_filtered():
+        # An integration's wrap of nn.Module.named_modules that leaves a quantizer out of walks of
+        # the whole model.
+        def named_modules(self, *args, **kwargs):
+            for name, module in stock_named_modules(self, *args, **kwargs):
+                if args or kwargs or name != "7.weight_quantizer":
+                    yield name, module
+
+        torch.nn.Module.named_modules = named_modules
+        try:
+            yield
+        finally:
+            torch.nn.Module.named_modules = stock_named_modules
+
     contexts = {
+        "patched-traversal": root_filtered,
         "device-context": lambda: torch.device("cpu"),
         "torch-mode": lambda: FlopCounterMode(display=False),
         "python-dispatcher": enable_python_dispatcher,
@@ -1046,17 +1067,20 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         mtq.set_quantizer_by_cfg(walked, walked_cfg)
     named = quantized()
     walks = 0
-    named_modules = torch.nn.Module.named_modules
 
-    def count_walks(self, *args, **kwargs):
+    def count_walks(frame, event, arg):
+        # A walk of the whole model: torch's named_modules called on it, outside any other walk.
         nonlocal walks
-        walks += self is named
-        return named_modules(self, *args, **kwargs)
+        if event == "call" and frame.f_code is stock_named_modules.__code__:
+            local = frame.f_locals
+            walks += local.get("self") is named and local.get("memo") is None
 
-    monkeypatch.setattr(torch.nn.Module, "named_modules", count_walks)
-    with context():
-        mtq.set_quantizer_by_cfg(named, quant_cfg)
-    monkeypatch.undo()
+    sys.setprofile(count_walks)
+    try:
+        with context():
+            mtq.set_quantizer_by_cfg(named, quant_cfg)
+    finally:
+        sys.setprofile(None)
     # The check refuses a class's own lookups, a state dict of a subclass or a key of a str
     # subclass without running them, and reads classes without their metaclass. (Comparing the
     # states compares the keys.)

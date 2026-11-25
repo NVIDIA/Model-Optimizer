@@ -22,6 +22,7 @@ import warnings
 import weakref
 from collections.abc import Callable
 from contextlib import contextmanager
+from types import FunctionType
 from typing import Any, cast
 
 import torch
@@ -510,10 +511,14 @@ def _runs_global_hooks() -> bool:
     # A replaced quantizer, or one given a buffer or parameter, runs PyTorch's global registration
     # hooks, and a quantizer's tensor operations run the active torch function and dispatch modes,
     # PyTorch's own among them, which can call back into the caller's code, and the Python
-    # dispatcher's kernels. A device context only sets where new tensors go.
+    # dispatcher's kernels. A device context only sets where new tensors go. And a wrap of
+    # nn.Module.named_modules itself, which an integration can install, lists other paths.
     modes = (*_get_current_function_mode_stack(), *_get_current_dispatch_mode_stack())
+    named_modules = _CLASS_DICT.__get__(nn.Module).get("named_modules")
     return (
-        any(
+        type(named_modules) is not FunctionType
+        or named_modules.__code__.co_filename != nn.modules.module.__file__
+        or any(
             getattr(nn.modules.module, f"_global_{kind}_registration_hooks", None)
             for kind in ("module", "parameter", "buffer")
         )
