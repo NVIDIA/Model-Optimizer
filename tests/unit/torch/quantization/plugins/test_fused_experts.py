@@ -1945,9 +1945,13 @@ def _local_hessian_grouped_capture_job(rank, size, impl):
 
         local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
 
-        # Each expert's Hessian, in both projections, holds exactly the rows routed to it.
+        # Each expert's Hessian, in both projections, holds the rows routed to it across all
+        # data-parallel ranks (DP sync sums the per-rank token counts).
         routed = torch.cat([model.moe.gate(b.view(-1, HIDDEN_DIM))[2] for b in batches])
-        rows = torch.bincount(routed.flatten(), minlength=NUM_EXPERTS).tolist()
+        rows = [
+            count * size
+            for count in torch.bincount(routed.flatten(), minlength=NUM_EXPERTS).tolist()
+        ]
         accumulators = model._local_hessian_accumulators
         for quantizers in (
             experts.gate_up_proj_weight_quantizers,

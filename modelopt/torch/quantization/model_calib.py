@@ -58,6 +58,7 @@ from .nn import (
     StaticBlockScaleQuantizer,
     TensorQuantizer,
 )
+from .nn.modules.tensor_quantizer import _collective_device
 from .utils import (
     SHARED_PATTERNS,
     ModuleNames,
@@ -1038,7 +1039,7 @@ class _LocalHessianAccumulator:
     @torch.no_grad()
     def accumulate(self, input_tensor: torch.Tensor) -> None:
         """Accumulate ``XᵀX`` per block from an activation of shape ``(..., cin)``."""
-        if not self.is_enabled:
+        if not self.is_enabled or input_tensor.numel() == 0:
             return
         # (cin, tokens) -> (n_blocks, bs, tokens). A float32 GEMM avoids bf16/fp16 precision loss;
         # a bfloat16 one, accumulating in float32, is faster and needs no float32 copy.
@@ -1220,27 +1221,95 @@ def _expert_slices(offs: torch.Tensor, num_experts: int, rows: int):
         start = end
 
 
+def _is_quant_te_grouped_linear(module: nn.Module) -> bool:
+    """Whether ``module`` is a quantized TEGroupedLinear (``weight0..N`` + ``GroupedQuantizer``)."""
+    return (
+        isinstance(module, QuantModule)
+        and isinstance(getattr(module, "weight_quantizer", None), GroupedQuantizer)
+        and getattr(module, "weight", None) is None
+        and hasattr(module, "num_gemms")
+        and getattr(module, "weight0", None) is not None
+    )
+
+
+def _grouped_linear_slices(m_splits, num_gemms: int, rows: int):
+    """Yield ``(expert, start, end)`` for each expert's rows in a TEGroupedLinear batch.
+
+    ``m_splits`` gives per-expert token counts (one non-negative int per local expert), as
+    ``te.pytorch.GroupedLinear`` and Megatron's ``TEGroupedLinear`` take. Experts with zero rows
+    are skipped, and trailing padded rows beyond ``sum(m_splits)`` belong to no expert.
+    """
+    if isinstance(m_splits, torch.Tensor):
+        if m_splits.dim() != 1:
+            raise RuntimeError(
+                f"Grouped linear m_splits must be 1-D, got shape {tuple(m_splits.shape)}."
+            )
+        splits = m_splits.tolist()
+    else:
+        splits = list(m_splits)
+    if len(splits) != num_gemms or any(c < 0 for c in splits) or sum(splits) > rows:
+        raise RuntimeError(
+            f"Grouped linear m_splits {splits} do not split {rows} rows over {num_gemms} experts."
+        )
+    start = 0
+    for idx, count in enumerate(splits):
+        end = start + count
+        if count > 0:
+            yield idx, start, end
+        start = end
+
+
 class _WeightInputHook:
     """Identify active input collectors so auxiliary modules can request a calibration forward."""
 
     def __init__(self, hook: Callable):
         self.hook = hook
 
-    def __call__(self, module, args):
-        self.hook(module, args)
+    def __call__(self, module, args, kwargs=None):
+        if kwargs is None:
+            self.hook(module, args)
+        else:
+            self.hook(module, args, kwargs)
 
 
-def _register_weight_input_hooks(model, names, capture, on_weight=None):
+def _register_weight_input_hooks(model, names, capture, on_weight=None, on_target=None):
     """Register forward hooks feeding each weight's input activations to ``capture``.
 
     ``capture(weight_quantizer, weight, inputs)`` runs on every forward of a weight whose quantizer
-    is enabled: dense quantized linears hook the layer input; HF fused-MoE experts hook the shared
-    input quantizers, keyed by the active expert (``_current_expert_idx``) when eager, or split per
-    expert by ``_grouped_offs`` under ``grouped_mm``. Weights without a hook (conv,
-    SequentialQuantizer) are never captured. ``on_weight(name, weight, weight_quantizer)``, if
-    given, is called once per hooked weight. Returns removable handles.
+    is enabled: dense quantized linears hook the layer input; TEGroupedLinear layers split the
+    input batch per expert by ``m_splits``; HF fused-MoE experts hook the shared input quantizers,
+    keyed by the active expert (``_current_expert_idx``) when eager, or split per expert by
+    ``_grouped_offs`` under ``grouped_mm``. Weights without a hook (conv, SequentialQuantizer) are
+    never captured. ``on_weight(name, weight, weight_quantizer)``, if given, is called once per
+    hooked layer/projection. ``on_target(module, weight_quantizer, weight_shape)``, if given, is
+    called once per hooked weight in deterministic module/expert order without retaining weights.
+    Returns removable handles.
     """
     handles: list = []
+
+    def _make_grouped_linear_hook(enabled):
+        """Per-expert capture for TEGroupedLinear, splitting the token batch by ``m_splits``."""
+
+        def _grouped_hook(linear, args, kwargs):
+            inp = args[0] if args else kwargs.get("inp", kwargs.get("x"))
+            m_splits = args[1] if len(args) > 1 else kwargs.get("m_splits")
+            if inp is None or m_splits is None:
+                return
+            inp_local = inp.to_local() if hasattr(inp, "to_local") else inp
+            inp_2d = (
+                inp_local if inp_local.dim() == 2 else inp_local.reshape(-1, inp_local.shape[-1])
+            )
+            for idx, start, end in _grouped_linear_slices(
+                m_splits, linear.num_gemms, inp_2d.shape[0]
+            ):
+                if idx in enabled:
+                    capture(
+                        linear.weight_quantizer[idx],
+                        getattr(linear, f"weight{idx}"),
+                        inp_2d[start:end],
+                    )
+
+        return _grouped_hook
 
     def _make_expert_hook(expert_module, weight_name, quantizers, enabled):
         """Per-expert capture for whichever forward ran.
@@ -1273,47 +1342,195 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
 
         return _expert_hook
 
-    for name, module in names.name_to_module.items():
-        if is_quantized_linear(module) and isinstance(module.weight_quantizer, TensorQuantizer):
-            with enable_weight_access_and_writeback(module, model, names):
-                # ``weight`` may be absent (e.g. TE GroupedLinear exposes weight0..N, not weight);
-                # such modules have no single 2-D weight to pair and fall back to plain MSE.
-                weight = getattr(module, "weight", None)
-                if weight is None or weight.dim() != 2 or not module.weight_quantizer.is_enabled:
-                    continue
-                if on_weight is not None:
-                    on_weight(name, weight, module.weight_quantizer)
-
-            def _dense_hook(linear, args):
-                if args:
-                    capture(linear.weight_quantizer, linear.weight, args[0])
-
-            handles.append(module.register_forward_pre_hook(_WeightInputHook(_dense_hook)))
-        elif _is_quant_fused_experts(module):
-            with enable_weight_access_and_writeback(module, model, names):
-                for weight_name, weight, quantizers, input_quantizer in _fused_expert_projections(
-                    module
-                ):
+    try:
+        for name, module in names.name_to_module.items():
+            if is_quantized_linear(module) and isinstance(module.weight_quantizer, TensorQuantizer):
+                with enable_weight_access_and_writeback(module, model, names):
+                    # ``weight`` may be absent (e.g. legacy shared-quantizer TEGroupedLinear);
+                    # such modules have no single 2-D weight to pair and fall back to plain MSE.
+                    weight = getattr(module, "weight", None)
+                    if (
+                        weight is None
+                        or weight.dim() != 2
+                        or not module.weight_quantizer.is_enabled
+                    ):
+                        continue
                     if on_weight is not None:
-                        # This rank's first expert, the one quantizers[0] quantizes: indexing an
-                        # expert-parallel DTensor names a global expert and all-gathers every expert.
-                        on_weight(
-                            f"{name}.{weight_name}", module._local_experts(weight)[0], quantizers[0]
-                        )
-                    # Snapshot which experts are enabled now, before the caching forward silences
-                    # all weight quantizers — so we don't capture (and discard) disabled experts.
-                    enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
+                        on_weight(name, weight, module.weight_quantizer)
+                    if on_target is not None:
+                        on_target(module, module.weight_quantizer, tuple(weight.shape))
+
+                def _dense_hook(linear, args):
+                    if args:
+                        capture(linear.weight_quantizer, linear.weight, args[0])
+
+                handles.append(module.register_forward_pre_hook(_WeightInputHook(_dense_hook)))
+            elif _is_quant_te_grouped_linear(module):
+                quantizers = module.weight_quantizer
+                num_gemms = module.num_gemms
+                if len(quantizers) != num_gemms:
+                    raise RuntimeError(
+                        f"{name}: TEGroupedLinear has {num_gemms} local experts but "
+                        f"{len(quantizers)} weight quantizers."
+                    )
+                with enable_weight_access_and_writeback(module, model, names):
+                    # Snapshot enabled experts now, before the caching forward silences weight quantizers.
+                    enabled: set[int] = set()
+                    target_shapes: list[tuple[int, tuple[int, int]]] = []
+                    for i in range(num_gemms):
+                        q = quantizers[i]
+                        weight_i = getattr(module, f"weight{i}", None)
+                        if (
+                            isinstance(q, TensorQuantizer)
+                            and q.is_enabled
+                            and weight_i is not None
+                            and weight_i.dim() == 2
+                        ):
+                            enabled.add(i)
+                            target_shapes.append((i, tuple(weight_i.shape)))
                     if not enabled:
                         continue
-                    module._weight_input_capture = True
-                    handles.append(
-                        input_quantizer.register_forward_pre_hook(
-                            _WeightInputHook(
-                                _make_expert_hook(module, weight_name, quantizers, enabled)
+                    if on_weight is not None:
+                        first = min(enabled)
+                        on_weight(name, getattr(module, f"weight{first}"), quantizers[first])
+                    if on_target is not None:
+                        for i, shape in target_shapes:
+                            on_target(module, quantizers[i], shape)
+
+                handles.append(
+                    module.register_forward_pre_hook(
+                        _WeightInputHook(_make_grouped_linear_hook(enabled)),
+                        with_kwargs=True,
+                    )
+                )
+            elif _is_quant_fused_experts(module):
+                with enable_weight_access_and_writeback(module, model, names):
+                    for (
+                        weight_name,
+                        weight,
+                        quantizers,
+                        input_quantizer,
+                    ) in _fused_expert_projections(module):
+                        local_weights = (
+                            module._local_experts(weight)
+                            if (on_weight is not None or on_target is not None)
+                            else None
+                        )
+                        if on_weight is not None and local_weights is not None:
+                            # This rank's first expert, the one quantizers[0] quantizes: indexing an
+                            # expert-parallel DTensor names a global expert and all-gathers every expert.
+                            on_weight(f"{name}.{weight_name}", local_weights[0], quantizers[0])
+                        # Snapshot which experts are enabled now, before the caching forward silences
+                        # all weight quantizers — so we don't capture (and discard) disabled experts.
+                        enabled = {
+                            i
+                            for i, q in enumerate(quantizers)
+                            if isinstance(q, TensorQuantizer) and q.is_enabled
+                        }
+                        if not enabled:
+                            continue
+                        if (
+                            on_target is not None
+                            and local_weights is not None
+                            and local_weights.dim() == 3
+                        ):
+                            expert_shape = (local_weights.shape[1], local_weights.shape[2])
+                            for i in sorted(enabled):
+                                on_target(module, quantizers[i], expert_shape)
+                        module._weight_input_capture = True
+                        handles.append(
+                            input_quantizer.register_forward_pre_hook(
+                                _WeightInputHook(
+                                    _make_expert_hook(module, weight_name, quantizers, enabled)
+                                )
                             )
                         )
-                    )
+    except BaseException:
+        for handle in handles:
+            handle.remove()
+        raise
     return handles
+
+
+def _local_hessian_target_device(
+    quantizer: TensorQuantizer, module: nn.Module, fallback: torch.device
+) -> torch.device:
+    """Device where ``quantizer``'s synced Hessian should reside when this rank saw zero tokens."""
+    amax = getattr(quantizer, "_amax", None)
+    if isinstance(amax, torch.Tensor) and not amax.is_meta:
+        return amax.device
+    return _quantizer_state_device(module) or fallback
+
+
+@torch.no_grad()
+def _sync_local_hessians_across_dp(
+    sync_targets: list[tuple[nn.Module, TensorQuantizer, int, int, int]],
+    accumulators: dict[int, _LocalHessianAccumulator],
+    input_dtype: torch.dtype,
+) -> None:
+    """All-reduce per-block Hessians and sample counts across each module's data-parallel group.
+
+    Iterates ``sync_targets`` in static module/expert order (independent of which experts
+    received local tokens) so every rank in a DP group issues the same collectives in the
+    same order even under sparse or uneven MoE routing.
+    """
+    by_group: dict[
+        Any,
+        tuple[DistributedProcessGroup, list[tuple[nn.Module, TensorQuantizer, int, int, int]]],
+    ] = {}
+    for target in sync_targets:
+        module = target[0]
+        parallel_state = getattr(module, "parallel_state", None)
+        dp_group = parallel_state.data_parallel_group if parallel_state is not None else None
+        if dp_group is None or not dp_group.is_initialized() or dp_group.world_size() <= 1:
+            continue
+        pg = dp_group.group if dp_group.group is not None else dist.group.WORLD
+        if pg not in by_group:
+            by_group[pg] = (dp_group, [])
+        by_group[pg][1].append(target)
+
+    for dp_group, targets in by_group.values():
+        pg = dp_group.group
+        device = _collective_device(pg)
+        # Batch all sample counts for this DP group into one collective and one host sync.
+        counts = torch.tensor(
+            [
+                accumulators[id(q)].num_samples if id(q) in accumulators else 0
+                for _, q, _, _, _ in targets
+            ],
+            dtype=torch.int64,
+            device=device,
+        )
+        dist.all_reduce(counts, op=dist.ReduceOp.SUM, group=pg)
+        global_counts = counts.tolist()
+
+        for (module, q, cout, cin, bs), global_count in zip(targets, global_counts):
+            if global_count == 0:
+                continue
+            qid = id(q)
+            acc = accumulators.get(qid)
+            if acc is None:
+                acc = _LocalHessianAccumulator(cout, cin, bs, input_dtype)
+                accumulators[qid] = acc
+            if acc.hessian_per_block is None:
+                buf = torch.zeros(
+                    (acc.num_blocks_per_cin, bs, bs), dtype=torch.float32, device=device
+                )
+                dist.all_reduce(buf, op=dist.ReduceOp.SUM, group=pg)
+                target_device = _local_hessian_target_device(q, module, device)
+                acc.hessian_per_block = buf.to(target_device) if target_device != device else buf
+                del buf
+            else:
+                h = acc.hessian_per_block
+                if h.device == device and h.is_contiguous():
+                    dist.all_reduce(h, op=dist.ReduceOp.SUM, group=pg)
+                else:
+                    buf = h.to(device).contiguous()
+                    dist.all_reduce(buf, op=dist.ReduceOp.SUM, group=pg)
+                    h.copy_(buf)
+                    del buf
+            acc.num_samples = global_count
+            acc._normalized_hessian = None
 
 
 @torch.no_grad()
@@ -1338,9 +1555,9 @@ def local_hessian_calibrate(
     (input quantizers untouched) and fed to :func:`mse_calibrate`'s weight search via ``error_func``.
 
     Like :func:`mse_calibrate`, TensorQuantizer weights are calibrated — with the Hessian
-    metric where a weight pairs with its input activations (dense linears and HF fused-MoE
-    experts), plain MSE otherwise. Other quantizer types (e.g. SequentialQuantizer) are
-    unsupported and left at their max-calibrated scale.
+    metric where a weight pairs with its input activations (dense linears, TEGroupedLinear, and
+    HF fused-MoE experts), plain MSE otherwise. Other quantizer types (e.g. SequentialQuantizer)
+    are unsupported and left at their max-calibrated scale.
 
     Weights whose quantizer backend registered a local-Hessian encoder (see
     :func:`~modelopt.torch.quantization.utils.calib_utils.register_local_hessian_encoder`), such as
@@ -1360,7 +1577,7 @@ def local_hessian_calibrate(
         model: Model to be calibrated.
         forward_loop: A callable which takes the model as argument and
             forwards calibration data through the model. Required for this algorithm.
-        distributed_sync: Whether to sync amax across distributed processes.
+        distributed_sync: Whether to sync amax and per-block Hessians across data-parallel ranks.
         step_size: Step size for amax search (default: 0.1).
         start_multiplier: Starting multiplier for amax search (default: 0.25).
         stop_multiplier: Ending multiplier for amax search (default: 4.0).
@@ -1400,19 +1617,24 @@ def local_hessian_calibrate(
 
     # Hessians keyed by id(weight_quantizer); modules pair weights<->activations via the hook.
     accumulators: dict[int, _LocalHessianAccumulator] = {}
+    sync_targets: list[tuple[nn.Module, TensorQuantizer, int, int, int]] = []
+    seen_target_ids: set[int] = set()
+    hessian_dtype = getattr(torch, hessian_input_dtype)
 
     def capture(weight_quantizer, weight, input_tensor):
         encoder = encoders.get(id(weight_quantizer))
         if encoder is None and _has_local_hessian_encoder(weight_quantizer):
             return  # declined by its encoder, e.g. already holding GPTQ's codes
         input_local = input_tensor.to_local() if hasattr(input_tensor, "to_local") else input_tensor
+        if input_local.numel() == 0:
+            return
         acc = accumulators.get(id(weight_quantizer))
         if acc is None:
             acc = _LocalHessianAccumulator(
                 weight.shape[0],
                 weight.shape[1],
                 block_size if encoder is None else encoder.block_size,
-                getattr(torch, hessian_input_dtype),
+                hessian_dtype,
             )
             accumulators[id(weight_quantizer)] = acc
         acc.accumulate(input_local)
@@ -1422,10 +1644,27 @@ def local_hessian_calibrate(
         if not _has_local_hessian_encoder(quantizer):  # validated against the encoder's own block
             _warn_local_hessian_fallback(name, weight, quantizer, block_size, warned)
 
+    def record_sync_target(module, quantizer, weight_shape):
+        """Record each eligible hooked weight in static order for deadlock-free DP Hessian sync."""
+        qid = id(quantizer)
+        if qid in seen_target_ids:
+            return
+        encoder = encoders.get(qid)
+        if encoder is None and _has_local_hessian_encoder(quantizer):
+            return
+        acc_block_size = block_size if encoder is None else encoder.block_size
+        cout, cin = weight_shape
+        if cin % acc_block_size != 0:
+            return
+        seen_target_ids.add(qid)
+        sync_targets.append((module, quantizer, cout, cin, acc_block_size))
+
     # Phase 2: capture each weight's input activations during a forward with weight fake-quant
     # disabled (so H = ΣXᵀX reflects full-precision weights); input quantizers are left as-is.
     warned: set = set()
-    handles = _register_weight_input_hooks(model, names, capture, on_weight=warn_fallback)
+    handles = _register_weight_input_hooks(
+        model, names, capture, on_weight=warn_fallback, on_target=record_sync_target
+    )
     print_rank_0("local_hessian: Caching activations and computing local Hessian...")
     try:
         with set_quantizer_by_cfg_context(
@@ -1436,13 +1675,18 @@ def local_hessian_calibrate(
         for handle in handles:
             handle.remove()
 
-    # TODO(fridah-nv): the per-block Hessian is not synced across TP/DP ranks (max_calibrate's
-    # amax sync runs before this), so refined amaxes can diverge. All-reduce Hessian / re-sync.
-    if dist_is_initialized() and dist_size() > 1:
-        warn_rank_0(
-            "local_hessian: Hessian is not synced across ranks; refined weight amaxes may "
-            "diverge under tensor/data parallelism. Treat local_hessian as single-rank for now."
-        )
+    if distributed_sync:
+        _sync_local_hessians_across_dp(sync_targets, accumulators, hessian_dtype)
+        if any(
+            (ps := getattr(m, "parallel_state", None)) is not None
+            and ps.tensor_parallel_group.is_initialized()
+            and ps.tensor_parallel_group.world_size() > 1
+            for m, *_ in sync_targets
+        ):
+            warn_rank_0(
+                "local_hessian: Hessian is not synced across tensor-parallel ranks; refined "
+                "weight amaxes may diverge under tensor parallelism."
+            )
 
     # Phase 3a: encode the weights an encoder takes, freeing each Hessian once it is used.
     def encode(weight, quantizer):

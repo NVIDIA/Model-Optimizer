@@ -255,3 +255,69 @@ def test_save_restore(model_cls, quant_config):
     mto.restore_from_modelopt_state(model_ref, state_dict)
     model_ref.load_state_dict(model_quant.state_dict())
     assert torch.allclose(model_quant(calib_data[0]), model_ref(calib_data[0]))
+
+
+def test_te_grouped_local_hessian_and_lsq():
+    """local_hessian + LSQ hooks TEGroupedLinear per expert instead of falling back to plain MSE."""
+    set_seed()
+    model_lh = TEGroupedLinear().cuda()
+    model_mse = copy.deepcopy(model_lh)
+
+    def make_inputs():
+        torch.manual_seed(0)
+        batches = []
+        for _ in range(3):
+            x = torch.randn(model_lh.num_gemms * 2, 16, device="cuda")
+            x[:, 0] *= 40.0
+            batches.append(x)
+        return batches
+
+    batches = make_inputs()
+
+    def forward_loop(m):
+        for x in batches:
+            m(x)
+
+    base_quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {"num_bits": 4, "block_sizes": {-1: 16, "type": "static"}},
+        },
+    ]
+    lh_cfg = {
+        "quant_cfg": base_quant_cfg,
+        "algorithm": {
+            "method": "lsq",
+            "scale_algorithm": {
+                "method": "local_hessian",
+                "fp8_scale_sweep": False,
+                "debug": True,
+            },
+        },
+    }
+    mse_cfg = {
+        "quant_cfg": base_quant_cfg,
+        "algorithm": {
+            "method": "lsq",
+            "scale_algorithm": {"method": "mse", "fp8_scale_sweep": False},
+        },
+    }
+
+    mtq.quantize(model_lh, lh_cfg, forward_loop=forward_loop)
+    mtq.quantize(model_mse, mse_cfg, forward_loop=forward_loop)
+
+    accs = model_lh._local_hessian_accumulators
+    wqs_lh = model_lh.net.weight_quantizer
+    wqs_mse = model_mse.net.weight_quantizer
+    assert isinstance(wqs_lh, GroupedQuantizer)
+    for i in range(model_lh.num_gemms):
+        assert id(wqs_lh[i]) in accs
+        assert accs[id(wqs_lh[i])].num_samples == len(batches) * 2
+        assert wqs_lh[i]._lsq
+    assert any(
+        not torch.allclose(wqs_lh[i]._amax_post, wqs_mse[i]._amax_post)
+        for i in range(model_lh.num_gemms)
+    )
+    out = model_lh(batches[0])
+    assert torch.isfinite(out).all()

@@ -618,7 +618,18 @@ def test_every_calibrate_mode_declares_whether_it_calibrates_distributed():
 
 @pytest.mark.parametrize(
     "algorithm",
-    [None, "max", "mse", "smoothquant", "awq_clip", "gptq", "nvfp4_act_headroom", "lsq"],
+    [
+        None,
+        "max",
+        "mse",
+        "local_hessian",
+        "smoothquant",
+        "awq_clip",
+        "gptq",
+        "nvfp4_act_headroom",
+        "lsq",
+        {"method": "lsq", "scale_algorithm": {"method": "local_hessian"}},
+    ],
 )
 def test_a_calibration_that_syncs_across_ranks_is_accepted_on_several_ranks(algorithm):
     """The modes that declare they calibrate correctly on several ranks pass the guard."""
@@ -657,8 +668,11 @@ def test_an_undeclared_calibration_is_refused_on_several_ranks():
         ("calibrate", "awq_lite", "awq_lite"),
         (
             "calibrate",
-            {"method": "nvfp4_act_headroom", "weight_scale_algorithm": {"method": "local_hessian"}},
-            "local_hessian",
+            {
+                "method": "lsq",
+                "scale_algorithm": {"method": "local_hessian", "distributed_sync": False},
+            },
+            "local_hessian with distributed_sync=False",
         ),
         (
             "calibrate",
@@ -678,7 +692,7 @@ def test_an_undeclared_calibration_is_refused_on_several_ranks():
     ids=[
         "quantize",
         "calibrate",
-        "for-the-weight-scales",
+        "for-the-lsq-scales-without-their-sync",
         "max-without-its-sync",
         "for-the-weight-scales-without-their-sync",
         "auto_quantize",
@@ -688,10 +702,9 @@ def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model
     entry, algorithm, refused
 ):
     """Each rank calibrates on its own data, and AWQ keeps what its search gathers on the rank: the
-    ranks' copies of a weight would come out different. So would local_hessian, run by another
-    algorithm for its weight scales, and max or MSE told not to sync, by False in any spelling its
-    schema reads as False, or by None, which skips the sync too. The refusal comes before any
-    change."""
+    ranks' copies of a weight would come out different. So would max, MSE or local_hessian told not
+    to sync (directly or as a nested scale algorithm), by False in any spelling its schema reads as
+    False, or by None, which skips the sync too. The refusal comes before any change."""
     model = nn.Sequential(nn.Linear(16, 16))
     set_distribution_plan(model, DistributionPlan(world_size=2))
     if entry == "calibrate":

@@ -516,7 +516,7 @@ class LocalHessianModeDescriptor(BaseCalibrateModeDescriptor):
         return LocalHessianCalibConfig
 
     _calib_func = local_hessian_calibrate
-    _distributed_calibration = False  # its distributed_sync syncs only the max amax it starts from
+    _distributed_calibration = True
 
 
 @CalibrateModeRegistry.register_mode
