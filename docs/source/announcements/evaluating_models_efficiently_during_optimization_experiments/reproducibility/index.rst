@@ -7,20 +7,6 @@ See its
 `reproducibility instructions <https://github.com/NVIDIA/Model-Optimizer/blob/13ad0ef401ec5e4480abd1b8eb236ccdf50ef802/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/kto/reproducibility/README.md>`__
 for the checkpoints, subtask split, and evaluation settings.
 
-Saved metrics
--------------
-
-We save the means, observed standard deviations, confidence intervals, and p-values as CSV
-summaries:
-
-- **SciCode: candidate accuracy at fixed response budgets** — data used in the
-  :ref:`Choose between question-level and repetition-level analysis <evaluation-choose-questions-and-repetitions>`
-  example.
-  CSV file: :download:`budget-allocation-accuracy.csv <budget-allocation-accuracy.csv>`.
-- **SciCode: cap-hit rates** — data used in the
-  :ref:`Collect as much evaluation data as you need <evaluation-collect-data>` example.
-  CSV file: :download:`scicode-cap-data-volume.csv <scicode-cap-data-volume.csv>`.
-
 .. _evaluation-statistical-methods:
 
 Statistical methods
@@ -58,24 +44,24 @@ Statistical methods
 
   .. _evaluation-scicode-cap-hit-p-values:
 
-  **SciCode cap-hit p-values**
+  - **SciCode cap-hit p-values**
 
-  For the one-sided `paired permutation p-values
-  <https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html>`__,
-  swap model labels for whole parent problems and count permuted cap-hit rate differences at least
-  as extreme as the observed difference in the tested direction. For an exact p-value, divide
-  this count by the total number of possible swap patterns.
+    For the one-sided `paired permutation p-values
+    <https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html>`__,
+    swap model labels for whole parent problems and count permuted cap-hit rate differences at least
+    as extreme as the observed difference in the tested direction. For an exact p-value, divide
+    this count by the total number of possible swap patterns.
 
-  Cap hits are rare, so most parent-level differences are zero. The permutation test avoids relying
-  on a t-distribution approximation for these sparse differences. It assumes that the models' results
-  for each parent problem are interchangeable under the null hypothesis.
+    Cap hits are rare, so most parent-level differences are zero. The permutation test avoids relying
+    on a t-distribution approximation for these sparse differences. It assumes that the models' results
+    for each parent problem are interchangeable under the null hypothesis.
 
-  The outcomes are binary, but a simple binomial test on pooled responses would ignore question
-  pairing and repetitions within each question. With one response per model and question and
-  independent question pairs, an
-  `exact McNemar test
-  <https://www.statsmodels.org/stable/generated/statsmodels.stats.contingency_tables.mcnemar.html>`__
-  is another paired option.
+    The outcomes are binary, but a simple binomial test on pooled responses would ignore question
+    pairing and repetitions within each question. With one response per model and question and
+    independent question pairs, an
+    `exact McNemar test
+    <https://www.statsmodels.org/stable/generated/statsmodels.stats.contingency_tables.mcnemar.html>`__
+    is another paired option.
 
 - **Verbosity:** to compare mean completion lengths, average each model’s response lengths across
   repetitions within each question, then subtract Baseline’s average from Candidate’s. Use these
@@ -111,6 +97,20 @@ We report the mean and sample SD across the group scores. Accuracy means are per
 SDs are in percentage points. The means stay
 fixed because every allocation partitions the same saved response pool. Groups can share
 question or repetition IDs, so their observed spread is descriptive.
+
+Saved metrics
+-------------
+
+We save the means, observed standard deviations, confidence intervals, and p-values as CSV
+summaries:
+
+- **SciCode: candidate accuracy at fixed response budgets** — data used in the
+  :ref:`Choose between question-level and repetition-level analysis <evaluation-choose-questions-and-repetitions>`
+  example.
+  CSV file: :download:`budget-allocation-accuracy.csv <budget-allocation-accuracy.csv>`.
+- **SciCode: cap-hit rates** — data used in the
+  :ref:`Collect as much evaluation data as you need <evaluation-collect-data>` example.
+  CSV file: :download:`scicode-cap-data-volume.csv <scicode-cap-data-volume.csv>`.
 
 Reproducibility limits
 ----------------------
