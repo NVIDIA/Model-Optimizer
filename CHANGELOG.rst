@@ -51,6 +51,7 @@ Changelog
 - NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 - Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
+- With ``mto.enable_huggingface_checkpointing()`` and transformers before 5.21, ``save_pretrained`` no longer fails on Hugging Face MoE models with quantized fused experts, and ``from_pretrained`` restores them. A Qwen3-VL-MoE checkpoint does not load on those versions, so save and restore the live model with ``mto.save`` and ``mto.restore`` instead.
 - Applying a finalized AutoQuantize config to a large MoE with one module per expert no longer takes hours: ``mtq.set_quantizer_by_cfg`` no longer walks the whole model for each entry that names a quantizer exactly.
 
 *ONNX*
