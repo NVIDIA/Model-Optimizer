@@ -224,6 +224,13 @@ class PrecisionConverter:
             for input in self.model.graph.input:
                 if input.type.tensor_type.elem_type == self.high_precision_type.onnx_type:
                     input.type.tensor_type.elem_type = self.low_precision_type.onnx_type
+                    if input.name in self.initializer_map:
+                        init = self.initializer_map[input.name]
+                        init.CopyFrom(
+                            self._convert_initializer_data(
+                                init, self.high_precision_type, self.low_precision_type
+                            )
+                        )
 
         cast_down_tensors, cast_up_tensors, fp32_input_to_low_precision_node = (
             self._get_tensors_to_cast(low_precision_nodes)
@@ -717,8 +724,8 @@ class PrecisionConverter:
             # Add cast down for network outputs
             cast_to_fp16.extend([output for output in node.output if output in network_outputs])
 
-        # Remove initializers, they are handled separately
-        initializers = {init.name for init in self.model.graph.initializer}
+        # Constant initializers are handled separately; overridable inputs need runtime casts.
+        initializers = {init.name for init in self.model.graph.initializer} - set(network_inputs)
         cast_to_fp16 = list(set(cast_to_fp16) - initializers)
         cast_to_fp32 = list(set(cast_to_fp32) - initializers)
 

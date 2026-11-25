@@ -644,9 +644,13 @@ class GraphSanitizer:
 
     def cleanup_model(self) -> None:
         """Use GraphSurgeon to cleanup unused nodes, tensors and initializers."""
+        inputs = list(self.model.graph.input)
         gs_graph = gs.import_onnx(self.model)
         gs_graph.cleanup()
         self.model = onnx_utils.export_onnx(gs_graph)
+        # GraphSurgeon omits initializer-backed inputs, which remain runtime-overridable.
+        self.model.graph.ClearField("input")
+        self.model.graph.input.extend(inputs)
 
     def replace_custom_domain_nodes(self):
         """Replace custom domain nodes with standard ONNX nodes."""

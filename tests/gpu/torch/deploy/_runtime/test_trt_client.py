@@ -91,7 +91,7 @@ def test_trt11_precision_graph_and_inference(tmp_path, monkeypatch, precision):
         pytest.skip("TensorRT 11 precision migration")
     if not torch.cuda.is_available():
         pytest.skip("A CUDA device is required")
-    if precision == "bf16" and not torch.cuda.is_bf16_supported():
+    if precision == "bf16" and not torch.cuda.is_bf16_supported(including_emulation=False):
         pytest.skip("BF16 requires a supported GPU")
     skip_if_no_trtexec()
     model, args, kwargs = process_model_and_inputs(
@@ -140,6 +140,8 @@ def test_trt11_precision_graph_and_inference(tmp_path, monkeypatch, precision):
 def test_trt11_public_outputs(tmp_path, monkeypatch, precision, layout):
     if int(trt.__version__.split(".", 1)[0]) < 11:
         pytest.skip("TensorRT 11 precision migration")
+    if precision == "bf16" and not torch.cuda.is_bf16_supported(including_emulation=False):
+        pytest.skip("BF16 requires a supported GPU")
     skip_if_no_trtexec()
     helper, tensor = onnx.helper, onnx.TensorProto
     weight = np.eye(4, dtype=np.float32)
@@ -189,6 +191,7 @@ def test_trt11_public_outputs(tmp_path, monkeypatch, precision, layout):
         engine[SHA_256_HASH_LENGTH:], runtime, torch.cuda.Stream(), "cuda", shapes
     )
     x = torch.arange(4, device="cuda", dtype=torch.float32).reshape(1, 4)
+    session.stream.wait_stream(torch.cuda.current_stream())
     outputs = session.run([x])
     expected = [x]
     if layout == "input_output":

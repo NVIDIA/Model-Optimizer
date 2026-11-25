@@ -179,7 +179,14 @@ def test_default_artifact_dir_is_private_and_reused_within_a_process(setup_mocks
     + [
         ("11.4", precision, True, layout)
         for precision, layout in product(
-            ["fp16", "bf16"], ["unnamed", "input_output", "initializer_output", "weight_output"]
+            ["fp16", "bf16"],
+            [
+                "unnamed",
+                "input_output",
+                "initializer_output",
+                "weight_output",
+                "overridable_weight",
+            ],
         )
     ],
 )
@@ -204,6 +211,9 @@ def test_build_engine_precision_graph(tmp_path, monkeypatch, version, precision,
         graph.output.append(helper.make_tensor_value_info("constant", TensorProto.FLOAT, [32, 32]))
     elif layout == "weight_output":
         graph.output.append(helper.make_tensor_value_info("weight", TensorProto.FLOAT, [32, 32]))
+    elif layout == "overridable_weight":
+        graph.input.append(helper.make_tensor_value_info("weight", TensorProto.FLOAT, [32, 32]))
+        graph.output.append(graph.input[-1])
     original_io = [value.SerializeToString() for value in (*graph.input, *graph.output)]
     path = source / "model.onnx"
     onnx.save_model(
@@ -237,15 +247,24 @@ def test_build_engine_precision_graph(tmp_path, monkeypatch, version, precision,
         elif precision != "fp32":
             assert "--" + precision in arguments
         matmul = next(node for node in compiled_graph.graph.node if node.op_type == "MatMul")
-        assert (
-            next(t for t in compiled_graph.graph.initializer if t.name == matmul.input[1]).data_type
-            == expected_type
-        )
+        if layout == "overridable_weight":
+            cast = next(
+                node for node in compiled_graph.graph.node if matmul.input[1] in node.output
+            )
+            assert cast.op_type == "Cast" and list(cast.input) == ["weight"]
+            assert next(attr.i for attr in cast.attribute if attr.name == "to") == expected_type
+        else:
+            assert (
+                next(
+                    t for t in compiled_graph.graph.initializer if t.name == matmul.input[1]
+                ).data_type
+                == expected_type
+            )
         assert [
             value.SerializeToString()
             for value in (*compiled_graph.graph.input, *compiled_graph.graph.output)
         ] == original_io
-        if layout in ("initializer_output", "weight_output"):
+        if layout in ("initializer_output", "weight_output", "overridable_weight"):
             name = "constant" if layout == "initializer_output" else "weight"
             constant = next(t for t in compiled_graph.graph.initializer if t.name == name)
             np.testing.assert_array_equal(numpy_helper.to_array(constant), weights)

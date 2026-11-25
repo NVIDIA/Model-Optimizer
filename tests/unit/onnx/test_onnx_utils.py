@@ -30,6 +30,7 @@ from onnx.helper import (
     make_tensor,
     make_tensor_value_info,
 )
+from onnx.reference import ReferenceEvaluator
 from onnx_graphsurgeon.exporters.onnx_exporter import OnnxExporter
 
 import modelopt.onnx.utils as onnx_utils
@@ -308,7 +309,6 @@ def test_duplicate_shared_constants_preserves_and_materializes_external_data(tmp
         "shared_external_initializer",
         [
             make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1]),
-            make_tensor_value_info("shared", onnx.TensorProto.FLOAT, [1]),
         ],
         [make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1])],
         initializer=[shared, collision],
@@ -386,7 +386,6 @@ def test_duplicate_shared_constants_retains_initializer_captured_by_subgraphs():
         [
             make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1]),
             make_tensor_value_info("condition", onnx.TensorProto.BOOL, []),
-            make_tensor_value_info("shared", onnx.TensorProto.FLOAT, [1]),
         ],
         [make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1])],
         initializer=[shared],
@@ -402,39 +401,46 @@ def test_duplicate_shared_constants_retains_initializer_captured_by_subgraphs():
         "shared_1",
         "shared_2",
     }
-    assert "shared" in {graph_input.name for graph_input in result.graph.input}
+    assert {graph_input.name for graph_input in result.graph.input} == {"input", "condition"}
     onnx.checker.check_model(result)
 
 
-def test_duplicate_shared_constants_retains_initializer_exposed_as_graph_output():
+@pytest.mark.parametrize("overridable", [False, True])
+@pytest.mark.parametrize("consumers", [1, 2])
+def test_duplicate_shared_constants_retains_initializer_exposed_as_graph_output(
+    overridable, consumers
+):
     shared = make_tensor("shared", onnx.TensorProto.FLOAT, [1], [1.0])
+    outputs = ["left", "right"][:consumers]
     graph = make_graph(
-        [
-            make_node("Add", ["input", "shared"], ["left"]),
-            make_node("Add", ["input", "shared"], ["right"]),
-        ],
+        [make_node("Add", ["input", "shared"], [name]) for name in outputs],
         "initializer_graph_output",
         [make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1])],
         [
-            make_tensor_value_info("left", onnx.TensorProto.FLOAT, [1]),
-            make_tensor_value_info("right", onnx.TensorProto.FLOAT, [1]),
-            make_tensor_value_info("shared", onnx.TensorProto.FLOAT, [1]),
+            make_tensor_value_info(name, onnx.TensorProto.FLOAT, [1])
+            for name in (*outputs, "shared")
         ],
         initializer=[shared],
     )
+    if overridable:
+        graph.input.append(make_tensor_value_info("shared", onnx.TensorProto.FLOAT, [1]))
     model = make_model(graph)
 
     result, modified = onnx_utils.duplicate_shared_constants(model)
 
-    assert modified
-    assert [node.input[1] for node in result.graph.node] == ["shared_1", "shared_2"]
-    assert {initializer.name for initializer in result.graph.initializer} == {
-        "shared",
-        "shared_1",
-        "shared_2",
-    }
-    assert [output.name for output in result.graph.output] == ["left", "right", "shared"]
+    assert modified is not overridable
+    names = ["shared"] * consumers if overridable else [f"shared_{i + 1}" for i in range(consumers)]
+    assert [node.input[1] for node in result.graph.node] == names
+    assert {initializer.name for initializer in result.graph.initializer} == {"shared", *names}
+    assert [output.name for output in result.graph.output] == [*outputs, "shared"]
     onnx.checker.check_model(result)
+    feeds = {"input": np.array([1.0], dtype=np.float32)}
+    if overridable:
+        feeds["shared"] = np.array([5.0], dtype=np.float32)
+    actual = ReferenceEvaluator(result).run(None, feeds)
+    for value in actual[:-1]:
+        np.testing.assert_array_equal(value, [6.0 if overridable else 2.0])
+    np.testing.assert_array_equal(actual[-1], [5.0 if overridable else 1.0])
 
 
 @pytest.mark.parametrize(
