@@ -28,6 +28,11 @@ from datasets import load_from_disk
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer, Mxfp4Config
 
+import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
+from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.quantization.qtensor import MXFP4QTensor
+
 REPO = Path(__file__).resolve().parents[3]
 README = REPO / "examples/llm_qat/README.md"
 README_SCENARIOS = {
@@ -362,10 +367,6 @@ def test_qwen3_qlora_nvfp4(tiny_qwen3_path, dataset_cache_dir, tmp_path):
 @pytest.fixture(scope="module")
 def mxfp4_gpt_oss_path(tiny_gpt_oss_path, tmp_path_factory):
     """A tiny GPT-OSS with MXFP4 experts, stored as openai/gpt-oss-* store theirs."""
-    import modelopt.torch.quantization as mtq
-    from modelopt.recipe import load_recipe
-    from modelopt.torch.export import export_hf_checkpoint
-
     model = AutoModelForCausalLM.from_pretrained(tiny_gpt_oss_path)
     mtq.quantize(model, load_recipe("general/ptq/mxfp4_mlp_weight_only").quantize)
     path = tmp_path_factory.mktemp("mxfp4_gpt_oss")
@@ -386,8 +387,6 @@ def _mxfp4_experts(path, layer=0):
 
 def test_gpt_oss_qat_mxfp4(mxfp4_gpt_oss_path, dataset_cache_dir, tmp_path):
     """QAT of GPT-OSS from its MXFP4 release to an export that deploys the same way."""
-    from modelopt.torch.quantization.qtensor import MXFP4QTensor
-
     ptq_dir, qat_dir, export_dir = tmp_path / "ptq", tmp_path / "qat", tmp_path / "export"
     data_args = _fast_data_args(dataset_cache_dir)
     run_example_command(
