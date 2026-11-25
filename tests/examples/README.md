@@ -127,6 +127,12 @@ pytest tests/examples/hf_ptq/test_deploy.py --run-release \
 
 The image, logs and resolved request are saved in the case's pytest temporary
 directory. The command above keeps them in a directory suitable for archiving.
+An insufficient GPU allocation or unsupported SM is reported as a skip. A job
+qualifying a specific image checkpoint must require a passing result for its
+selected case; a skip does not qualify the checkpoint.
+
+Text deployment cases inherit the examples timeout (`MODELOPT_QA_TEST_TIMEOUT`,
+300 seconds by default). Qwen-Image has its own 7200-second pytest timeout.
 
 The newly added release cases have the following initial deployment recipes:
 

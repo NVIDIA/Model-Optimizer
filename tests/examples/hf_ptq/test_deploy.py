@@ -50,29 +50,29 @@ def pytest_generate_tests(metafunc):
         )
         # Explicit selection must reach execution even if an engine import is broken.
         available = {requested_backend} if requested_backend else get_available_backends()
-        commands = []
-        for case in groups[metafunc.function.__name__]:
-            for backend in case["backends"]:
-                if backend not in available:
-                    continue
-                params = resolve_deploy_config(case, backend, overrides, tensor_parallel_size=tp)
-                deployer = (
-                    ImageModelDeployer if case.get("task") == "image-generation" else ModelDeployer
-                )
-                command = deployer(**params)
-                command.test_id = f"{case['model_id']}_{backend}"
-                commands.append(command)
+        commands = [
+            pytest.param((case, backend), id=f"{case['model_id']}_{backend}")
+            for case in groups[metafunc.function.__name__]
+            for backend in case["backends"]
+            if backend in available
+        ]
     except (OSError, ValueError, yaml.YAMLError) as exc:
         raise pytest.UsageError(f"Invalid deployment configuration: {exc}") from exc
     if requested_backend and not commands:
         commands = [pytest.param(None, marks=pytest.mark.deploy_empty_group, id="no-backend-cases")]
-    metafunc.parametrize("command", commands, ids=idfn)
+    metafunc.parametrize("command", commands, indirect=True)
 
 
-def idfn(val):
-    if hasattr(val, "test_id"):
-        return val.test_id
-    return str(val)
+@pytest.fixture
+def command(request):
+    """Apply run overrides only after pytest has selected this case."""
+    case, backend = request.param
+    _, overrides = _deployment_settings(request.config)
+    params = resolve_deploy_config(
+        case, backend, overrides, tensor_parallel_size=request.config.getoption("--deploy-tp")
+    )
+    deployer = ImageModelDeployer if case.get("task") == "image-generation" else ModelDeployer
+    return deployer(**params)
 
 
 def test_deepseek(command):

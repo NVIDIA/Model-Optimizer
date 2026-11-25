@@ -75,6 +75,7 @@ test_nemotron_lilicorr:
           max_seq_len: 8192
           enable_chunked_prefill: true
           disable_overlap_scheduler: false
+          # Explicit null: use the engine's default CUDA graph configuration.
           cuda_graph_config:
           attn_backend: TRTLLM
           kv_cache_config:

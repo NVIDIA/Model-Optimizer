@@ -14,21 +14,24 @@
 # limitations under the License.
 """Deploy published image checkpoints without importing their engines during collection."""
 
-import contextlib
 import copy
 import fnmatch
 import importlib.metadata
 import json
 import os
 import re
-import signal
 import struct
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 __all__ = ["ImageModelDeployer"]
+
+_GPU_SKIP_EXIT_CODE = 77
+
+
+class _UnavailableGPUError(Exception):
+    """The visible allocation cannot run this image recipe."""
 
 
 class ImageModelDeployer:
@@ -93,6 +96,9 @@ class ImageModelDeployer:
         count_key = "num_images_per_prompt" if backend == "trtllm" else "num_outputs_per_prompt"
         if sampling.get(count_key) != 1:
             raise ValueError(f"Image deployment requires {count_key}: 1")
+        for dimension in ("width", "height"):
+            if not isinstance(sampling.get(dimension), int) or sampling[dimension] < 1:
+                raise ValueError(f"Image deployment requires a positive integer {dimension}")
         self.config = {
             "model_id": model_id,
             "backend": backend,
@@ -110,6 +116,11 @@ class ImageModelDeployer:
 
     def run(self, output_dir):
         """Generate and validate an RGB image, retaining configuration, logs, and evidence."""
+        # Pytest and the shared runner are needed only in the parent process.
+        import pytest
+
+        from .examples.run_command import ProcessGroupCleanupError, _run_capturing
+
         directory = Path(output_dir).resolve()
         directory.mkdir(parents=True, exist_ok=True)
         config_path = directory / "deployment-config.json"
@@ -123,7 +134,28 @@ class ImageModelDeployer:
         try:
             assert os.name == "posix", "Image deployment requires Linux"
             with log_path.open("w", encoding="utf-8") as log:
-                _run_child(command, log)
+                returncode, _ = _run_capturing(
+                    command,
+                    Path.cwd(),
+                    os.environ.copy(),
+                    cleanup_process_group=True,
+                    timeout=6900,
+                    log=log,
+                )
+            if returncode == _GPU_SKIP_EXIT_CODE:
+                evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                if evidence.get("stage") == "skipped":
+                    pytest.skip(evidence["reason"])
+            if returncode:
+                raise subprocess.CalledProcessError(returncode, command)
+        except ProcessGroupCleanupError as error:
+            try:
+                _write_json(
+                    evidence_path,
+                    {"stage": "cleanup", "passed": False, "subprocess_error": str(error)},
+                )
+            finally:
+                pytest.exit(f"Cannot confirm deployment workers stopped: {error}", returncode=1)
         except (subprocess.SubprocessError, OSError) as error:
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
             evidence.update(passed=False, subprocess_error=str(error))
@@ -135,39 +167,6 @@ class ImageModelDeployer:
 
 def _write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-
-
-def _run_child(command, log):
-    with subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        start_new_session=True,
-    ) as process:
-
-        def copy_output():
-            for line in process.stdout:
-                log.write(line)
-                log.flush()
-                print(line, end="", flush=True)
-
-        reader = threading.Thread(target=copy_output, daemon=True)
-        reader.start()
-        try:
-            return_code = process.wait(timeout=6900)
-        except BaseException:
-            # Include VisualGen workers so a timeout cannot leave allocated GPUs busy.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-            raise
-        finally:
-            reader.join(timeout=10)
-        if return_code:
-            raise subprocess.CalledProcessError(return_code, command)
 
 
 def _check_static_nvfp4(snapshot, directory):
@@ -247,14 +246,33 @@ def _generate_sglang(config, snapshot, directory):
         return Path(result.output_file_path), request["width"], request["height"]
 
 
+def _check_gpu_allocation(cuda, config, required_gpus, gpus):
+    visible = cuda.device_count()
+    if visible < required_gpus:
+        raise _UnavailableGPUError(
+            f"Configured image parallelism needs {required_gpus} GPUs, got {visible}"
+        )
+    for index in range(len(gpus), required_gpus):
+        properties = cuda.get_device_properties(index)
+        sm = properties.major * 10 + properties.minor
+        gpus.append({"name": properties.name, "sm": sm, "memory_bytes": properties.total_memory})
+        if sm < config["mini_sm"]:
+            raise _UnavailableGPUError(f"GPU {index} requires SM{config['mini_sm']}, got SM{sm}")
+        if config["sm_versions"] and sm not in config["sm_versions"]:
+            raise _UnavailableGPUError(
+                f"GPU {index} SM{sm} is outside configured candidates {config['sm_versions']}"
+            )
+
+
 def _deploy(config, directory, evidence):
     # Engine and CUDA imports are confined to the child, keeping collection lightweight.
     import torch
-    from huggingface_hub import snapshot_download
-    from PIL import Image
 
     assert os.name == "posix", "Image deployment requires Linux"
-    assert torch.cuda.is_available(), "Image deployment requires a CUDA GPU"
+    if not torch.cuda.is_available():
+        raise _UnavailableGPUError("Image deployment requires a CUDA GPU")
+    evidence["gpus"] = []
+    _check_gpu_allocation(torch.cuda, config, config["tensor_parallel_size"], evidence["gpus"])
     backend = config["backend"]
     package = "tensorrt_llm" if backend == "trtllm" else "sglang"
     version = importlib.metadata.version(package)
@@ -271,24 +289,14 @@ def _deploy(config, directory, evidence):
         if unknown:
             raise ValueError(f"Unknown VisualGen engine parameters: {sorted(unknown)}")
         runtime_args = VisualGenArgs(**options)
-        required_gpus = runtime_args.parallel_config.n_workers
-    else:
-        required_gpus = options["num_gpus"]
-    visible_gpus = torch.cuda.device_count()
-    assert visible_gpus >= required_gpus, (
-        f"Configured image parallelism needs {required_gpus} GPUs, got {visible_gpus}"
-    )
-    evidence["gpus"] = []
-    for index in range(required_gpus):
-        properties = torch.cuda.get_device_properties(index)
-        sm = properties.major * 10 + properties.minor
-        evidence["gpus"].append(
-            {"name": properties.name, "sm": sm, "memory_bytes": properties.total_memory}
+        # VisualGen can allocate additional workers for CFG and Ulysses parallelism.
+        _check_gpu_allocation(
+            torch.cuda, config, runtime_args.parallel_config.n_workers, evidence["gpus"]
         )
-        assert sm >= config["mini_sm"], f"GPU {index} requires SM{config['mini_sm']}, got SM{sm}"
-        assert not config["sm_versions"] or sm in config["sm_versions"], (
-            f"GPU {index} SM{sm} is outside configured candidates {config['sm_versions']}"
-        )
+
+    from huggingface_hub import snapshot_download
+    from PIL import Image
+
     evidence["stage"] = "download"
     _write_json(directory / "deployment-result.json", evidence)
     snapshot = Path(snapshot_download(repo_id=config["model_id"], revision=config["revision"]))
@@ -348,6 +356,9 @@ if __name__ == "__main__":
     }
     try:
         _deploy(config, config_path.parent, evidence)
+    except _UnavailableGPUError as error:
+        evidence.update(stage="skipped", reason=str(error))
+        sys.exit(_GPU_SKIP_EXIT_CODE)
     except Exception as error:
         evidence["error"] = f"{type(error).__name__}: {error}"
         raise

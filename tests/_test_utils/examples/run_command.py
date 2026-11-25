@@ -22,8 +22,8 @@ import threading
 import time
 import warnings
 from pathlib import Path
+from typing import TextIO
 
-from _test_utils.torch.distributed.utils import get_free_port
 from _test_utils.transient_errors import TransientError, find_transient_marker
 
 MODELOPT_ROOT = Path(__file__).parents[3]
@@ -50,6 +50,8 @@ class ProcessGroupCleanupError(RuntimeError):
 
 def _wait_for_process_group_exit(pgid: int) -> None:
     """Wait for this unreaped child's Linux process group to have no live members."""
+    if os.name != "posix":
+        return  # /proc exists only on POSIX; there is no process group to confirm elsewhere
     deadline = time.monotonic() + _KILLED_PIPE_TIMEOUT_S
     while True:
         live = []
@@ -78,17 +80,37 @@ def _wait_for_process_group_exit(pgid: int) -> None:
         time.sleep(0.02)
 
 
+def _wait_without_reaping(process: subprocess.Popen, timeout: float | None) -> None:
+    # Keep the group leader's PID reserved until its workers have been cleaned up.
+    if os.name != "posix":
+        process.wait(timeout=timeout)
+        return
+    flags = os.WEXITED | os.WNOWAIT
+    if timeout is None:
+        os.waitid(os.P_PID, process.pid, flags)
+        return
+    deadline = time.monotonic() + timeout
+    while os.waitid(os.P_PID, process.pid, flags | os.WNOHANG) is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        time.sleep(min(0.25, remaining))
+
+
 def _run_capturing(
     cmd_parts: list[str],
     cwd: Path,
     env: dict[str, str],
     *,
     cleanup_process_group: bool = False,
+    timeout: float | None = None,
+    log: TextIO | None = None,
 ) -> tuple[int, str]:
     """Run a command, streaming and capturing combined stdout/stderr to catch transient errors.
 
     Drained by a reader thread rather than ``subprocess.run``, which waits for EOF: a descendant
     outliving the command keeps the pipe open, hanging the read and discarding every log line.
+    When a log is supplied, capture to that file instead of accumulating output in memory.
     """
     chunks: list[str] = []
     process = subprocess.Popen(
@@ -98,6 +120,8 @@ def _run_capturing(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8" if log is not None else None,
+        errors="replace" if log is not None else None,
         start_new_session=True,
     )
     # start_new_session makes the child its own group leader, so the group id is its pid (read now:
@@ -114,32 +138,28 @@ def _run_capturing(
     def _drain():
         with contextlib.suppress(ValueError):  # the stream is closed under us on the escape path
             for line in process.stdout:  # type: ignore[union-attr]
-                print(line, end="")
-                chunks.append(line)
+                print(line, end="", flush=log is not None)
+                if log is None:
+                    chunks.append(line)
+                else:
+                    log.write(line)
+                    log.flush()
 
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
     try:
-        if os.name == "posix":
-            # Wait *without* reaping: a reaped pid can be recycled, and pgid == the child's pid, so
-            # reaping before the kill below would risk signalling an unrelated group.
-            os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
-        else:  # no process groups, so nothing to protect the pid for
-            process.wait()
-        reader.join(_ORPHAN_PIPE_TIMEOUT_S)
-
-        if reader.is_alive():
-            warnings.warn(
-                f"{cmd_parts[0]} left descendants holding its output pipe open; killing the process "
-                "group. Output may be truncated."
-            )
-            _kill_process_group()
-            reader.join(_KILLED_PIPE_TIMEOUT_S)
-
+        _wait_without_reaping(process, timeout)
         if cleanup_process_group:
-            # A completed deployment must not retain workers on the next case's GPUs.
             _kill_process_group()
             _wait_for_process_group_exit(pgid)
+        else:
+            reader.join(_ORPHAN_PIPE_TIMEOUT_S)
+            if reader.is_alive():
+                warnings.warn(
+                    f"{cmd_parts[0]} left descendants holding its output pipe open; killing the "
+                    "process group. Output may be truncated."
+                )
+                _kill_process_group()
         returncode = process.wait()
     except ProcessGroupCleanupError:
         with contextlib.suppress(Exception):
@@ -157,8 +177,10 @@ def _run_capturing(
             with contextlib.suppress(Exception):
                 process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)  # reap: WNOWAIT left it waitable
         raise
-    with contextlib.suppress(Exception):
-        process.stdout.close()  # type: ignore[union-attr]
+    finally:
+        reader.join(_KILLED_PIPE_TIMEOUT_S)
+        if not reader.is_alive():
+            process.stdout.close()  # type: ignore[union-attr]
     return returncode, "".join(chunks)
 
 
@@ -216,6 +238,8 @@ def run_example_command(
         return result
 
     if setup_free_port:
+        from _test_utils.torch.distributed.utils import get_free_port
+
         # Subprocess steps only: an in-process runner picks its own free port, since env is a
         # copy it never sees.
         env["MASTER_PORT"] = str(get_free_port())
