@@ -89,10 +89,10 @@ def inference_flops(
 
     Args:
         network: The PyTorch model.
-        args: The dummy input as defined in
+        dummy_input: The dummy input as defined in
             :meth:`mtn.convert() <modelopt.torch.nas.conversion.convert>`.
         data_shape: The shape of the dummy input if the dummy input is a single tensor. If provided,
-            ``args`` must be ``None``.
+            ``dummy_input`` must be ``None``.
         unit: The unit to return the number of parameters in. Default is 1e6 (million).
         return_str: Whether to return the number of FLOPs as a string.
 
