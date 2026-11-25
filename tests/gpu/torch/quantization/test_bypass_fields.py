@@ -51,7 +51,7 @@ def _iq(path, name):
 @pytest.mark.parametrize("input_grad", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.timeout(180)
-def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype):
+def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys):
     # Packed kernels require optional Triton; materialized replay also supports CPU.
     pytest.importorskip("triton")
     from modelopt.torch.kernels.quantization.iq_gemm import iq_linear
@@ -112,22 +112,25 @@ def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype):
                     seconds = time.perf_counter() - started
                     peak = torch.cuda.max_memory_allocated()
                     incremental = peak - baseline
-                    print(
-                        json.dumps(
-                            {
-                                "format": name,
-                                "dtype": str(dtype),
-                                "shape": shape,
-                                "tokens": tokens,
-                                "packed_bytes": state.packed.numel() * state.packed.element_size(),
-                                "baseline_bytes": baseline,
-                                "peak_bytes": peak,
-                                "incremental_bytes": incremental,
-                                "seconds": seconds,
-                            },
-                            separators=(",", ":"),
+                    with capsys.disabled():
+                        print(
+                            json.dumps(
+                                {
+                                    "format": name,
+                                    "dtype": str(dtype),
+                                    "shape": shape,
+                                    "tokens": tokens,
+                                    "packed_bytes": state.packed.numel()
+                                    * state.packed.element_size(),
+                                    "baseline_bytes": baseline,
+                                    "peak_bytes": peak,
+                                    "incremental_bytes": incremental,
+                                    "seconds": seconds,
+                                },
+                                separators=(",", ":"),
+                            ),
+                            flush=True,
                         )
-                    )
                     assert incremental < 16777216
                 reference_weight = native.detach().requires_grad_(True)
                 reference_x = x.detach().requires_grad_(input_grad)
