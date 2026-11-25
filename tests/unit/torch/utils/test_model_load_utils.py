@@ -393,34 +393,36 @@ def _as_on_transformers_5_5(monkeypatch):
 
 @pytest.mark.parametrize("loader", ["fsdp2", "whole"])
 def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monkeypatch, loader):
-    """Without ``was_used`` (5.5) the load still records only the conversions it matched a key with.
+    """A load records only the conversions it converted a key with, on every Transformers version.
 
-    The head is tied, so the checkpoint has no ``language_model.lm_head.weight`` and that rename
-    never runs; recorded anyway, it renames ``lm_head`` in the export (to
-    ``language_model.model.lm_head`` for Gemma3). The renames the load did run keep the names every
-    conversion gives. FSDP2 also meets a ``language_model.lm_head`` key with no parameter, which it
-    only carries over; the whole-model load reads a projector weight its index leaves out.
+    Each load meets an ``lm_head`` it doesn't convert: FSDP2 a head weight its index leaves out, so
+    it never reads it, and a head bias with no parameter, which it only carries over; the
+    whole-model load (as on 5.5, without ``was_used``) a tied head with no tensor. Recorded anyway,
+    the head's rename renames ``lm_head`` in the export (to ``language_model.model.lm_head`` for
+    Gemma3). The whole-model load also reads a projector its index leaves out, and keeps its rename.
     """
-    ref = _tiny_llava_checkpoint(tmp_path, drop=("lm_head.",), tie=True)
-    auto_class = _as_on_transformers_5_5(monkeypatch)
+    fsdp2 = loader == "fsdp2"
+    ref = _tiny_llava_checkpoint(tmp_path, drop=() if fsdp2 else ("lm_head.",), tie=not fsdp2)
     state = load_file(str(tmp_path / "model.safetensors"))
-    if loader == "fsdp2":
+    (tmp_path / "model.safetensors").unlink()
+    if fsdp2:
+        state["language_model.lm_head.bias"] = torch.zeros(64)
+        off_index = {"language_model.lm_head.weight"}
+    else:
+        off_index = {k for k in state if k.startswith("multi_modal_projector.")}
+    shard = "model-00001-of-00001.safetensors"
+    save_file(state, str(tmp_path / shard), metadata={"format": "pt"})
+    index = {"metadata": {}, "weight_map": {k: shard for k in state if k not in off_index}}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+    if fsdp2:
         request.getfixturevalue("gloo_group")
-        save_file(
-            {**state, "language_model.lm_head.bias": torch.zeros(64)},
-            str(tmp_path / "model.safetensors"),
-        )
         model = _fsdp2_load(tmp_path)
         assert "language_model.lm_head.bias" in model._modelopt_unplaced_source_keys
     else:
-        shard = "model-00001-of-00001.safetensors"
-        (tmp_path / "model.safetensors").rename(tmp_path / shard)
-        off_index = "multi_modal_projector.linear_1.weight"
-        index = {"metadata": {}, "weight_map": {k: shard for k in state if k != off_index}}
-        (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
-        model = load_pretrained(str(tmp_path), auto_class)
-        projector = model.model.multi_modal_projector.linear_1.weight
-        assert torch.equal(projector, ref.model.multi_modal_projector.linear_1.weight)
+        model = load_pretrained(str(tmp_path), _as_on_transformers_5_5(monkeypatch))
+        ref_projector = ref.model.multi_modal_projector
+        for name, param in model.model.multi_modal_projector.named_parameters():
+            assert torch.equal(param, ref_projector.get_parameter(name)), name
 
     to_source = build_reverse_name_mapper(model)
     recorded, model._weight_conversions = (
@@ -431,8 +433,12 @@ def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monke
     model._weight_conversions = recorded
     assert to_source("lm_head") == "lm_head"
     assert every("lm_head") != "lm_head"
-    for name in ("model.multi_modal_projector.linear_1", "model.language_model.layers.0.mlp"):
-        assert to_source(name) == every(name)
+    language = "model.language_model.layers.0.mlp"
+    assert to_source(language) == every(language)
+    # 5.5's Llava mapping has no projector rename; where there is one, the load ran it.
+    projector = "model.multi_modal_projector.linear_1"
+    renamed = every(projector) != projector
+    assert to_source(projector) == ("multi_modal_projector.linear_1" if renamed else projector)
 
 
 def test_overlapping_loads_each_record_their_matches(monkeypatch):

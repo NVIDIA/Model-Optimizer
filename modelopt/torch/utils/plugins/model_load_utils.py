@@ -1679,14 +1679,17 @@ def parallel_load_and_prepare_fsdp2(
     # memory this loader exists to save.
     record_unplaced_source_keys(model, resolved_path, unplaced)
     # What from_pretrained records: the conversions some checkpoint key used. The export reverts
-    # these and would otherwise query the wrapped class, which has lost them. Only the keys placed
-    # above are read and converted; one with no parameter is carried over unconverted, so a rename
-    # only it matches must not rename the export.
+    # these and would otherwise query the wrapped class, which has lost them. They are matched over
+    # exactly the keys the reads below convert -- placed and in weight_map, which is what
+    # read_safetensors_subset selects from -- so a rename only an unread key matches, such as one
+    # with no parameter that is only carried over, doesn't rename the export. Transformers'
+    # was_used isn't used even where it exists: the placement pass above set it for every key.
     model._weight_conversions = []
     if plan:
         with _flagging_used_conversions(defer_to_was_used=False) as matched:
             for key in chain(non_layer_sources, *layer_sources.values()):
-                _resolve_target(plan, key)
+                if key in weight_map:
+                    _resolve_target(plan, key)
         model._weight_conversions = _used_conversions(plan["conversions"], matched)
     _check_every_param_sourced(model, sourced_targets)
 
