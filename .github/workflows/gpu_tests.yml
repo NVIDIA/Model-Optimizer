@@ -18,6 +18,8 @@ jobs:
   pr-gate:
     uses: ./.github/workflows/_pr_gate.yml
     permissions:
+      actions: read
+      contents: read
       checks: read
     secrets: inherit
     with:
