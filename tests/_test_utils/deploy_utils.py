@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -304,10 +304,15 @@ class ModelDeployer:
         }
 
         if "eagle" in self.model_id.lower():
+            eagle_options = {}
+            if "eagle3_one_model" in EagleDecodingConfig.model_fields:
+                eagle_options["eagle3_one_model"] = self.eagle3_one_model
+            elif not self.eagle3_one_model:
+                print("This TensorRT-LLM version only supports one-model EAGLE3 execution.")
             spec_config = EagleDecodingConfig(
                 max_draft_len=3,
                 speculative_model_dir=self.model_id,
-                eagle3_one_model=self.eagle3_one_model,
+                **eagle_options,
             )
             llm = LLM(
                 model=self.base_model,
