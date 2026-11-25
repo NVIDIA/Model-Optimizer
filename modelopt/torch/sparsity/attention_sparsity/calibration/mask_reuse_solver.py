@@ -512,6 +512,9 @@ class _SolverSession:
                     mip_abs_gap=0.0,
                     # Check native warm starts against the returned assignment.
                     presolve="choose",
+                    # HiGHS 1.15 and 1.16 can loop in the node queue after a root restart
+                    # and then never return, whatever the time limit.
+                    mip_allow_restart=False,
                 )
                 self._highs_solver._disable_starts = self._highs_cold
             solver = self._highs_solver
