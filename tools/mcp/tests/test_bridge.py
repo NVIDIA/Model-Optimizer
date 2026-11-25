@@ -15,6 +15,7 @@
 
 """Unit tests for modelopt-mcp's bridge module — subprocess + filesystem interactions mocked."""
 
+import asyncio
 import json
 import shlex
 import shutil
@@ -31,7 +32,7 @@ import pytest
 pytest.importorskip("mcp")
 pytest.importorskip("pydantic")
 
-from modelopt_mcp import bridge
+from modelopt_mcp import bridge, server
 
 
 @pytest.fixture(autouse=True)
@@ -395,6 +396,67 @@ def test_ensure_source_checkout_defaults_to_main(monkeypatch, tmp_path):
     assert result["checkout"].resolved_sha == "a" * 40
 
 
+@pytest.mark.parametrize(
+    ("env_repo", "source_repo", "allowed"),
+    [
+        (None, "https://github.com/NVIDIA/Model-Optimizer.git", True),
+        (
+            "https://github.com/alice/Model-Optimizer.git",
+            "https://github.com/alice/Model-Optimizer.git",
+            True,
+        ),
+        (None, "https://github.com/attacker/Model-Optimizer.git", False),
+        ("https://github.com/alice/Model-Optimizer.git", "/tmp/evil-repo", False),
+    ],
+)
+def test_ensure_source_checkout_source_repo_allowlist(
+    monkeypatch, tmp_path, env_repo, source_repo, allowed
+):
+    """Only the default or operator-configured repo can be checked out."""
+    monkeypatch.delenv("MODELOPT_MCP_DISABLE_MANAGED_SOURCE", raising=False)
+    monkeypatch.setenv("MODELOPT_MCP_SOURCE_CACHE", str(tmp_path / "cache"))
+    if env_repo:
+        monkeypatch.setenv("MODELOPT_MCP_SOURCE_REPO", env_repo)
+    else:
+        monkeypatch.delenv("MODELOPT_MCP_SOURCE_REPO", raising=False)
+    seen = []
+
+    def fake_resolve(repo, ref):
+        seen.append(repo)
+        return {"ok": True, "resolved_sha": "a" * 40}
+
+    monkeypatch.setattr(bridge, "_resolve_source_ref", fake_resolve)
+    monkeypatch.setattr(bridge, "_checkout_ready", lambda path, sha: True)
+
+    result = bridge._ensure_source_checkout(source_repo=source_repo)
+
+    assert result["ok"] is allowed
+    assert seen == ([source_repo] if allowed else [])
+    if not allowed:
+        assert result["reason"] == "source_repo_not_allowed"
+
+
+def test_source_ref_is_operator_only(monkeypatch, tmp_path):
+    """Agents cannot pick the checkout ref; only MODELOPT_MCP_SOURCE_REF sets it."""
+    tools = {t.name: t for t in asyncio.run(server._build_server().list_tools())}
+    assert "source_ref" not in tools["submit_job"].inputSchema["properties"]
+
+    monkeypatch.delenv("MODELOPT_MCP_DISABLE_MANAGED_SOURCE", raising=False)
+    monkeypatch.setenv("MODELOPT_MCP_SOURCE_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("MODELOPT_MCP_SOURCE_REF", "release/0.49.0")
+    seen = []
+
+    def fake_resolve(repo, ref):
+        seen.append(ref)
+        return {"ok": True, "resolved_sha": "a" * 40}
+
+    monkeypatch.setattr(bridge, "_resolve_source_ref", fake_resolve)
+    monkeypatch.setattr(bridge, "_checkout_ready", lambda path, sha: True)
+
+    assert bridge._ensure_source_checkout()["ok"] is True
+    assert seen == ["release/0.49.0"]
+
+
 def test_submit_job_dry_run_uses_managed_source_checkout(monkeypatch, tmp_path):
     """Managed source routes launcher execution through an editable checkout."""
     checkout_root = tmp_path / "checkout"
@@ -439,7 +501,6 @@ def test_submit_job_dry_run_uses_managed_source_checkout(monkeypatch, tmp_path):
         extra_overrides=None,
         skip_verify=True,
         dry_run=True,
-        source_ref="feature/ref",
     )
 
     assert result["ok"] is True
@@ -480,7 +541,6 @@ def test_submit_job_source_checkout_failure_short_circuits(monkeypatch):
         extra_overrides=None,
         skip_verify=True,
         dry_run=True,
-        source_ref="ghost",
     )
 
     assert result["ok"] is False

@@ -404,8 +404,18 @@ def insert_dq_nodes(
 
         num_bits = get_num_bits(layer_info, name)
         # Updating the attributes for per-channel nodes.
-        attrs = attributes.copy() if attributes is not None else None
-        attrs = update_attributes_for_per_channel_nodes(attrs, num_bits)
+        attrs = update_attributes_for_per_channel_nodes(attributes, num_bits)
+        if attrs is not None and attrs.get("block_size", 0) > 0:
+            # Gemm and column-major paths can transpose the stored weights and scales.
+            blocked_axes = [
+                axis
+                for axis, (weight_dim, scale_dim) in enumerate(
+                    zip(quantized_weights[name].shape, scale.shape, strict=True)
+                )
+                if weight_dim != scale_dim
+            ]
+            if len(blocked_axes) == 1:
+                attrs["axis"] = blocked_axes[0]
         validate_scale_shape_for_per_channel_nodes(scale, attrs, num_bits)
         _insert_helper(
             name,
