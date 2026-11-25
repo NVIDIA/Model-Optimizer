@@ -75,8 +75,12 @@ trap 'error_handler $0 $LINENO' ERR
 # masking training failures (e.g. CUDA OOM) as Slurm SUCCEEDED.
 trap 'exit_handler' EXIT
 
-# Auto-detect head node IP for multi-node training
-NUM_NODES=${NUM_NODES:-1}
+# Auto-detect head node IP for multi-node training.
+# Default from Slurm rather than 1: NUM_NODES gates every multi-node flag below, so a
+# multi-node allocation that forgets to set it does not fail -- each node silently runs
+# its own independent single-node job, duplicating the work and shrinking the global
+# batch by a factor of NUM_NODES. An explicit NUM_NODES still wins.
+NUM_NODES=${NUM_NODES:-${SLURM_NNODES:-1}}
 if [ -z "$HEAD_NODE_IP" ] && [[ "$NUM_NODES" != "1" ]]; then
     HEAD_NODE_IP=$(scontrol show hostnames "$SLURM_JOB_NODELIST" 2>/dev/null | head -1)
     HEAD_NODE_IP=${HEAD_NODE_IP:-$SLURM_LAUNCH_NODE_IPADDR}
