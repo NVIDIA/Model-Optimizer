@@ -768,7 +768,8 @@ class QDQAutotunerBase:
         Restores optimization results from a previous session:
         1. Matches saved patterns to current model's patterns by signature
         2. Loads all schemes with their insertion points and latencies (including unmeasured ones)
-        3. Restores baseline latency and configuration
+        3. Restores baseline latency and configuration; a state written before
+           ``use_varied_activation_scales`` existed restores it as False
 
         Args:
             input_path: File path to the YAML state file to load
@@ -789,6 +790,11 @@ class QDQAutotunerBase:
             if isinstance(config_data, dict):
                 default_dict = dataclasses.asdict(Config())
                 default_dict.update({k: v for k, v in config_data.items() if k in default_dict})
+                if "use_varied_activation_scales" not in config_data:
+                    # Written before varied activation scales: its latencies were measured with
+                    # the uniform scale, so keep it for the rest of the run.
+                    default_dict["use_varied_activation_scales"] = False
+                    logger.debug(f"{input_path} predates varied activation scales")
                 self.config = Config(**default_dict)
                 logger.debug(f"Config restored: quant_type={self.config.default_quant_type}")
 

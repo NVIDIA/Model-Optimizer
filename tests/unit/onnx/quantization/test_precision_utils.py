@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -222,3 +223,32 @@ def test_workflow_passes_concat_elimination_to_config(monkeypatch, tmp_path, con
 
     config = autotuner.initialize.call_args.args[0]
     assert config.concat_elimination is concat_elimination
+
+
+@pytest.mark.parametrize("transformed", [False, True])
+def test_workflow_warns_only_when_resume_keeps_the_uniform_scale(
+    monkeypatch, tmp_path, caplog, transformed
+):
+    """A restored uniform-scale config is kept by the standalone workflow, not by quantize()."""
+    autotuner = Mock(regions=[], baseline_latency_ms=None, profiled_patterns=[])
+    autotuner.export_onnx.return_value = onnx.ModelProto().SerializeToString()
+
+    def load_state(_):
+        autotuner.config = Config(use_varied_activation_scales=False)
+
+    autotuner.load_state.side_effect = load_state
+    monkeypatch.setattr(workflows, "QDQAutotuner", lambda model: autotuner)
+    monkeypatch.setattr(workflows, "benchmark_onnx_model", lambda *args, **kwargs: 1.0)
+    state_path = tmp_path / "state.yaml"
+    state_path.touch()
+    caplog.set_level(logging.WARNING, logger="modelopt.onnx")
+
+    workflows.region_pattern_autotuning_workflow(
+        onnx.ModelProto(),
+        output_dir=tmp_path,
+        state_file=str(state_path),
+        model_transform=(lambda model: model) if transformed else None,
+    )
+
+    assert autotuner.config.use_varied_activation_scales is transformed
+    assert ("measured with the uniform activation scale" in caplog.text) is not transformed

@@ -298,6 +298,11 @@ def region_pattern_autotuning_workflow(
             autotuner.baseline_latency_ms = None
             autotuner.config = config
             logger.info("Re-profiling checkpoint measurements for transformed models")
+        elif not autotuner.config.use_varied_activation_scales:
+            logger.warning(
+                f"{state_path} was measured with the uniform activation scale, which this run "
+                "keeps; delete it to tune with varied activation scales"
+            )
     else:
         logger.info("Starting new autotuning session")
 

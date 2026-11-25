@@ -27,8 +27,10 @@ import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
 import pytest
+import yaml
 from _test_utils.onnx.quantization.autotune.models import _create_simple_conv_onnx_model
 from google.protobuf.message import EncodeError
+from onnx import numpy_helper
 
 from modelopt.onnx.quantization.autotune import Config, QDQAutotuner, RegionPattern
 from modelopt.onnx.quantization.autotune.autotuner_base import QDQAutotunerBase
@@ -344,6 +346,48 @@ class TestQDQAutotuner:
         finally:
             if os.path.exists(state_path):
                 os.unlink(state_path)
+
+    @pytest.mark.parametrize("legacy", [True, False])
+    def test_resume_keeps_the_activation_scales_the_state_was_measured_with(
+        self, simple_conv_model, tmp_path, legacy
+    ):
+        """A state written before varied activation scales resumes with the uniform scale."""
+        autotuner = QDQAutotuner(simple_conv_model)
+        autotuner.initialize(_create_test_config())
+        autotuner.submit(10.0)
+        state_path = tmp_path / "autotuner_state.yaml"
+        autotuner.save_state(str(state_path))
+        if legacy:  # What a release without varied activation scales wrote
+            state = yaml.safe_load(state_path.read_text())
+            for key in ("use_varied_activation_scales", "concat_elimination"):
+                del state["config"][key]
+            state_path.write_text(yaml.safe_dump(state))
+
+        resumed = QDQAutotuner(simple_conv_model)
+        resumed.initialize(_create_test_config())
+        resumed.load_state(str(state_path))
+        assert resumed.config.use_varied_activation_scales is not legacy
+
+        if not resumed.regions:
+            pytest.skip("No regions discovered")
+        resumed.set_profile_region(resumed.regions[0])
+        scales = []
+        for _ in range(10):
+            resumed.generate()
+            exported = onnx.load_from_string(resumed.export_onnx(None, insert_qdq=True))
+            weights = {init.name: init for init in exported.graph.initializer}
+            scales = [
+                float(numpy_helper.to_array(weights[node.input[1]]).flatten()[0])
+                for node in exported.graph.node
+                if node.op_type == "QuantizeLinear" and node.input[0] not in weights
+            ]
+            if scales:
+                break
+            resumed.submit(10.0)
+        assert scales, "no candidate quantized an activation"
+        uniform = np.float32(resumed.config.default_q_scale)
+        assert all(scale == uniform for scale in scales) is legacy
+        assert any(scale == uniform for scale in scales) is legacy
 
     def test_regions_prioritization(self, simple_conv_model):
         """Test that LEAF regions are prioritized."""
