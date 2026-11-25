@@ -707,6 +707,7 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         (True, "dict-property"),
         (True, "state-key"),
         (True, "calibrator-setattr"),
+        (True, "class-metaclass"),
         (True, "str-name"),
         (True, "foreign-member"),
         (True, "parametrized"),
@@ -740,6 +741,7 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         "dict-property",
         "state-key",
         "calibrator-setattr",
+        "class-metaclass",
         "str-name",
         "foreign-member",
         "parametrized",
@@ -809,6 +811,21 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         def __dict__(self):
             type(self).reads += 1
             return torch.nn.Module.__dict__["__dict__"].__get__(self)
+
+    class RecordingMeta(type):
+        hooks = 0
+
+        def __hash__(cls):
+            RecordingMeta.hooks += 1
+            return type.__hash__(cls)
+
+        def __getattribute__(cls, name):
+            if name == "__mro__":
+                RecordingMeta.hooks += 1
+            return type.__getattribute__(cls, name)
+
+    class MetaHolder(torch.nn.Module, metaclass=RecordingMeta):
+        pass
 
     class Key(str):
         compared = 0
@@ -922,6 +939,9 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
             model.add_module("8", torch.nn.Module())
             model[8].weight_quantizer = TensorQuantizer()
             model[8].weight_quantizer.__dict__[Key("_hf_hook")] = None
+        elif layout == "class-metaclass":
+            # A class whose metaclass's hash and attribute lookup no walk runs.
+            model.add_module("8", MetaHolder())
         elif layout == "calibrator-setattr":
             # Configuring a quantizer sets its calibrator's axis through the calibrator's class.
             model.add_module("8", torch.nn.Module())
@@ -1021,8 +1041,10 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         mtq.set_quantizer_by_cfg(named, quant_cfg)
     monkeypatch.undo()
     # The check refuses a class's own lookups, a state dict of a subclass or a key of a str
-    # subclass without running them. (Comparing the states compares the keys.)
+    # subclass without running them, and reads classes without their metaclass. (Comparing the
+    # states compares the keys.)
     assert LookupHolder.state_reads == State.gets == DictHolder.reads == Key.compared == 0
+    assert RecordingMeta.hooks == 0
     assert states(named) == states(walked)
     fast = (
         "plain",
@@ -1031,6 +1053,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         "calibrator-state",
         "device-context",
         "dict-property",
+        "class-metaclass",
     )
     if case_sensitive and layout in fast:
         # Only the "*" entry walks the model, the named entries before the one the model is checked
@@ -1131,8 +1154,9 @@ def test_set_quantizer_by_cfg_walks_a_model_the_check_cannot_read():
 
 @pytest.fixture
 def check_at_the_first_named_entry(monkeypatch):
-    # These calls name one or two quantizers.
+    # These calls name one or two quantizers, in lowercase, which fnmatch matches alike everywhere.
     monkeypatch.setattr(quant_conversion, "_EXACT_ENTRIES_BEFORE_CHECK", 1)
+    monkeypatch.setattr(quant_conversion, "_CASE_SENSITIVE_NAMES", True)
 
 
 @pytest.mark.usefixtures("check_at_the_first_named_entry")

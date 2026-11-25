@@ -333,7 +333,7 @@ def _modelopt_state_names(kind: type) -> tuple[str, ...] | None:
     # A modelopt object's __dict__ and slots, pydantic's per-instance state among them.
     names = _MODELOPT_STATE_NAMES.get(kind)
     if names is None and _of_modelopt(kind):
-        slots = (_CLASS_DICT.__get__(c).get("__slots__", ()) for c in kind.__mro__)
+        slots = (_CLASS_DICT.__get__(c).get("__slots__", ()) for c in _CLASS_MRO.__get__(kind))
         found = {"__dict__"}.union(*(((s,) if isinstance(s, str) else s) for s in slots))
         names = _MODELOPT_STATE_NAMES[kind] = tuple(found - {"__weakref__"})
     return names
@@ -405,22 +405,25 @@ def _allows_subtree_walk(model: nn.Module) -> bool:
     """
     seen = set()
     scanned: dict[int, Any] = {}
-    classes: dict[type, tuple[bool, bool]] = {}  # whether a class redefines a lookup, is modelopt's
+    # For each class, by id so that no metaclass hashes it: the class, whether it redefines a lookup,
+    # and whether it is modelopt's.
+    classes: dict[int, tuple[type, bool, bool]] = {}
     stack = [model]
     while stack:
         module = stack.pop()
         kind = type(module)
-        if kind not in classes:
-            classes[kind] = (
+        if id(kind) not in classes:
+            classes[id(kind)] = (
+                kind,
                 any(
                     name in _CLASS_DICT.__get__(c)
-                    for c in kind.__mro__
-                    if c not in (nn.Module, object)
+                    for c in _CLASS_MRO.__get__(kind)
+                    if c is not nn.Module and c is not object
                     for name in _LOOKUP_NAMES
                 ),
                 _of_modelopt(kind),
             )
-        redefines_lookups, of_modelopt = classes[kind]
+        _, redefines_lookups, of_modelopt = classes[id(kind)]
         # named_modules skips a module equal to one it has listed, as a set does, which a class's
         # own equality or hash can base on state the entries change; a class's own lookups run as
         # the walks look modules up, and its or the instance's named_modules can list other paths.
