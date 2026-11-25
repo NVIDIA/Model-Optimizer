@@ -31,18 +31,21 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import FSDPModule, fully_shard
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.hf_export_handlers import _export_quant_linear
 from modelopt.torch.export.layer_utils import is_quantlinear
 from modelopt.torch.export.model_utils import TiedWeightMap
+from modelopt.torch.export.registry import ExportModuleRegistry
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _export_transformers_checkpoint,
     requantize_resmooth_fused_llm_layers,
 )
 from modelopt.torch.export.unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
+from modelopt.torch.quantization.nn import QuantLinearConvBase
 from modelopt.torch.quantization.utils import (
     core_utils,
     enable_weight_access_and_writeback,
@@ -467,6 +470,23 @@ def _streaming_export_matches_reference_test(rank, size, export_dir, quant_confi
         mtq.quantize(model, quant_config, calib_fn)
         mtq.quantize(reference, quant_config, calib_fn)
         torch.distributed.barrier()
+        if measure:
+            for index, layer in enumerate(model.model.layers):
+                for name in ("gate_proj", "up_proj", "down_proj"):
+                    module = getattr(layer.mlp, name)
+                    detail = f"model.layers.{index}.mlp.{name}: {type(module).__name__}"
+                    assert isinstance(module, FSDPModule), detail
+                    assert fully_shard.state(module)._fsdp_param_group is not None, detail
+                    assert isinstance(module, torch.nn.Linear) and isinstance(
+                        module, QuantLinearConvBase
+                    ), detail
+                    for quantizer in (module.input_quantizer, module.weight_quantizer):
+                        assert quantizer.is_enabled and quantizer.is_fp8, detail
+                        assert quantizer.amax is not None, detail
+                        assert (
+                            torch.isfinite(quantizer.amax).all() and (quantizer.amax > 0).any()
+                        ), detail
+                    assert ExportModuleRegistry.match(module) is _export_quant_linear, detail
 
         from modelopt.torch.export import unified_export_hf_streaming as streaming
 
