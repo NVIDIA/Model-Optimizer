@@ -18,6 +18,7 @@
 import copy
 import gc
 import json
+import os
 import random
 import shutil
 import time
@@ -74,9 +75,12 @@ class _WrongNextCursor(_RandomCursor):
 
 
 class _StatefulCursor:
-    def __init__(self, batches, *, interrupted=False, snapshot_failure=False):
+    def __init__(
+        self, batches, *, interrupted=False, snapshot_failure=False, unsafe=None, native_state=False
+    ):
         self.batches, self.position, self.interrupted = batches, 0, interrupted
-        self.snapshot_failure = snapshot_failure
+        self.snapshot_failure, self.unsafe = snapshot_failure, unsafe
+        self.native_state = native_state
         self.data_identity = [_batch_hash(batch) for batch in batches]
 
     def __iter__(self):
@@ -89,6 +93,8 @@ class _StatefulCursor:
             raise StopIteration
         batch = self.batches[self.position]
         self.position += 1
+        if self.unsafe == "priming_batch" and self.position > 2:
+            batch = {"hidden_states": batch, "sample_ids": np.arange(batch.shape[0])}
         random.random()
         np.random.random()
         torch.rand(())
@@ -97,10 +103,19 @@ class _StatefulCursor:
     def state_dict(self):
         if self.snapshot_failure:
             raise OSError("Simulated data-cursor snapshot failure")
-        return {"position": self.position}
+        state = {"position": self.position}
+        if self.native_state:
+            state["sparse_position"] = torch.tensor([self.position]).to_sparse()
+        if self.unsafe == "loader_state" and self.position > 2:
+            state["permutation"] = np.arange(len(self.batches))
+        return state
 
     def load_state_dict(self, state):
-        self.position = state["position"]
+        if self.native_state:
+            self.position = state["sparse_position"].to_dense().item()
+            assert self.position == state["position"]
+        else:
+            self.position = state["position"]
 
 
 @pytest.mark.parametrize("stateful", [False, True])
@@ -133,7 +148,7 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
 
     def cursor(data, *, interrupted=False):
         if stateful:
-            return _StatefulCursor(data, interrupted=interrupted)
+            return _StatefulCursor(data, interrupted=interrupted, native_state=True)
         return _Interrupted(data) if interrupted else _RandomCursor(data)
 
     recipe = {
@@ -252,6 +267,46 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
     assert _committed(tmp_path / "resumed")[0] == generation
     assert not list((tmp_path / "resumed").glob(".pending-step-*"))
     assert incomplete.exists()  # Never delete a different writer's uncommitted directory.
+    if not stateful:
+        for phase in ("after_rename", "before_latest", "after_latest"):
+            root = tmp_path / f"commit-{phase}"
+            shutil.copytree(tmp_path / "resumed", root)
+            foreign = root / ".latest-other-writer"
+            foreign.write_text("untouched")
+            original_replace = os.replace
+
+            def fail_commit(source, target):
+                source = Path(source)
+                if phase == "before_latest" and source.name.startswith(".latest-"):
+                    raise OSError("Simulated latest pointer write failure")
+                result = original_replace(source, target)
+                if (phase == "after_rename" and source.name.startswith(".pending-step-")) or (
+                    phase == "after_latest" and source.name.startswith(".latest-")
+                ):
+                    raise OSError("Simulated checkpoint commit failure")
+                return result
+
+            with monkeypatch.context() as patch:
+                patch.setattr(os, "replace", fail_commit)
+                with pytest.raises(ValueError):
+                    mtd.bypass(
+                        fresh_student(),
+                        copy.deepcopy(teacher),
+                        cursor(batches),
+                        {**recipe, "resume_from": str(root), "checkpoint_dir": str(root)},
+                    )
+            current, committed = _committed(root)
+            assert foreign.read_text() == "untouched"
+            assert (root / incomplete.name).exists()
+            assert not list(root.glob(".pending-step-*"))
+            assert set(root.glob(".latest-*")) == {foreign}
+            if phase == "after_latest":
+                assert current.name != generation.name and committed["step"] == 4
+                assert current.exists()  # Never remove the generation latest publishes.
+            else:
+                assert current.name == generation.name
+                assert list(root.glob("step-*")) == [current]
+
     resumed = fresh_student()
     random.seed(203)
     np.random.seed(203)
@@ -285,7 +340,11 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
     _equal(unchanged, actual)
     assert actual["data_position"]["consumed_batches"] == 4
     if stateful:
-        assert actual["data_position"]["loader_state"] == {"position": 4}
+        assert actual["data_position"]["loader_state"]["position"] == 4
+        _equal(
+            actual["data_position"]["loader_state"]["sparse_position"],
+            torch.tensor([4]).to_sparse(),
+        )
         assert "prefix_hashes" not in actual["data_position"]
     else:
         assert actual["data_position"]["next_batch_hash"] == _batch_hash(batches[4])
@@ -305,6 +364,39 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
     reloaded = mto.restore(copy.deepcopy(teacher), deployed)
     torch.testing.assert_close(reloaded(batches[0]), reference(batches[0]), rtol=0, atol=0)
 
+    if stateful:
+
+        class LargeSequence(_RandomCursor):
+            def __len__(self):
+                return 1_000_000
+
+            def __getitem__(self, index):
+                if index >= 9:
+                    raise OSError("Unneeded lazy dataset tail was accessed")
+                return super().__getitem__(index)
+
+        data = [*batches, batches[-1] + 0.125]
+        bounded = fresh_student()
+        mtd.bypass(
+            bounded,
+            copy.deepcopy(teacher),
+            LargeSequence(data),
+            {**recipe, "checkpoint_dir": str(tmp_path / "bounded-data")},
+        )
+        _equal(bounded.state_dict(), reference.state_dict())
+        # Future values inside the recipe bound remain part of preflight identity.
+        changed = [*data[:8], data[8] + 1]
+        refused = fresh_student()
+        before = copy.deepcopy(refused.state_dict())
+        with pytest.raises(ValueError):
+            mtd.bypass(
+                refused,
+                copy.deepcopy(teacher),
+                LargeSequence(changed),
+                {**recipe, "resume_from": str(tmp_path / "bounded-data")},
+            )
+        _equal(refused.state_dict(), before)
+
 
 def _distributed_resume_worker(rank, size, directory, failure=None):
     threads = torch.get_num_threads()
@@ -313,7 +405,7 @@ def _distributed_resume_worker(rank, size, directory, failure=None):
         torch.set_num_threads(1)
         print(
             f"CPU checkpoint worker rank={rank} threads={torch.get_num_threads()} "
-            f"previous_threads={threads}",
+            f"previous_threads={threads} interop_threads={torch.get_num_interop_threads()}",
             flush=True,
         )
         _distributed_resume_case(rank, size, directory, failure)
@@ -336,6 +428,31 @@ def _distributed_resume_case(rank, size, directory, failure):
         "warmup_fraction": 0.25,
     }
     root = Path(directory)
+    if failure in ("loader_state", "priming_batch"):
+        candidate = copy.deepcopy(initial)
+        before = copy.deepcopy(candidate.state_dict())
+        caller_rng = _rng_state([])
+        directory = root / failure
+        with bounded_collectives(10):
+            try:
+                mtd.bypass(
+                    candidate,
+                    copy.deepcopy(teacher),
+                    _StatefulCursor(local, unsafe=failure if rank == 1 else None),
+                    {**recipe, "checkpoint_dir": str(directory)},
+                    device_mesh=mesh,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Unsafe stateful checkpoint was accepted")
+        previous, state = _committed(directory, size=size, rank=rank)
+        assert state["step"] == 2
+        assert list(directory.glob("step-*")) == [previous]
+        assert not list(directory.glob(".pending-step-*"))
+        _equal(candidate.state_dict(), before)
+        _equal(_rng_state([]), caller_rng)
+        return
     reference = copy.deepcopy(initial)
     mtd.bypass(
         reference,
@@ -427,7 +544,16 @@ def _distributed_resume_case(rank, size, directory, failure):
 
 
 @pytest.mark.parametrize(
-    "failure", [None, "priming_transfer", "priming_validation", "optimizer_restore", "rng_restore"]
+    "failure",
+    [
+        None,
+        "priming_transfer",
+        "priming_validation",
+        "optimizer_restore",
+        "rng_restore",
+        "loader_state",
+        "priming_batch",
+    ],
 )
 @pytest.mark.timeout(180)
 def test_distributed_resume_commits_every_owner(bypass_cpu_workers, tmp_path, failure):
@@ -564,6 +690,74 @@ def _native_resume_worker(rank, size, directory):
     )
     assert peak <= 10 * 1024**2  # Existing 8-MiB hash chunks plus 2 MiB allocator slack.
     del probe
+    gc.collect()
+    # Real 2.147B-parameter frozen pair, assembled one layer at a time so the
+    # constructor stages one BF16 matrix rather than an uncompressed student.
+    construction_started = time.perf_counter()
+    construction_baseline = torch.cuda.memory_allocated(rank)
+    torch.cuda.reset_peak_memory_stats(rank)
+    pair = {"student": torch.nn.Sequential(), "teacher": torch.nn.Sequential()}
+    for _ in range(64):
+        layer = mtq.quantize(
+            torch.nn.Sequential(
+                torch.nn.Linear(4096, 4096, bias=False, device=f"cuda:{rank}", dtype=torch.bfloat16)
+            ),
+            {
+                "quant_cfg": [
+                    {"quantizer_name": "*", "enable": False},
+                    {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": 0}},
+                ],
+                "algorithm": None,
+            },
+        )
+        mtq.compress(layer)
+        assert isinstance(layer[0].weight, QTensorWrapper)
+        pair["student"].append(layer[0])
+        pair["teacher"].append(
+            torch.nn.Linear(4096, 4096, bias=False, device=f"cuda:{rank}", dtype=torch.bfloat16)
+        )
+    torch.cuda.synchronize(rank)
+    resident = torch.cuda.memory_allocated(rank)
+    construction_peak = torch.cuda.max_memory_allocated(rank)
+    construction_seconds = time.perf_counter() - construction_started
+    model_measurements = {}
+    for role, model in pair.items():
+        torch.cuda.reset_peak_memory_stats(rank)
+        started = time.perf_counter()
+        identity = _model_hash(model)
+        torch.cuda.synchronize(rank)
+        elapsed = time.perf_counter() - started
+        peak = torch.cuda.max_memory_allocated(rank) - resident
+        model_measurements[role] = {
+            "parameters": sum(value.numel() for value in model.parameters()),
+            "physical_bytes": sum(
+                value.numel() * value.element_size()
+                for value in (*model.parameters(), *model.buffers())
+            ),
+            "seconds": elapsed,
+            "incremental_peak_bytes": peak,
+            "hash_length": len(identity),
+        }
+        assert peak <= 10 * 1024**2
+    measurement_path = root / f"native-identity-{rank}.json"
+    measurements = json.loads(measurement_path.read_text())
+    measurements["native_checkpoint_pair_identity"] = {
+        "rank": rank,
+        "layers_per_model": 64,
+        "layer_shape": [4096, 4096],
+        "models": model_measurements,
+        "pair_parameters": sum(value["parameters"] for value in model_measurements.values()),
+        "pair_physical_bytes": sum(
+            value["physical_bytes"] for value in model_measurements.values()
+        ),
+        "pair_seconds": sum(value["seconds"] for value in model_measurements.values()),
+        "resident_cuda_bytes": resident - construction_baseline,
+        "construction_seconds": construction_seconds,
+        "construction_peak_bytes": construction_peak - construction_baseline,
+        "construction_extra_peak_bytes": construction_peak - resident,
+    }
+    measurement_path.write_text(json.dumps(measurements))
+    del pair, layer, model
     gc.collect()
     recipe = {
         "num_steps": 2,
