@@ -373,12 +373,8 @@ class HFDFlashModel(DFlashModel):
         num_draft_layers = self.dflash_config.num_hidden_layers
         user_target_layer_ids = config.dflash_architecture_config.get("target_layer_ids")
         if user_target_layer_ids:
-            if len(user_target_layer_ids) != num_draft_layers:
-                raise ValueError(
-                    f"dflash_architecture_config.target_layer_ids has "
-                    f"{len(user_target_layer_ids)} entries but the draft has "
-                    f"{num_draft_layers} layers; one target layer per draft layer is required."
-                )
+            # Any count is valid: `fc` is sized by len(target_layer_ids), not by the draft depth
+            # (z-lab's Qwen3.5 drafters fuse 8 target layers into a 6-layer draft).
             if max(user_target_layer_ids) >= num_target_layers:
                 raise ValueError(
                     f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "

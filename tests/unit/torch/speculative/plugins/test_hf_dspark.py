@@ -870,9 +870,12 @@ class TestExplicitTargetLayerIds:
         assert len(model.target_layer_ids) == NUM_DRAFT_LAYERS
         assert model.target_layer_ids == build_target_layer_ids(8, NUM_DRAFT_LAYERS)
 
-    def test_wrong_count_raises(self):
-        with pytest.raises(ValueError, match="one target layer per draft layer"):
-            self._make_model(target_layer_ids=[0, 3, 7])
+    def test_count_independent_of_draft_depth(self):
+        """More target layers than draft layers widens ``fc`` (z-lab's Qwen3.5 drafter shape)."""
+        model = self._make_model(target_layer_ids=[0, 3, 7])
+        assert model.target_layer_ids == [0, 3, 7]
+        fc = model.dflash_module.fc
+        assert fc.in_features == 3 * fc.out_features
 
     def test_out_of_range_raises(self):
         with pytest.raises(ValueError, match="beyond the base model"):
