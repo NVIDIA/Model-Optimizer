@@ -21,8 +21,10 @@ import pytest
 import torch
 from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
+from pydantic import ValidationError, model_validator
 from torch.utils.data import DataLoader
 
+from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.utils import dataset_utils
 from modelopt.torch.utils.dataset_utils import (
     DATASET_COMBOS,
@@ -294,17 +296,19 @@ def test_disable_use_cache_with_existing_attr(prev_value):
 
     with _disable_use_cache(model):
         assert model.config.use_cache is False
+        model.config.use_cache = not prev_value
 
     assert model.config.use_cache is prev_value
 
 
 def test_disable_use_cache_without_existing_attr():
-    """Config that lacks `use_cache`: set to False inside, attribute removed on exit (no leak)."""
+    """Step-3.5 reads a missing cache flag directly; do not leak it after calibration."""
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
+    model.config.model_type = "step3p5"
     assert not hasattr(model.config, "use_cache")
 
-    with _disable_use_cache(model):
+    with _disable_use_cache(model, for_layerwise_capture=True):
         assert model.config.use_cache is False
 
     assert not hasattr(model.config, "use_cache")
@@ -330,9 +334,11 @@ def test_disable_use_cache_with_nested_text_config_without_existing_attr():
     """Nested text config `use_cache` is removed if it was added by the context."""
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
+    model.config.model_type = "step3p7"
     model.config.text_config = _Config()
+    model.config.text_config.model_type = "step3p5"
 
-    with _disable_use_cache(model):
+    with _disable_use_cache(model, for_layerwise_capture=True):
         assert model.config.use_cache is False
         assert model.config.text_config.use_cache is False
 
@@ -349,7 +355,8 @@ def test_iter_use_cache_configs_deduplicates_text_config_alias():
     assert list(_iter_use_cache_configs(model)) == [model.config]
 
 
-def test_forward_loop_runs_under_disabled_use_cache():
+@pytest.mark.parametrize("has_cache_flag", [True, False])
+def test_forward_loop_runs_under_disabled_use_cache(has_cache_flag):
     """`_forward_loop` runs forward on every batch and restores `use_cache` on exit."""
     seen_use_cache: list[bool] = []
 
@@ -357,7 +364,8 @@ def test_forward_loop_runs_under_disabled_use_cache():
         def __init__(self):
             super().__init__()
             self.config = _Config()
-            self.config.use_cache = True
+            if has_cache_flag:
+                self.config.use_cache = True
 
         def forward(self, **kwargs):
             seen_use_cache.append(self.config.use_cache)
@@ -373,7 +381,10 @@ def test_forward_loop_runs_under_disabled_use_cache():
     _forward_loop(model, loader)
 
     assert seen_use_cache == [False, False, False]
-    assert model.config.use_cache is True
+    if has_cache_flag:
+        assert model.config.use_cache is True
+    else:
+        assert not hasattr(model.config, "use_cache")
 
 
 @pytest.mark.parametrize("world_size", [None, 1, 2], ids=["no-plan", "one-rank", "two-ranks"])
@@ -403,20 +414,56 @@ def test_forward_loop_raises_out_of_memory_for_a_model_over_several_ranks(world_
         assert batch_sizes == [4, 2, 2]
 
 
-def test_disable_use_cache_restores_on_exception():
+@pytest.mark.parametrize("prev_value", [True, False])
+def test_disable_use_cache_restores_on_exception(prev_value):
     """Restore must run even if the with-block raises."""
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
-    model.config.use_cache = True
+    model.config.use_cache = prev_value
 
     with pytest.raises(RuntimeError, match="boom"), _disable_use_cache(model):
         assert model.config.use_cache is False
+        model.config.use_cache = not prev_value
         raise RuntimeError("boom")
 
+    assert model.config.use_cache is prev_value
+
+
+class _ReadOnlyCacheConfig:
+    @property
+    def use_cache(self):
+        return True
+
+
+class _ValidatedCacheConfig(ModeloptBaseConfig):
+    use_cache: bool = True
+
+    @model_validator(mode="after")
+    def require_cache(self):
+        if not self.use_cache:
+            raise ValueError("cache required")
+        return self
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "error"),
+    [(_ReadOnlyCacheConfig, AttributeError), (_ValidatedCacheConfig, ValidationError)],
+)
+def test_disable_use_cache_restores_on_setup_error(config_cls, error):
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.use_cache = True
+    model.config.text_config = config_cls()
+
+    with pytest.raises(error), _disable_use_cache(model):
+        pytest.fail("A setup error should prevent entering the context")
+
     assert model.config.use_cache is True
+    assert model.config.text_config.use_cache is True
 
 
-def test_get_max_batch_size_oom_retry_shrinks_input():
+@pytest.mark.parametrize("custom_probe", [False, True])
+def test_get_max_batch_size_oom_retry_shrinks_input(custom_probe):
     """On OOM, target_input must be re-expanded to the halved batch size.
 
     Regression test: previously target_input was built once and never shrunk,
@@ -436,9 +483,16 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             raise torch.cuda.OutOfMemoryError
 
     model = Mock(spec=torch.nn.Module)
+    model.config = _Config()
+
+    def forward_step(m, x):
+        m.config.use_cache = True
+        fake_call(x)
+
     # get_max_batch_size calls the module (model(...)) so FSDP2 hooks fire, not model.forward,
     # so route the mock's __call__ via side_effect.
-    model.side_effect = fake_call
+    if not custom_probe:
+        model.side_effect = fake_call
     model.__class__.__name__ = "DummyModel"  # not enc/dec
 
     free_before = 1000
@@ -458,12 +512,14 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             model,
             max_sample_length=seq_len,
             sample_input_single_batch=sample_input,
+            forward_step=forward_step if custom_probe else None,
         )
 
     # Model calls: probe(1), retry-at-target(10), retry-after-halve(5)
     assert seen_batch_sizes == [1, 10, 5]
     # Final batch is 5 -> regulated to 4 (5 // 4 * 4 = 4).
     assert result == 4
+    assert not hasattr(model.config, "use_cache")
 
 
 class _BatchSizeProbe(torch.nn.Module):

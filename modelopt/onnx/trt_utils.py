@@ -61,11 +61,11 @@ def _has_only_standard_onnx_ops(model: onnx.ModelProto) -> bool:
         for node in graphs.pop().node:
             if (node.domain, node.op_type) not in standard_ops:
                 return False
-            for attribute in node.attribute:
-                if attribute.type == onnx.AttributeProto.GRAPH:
-                    graphs.append(attribute.g)
-                elif attribute.type == onnx.AttributeProto.GRAPHS:
-                    graphs.extend(attribute.graphs)
+            graphs.extend(
+                attribute.g
+                for attribute in node.attribute
+                if attribute.type == onnx.AttributeProto.GRAPH
+            )
     return True
 
 

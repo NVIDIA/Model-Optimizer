@@ -49,12 +49,16 @@ Changelog
 - ``capture_quantized_weight_export_state`` now works on FSDP2-sharded (DTensor) weights; it raised on them, and could pick another weight's quantizer when local shards were empty.
 - NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
+- Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
+- With ``mto.enable_huggingface_checkpointing()`` and transformers before 5.21, ``save_pretrained`` no longer fails on Hugging Face MoE models with quantized fused experts, and ``from_pretrained`` restores them. A Qwen3-VL-MoE checkpoint does not load on those versions, so save and restore the live model with ``mto.save`` and ``mto.restore`` instead.
 
 *ONNX*
 
 - Fix ONNX AutoCast retaining one full-graph activation dump per calibration sample during inference: samples are now folded into the running per-tensor statistics as they arrive, so this retention no longer scales with the number of samples in ``calibration_data``. Loading the input data itself (a JSON input list, or a single NPZ holding multiple samples) still materializes every sample's inputs.
 - ONNX AutoCast now keeps the variance of decomposed RMSNorm and unfused LayerNorm in FP32 for both FP16 and BF16 conversion, so FP16 models converted without calibration data no longer give wrong outputs on execution providers such as TensorRT-RTX. Reconvert affected models.
 - Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
+- Fix blocked INT4 ONNX exports using the wrong dequantization axis for transposed weights, which prevented TensorRT and ONNX Runtime from executing affected models. Re-export affected models.
+- ONNX PTQ can use CPU calibration when TensorRT is installed but cannot initialize a CUDA device. Models requiring TensorRT plugins still require a usable TensorRT runtime.
 
 *Speculative Decoding*
 
@@ -178,6 +182,7 @@ Changelog
 - ``export_hf_checkpoint`` now reads how a model is distributed from the plan recorded on it, and raises for an FSDP2-sharded model, or one in a multi-rank run, that carries none. ``load_pretrained`` and ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` record it; for a model you distribute yourself (``fsdp2_wrap`` and ``parallel_load_and_prepare_fsdp2`` record none), or export from several ranks as a DDP script does, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it, e.g. ``DistributionPlan(world_size)`` when every rank holds the whole model.
 - Streaming speculative-decoding training's vLLM connector (``modelopt.torch.speculative.plugins.rdma_hidden_states_connector``) now requires vLLM 0.22 or later. It is tested with vLLM 0.29 and later.
 - The yes/no environment variables ``MODELOPT_NVFP4_TRITON_SWEEP``, ``MODELOPT_SKIP_WEIGHT_QUANT_CHECK`` and ``MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP`` now take ``1``/``0``, ``true``/``false``, ``yes``/``no`` or ``on``/``off`` in any case and raise on any other value, which they used to ignore. ``modelopt.env`` documents every ``MODELOPT_*`` variable ModelOpt reads.
+- The DFlash2 and LiLiCorr training forwards now return their metrics in one ``draft_metrics`` dict of detached 0-dim tensors (call ``.item()`` for a Python float), replacing ``selector_metrics`` and ``lilicorr_metrics``.
 
 **Deprecations**
 
@@ -247,7 +252,6 @@ Changelog
 - Fix BF16-to-FP8 ONNX export with ``ml_dtypes`` 0.7.0 producing NaN FP8 weights for very small convolution weights.
 - Fix AutoCast turning FP64 initializers and ``Constant`` values that exceed the FP32 range into infinities. They are now clamped to the largest FP32 value and the affected tensor is named in a warning.
 - Fix AutoCast flipping the sign of an initializer value too small for the target precision; such values now keep their sign.
-- ONNX PTQ can use CPU calibration when TensorRT is installed but cannot initialize a CUDA device. Models requiring TensorRT plugins still require a usable TensorRT runtime.
 
 *Speculative Decoding*
 
