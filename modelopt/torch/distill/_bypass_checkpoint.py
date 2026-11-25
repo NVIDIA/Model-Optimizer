@@ -465,10 +465,6 @@ class BypassCheckpoint(_CheckpointRanks):
             temporary.unlink(missing_ok=True)
             _sync_directory(root)
 
-        if errors:
-            self._coordinate(discard_pending)
-            raise ValueError("Bypass checkpoint shards failed: " + "; ".join(errors))
-
         def commit():
             for rank, expected in enumerate(receipts):
                 actual = json.loads((pending / f"rank-{rank}.json").read_text())
@@ -498,14 +494,24 @@ class BypassCheckpoint(_CheckpointRanks):
             _sync_directory(root)
             if previous and previous != name and Path(previous).name == previous:
                 old = root / previous
-                if not old.is_symlink() and (old / "COMMITTED.json").is_file():
-                    shutil.rmtree(old)
+                try:
+                    if not old.is_symlink() and (old / "COMMITTED.json").is_file():
+                        shutil.rmtree(old)
+                except OSError as exc:
+                    _LOG.warning(
+                        "Bypass checkpoint committed but could not retire %s: %s", old, exc
+                    )
             return str(root / name)
 
         try:
+            if errors:
+                raise ValueError("Bypass checkpoint shards failed: " + "; ".join(errors))
             return Path(self._coordinate(commit))
         except Exception:
-            self._coordinate(discard_pending)
+            try:
+                self._coordinate(discard_pending)
+            except Exception as exc:
+                _LOG.warning("Bypass checkpoint cleanup also failed: %s", exc)
             raise
 
     def load(self, directory):

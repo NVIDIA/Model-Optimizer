@@ -22,6 +22,7 @@ import os
 import random
 import shutil
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from unittest import mock
 
@@ -119,7 +120,7 @@ class _StatefulCursor:
 
 
 @pytest.mark.parametrize("stateful", [False, True])
-def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
+def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, caplog, stateful):
     def activation_factory():
         activation = torch.nn.LeakyReLU(0.1) if stateful else torch.nn.SiLU()
         if stateful:
@@ -268,12 +269,13 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
     assert not list((tmp_path / "resumed").glob(".pending-step-*"))
     assert incomplete.exists()  # Never delete a different writer's uncommitted directory.
     if not stateful:
-        for phase in ("after_rename", "before_latest", "after_latest"):
+        for phase in ("after_rename", "before_latest", "after_latest", "retirement"):
             root = tmp_path / f"commit-{phase}"
             shutil.copytree(tmp_path / "resumed", root)
             foreign = root / ".latest-other-writer"
             foreign.write_text("untouched")
             original_replace = os.replace
+            original_rmtree = shutil.rmtree
 
             def fail_commit(source, target):
                 source = Path(source)
@@ -286,11 +288,19 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
                     raise OSError("Simulated checkpoint commit failure")
                 return result
 
+            def fail_retire(path, *args, **kwargs):
+                if Path(path) == root / generation.name:
+                    raise OSError("Simulated old-generation retirement failure")
+                return original_rmtree(path, *args, **kwargs)
+
+            candidate = fresh_student()
             with monkeypatch.context() as patch:
                 patch.setattr(os, "replace", fail_commit)
-                with pytest.raises(ValueError):
+                if phase == "retirement":
+                    patch.setattr(shutil, "rmtree", fail_retire)
+                with pytest.raises(ValueError) if phase != "retirement" else nullcontext():
                     mtd.bypass(
-                        fresh_student(),
+                        candidate,
                         copy.deepcopy(teacher),
                         cursor(batches),
                         {**recipe, "resume_from": str(root), "checkpoint_dir": str(root)},
@@ -300,12 +310,24 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
             assert (root / incomplete.name).exists()
             assert not list(root.glob(".pending-step-*"))
             assert set(root.glob(".latest-*")) == {foreign}
-            if phase == "after_latest":
+            if phase in ("after_latest", "retirement"):
                 assert current.name != generation.name and committed["step"] == 4
                 assert current.exists()  # Never remove the generation latest publishes.
             else:
                 assert current.name == generation.name
                 assert list(root.glob("step-*")) == [current]
+            if phase == "retirement":
+                assert (
+                    root / generation.name
+                ).is_dir()  # Failed retirement may need manual cleanup.
+                _equal(candidate.state_dict(), reference.state_dict())
+                _, expected = _committed(tmp_path / "reference")
+                for key in ("fields", "optimizers", "rng_state", "data_position"):
+                    _equal(committed[key], expected[key])
+                assert any(
+                    "Simulated old-generation retirement failure" in record.message
+                    for record in caplog.records
+                )
 
     resumed = fresh_student()
     random.seed(203)
@@ -429,6 +451,73 @@ def _distributed_resume_case(rank, size, directory, failure):
         "warmup_fraction": 0.25,
     }
     root = Path(directory)
+    if failure in ("shard_cleanup", "commit_cleanup"):
+        directory = root / failure
+        candidate = copy.deepcopy(initial)
+        before = copy.deepcopy(candidate.state_dict())
+        caller_rng = _rng_state([])
+        original_save, original_replace, original_rmtree = torch.save, os.replace, shutil.rmtree
+
+        def fail_shard(state, stream, *args, **kwargs):
+            path = Path(getattr(stream, "name", ""))
+            if (
+                failure == "shard_cleanup"
+                and rank == 1
+                and path.parent.name.startswith(".pending-step-000004-")
+            ):
+                raise OSError("Primary shard failure")
+            return original_save(state, stream, *args, **kwargs)
+
+        def fail_commit(source, target):
+            result = original_replace(source, target)
+            if failure == "commit_cleanup" and Path(source).name.startswith(
+                ".pending-step-000004-"
+            ):
+                raise OSError("Primary commit failure")
+            return result
+
+        def fail_cleanup(path, *args, **kwargs):
+            path = Path(path)
+            if path.parent == directory and path.name.startswith(
+                (".pending-step-000004-", "step-000004-")
+            ):
+                raise OSError("Secondary cleanup failure")
+            return original_rmtree(path, *args, **kwargs)
+
+        with bounded_collectives(10):
+            if rank == 0:
+                (directory / ".pending-other-writer").mkdir(parents=True)
+                (directory / ".latest-other-writer").write_text("untouched")
+            torch.distributed.barrier()
+            with (
+                mock.patch.object(torch, "save", fail_shard),
+                mock.patch.object(os, "replace", fail_commit),
+                mock.patch.object(shutil, "rmtree", fail_cleanup),
+            ):
+                try:
+                    mtd.bypass(
+                        candidate,
+                        copy.deepcopy(teacher),
+                        _RandomCursor(local),
+                        {**recipe, "checkpoint_dir": str(directory)},
+                        device_mesh=mesh,
+                    )
+                except ValueError as exc:
+                    error = str(exc)
+                else:
+                    raise AssertionError("Primary checkpoint failure was accepted")
+        previous, state = _committed(directory, size=size, rank=rank)
+        assert state["step"] == 2
+        assert previous.is_dir()
+        assert (directory / ".pending-other-writer").is_dir()
+        assert (directory / ".latest-other-writer").read_text() == "untouched"
+        _equal(candidate.state_dict(), before)
+        _equal(_rng_state([]), caller_rng)
+        primary = (
+            "Primary shard failure" if failure == "shard_cleanup" else "Primary commit failure"
+        )
+        assert primary in error, error
+        return
     if failure in ("loader_state", "priming_batch"):
         candidate = copy.deepcopy(initial)
         before = copy.deepcopy(candidate.state_dict())
@@ -554,6 +643,8 @@ def _distributed_resume_case(rank, size, directory, failure):
         "rng_restore",
         "loader_state",
         "priming_batch",
+        "shard_cleanup",
+        "commit_cleanup",
     ],
 )
 @pytest.mark.timeout(180)
