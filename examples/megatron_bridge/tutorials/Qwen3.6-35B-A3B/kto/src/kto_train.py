@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Adapt NeMo RL's examples/run_dpo.py to train with KTO.
+"""Fine-tune the Qwen3.6 QAD checkpoint with KTO.
 
-Reuse its setup and training loop with a custom KTO loss and a response
-processor that allows correct and looping responses to have different prompts.
+Reuse NeMo RL's examples/run_dpo.py setup and training loop with a custom KTO loss
+and a response processor that allows correct and looping responses to have different prompts.
 
 With kto.yaml, training keeps the weights in BF16 and simulates NVFP4
 quantization during each forward pass, so KTO learns with quantization error
@@ -33,6 +33,7 @@ from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.distributed.virtual_cluster import init_ray
 from omegaconf import OmegaConf
 from preference_processor import preference_processor
+from qwen36_checkpoint import register_qwen36_worker, validate_checkpoint
 from unpaired_objective import install
 
 
@@ -57,6 +58,18 @@ def main():
         resolve=True,
         throw_on_missing=True,
     )
+    # NeMo RL passes this checkpoint config to its training workers.
+    checkpoint = cfg["checkpointing"]["pretrained_checkpoint"]
+    # Check for saved ModelOpt state and give the workers an absolute path.
+    checkpoint["path"] = str(validate_checkpoint(Path(checkpoint["path"])))
+    # - Megatron Bridge QAD saves only Qwen's language weights. The default NeMo RL
+    #   worker builds the full VLM, so the custom worker builds only the language model.
+    # - The default worker looks for ModelOpt state under iter_0000000. The custom
+    #   worker uses the supplied QAD iteration directory, such as iter_0000500.
+    # - The VLM wrapper normally computes rotary positions. The custom worker calls
+    #   the language model directly, so it repeats each text position across three axes.
+    register_qwen36_worker()
+
     config = MasterConfig(**cfg)
     tokenizer = get_tokenizer(config.policy["tokenizer"])
 
