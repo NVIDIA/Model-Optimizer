@@ -368,9 +368,25 @@ torch.serialization.add_safe_globals([DistributionPlan])
 _PLAN_ATTR = "_modelopt_distribution_plan"
 
 
+def _plan_holders(model: torch.nn.Module) -> Iterator[tuple[str, torch.nn.Module]]:
+    """``model`` and those of its submodules that hold a parameter or buffer, named.
+
+    A submodule without any distributes nothing, and may be shared by every model in the process: a
+    Hub kernel Transformers attaches to each attention layer (5.5 with ``kernels``, ``rotary_fn``)
+    is a single module, so a plan recorded on it would read as already recorded on the next model.
+    """
+    for name, module in model.named_modules():
+        if (
+            module is model
+            or next(module.parameters(), None) is not None
+            or next(module.buffers(), None) is not None
+        ):
+            yield name, module
+
+
 def _recorded_plan(model: torch.nn.Module) -> tuple[str, DistributionPlan] | None:
     """Which of ``model`` and its submodules records a plan, named, and that plan; else ``None``."""
-    for name, module in model.named_modules():
+    for name, module in _plan_holders(model):
         recorded = getattr(module, _PLAN_ATTR, None)
         if recorded is not None:
             where = f"{type(module).__name__} {name!r}" if name else type(module).__name__
@@ -382,10 +398,11 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
     """Record that ``model`` is distributed as ``plan``, on it and on every submodule it has now.
 
     Code handed a submodule, such as a VLM's language model, then reads the same plan as code handed
-    the whole model; a module added afterwards records none. Code that distributes a model records
-    its plan here before calibrating or exporting the model. The plan says how the model is placed
-    over the run; the :class:`ParallelState` a quantized module holds names the process groups its
-    collectives run on.
+    the whole model; a module added afterwards records none, and neither does a submodule without
+    parameters or buffers, which distributes nothing and may be shared by other models (see
+    :func:`_plan_holders`). Code that distributes a model records its plan here before calibrating
+    or exporting the model. The plan says how the model is placed over the run; the
+    :class:`ParallelState` a quantized module holds names the process groups its collectives run on.
 
     A model is distributed once, and its plan recorded once: recording a plan on a model that, or
     any of whose submodules, already records one raises, the same plan included, and leaves the
@@ -407,7 +424,7 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
             f"{where} is already recorded as distributed by {recorded!r}; a model is distributed "
             f"and its plan recorded once, so {plan!r} cannot be recorded over it."
         )
-    for module in model.modules():
+    for _, module in _plan_holders(model):
         setattr(module, _PLAN_ATTR, plan)
 
 
