@@ -286,8 +286,9 @@ class HFDSpineModel(HFDFlashModel):
                 "base_accept_len": _acceptance_length(base, labels, mask),
                 "backbone_ce": ce_sum / weight_sum,
                 "backbone_l1": l1_sum / weight_sum,
-                "refine_ce": refine_ce,
-                "refine_l1": refine_l1,
+                # Computed for the loss, outside no_grad: detach so a kept metric frees the graph.
+                "refine_ce": refine_ce.detach(),
+                "refine_l1": refine_l1.detach(),
                 "alignment": alignment_sum / weight_sum,
                 "candidate_coverage": hits / n_valid,
             }

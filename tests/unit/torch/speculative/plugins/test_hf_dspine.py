@@ -134,6 +134,7 @@ def test_train_step_and_generate():
     assert torch.isfinite(out.loss)
     assert out.train_acc == [[out.draft_metrics["accuracy"].item()]]
     assert out.draft_metrics["teacher_forcing"].item() == 0.5
+    assert not any(value.requires_grad for value in out.draft_metrics.values())
     out.loss.backward()
     trainable = {n: p for n, p in model.named_parameters() if p.requires_grad}
     assert any("selected_prefix_bridge" in n for n in trainable)
