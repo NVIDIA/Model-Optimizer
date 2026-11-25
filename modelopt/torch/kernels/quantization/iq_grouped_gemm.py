@@ -45,6 +45,7 @@ def _grouped(
     OFFS,
     BIAS,
     Y,
+    ROWS,
     N: tl.constexpr,
     K: tl.constexpr,
     E: tl.constexpr,
@@ -61,7 +62,9 @@ def _grouped(
     experts = tl.arange(0, BE)
     ends = tl.load(OFFS + experts, experts < E, 0).to(tl.int64)
     starts = tl.load(OFFS + experts - 1, (experts > 0) & (experts < E), 0).to(tl.int64)
-    tile_ends = tl.cumsum(tl.where(experts < E, tl.cdiv(ends - starts, BM), 0))
+    ends = tl.minimum(tl.maximum(ends, 0), ROWS)
+    starts = tl.minimum(tl.maximum(starts, 0), ROWS)
+    tile_ends = tl.cumsum(tl.where(experts < E, tl.cdiv(tl.maximum(ends - starts, 0), BM), 0))
     columns: tl.constexpr = tl.cdiv(K, BK) if BACKWARD else tl.cdiv(N, BN)
     total_tiles = tl.sum(tl.where(experts == E - 1, tile_ends, 0)) * columns
     for task in range(tl.program_id(0), total_tiles, tl.num_programs(0)):
@@ -125,6 +128,7 @@ def _grouped_scales(
     GRID,
     OFFS,
     DS,
+    ROWS,
     N: tl.constexpr,
     K: tl.constexpr,
     GROUP: tl.constexpr,
@@ -137,6 +141,8 @@ def _grouped_scales(
     expert = tl.program_id(0)
     start = tl.load(OFFS + expert - 1, expert > 0, 0).to(tl.int64)
     end = tl.load(OFFS + expert).to(tl.int64)
+    start = tl.minimum(tl.maximum(start, 0), ROWS)
+    end = tl.maximum(start, tl.minimum(tl.maximum(end, 0), ROWS))
     packed = tl.load(POINTERS + expert).to(tl.pointer_type(tl.uint8))
     _scale_backward(
         X + start * K,
@@ -160,12 +166,14 @@ def _grouped_scales(
 
 
 @triton.jit
-def _grouped_bias(G, OFFS, DB, N: tl.constexpr):
+def _grouped_bias(G, OFFS, DB, N: tl.constexpr, ROWS):
     expert = tl.program_id(0)
     n = tl.program_id(1) * 64 + tl.arange(0, 64)
     m = tl.arange(0, 32)
     start = tl.load(OFFS + expert - 1, expert > 0, 0).to(tl.int64)
     end = tl.load(OFFS + expert).to(tl.int64)
+    start = tl.minimum(tl.maximum(start, 0), ROWS)
+    end = tl.maximum(start, tl.minimum(tl.maximum(end, 0), ROWS))
     acc = tl.full((32, 64), 0, tl.float32)
     for first in range(start, end, 32):
         rows = first + m
@@ -184,7 +192,14 @@ class _IQGrouped(torch.autograd.Function):
         group = len(packeds) * n * k // steps.numel()
         # Zero ownerless tails; routing never consumes them and backward must ignore them.
         output = inputs.new_zeros((inputs.shape[0], n))
-        meta = {"N": n, "K": k, "GROUP": group, "KIND": name, "BYTES": block_bytes}
+        meta = {
+            "N": n,
+            "K": k,
+            "ROWS": inputs.shape[0],
+            "GROUP": group,
+            "KIND": name,
+            "BYTES": block_bytes,
+        }
         programs = torch.cuda.get_device_properties(inputs.device).multi_processor_count * 2
         common = {
             "E": len(packeds),
@@ -248,7 +263,9 @@ class _IQGrouped(torch.autograd.Function):
         if ctx.has_bias and ctx.needs_input_grad[6]:
             n = ctx.meta["N"]
             db = inputs.new_empty((len(packeds), n))
-            _grouped_bias[(len(packeds), triton.cdiv(n, 64))](gradient, offsets, db, n)
+            _grouped_bias[(len(packeds), triton.cdiv(n, 64))](
+                gradient, offsets, db, n, inputs.shape[0]
+            )
         return dx, ds, None, None, None, None, db, None
 
 
@@ -266,6 +283,7 @@ def iq_grouped_linear(
     """Use native expert-sorted rows without host token counts or expanded expert weights.
 
     Offsets are cumulative, monotonic CUDA expert endpoints from HF routing.
+    Bounds are clipped to available rows on device; ordering remains the caller's contract.
     The caller retains ownership of the immutable packed pointer table.
     """
     fmt = IQ_FORMAT_REGISTRY[format_name]

@@ -570,11 +570,21 @@ def test_grouped_iq_projection_matches_uneven_native_experts(name, dtype):
         packeds = [s.packed for s in states]
         original_codes = [p.clone() for p in packeds]
         pointers = torch.tensor([p.data_ptr() for p in packeds], device="cuda", dtype=torch.int64)
-        for counts in ((5, 0, 3), (0, 0, 0)):
-            ends = torch.tensor(counts, device="cuda", dtype=torch.int32).cumsum(0)
+        for endpoints, rows, counts in (
+            ((5, 5, 8), 10, (5, 0, 3)),
+            ((0, 0, 0), 2, (0, 0, 0)),
+            ((5, 5, 128), 10, (5, 0, 5)),
+            ((-16, 5, 128), 10, (0, 5, 5)),
+            ((-128, -64, -1), 10, (0, 0, 0)),
+            ((128, 256, 512), 10, (10, 0, 0)),
+            ((128, -64, -128), 10, (10, 0, 0)),
+            ((0, 0, 0), 0, (0, 0, 0)),
+        ):
+            # Literal row counts form an independent oracle for clipping to the owned rows.
+            ends = torch.tensor(endpoints, device="cuda", dtype=torch.int64)
             # An unowned EP tail must stay zero in both autograd directions.
             x = (
-                torch.randn(sum(counts) + 2, 1024, device="cuda", dtype=dtype)[:, ::2]
+                torch.randn(rows, 1024, device="cuda", dtype=dtype)[:, ::2]
                 .detach()
                 .requires_grad_(True)
             )
