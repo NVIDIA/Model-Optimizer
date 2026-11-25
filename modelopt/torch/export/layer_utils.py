@@ -86,11 +86,17 @@ def is_layernorm(module: nn.Module) -> bool:
 
 def is_quantlinear(module: nn.Module) -> bool:
     """Returns whether the module is a quantized linear layer."""
+    from modelopt.torch.quantization.nn import QuantLinearConvBase
+
     name = type(module).__name__
     return (
-        any(
-            keyword in name
-            for keyword in ["QuantLinear", "QuantCompressedLinear", "QuantFP8Linear"]
+        (
+            # Native/custom unchanged-forward wrappers need not retain the QuantLinear name.
+            (isinstance(module, nn.Linear) and isinstance(module, QuantLinearConvBase))
+            or any(
+                keyword in name
+                for keyword in ["QuantLinear", "QuantCompressedLinear", "QuantFP8Linear"]
+            )
         )
         and "lora" not in name.lower()
         and "ds_kernel" not in name.lower()
