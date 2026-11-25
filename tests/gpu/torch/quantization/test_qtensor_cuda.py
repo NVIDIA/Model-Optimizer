@@ -24,7 +24,7 @@ from _test_utils.torch.misc import set_seed
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
+from modelopt.torch.quantization.qtensor import FP8QTensor, MXFP8QTensor, NVFP4QTensor
 
 set_seed()
 
@@ -295,6 +295,31 @@ class TestQTensor:
             fake_quantizer = TensorQuantizer(fake_quant_attr_cfg).to(device)
             fake_quant_x = fake_quantizer(x)
             assert torch.allclose(fake_quant_x, deq_x.to(device), rtol=1e-1, atol=1e-1)
+
+    @pytest.mark.parametrize("block", [32, 128])
+    @pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float32, torch.float64])
+    def test_fp8_ue8m0_partial_blocks_and_exponent_boundaries(self, block, input_dtype):
+        """Native scales round-trip exactly at power-of-two boundaries on CUDA."""
+        exponents = torch.arange(-127, 128 if input_dtype == torch.float64 else 120, device="cuda")
+        rows, cols = exponents.numel() * block - 3, block + 5
+        codes = torch.tensor([448.0, -224.0, 1.125, -0.5, 0.0], device="cuda")
+        codes = codes.repeat(rows, math.ceil(cols / codes.numel()))[:, :cols]
+        working_dtype = torch.float64 if input_dtype == torch.float64 else torch.float32
+        weight = torch.ldexp(
+            codes.to(working_dtype), exponents[torch.arange(rows, device="cuda") // block, None]
+        ).to(input_dtype)
+        blocks = {-2: block, -1: block}
+
+        quantized, scales = FP8QTensor.quantize(
+            weight, block_sizes=blocks, scale_dtype=torch.float8_e8m0fnu
+        )
+        torch.testing.assert_close(
+            scales.view(torch.uint8), (exponents + 127).to(torch.uint8)[:, None].expand(-1, 2)
+        )
+        torch.testing.assert_close(quantized._quantized_data.float(), codes, rtol=0, atol=0)
+        torch.testing.assert_close(
+            quantized.dequantize(scale=scales, block_sizes=blocks), weight, rtol=0, atol=0
+        )
 
     @pytest.mark.parametrize("device", ["cuda", "cpu"])
     @pytest.mark.parametrize("block_size", [8])
