@@ -438,7 +438,9 @@ The ``Config`` class controls autotuner behavior:
    config = Config(
        default_quant_type="int8",             # "int8" or "fp8"
        default_dq_dtype="float32",            # float16, float32, bfloat16 (bfloat16 needs NumPy with np.bfloat16)
-       default_q_scale=0.1,
+       default_q_scale=0.1,                   # weight Q/DQ scale
+       use_varied_activation_scales=True,     # False: default_q_scale on activations too
+       concat_elimination=True,               # share Concat scales as the concat_elimination pass does
        default_q_zero_point=0,
        top_percent_to_mutate=0.1,
        minimum_schemes_to_mutate=10,

@@ -59,6 +59,7 @@ Changelog
 - ONNX AutoCast now keeps the variance of decomposed RMSNorm and unfused LayerNorm in FP32 for both FP16 and BF16 conversion, so FP16 models converted without calibration data no longer give wrong outputs on execution providers such as TensorRT-RTX. Reconvert affected models.
 - Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
 - Fix blocked INT4 ONNX exports using the wrong dequantization axis for transposed weights, which prevented TensorRT and ONNX Runtime from executing affected models. Re-export affected models.
+- Fix ONNX AutoTune benchmarking every candidate with one uniform Q/DQ scale, which enabled TensorRT fusions that the final quantized model (with real scales) cannot use, so it could run slower than measured. Candidates now get different activation scales, set so that their measured latency matches the final quantized model as closely as possible (``use_varied_activation_scales=False`` in the AutoTune ``Config`` restores the previous behavior); AutoTune CLI runs (``python -m modelopt.onnx.quantization.autotune``) resumed from an older state file keep the previous behavior.
 
 *Speculative Decoding*
 

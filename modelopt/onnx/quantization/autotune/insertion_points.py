@@ -21,6 +21,7 @@ Q/DQ insertion that can be reused across multiple matching regions in a model.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Self
 
@@ -493,6 +494,47 @@ def merge_resolved_insertion_points(
         else:
             results.update(qdq_users)
     return results
+
+
+def get_covered_inputs(
+    graph: gs.Graph,
+    resolved_insertion_points: Iterable[ResolvedInsertionPoint],
+    tensor_users_map: dict[str, list[int]] | None = None,
+) -> set[tuple[int, int]]:
+    """Return the (node index, input index) pairs that read a Q/DQ'd tensor.
+
+    A tensor-level insertion point covers every input that reads its tensor.
+    """
+    if tensor_users_map is None:
+        tensor_users_map = get_tensor_consumer_node_indices(graph)
+    covered: set[tuple[int, int]] = set()
+    for ip in resolved_insertion_points:
+        if ip.node_index is not None and ip.input_index is not None:
+            covered.add((ip.node_index, ip.input_index))
+            continue
+        for consumer_idx in tensor_users_map.get(ip.tensor_name, []):
+            for inp_idx, inp in enumerate(graph.nodes[consumer_idx].inputs):
+                if getattr(inp, "name", None) == ip.tensor_name:
+                    covered.add((consumer_idx, inp_idx))
+    return covered
+
+
+def get_quantized_node_indices(graph: gs.Graph, covered: set[tuple[int, int]]) -> set[int]:
+    """Return the nodes the final quantization quantizes for the covered inputs.
+
+    These are the nodes that read a covered input, plus the producers of the covered tensors: a
+    producer must be quantized for ORT to place Q on its output (e.g. Add when Q/DQ sits between
+    Add and Relu).
+    """
+    node_indices = {node_idx for node_idx, _ in covered}
+    position = {id(node): idx for idx, node in enumerate(graph.nodes)}
+    for node_idx, inp_idx in covered:
+        tensor = graph.nodes[node_idx].inputs[inp_idx]
+        if tensor.inputs:
+            producer_idx = position.get(id(tensor.inputs[0]))
+            if producer_idx is not None:
+                node_indices.add(producer_idx)
+    return node_indices
 
 
 def get_autotuner_skip_ops():

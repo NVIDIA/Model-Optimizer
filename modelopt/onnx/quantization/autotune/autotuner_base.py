@@ -51,6 +51,8 @@ from modelopt.onnx.quantization.autotune.export_utils import export_qdq_onnx
 from modelopt.onnx.quantization.autotune.insertion_points import (
     ResolvedInsertionPoint,
     get_autotuner_quantizable_ops,
+    get_covered_inputs,
+    get_quantized_node_indices,
 )
 from modelopt.onnx.quantization.autotune.region_pattern import RegionPattern
 from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
@@ -503,32 +505,9 @@ class QDQAutotunerBase:
         resolved_ips = self.get_resolved_insertion_points(best=True)
         graph = self.graph
 
-        # Build (node_index, input_index) pairs that have Q/DQ
-        covered: set[tuple[int, int]] = set()
-        for ip in resolved_ips:
-            if ip.node_index is not None and ip.input_index is not None:
-                covered.add((ip.node_index, ip.input_index))
-            else:
-                # Tensor-level insertion point: expand to all consumer (node, input) pairs
-                for consumer_idx in graph.tensor_users_map.get(ip.tensor_name, []):
-                    node = graph.nodes[consumer_idx]
-                    for inp_idx, inp in enumerate(node.inputs):
-                        if getattr(inp, "name", None) == ip.tensor_name:
-                            covered.add((consumer_idx, inp_idx))
-
-        # Nodes that consume a covered (DQ-fed) input
-        quantized_node_indices: set[int] = {node_idx for node_idx, _ in covered}
-
-        # Also include producer nodes of covered inputs: a producer whose output feeds a
-        # covered slot needs to be in nodes_to_quantize so ORT can place Q on its output
-        # (e.g., Add must be included when Q/DQ sits between Add and Relu).
-        node_name_to_idx = {node.name: i for i, node in enumerate(graph.nodes)}
-        for node_idx, inp_idx in covered:
-            tensor = graph.nodes[node_idx].inputs[inp_idx]
-            if tensor.inputs:
-                producer_idx = node_name_to_idx.get(tensor.inputs[0].name)
-                if producer_idx is not None:
-                    quantized_node_indices.add(producer_idx)
+        # Candidate export derives its Concat scale groups from the same two helpers.
+        covered = get_covered_inputs(graph, resolved_ips, graph.tensor_users_map)
+        quantized_node_indices = get_quantized_node_indices(graph, covered)
 
         nodes_to_quantize = [graph.nodes[i].name for i in quantized_node_indices]
         op_types_to_quantize = get_autotuner_quantizable_ops()
@@ -789,7 +768,8 @@ class QDQAutotunerBase:
         Restores optimization results from a previous session:
         1. Matches saved patterns to current model's patterns by signature
         2. Loads all schemes with their insertion points and latencies (including unmeasured ones)
-        3. Restores baseline latency and configuration
+        3. Restores baseline latency and configuration; a state written before
+           ``use_varied_activation_scales`` existed restores it as False
 
         Args:
             input_path: File path to the YAML state file to load
@@ -810,6 +790,11 @@ class QDQAutotunerBase:
             if isinstance(config_data, dict):
                 default_dict = dataclasses.asdict(Config())
                 default_dict.update({k: v for k, v in config_data.items() if k in default_dict})
+                if "use_varied_activation_scales" not in config_data:
+                    # Written before varied activation scales: its latencies were measured with
+                    # the uniform scale, so keep it for the rest of the run.
+                    default_dict["use_varied_activation_scales"] = False
+                    logger.debug(f"{input_path} predates varied activation scales")
                 self.config = Config(**default_dict)
                 logger.debug(f"Config restored: quant_type={self.config.default_quant_type}")
 

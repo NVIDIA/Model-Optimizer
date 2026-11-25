@@ -186,6 +186,7 @@ def region_pattern_autotuning_workflow(
     node_filter_list: list[str] | None = None,
     verbose: bool = False,
     model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
+    concat_elimination: bool = True,
 ) -> QDQAutotuner:
     """Run automated Q/DQ (Quantization/Dequantization) optimization on an ONNX model.
 
@@ -231,6 +232,8 @@ def region_pattern_autotuning_workflow(
                          without any matching nodes are skipped during autotuning (default: None)
         verbose: Enable verbose logging in Config for detailed autotuner output (default: False)
         model_transform: Optional transform applied to every model before benchmarking.
+        concat_elimination: Whether the final quantization runs the concat_elimination pass,
+            so candidates share Concat scales the same way (default: True).
 
     Returns:
         QDQAutotuner instance after autotuning
@@ -274,6 +277,7 @@ def region_pattern_autotuning_workflow(
         default_quant_type=quant_type,
         default_dq_dtype=default_dq_dtype,
         verbose=verbose,
+        concat_elimination=concat_elimination,
     )
 
     autotuner = QDQAutotuner(model)
@@ -294,6 +298,11 @@ def region_pattern_autotuning_workflow(
             autotuner.baseline_latency_ms = None
             autotuner.config = config
             logger.info("Re-profiling checkpoint measurements for transformed models")
+        elif not autotuner.config.use_varied_activation_scales:
+            logger.warning(
+                f"{state_path} was measured with the uniform activation scale, which this run "
+                "keeps; delete it to tune with varied activation scales"
+            )
     else:
         logger.info("Starting new autotuning session")
 

@@ -340,6 +340,7 @@ def _find_nodes_to_quantize_autotune(
     timing_runs: int = 100,
     trtexec_args: str | None = None,
     remote_model_path: str | None = None,
+    concat_elimination: bool = True,
 ) -> _AutotuneContext:
     """Extracts quantization information from Autotune to provide ORT quantization."""
     logger.info("Running Auto Q/DQ with TensorRT")
@@ -402,6 +403,7 @@ def _find_nodes_to_quantize_autotune(
             node_filter_list=node_filter_list,
             verbose=verbose,
             model_transform=model_transform,
+            concat_elimination=concat_elimination,
         )
         return _AutotuneContext(
             ort_config=autotuner.get_ort_quantization_config(),
@@ -859,6 +861,7 @@ def quantize(
                 timing_runs=autotune_timing_runs,
                 trtexec_args=autotune_trtexec_args,
                 remote_model_path=autotune_remote_model_path,
+                concat_elimination=bool(passes) and "concat_elimination" in passes,
             )
             (
                 nodes_to_quantize_autotune,
