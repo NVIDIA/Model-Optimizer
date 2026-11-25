@@ -246,9 +246,11 @@ class SEResidualBlock(nn.Module):
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
         self.se1 = nn.Conv2d(channels, 4, 1)
         self.se2 = nn.Conv2d(4, channels, 1)
+        self.drop = nn.Dropout(0.1)
 
     def forward(self, x):
         silu = torch.nn.functional.silu
+        x = self.drop(x)
         y = self.conv2(silu(self.bn1(self.conv1(x))))
         pooled = torch.nn.functional.adaptive_avg_pool2d(y, 1)
         scale = torch.sigmoid(self.se2(silu(self.se1(pooled))))

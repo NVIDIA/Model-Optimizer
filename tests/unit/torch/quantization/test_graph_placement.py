@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
+
 import pytest
 import torch
 
@@ -21,6 +23,7 @@ pytest.importorskip("onnxscript")
 
 from _test_utils.onnx.lib_test_models import build_se_residual_model
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import TensorQuantizer
 
@@ -43,8 +46,10 @@ def test_quantize_graph_shares_quantizers():
     readers = [{user.target for user in node.users} for node in quantizer_nodes]
     # One quantizer feeds the residual add and the next conv, another the pooling and the SE multiply.
     assert {aten.add.Tensor, aten.conv2d.default} in readers
-    assert {aten.mean.dim, aten.mul.Tensor} in readers
+    assert {aten.adaptive_avg_pool2d.default, aten.mul.Tensor} in readers
     assert all(readers)
+    # Eval-mode identities stay in front of the quantizer so they still apply in train mode.
+    assert not any(aten.dropout.default in targets for targets in readers)
     for node in quantizer_nodes:
         quantizer = graph_module.get_submodule(node.target)
         assert quantizer.is_enabled and quantizer.amax is not None, node.target
@@ -73,3 +78,27 @@ def test_quantize_graph_attention():
     assert len(matmul_inputs) == 4
     assert all(arg.op == "call_module" for arg in matmul_inputs)
     torch.testing.assert_close(graph_module(example), model(example), rtol=0.1, atol=0.1)
+
+
+def test_quantize_graph_qat_save_restore():
+    model, example = build_se_residual_model()
+    graph_module = mtq.quantize_graph(
+        model, mtq.INT8_DEFAULT_CFG, (example,), lambda m: m(example), log_level="WARNING"
+    )
+
+    # Train mode uses batch statistics and trains the eager model's parameters in place.
+    graph_module.train()
+    batch_norm = model[2].bn1
+    running_mean = batch_norm.running_mean.clone()
+    graph_module(example).square().mean().backward()
+    assert not torch.equal(batch_norm.running_mean, running_mean)
+    assert all(param.grad is not None for param in model.parameters())
+    graph_module.eval()
+    expected = graph_module(example)
+
+    buffer = io.BytesIO()
+    mto.save(graph_module, buffer)
+    buffer.seek(0)
+    restored_model, _ = build_se_residual_model()
+    restored = mto.restore(restored_model, buffer)
+    torch.testing.assert_close(restored(example), expected, rtol=0, atol=0)
