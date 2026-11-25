@@ -32,7 +32,6 @@ from modelopt.onnx.op_types import is_copy_op, is_linear_op
 from modelopt.onnx.quantization.graph_indexing import (
     expand_node_names_from_patterns,
     get_fusible_backbone,
-    get_tensor_consumer_nodes,
     has_const_input,
     has_path_type,
     is_const_input,
@@ -881,14 +880,10 @@ def get_concat_eliminated_tensors(
         {current tensor name: set of tensors that should share the same scaling factor}
     """
     logger.info("Finding concat eliminated tensors")
-    input_name_to_nodes = get_tensor_consumer_nodes(onnx_model.graph)
-
-    def is_quantized(tensor_name: str) -> bool:
-        return any(
-            consumer.name in nodes_to_quantize for consumer in input_name_to_nodes[tensor_name]
-        )
-
-    representatives = group_scale_sharing_tensors(gs.import_onnx(onnx_model), is_quantized)
+    quantized_nodes = set(nodes_to_quantize)
+    representatives = group_scale_sharing_tensors(
+        gs.import_onnx(onnx_model), lambda node: node.name in quantized_nodes
+    )
     groups: dict[str, set[str]] = defaultdict(set)
     for tensor, root in representatives.items():
         groups[root].add(tensor)
@@ -903,14 +898,16 @@ _REARRANGE_OPS = frozenset({"Flatten", "Reshape", "Squeeze", "Transpose", "Unsqu
 
 def group_scale_sharing_tensors(
     graph: gs.Graph,
-    is_quantized: Callable[[str], bool],
+    is_quantized_node: Callable[[gs.Node], bool],
     *,
     through_rearrange_ops: bool = False,
 ) -> dict[str, str]:
     """Map the tensors that end up with one scaling factor to a common representative.
 
     Concat elimination gives one scaling factor to the quantized activation inputs and the
-    output of each Concat whose output is quantized.
+    output of each Concat whose output is quantized. A tensor counts as quantized when a
+    quantized node reads it, even without Q/DQ of its own, so such a tensor can still join the
+    groups of two Concats that read it.
 
     With ``through_rearrange_ops``, tensors joined by ops that only rearrange values (Reshape,
     Transpose, ...), also through unquantized tensors, are grouped as well. They hold the same
@@ -920,11 +917,11 @@ def group_scale_sharing_tensors(
     the groups the rearranging ops form, while the tensors on either side of them stay together.
     Only the output of a group formed by one Concat keeps its rearranging neighbors: it holds
     every value of the group, so its own range is already the group's. (Under histogram-based
-    calibration, that holds exactly when every input of the Concat is in the group.)
+    calibration, that holds only approximately.)
 
     Args:
         graph: Graph to search.
-        is_quantized: Whether a tensor, given by name, is quantized.
+        is_quantized_node: Whether the quantizer quantizes a node of ``graph``.
         through_rearrange_ops: Whether to also group tensors joined by rearranging ops.
 
     Returns:
@@ -951,6 +948,14 @@ def group_scale_sharing_tensors(
             if rb < ra:
                 ra, rb = rb, ra
             parent[rb] = ra
+
+    readers: dict[str, list[gs.Node]] = defaultdict(list)
+    for node in graph.nodes:
+        for tensor in node.inputs:
+            readers[tensor.name].append(node)
+
+    def is_quantized(tensor_name: str) -> bool:
+        return any(is_quantized_node(reader) for reader in readers[tensor_name])
 
     concat_inputs: set[str] = set()
     concat_outputs: list[str] = []

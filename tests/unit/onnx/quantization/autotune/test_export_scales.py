@@ -20,11 +20,13 @@ import itertools
 import logging
 
 import numpy as np
+import onnx
 import onnx_graphsurgeon as gs
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.onnx.quantization.autotune.export_utils as export_utils
+from modelopt.onnx.quantization.autotune import QDQAutotuner
 from modelopt.onnx.quantization.autotune.common import Config
 from modelopt.onnx.quantization.autotune.export_utils import (
     _ACTIVATION_SCALE_RANGE,
@@ -33,6 +35,8 @@ from modelopt.onnx.quantization.autotune.export_utils import (
     export_qdq_onnx,
 )
 from modelopt.onnx.quantization.autotune.insertion_points import ResolvedInsertionPoint
+from modelopt.onnx.quantization.calib_utils import CalibrationDataProvider
+from modelopt.onnx.quantization.int8 import quantize as quantize_int8
 from modelopt.onnx.quantization.precision_utils import _convert_to_runtime_precision
 
 
@@ -340,13 +344,157 @@ def test_concats_sharing_an_input_leave_their_output_rearrange_chains():
         helper.make_node("Concat", ["b", "d"], ["cat1"], name="concat1", axis=1),
         helper.make_node("Transpose", ["cat1"], ["f"], name="transpose1", perm=[0, 1, 3, 2]),
         helper.make_node("Concat", ["b", "e"], ["cat2"], name="concat2", axis=1),
+        helper.make_node("Relu", ["cat2"], ["g"], name="relu1"),
     ]
     graph = _graph(
-        nodes, {"b": shape, "d": shape, "e": shape}, {"f": [1, 8, 4, 4], "cat2": [1, 8, 4, 4]}
+        nodes, {"b": shape, "d": shape, "e": shape}, {"f": [1, 8, 4, 4], "g": [1, 8, 4, 4]}
     )
     groups = build_scale_group_map(graph, {"b", "d", "e", "cat1", "cat2", "f"})
     assert groups["b"] == groups["d"] == groups["e"] == groups["cat1"] == groups["cat2"]
     assert groups["f"] != groups["cat1"]
+
+
+def test_concats_joined_by_an_input_without_qdq_share_a_scale():
+    """``b`` has no Q/DQ, but the quantized Concats read it, so their groups join through it."""
+    shape = [1, 4, 4, 4]
+    nodes = [
+        helper.make_node("Concat", ["a", "b"], ["x"], name="concat1", axis=1),
+        helper.make_node("Concat", ["b", "c"], ["y"], name="concat2", axis=1),
+        helper.make_node("Add", ["x", "y"], ["s"], name="add1"),
+    ]
+    graph = _graph(nodes, {"a": shape, "b": shape, "c": shape}, {"s": [1, 8, 4, 4]})
+    groups = build_scale_group_map(graph, {"x", "y"})
+    assert groups["x"] == groups["y"]
+
+
+def _concat_add_model(shared_input):
+    """Convs make a, b, c, d of different ranges; Add(Concat(a, b), Concat(b or d, c))."""
+    nodes = [
+        helper.make_node("Conv", ["inp", f"w_{name}"], [name], name=f"conv_{name}")
+        for name in "abcd"
+    ]
+    nodes += [
+        helper.make_node("Concat", ["a", "b"], ["x"], name="concat1", axis=1),
+        helper.make_node(
+            "Concat", ["b" if shared_input else "d", "c"], ["y"], name="concat2", axis=1
+        ),
+        helper.make_node("Add", ["x", "y"], ["s"], name="add1"),
+    ]
+    rng = np.random.RandomState(0)
+    inits = [
+        numpy_helper.from_array((rng.randn(4, 4, 1, 1) * scale).astype(np.float32), f"w_{name}")
+        for name, scale in zip("abcd", (1.0, 3.0, 10.0, 0.3))
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "concat_add",
+        [helper.make_tensor_value_info("inp", TensorProto.FLOAT, [1, 4, 4, 4])],
+        [helper.make_tensor_value_info("s", TensorProto.FLOAT, [1, 8, 4, 4])],
+        initializer=inits,
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 9
+    return model
+
+
+def _candidate_and_calibrated_scales(model, points, calibration_method, tmp_path, monkeypatch):
+    """Activation scales of the candidate and of the model calibrated for the same ``points``.
+
+    The quantizer gets what get_ort_quantization_config derives, as ``quantize(autotune=...)``
+    passes it.
+    """
+    candidate = _activation_scales(export_qdq_onnx(model, points, Config()))
+    autotuner = QDQAutotuner(model)
+    autotuner.initialize(Config())
+    monkeypatch.setattr(autotuner, "get_resolved_insertion_points", lambda best=False: set(points))
+    nodes, op_types, no_quantize_inputs, output_quant_ops = autotuner.get_ort_quantization_config()
+    path = str(tmp_path / "model.onnx")
+    onnx.save(model, path)
+    calibration_data = {"inp": np.random.RandomState(1).randn(16, 4, 4, 4).astype(np.float32)}
+    calibrated = quantize_int8(
+        onnx_path=path,
+        calibration_method=calibration_method,
+        calibration_data_reader=CalibrationDataProvider(path, calibration_data),
+        calibration_eps=["cpu"],
+        op_types_to_quantize=op_types,
+        nodes_to_quantize=nodes,
+        nodes_to_exclude=[],
+        high_precision_dtype="fp32",
+        autotune=True,
+        no_quantize_inputs=no_quantize_inputs,
+        op_types_needing_output_quant=output_quant_ops,
+    )
+    return candidate, _activation_scales(calibrated)
+
+
+@pytest.mark.parametrize("calibration_method", ["max", "entropy"])
+@pytest.mark.parametrize("shared_input", [True, False])
+def test_candidate_scale_sharing_matches_the_calibrated_model(
+    tmp_path, monkeypatch, calibration_method, shared_input
+):
+    """Q/DQ on the two Add inputs only: x and y share a scale exactly when the Concats share b."""
+    model = _concat_add_model(shared_input)
+    points = _points(model, [("add1", 0, "x"), ("add1", 1, "y")])
+    candidate, calibrated = _candidate_and_calibrated_scales(
+        model, points, calibration_method, tmp_path, monkeypatch
+    )
+    assert set(calibrated) == {"x", "y"}
+    assert (calibrated["x"] == calibrated["y"]) is shared_input
+    assert (candidate["x"] == candidate["y"]) is shared_input
+
+
+@pytest.mark.parametrize("calibration_method", ["max", "entropy"])
+def test_concat_read_only_without_qdq_forms_no_group(tmp_path, monkeypatch, calibration_method):
+    """The candidate puts Q/DQ on t and u only before their Convs, not before the Concat or Add.
+
+    The quantizer then quantizes neither the Concat nor the Add, so t and u keep separate scales.
+    """
+    nodes = [
+        helper.make_node("Conv", ["inp", f"w_{name}"], [name], name=f"conv_{name}")
+        for name in "tuv"
+    ]
+    nodes += [
+        helper.make_node("Conv", [src, f"w_{dst}"], [dst], name=f"conv_{dst}")
+        for src, dst in (("t", "x"), ("u", "y"), ("v", "z"))
+    ]
+    nodes += [
+        helper.make_node("Concat", ["t", "u"], ["cat"], name="concat1", axis=1),
+        helper.make_node("Add", ["cat", "v"], ["s"], name="add1"),
+    ]
+    rng = np.random.RandomState(0)
+    shapes = {"t": (4, 4), "u": (4, 4), "v": (8, 4), "x": (4, 4), "y": (4, 4), "z": (4, 8)}
+    scales = {"t": 1.0, "u": 3.0, "v": 10.0, "x": 1.0, "y": 1.0, "z": 1.0}
+    inits = [
+        numpy_helper.from_array(
+            (rng.randn(*shapes[name], 1, 1) * scales[name]).astype(np.float32), f"w_{name}"
+        )
+        for name in shapes
+    ]
+    outputs = {"x": 4, "y": 4, "z": 4, "s": 8}
+    graph = helper.make_graph(
+        nodes,
+        "concat_without_qdq",
+        [helper.make_tensor_value_info("inp", TensorProto.FLOAT, [1, 4, 4, 4])],
+        [
+            helper.make_tensor_value_info(n, TensorProto.FLOAT, [1, c, 4, 4])
+            for n, c in outputs.items()
+        ],
+        initializer=inits,
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 9
+    points = _points(model, [("conv_x", 0, "t"), ("conv_y", 0, "u"), ("conv_z", 0, "v")])
+    candidate, calibrated = _candidate_and_calibrated_scales(
+        model, points, calibration_method, tmp_path, monkeypatch
+    )
+    assert calibrated["t"] != calibrated["u"]
+    assert candidate["t"] != candidate["u"]
+
+
+def test_out_of_range_insertion_point_is_reported(model):
+    points = {ResolvedInsertionPoint(tensor_name="p1", node_index=99, input_index=0)}
+    with pytest.raises(IndexError, match="Node index out of range: 99"):
+        export_qdq_onnx(model, points, Config())
 
 
 def test_concat_keeps_separate_scales_without_concat_elimination(model):

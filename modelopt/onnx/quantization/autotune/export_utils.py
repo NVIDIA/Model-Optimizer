@@ -27,6 +27,8 @@ from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.autotune.common import Config
 from modelopt.onnx.quantization.autotune.insertion_points import (
     ResolvedInsertionPoint,
+    get_covered_inputs,
+    get_quantized_node_indices,
     merge_resolved_insertion_points,
 )
 from modelopt.onnx.quantization.fp8 import _rescale_int8_scales_to_fp8, int8_to_fp8
@@ -218,15 +220,20 @@ def _hashed_scale(key: str) -> float:
 
 
 def build_scale_group_map(
-    graph: gs.Graph, quantized_tensors: set[str], *, concat_elimination: bool = True
+    graph: gs.Graph,
+    quantized_tensors: set[str],
+    *,
+    quantized_nodes: set[int] | None = None,
+    concat_elimination: bool = True,
 ) -> dict[str, str]:
     """Map each quantized tensor to the representative of its scale group.
 
     Tensors in one group get one scale, as they do in the quantized model:
 
-    * The quantized inputs and the output of a Concat whose output is quantized, which the
-      ``concat_elimination`` pass unifies, when that pass runs. Unquantized inputs stay out:
-      merging a boundary the quantized model keeps would drop a requantization it performs.
+    * The inputs and the output of a Concat, as the ``concat_elimination`` pass unifies them
+      when it runs. A tensor joins when a node of ``quantized_nodes`` reads it, as in the
+      quantizer, so a tensor without Q/DQ of its own can still join the groups of two Concats
+      into one.
     * Tensors joined by rearranging ops, including chains of such ops through tensors this
       candidate leaves unquantized, since they hold the same values. A member of a Concat group
       stays out and takes the group's scale instead, except the output of a group formed by one
@@ -238,16 +245,24 @@ def build_scale_group_map(
     Args:
         graph: Graph the candidate is built from.
         quantized_tensors: Names of the (activation) tensors that receive Q/DQ.
+        quantized_nodes: Indices of the nodes the final quantization quantizes, from
+            :func:`~modelopt.onnx.quantization.autotune.insertion_points.get_quantized_node_indices`.
+            Defaults to the nodes for Q/DQ on every reader of ``quantized_tensors``.
         concat_elimination: Whether the final quantization runs the concat_elimination pass.
 
     Returns:
         Mapping from every name in ``quantized_tensors`` to its group representative, which
         is the tensor itself when it shares a scale with nothing.
     """
-    # Without the pass no Concat group forms, so no tensor counts as a Concat member.
-    is_concat_member = quantized_tensors.__contains__ if concat_elimination else lambda _: False
+    if quantized_nodes is None:
+        points = (ResolvedInsertionPoint(tensor_name=name) for name in quantized_tensors)
+        quantized_nodes = get_quantized_node_indices(graph, get_covered_inputs(graph, points))
+    # Without the pass no Concat group forms, so no node counts as quantized for it.
+    concat_nodes = (
+        {id(graph.nodes[idx]) for idx in quantized_nodes} if concat_elimination else set()
+    )
     representatives = group_scale_sharing_tensors(
-        graph, is_concat_member, through_rearrange_ops=True
+        graph, lambda node: id(node) in concat_nodes, through_rearrange_ops=True
     )
     return {name: representatives.get(name, name) for name in quantized_tensors}
 
@@ -335,6 +350,44 @@ def build_activation_scales(
     return {t: group_scales[scale_group_map.get(t, t)] for t in quantized_tensors}
 
 
+def _insertion_target(
+    graph: gs.Graph, tensor_map: dict[str, gs.Tensor], insertion_point: ResolvedInsertionPoint
+) -> tuple[gs.Tensor, gs.Node | None]:
+    """Return the tensor an insertion point quantizes and the node it targets, if node-level.
+
+    Raises:
+        IndexError, KeyError, ValueError: If the insertion point does not fit ``graph``.
+    """
+    tensor_name = insertion_point.tensor_name
+    node_index = insertion_point.node_index
+    input_index = insertion_point.input_index
+    if node_index is None:
+        if tensor_name not in tensor_map:
+            raise KeyError(f"Tensor {tensor_name!r} not found in tensor map")
+        if input_index is not None:
+            raise ValueError("Input index must be None when node index is None")
+        return tensor_map[tensor_name], None
+    if node_index < 0 or node_index >= len(graph.nodes):
+        raise IndexError(
+            f"Node index out of range: {node_index} (graph has {len(graph.nodes)} nodes)"
+        )
+    target_node = graph.nodes[node_index]
+    if input_index is None:
+        raise ValueError("Input index must be set when node index is set")
+    if input_index < 0 or input_index >= len(target_node.inputs):
+        raise IndexError(
+            f"Input index out of range for node {target_node.name}: "
+            f"{input_index} (node has {len(target_node.inputs)} inputs)"
+        )
+    original_tensor = target_node.inputs[input_index]
+    if tensor_name != original_tensor.name:
+        raise ValueError(
+            f"Tensor name mismatch for node {target_node.name} input {input_index}: "
+            f"expected {tensor_name!r}, got {original_tensor.name!r}"
+        )
+    return original_tensor, target_node
+
+
 def insert_qdq_at_tensors(
     graph: gs.Graph,
     resolved_insertion_points: set[ResolvedInsertionPoint],
@@ -366,6 +419,13 @@ def insert_qdq_at_tensors(
     resolved_insertion_points = merge_resolved_insertion_points(graph, resolved_insertion_points)
 
     tensor_map = build_tensor_map(graph)
+    if tensor_users_map is None:
+        tensor_users_map = get_tensor_consumer_node_indices(graph)
+    logger.debug(
+        f"Built tensor maps: {len(tensor_map)} tensors, {len(tensor_users_map)} with users"
+    )
+    # Validate every insertion point before anything below indexes the graph with it.
+    targets = [(ip, *_insertion_target(graph, tensor_map, ip)) for ip in resolved_insertion_points]
 
     activation_scales: dict[str, float] = {}
     if config.use_varied_activation_scales:
@@ -374,8 +434,15 @@ def insert_qdq_at_tensors(
             for ip in resolved_insertion_points
             if not isinstance(tensor_map.get(ip.tensor_name), gs.Constant)
         }
+        # The nodes get_ort_quantization_config would hand the quantizer for this placement.
+        quantized_nodes = get_quantized_node_indices(
+            graph, get_covered_inputs(graph, resolved_insertion_points, tensor_users_map)
+        )
         scale_group_map = build_scale_group_map(
-            graph, quantized_activations, concat_elimination=config.concat_elimination
+            graph,
+            quantized_activations,
+            quantized_nodes=quantized_nodes,
+            concat_elimination=config.concat_elimination,
         )
         activation_scales = build_activation_scales(
             quantized_activations,
@@ -384,44 +451,12 @@ def insert_qdq_at_tensors(
             fp8=fp8_conversion,
         )
 
-    if tensor_users_map is None:
-        tensor_users_map = get_tensor_consumer_node_indices(graph)
-    logger.debug(
-        f"Built tensor maps: {len(tensor_map)} tensors, {len(tensor_users_map)} with users"
-    )
-
     default_dq_dtype = resolve_dtype(config.default_dq_dtype, np.float32, _DTYPE_MAP)
 
-    for insertion_point in resolved_insertion_points:
+    for insertion_point, original_tensor, target_node in targets:
         tensor_name = insertion_point.tensor_name
         node_index = insertion_point.node_index
         input_index = insertion_point.input_index
-
-        original_tensor = tensor_map[tensor_name]
-        if node_index is not None:
-            if node_index < 0 or node_index >= len(graph.nodes):
-                raise IndexError(
-                    f"Node index out of range: {node_index} (graph has {len(graph.nodes)} nodes)"
-                )
-            target_node = graph.nodes[node_index]
-            if input_index is None:
-                raise ValueError("Input index must be set when node index is set")
-            if input_index < 0 or input_index >= len(target_node.inputs):
-                raise IndexError(
-                    f"Input index out of range for node {target_node.name}: "
-                    f"{input_index} (node has {len(target_node.inputs)} inputs)"
-                )
-            original_tensor = target_node.inputs[input_index]
-            if tensor_name != original_tensor.name:
-                raise ValueError(
-                    f"Tensor name mismatch for node {target_node.name} input {input_index}: "
-                    f"expected {tensor_name!r}, got {original_tensor.name!r}"
-                )
-        else:
-            if tensor_name not in tensor_map:
-                raise KeyError(f"Tensor {tensor_name!r} not found in tensor map")
-            if input_index is not None:
-                raise ValueError("Input index must be None when node index is None")
 
         is_constant = isinstance(original_tensor, gs.Constant)
         output_shape, output_dtype = get_tensor_metadata(
@@ -447,7 +482,7 @@ def insert_qdq_at_tensors(
 
         graph.nodes.extend([q_node, dq_node])
 
-        if node_index is not None:
+        if target_node is not None:
             target_node.inputs[input_index] = dq_node.outputs[0]
             logger.debug(
                 f"  Q/DQ inserted: tensor '{tensor_name}' → node #{node_index} "
