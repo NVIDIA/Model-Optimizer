@@ -34,33 +34,23 @@ import os
 import pytest
 from _test_utils.examples.run_command import MODELOPT_ROOT, run_example_command
 
-DFLASH_YAML = str(
-    MODELOPT_ROOT / "modelopt_recipes" / "general" / "speculative_decoding" / "dflash.yaml"
-)
+DFLASH_YAML = str(MODELOPT_ROOT / "modelopt_recipes" / "models" / "Qwen3-0.6B" / "dflash.yaml")
 
 CHAT_TEMPLATE = str(
-    MODELOPT_ROOT
-    / "tools"
-    / "launcher"
-    / "examples"
-    / "Qwen"
-    / "Qwen3-0.6B"
-    / "chat_template_train.jinja"
+    MODELOPT_ROOT / "modelopt_recipes" / "models" / "Qwen3-0.6B" / "chat_template_train.jinja"
 )
 
 SYNTH_DATA = str(MODELOPT_ROOT / "examples" / "dataset" / "synthetic_conversations_1k.jsonl")
 
 # Match _DFLASH_OVERRIDES in test_dflash.py so the offline run is comparable to online.
+# Model-specific settings live in DFLASH_YAML; only env-/run-specific knobs go here.
+# logging_steps is overridden lower than the online test so the shorter offline run
+# still produces multiple log entries.
 _DFLASH_OVERRIDES = [
     f"data.chat_template={CHAT_TEMPLATE}",
-    "training.training_seq_len=512",
     "training.per_device_train_batch_size=2",
     "training.logging_steps=50",
-    "training.answer_only_loss=true",
-    "dflash.dflash_block_size=8",
-    "dflash.dflash_mask_token_id=151669",
     "dflash.dflash_use_torch_compile=False",
-    "dflash.dflash_architecture_config.num_hidden_layers=2",
 ]
 
 # Number of conversations to dump. Smaller than the full 1K to keep dump time

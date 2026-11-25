@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Per-model DFlash training recipe for Qwen3-8B.
+
+metadata:
+  recipe_type: speculative_dflash
+  description: DFlash training recipe for Qwen3-8B.
+
+# maps to ModelArguments (main.py)
+model:
+  model_name_or_path: Qwen/Qwen3-8B
+  trust_remote_code: false
+  use_fake_base_for_offline: false
+
+# maps to DataArguments (main.py)
+data:
+  data_path:
+  offline_data_path:
+
+# maps to TrainingArguments (main.py)
+training:
+  output_dir:
+  training_seq_len: 4096
+
+# maps to DFlashConfig (modelopt/torch/speculative/config.py).
+dflash:
+  dflash_block_size: 16
+  dflash_loss_decay_factor: 7.0  # paper Eq.4: gamma=7 pairs with block_size=16
+  dflash_mask_token_id: 151669   # Qwen3 tokenizer mask token
