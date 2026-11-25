@@ -17,6 +17,7 @@
 
 import json
 import math
+import random
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -103,6 +104,26 @@ def test_reduced_program_preserves_the_full_optimum(tmp_path, monkeypatch, seed)
         reduced["calibration_report"]["combined_tile_cost"]
         == full["calibration_report"]["combined_tile_cost"]
     )
+
+
+def test_objective_target_stops_one_solve_and_not_the_next():
+    pytest.importorskip("highspy")
+    rng = random.Random(1)
+    items = [pulp.LpVariable(f"x{index}", cat="Binary") for index in range(60)]
+    problem = pulp.LpProblem("cover", pulp.LpMinimize)
+    for row in range(180):
+        problem += pulp.lpSum(items[index] for index in rng.sample(range(60), 4)) >= 1 + row % 2
+    weights = [rng.randrange(10, 60) for _ in items]
+    cost = pulp.lpSum(weight * item for weight, item in zip(weights, items))
+    session = _SolverSession()
+    # Any cover meets this target, so the search stops at its first one, unproved.
+    problem._mask_reuse_objective_target = float(sum(weights))
+    with pytest.raises(MaskReuseSolverError, match="unresolved"):
+        session.minimize(problem, cost, "risk")
+    assert session.records[-1]["dual_bound"] < session.records[-1]["primal_bound"]
+    # The persistent native model must not keep the target for the next solve.
+    problem._mask_reuse_objective_target = None
+    assert session.minimize(problem, cost, "risk")
 
 
 def test_lazy_prompt_rows_preserve_the_eager_optimum(tmp_path, monkeypatch):

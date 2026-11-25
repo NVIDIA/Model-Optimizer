@@ -136,6 +136,8 @@ _MOST_WORK = "most_work"
 _PRICE_ROUNDS = 400
 _LAYOUT_PRICE_ROUNDS = 120
 _LAYOUT_SWEEPS = 4
+# Share of one solver stage spent searching for a starting policy near the bound.
+_DIVE_SHARE = 0.25
 
 
 def _prompt_risk_vector(values, count: int) -> Sequence[float]:
@@ -1139,7 +1141,8 @@ def _selection_pass(
         target_met: bool,
         keep=None,
         start_policy: _FrozenSelection | None = None,
-    ) -> _FrozenSelection | None:
+        objective_target: float | None = None,
+    ) -> bool:
         most_work = keep == _MOST_WORK
         keep = None if most_work else keep
         edge_rows: dict[tuple[int, int], _Edge] = {}
@@ -1153,8 +1156,17 @@ def _selection_pass(
                 row = edge(start, stop, targets)
                 if row is not None:
                     edge_rows[(start, stop)] = row
+        if keep is not None:
+            # A reduction that leaves no complete anchor path leaves no policy.
+            reached = {0}
+            for start, stop in sorted(edge_rows):
+                if start in reached:
+                    reached.add(stop)
+            if len(layers) not in reached:
+                return False
 
         problem = pulp.LpProblem("mask_reuse_topology", pulp.LpMinimize)
+        problem._mask_reuse_objective_target = objective_target
         edge_variables = {
             edge_key: pulp.LpVariable(
                 f"edge_{edge_key[0]}_{edge_key[1]}", lowBound=0, upBound=1, cat="Binary"
@@ -1814,13 +1826,14 @@ def _selection_pass(
         row = rows[values]
         remaining = session.config.time_limit_seconds - session.elapsed_seconds
         met = None
+        priced_bound = None
         if remaining <= 0:
             receipt: dict = {"status": "budget_exhausted", "finished": False}
         else:
             stage = session.stage(remaining / stages_left)
             targets = dict(zip(dataset.buckets, values, strict=True))
 
-            def solve(keep, stage=stage):
+            def solve(keep, stage=stage, objective_target=None):
                 return solve_path(
                     targets,
                     minimum_bmm1_skipped_tiles=None
@@ -1832,7 +1845,21 @@ def _selection_pass(
                     stage=stage,
                     keep=keep,
                     start_policy=None if keep in (None, _MOST_WORK) else observed,
+                    objective_target=objective_target,
                 )
+
+            def dive(keep, objective_target):
+                # A restricted program can only supply a better starting policy; its
+                # status and bounds say nothing about the full program.
+                part = session.stage(_DIVE_SHARE * remaining / stages_left)
+                try:
+                    solve(keep, part, objective_target)
+                except (MaskReuseSolverFailure, MaskReuseAllocationPause):
+                    raise
+                except MaskReuseSolverError:
+                    pass
+                finally:
+                    session.record_stage(part, False, targets=values, restricted=True)
 
             proof = None
             try:
@@ -1841,7 +1868,55 @@ def _selection_pass(
                 elif phase == "maximum_work":
                     met = solve(_MOST_WORK)
                 elif phase == "cost":
-                    met = solve(reduction(values, float(ceiling) * risk_scale))
+                    keep = reduction(values, float(ceiling) * risk_scale)
+                    limit = float(ceiling) * risk_scale
+                    limit += 4 * NATIVE_FEASIBILITY_TOLERANCE + 1e-12 * abs(limit)
+                    relaxed = keep and _PricedRelaxation(
+                        relaxation(values).tables, edge_allowed, donor_allowed, limit, keep
+                    )
+                    if relaxed and relaxed.connected():
+                        # Price the risk rows against the ceiling: the priced tile cost
+                        # bounds every policy within it, and shrinks the program again.
+                        prices = relaxed.maximize(
+                            tolerance=0.5, max_rounds=_PRICE_ROUNDS, expired=session_expired
+                        )
+                        priced_bound = prices.bound
+                        # Tiles that half the risk tolerance is worth at these prices.
+                        near = priced_bound + max(
+                            2.0,
+                            0.5
+                            * float(risk_tolerance)
+                            * risk_scale
+                            * float(sum(map(np.sum, prices.weights))),
+                        )
+                        inside = relaxed.reduce(prices, near)
+                        if observed is not None and observed.combined_tile_cost > near:
+                            # Context buckets meet only in the anchor layout. A bucket
+                            # already at the ceiling has little cost left to save and
+                            # makes every cheaper policy hard to find, so on the verified
+                            # layout it keeps its verified choices while the others move.
+                            used, peaks = policy_variables(values, observed)
+                            free = [
+                                peak + float(risk_tolerance) * risk_scale <= limit for peak in peaks
+                            ]
+                            if any(free) and not all(free):
+                                inside = freeing(
+                                    _Reduction(
+                                        used.edges,
+                                        used.pairs,
+                                        tuple(a | b for a, b in zip(inside.donors, used.donors)),
+                                        tuple(
+                                            a | b for a, b in zip(inside.fallbacks, used.fallbacks)
+                                        ),
+                                    ),
+                                    used,
+                                    free,
+                                )
+                        if observed is None or observed.combined_tile_cost > near:
+                            dive(inside, near)
+                        if observed is not None:
+                            keep = relaxed.reduce(prices, observed.combined_tile_cost + 0.5)
+                    met = solve(keep)
                 else:
                     if observed is None:
                         # No verified policy sizes the program yet: settle whether the
@@ -1858,21 +1933,34 @@ def _selection_pass(
                         if met is False:
                             proof = probed
                     if observed is not None or met is not False:
-                        met = solve(
-                            None
-                            if observed is None
-                            else reduction(
-                                values, float(observed.risk_objective) * risk_scale, observed
+                        near = math.inf
+                        if values in priced:
+                            near = priced[values].bound + 0.5 * float(risk_tolerance) * risk_scale
+
+                        def risk():
+                            return (
+                                math.inf
+                                if observed is None
+                                else float(observed.risk_objective) * risk_scale
                             )
+
+                        if near < risk() < math.inf:
+                            # A policy close to the bound usually exists among the
+                            # options priced within the tolerance of it.
+                            dive(reduction(values, near, observed), near)
+                        met = solve(
+                            None if observed is None else reduction(values, risk(), observed)
                         )
             except (MaskReuseSolverFailure, MaskReuseAllocationPause):
                 raise
             except MaskReuseSolverError:
                 met = None
             receipt = proof or session.record_stage(stage, met is True, targets=values)
-        # The priced bound holds for the full program; keep the tighter of the two.
+        # The priced bounds hold for the full program; keep the tighter of each pair.
         if phase == "risk" and values in priced:
-            receipt["dual_bound"] = max(receipt.get("dual_bound", -math.inf), priced[values].bound)
+            priced_bound = priced[values].bound
+        if priced_bound is not None:
+            receipt["dual_bound"] = max(receipt.get("dual_bound", -math.inf), priced_bound)
         row[phase] = receipt
         if phase == "risk" and met is False and observed is None:
             row["feasible"] = row["target_bmm1_skip_ratio_feasible"] = False

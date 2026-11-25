@@ -388,6 +388,14 @@ class _PersistentHiGHS(_BatchHiGHS):
                 problem.solverModel.setOptionValue("time_limit", limit),
                 "time limit",
             )
+        # A search for a starting policy may stop at the first one that is good enough.
+        target = getattr(problem, "_mask_reuse_objective_target", None)
+        self._check(
+            problem.solverModel.setOptionValue(
+                "objective_target", -math.inf if target is None else target
+            ),
+            "objective target",
+        )
         pulp.HiGHS.callSolver(self, problem)
         if problem.solverModel.getModelStatus().name.endswith("Error"):
             raise pulp.PulpSolverError("HiGHS persistent solve failed")
