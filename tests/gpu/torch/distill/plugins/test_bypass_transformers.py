@@ -65,6 +65,60 @@ def native_cp_models():
     return teacher, adapter
 
 
+def test_native_cp_reuses_owners_with_live_quantizers(native_cp_models, monkeypatch):
+    teacher, adapter = native_cp_models
+    batch = {"input_ids": torch.tensor([[1, 2, 3, 4]])}
+    adapter._cp_inputs(teacher, batch)
+    student = adapter.student
+    register_hf_attentions_on_the_fly(student)
+    attention = QuantModuleRegistry.convert(student.model.layers[0].self_attn)
+    for name in ("q", "k", "v", "p"):
+        getattr(attention, f"{name}_bmm_quantizer").disable()
+    attention.add_module(
+        "future_activation", TensorQuantizer(QuantizerAttributeConfig(type="dynamic", enable=False))
+    )
+    probability = attention.p_bmm_quantizer
+    probability.num_bits = (4, 3)
+    probability.block_sizes = None
+    probability.amax = torch.tensor(3.0)
+    scans = []
+
+    def observe(model):
+        original = model.named_modules
+
+        def named_modules(*args, **kwargs):
+            scans.append(model)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(model, "named_modules", named_modules)
+
+    for model in (teacher, student):
+        observe(model)
+    for quantizer in (attention.future_activation, probability):
+        for enabled in (False, True, False):
+            quantizer.enable() if enabled else quantizer.disable()
+            for length in (3, 4):
+                document = {"input_ids": batch["input_ids"][:, :length]}
+                if enabled:
+                    with pytest.raises(ValueError):
+                        adapter._cp_inputs(teacher, document)
+                else:
+                    tokens, _ = adapter._cp_inputs(teacher, document)
+                    torch.testing.assert_close(tokens, document["input_ids"])
+    assert not scans
+
+
+@pytest.mark.parametrize("missing", ["one", "all"])
+def test_native_cp_requires_declared_decoder_attentions(native_cp_models, missing):
+    teacher, adapter = native_cp_models
+    if missing == "all":
+        teacher.model.layers = nn.ModuleList()
+    else:
+        del teacher.model.layers[0].self_attn
+    with pytest.raises(ValueError, match="self_attn"):
+        adapter._cp_inputs(teacher, {"input_ids": torch.tensor([[1, 2, 3]])})
+
+
 @pytest.mark.parametrize("validity", ["default", "all", "partial", "zero", "override"])
 def test_native_cp_preserves_effective_loss_validity(native_cp_models, validity):
     teacher, adapter = native_cp_models
