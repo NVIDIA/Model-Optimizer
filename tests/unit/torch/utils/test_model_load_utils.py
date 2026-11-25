@@ -31,6 +31,7 @@ import json
 import math
 import os
 import sys
+import threading
 import warnings
 from contextlib import ExitStack, contextmanager, nullcontext
 from types import SimpleNamespace
@@ -91,6 +92,7 @@ from transformers.core_model_loading import (
     Concatenate,
     MergeModulelist,
     WeightConverter,
+    WeightRenaming,
     WeightTransform,
 )
 from transformers.distributed import DistributedConfig
@@ -118,6 +120,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _ep_aware_caching_allocator_warmup,
     _ep_dense_meta_load,
     _experts_sharded_over,
+    _flagging_used_conversions,
     _fsdp2_shard_dense,
     _load_ep_dense_distributed,
     _make_expert_param_matcher,
@@ -392,17 +395,32 @@ def _as_on_transformers_5_5(monkeypatch):
 def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monkeypatch, loader):
     """Without ``was_used`` (5.5) the load still records only the conversions it matched a key with.
 
-    The head is tied, so the checkpoint has no ``language_model.lm_head`` and that rename never
-    runs; recorded anyway, it renames ``lm_head`` in the export (to ``language_model.model.lm_head``
-    for Gemma3). The renames the load did run keep the names every conversion gives.
+    The head is tied, so the checkpoint has no ``language_model.lm_head.weight`` and that rename
+    never runs; recorded anyway, it renames ``lm_head`` in the export (to
+    ``language_model.model.lm_head`` for Gemma3). The renames the load did run keep the names every
+    conversion gives. FSDP2 also meets a ``language_model.lm_head`` key with no parameter, which it
+    only carries over; the whole-model load reads a projector weight its index leaves out.
     """
     ref = _tiny_llava_checkpoint(tmp_path, drop=("lm_head.",), tie=True)
     auto_class = _as_on_transformers_5_5(monkeypatch)
+    state = load_file(str(tmp_path / "model.safetensors"))
     if loader == "fsdp2":
         request.getfixturevalue("gloo_group")
+        save_file(
+            {**state, "language_model.lm_head.bias": torch.zeros(64)},
+            str(tmp_path / "model.safetensors"),
+        )
         model = _fsdp2_load(tmp_path)
+        assert "language_model.lm_head.bias" in model._modelopt_unplaced_source_keys
     else:
+        shard = "model-00001-of-00001.safetensors"
+        (tmp_path / "model.safetensors").rename(tmp_path / shard)
+        off_index = "multi_modal_projector.linear_1.weight"
+        index = {"metadata": {}, "weight_map": {k: shard for k in state if k != off_index}}
+        (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
         model = load_pretrained(str(tmp_path), auto_class)
+        projector = model.model.multi_modal_projector.linear_1.weight
+        assert torch.equal(projector, ref.model.multi_modal_projector.linear_1.weight)
 
     to_source = build_reverse_name_mapper(model)
     recorded, model._weight_conversions = (
@@ -415,6 +433,32 @@ def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monke
     assert every("lm_head") != "lm_head"
     for name in ("model.multi_modal_projector.linear_1", "model.language_model.layers.0.mlp"):
         assert to_source(name) == every(name)
+
+
+def test_overlapping_loads_each_record_their_matches(monkeypatch):
+    """The matching hook is process-wide: a load that ends first must not unhook one still running."""
+    monkeypatch.delattr(WeightTransform, "was_used", raising=False)
+    stock = vars(WeightTransform)["rename_source_key"]
+    rename_a, rename_b = (WeightRenaming(f"^{p}\\.", "x.") for p in ("a", "b"))
+    b_entered, a_exited, b_matched = threading.Event(), threading.Event(), []
+
+    def load_b():
+        with _flagging_used_conversions() as matched:
+            b_entered.set()
+            a_exited.wait(5)
+            rename_b.rename_source_key("b.w")
+        b_matched.append(matched)
+
+    with _flagging_used_conversions() as a_matched:
+        other = threading.Thread(target=load_b)
+        other.start()
+        b_entered.wait(0.2)  # B waits for A; unserialized, it would be inside by now
+        rename_a.rename_source_key("a.w")
+    a_exited.set()
+    other.join(10)
+    assert a_matched == {id(rename_a)}
+    assert b_matched == [{id(rename_b)}]
+    assert vars(WeightTransform)["rename_source_key"] is stock
 
 
 def test_unsourced_parameter_raises(tmp_path, gloo_group):

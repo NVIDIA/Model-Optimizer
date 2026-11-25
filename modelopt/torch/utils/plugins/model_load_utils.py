@@ -25,6 +25,7 @@ import math
 import os
 import re
 import sys
+import threading
 import warnings
 from collections import defaultdict
 from contextlib import contextmanager
@@ -238,48 +239,54 @@ def _resolve_target(plan: dict, key: str) -> tuple[str, str | None]:
     )
 
 
+# The hook below is installed on Transformers' classes, so process-wide: blocks that overlap in
+# time take turns, or one restoring the methods would drop the hook another still counts on.
+_CONVERSION_HOOK_LOCK = threading.RLock()
+
+
 @contextmanager
-def _flagging_used_conversions():
-    """Flag each conversion as the load matches a key with it, as ``was_used`` does.
+def _flagging_used_conversions(defer_to_was_used: bool = True):
+    """Flag each conversion as a key in the block is matched with it, as ``was_used`` does.
 
     Transformers keeps the record of a load's conversions to those some key matched
     (``was_used``), and the export reverts that record. One without ``was_used`` (5.5) keeps every
     conversion, and the export then reverts renames no key took: Gemma3's tied ``lm_head``, which
     its checkpoint has no tensor for, comes out as ``language_model.model.lm_head``. There the flag
-    is set here, where Transformers matches each key the load reads, so the load's own matching
-    decides it, whatever files and keys it read.
+    is set here, where Transformers matches each key, so the load's own matching decides it,
+    whatever files and keys it read.
 
     Yields the ids of the conversions matched in the block, or ``None`` when Transformers keeps
-    ``was_used`` itself; :func:`_used_conversions` reads either.
+    ``was_used`` itself and ``defer_to_was_used``; :func:`_used_conversions` reads either.
     """
-    if callable(getattr(WeightTransform, "was_used", None)):
+    if defer_to_was_used and callable(getattr(WeightTransform, "was_used", None)):
         yield None
         return
-    matched: set[int] = set()
-    classes, pending = [], [WeightTransform]
-    while pending:
-        cls = pending.pop()
-        pending.extend(cls.__subclasses__())
-        if "rename_source_key" in vars(cls):
-            classes.append(cls)
+    with _CONVERSION_HOOK_LOCK:
+        matched: set[int] = set()
+        classes, pending = [], [WeightTransform]
+        while pending:
+            cls = pending.pop()
+            pending.extend(cls.__subclasses__())
+            if "rename_source_key" in vars(cls):
+                classes.append(cls)
 
-    def flagging(rename):
-        def rename_source_key(self, source_key):
-            renamed, source_pattern = rename(self, source_key)
-            if source_pattern is not None:
-                matched.add(id(self))
-            return renamed, source_pattern
+        def flagging(rename):
+            def rename_source_key(self, source_key):
+                renamed, source_pattern = rename(self, source_key)
+                if source_pattern is not None:
+                    matched.add(id(self))
+                return renamed, source_pattern
 
-        return rename_source_key
+            return rename_source_key
 
-    originals = {cls: vars(cls)["rename_source_key"] for cls in classes}
-    try:
-        for cls, rename in originals.items():
-            cls.rename_source_key = flagging(rename)
-        yield matched
-    finally:
-        for cls, rename in originals.items():
-            cls.rename_source_key = rename
+        originals = {cls: vars(cls)["rename_source_key"] for cls in classes}
+        try:
+            for cls, rename in originals.items():
+                cls.rename_source_key = flagging(rename)
+            yield matched
+        finally:
+            for cls, rename in originals.items():
+                cls.rename_source_key = rename
 
 
 def _used_conversions(conversions: list, matched: set[int] | None) -> list:
@@ -1655,13 +1662,12 @@ def parallel_load_and_prepare_fsdp2(
     # non_layer_sources). Every tensor in the files the index names, not only the ones it lists, so
     # the unplaced ones fall out of this same pass. A model built from its config ran no
     # conversions of its own, so the stock plan is the only one.
-    with _flagging_used_conversions() as matched:
-        layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
-            checkpoint_tensor_files(resolved_path),
-            [plan] if plan else [],
-            model_param_names,
-            layer_prefixes,
-        )
+    layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
+        checkpoint_tensor_files(resolved_path),
+        [plan] if plan else [],
+        model_param_names,
+        layer_prefixes,
+    )
     if unplaced:
         logger.debug(
             "%d checkpoint keys have no parameter in the built model (e.g. an MTP head); "
@@ -1673,8 +1679,15 @@ def parallel_load_and_prepare_fsdp2(
     # memory this loader exists to save.
     record_unplaced_source_keys(model, resolved_path, unplaced)
     # What from_pretrained records: the conversions some checkpoint key used. The export reverts
-    # these and would otherwise query the wrapped class, which has lost them.
-    model._weight_conversions = _used_conversions(plan["conversions"] if plan else [], matched)
+    # these and would otherwise query the wrapped class, which has lost them. Only the keys placed
+    # above are read and converted; one with no parameter is carried over unconverted, so a rename
+    # only it matches must not rename the export.
+    model._weight_conversions = []
+    if plan:
+        with _flagging_used_conversions(defer_to_was_used=False) as matched:
+            for key in chain(non_layer_sources, *layer_sources.values()):
+                _resolve_target(plan, key)
+        model._weight_conversions = _used_conversions(plan["conversions"], matched)
     _check_every_param_sourced(model, sourced_targets)
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
