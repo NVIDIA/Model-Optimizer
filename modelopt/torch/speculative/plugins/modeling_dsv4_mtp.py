@@ -34,7 +34,11 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4RotaryEmbedding,
 )
 
-from modelopt.torch.quantization.qtensor import FP8QTensor, MXFP4QTensor
+from modelopt.torch.export.shard_cast_utils import (
+    dequantize_fp8_ue8m0_to_bf16,
+    quantize_bf16_to_fp8_ue8m0,
+)
+from modelopt.torch.quantization.qtensor import MXFP4QTensor
 from modelopt.torch.quantization.utils import replace_function
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import indexed_weight_map
 
@@ -434,10 +438,7 @@ class DeepSeekV4MTPAdapter(NativeMTPAdapter):
             weight = weight.to(target.device)
             scale = scale[:].to(target.device).contiguous()
             if weight.dtype == torch.float8_e4m3fn:
-                weight = FP8QTensor(target.shape, target.dtype, weight).dequantize(
-                    scale=scale.view(torch.float8_e8m0fnu),
-                    block_sizes={-2: 128, -1: 128},
-                )
+                weight = dequantize_fp8_ue8m0_to_bf16(weight, scale)
             else:
                 weight = MXFP4QTensor(
                     target.shape, target.dtype, weight.contiguous().view(torch.uint8)
@@ -463,10 +464,7 @@ class DeepSeekV4MTPAdapter(NativeMTPAdapter):
                         {"BF16": torch.bfloat16, "F32": torch.float32, "F16": torch.float16}[fmt]
                     )
                 elif fmt == "F8_E4M3":
-                    quantized, scale = FP8QTensor.quantize(
-                        value, block_sizes={-2: 128, -1: 128}, scale_dtype=torch.float8_e8m0fnu
-                    )
-                    encoded = quantized._quantized_data
+                    encoded, scale = quantize_bf16_to_fp8_ue8m0(value)
                 else:
                     quantized, scale = MXFP4QTensor.quantize(value, block_size=32)
                     encoded = quantized._quantized_data.view(

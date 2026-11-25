@@ -30,7 +30,7 @@ from modelopt.torch.speculative.plugins.modeling_dsv4_mtp import DeepSeekV4MTPAd
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import indexed_weight_map
 
 
-def _write_native(path, *, tied=False, sharded=True):
+def _write_native(path, *, tied=False, sharded=True, scale_dtype=torch.float8_e8m0fnu):
     config = {
         "model_type": "deepseek_v4",
         "num_hidden_layers": 1,
@@ -109,14 +109,14 @@ def _write_native(path, *, tied=False, sharded=True):
             native[key] = packed.view(torch.int8)
             native[key.removesuffix(".weight") + ".scale"] = torch.full(
                 (shape[0], shape[1] // 32), 120, dtype=torch.uint8
-            ).view(torch.float8_e8m0fnu)
+            ).view(scale_dtype)
         elif len(shape) == 2 and not suffix.startswith("hc_") and suffix != "ffn.gate.weight":
             codes = torch.randint(-16, 17, shape, generator=gen).float().to(torch.float8_e4m3fn)
             value = (codes.float() / 128).bfloat16()
             native[key] = codes
             native[key.removesuffix(".weight") + ".scale"] = torch.full(
                 ((shape[0] + 127) // 128, (shape[1] + 127) // 128), 120, dtype=torch.uint8
-            ).view(torch.float8_e8m0fnu)
+            ).view(scale_dtype)
         else:
             value = torch.randn(shape, generator=gen) * 0.01
             if "norm.weight" in suffix or suffix.endswith("_scale"):
@@ -153,8 +153,9 @@ def _write_native(path, *, tied=False, sharded=True):
 
 
 @pytest.mark.parametrize(("tied", "sharded"), [(False, True), (True, False)])
-def test_native_load_maps_weights_and_freezes_target(tmp_path, tied, sharded):
-    expected = _write_native(tmp_path, tied=tied, sharded=sharded)
+@pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
+def test_native_load_maps_weights_and_freezes_target(tmp_path, tied, sharded, scale_dtype):
+    expected = _write_native(tmp_path, tied=tied, sharded=sharded, scale_dtype=scale_dtype)
     model = create_native_mtp_boost_model(tmp_path)
     mtp = model.eagle_module
     assert model.mtp_config.mtp_adapter == "deepseek_v4"
@@ -276,10 +277,11 @@ def test_invalid_native_checkpoint_fails_before_loading(tmp_path, corruption):
 
 
 @pytest.mark.parametrize("sharded", [True, False])
-def test_native_export_reloads_trained_mtp_without_backbone(tmp_path, sharded):
+@pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
+def test_native_export_reloads_trained_mtp_without_backbone(tmp_path, sharded, scale_dtype):
     source = tmp_path / "native"
     source.mkdir()
-    _write_native(source, tied=not sharded, sharded=sharded)
+    _write_native(source, tied=not sharded, sharded=sharded, scale_dtype=scale_dtype)
     model = create_native_mtp_boost_model(source, mtp_use_torch_compile=False)
     if sharded:
         # FSDP2 saves trainable master weights in FP32 and keeps frozen state in BF16.
@@ -308,7 +310,11 @@ def test_native_export_reloads_trained_mtp_without_backbone(tmp_path, sharded):
     keys = []
     for shard in output.glob("*.safetensors"):
         with safe_open(shard, framework="pt") as handle:
-            keys.extend(handle.keys())
+            shard_keys = handle.keys()
+            keys.extend(shard_keys)
+            for key in shard_keys:
+                if key.endswith(".scale"):
+                    assert handle.get_tensor(key).dtype == scale_dtype
     weight_map = indexed_weight_map(output)
     scale_key = "mtp.0.hc_head_scale"
     with safe_open(output / weight_map[scale_key], framework="pt") as handle:
