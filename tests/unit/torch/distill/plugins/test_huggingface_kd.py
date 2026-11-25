@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
 
@@ -264,3 +265,28 @@ def test_kd_loss_ddp_scaling(tmp_path):
     # the KD loss by (num_items * 2) and multiplying by world_size (2) should
     # perfectly match the single-rank calculation.
     assert loss_ddp.item() == pytest.approx(loss_single.item())
+
+
+def test_liger_blend_scales_ce_by_world_size_as_the_kd_term_is(tmp_path):
+    """With Liger the CE term is the fused loss called directly, which skips the parent's scaling by
+    the world size, while the KD term is scaled: CE needs the same factor to keep the blend's ratio."""
+    student, teacher = _make_models()
+    batch = _make_batch()
+    # kd as _liger_kd_loss returns it, with the world size applied.
+    ce, kd = torch.tensor(2.0), torch.tensor(8.0)
+    with patch(
+        "transformers.TrainingArguments.world_size", new_callable=PropertyMock
+    ) as mock_world_size:
+        mock_world_size.return_value = 2
+        trainer = _make_trainer(tmp_path, student, teacher, kd_loss_alpha=0.5)
+        trainer.args.average_tokens_across_devices = True
+        trainer.use_liger_kernel = True
+        trainer._liger_identity_lm_head = nullcontext
+        trainer._teacher_liger_identity_lm_head = nullcontext
+        trainer._liger_loss_func = lambda outputs, labels, **kwargs: ce
+        trainer._liger_kd_loss = lambda outputs, labels, **kwargs: kd
+        trainer.model.train()
+
+        loss = trainer.compute_loss(trainer.model, batch.copy(), num_items_in_batch=8)
+
+    assert loss.item() == pytest.approx(0.5 * kd.item() + 0.5 * ce.item() * 2)
