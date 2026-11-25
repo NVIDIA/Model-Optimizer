@@ -17,6 +17,7 @@
 
 import copy
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -133,13 +134,35 @@ def test_nvfp4_awq_clip_picks_the_same_clip_on_every_rank(need_2_gpus, dist_work
     dist_workers.run(_nvfp4_awq_clip_on_every_rank_job)
 
 
-def test_nvfp4_svdquant_fused_groups_export_as_calibrated(tmp_path):
+@pytest.mark.parametrize("family", ["llm", "diffusion"])
+def test_nvfp4_svdquant_fused_groups_export_as_calibrated(tmp_path, family):
     """With ``fused_group_scale`` and ``fused_group_svd``, the HF checkpoint holds the calibrated
-    model: export, which finds q/k/v and gate/up by its own dummy forward, keeps their shared
-    low-rank branch, smoothing scale and ranges as calibrated."""
+    model: export, which finds q/k/v and gate/up (a diffusion model's Q/K/V per attention block) by
+    its own dummy forward, keeps their shared low-rank branch, smoothing scale and ranges as
+    calibrated."""
     torch.manual_seed(0)
-    model = get_tiny_qwen3().cuda()
-    input_ids = torch.randint(0, model.config.vocab_size, (2, 16), device="cuda")
+    if family == "llm":
+        model = get_tiny_qwen3().cuda()
+        inputs = {"input_ids": torch.randint(0, model.config.vocab_size, (2, 16), device="cuda")}
+        groups = [
+            group
+            for layer in model.model.layers
+            for group in (
+                [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj],
+                [layer.mlp.gate_proj, layer.mlp.up_proj],
+            )
+        ]
+        lora = "weight_quantizer._svdquant_lora"  # the diffusers path saves it as svdquant_lora
+    else:
+        pytest.importorskip("diffusers")
+        from _test_utils.torch.diffusers_models import get_tiny_dit
+
+        from modelopt.torch.export.diffusers_utils import generate_diffusion_dummy_inputs
+
+        model = get_tiny_dit().cuda()
+        inputs = generate_diffusion_dummy_inputs(model, torch.device("cuda"), torch.float32)
+        groups = [[b.attn1.to_q, b.attn1.to_k, b.attn1.to_v] for b in model.transformer_blocks]
+        lora = "svdquant_lora"
     config = copy.deepcopy(mtq.NVFP4_SVDQUANT_DEFAULT_CFG)
     config["algorithm"] = {
         "method": "svdquant",
@@ -147,17 +170,15 @@ def test_nvfp4_svdquant_fused_groups_export_as_calibrated(tmp_path):
         "fused_group_scale": True,
         "fused_group_svd": True,
     }
-    model = mtq.quantize(model, config, lambda m: m(input_ids))
-    for layer in model.model.layers:
-        attn, mlp = layer.self_attn, layer.mlp
-        for group in ([attn.q_proj, attn.k_proj, attn.v_proj], [mlp.gate_proj, mlp.up_proj]):
-            lora_a = group[0].weight_quantizer.svdquant_lora_a
-            assert all(torch.equal(m.weight_quantizer.svdquant_lora_a, lora_a) for m in group)
+    model = mtq.quantize(model, config, lambda m: m(**inputs))
+    for group in groups:
+        lora_a = group[0].weight_quantizer.svdquant_lora_a
+        assert all(torch.equal(m.weight_quantizer.svdquant_lora_a, lora_a) for m in group)
 
     calibrated = {
         name: {
-            "weight_quantizer._svdquant_lora_a": m.weight_quantizer.svdquant_lora_a.cpu(),
-            "weight_quantizer._svdquant_lora_b": m.weight_quantizer.svdquant_lora_b.cpu(),
+            f"{lora}_a": m.weight_quantizer.svdquant_lora_a.cpu(),
+            f"{lora}_b": m.weight_quantizer.svdquant_lora_b.cpu(),
             "pre_quant_scale": m.input_quantizer.pre_quant_scale.cpu(),
             # NVFP4 stores each per-tensor range as amax / (6 * 448), E2M1's max times E4M3's.
             "input_scale": m.input_quantizer.amax.float().cpu() / 2688,
@@ -168,7 +189,7 @@ def test_nvfp4_svdquant_fused_groups_export_as_calibrated(tmp_path):
     }
     export_hf_checkpoint(model, export_dir=tmp_path)
     saved = {}
-    for path in tmp_path.glob("*.safetensors"):
+    for path in tmp_path.rglob("*.safetensors"):
         saved.update(load_file(path))
     for name, tensors in calibrated.items():
         for key, value in tensors.items():

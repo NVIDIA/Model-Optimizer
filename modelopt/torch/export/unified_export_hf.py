@@ -488,7 +488,7 @@ def _fuse_shared_input_modules(
         fused_count += 1
 
         # Fuse layernorms (for AWQ)
-        group_quant_format = get_quantization_format(modules[0])
+        group_quant_format = get_quantization_format(modules[0]) if modules else quantization_format
         if (
             fuse_layernorms
             and can_fuse_layernorm

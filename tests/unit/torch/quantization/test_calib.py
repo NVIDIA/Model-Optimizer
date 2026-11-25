@@ -618,6 +618,46 @@ def test_svd_matches_full_svd(shape, rank, autocast, scale, lead):
     torch.testing.assert_close(vt[:k] @ vt[:k].T, torch.eye(k), atol=1e-5, rtol=0)
 
 
+@pytest.mark.parametrize(
+    "enable_tf32",
+    [
+        lambda: setattr(torch.backends.cuda.matmul, "allow_tf32", True),
+        lambda: torch.set_float32_matmul_precision("high"),
+        lambda: setattr(torch.backends.cuda.matmul, "fp32_precision", "tf32"),
+    ],
+    ids=["allow_tf32", "float32_matmul_precision", "fp32_precision"],
+)
+def test_svd_turns_tf32_off_through_either_api(monkeypatch, enable_tf32):
+    """The fast path turns TF32 off however the caller turned it on, so that what reads the legacy
+    settings in between, such as TunableOp, still can, and the caller's settings come back."""
+    matmul, onednn = torch.backends.cuda.matmul, torch.backends.mkldnn.matmul
+
+    def settings():
+        try:
+            legacy = (matmul.allow_tf32, torch.get_float32_matmul_precision())
+        except RuntimeError:  # refused when the per-backend setting disagrees with them
+            legacy = None
+        return legacy, matmul.fp32_precision, onednn.fp32_precision
+
+    seen, eigh = [], torch.linalg.eigh
+
+    def eigh_reading_legacy_settings(gram):
+        seen.append((matmul.allow_tf32, matmul.fp32_precision))
+        return eigh(gram)
+
+    monkeypatch.setattr(torch.linalg, "eigh", eigh_reading_legacy_settings)
+    default = (torch.get_float32_matmul_precision(), matmul.fp32_precision, onednn.fp32_precision)
+    enable_tf32()
+    before = settings()
+    try:
+        svd(torch.randn(128, 48), 4)
+        assert seen == [(False, "ieee")]
+        assert settings() == before
+    finally:
+        torch.set_float32_matmul_precision(default[0])
+        matmul.fp32_precision, onednn.fp32_precision = default[1:]
+
+
 def test_svdquant_fused_group_svd():
     """Each group export fuses shares its lora_a and amax. That export then leaves an NVFP4
     model unchanged is tested in ``tests/gpu/torch/quantization/test_calib_cuda.py``."""
@@ -647,22 +687,42 @@ def test_svdquant_fused_group_svd():
                     getattr(m.input_quantizer, attr), getattr(first.input_quantizer, attr)
                 )
 
-    # A group whose members differ in format, here with one input quantizer disabled, keeps its
-    # per-layer scales and low-rank branches; export cannot fuse it either.
-    mixed = copy.deepcopy(config)
-    mixed["quant_cfg"] = [
-        *mixed["quant_cfg"],
+    # A group whose members differ in format or range layout keeps its per-layer scales and
+    # low-rank branches; export cannot stack its ranges either.
+    for k_differs in (
         {"quantizer_name": "*k.input_quantizer", "enable": False},
-    ]
-    model = mtq.quantize(_SharedInputLLM(), mixed, partial(forward_loop, dataloader=[inputs]))
-    assert not torch.equal(
-        model.q.weight_quantizer.svdquant_lora_a, model.v.weight_quantizer.svdquant_lora_a
-    )
-    la = model.layer.linear_attn
-    assert torch.equal(
-        la.in_proj_qkv.weight_quantizer.svdquant_lora_a,
-        la.in_proj_z.weight_quantizer.svdquant_lora_a,
-    )
+        {"quantizer_name": "*k.input_quantizer", "cfg": {"num_bits": 8, "type": "dynamic"}},
+        {"quantizer_name": "*k.weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+    ):
+        mixed = copy.deepcopy(config)
+        mixed["quant_cfg"] = [*mixed["quant_cfg"], k_differs]
+        model = mtq.quantize(_SharedInputLLM(), mixed, partial(forward_loop, dataloader=[inputs]))
+        assert not torch.equal(
+            model.q.weight_quantizer.svdquant_lora_a, model.v.weight_quantizer.svdquant_lora_a
+        )
+        la = model.layer.linear_attn
+        assert torch.equal(
+            la.in_proj_qkv.weight_quantizer.svdquant_lora_a,
+            la.in_proj_z.weight_quantizer.svdquant_lora_a,
+        )
+
+    # Where export could not tell a format or fuse a group, here formats differing within the QKVZ
+    # group and an INT4 per-channel weight, every layer keeps its own scale; calibration goes on.
+    for unexportable in (
+        {
+            "quantizer_name": "*in_proj_z.weight_quantizer",
+            "cfg": {"num_bits": 4, "block_sizes": {-1: 16}},
+        },
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+    ):
+        per_layer = copy.deepcopy(config)
+        per_layer["quant_cfg"] = [*per_layer["quant_cfg"], unexportable]
+        model = mtq.quantize(
+            _SharedInputLLM(), per_layer, partial(forward_loop, dataloader=[inputs])
+        )
+        assert not torch.equal(
+            model.q.weight_quantizer.svdquant_lora_a, model.v.weight_quantizer.svdquant_lora_a
+        )
 
     # fused_group_svd without fused_group_scale is refused before the model changes.
     model = _SharedInputLLM()
@@ -692,6 +752,14 @@ def test_svdquant_fused_group_scale_needs_one_forward():
         model(inputs, "r")
 
     _svdquant_fused_group_scale_case(_TwoBranches(), loop, groups={}, kept=["p", "r"])
+
+    def forward_method_loop(model):  # forward hooks, which mark where a forward ends, do not run
+        model.forward(inputs, "p")
+        model.forward(inputs, "r")
+
+    _svdquant_fused_group_scale_case(
+        _TwoBranches(), forward_method_loop, groups={}, kept=["p", "r"]
+    )
 
 
 def _svdquant_fused_group_scale_in_a_distributed_run_job(rank, size):
@@ -758,6 +826,18 @@ def test_svdquant_fused_group_scale_diffusers():
 
     _svdquant_fused_group_scale_case(_Transformer(), pipeline_loop, groups, kept)
 
+    # LTX-2's models are not diffusers models, but export fuses their Q/K/V per block too.
+    class _LTXModel(nn.Module):
+        __module__ = "ltx_core.model.transformer.model"
+
+        def __init__(self):
+            super().__init__()
+            self.blocks = nn.ModuleList(_CrossAttnBlock() for _ in range(2))
+
+        forward = _Transformer.forward
+
+    _svdquant_fused_group_scale_case(_LTXModel(), loop, groups, kept)
+
     # A wrapper of both backbones is not a diffusers object: calibration would group its linears
     # by the LLM rule, across backbones and blocks, so it is refused before the model changes.
     class _Pipeline(nn.Module):
@@ -771,7 +851,7 @@ def test_svdquant_fused_group_scale_diffusers():
     pipeline = _Pipeline()
     config = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
     config["algorithm"] = {"method": "svdquant", "fused_group_scale": True}
-    with pytest.raises(NotImplementedError, match="wraps diffusers components"):
+    with pytest.raises(NotImplementedError, match="wraps diffusion components"):
         mtq.quantize(pipeline, config, lambda m: m(x, context))
     assert not is_quantized(pipeline)
 

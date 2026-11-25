@@ -134,14 +134,12 @@ def _refuse_unsupported_fused_svdquant(model: nn.Module, algorithm: QuantizeAlgo
                 "processes: each would pick its own smoothing scales and fused groups. Calibrate "
                 "in a single process, or without fused_group_scale."
             )
-        # Imported here: modelopt.torch.export imports this package.
-        from modelopt.torch.export.diffusers_utils import is_diffusers_object
-
-        if not is_diffusers_object(model) and any(map(is_diffusers_object, model.modules())):
-            # Export fuses each diffusers component's Q/K/V per attention block, but calibration
+        per_block = model_calib._exports_qkv_per_block
+        if not per_block(model) and any(map(per_block, model.modules())):
+            # Export fuses each diffusion component's Q/K/V per attention block, but calibration
             # would group a wrapper's linears by the LLM rule, across its components' blocks.
             raise NotImplementedError(
-                "SVDQuant's fused_group_scale does not support a model that wraps diffusers "
+                "SVDQuant's fused_group_scale does not support a model that wraps diffusion "
                 "components. Quantize each component by itself, as examples/diffusers does."
             )
 
@@ -220,9 +218,9 @@ def _refuse_awq_on_a_sharded_fsdp2_model(
         what = f"AutoQuantize candidate {candidate!r} calibrates" if candidate else "Calibrating"
         raise NotImplementedError(
             f"{what} with {', '.join(awq)}, which is not supported yet on an FSDP2 model sharded "
-            f"over {ranks} ranks: each rank calibrates on its own data and folds the AWQ scale it "
+            f"over {ranks} ranks: each rank calibrates on its own data and folds the smoothing scale it "
             "picks into its own weight shard, so the shards would not match. Calibrate in a single "
-            "process, or with an algorithm other than AWQ."
+            "process, or with an algorithm other than AWQ and SVDQuant."
         )
 
 
@@ -1305,7 +1303,6 @@ def auto_quantize(
             )
         # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
         _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
-        _refuse_unsupported_fused_svdquant(model, algo)
         _refuse_unsupported_distributed_calibration(model, algo)
         _refuse_layerwise_dirs(recipe, rewrites_weights)
 

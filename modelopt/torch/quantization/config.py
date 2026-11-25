@@ -1256,12 +1256,13 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
         title="Give each fused group its exported smoothing scale during calibration",
         description=(
             "The linears that export fuses (q/k/v and gate/up for LLMs, each attention block's "
-            "Q/K/V for diffusers models) get the mean of their searched ``pre_quant_scale`` "
-            "before the SVD and the final max calibration, instead of only at export. The "
-            "activation ranges are then measured under the scale that is exported. MoE experts "
-            "that are separate linears are not covered, each expert's own gate/up pair included: "
-            "export still averages their scales across experts. Supported only when calibrating "
-            "a single model, not a wrapper of diffusers components, in a single process."
+            "Q/K/V for diffusers and LTX-2 models) get the mean of their searched "
+            "``pre_quant_scale`` before the SVD and the final max calibration, instead of only at "
+            "export. The activation ranges are then measured under the scale that is exported. "
+            "MoE experts that are separate linears are not covered, each expert's own gate/up pair "
+            "included: export still averages their scales across experts. Supported only when "
+            "calibrating a single model, not a wrapper of diffusion components, in a single "
+            "process, with a forward loop that calls the model rather than its forward method."
         ),
     )
 

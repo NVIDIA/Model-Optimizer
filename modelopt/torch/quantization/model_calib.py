@@ -25,7 +25,7 @@ import warnings
 import weakref
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from functools import partial
 from typing import Any, TypeAlias
 
@@ -1951,8 +1951,14 @@ def awq_lite(
         return out_actual
 
     shared_inputs: dict[int, tuple] = {}  # id(input) -> (weakref to input, helpers reading it)
+    # The model's forwards in progress, and the first linear that ran outside one: a forward loop
+    # that calls model.forward or a submodule directly hides where one forward ends.
+    model_forward = {"depth": 0, "linear_outside": None}
 
     def note_shared_input(helper, x):
+        if model_forward["depth"] == 0:
+            model_forward["linear_outside"] = model_forward["linear_outside"] or helper.name
+            return
         # Identity, not data_ptr: a freed activation's memory can be reused by a later layer.
         # The weakref proves the tensor is still the one recorded under this id.
         entry = shared_inputs.get(id(x))
@@ -1974,11 +1980,43 @@ def awq_lite(
         The groups come from export's own rule, applied to the inputs seen while caching.
         """
         # Imported here: modelopt.torch.export imports this module.
-        from modelopt.torch.export.diffusers_utils import is_diffusers_object
         from modelopt.torch.export.quant_utils import get_quantization_format
         from modelopt.torch.export.unified_export_hf import fused_linear_groups
 
+        def layout(helper):
+            """What decides whether export can stack a group's ranges."""
+            weight = helper.module.weight_quantizer
+            weights = weight if isinstance(weight, SequentialQuantizer) else [weight]
+            # Ranges from the caching pass: one per member with a static input range.
+            has_input_range = helper.module.input_quantizer.amax is not None
+            return (
+                helper.is_input_quantized,
+                has_input_range,
+                repr([(type(q), q.num_bits, q.axis, q.block_sizes) for q in weights]),
+            )
+
         helpers = [m.awq_lite for m in model.modules() if hasattr(m, "awq_lite")]
+
+        def keep_every_scale(reason):
+            warn_rank_0(f"awq_lite: every layer keeps its own scale: {reason}")
+            for h in helpers:
+                h.input_peers = []
+            return []
+
+        if model_forward["linear_outside"] is not None:
+            return keep_every_scale(
+                f"{model_forward['linear_outside']} ran outside the model's forward (the forward "
+                "loop calls a submodule or the forward method, or generate runs an encoder by "
+                "itself), so which linears read one input in one forward is unknown."
+            )
+        # Export fails on a format it cannot tell, as grouping below would; the search has
+        # disabled every input quantizer, so whether each input is quantized is compared apart.
+        formats = {}
+        for h in helpers:
+            try:
+                formats[h.name] = get_quantization_format(h.module)
+            except (AssertionError, NotImplementedError, TypeError) as error:
+                return keep_every_scale(f"export cannot tell {h.name}'s format ({error!r}).")
         by_name = {h.name: h for h in helpers}
         input_to_linear, keys_of = {}, {}
         for h in helpers:
@@ -1989,13 +2027,19 @@ def awq_lite(
                 input_to_linear.setdefault(key, [by_name[n].module for n in key])
             h.input_peers = []
 
+        try:
+            candidates = list(
+                fused_linear_groups(
+                    model,
+                    input_to_linear,
+                    qkv_only=_exports_qkv_per_block(model),
+                    name_of=lambda module: module.awq_lite.name,
+                )
+            )
+        except AssertionError as error:  # export's own check, which exporting this model fails too
+            return keep_every_scale(f"export cannot fuse its layers ({error}).")
         groups = []
-        for key, modules, _ in fused_linear_groups(
-            model,
-            input_to_linear,
-            qkv_only=is_diffusers_object(model),
-            name_of=lambda module: module.awq_lite.name,
-        ):
+        for key, modules, _ in candidates:
             members = [m.awq_lite for m in modules]
             if any(keys_of[m.name] != {key} for m in members) or not all(
                 m.is_enabled and m.num_search_steps > 0 for m in members
@@ -2005,16 +2049,12 @@ def awq_lite(
                     "share an input on every step, or a member was not searched."
                 )
                 continue
-            # Checked before any scale changes: export refuses to fuse a group whose formats differ,
-            # as the range sharing below would. The search has disabled every input quantizer, so
-            # whether each member's input is quantized comes from before it.
-            if (
-                len({(m.is_input_quantized, get_quantization_format(m.module)) for m in members})
-                > 1
-            ):
+            # Checked before any scale changes: export's fusion, which the range sharing after the
+            # SVD reuses, stacks the members' ranges and refuses differing formats.
+            if len({(layout(m), formats[m.name]) for m in members}) > 1:
                 warn_rank_0(
                     f"awq_lite: {[m.name for m in members]} keep per-layer scales: their "
-                    "quantization formats differ, so export cannot fuse them."
+                    "quantization formats or range layouts differ, so export cannot fuse them."
                 )
                 continue
             for m in members:
@@ -2043,17 +2083,29 @@ def awq_lite(
     # Lets enable stats collection
     # This will collect amax for input_quantizers and KV quantizers during the caching mode forward pass
     enable_stats_collection(model)
-    # A tensor passed again in a later forward does not join its readers there to this one's.
-    new_forward = (
-        model.register_forward_pre_hook(lambda *_: shared_inputs.clear())
+
+    def enter_forward(*_):
+        if model_forward["depth"] == 0:
+            # A tensor passed again in a later forward does not join its readers there to this one's.
+            shared_inputs.clear()
+        model_forward["depth"] += 1
+
+    def leave_forward(*_):
+        model_forward["depth"] -= 1
+
+    hooks = (
+        [
+            model.register_forward_pre_hook(enter_forward),
+            model.register_forward_hook(leave_forward, always_call=True),
+        ]
         if fused_group_scale
-        else None
+        else []
     )
     try:
         forward_loop(model)
     finally:
-        if new_forward is not None:
-            new_forward.remove()
+        for hook in hooks:
+            hook.remove()
 
     # Load the amax values collected during the caching mode forward pass
     # This will also perform distributed amax sync for input_quantizers
@@ -2448,6 +2500,45 @@ def _get_awq_quantizer_block_size(tensor: torch.Tensor, quantizer: TensorQuantiz
     return blocksize
 
 
+def _exports_qkv_per_block(model: nn.Module) -> bool:
+    """Whether export fuses only ``model``'s Q/K/V, per attention block, as for diffusion components.
+
+    That is how it exports diffusers models and LTX-2's, which are ``ltx_core`` models instead.
+    """
+    # Imported here: modelopt.torch.export imports this module.
+    from modelopt.torch.export.diffusers_utils import is_diffusers_object
+
+    return is_diffusers_object(model) or type(model).__module__.startswith("ltx_core.")
+
+
+@contextmanager
+def _ieee_fp32_matmuls():
+    """Run float32 matmuls in full precision, whichever TF32 API the caller set.
+
+    PyTorch refuses to read the legacy TF32 settings (``allow_tf32``, the global matmul precision)
+    while they disagree with the per-backend ``fp32_precision``. Overriding only the latter would
+    break legacy readers in between, such as TunableOp and torch.compile.
+    """
+    backends = (torch.backends.cuda.matmul, torch.backends.mkldnn.matmul)
+    saved = [backend.fp32_precision for backend in backends]
+    try:
+        legacy = torch.get_float32_matmul_precision()
+    except RuntimeError:  # the caller's per-backend settings already disagree with the legacy ones
+        legacy = None
+    if legacy is not None:
+        torch.set_float32_matmul_precision("highest")
+    for backend in backends:  # oneDNN too, for weights on CPU
+        backend.fp32_precision = "ieee"
+    try:
+        yield
+    finally:
+        if legacy is not None:
+            torch.set_float32_matmul_precision(legacy)
+        # The global setter also sets oneDNN's matmul precision, which the caller may have set apart.
+        for backend, precision in zip(backends, saved):
+            backend.fp32_precision = precision
+
+
 def _top_singular_factors(w, rank, oversample=32):
     """Return ``(U_r·S_r, V_rᵀ)`` of ``w``, computed through an eigendecomposition of its Gram matrix.
 
@@ -2467,25 +2558,19 @@ def _top_singular_factors(w, rank, oversample=32):
     wide = w.shape[0] < w.shape[1]
     a = w.T if wide else w
     lo, hi = w.aminmax()
-    peak = max(-lo.item(), hi.item())  # a host sync, as eigh's own is
+    peak = torch.maximum(-lo, hi).item()  # a host sync, as eigh's own is
     if peak > 0 and not 1e-15 < peak < 1e15:
         # The Gram matrix squares the weight's magnitudes, which float32 would overflow or underflow.
         # Rescaled only then, as the rescaled copy costs as much memory as the weight.
         a = a / peak
     else:
         peak = 1.0
-    matmul = torch.backends.cuda.matmul
-    precision = matmul.fp32_precision
     # TF32's 10-bit mantissa, or the 16-bit dtype autocast would run the matmuls in, would swamp the
     # squared condition number of the Gram matrix.
-    matmul.fp32_precision = "ieee"
-    try:
-        with torch.autocast(w.device.type, enabled=False):
-            basis = torch.linalg.eigh(a.T @ a)[1][:, -(rank + oversample) :]
-            u, s, yt = torch.linalg.svd(a @ basis, full_matrices=False)
-            v = basis @ yt[:rank].T
-    finally:
-        matmul.fp32_precision = precision
+    with _ieee_fp32_matmuls(), torch.autocast(w.device.type, enabled=False):
+        basis = torch.linalg.eigh(a.T @ a)[1][:, -(rank + oversample) :]
+        u, s, yt = torch.linalg.svd(a @ basis, full_matrices=False)
+        v = basis @ yt[:rank].T
     # The Gram matrix resolves the k-th direction only to about eps·(s_1/s_k)² of its size. Past 1e-4,
     # no longer far below BF16's rounding of the factors, the full SVD is taken instead (in float32,
     # when s_rank < 0.035·s_1). Ritz values only underestimate s_rank, so the check errs that way.
