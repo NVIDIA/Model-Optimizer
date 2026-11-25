@@ -48,6 +48,7 @@ from .quant_aware_conversion import _build_reverse_rules, build_reverse_name_map
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
     _postprocess_single_tensor,
+    _refuse_declared_modules_outside,
     get_quant_config,
 )
 from .registry import ExportContext
@@ -354,6 +355,23 @@ def _export_transformers_checkpoint_streaming(
     # Materialization dispatch walks the module tree from the root; without these maps each
     # call re-derives them, which is O(N^2) over a MoE model's expert modules.
     names = module_name_maps(model)
+
+    # Handlers run only in the decoder-layer windows and in the windows of the other modules whose
+    # weights need materializing, below. Before changing the model, refuse a module whose handler
+    # declares its format but that opens neither, such as an untied lm_head kept resident.
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
+    if decoder_layers is not None:  # else refused below
+        reached = {id(m) for layer in decoder_layers for m in layer.modules()}
+        for module in model.modules():
+            if id(module) not in reached and requires_weight_materialization(module, model, names):
+                reached.update(id(m) for m in module.modules())
+        _refuse_declared_modules_outside(
+            model,
+            reached,
+            "the offloaded export packs only the decoder layers and the modules whose weights it "
+            "materializes, and would write this resident weight unpacked. Export the model "
+            "without offload, or offload this module too.",
+        )
 
     # --- Same model-level setup as _export_transformers_checkpoint ---
     dtype = _resolve_export_dtype(model, dtype)

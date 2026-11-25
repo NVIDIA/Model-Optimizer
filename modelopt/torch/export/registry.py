@@ -253,13 +253,17 @@ class _ExportModuleRegistryCls(_ExportHandlerRegistryCls):
         which rescales weights and recalibrates their ``amax``. Under
         :attr:`ExportContext.keep_fused_experts`, the distributed export that packs a still-sharded
         model, the handler must pack as the built-in handlers do, FSDP2-owned weights inside their
-        unit's weight-update window and fused experts kept fused, or raise.
+        unit's weight-update window and fused experts kept fused, or raise. The export of an
+        offloaded model calls the handler only for the decoder layers and the modules it
+        materializes, and raises for another such module, such as an untied ``lm_head`` kept
+        resident.
 
         ``export_hf_vllm_fq_checkpoint``, which writes the weights the backend fake-quantizes,
         reads the declared format and does not call the handler. It folds a fake-quant
         ``TensorQuantizer`` into the weight and raises for any other weight quantizer of these
-        modules, such as a ``SequentialQuantizer``. The exporters that pack weights with the
-        built-in math, such as the Megatron export, raise for these modules.
+        modules, such as a ``SequentialQuantizer``, and, with ``inplace_mem_efficient=True``, which
+        folds only the decoder layers, for these modules outside them. The exporters that pack
+        weights with the built-in math, such as the Megatron export, raise for these modules.
 
         Usage::
 
