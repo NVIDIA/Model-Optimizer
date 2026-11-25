@@ -27,6 +27,8 @@ from torch.utils._pytree import tree_map
 
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
 from modelopt.torch.quantization.repair import _iq_quantizer, _router_paths, _storage_span
+from modelopt.torch.quantization.repair_formats import _native_scale_kernels
+from modelopt.torch.utils import same_device_as
 
 _MSE_CHUNK_ELEMENTS = {"cpu": 1 << 18, "cuda": 1 << 24}
 
@@ -258,11 +260,10 @@ def mse_statistics(prediction, target, valid_mask=None):
         if mask is None
         else mask.sum(dtype=torch.int64) * features
     )
-    from modelopt.torch.quantization.repair_formats import _native_scale_kernels
-
     kernels = _native_scale_kernels(prediction)
     if kernels is not None:
-        return kernels.masked_mse_sum(prediction, target, mask, features), count
+        with same_device_as(prediction):
+            return kernels.masked_mse_sum(prediction, target, mask, max(features, 1)), count
     return _MaskedMSE.apply(prediction, target, mask, max(features, 1)), count
 
 

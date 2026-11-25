@@ -28,7 +28,8 @@ from .nn.modules.tensor_quantizer import TensorQuantizer
 
 __all__: list[str] = []
 
-_PACKED_EXPERTS = 4  # Grouped dispatch is qualified only for the measured four-expert bank.
+# Changing the automatic allowlist width requires target-hardware qualification.
+_GROUPED_EXPERT_ALLOWLIST_WIDTH = 4
 
 
 def _ste(value, projected):
@@ -94,8 +95,7 @@ def _native_scale_kernels(tensor):
 
 
 def _packed_projection_qualified(inputs, name, shape):
-    # GB300 forward/backward qualification: packed IQ is ~1.5x faster and
-    # saves 31-36 MiB here. At 32K tokens, materialized GEMM is 15-80x faster.
+    # Keep automatic packed dispatch limited to this fixed geometry and small-token allowlist.
     return (
         inputs.is_cuda
         and inputs.dtype == torch.bfloat16
@@ -211,7 +211,11 @@ def repair_grouped_linear(quantizers, inputs, offsets, bias=None, *, is_transpos
         if not isinstance(state, IQScaleState) or not _plain_repair_quantizer(quantizer):
             return None
         states.append(state)
-    if is_transposed or isinstance(inputs, DTensor) or len(states) != _PACKED_EXPERTS:
+    if (
+        is_transposed
+        or isinstance(inputs, DTensor)
+        or len(states) != _GROUPED_EXPERT_ALLOWLIST_WIDTH
+    ):
         return None
     first = states[0]
     if not _packed_projection_qualified(inputs, first.name, first.weight_shape) or any(
@@ -255,16 +259,17 @@ def repair_grouped_linear(quantizers, inputs, offsets, bias=None, *, is_transpos
     else:
         pointers = cached[1]
     first.projection_counts["packed_grouped"] = first.projection_counts.get("packed_grouped", 0) + 1
-    return iq_grouped_linear(
-        inputs,
-        packed,
-        torch.stack([state.projected_steps() for state in states]),
-        offsets,
-        first.name,
-        first.weight_shape,
-        bias,
-        packed_pointers=pointers,
-    )
+    with same_device_as(inputs):
+        return iq_grouped_linear(
+            inputs,
+            packed,
+            torch.stack([state.projected_steps() for state in states]),
+            offsets,
+            first.name,
+            first.weight_shape,
+            bias,
+            packed_pointers=pointers,
+        )
 
 
 class IQScaleState(nn.Module):
@@ -363,9 +368,10 @@ class IQScaleState(nn.Module):
         from modelopt.torch.kernels.quantization.iq_gemm import iq_linear
 
         self.projection_counts["packed_dense"] = self.projection_counts.get("packed_dense", 0) + 1
-        return iq_linear(
-            inputs, self.packed, self.projected_steps(), self.name, self.weight_shape, bias
-        )
+        with same_device_as(inputs):
+            return iq_linear(
+                inputs, self.packed, self.projected_steps(), self.name, self.weight_shape, bias
+            )
 
     @torch.no_grad()
     def project_(self):
