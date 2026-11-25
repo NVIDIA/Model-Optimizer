@@ -88,10 +88,11 @@ class ImageModelDeployer:
         else:
             if options.get("backend", "sglang") != "sglang":
                 raise ValueError("SGLang image deployment requires its native diffusion backend")
-            for key in ("tp_size", "num_gpus"):
-                if key in options and options[key] != tensor_parallel_size:
-                    raise ValueError(f"{key} conflicts with tensor_parallel_size")
-                options[key] = tensor_parallel_size
+            if options.setdefault("tp_size", tensor_parallel_size) != tensor_parallel_size:
+                raise ValueError("tp_size conflicts with tensor_parallel_size")
+            num_gpus = options.setdefault("num_gpus", tensor_parallel_size)
+            if type(num_gpus) is not int or num_gpus < 1 or num_gpus % tensor_parallel_size:
+                raise ValueError("num_gpus must be a positive multiple of tensor_parallel_size")
         sampling = copy.deepcopy(sampling_kwargs or {})
         count_key = "num_images_per_prompt" if backend == "trtllm" else "num_outputs_per_prompt"
         if sampling.get(count_key) != 1:
@@ -166,7 +167,10 @@ class ImageModelDeployer:
 
 
 def _write_json(path, value):
-    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    # A killed worker must leave its last complete evidence available to the parent.
+    pending = path.with_suffix(f".{os.getpid()}.tmp")
+    pending.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    pending.replace(path)
 
 
 def _check_static_nvfp4(snapshot, directory):
@@ -272,15 +276,16 @@ def _deploy(config, directory, evidence):
     if not torch.cuda.is_available():
         raise _UnavailableGPUError("Image deployment requires a CUDA GPU")
     evidence["gpus"] = []
-    _check_gpu_allocation(torch.cuda, config, config["tensor_parallel_size"], evidence["gpus"])
     backend = config["backend"]
+    options = config["engine_kwargs"]
+    required_gpus = options["num_gpus"] if backend == "sglang" else config["tensor_parallel_size"]
+    _check_gpu_allocation(torch.cuda, config, required_gpus, evidence["gpus"])
     package = "tensorrt_llm" if backend == "trtllm" else "sglang"
     version = importlib.metadata.version(package)
     evidence["engine_version"] = version
     assert version.split("+")[0] == config["engine_version"], (
         f"Expected {backend} {config['engine_version']}, got {version}"
     )
-    options = config["engine_kwargs"]
     if backend == "trtllm":
         # TRT-LLM is optional and must not be imported in a SGLang image.
         from tensorrt_llm import VisualGen, VisualGenArgs

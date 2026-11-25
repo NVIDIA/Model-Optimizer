@@ -74,8 +74,10 @@ still determine whether deployment succeeds. Model identity and TP cannot be
 overridden inside `engine_kwargs`.
 For image generation, TensorRT-LLM's VisualGen adapter binds the same resolved
 TP to `parallel_config.tp_size` and checks the complete worker count, including
-CFG and Ulysses parallelism, against the allocation. SGLang Diffusion uses its
-native parallelism configuration with the same resolved TP.
+CFG and Ulysses parallelism, against the allocation. SGLang Diffusion uses the
+resolved TP for `tp_size`. Its total worker count (`engine_kwargs.num_gpus`)
+defaults to TP. For example, to split one TP1 image generation across two GPUs
+with sequence parallelism, set `num_gpus: 2` and `sp_degree: 2`.
 
 Each backend accepts its native `engine_kwargs` and `sampling_kwargs`.
 `chat_kwargs.chat_template_kwargs` controls prompt rendering for all three engines;
