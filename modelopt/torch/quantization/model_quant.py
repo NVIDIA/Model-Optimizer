@@ -56,7 +56,7 @@ from .algorithms import (
     merge_auto_quantize_shards,
 )
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
-from .config import QuantizeAlgoCfgType
+from .config import QuantizeAlgoCfgType, SVDQuantConfig
 from .kv_cache_auto_quant import (
     _KV_QUANTIZER_ATTRS,
     AutoQuantizeKVSearcher,
@@ -115,6 +115,37 @@ def _names_the_experts_groups(
     ) == list(data_parallel)
 
 
+def _refuse_unsupported_fused_svdquant(model: nn.Module, algorithm: QuantizeAlgoCfgType) -> None:
+    """Refuse SVDQuant's fused-group options where calibration could not match export.
+
+    Called before the model changes.
+    """
+    for mode, options in get_modelike_from_algo_cfg(algorithm):
+        if mode != "svdquant_calibrate":
+            continue
+        config = SVDQuantConfig.model_validate(options)  # fused_group_svd needs fused_group_scale
+        if not config.fused_group_scale:
+            continue
+        if dist.is_distributed_run():
+            # Whatever the model's layout: each process would search the shared scales, and find
+            # the groups to share them, on its own data and forwards.
+            raise NotImplementedError(
+                f"SVDQuant's fused_group_scale is not supported in a run of {dist.size()} "
+                "processes: each would pick its own smoothing scales and fused groups. Calibrate "
+                "in a single process, or without fused_group_scale."
+            )
+        # Imported here: modelopt.torch.export imports this package.
+        from modelopt.torch.export.diffusers_utils import is_diffusers_object
+
+        if not is_diffusers_object(model) and any(map(is_diffusers_object, model.modules())):
+            # Export fuses each diffusers component's Q/K/V per attention block, but calibration
+            # would group a wrapper's linears by the LLM rule, across its components' blocks.
+            raise NotImplementedError(
+                "SVDQuant's fused_group_scale does not support a model that wraps diffusers "
+                "components. Quantize each component by itself, as examples/diffusers does."
+            )
+
+
 def _refuse_unsupported_distributed_calibration(
     model: nn.Module, algorithm: QuantizeAlgoCfgType
 ) -> None:
@@ -127,17 +158,6 @@ def _refuse_unsupported_distributed_calibration(
     anything changes, so the caller seeds the experts' ``ParallelState`` before quantizing, as the
     expert-parallel load does; their quantized modules are checked again before they calibrate.
     """
-    # Whatever the model's layout: each process would search the shared scales, and find the groups
-    # to share them, on its own data and forwards.
-    if dist.is_distributed_run() and any(
-        mode == "svdquant_calibrate" and options.get("fused_group_scale")
-        for mode, options in get_modelike_from_algo_cfg(algorithm)
-    ):
-        raise NotImplementedError(
-            f"SVDQuant's fused_group_scale is not supported in a run of {dist.size()} processes: "
-            "each would pick its own smoothing scales and fused groups. Calibrate in a single "
-            "process, or without fused_group_scale."
-        )
     plan = dist.recorded_distribution_plan(model)
     if plan is None or plan.world_size == 1:
         return
@@ -258,6 +278,7 @@ def calibrate(
     Returns: The calibrated pytorch model.
     """
     _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
+    _refuse_unsupported_fused_svdquant(model, algorithm)
     _refuse_unsupported_distributed_calibration(model, algorithm)
     _refuse_a_malformed_variable()
     if forward_loop is not None:
@@ -615,6 +636,7 @@ def quantize(
     """
     quantize_config = QuantizeConfig(**dict(config))
     _refuse_awq_on_a_sharded_fsdp2_model(model, config.get("algorithm"))
+    _refuse_unsupported_fused_svdquant(model, config.get("algorithm"))
     _refuse_unsupported_distributed_calibration(model, config.get("algorithm"))
     _refuse_a_malformed_variable()
     if not is_quantized(model):
@@ -1283,6 +1305,7 @@ def auto_quantize(
             )
         # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
         _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
+        _refuse_unsupported_fused_svdquant(model, algo)
         _refuse_unsupported_distributed_calibration(model, algo)
         _refuse_layerwise_dirs(recipe, rewrites_weights)
 

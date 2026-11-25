@@ -1259,8 +1259,9 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
             "Q/K/V for diffusers models) get the mean of their searched ``pre_quant_scale`` "
             "before the SVD and the final max calibration, instead of only at export. The "
             "activation ranges are then measured under the scale that is exported. MoE experts "
-            "that are separate linears are not covered: export still averages their scales "
-            "across experts. Supported only when calibrating in a single process."
+            "that are separate linears are not covered, each expert's own gate/up pair included: "
+            "export still averages their scales across experts. Supported only when calibrating "
+            "a single model, not a wrapper of diffusers components, in a single process."
         ),
     )
 
@@ -1272,9 +1273,16 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
             "stacked weights (a shared ``lora_a``) instead of one SVD per linear, and after "
             "the final max calibration its members share the group max of their input and "
             "weight amax. Export then keeps these groups as calibrated. It still averages the "
-            "scales of MoE experts that are separate linears, and re-fits their low-rank branches."
+            "scales of MoE experts that are separate linears, each expert's gate/up pair "
+            "included, and re-fits their low-rank branches."
         ),
     )
+
+    @model_validator(mode="after")
+    def _fused_group_svd_needs_fused_group_scale(self):
+        if self.fused_group_svd and not self.fused_group_scale:
+            raise ValueError("fused_group_svd requires fused_group_scale=True.")
+        return self
 
 
 class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):

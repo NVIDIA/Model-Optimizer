@@ -1975,6 +1975,7 @@ def awq_lite(
         """
         # Imported here: modelopt.torch.export imports this module.
         from modelopt.torch.export.diffusers_utils import is_diffusers_object
+        from modelopt.torch.export.quant_utils import get_quantization_format
         from modelopt.torch.export.unified_export_hf import fused_linear_groups
 
         helpers = [m.awq_lite for m in model.modules() if hasattr(m, "awq_lite")]
@@ -2002,6 +2003,18 @@ def awq_lite(
                 warn_rank_0(
                     f"awq_lite: {[m.name for m in members]} keep per-layer scales: they do not "
                     "share an input on every step, or a member was not searched."
+                )
+                continue
+            # Checked before any scale changes: export refuses to fuse a group whose formats differ,
+            # as the range sharing below would. The search has disabled every input quantizer, so
+            # whether each member's input is quantized comes from before it.
+            if (
+                len({(m.is_input_quantized, get_quantization_format(m.module)) for m in members})
+                > 1
+            ):
+                warn_rank_0(
+                    f"awq_lite: {[m.name for m in members]} keep per-layer scales: their "
+                    "quantization formats differ, so export cannot fuse them."
                 )
                 continue
             for m in members:
@@ -2476,7 +2489,7 @@ def _top_singular_factors(w, rank, oversample=32):
     # The Gram matrix resolves the k-th direction only to about eps·(s_1/s_k)² of its size. Past 1e-4,
     # no longer far below BF16's rounding of the factors, the full SVD is taken instead (in float32,
     # when s_rank < 0.035·s_1). Ritz values only underestimate s_rank, so the check errs that way.
-    if s[rank - 1] < s[0] * (torch.finfo(s.dtype).eps / 1e-4) ** 0.5:
+    if rank > 0 and s[rank - 1] < s[0] * (torch.finfo(s.dtype).eps / 1e-4) ** 0.5:
         return full_svd()
     u, s = u[:, :rank], s[:rank] * peak
     return (v * s, u.T) if wide else (u * s, v.T)  # a = U·S·Vᵀ, and w = aᵀ when wide
@@ -2530,9 +2543,6 @@ def svdquant(
     def is_skipped(name):
         return any(fnmatch.fnmatch(name, pattern) for pattern in skip_layers or [])
 
-    if fused_group_svd and not fused_group_scale:
-        raise ValueError("fused_group_svd requires fused_group_scale=True.")
-
     def postprocess(modules, names):
         # One SVD of the stacked weights: the members share lora_a, as export fuses them.
         print_rank_0(f"SVD {', '.join(names)}")
@@ -2556,8 +2566,8 @@ def svdquant(
             warn_rank_0(
                 "fused_group_scale gives fused groups of dense layers the scale and low-rank branch "
                 f"export writes. MoE experts that are separate linears (e.g. {experts[0]}) are not "
-                "covered: export still averages their scales across experts and re-fits their "
-                "low-rank branches."
+                "covered, each expert's gate/up pair included: export still averages their scales "
+                "across experts and re-fits their low-rank branches."
             )
 
     create_and_replace_svdquant_linear_on_the_fly(model=model)

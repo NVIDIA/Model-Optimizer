@@ -593,7 +593,9 @@ def test_svdquant_fused_group_scale():
         (False, 1.0, 1e3),
     ],
 )
-@pytest.mark.parametrize(("shape", "rank"), [((128, 48), 4), ((48, 128), 4), ((6, 8), 8)])
+@pytest.mark.parametrize(
+    ("shape", "rank"), [((128, 48), 4), ((48, 128), 4), ((6, 8), 8), ((128, 48), 0)]
+)
 def test_svd_matches_full_svd(shape, rank, autocast, scale, lead):
     """The top-rank factors match the full SVD for tall and wide weights, and pad past the rank.
     Under BF16 autocast too, which would otherwise compute the Gram matrix in BF16; for weights
@@ -644,6 +646,30 @@ def test_svdquant_fused_group_svd():
                 assert torch.equal(
                     getattr(m.input_quantizer, attr), getattr(first.input_quantizer, attr)
                 )
+
+    # A group whose members differ in format, here with one input quantizer disabled, keeps its
+    # per-layer scales and low-rank branches; export cannot fuse it either.
+    mixed = copy.deepcopy(config)
+    mixed["quant_cfg"] = [
+        *mixed["quant_cfg"],
+        {"quantizer_name": "*k.input_quantizer", "enable": False},
+    ]
+    model = mtq.quantize(_SharedInputLLM(), mixed, partial(forward_loop, dataloader=[inputs]))
+    assert not torch.equal(
+        model.q.weight_quantizer.svdquant_lora_a, model.v.weight_quantizer.svdquant_lora_a
+    )
+    la = model.layer.linear_attn
+    assert torch.equal(
+        la.in_proj_qkv.weight_quantizer.svdquant_lora_a,
+        la.in_proj_z.weight_quantizer.svdquant_lora_a,
+    )
+
+    # fused_group_svd without fused_group_scale is refused before the model changes.
+    model = _SharedInputLLM()
+    config["algorithm"] = {"method": "svdquant", "fused_group_svd": True}
+    with pytest.raises(ValueError, match="fused_group_svd requires fused_group_scale"):
+        mtq.quantize(model, config, partial(forward_loop, dataloader=[inputs]))
+    assert not is_quantized(model)
 
 
 def test_svdquant_fused_group_scale_needs_one_forward():
@@ -722,6 +748,32 @@ def test_svdquant_fused_group_scale_diffusers():
     groups = {(f"blocks.{i}.attn.to_k", f"blocks.{i}.attn.to_v"): context for i in range(2)}
     kept = [f"blocks.{i}.{n}" for i in range(2) for n in ("attn.to_q", "context_proj")]
     _svdquant_fused_group_scale_case(_Transformer(), loop, groups, kept)
+
+    # Wan 2.2's layout: a pipeline runs two backbones on one context, and examples/diffusers
+    # quantizes each by itself while calibration runs the whole pipeline.
+    transformer_2 = _Transformer()
+
+    def pipeline_loop(transformer):
+        transformer_2(transformer(x, context), context)
+
+    _svdquant_fused_group_scale_case(_Transformer(), pipeline_loop, groups, kept)
+
+    # A wrapper of both backbones is not a diffusers object: calibration would group its linears
+    # by the LLM rule, across backbones and blocks, so it is refused before the model changes.
+    class _Pipeline(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.transformer, self.transformer_2 = _Transformer(), _Transformer()
+
+        def forward(self, x, context):
+            return self.transformer_2(self.transformer(x, context), context)
+
+    pipeline = _Pipeline()
+    config = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
+    config["algorithm"] = {"method": "svdquant", "fused_group_scale": True}
+    with pytest.raises(NotImplementedError, match="wraps diffusers components"):
+        mtq.quantize(pipeline, config, lambda m: m(x, context))
+    assert not is_quantized(pipeline)
 
 
 def test_layerwise_calibrate_support_gate():
