@@ -68,6 +68,7 @@ def _native_scale_kernels(tensor):
     if not tensor.is_cuda:
         return None
     try:
+        # Triton is optional for the materialized replay fallback.
         from modelopt.torch.kernels.quantization import repair
     except ModuleNotFoundError as exc:
         if not (exc.name or "").startswith("triton"):
