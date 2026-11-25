@@ -22,6 +22,8 @@ This example focuses on training with Hugging Face. To train with Megatron‑LM,
 | External Draft Training | Train a standalone pretrained LM as the draft, not a grafted head | \[[Link](#training-a-standalone-external-draft-model)\] |
 | After Training | Evaluation, export and deployment | \[[Link](#model-validation)\] |
 | Advanced Usage | Data synthesis, vocab compression, and configuration | \[[Link](#advanced-usage)\] |
+| Native MTP Boosting | Shared training flow and adding a model adapter | \[[Link](#native-mtp-boosting)\] |
+| DeepSeek-V4 Pro MTP Boosting | Example using a native model checkpoint | \[[Link](#example-deepseek-v4-pro-mtp-boosting)\] |
 | Support Matrix | Supported models for speculative decoding training | \[[Link](#support-matrix)\] |
 | Speculation Module Checkpoints | View pre-trained speculation modules ready to deploy! | \[[Link](#speculation-module-checkpoints)\] |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] |
@@ -431,13 +433,170 @@ See `main.py` for the full example including tokenizer setup, dataset loading, a
 ### Native MTP Boosting
 
 Native multi-token prediction (MTP) boosting fine-tunes a model's existing MTP
-module using target-model supervision. Only the MTP module is trained. LK lambda
-is the default loss; set `mtp_loss_type="soft_target_ce"` to use cross-entropy.
+module using precomputed target-model hidden states. Only the MTP module is trained;
+the target embedding, LM head, and final norm remain frozen, and the target backbone
+is not loaded for offline training.
 
-The [Python API](../../modelopt/torch/speculative/mtp/adapter.py) currently requires
-a custom model adapter. When training from offline hidden-state data with Hugging
-Face Trainer, set `remove_unused_columns=False` in `TrainingArguments` so the
-collator receives the hidden-state features.
+The model-independent flow uses
+[`create_native_mtp_boost_model`](../../modelopt/torch/speculative/mtp/adapter.py)
+to select an adapter and load the native MTP weights. The shared
+[`hf_eagle.py`](../../modelopt/torch/speculative/plugins/hf_eagle.py) forward handles
+token alignment, training rounds, hidden-state mixing, and losses. Hugging Face
+Trainer owns the optimizer loop and checkpoint saving. Configure rounds with
+`mtp_ttt_steps` and enable hidden-state mixing with `mtp_mix_hidden_states=True`
+(requires at least two rounds). LK lambda is the default loss; set
+`mtp_loss_type="soft_target_ce"` to use soft-target cross-entropy.
+
+To support another model, add a model-specific plugin with:
+
+1. An [`MTPModule`](../../modelopt/torch/speculative/plugins/modeling_mtp.py)
+   subclass that reuses the model's existing Transformers components where possible.
+   Declare the native recurrent `state_shape` and implement `_forward` to return
+   `MTPModuleOutput`: LM-head input, the next native recurrent state, and an optional
+   KV cache. Inputs are already aligned by EAGLE; honor the supplied attention mask
+   and cache. The base class handles flattening and restoring the native state shape.
+   Models with precision-sensitive controls can override `fsdp2_context()` to
+   configure FSDP2 precision groups; the training entry point enters this context.
+2. A [`NativeMTPAdapter`](../../modelopt/torch/speculative/mtp/adapter.py) subclass
+   with a unique `name`, `supports()` to identify checkpoint metadata, and
+   `load_mtp()` to construct and load only the native MTP module. Reuse ModelOpt
+   dequantization for quantized weights. The default `create()` loads the frozen
+   target components through `FakeBaseModel` and attaches MTP with `create_mtp_model()`;
+   override it only when the checkpoint needs custom loading of those components.
+3. Registration with `@register_native_mtp_adapter` and an import of the plugin so
+   registration runs. The factory detects the adapter automatically, or callers can
+   select it explicitly with `mtp_adapter="<adapter_name>"`.
+
+For deployment export, implement the adapter's `export_tensors()` iterator to map
+lazy training-checkpoint slices to native `(name, tensor)` pairs, including scales
+and excluding frozen target weights. ModelOpt's `NativeMTPExporter` handles
+validation, lazy reads, and shard writing through `export_speculative_decoding()`;
+`scripts/export_hf_checkpoint.py` selects this path from the saved `mtp_boost`
+configuration.
+
+Offline batches supply `input_ids`, `attention_mask`, `loss_mask`, and a
+`base_model_outputs` dictionary containing:
+
+- `draft_hidden_states`: native MTP starting states, `[batch, sequence, *state_shape]`.
+- `base_model_hidden_states`: teacher LM-head input, `[batch, sequence, hidden_size]`.
+- `base_hidden_prenorm=True` only if the teacher features precede the target's final norm.
+
+Set `remove_unused_columns=False` in `TrainingArguments` so the collator receives
+these features. To resume training, reconstruct the model through the adapter before
+loading the Trainer checkpoint.
+
+The [`mtp_boost` recipe](../../modelopt_recipes/general/speculative_decoding/mtp_boost.yaml)
+runs this flow through the same `main.py` and Trainer as EAGLE. Set
+`data.offline_feature_key_mapping` to map the two tensor names in your `.pt` records
+to `draft_hidden_states` and `base_model_hidden_states`. Each record also contains
+`input_ids` and `loss_mask`, without a batch dimension. `data.offline_data_path`
+points to a directory of `.pt` records, discovered recursively.
+Native MTP currently supports offline training with
+`cp_size=1`; distributed sharding uses FSDP2.
+
+### Example: DeepSeek-V4 Pro MTP Boosting
+
+The [DeepSeek-V4 adapter](../../modelopt/torch/speculative/plugins/modeling_dsv4_mtp.py)
+implements this flow for local DSV4 Pro native checkpoints with one sliding-attention
+MTP layer. It requires a Transformers build containing `transformers.models.deepseek_v4`.
+Its MTP module combines the native token/state projections with the Transformers
+DeepSeek-V4 decoder and hyperconnection head. The adapter loads native FP8 and MXFP4
+weights into BF16 parameters using ModelOpt's quantized tensor implementations.
+Native FP32 routing biases, attention sinks, and hyperconnection parameters retain
+their precision through loading, FSDP2 training, and export. The adapter loads the
+frozen embedding, LM head, and final norm without constructing the backbone.
+
+```python
+from modelopt.torch.speculative import create_native_mtp_boost_model
+
+model = create_native_mtp_boost_model(
+    "/path/to/DeepSeek-V4-Pro",
+    device="cpu",
+    mtp_ttt_steps=3,
+    mtp_mix_hidden_states=True,
+)
+```
+
+Here the factory selects the `deepseek_v4` adapter. DSV4 uses raw hyperconnection
+(HC) states, so `state_shape=(hc_mult, hidden_size)` and `draft_hidden_states` must
+have shape `[batch, sequence, hc_mult, hidden_size]`. Teacher LM-head features retain
+the standard `[batch, sequence, hidden_size]` shape. These batches use the same
+shared training flow described above.
+
+On CUDA, attention uses Transformers' FlexAttention with a sparse sliding-window
+mask and learned attention sinks; CPU execution uses eager attention.
+`device="meta"` validates the checkpoint layout and constructs parameters without
+reading their data; those weights must be materialized and loaded before training.
+
+The [DSV4 recipe](../../modelopt_recipes/models/deepseek-ai/DeepSeek-V4-Pro/speculative_decoding/mtp_boost.yaml)
+maps `target_mtp_hidden_states` and `target_lm_head_hidden_states` from the cached
+features to the shared dataset contract. It selects three epochs, five training
+rounds, uniform hidden-state mixing, LK loss with eta 3, and FSDP2. Only rank zero reads the native
+weights; FSDP distributes them to the other ranks.
+
+```bash
+torchrun --standalone --nproc_per_node=8 examples/speculative_decoding/main.py \
+  --config models/deepseek-ai/DeepSeek-V4-Pro/speculative_decoding/mtp_boost \
+  model.model_name_or_path=/path/to/DeepSeek-V4-Pro \
+  data.offline_data_path=/path/to/hidden_states \
+  training.output_dir=/path/to/mtp-training
+```
+
+Choose the GPU count for the available memory, sequence length, and batch size.
+AdamW state is allocated on the first update, so validate memory over multiple steps.
+For multiple nodes, use the same recipe with the usual `torchrun` rendezvous arguments.
+
+Trainer saves standard Hugging Face MTP weights alongside its optimizer, scheduler,
+and RNG state in each `checkpoint-N` directory. Frozen target weights are omitted.
+Resume with the same command and
+`training.resume_from_checkpoint=/path/to/mtp-training/checkpoint-N`; keep the
+original native model path and training settings. For deployment, export the final
+output directory or an intermediate Trainer checkpoint:
+
+```bash
+python examples/speculative_decoding/scripts/export_hf_checkpoint.py \
+  --model_path /path/to/mtp-training \
+  --base_model /path/to/DeepSeek-V4-Pro \
+  --export_path /path/to/DeepSeek-V4-Pro-MTP-boosted \
+  --device cuda
+```
+
+The same export is available through the shared Python API:
+
+```python
+from modelopt.torch.export import export_speculative_decoding
+
+export_speculative_decoding(
+    "/path/to/mtp-training",
+    base_model="/path/to/DeepSeek-V4-Pro",
+    export_dir="/path/to/DeepSeek-V4-Pro-MTP-boosted",
+    device="cuda",
+)
+```
+
+Export quantizes the trained MTP projections to native FP8/UE8M0 and MXFP4 layouts
+using ModelOpt. FP32 Trainer masters for BF16 projections are first converted to
+BF16, matching MTP execution; export can therefore round those trained values.
+Native FP32 controls are exported directly without BF16 rounding. The output contains only
+native `mtp.*` tensors, an index when sharded, and the original model configuration. The
+backbone, embedding, and target LM head remain in the separate target checkpoint;
+they are neither copied nor linked into the export. The destination must not
+already exist. This checkpoint is for inference; continue training from the
+Trainer checkpoint to preserve optimizer state and unquantized weights.
+
+Use the exported directory as the separate draft model with a serving runtime
+that supports native DSV4 MTP. For example, keep the original target model and
+its normal serving options, and set vLLM's speculative configuration to:
+
+```json
+{
+  "method": "mtp",
+  "model": "/path/to/DeepSeek-V4-Pro-MTP-boosted",
+  "num_speculative_tokens": 7
+}
+```
+
+The target checkpoint supplies the tokenizer and frozen weights.
 
 ## Support Matrix
 

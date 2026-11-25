@@ -81,6 +81,15 @@ class NativeMTPAdapter(ABC):
         mtp = cls.load_mtp(model_path, dtype=dtype, device=device)
         return create_mtp_model(mtp, base_model, config)
 
+    @classmethod
+    def export_tensors(cls, model_path, mtp, state, *, device):
+        """Yield native ``(name, tensor)`` pairs from lazy training-checkpoint slices.
+
+        ``mtp`` is the module loaded on meta for shape and configuration metadata.
+        The export framework validates ``state`` against it and owns checkpoint writing.
+        """
+        raise NotImplementedError(f"Native checkpoint export is not implemented for {cls.name}")
+
 
 _ADAPTERS: dict[str, type[NativeMTPAdapter]] = {}
 

@@ -219,8 +219,12 @@ def make_speculative_data_module(
             answer_only_loss=answer_only_loss,
             tokenizer=tokenizer,
             aux_hidden_states_optional=aux_hidden_states_optional,
+            feature_key_mapping=getattr(data_args, "offline_feature_key_mapping", None),
         )
-        data_collator = EagleOfflineDataCollator(train_len=train_len)
+        data_collator = EagleOfflineDataCollator(
+            train_len=train_len,
+            feature_keys=tuple(train_dataset.feature_key_mapping.values()),
+        )
 
     return {
         "train_dataset": train_dataset,

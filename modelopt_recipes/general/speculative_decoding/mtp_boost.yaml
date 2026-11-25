@@ -1,0 +1,43 @@
+# modelopt-schema: modelopt.recipe.config.ModelOptMTPRecipe
+metadata:
+  description: Offline native MTP boosting with shared EAGLE training and LK loss.
+
+model:
+  model_name_or_path:
+
+data:
+  offline_data_path:
+  # Map the model's dump keys to draft_hidden_states and base_model_hidden_states.
+  offline_feature_key_mapping:
+
+training:
+  output_dir:
+  num_train_epochs: 1
+  per_device_train_batch_size: 1
+  learning_rate: 1.0e-4
+  warmup_steps: 5
+  training_seq_len: 8192
+  logging_steps: 1
+  save_steps: 1024
+  cp_size: 1
+  dp_shard_size: 1
+  ar_validate_steps: -1
+  answer_only_loss: true
+  weight_decay: 0.0
+  dataloader_drop_last: false
+  dataloader_in_order: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+  seed: 42
+  data_seed: 42
+  lr_scheduler_type: linear
+
+mtp:
+  mtp_adapter: auto
+  mtp_loss_type: lk_lambda
+  mtp_lk_eta: 3.0
+  mtp_ttt_steps: 5
+  mtp_mix_hidden_states: true
+  mtp_mix_hidden_states_mode: uniform_layer_sample
+  mtp_loss_decay_factor: 1.0

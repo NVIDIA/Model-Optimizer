@@ -43,6 +43,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
+from modelopt.torch.speculative.plugins.hf_training_args import DataArguments
 from modelopt.torch.utils.plugins import transformers_dataset
 
 _mock_scripts = types.ModuleType("scripts")
@@ -881,7 +882,8 @@ def test_collator_batches_multiple(tmp_path):
     )
 
 
-def test_offline_custom_features_and_collation(tmp_path):
+@pytest.mark.parametrize("source", ["direct", "directory"])
+def test_offline_custom_features_and_collation(tmp_path, source):
     """Native state layouts reuse mask handling, padding and truncation without EAGLE metadata."""
     mapping = {"raw_state": "target_state", "head_input": "teacher_hidden"}
     records = []
@@ -898,24 +900,39 @@ def test_offline_custom_features_and_collation(tmp_path):
         torch.save(record, path)
         records.append(record)
         files.append(path)
-    dataset = OfflineSupervisedDataset(files, answer_only_loss=True, feature_key_mapping=mapping)
-    collator = EagleOfflineDataCollator(
-        8,
-        batch_keys=("input_ids", "attention_mask", "loss_mask"),
-        feature_keys=tuple(mapping.values()),
-        feature_output_key="mtp_boost_inputs",
-    )
+    if source == "direct":
+        dataset = OfflineSupervisedDataset(
+            files, answer_only_loss=True, feature_key_mapping=mapping
+        )
+        collator = EagleOfflineDataCollator(
+            8,
+            batch_keys=("input_ids", "attention_mask", "loss_mask"),
+            feature_keys=tuple(mapping.values()),
+            feature_output_key="mtp_boost_inputs",
+        )
+        output_key = "mtp_boost_inputs"
+        batch_keys = {"input_ids", "attention_mask", "loss_mask", output_key}
+    else:
+        args = DataArguments(
+            offline_data_path=str(tmp_path),
+            offline_feature_key_mapping=mapping,
+        )
+        module = make_speculative_data_module(None, args, train_len=8, answer_only_loss=True)
+        dataset, collator = module["train_dataset"], module["data_collator"]
+        records = [records[files.index(Path(path).resolve())] for path in dataset.dumped_files]
+        output_key = "base_model_outputs"
+        batch_keys = {"input_ids", "attention_mask", "loss_mask", "labels", output_key}
     batch = collator([dataset[0], dataset[1]])
-    assert set(batch) == {"input_ids", "attention_mask", "loss_mask", "mtp_boost_inputs"}
-    assert set(batch["mtp_boost_inputs"]) == set(mapping.values())
+    assert set(batch) == batch_keys
+    assert set(batch[output_key]) == set(mapping.values())
     for i, record in enumerate(records):
         length = min(len(record["input_ids"]), 8)
         torch.testing.assert_close(batch["loss_mask"][i, :length], record["loss_mask"][:length])
         assert not batch["attention_mask"][i, length:].any()
         assert not batch["loss_mask"][i, length:].any()
-        for source, destination in mapping.items():
-            value = batch["mtp_boost_inputs"][destination][i]
-            torch.testing.assert_close(value[:length], record[source][:length])
+        for source_key, destination in mapping.items():
+            value = batch[output_key][destination][i]
+            torch.testing.assert_close(value[:length], record[source_key][:length])
             assert not value[length:].any()
 
 

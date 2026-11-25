@@ -124,7 +124,7 @@ from . import hf_export_handlers as _hf_export_handlers
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
-from .plugins import SpeculativeDecodingExporter, has_spec_opt
+from .plugins import NativeMTPExporter, SpeculativeDecodingExporter, has_spec_opt
 from .quant_aware_conversion import (
     build_reverse_name_mapper,
     revert_quant_config_names,
@@ -1748,14 +1748,31 @@ def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
 
 
 def export_speculative_decoding(
-    model: torch.nn.Module,
+    model: torch.nn.Module | str | Path,
     dtype: torch.dtype | None = None,
     export_dir: Path | str = tempfile.gettempdir(),
+    *,
+    base_model: str | Path | None = None,
+    device: torch.device | str | None = None,
 ) -> None:
-    """Export speculative decoding HuggingFace model checkpoint."""
-    assert has_spec_opt(model), "Model is not optimized for speculative decoding."
+    """Export a speculative model or a saved native MTP training checkpoint.
 
-    exporter: SpeculativeDecodingExporter = model.get_exporter()
+    For native MTP, pass the consolidated HF training checkpoint path as ``model``
+    and the original native checkpoint as ``base_model``. Weights are read lazily,
+    requantized on ``device`` (CPU by default), and exported without target weights.
+    Native tensor dtypes are preserved; leave ``dtype`` unset.
+    Loaded EAGLE and DFlash models use their existing exporters.
+    """
+    exporter: SpeculativeDecodingExporter
+    if isinstance(model, (str, Path)):
+        if base_model is None:
+            raise ValueError("Native MTP checkpoint export requires base_model.")
+        exporter = NativeMTPExporter(model, base_model, device=device or "cpu")
+    else:
+        if base_model is not None or device is not None:
+            raise ValueError("base_model and device apply only to native MTP checkpoint paths.")
+        assert has_spec_opt(model), "Model is not optimized for speculative decoding."
+        exporter = model.get_exporter()
     exporter.export(export_dir, dtype)
 
 

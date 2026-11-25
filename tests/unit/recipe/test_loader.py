@@ -861,6 +861,7 @@ _MINIMAL_BODIES: dict[RecipeType, dict] = {
     RecipeType.SPECULATIVE_DFLASH: {},
     RecipeType.SPECULATIVE_MEDUSA: {},
     RecipeType.SPECULATIVE_EXTERNAL: {},
+    RecipeType.SPECULATIVE_MTP: {},
 }
 
 
@@ -1224,6 +1225,23 @@ def test_load_recipe_dflash_field_validation_raises(tmp_path):
     )
     with pytest.raises(Exception):  # pydantic.ValidationError
         load_recipe(bad)
+
+
+def test_dsv4_mtp_recipe_preserves_boosting_training_settings():
+    """The model recipe must retain the generic training settings when adding FSDP."""
+    generic = load_recipe("general/speculative_decoding/mtp_boost")
+    native = load_recipe("models/deepseek-ai/DeepSeek-V4-Pro/speculative_decoding/mtp_boost")
+    generic_training = generic.training.model_dump(exclude_unset=True)
+    native_training = native.training.model_dump(exclude_unset=True)
+    for key in generic_training.keys() - {"dp_shard_size", "num_train_epochs"}:
+        assert native_training[key] == generic_training[key]
+    assert native.mtp.model_dump(exclude={"mtp_adapter"}) == generic.mtp.model_dump(
+        exclude={"mtp_adapter"}
+    )
+    assert native.data.offline_feature_key_mapping == {
+        "target_mtp_hidden_states": "draft_hidden_states",
+        "target_lm_head_hidden_states": "base_model_hidden_states",
+    }
 
 
 # ---------------------------------------------------------------------------

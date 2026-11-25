@@ -1,0 +1,51 @@
+# modelopt-schema: modelopt.recipe.config.ModelOptMTPRecipe
+metadata:
+  description: DeepSeek-V4 Pro native MTP boosting from offline HC and LM-head features.
+
+model:
+  model_name_or_path:
+
+data:
+  offline_data_path:
+  offline_feature_key_mapping:
+    target_mtp_hidden_states: draft_hidden_states
+    target_lm_head_hidden_states: base_model_hidden_states
+
+training:
+  output_dir:
+  num_train_epochs: 3
+  per_device_train_batch_size: 1
+  learning_rate: 1.0e-4
+  warmup_steps: 5
+  training_seq_len: 8192
+  logging_steps: 1
+  save_steps: 1024
+  cp_size: 1
+  dp_shard_size:
+  fsdp: full_shard auto_wrap
+  fsdp_config:
+    version: 2
+    cpu_ram_efficient_loading: true
+    state_dict_type: FULL_STATE_DICT
+    activation_checkpointing: false
+  optim: adamw_torch
+  ar_validate_steps: -1
+  answer_only_loss: true
+  weight_decay: 0.0
+  dataloader_drop_last: false
+  dataloader_in_order: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+  seed: 42
+  data_seed: 42
+  lr_scheduler_type: linear
+
+mtp:
+  mtp_adapter: deepseek_v4
+  mtp_loss_type: lk_lambda
+  mtp_lk_eta: 3.0
+  mtp_ttt_steps: 5
+  mtp_mix_hidden_states: true
+  mtp_mix_hidden_states_mode: uniform_layer_sample
+  mtp_loss_decay_factor: 1.0
