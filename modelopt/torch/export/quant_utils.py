@@ -1882,8 +1882,9 @@ def mxfp4_release_quantization_config(model: nn.Module) -> dict[str, Any] | None
     quantized modules are fused experts in weight-only MXFP4. ``None`` when no experts are.
 
     Raises:
-        NotImplementedError: the experts are quantized beside another module, or in blocks other
-            than the release's 32 elements, which the release layout cannot carry.
+        NotImplementedError: the experts are quantized beside another module, some layers' experts
+            are not, or they are in blocks other than the release's 32 elements; the release
+            layout cannot carry any of those.
     """
     modules_to_not_convert = mxfp4_release_modules_to_not_convert(hf_model_type(model))
     if not modules_to_not_convert:
@@ -1900,7 +1901,19 @@ def mxfp4_release_quantization_config(model: nn.Module) -> dict[str, Any] | None
         raise NotImplementedError(
             f"{hf_model_type(model)} exports weight-only MXFP4 experts as its MXFP4 release stores "
             f"them, a layout that cannot carry other quantized modules: {others[:5]}"
-            f"{' ...' if len(others) > 5 else ''}. Quantize the experts alone, or in another format."
+            f"{' ...' if len(others) > 5 else ''}. Quantize the experts alone, leaving the KV cache "
+            "unquantized too, or in another format."
+        )
+    # The release config declares every layer's experts MXFP4.
+    weight_quantizer = quantizer_attr_names("gate_up_proj").weight_quantizer
+    if partial := sorted(
+        name
+        for name, module in model.named_modules()
+        if hasattr(module, weight_quantizer) and name not in experts
+    ):
+        raise NotImplementedError(
+            f"{hf_model_type(model)}'s MXFP4 release layout holds every layer's experts in MXFP4, "
+            f"but these are not quantized so: {partial[:5]}{' ...' if len(partial) > 5 else ''}."
         )
     for name in sorted(experts):
         module = model.get_submodule(name)
@@ -2115,7 +2128,7 @@ def get_quant_config(
         # Preserve the pre-AutoQuantize uniform KV schema, including partial coverage.
         quant_config["quantization"]["kv_cache_quant_algo"] = next(iter(kv_cache_formats))
 
-    # Decided here, before any weight is packed, so a refusal leaves the weights as they were.
+    # The exports check this first, before they change the model; here it records the config.
     if (release_config := mxfp4_release_quantization_config(model)) is not None:
         quant_config["mxfp4_release_quantization_config"] = release_config
 

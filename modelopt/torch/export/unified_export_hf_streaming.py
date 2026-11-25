@@ -585,8 +585,13 @@ def collect_export_tensors(
             # would be gone. True instead redistributes only this module's own parameters. The
             # writeback itself is a no-op here -- packing rebinds the parameter, so the restore
             # copies the untouched gathered data back and drops the packed tensor, which is
-            # exactly what we want.
-            with enable_weight_access_and_writeback(module, model, names, writeback=True):
+            # exactly what we want. What packing adds instead (scale buffers, MXFP4 release
+            # blocks, per-expert holders) no restore reclaims, so it is released as on the
+            # offload path.
+            with (
+                enable_weight_access_and_writeback(module, model, names, writeback=True),
+                _release_exported_tensors(module),
+            ):
                 if not is_owner:
                     continue
                 for sub_name, sub_module in module.named_modules():

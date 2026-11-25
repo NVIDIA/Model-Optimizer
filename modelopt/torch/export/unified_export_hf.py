@@ -42,6 +42,7 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_off_index_safetensors,
     locate_source_keys,
     off_index_safetensors_files,
+    resolve_checkpoint_file,
     sanitize_hf_config_for_deployment,
 )
 
@@ -74,6 +75,11 @@ try:
 except ImportError:
     _TRANSFORMERS_MODEL_TYPES = ()
     _TRANSFORMERS_CONFIG_TYPES = ()
+
+try:
+    from transformers.configuration_utils import remap_legacy_layer_types
+except ImportError:  # transformers without the layer type renames has nothing to restore
+    remap_legacy_layer_types = None
 
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
@@ -152,6 +158,7 @@ from .quant_utils import (
     get_weight_scaling_factor_2,
     has_quantized_modules,
     maybe_transpose_expert_weight_dimensions,
+    mxfp4_release_quantization_config,
     postprocess_state_dict,
     preprocess_linear_fusion,
     sync_tied_input_amax,
@@ -1038,6 +1045,8 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
     the quant config.
     """
     dtype = _resolve_export_dtype(model, dtype)
+    # What the MXFP4 release layout cannot carry is refused before the steps below change the model.
+    mxfp4_release_quantization_config(model)
     # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
     # Sourced from HF's name-based all_tied_weights_keys, so it is correct even under FSDP/offload.
     tied_map = TiedWeightMap(model)
@@ -1765,9 +1774,11 @@ def _write_hf_export_config(
         or quantization_details.get("kv_cache_quant_algo") is not None
     )
     # The model's MXFP4 release layout is described as the release describes it, alone: a
-    # runtime that finds hf_quant_config.json reads that instead.
+    # runtime that finds hf_quant_config.json, even an earlier export's, reads that instead.
     quantization_config = (hf_quant_config or {}).get("mxfp4_release_quantization_config")
-    if quantization_config is None and hf_quant_config is not None and is_quantized_export:
+    if quantization_config is not None:
+        Path(export_dir, "hf_quant_config.json").unlink(missing_ok=True)
+    elif hf_quant_config is not None and is_quantized_export:
         with open(f"{export_dir}/hf_quant_config.json", "w") as file:
             json.dump(hf_quant_config, file, indent=4)
         quantization_config = convert_hf_quant_config_format(hf_quant_config)
@@ -1775,6 +1786,12 @@ def _write_hf_export_config(
     original_config = f"{export_dir}/config.json"
     with open(original_config) as file:
         config_data = json.load(file)
+    if remap_legacy_layer_types is not None:
+        # Before the sanitize step: it trims trailing MTP entries from layer_types, and the
+        # restore only matches a list that is still exactly the remap of the source's.
+        _restore_source_layer_types(
+            config_data, _source_config_json(model), getattr(model, "config", None)
+        )
     sanitize_hf_config_for_deployment(config_data, model)
     if quantization_config is not None:
         config_data["quantization_config"] = quantization_config
@@ -1842,6 +1859,60 @@ def _source_checkpoint(model: nn.Module) -> str | None:
         or getattr(getattr(model, "config", None), "_name_or_path", None)
         or None
     )
+
+
+def _source_config_json(model: nn.Module) -> Any:
+    """The source checkpoint's ``config.json`` as parsed, or ``{}`` if it cannot be read.
+
+    Read through ``resolve_checkpoint_file``, which keeps the file inside the checkpoint directory
+    and bounds its size.
+    """
+    ckpt = _source_checkpoint(model)
+    # RuntimeError: a symlink loop on Python < 3.13, and the RecursionError of a deeply nested file.
+    with contextlib.suppress(OSError, ValueError, RuntimeError):
+        if ckpt:
+            return json.loads(
+                resolve_checkpoint_file(Path(ckpt), "config.json").read_text(encoding="utf-8")
+            )
+    return {}
+
+
+def _remapped_layer_types(layer_types: list) -> list | None:
+    """Transformers' remap of ``layer_types``, or ``None`` when it cannot be applied.
+
+    The remap is a transformers internal, and this runs on the last write of an export, so a
+    changed contract warns and leaves the config as transformers wrote it.
+    """
+    if remap_legacy_layer_types is None or not all(isinstance(t, str) for t in layer_types):
+        return None
+    try:
+        return remap_legacy_layer_types(layer_types)
+    except Exception as exc:
+        warnings.warn(f"Could not restore the source layer_types spelling ({exc}).")
+        return None
+
+
+def _restore_source_layer_types(config_data: dict, source: Any, config: Any) -> None:
+    """Spell ``layer_types`` as the source ``config.json`` does, in the config and its sub-configs.
+
+    transformers renames some layer types on load (``deepseek_sparse_attention`` becomes
+    ``indexed_attention`` in 5.18), and runtimes validate against the names the checkpoint ships.
+    The source's list is restored only where it is exactly what transformers' remap turns it into,
+    so a list the export edited or trimmed keeps its handling. Only the live config nodes are
+    followed, not any dict that happens to sit in the file.
+    """
+    if not isinstance(source, dict):
+        return
+    for key in ("layer_types", "mtp_layer_types"):  # the lists transformers' remap rewrites
+        source_types = source.get(key)
+        remapped = _remapped_layer_types(source_types) if isinstance(source_types, list) else None
+        if remapped is not None and remapped == config_data.get(key):
+            config_data[key] = source_types
+    for key, sub_config in getattr(config, "__dict__", {}).items():
+        if isinstance(sub_config, _TRANSFORMERS_CONFIG_TYPES) and isinstance(
+            config_data.get(key), dict
+        ):
+            _restore_source_layer_types(config_data[key], source.get(key), sub_config)
 
 
 def carryable_unplaced_keys(model: nn.Module) -> list[str]:
@@ -2177,6 +2248,8 @@ def export_hf_checkpoint(
             )
         # Each rank holds only its own experts' quantizers, so they are agreed on before any folds.
         _agree_on_fused_expert_quantization(model)
+    # What the MXFP4 release layout cannot carry is refused before anything is written or folded.
+    mxfp4_release_quantization_config(model)
     # Either form of sharding, including the hybrid where both hold: a model can be FSDP2-dense AND
     # expert-parallel, so these are tracked separately rather than as an either/or.
     _sharded_export = _ep_sharded or _fsdp2_sharded
