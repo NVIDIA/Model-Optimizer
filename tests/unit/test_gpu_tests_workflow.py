@@ -17,6 +17,8 @@
 
 import importlib.util
 import json
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -197,16 +199,68 @@ def test_receipts_fail_closed(measurement, tmp_path, corruption):
         measurement.validate_results(scratch, junit)
 
 
-def test_exact_two_devices_and_source_sha(measurement, monkeypatch):
+@pytest.mark.timeout(5)
+def test_exact_two_devices_and_source_sha(measurement, monkeypatch, tmp_path):
     cuda = SimpleNamespace(is_available=lambda: True, device_count=lambda: 1)
     with pytest.raises(ValueError, match="exactly two"):
         measurement.check_devices(cuda)
     cuda.device_count = lambda: 2
     measurement.check_devices(cuda)
-    monkeypatch.setenv("GITHUB_SHA", "expected")
-    monkeypatch.setattr(measurement.subprocess, "check_output", lambda *a, **kw: "wrong\n")
+    # Real Git refusal without chown or persistent configuration changes.
+    checkout = tmp_path / "checkout with spaces"
+    checkout.mkdir()
+    monkeypatch.chdir(checkout)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.delenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", raising=False)
+    subprocess.run(["git", "init", "-q"], check=True, timeout=5)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=CI fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+        timeout=5,
+    )
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, timeout=5).strip()
+    original_config = (checkout / ".git/config").read_bytes()
+    monkeypatch.setenv("GITHUB_SHA", sha)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(checkout))
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    refused = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5
+    )
+    assert refused.returncode == 128 and "dubious ownership" in refused.stderr
+    assert measurement.check_source() == sha
+    monkeypatch.setenv("GITHUB_SHA", "wrong")
     with pytest.raises(ValueError, match="checkout"):
         measurement.check_source()
+    monkeypatch.delenv("GITHUB_SHA")
+    with pytest.raises(ValueError, match="checkout"):
+        measurement.check_source()
+    monkeypatch.setenv("GITHUB_SHA", sha)
+    for wrong in (str(tmp_path), "checkout with spaces", ""):
+        monkeypatch.setenv("GITHUB_WORKSPACE", wrong)
+        with pytest.raises(ValueError, match=r"workspace|checkout"):
+            measurement.check_source()
+    monkeypatch.delenv("GITHUB_WORKSPACE")
+    with pytest.raises(ValueError, match=r"workspace|checkout"):
+        measurement.check_source()
+    assert (checkout / ".git/config").read_bytes() == original_config
+    # The exception must not persist even in this temporary repository.
+    refused = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5
+    )
+    assert refused.returncode == 128 and "dubious ownership" in refused.stderr
 
 
 def test_focused_pytest_command_and_failure_status(measurement, tmp_path, monkeypatch):

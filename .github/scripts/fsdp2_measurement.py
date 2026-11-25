@@ -41,7 +41,22 @@ def check_devices(cuda):
 
 def check_source():
     """Require the actual checkout to match the dispatch event source."""
-    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    workspace = Path(os.environ.get("GITHUB_WORKSPACE", ""))
+    if not workspace.is_absolute():
+        raise ValueError("Measurement requires an absolute GITHUB_WORKSPACE checkout")
+    workspace = workspace.resolve()
+    if workspace != Path.cwd().resolve() or not (workspace / ".git").exists():
+        raise ValueError("Measurement workspace must be the current checkout root")
+    # Checkout's temporary HOME trust may not reach this child; trust only this verified
+    # checkout for this read-only command, without changing persistent Git configuration.
+    root, sha = subprocess.check_output(
+        ["git", "-c", f"safe.directory={workspace}", "rev-parse", "--show-toplevel", "HEAD"],
+        cwd=workspace,
+        text=True,
+        timeout=5,
+    ).splitlines()
+    if Path(root).resolve() != workspace:
+        raise ValueError("Measurement Git checkout root differs from workspace")
     if not os.environ.get("GITHUB_SHA") or sha != os.environ["GITHUB_SHA"]:
         raise ValueError("Measurement checkout does not match event SHA")
     return sha
