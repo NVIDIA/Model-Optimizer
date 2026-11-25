@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub import HfApi, constants, snapshot_download
 from huggingface_hub.errors import (
     GatedRepoError,
     HFValidationError,
@@ -425,68 +425,19 @@ def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
 # knows what it actually wrote.
 
 # --- HF checkpoint layout: what counts as a file inside a checkpoint -------------------
-# A hub snapshot stores every entry as a symlink into a sibling ``blobs/`` directory, so
-# "inside the checkpoint" has to mean the snapshot dir OR that blob root. Getting this wrong
-# in either direction is costly: reject links and no hub checkpoint works, follow them blindly
-# and a checkpoint can name any file on the host.
-#
-# huggingface_hub >= 1.32 also keeps each Xet-backed file once per cache, in a store shared by all
-# repos that their ``blobs/<etag>`` links into; ``_is_shared_store_blob`` admits those files.
-_HF_SHARED_BLOBS_MARKER = ".huggingface-shared-blobs"
-_XET_HASH = re.compile(r"[0-9a-f]{64}")
+# A checkpoint's links may lead only to its own files, or an export could copy any file on the
+# host: inside the checkpoint dir or, for a checkpoint in the Hugging Face cache (HF_HUB_CACHE),
+# anywhere in that cache, whose snapshot and blob layout is the hub's to change.
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _snapshot_blob_root(source_root: Path) -> Path | None:
-    if source_root.parent.name != "snapshots":
-        return None
-    blob_root = source_root.parent.parent / "blobs"
-    return blob_root.resolve(strict=True) if blob_root.is_dir() else None
-
-
-def _allowed_source_roots(src_dir: Path) -> list[Path]:
+def _allowed_source_root(src_dir: Path) -> Path:
     source_root = src_dir.resolve(strict=True)
-    allowed_roots = [source_root]
-    if blob_root := _snapshot_blob_root(source_root):
-        allowed_roots.append(blob_root)
-    return allowed_roots
-
-
-def _link_target(link: Path) -> Path:
-    """Where the symlink ``link`` points: its directories resolved, its last part not followed."""
-    target = link.parent / os.readlink(link)
-    return target.parent.resolve(strict=True) / target.name
-
-
-def _is_shared_store_blob(src_dir: Path, src: Path, resolved_src: Path) -> bool:
-    """Whether ``src`` reaches ``resolved_src`` the way the hub links a file in its shared store.
-
-    That is through a link in its repo's own ``blobs/``, straight to ``<cache>/blobs/<hash[:2]>/<hash>``
-    in a store that holds the hub's marker (see huggingface_hub's ``utils/_shared_blobs.py``).
-    """
-    source_root = src_dir.resolve(strict=True)
-    if source_root.parent.name != "snapshots":
-        return False
-    repo_blobs = source_root.parent.parent / "blobs"
-    store = repo_blobs.parent.parent / "blobs"
-    try:
-        if not stat.S_ISREG((store / _HF_SHARED_BLOBS_MARKER).lstat().st_mode):
-            return False
-        # Both hops as the filesystem takes them, not as the link text spells them. Matching them
-        # against paths spelled under the resolved snapshot also refuses a blobs/ that is a link.
-        repo_blob = _link_target(src)
-        return (
-            repo_blob.parent == repo_blobs
-            and _link_target(repo_blob) == resolved_src
-            and resolved_src.parent.parent == store
-            and _XET_HASH.fullmatch(resolved_src.name) is not None
-            and resolved_src.parent.name == resolved_src.name[:2]
-        )
-    except OSError:  # an unreadable store is no store, and a regular file links nowhere
-        return False
+    hub_cache = Path(constants.HF_HUB_CACHE).resolve()
+    return hub_cache if _is_relative_to(source_root, hub_cache) else source_root
 
 
 def resolve_checkpoint_file(
@@ -503,9 +454,7 @@ def resolve_checkpoint_file(
         raise ValueError(f"checkpoint source is not a readable regular file: {src}") from exc
     if not resolved_src.is_file():
         raise ValueError(f"checkpoint source must resolve to a regular file: {src}")
-    if not any(
-        _is_relative_to(resolved_src, root) for root in _allowed_source_roots(src_dir)
-    ) and not _is_shared_store_blob(src_dir, src, resolved_src):
+    if not _is_relative_to(resolved_src, _allowed_source_root(src_dir)):
         raise ValueError(f"checkpoint source is outside the checkpoint directory: {src}")
     if max_bytes is not None and resolved_src.stat().st_size > max_bytes:
         raise ValueError(f"checkpoint source exceeds the {max_bytes}-byte size limit: {src}")
@@ -774,8 +723,8 @@ def copy_off_index_safetensors(
         #
         # resolve_checkpoint_file already draws that line and is tested against both shapes: it
         # resolves strictly, demands a regular file, and demands the target sit under the
-        # checkpoint dir or its hub blob stores. max_bytes=None because its default bounds
-        # metadata, and these are weight files.
+        # checkpoint dir or, for a hub snapshot, the Hugging Face cache. max_bytes=None because its
+        # default bounds metadata, and these are weight files.
         try:
             source = resolve_checkpoint_file(Path(src), name, max_bytes=None)
         except ValueError as exc:
@@ -1014,8 +963,8 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
     * files under ``export_dir`` when it lies inside ``source``, e.g. an earlier export;
     * files under hidden directories (``.git``, ``.cache``), which are version-control or download
       state rather than part of the checkpoint;
-    * links that resolve outside the checkpoint (or, for a Hub snapshot, its blob stores), and
-      dangling links, each with a warning.
+    * links that resolve outside the checkpoint (or, for a checkpoint in the Hugging Face cache,
+      outside that cache), and dangling links, each with a warning.
 
     Args:
         source: Local checkpoint directory. Download a Hub model first with
@@ -1049,7 +998,7 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
         if dst.exists() or dst.is_symlink():
             continue
         # A link is followed only to where a checkpoint file may live -- the checkpoint itself or,
-        # for a Hub snapshot, its blob stores -- or the export could copy any file on the host.
+        # for a Hub snapshot, the Hugging Face cache -- or the export could copy any file on the host.
         try:
             resolved = resolve_checkpoint_file(source_dir, rel, max_bytes=None)
         except ValueError as error:

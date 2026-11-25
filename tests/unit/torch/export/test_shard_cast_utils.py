@@ -110,7 +110,8 @@ def test_copy_aux_files_preserves_sidecars_and_applies_skips(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
-def test_copy_aux_files_accepts_huggingface_snapshot_blobs(tmp_path):
+def test_copy_aux_files_accepts_huggingface_snapshot_blobs(tmp_path, monkeypatch):
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path))
     repository = tmp_path / "models--moonshotai--Kimi-K3"
     snapshot = repository / "snapshots" / "revision"
     blob = repository / "blobs" / "tokenizer-blob"
