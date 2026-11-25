@@ -63,7 +63,7 @@ from modelopt.torch.distill._bypass_runner import _BypassRunner
 from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.qtensor import FP8QTensor, NVFP4QTensor, QTensorWrapper
 from modelopt.torch.quantization.repair import IQRepairPolicy, plan_iq_repair
 from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
@@ -2271,12 +2271,18 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
         ),
     )
     if case == "p_qdq":
-        from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
+        from modelopt.torch.quantization.plugins.huggingface import (
+            _QuantAttention,
+            register_hf_attentions_on_the_fly,
+        )
 
         for model in (teacher, student):
             attention = model.model.layers[0].self_attn
+            original_attention_type = _QuantAttention.get_attn_type(attention)
             if not isinstance(attention, _QuantAttention):
-                attention = _QuantAttention.convert(attention)
+                register_hf_attentions_on_the_fly(model)
+                attention = QuantModuleRegistry.convert(attention)
+            assert original_attention_type in type(attention).__mro__
             for name in ("q", "k", "v"):
                 getattr(attention, f"{name}_bmm_quantizer").disable()
             pq = attention.p_bmm_quantizer
