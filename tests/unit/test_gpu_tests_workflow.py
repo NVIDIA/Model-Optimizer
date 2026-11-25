@@ -229,6 +229,7 @@ def test_focused_pytest_command_and_failure_status(measurement, tmp_path, monkey
 def test_measurement_check_names_and_coverage_are_isolated():
     workflow = _workflow()
     jobs = workflow["jobs"]
+    assert ".github/scripts/fsdp2_measurement.py" in jobs["pr-gate"]["with"]["files"].splitlines()
     assert "fsdp2-measurement" in workflow["concurrency"]["group"]
     assert "fsdp2-measurement-gate" in jobs["pr-gate"]["name"]
     assert (
