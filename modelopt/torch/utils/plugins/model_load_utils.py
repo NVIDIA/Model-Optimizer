@@ -1688,11 +1688,13 @@ def parallel_load_and_prepare_fsdp2(
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
 
     # Bucket each checkpoint tensor by its target's decoder layer (root params go to
-    # non_layer_sources). Every tensor in the files the index names, not only the ones it lists, so
-    # the unplaced ones fall out of this same pass. A model built from its config ran no
-    # conversions of its own, so the stock plan is the only one.
+    # non_layer_sources). Every tensor in the files the index names, not only the ones it lists:
+    # from_pretrained loads all of them, so the reads below take the same map, and the unplaced
+    # ones fall out of this same pass. A model built from its config ran no conversions of its
+    # own, so the stock plan is the only one.
+    tensor_files = checkpoint_tensor_files(resolved_path)
     layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
-        checkpoint_tensor_files(resolved_path),
+        tensor_files,
         [plan] if plan else [],
         model_param_names,
         layer_prefixes,
@@ -1708,10 +1710,9 @@ def parallel_load_and_prepare_fsdp2(
     # memory this loader exists to save.
     record_unplaced_source_keys(model, resolved_path, unplaced)
     # What from_pretrained records: the conversions some checkpoint key used. The export reverts
-    # these and would otherwise query the wrapped class, which has lost them. They are matched over
-    # exactly the keys the reads below convert -- placed and in weight_map, which is what
-    # read_safetensors_subset selects from -- so a rename only an unread key matches, such as one
-    # with no parameter that is only carried over, doesn't rename the export. Transformers'
+    # these and would otherwise query the wrapped class, which has lost them. They are taken from
+    # exactly the keys the reads below convert, the placed ones, so a rename only a key with no
+    # parameter matches, which is only carried over, doesn't rename the export. Transformers'
     # was_used isn't used even where it exists: the placement pass above set it for every key. Nor
     # is a hook on each rule's matching: a key that already names a parameter keeps that name even
     # where a rule matched it (a VLM's text sub-model rule), so only the rules that named the target
@@ -1721,7 +1722,6 @@ def parallel_load_and_prepare_fsdp2(
         used = {
             id(conversion)
             for key in chain(non_layer_sources, *layer_sources.values())
-            if key in weight_map
             for conversion in _resolve_target(plan, key)[2]
         }
         model._weight_conversions = [c for c in plan["conversions"] if id(c) in used]
@@ -1731,7 +1731,7 @@ def parallel_load_and_prepare_fsdp2(
 
     owned_layer_indices = _layers_for_rank(len(decoder_layers), world_size, rank)
     owned_layer_state_dicts = _read_owned_layers(
-        resolved_path, weight_map, layer_sources, owned_layer_indices, plan
+        resolved_path, tensor_files, layer_sources, owned_layer_indices, plan
     )
 
     # Smaller broadcast_chunk_size lowers the transient GPU peak (more, smaller collectives).
@@ -1756,7 +1756,7 @@ def parallel_load_and_prepare_fsdp2(
     # TODO: layerwise support.
     non_layer = None
     if rank == 0:
-        non_layer = _read_and_convert(resolved_path, weight_map, set(non_layer_sources), plan)
+        non_layer = _read_and_convert(resolved_path, tensor_files, set(non_layer_sources), plan)
     non_layer = broadcast_state_dict(non_layer, src=0, device=device)
     if cpu_offload:
         non_layer = {k: v.cpu() for k, v in non_layer.items()}

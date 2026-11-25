@@ -387,21 +387,19 @@ def _as_on_transformers_5_5(monkeypatch):
 def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monkeypatch, loader):
     """A load records only the conversions it converted a key with, on every Transformers version.
 
-    Each load meets a tied ``lm_head`` it doesn't convert: FSDP2 a copy of it its index leaves out,
-    which it places but never reads, and a head bias with no parameter, which it only carries over;
-    the whole-model load (as on 5.5, without ``was_used``) no head tensor at all. Recorded anyway,
-    the head's rename renames ``lm_head`` in the export (to ``language_model.model.lm_head`` for
-    Gemma3). The whole-model load also reads a projector its index leaves out, and keeps its rename.
+    Each load meets a tied ``lm_head`` with no tensor of its own (the whole-model load as on 5.5,
+    without ``was_used``), and FSDP2 also a head bias with no parameter, which it only carries over.
+    Recorded anyway, the head's rename renames ``lm_head`` in the export (to
+    ``language_model.model.lm_head`` for Gemma3). Both loads also read a projector its index leaves
+    out, as from_pretrained reads every tensor of a shard it opens, and keep its rename.
     """
     fsdp2 = loader == "fsdp2"
-    ref = _tiny_llava_checkpoint(tmp_path, drop=() if fsdp2 else ("lm_head.",), tie=True)
+    ref = _tiny_llava_checkpoint(tmp_path, drop=("lm_head.",), tie=True)
     state = load_file(str(tmp_path / "model.safetensors"))
     (tmp_path / "model.safetensors").unlink()
     if fsdp2:
         state["language_model.lm_head.bias"] = torch.zeros(64)
-        off_index = {"language_model.lm_head.weight"}
-    else:
-        off_index = {k for k in state if k.startswith("multi_modal_projector.")}
+    off_index = {k for k in state if k.startswith("multi_modal_projector.")}
     shard = "model-00001-of-00001.safetensors"
     save_file(state, str(tmp_path / shard), metadata={"format": "pt"})
     index = {"metadata": {}, "weight_map": {k: shard for k in state if k not in off_index}}
@@ -415,9 +413,10 @@ def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monke
         assert torch.equal(head.detach(), ref.get_input_embeddings().weight.detach())
     else:
         model = load_pretrained(str(tmp_path), _as_on_transformers_5_5(monkeypatch))
-        ref_projector = ref.model.multi_modal_projector
-        for name, param in model.model.multi_modal_projector.named_parameters():
-            assert torch.equal(param, ref_projector.get_parameter(name)), name
+    ref_projector = ref.model.multi_modal_projector
+    for name, param in model.model.multi_modal_projector.named_parameters():
+        param = param.full_tensor() if isinstance(param, DTensor) else param
+        assert torch.equal(param.detach(), ref_projector.get_parameter(name).detach()), name
 
     to_source = build_reverse_name_mapper(model)
     recorded, model._weight_conversions = (
