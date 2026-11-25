@@ -87,6 +87,17 @@ class TestMaxCalibrator:
         with pytest.raises(RuntimeError, match="shape changed"):
             max_calibrator.collect(x_3)
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_invalid_amax_raises_after_later_batches(self, bad):
+        max_calibrator = calib.MaxCalibrator(8, 0, False)
+        x_1 = torch.rand(3, 4)
+        x_1[1, 2] = bad
+        max_calibrator.collect(x_1)
+        max_calibrator.collect(torch.rand(3, 4))
+        with pytest.raises(AssertionError, match="values in amax"):
+            max_calibrator.compute_amax()
+        assert max_calibrator.compute_amax() is None
+
 
 class TestHistogramCalibrator:
     @pytest.mark.parametrize("torch_hist", [False, True])
