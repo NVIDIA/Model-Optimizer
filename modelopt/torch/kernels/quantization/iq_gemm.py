@@ -214,6 +214,14 @@ class _IQLinear(torch.autograd.Function):
         n, k = ctx.shape
         gradient = gradient.contiguous().view(-1, n)
         m = gradient.shape[0]
+        db = None
+        if ctx.has_bias and ctx.needs_input_grad[5]:
+            # Bound native reduction workspace before allocating the other VJPs.
+            db = (
+                gradient.sum(0)
+                if n <= 1024
+                else torch.cat([columns.sum(0) for columns in gradient.split(1024, dim=1)])
+            )
         dx, ds = None, None
         if ctx.needs_input_grad[0]:
             dx = gradient.new_empty((m, k))
@@ -236,7 +244,6 @@ class _IQLinear(torch.autograd.Function):
                 _scale_backward[(triton.cdiv(n, _SCALE_TILE_N), triton.cdiv(k, _TILE_K))](
                     x, gradient, packed, grid, ds, m, n, k, enable_fp_fusion=False, **ctx.meta
                 )
-        db = gradient.sum(0) if ctx.has_bias and ctx.needs_input_grad[5] else None
         return None if dx is None else dx.view(ctx.input_shape), None, ds, None, None, db
 
 
