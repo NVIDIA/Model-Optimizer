@@ -35,6 +35,7 @@ import pytest
 import torch
 from jinja2 import TemplateSyntaxError
 
+httpx = pytest.importorskip("httpx")
 # hf_streaming_dataset imports LabelSmoother at module scope.
 pytest.importorskip("transformers")
 httpx = pytest.importorskip("httpx")
