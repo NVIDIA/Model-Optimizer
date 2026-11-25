@@ -28,7 +28,6 @@ from torch import nn
 
 from modelopt.torch.models.specs import BypassSpec, get_spec
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
-from modelopt.torch.quantization.plugins import huggingface as hf_quantization
 
 from ..._bypass_capture import (
     BypassUnit,
@@ -650,6 +649,8 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         _synchronize_error(self.context, error)
 
     def _cp_inputs(self, teacher, batch):
+        # Generic adapter imports must remain usable without the optional HF extra.
+        from modelopt.torch.quantization.plugins import huggingface as hf_quantization
         from modelopt.torch.quantization.repair_partition import requires_full_context_activations
 
         models = [model for model in (teacher, self.student) if model is not None]
