@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import math
+import operator
 import types
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -326,6 +327,7 @@ def _map_placement(
     # Graph inputs are named after the forward arguments in ONNX but may be renamed in FX.
     inputs = dict(zip((value.name for value in onnx_model.graph.input), placeholders, strict=True))
     onnx_nodes = {node.name: node for node in onnx_model.graph.node}
+    producers = {output: node for node in onnx_model.graph.node for output in node.output}
     initializer_numel = {
         init.name: int(torch.Size(init.dims).numel()) for init in onnx_model.graph.initializer
     }
@@ -353,6 +355,8 @@ def _map_placement(
                     f"Quantized tensor '{tensor.name}' is internal to the decomposition of "
                     f"'{source.name}' and has no counterpart in the exported graph."
                 )
+        elif (getitem := _split_output(tensor.name, producers, decomposed_nodes)) is not None:
+            source = traced(getitem)
         elif tensor.is_constant:
             source = _find_folded_param(tensor.name, consumers, initializer_numel[tensor.name])
         else:
@@ -423,6 +427,30 @@ def _reader_of(source: fx.Node, consumer: fx.Node, elided: set[fx.Node]) -> tupl
         seen.add(node)
         pending.extend(n for n in node.all_input_nodes if n not in seen and n.op == "call_function")
     raise ValueError(f"No FX node at or above '{consumer.name}' reads '{source.name}'.")
+
+
+def _split_output(
+    tensor_name: str, producers: dict[str, onnx.NodeProto], decomposed_nodes: dict[str, fx.Node]
+) -> fx.Node | None:
+    """Return the ``getitem`` of an ``aten.split`` that the exporter folded into an ONNX Split."""
+    # The folded Split has no FX metadata, so output k is matched to getitem k of the only split
+    # of the same input.
+    producer = producers.get(tensor_name)
+    if producer is None or producer.op_type != "Split" or producer.input[0] not in decomposed_nodes:
+        return None
+    index = list(producer.output).index(tensor_name)
+    splits = [
+        user
+        for user in decomposed_nodes[producer.input[0]].users
+        if user.target in (torch.ops.aten.split.Tensor, torch.ops.aten.split_with_sizes.default)
+    ]
+    getitems = [
+        user
+        for split in splits
+        for user in split.users
+        if user.target is operator.getitem and user.args[1] == index
+    ]
+    return getitems[0] if len(splits) == 1 and len(getitems) == 1 else None
 
 
 def _find_folded_param(tensor_name: str, consumers: list[fx.Node], numel: int) -> fx.Node:

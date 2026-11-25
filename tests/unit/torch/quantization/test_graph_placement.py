@@ -59,9 +59,39 @@ def test_quantize_graph_shares_quantizers():
     torch.testing.assert_close(graph_module(example), model(example), rtol=0.1, atol=0.1)
 
 
-def test_quantize_graph_attention():
+class _Attention(torch.nn.Module):
+    def __init__(self, kv_heads=4, **sdpa_kwargs):
+        super().__init__()
+        self.query = torch.nn.Linear(64, 64)
+        self.key_value = torch.nn.Linear(64, 2 * 16 * kv_heads)
+        self.sdpa_kwargs = sdpa_kwargs
+
+    def forward(self, x):
+        query = self.query(x).unflatten(-1, (4, 16)).transpose(1, 2)
+        key, value = self.key_value(x).unflatten(-1, (-1, 16)).transpose(1, 2).chunk(2, dim=1)
+        out = torch.nn.functional.scaled_dot_product_attention(
+            query, key, value, **self.sdpa_kwargs
+        )
+        return out.transpose(1, 2).flatten(-2)
+
+
+_MASK = torch.rand(16, 16, generator=torch.Generator().manual_seed(0))
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: torch.nn.TransformerEncoderLayer(64, 4, 128, dropout=0.0, batch_first=True),
+        lambda: _Attention(kv_heads=2, enable_gqa=True),
+        lambda: _Attention(is_causal=True, scale=0.5),
+        lambda: _Attention(attn_mask=_MASK > 0.3),
+        lambda: _Attention(attn_mask=_MASK),
+    ],
+    ids=["encoder_layer", "gqa", "causal", "bool_mask", "float_mask"],
+)
+def test_quantize_graph_attention(build):
     torch.manual_seed(0)
-    model = torch.nn.TransformerEncoderLayer(64, 4, 128, dropout=0.0, batch_first=True).eval()
+    model = build().eval()
     example = torch.randn(4, 16, 64)
 
     graph_module = mtq.quantize_graph(
@@ -78,6 +108,12 @@ def test_quantize_graph_attention():
     assert len(matmul_inputs) == 4
     assert all(arg.op == "call_module" for arg in matmul_inputs)
     torch.testing.assert_close(graph_module(example), model(example), rtol=0.1, atol=0.1)
+
+    # Without quantization noise, the decomposed attention matches the fused op.
+    for module in graph_module.modules():
+        if isinstance(module, TensorQuantizer):
+            module.disable()
+    torch.testing.assert_close(graph_module(example), model(example))
 
 
 def test_quantize_graph_qat_save_restore():
