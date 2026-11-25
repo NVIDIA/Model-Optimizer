@@ -18,6 +18,7 @@
 import errno
 import os
 import shutil
+import stat
 from collections import defaultdict
 from collections.abc import Callable, Collection
 from pathlib import Path
@@ -169,9 +170,14 @@ def quantize_mxfp4_to_nvfp4_lossless(
 
 
 def link_or_copy(src: Path, dst: Path) -> None:
-    """Hard-link a file, copying when the filesystem cannot create the link."""
+    """Hard-link a file, copying it when it is read-only or the filesystem cannot link it."""
     if src.is_symlink() or not src.is_file():
         raise ValueError(f"source must be a regular file, not a symlink: {src}")
+    # A link to a read-only file, like those in the hub's shared blob store, would be read-only too,
+    # and a write through it would change the file that every cached repo shares.
+    if not src.stat().st_mode & stat.S_IWUSR:
+        shutil.copyfile(src, dst)
+        return
     try:
         os.link(src, dst)
     except OSError as exc:

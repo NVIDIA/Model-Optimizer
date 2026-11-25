@@ -430,11 +430,8 @@ def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
 # in either direction is costly: reject links and no hub checkpoint works, follow them blindly
 # and a checkpoint can name any file on the host.
 #
-# Since huggingface_hub 1.32, a Xet-backed file (tokenizer.json, weight shards) is stored once per
-# cache, in a store at ``<cache>/blobs`` shared by all repos, and the repo's ``blobs/<etag>`` is a
-# link into it. A snapshot entry may land in that store only the way the hub links it, through its
-# own repo's ``blobs/``, and only on a file the hub stored there (its ``utils/_shared_blobs.py``):
-# ``<store>/<hash[:2]>/<hash>``, in a store marked as the hub's, with no directory on the way a link.
+# huggingface_hub >= 1.32 also keeps each Xet-backed file once per cache, in a store shared by all
+# repos that their ``blobs/<etag>`` links into; ``_is_shared_store_blob`` admits those files.
 _HF_SHARED_BLOBS_MARKER = ".huggingface-shared-blobs"
 _XET_HASH = re.compile(r"[0-9a-f]{64}")
 
@@ -465,7 +462,11 @@ def _link_target(link: Path) -> Path:
 
 
 def _is_shared_store_blob(src_dir: Path, src: Path, resolved_src: Path) -> bool:
-    """Whether ``src`` links to its repo's blob, which links straight into the hub's shared store."""
+    """Whether ``src`` reaches ``resolved_src`` the way the hub links a file in its shared store.
+
+    That is through a link in its repo's own ``blobs/``, straight to ``<cache>/blobs/<hash[:2]>/<hash>``
+    in a store that holds the hub's marker (see huggingface_hub's ``utils/_shared_blobs.py``).
+    """
     source_root = src_dir.resolve(strict=True)
     if source_root.parent.name != "snapshots":
         return False
@@ -509,6 +510,15 @@ def resolve_checkpoint_file(
     if max_bytes is not None and resolved_src.stat().st_size > max_bytes:
         raise ValueError(f"checkpoint source exceeds the {max_bytes}-byte size limit: {src}")
     return resolved_src
+
+
+def _copy_writable(src: Path, dst: Path) -> None:
+    """``shutil.copy2``, then owner-writable, as the hub keeps its shared store read-only.
+
+    An export's files must take later writes, e.g. a ``tokenizer.save_pretrained()`` over them.
+    """
+    shutil.copy2(src, dst)
+    dst.chmod(stat.S_IMODE(dst.stat().st_mode) | stat.S_IWUSR)
 
 
 def off_index_safetensors_files(src: "str | os.PathLike | None") -> list[str]:
@@ -771,7 +781,7 @@ def copy_off_index_safetensors(
         except ValueError as exc:
             warnings.warn(f"Skipping {name}: {exc}")
             continue
-        shutil.copy2(source, target)
+        _copy_writable(source, target)
         copied.append(name)
     if copied:
         print(f"Copied off-index safetensors into {dst}: {copied}")
@@ -1047,10 +1057,7 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
             continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(resolved, dst)
-            # The hub's shared blob store keeps its files read-only, and copy2 carries that over;
-            # the export's copy must stay writable, e.g. for a tokenizer.save_pretrained() over it.
-            dst.chmod(stat.S_IMODE(dst.stat().st_mode) | stat.S_IWUSR)
+            _copy_writable(resolved, dst)
         except OSError as error:
             dst.unlink(missing_ok=True)  # or a rerun would keep the partial file
             warnings.warn(f"Failed to copy checkpoint file {rel}: {error}")

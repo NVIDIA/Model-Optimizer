@@ -16,6 +16,7 @@
 """Tests for shared streaming checkpoint-cast utilities."""
 
 import os
+import stat
 import sys
 
 import pytest
@@ -117,6 +118,10 @@ def test_link_aux_files_accepts_huggingface_snapshot_blobs(tmp_path):
     blob.parent.mkdir()
     blob.write_text("tokenizer")
     (snapshot / "tokenizer.json").symlink_to(os.path.relpath(blob, snapshot))
+    frozen = repository / "blobs" / "tiktoken-blob"
+    frozen.write_text("tiktoken")
+    frozen.chmod(0o444)  # as huggingface_hub keeps the files of its shared store
+    (snapshot / "tiktoken.model").symlink_to(os.path.relpath(frozen, snapshot))
 
     assert resolve_checkpoint_file(snapshot, "tokenizer.json") == blob.resolve()
     validate_aux_files(snapshot)
@@ -125,6 +130,9 @@ def test_link_aux_files_accepts_huggingface_snapshot_blobs(tmp_path):
 
     assert (output / "tokenizer.json").read_text() == "tokenizer"
     assert not (output / "tokenizer.json").is_symlink()
+    # Copied, not linked: the output stays writable, and writing it cannot change the blob.
+    assert not (output / "tiktoken.model").samefile(frozen)
+    assert (output / "tiktoken.model").stat().st_mode & stat.S_IWUSR
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink and FIFO support")

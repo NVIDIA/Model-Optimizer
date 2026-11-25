@@ -589,6 +589,7 @@ def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path):
     snapshot.mkdir(parents=True)
 
     save_file({"model.mtp.eh_proj.weight": torch.zeros(1)}, str(blobs / "sha123"))
+    (blobs / "sha123").chmod(0o444)  # as huggingface_hub keeps the files of its shared store
     save_file({"a.weight": torch.zeros(1)}, str(blobs / "sha456"))
     (snapshot / "mtp.safetensors").symlink_to("../../blobs/sha123")
     (snapshot / "model-00001-of-00001.safetensors").symlink_to("../../blobs/sha456")
@@ -602,6 +603,7 @@ def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path):
     dst.mkdir()
     assert copy_off_index_safetensors(snapshot, dst) == ["mtp.safetensors"]
     assert (dst / "mtp.safetensors").is_file()
+    assert (dst / "mtp.safetensors").stat().st_mode & stat.S_IWUSR
 
 
 def _indexed_ckpt(src):
@@ -1012,20 +1014,27 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
     (blobs / "sha-tokenizer").symlink_to(f"../../blobs/ab/{xet_hash}")
     (snapshot / "tokenizer.json").symlink_to("../../blobs/sha-tokenizer")
 
-    # Links the hub would not make, each landing on a file in the store.
-    (store / "ab" / "not-a-hash").write_text("{}")
+    # Links the hub would not make, each landing on a file it did not store for this repo.
+    (store / "ab" / f"{xet_hash}.refs").write_text("models--org--other/blobs/etag\n")
     (store / "cd" / "x" / "y" / "z").mkdir(parents=True)
     (store / "cd" / "blobs").mkdir()
     (store / "cd" / "blobs" / "other").write_text("{}")
+    (store / "cd" / xet_hash).write_text("{}")
+    (tmp_path / "other-cache" / "blobs" / "ab").mkdir(parents=True)
+    (tmp_path / "other-cache" / "blobs" / "ab" / xet_hash).write_text("{}")
     (snapshot / "d").symlink_to("../../../blobs/cd/x/y/z")
     (repo / "relay").symlink_to(f"../blobs/ab/{xet_hash}")
     (blobs / "sha-relayed").symlink_to("../relay")
-    (blobs / "sha-plain").symlink_to("../../blobs/ab/not-a-hash")
+    (blobs / "sha-refs").symlink_to(f"../../blobs/ab/{xet_hash}.refs")
+    (blobs / "sha-misplaced").symlink_to(f"../../blobs/cd/{xet_hash}")
+    (blobs / "sha-elsewhere").symlink_to(f"../../other-cache/blobs/ab/{xet_hash}")
     foreign = {
         "vocab.json": f"../../../blobs/ab/{xet_hash}",  # straight into the store
         "merges.txt": "d/../../../blobs/other",  # spelled as a repo blob, led elsewhere by ``d``
         "vocab.txt": "../../blobs/sha-relayed",  # a repo blob that links on through another link
-        "special_tokens_map.json": "../../blobs/sha-plain",  # a store file the hub did not store
+        "special_tokens_map.json": "../../blobs/sha-refs",  # the hub's manifest, not a payload
+        "chat_template.jinja": "../../blobs/sha-misplaced",  # a payload under the wrong prefix
+        "added_tokens.json": "../../blobs/sha-elsewhere",  # a payload in another cache's store
     }
     for name, target in foreign.items():
         (snapshot / name).symlink_to(target)
