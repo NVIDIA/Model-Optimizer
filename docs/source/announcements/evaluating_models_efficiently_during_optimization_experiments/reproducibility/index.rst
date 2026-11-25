@@ -16,12 +16,13 @@ Statistical methods
   correctness across repetitions within each subtask, then compute **Candidate − Baseline** for
   that subtask. Average those differences across subtasks.
   For the confidence interval and p-values, group all scored subtasks and their repetitions by
-  parent problem. For the 95% interval, resample paired parent problems with replacement and
-  take the 2.5th and 97.5th percentiles of the resulting mean differences.
+  parent problem. For the 95% interval, draw 50,000 resamples of paired parent problems with
+  replacement and take the 2.5th and 97.5th percentiles of the resulting mean differences.
   For the one-sided `paired permutation p-values
   <https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html>`__,
   swap model labels for whole parent problems and count permuted mean differences at least as
-  extreme as the observed difference in the tested direction.
+  extreme as the observed difference in the tested direction. Use 50,000 random swap patterns
+  and calculate the p-value as ``(extreme swaps + 1) / (total swaps + 1)``.
 
   When question-level differences are independent and a t approximation is suitable, a paired
   t-based confidence interval and a one-sided paired t-test are alternatives.
@@ -36,9 +37,10 @@ Statistical methods
 - **Cap-hit rates:** for each model, divide the number of responses that hit the completion cap
   by the total number of responses across all subtasks and repetitions.
 
-  Calculate a two-sided 95% paired-bootstrap confidence interval for the rate difference by
-  sampling whole SciCode parent problems with replacement. Keep all repetitions and both models
-  together within each sampled group. The interval endpoints are the 2.5th and 97.5th percentiles.
+  Calculate a two-sided 95% paired-bootstrap confidence interval for the rate difference using
+  50,000 resamples of whole SciCode parent problems with replacement. Keep all repetitions and
+  both models together within each sampled group. The interval endpoints are the 2.5th and 97.5th
+  percentiles.
   If neither model has an observed failure, bootstrapping gives a [0, 0] interval. This does not
   establish that failures cannot occur or that the models have equal failure rates.
 
@@ -51,6 +53,8 @@ Statistical methods
   swap model labels for whole parent problems and count permuted cap-hit rate differences at least
   as extreme as the observed difference in the tested direction. For an exact p-value, divide
   this count by the total number of possible swap patterns.
+  To estimate the p-value from random swaps, sample 50,000 swap patterns and use the same
+  formula as for accuracy.
   Cap hits are rare, so most subtask differences are zero. The permutation test avoids relying
   on a t-distribution approximation for these sparse differences.
 
@@ -69,11 +73,6 @@ Statistical methods
   Compute each model's median completion length across all its responses. The verbosity tests
   compare mean lengths.
 
-The SciCode accuracy and cap-hit tables use 50,000 bootstrap resamples and 50,000 random swap
-patterns. The p-value is ``(extreme swaps + 1) / (total swaps + 1)``, counting swaps that give a
-difference at least as extreme as the observed one in the tested direction. The SciCode cap-hit
-plot uses the same bootstrap and exact permutation p-values.
-
 .. _evaluation-fixed-response-budgets:
 
 Observed variation at fixed response budgets
@@ -90,11 +89,9 @@ fixed-budget analyses use the first 280 subtasks in that order to allow exact gr
 across 1, 2, 4, and 8 repetitions. The SciCode cap-hit plot uses prefixes of the same
 order. The dotted reference in the SciCode accuracy plot uses all 294 subtasks with
 eight repetitions.
-
 We report the mean and sample SD across the group scores. Accuracy means are percentages.
-SDs are in percentage points. The means stay
-fixed because every allocation partitions the same saved response pool. Groups can share
-question or repetition IDs, so their observed spread is descriptive.
+SDs are in percentage points. The mean across groups (solid line) stays fixed because every
+allocation partitions the same saved response pool.
 
 Saved metrics
 -------------
