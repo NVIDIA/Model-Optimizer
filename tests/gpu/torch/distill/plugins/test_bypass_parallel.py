@@ -2296,11 +2296,18 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
     if qualification:
         recipe["modules"] = ["model.layers.0"]
     reference = copy.deepcopy(student)
-    original_codes = {
-        name: module._ggml_pinned_iq2_s.clone()
-        for name, module in student.named_modules()
-        if isinstance(module, TensorQuantizer) and module.backend == "ggml"
-    }
+    original_codes = {}
+    for projection in ("gate_proj", "up_proj", "down_proj"):
+        name = f"model.layers.0.mlp.{projection}"
+        owner = student.get_submodule(name)
+        quantizer = owner.weight_quantizer
+        assert quantizer.backend == "ggml" and quantizer.num_bits == "iq2_s"
+        original_codes[f"{name}.weight_quantizer"] = (
+            IQ_FORMAT_REGISTRY["iq2_s"].pack(owner.weight, quantizer).clone()
+        )
+    assert len(original_codes) == 3 and all(
+        payload.numel() > 0 for payload in original_codes.values()
+    )
     single = init_device_mesh("cuda", (size, 1), mesh_dim_names=("owners", "dp"))["dp"]
     gradients = []
     expected_records, actual_records = [], []
