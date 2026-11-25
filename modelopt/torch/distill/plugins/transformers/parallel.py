@@ -411,9 +411,6 @@ def parallelize_native_transformers(model, context, *, initialize=None):
                 raise ValueError("Native HF config sizes must match the caller's realized meshes.")
         plans = model._resolve_parallel_plans(config)
         tp_plan, ep_plan, fsdp_plan = plans
-        from .functional_fsdp import extend_family_fsdp_plan
-
-        plans = tp_plan, ep_plan, extend_family_fsdp_plan(model, fsdp_plan)
         for axis, plan, mesh in (
             ("TP", tp_plan, context.tensor_mesh),
             ("EP", ep_plan, context.expert_mesh),
