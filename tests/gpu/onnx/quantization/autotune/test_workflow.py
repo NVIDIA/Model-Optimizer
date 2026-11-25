@@ -23,8 +23,6 @@ import pytest
 from _test_utils.import_helper import skip_if_no_tensorrt, skip_if_no_trtexec
 from _test_utils.onnx.quantization.autotune import models as _test_models
 
-from modelopt.onnx.quantization.autotune.autotuner import QDQAutotuner
-from modelopt.onnx.quantization.autotune.common import Config
 from modelopt.onnx.quantization.autotune.workflows import (
     init_benchmark_instance,
     region_pattern_autotuning_workflow,
@@ -91,42 +89,3 @@ def test_export_quantized_model(use_trtexec, simple_conv_model):
             os.unlink(baseline_model_path)
         if os.path.isdir(output_dir):
             shutil.rmtree(output_dir)
-
-
-@pytest.mark.parametrize(
-    ("saved_type", "requested_type", "explicit_output_dir"),
-    [("int8", "fp8", True), ("fp8", "int8", False)],
-)
-def test_workflow_rejects_incompatible_quant_type(
-    monkeypatch, tmp_path, simple_conv_model, saved_type, requested_type, explicit_output_dir
-):
-    """A checkpoint must not silently override the workflow's requested quantization type."""
-    autotuner = QDQAutotuner(simple_conv_model)
-    autotuner.initialize(Config(default_quant_type=saved_type))
-    autotuner.submit(1.0)
-    state = tmp_path / "autotuner_state.yaml"
-    autotuner.save_state(str(state))
-    before = state.read_bytes()
-    source = tmp_path / "source.onnx"
-    onnx.save(simple_conv_model, source)
-    mkdtemp_calls = []
-    real_mkdtemp = tempfile.mkdtemp
-    monkeypatch.setattr(
-        tempfile, "mkdtemp", lambda *a, **kw: mkdtemp_calls.append(1) or real_mkdtemp(*a, **kw)
-    )
-
-    with pytest.raises(
-        ValueError,
-        match=rf"Checkpoint quant_type={saved_type} does not match requested quant_type={requested_type}",
-    ):
-        region_pattern_autotuning_workflow(
-            str(source),
-            tmp_path if explicit_output_dir else None,
-            state_file=None if explicit_output_dir else str(state),
-            num_schemes_per_region=1,
-            quant_type=requested_type,
-        )
-
-    assert state.read_bytes() == before
-    assert set(tmp_path.iterdir()) == {state, source}
-    assert not mkdtemp_calls

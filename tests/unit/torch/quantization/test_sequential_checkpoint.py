@@ -309,7 +309,7 @@ def test_hybrid_linear_attention_cache_round_trips(tmp_path):
 
 
 def test_resume_hf_model_with_quantizers(tmp_path):
-    """Resume of a real HF model (KV-cache and tuple inputs, quantizer state) still loads safely."""
+    """Resuming from cache-free decoder inputs restores the same quantized HF model state."""
     transformers = pytest.importorskip("transformers")
     ckpt_dir = str(tmp_path / "ckpt")
     ids = [torch.randint(0, 128, (2, 16)) for _ in range(2)]
@@ -339,11 +339,9 @@ def test_resume_hf_model_with_quantizers(tmp_path):
         return cfg
 
     ref = mtq.quantize(build(), quant_cfg(), forward_loop)
-    # Exercise the cache allowlist: next_inputs.pt must really hold a DynamicCache.
-    saved = torch.load(  # trusted: written by this test
-        os.path.join(ckpt_dir, "layer_0001", "next_inputs.pt"), weights_only=False
-    )
-    assert any(type(v).__name__ == "DynamicCache" for _, kw in saved for v in kw.values())
+    saved = _load_checkpoint_file(os.path.join(ckpt_dir, "layer_0001", "next_inputs.pt"), "cpu")
+    assert len(saved) == len(ids)
+    assert all(kwargs.get("past_key_values") is None for _, kwargs in saved)
     ref_state = {k: v.clone() for k, v in ref.state_dict().items()}
 
     manifest_path = os.path.join(ckpt_dir, "manifest.json")
