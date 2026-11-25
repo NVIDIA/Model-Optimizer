@@ -35,7 +35,9 @@ python examples/hf_ptq/hf_ptq.py $ARGS \
   --auto_quantize_checkpoint bolt-search.pth --export_path bolt-out
 ```
 
-On GB200s, the shards took under two hours and the merge run about half an hour. The same search
+On GB200s, the shards took under two hours. The merge run applies the selection as one config
+entry for each of about 84,000 quantizers, and walks the whole model for every entry, which can take
+hours; the rest of that run took about half an hour. The same search
 also runs as one process, run once to search and again to finalize and export, but it scores the
 six formats one after another: with the calibration above it needed about five hours.
 

@@ -398,14 +398,13 @@ class TestSetQuantizerAttributesFull:
             set_quantizer_attributes_full(model, "*weight_quantizer", {"num_bits": 4})  # type: ignore[arg-type]
 
     def test_list_attributes_creates_sequential_quantizer(self):
-        """A list of QuantizerAttributeConfig replaces TensorQuantizer with SequentialQuantizer,
-        returning nothing."""
+        """A list of QuantizerAttributeConfig replaces TensorQuantizer with SequentialQuantizer."""
         model = self._quantize(SimpleLinear())
         attrs = [
             QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 128}),
             QuantizerAttributeConfig(num_bits=8, axis=0),
         ]
-        assert set_quantizer_attributes_full(model, "*weight_quantizer", attrs) is None
+        set_quantizer_attributes_full(model, "*weight_quantizer", attrs)
         for name, module in model.named_modules():
             if name.endswith("weight_quantizer"):
                 assert isinstance(module, SequentialQuantizer)

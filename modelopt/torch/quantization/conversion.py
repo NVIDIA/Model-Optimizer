@@ -16,22 +16,14 @@
 """Quantization conversion/restore utilities."""
 
 import fnmatch
-import os
 import re
 import warnings
-import weakref
 from collections.abc import Callable
 from contextlib import contextmanager
-from types import FunctionType
 from typing import Any, cast
 
-import torch
 import torch.nn as nn
-from torch.overrides import _get_current_function_mode_stack
-from torch.utils._device import DeviceContext
-from torch.utils._python_dispatch import _get_current_dispatch_mode_stack
 
-from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.conversion import ApplyModeError, ModelLikeModule, ModeloptStateManager
 from modelopt.torch.opt.dynamic import _DMRegistryCls
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
@@ -284,298 +276,6 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
         _replace_quant_module(getattr(model, name), version=version, registry=registry)
 
 
-_WILDCARD_RE = re.compile(r"[*?[]")
-# fnmatch compares names after os.path.normcase, which ignores case on Windows.
-_CASE_SENSITIVE_NAMES = os.path.normcase("A") == "A"
-_SINGULAR_QUANTIZER_ATOM_RE = re.compile(r"(?:weight|input)_quantizer$")
-# The classes, by id so that checking a value never hashes its class, of values whose use runs no
-# other code; nothing follows a weak reference, such as a weight cache's.
-_PLAIN_TYPE_IDS = frozenset(
-    map(id, (type(None), bool, int, float, str, torch.dtype, torch.device, torch.Size, weakref.ref))
-)
-_CONTAINER_TYPES = frozenset({dict, list, tuple, set, frozenset, slice})
-# A modelopt config's metaclass, pydantic's, whose classes the scan can hash and read without running
-# other code, as it can those of type.
-_CONFIG_METACLASS = type(ModeloptBaseConfig)
-# A class's own namespace, and a module's or other object's instance dict, read without running a
-# metaclass's or a class's own code.
-_CLASS_DICT: Any = type.__dict__["__dict__"]
-_CLASS_MRO: Any = type.__dict__["__mro__"]
-_MODULE_DICT: Any = nn.Module.__dict__["__dict__"]
-_STR_ONLY = frozenset({id(str)})
-# What named_modules compares and hashes a module with, the walks look its attributes and children
-# up with, and isinstance reads its class with: a module class other than nn.Module defining one of
-# these runs its own code there.
-_LOOKUP_NAMES = ("__eq__", "__hash__", "__getattribute__", "__class__", "_modules", "named_modules")
-# Quantizer state the check skips: nn.Module's hook registries and the forward wrapper and hook
-# that accelerate's offloading installs, which configuring a quantizer never runs, its children,
-# which the walk checks in turn, and its calibrator, which configuring it replaces or sets the axis
-# of, so that only the calibrator's class and dict count. (Replacing it drops what it held, whose
-# finalizers, like any, must not rewire the model.)
-_UNSCANNED_QUANTIZER_STATE = frozenset(k for k in vars(nn.Module()) if "hook" in k) | {
-    "_modules",
-    "forward",
-    "_old_forward",
-    "_hf_hook",
-    "_calibrator",
-}
-# A call checks the model, at its first exact entry, only when it holds this many: on a model of
-# mostly quantizers the check costs a few dozen walks, which fewer named entries would not repay.
-_EXACT_ENTRIES_FOR_CHECK = 64
-# The names of the state the scan reads, for each modelopt class it met.
-_MODELOPT_STATE_NAMES: dict[type, tuple[str, ...]] = {}
-
-
-def _str_keyed(kind: type) -> bool:
-    # Whether a class and its bases keep only str keys in their namespaces: looking a name up there
-    # compares the keys of equal hash, which runs a str subclass's own equality.
-    return all(
-        _STR_ONLY.issuperset(map(id, map(type, _CLASS_DICT.__get__(c))))
-        for c in _CLASS_MRO.__get__(kind)
-    )
-
-
-def _is_plain_calibrator_class(kind: type) -> bool:
-    # Configuring a quantizer sets its calibrator's axis, which runs the calibrator class's own
-    # __setattr__.
-    return (
-        _str_keyed(kind)
-        and _of_modelopt(kind)
-        and not any("__setattr__" in _CLASS_DICT.__get__(c) for c in _CLASS_MRO.__get__(kind)[:-1])
-    )
-
-
-def _of_modelopt(kind: type) -> bool:
-    module = _CLASS_DICT.__get__(kind).get("__module__")
-    return type(module) is str and module.partition(".")[0] == "modelopt"
-
-
-def _modelopt_state_names(kind: type) -> tuple[str, ...] | None:
-    # A modelopt object's __dict__ and slots, pydantic's per-instance state among them.
-    names = _MODELOPT_STATE_NAMES.get(kind)
-    if names is None and _str_keyed(kind) and _of_modelopt(kind):
-        slots = (_CLASS_DICT.__get__(c).get("__slots__", ()) for c in _CLASS_MRO.__get__(kind))
-        found = {"__dict__"}.union(*(((s,) if isinstance(s, str) else s) for s in slots))
-        names = _MODELOPT_STATE_NAMES[kind] = tuple(found - {"__weakref__"})
-    return names
-
-
-def _is_exact(quantizer_name: Any) -> bool:
-    return type(quantizer_name) is str and not _WILDCARD_RE.search(quantizer_name)
-
-
-def _is_plain_state(state: Any) -> bool:
-    # A dict with only str keys: looking a key up, or setting one, compares the keys whose hash
-    # matches, which runs a str subclass's own equality, and a dict subclass runs its own methods.
-    return type(state) is dict and _STR_ONLY.issuperset(map(id, map(type, state)))
-
-
-def _slot(obj: Any, name: str) -> Any:
-    # Without falling back to the class's __getattr__, such as pydantic's.
-    try:
-        return object.__getattribute__(obj, name)
-    except AttributeError:
-        return None
-
-
-def _runs_callers_code(obj: Any, seen: dict[int, Any]) -> bool:
-    """Whether ``set_quantizer_by_cfg`` can run the caller's code as it uses ``obj``.
-
-    Applying an entry, and configuring a quantizer, copies, compares, reads and replaces config
-    values and quantizer state, which runs the code of anything within them but plain values,
-    builtin containers, plain tensors and modelopt objects, such as a config or a calibrator: a
-    class or function, an object of the caller's class or of a PyTorch one, such as a tensor
-    subclass, or of a class with a metaclass of its own, which hashing or reading the class runs,
-    or a builtin wrapper such as a mapping proxy over the caller's mapping. What a tensor or a
-    modelopt object holds, in its attributes, slots (pydantic's state among them) or items, counts
-    too. ``seen`` holds, by id, what earlier scans of the same call found clean, and keeps it alive
-    so that its id stays unique.
-    """
-    stack = [obj]
-    while stack:
-        obj = stack.pop()
-        kind: type = type(obj)
-        if id(kind) in _PLAIN_TYPE_IDS or id(obj) in seen:
-            continue
-        metaclass = type(kind)
-        if (
-            metaclass is not type
-            and metaclass is not _CONFIG_METACLASS
-            and kind is not torch.Tensor
-            and kind is not nn.Parameter
-        ):
-            return True
-        seen[id(obj)] = obj
-        if kind in _CONTAINER_TYPES:
-            if kind is dict:
-                stack.extend(obj.keys())
-                stack.extend(obj.values())
-            else:
-                stack.extend((obj.start, obj.stop, obj.step) if kind is slice else obj)
-        elif kind is torch.Tensor or kind is nn.Parameter:
-            stack.append(_slot(obj, "__dict__"))
-        else:
-            names = _modelopt_state_names(kind)
-            if names is None:
-                return True
-            stack.extend(_slot(obj, name) for name in names)
-            if issubclass(kind, (dict, tuple, list, set, frozenset)):
-                stack.append(tuple(obj.items() if issubclass(kind, dict) else obj))
-    return False
-
-
-def _allows_subtree_walk(model: nn.Module) -> bool:
-    """Whether a subtree walk of ``model`` finds what ``named_modules()`` lists, entry after entry.
-
-    It does where each module is registered once, under a nonempty plain-string name with no dot or
-    final newline, in a dict, and keeps ``nn.Module``'s lookups (``named_modules``, ``_modules``)
-    and ``object``'s attribute lookup, ``__class__``, equality and hash, which then list exactly the
-    paths a subtree walk follows, and where every quantizer is a modelopt quantizer, holding only
-    such quantizers or state that cannot run the caller's code. The check itself runs no code of the
-    model's, nor of what it holds.
-    """
-    seen = set()
-    scanned: dict[int, Any] = {}
-    # For each class, by id so that no metaclass hashes it: the class, whether it redefines a lookup,
-    # and whether it is modelopt's.
-    classes: dict[int, tuple[type, bool, bool]] = {}
-    calibrator_classes: dict[int, tuple[type, bool]] = {}  # the same, whether a plain calibrator's
-    stack = [model]
-    while stack:
-        module = stack.pop()
-        kind = type(module)
-        if id(kind) not in classes:
-            str_keyed = _str_keyed(kind)
-            classes[id(kind)] = (
-                kind,
-                not str_keyed
-                or any(
-                    name in _CLASS_DICT.__get__(c)
-                    for c in _CLASS_MRO.__get__(kind)
-                    if c is not nn.Module and c is not object
-                    for name in _LOOKUP_NAMES
-                ),
-                str_keyed and _of_modelopt(kind),
-            )
-        _, redefines_lookups, of_modelopt = classes[id(kind)]
-        # named_modules skips a module equal to one it has listed, as a set does, which a class's
-        # own equality or hash can base on state the entries change; a class's own lookups run as
-        # the walks look modules up, and its or the instance's named_modules can list other paths.
-        # Looking a key up in its dict compares the keys whose hash matches, which runs a str
-        # subclass's own equality.
-        if redefines_lookups:
-            return False
-        state = _MODULE_DICT.__get__(module)
-        if not _is_plain_state(state) or "named_modules" in state or module in seen:
-            return False
-        # TorchScript's module dict has no get(), and a dict subclass's runs its own code, as does a
-        # str subclass's hash. setattr, unlike add_module, registers any name, which named_modules
-        # joins as is, and the name regexes' $ also matches before a final "\n".
-        children = state.get("_modules")
-        if type(children) is not dict or any(
-            type(name) is not str or not name or "." in name or name.endswith("\n")
-            for name in children
-        ):
-            return False
-        if isinstance(module, (TensorQuantizer, SequentialQuantizer)):
-            calibrator = state.get("_calibrator")
-            calibrator_kind = type(calibrator)
-            if id(calibrator_kind) not in calibrator_classes:
-                calibrator_classes[id(calibrator_kind)] = (
-                    calibrator_kind,
-                    _is_plain_calibrator_class(calibrator_kind),
-                )
-            if (
-                not of_modelopt
-                # Setting the calibrator's axis stores it in the calibrator's dict.
-                or (
-                    calibrator is not None
-                    and (
-                        not calibrator_classes[id(calibrator_kind)][1]
-                        or not _is_plain_state(_slot(calibrator, "__dict__"))
-                    )
-                )
-                or _runs_callers_code(
-                    [v for k, v in state.items() if k not in _UNSCANNED_QUANTIZER_STATE], scanned
-                )
-                # A SequentialQuantizer configures its members.
-                or not all(
-                    member is None
-                    or issubclass(type(member), (TensorQuantizer, SequentialQuantizer))
-                    for member in children.values()
-                )
-            ):
-                return False
-        seen.add(module)
-        stack.extend(child for child in children.values() if child is not None)
-    return True
-
-
-def _runs_global_hooks() -> bool:
-    # A replaced quantizer, or one given a buffer or parameter, runs PyTorch's global registration
-    # hooks, and a quantizer's tensor operations run the active torch function and dispatch modes,
-    # PyTorch's own among them, which can call back into the caller's code, and the Python
-    # dispatcher's kernels. A device context only sets where new tensors go. And a wrap of
-    # nn.Module.named_modules itself, which an integration can install, lists other paths.
-    modes = (*_get_current_function_mode_stack(), *_get_current_dispatch_mode_stack())
-    named_modules = _CLASS_DICT.__get__(nn.Module).get("named_modules")
-    return (
-        type(named_modules) is not FunctionType
-        or named_modules.__code__.co_filename != nn.modules.module.__file__
-        or any(
-            getattr(nn.modules.module, f"_global_{kind}_registration_hooks", None)
-            for kind in ("module", "parameter", "buffer")
-        )
-        or any(type(mode) is not DeviceContext for mode in modes)
-        or torch._C._dispatch_tls_is_dispatch_key_included(torch._C.DispatchKey.PythonDispatcher)
-    )
-
-
-def _replaces_a_quantizer(
-    quant_model: nn.Module,
-    name: str,
-    attributes: QuantizerAttributeConfig | list[QuantizerAttributeConfig],
-    parent_class: type[nn.Module] | None,
-) -> bool:
-    # A list replaces a TensorQuantizer with a SequentialQuantizer, and a single config the reverse.
-    return any(
-        isinstance(module, SequentialQuantizer) != isinstance(attributes, list)
-        for module_name, module in _candidate_modules(quant_model, name, True)
-        if _match_quantizer(name, module_name, module, parent_class, quant_model)
-    )
-
-
-def _candidate_modules(
-    quant_model: nn.Module, wildcard_or_filter_func: str | Callable, subtree: bool
-):
-    """The ``(name, module)`` pairs ``wildcard_or_filter_func`` can match, in module order.
-
-    With ``subtree``, a wildcard-free name walks only the part of ``quant_model`` that can hold its
-    matches: each per-module entry of a finalized AutoQuantize search names one quantizer, and on a
-    large MoE there are tens of thousands of them, so walking the whole model for each costs hours.
-    Normalizing a fused-experts name only singularizes a ``*_quantizer[s]`` atom and drops the index
-    after it, so a quantizer matching ``name`` has its atoms up to the first ``*_quantizer`` one and
-    lies below that atom or its plural. The path is looked up live, so replaced quantizers count.
-    """
-    name = wildcard_or_filter_func
-    if not (subtree and isinstance(name, str) and name and not _WILDCARD_RE.search(name)):
-        yield from quant_model.named_modules()
-        return
-    atoms = name.split(".")
-    head = next(
-        (i for i, atom in enumerate(atoms) if _SINGULAR_QUANTIZER_ATOM_RE.search(atom)),
-        len(atoms) - 1,
-    )
-    parent = quant_model
-    for atom in atoms[:head]:
-        parent = parent._modules.get(atom)
-        if parent is None:
-            return
-    for child_name, child in parent._modules.items():
-        if child is not None and child_name in (atoms[head], atoms[head] + "s"):
-            yield from child.named_modules(prefix=".".join([*atoms[:head], child_name]))
-
-
 def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgType):
     """Apply a quantization config list to the quantizers in ``quant_model``.
 
@@ -610,16 +310,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
     See :ref:`quant-cfg` for the full format reference and common patterns.
     """
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
-    # Whether wildcard-free names walk only their subtree, which follows the model's _modules,
-    # decided at the first one of a call with enough of them: not where fnmatch ignores case, nor
-    # where named_modules can list other paths or a quantizer can run the caller's code, nor while
-    # PyTorch's global registration hooks, a mode other than a device context, or the Python
-    # dispatcher are set: configuring a quantizer runs them, and they can rewire the model mid-call.
-    # Code run from elsewhere, such as a warnings or logging handler, a finalizer, another thread, a
-    # patched function or a custom op kernel, must not rewire it.
-    exact_entries = sum(_is_exact(entry["quantizer_name"]) for entry in quant_cfg)
-    subtree = None if exact_entries >= _EXACT_ENTRIES_FOR_CHECK else False
-    scanned: dict[int, Any] = {}
+
     for entry in quant_cfg:
         quantizer_name: str = entry["quantizer_name"]
         cfg = entry["cfg"]  # None, dict, or list — always explicit after normalization
@@ -635,34 +326,11 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                 ) from None
         else:
             parent_class = None
-        exact = _is_exact(quantizer_name)
-        if subtree is None and exact:
-            try:
-                subtree = (
-                    _CASE_SENSITIVE_NAMES
-                    and not _runs_global_hooks()
-                    and _allows_subtree_walk(quant_model)
-                )
-            except Exception:
-                # A model the check cannot read, such as one holding a non-module child, is walked
-                # whole, which raises as it reaches that child, after the entry's earlier matches.
-                subtree = False
-        if subtree and (parent_class is not None or _runs_callers_code(entry, scanned)):
-            # Matching a parent_class entry runs the __getattr__ of the modules on a match's path,
-            # such as a DynamicModule's, and an entry holding the caller's code runs it as it
-            # applies, between its matches too: either can rewire the model, so it is walked whole
-            # from this entry on. Entries before the check walk it whole, and the check reads what
-            # they left on its quantizers.
-            subtree = False
 
         if cfg is None:
             # No cfg: only toggle the enable state, leave all other attributes unchanged.
             set_quantizer_attributes_partial(
-                quant_model,
-                quantizer_name,
-                {"enable": enable},
-                parent_class,
-                _subtree=bool(subtree),
+                quant_model, quantizer_name, {"enable": enable}, parent_class
             )
         else:
             # Has cfg: apply full replacement with the explicit enable value.
@@ -677,19 +345,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                     else QuantizerAttributeConfig(**c, enable=enable)
                     for c in cfg
                 ]
-            # Replacing a quantizer runs its parent's __setattr__, such as a DynamicModule's,
-            # which can rewire the model too: found before an exact entry applies, which then walks
-            # the model whole, and as a wildcard entry, which walks it whole anyway, applies.
-            if (
-                subtree
-                and exact
-                and _replaces_a_quantizer(quant_model, quantizer_name, attributes, parent_class)
-            ):
-                subtree = False
-            if _set_quantizer_attributes_full(
-                quant_model, quantizer_name, attributes, parent_class, subtree=bool(subtree)
-            ):
-                subtree = False
+            set_quantizer_attributes_full(quant_model, quantizer_name, attributes, parent_class)
 
 
 _FUSED_EXPERTS_QUANTIZER_LIST_RE = re.compile(
@@ -782,18 +438,6 @@ def set_quantizer_attributes_full(
             an instance of this class. If ``None``, all quantizers matching
             ``wildcard_or_filter_func`` are adjusted.
     """
-    _set_quantizer_attributes_full(quant_model, wildcard_or_filter_func, attributes, parent_class)
-
-
-def _set_quantizer_attributes_full(
-    quant_model: nn.Module,
-    wildcard_or_filter_func: str | Callable,
-    attributes: QuantizerAttributeConfig | list[QuantizerAttributeConfig],
-    parent_class: type[nn.Module] | None = None,
-    subtree: bool = False,
-) -> bool:
-    # set_quantizer_attributes_full, walking only an exact name's subtree when told to, and
-    # returning whether it replaced a quantizer, between a TensorQuantizer and a SequentialQuantizer.
     if not isinstance(attributes, (QuantizerAttributeConfig, list)):
         raise ValueError(
             f"Invalid type for attributes: {type(attributes)}, "
@@ -805,8 +449,7 @@ def _set_quantizer_attributes_full(
         raise ValueError(
             "All elements in attributes list must be of type QuantizerAttributeConfig."
         )
-    replaced = False
-    for name, module in _candidate_modules(quant_model, wildcard_or_filter_func, subtree):
+    for name, module in quant_model.named_modules():
         if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):
             if isinstance(attributes, list):
                 if not isinstance(module, SequentialQuantizer):
@@ -815,7 +458,6 @@ def _set_quantizer_attributes_full(
                         *(TensorQuantizer() for _ in range(len(attributes)))
                     )
                     setattr(parent_module, name.split(".")[-1], module)
-                    replaced = True
                 elif len(attributes) != len(module):
                     warnings.warn(
                         f"The number of attributes ({len(attributes)}) does not match the number of "
@@ -829,9 +471,7 @@ def _set_quantizer_attributes_full(
                     parent_module = quant_model.get_submodule(name.rpartition(".")[0])
                     module = TensorQuantizer()
                     setattr(parent_module, name.split(".")[-1], module)
-                    replaced = True
                 cast("TensorQuantizer", module).set_from_attribute_config(attributes)
-    return replaced
 
 
 def set_quantizer_attributes_partial(
@@ -839,8 +479,6 @@ def set_quantizer_attributes_partial(
     wildcard_or_filter_func: str | Callable,
     partial_attributes: dict[str, Any] | list[dict[str, Any]],
     parent_class: type[nn.Module] | None = None,
-    *,
-    _subtree: bool = False,
 ):
     """Update a subset of quantizer attributes by wildcard or filter function, merging with existing attributes.
 
@@ -883,7 +521,7 @@ def set_quantizer_attributes_partial(
     ):
         raise ValueError("All elements in attributes list must be of type dict.")
 
-    for name, module in _candidate_modules(quant_model, wildcard_or_filter_func, _subtree):
+    for name, module in quant_model.named_modules():
         if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):
             module = cast("TensorQuantizer | SequentialQuantizer", module)  # for type checker
             if isinstance(partial_attributes, list):
