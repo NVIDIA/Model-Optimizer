@@ -35,6 +35,30 @@ _ACTIVE_LAYOUT: contextvars.ContextVar["CPSequenceLayout | None"] = contextvars.
 )
 
 
+class _NativeCPUnavailableError(RuntimeError):
+    pass
+
+
+def _native_attention_api():
+    try:
+        native = importlib.import_module(
+            "torch.distributed.tensor.experimental._context_parallel._attention"
+        )
+        style = native._ContextParallel
+        attention_type = style.AttentionType.SDPA
+        apply = style._apply
+        options = native._cp_options
+        _ = options.enable_load_balance
+        custom_ops = native.custom_ops
+        enable = native._enable_cp_dtensor_dispatcher
+        disable = native._disable_cp_dtensor_dispatcher
+    except (ImportError, AttributeError) as error:
+        raise _NativeCPUnavailableError(
+            "Scoped native CP requires Torch's module-wrapper attention API."
+        ) from error
+    return style, attention_type, apply, options, custom_ops, enable, disable
+
+
 class _SDPA(nn.Module):
     def forward(self, *args, **kwargs):
         return F.scaled_dot_product_attention(*args, **kwargs)
@@ -132,33 +156,37 @@ class CPSequenceLayout:
             return
         if active is not None:
             raise ValueError("Different CP layouts cannot share one nested attention scope.")
-        try:
-            native = importlib.import_module(
-                "torch.distributed.tensor.experimental._context_parallel._attention"
-            )
-            style_class = native._ContextParallel
-        except (ImportError, AttributeError) as error:
-            raise RuntimeError(
-                "Scoped native CP requires Torch's module-wrapper attention API."
-            ) from error
-        style = style_class(seq_dim=2, attention_type=style_class.AttentionType.SDPA)
-        attention = style._apply(_SDPA(), self.mesh)
+        style_class, attention_type, apply, options, custom_ops, enable, disable = (
+            _native_attention_api()
+        )
+        style = style_class(seq_dim=2, attention_type=attention_type)
+        attention = apply(style, _SDPA(), self.mesh)
         with _DISPATCH_LOCK:
             previous_handlers = DTensor._op_dispatcher._custom_op_handlers
-            previous_balance = native._cp_options.enable_load_balance
+            previous_balance = options.enable_load_balance
             token = _ACTIVE_LAYOUT.set(self)
+            failed = False
             try:
-                native._cp_options.enable_load_balance = self.load_balance
-                native._enable_cp_dtensor_dispatcher()
+                options.enable_load_balance = self.load_balance
+                enable()
                 # Preserve unrelated handlers registered after the native module's import.
                 DTensor._op_dispatcher._custom_op_handlers = {
                     **previous_handlers,
-                    **native.custom_ops,
+                    **custom_ops,
                 }
                 with _AttentionMode(self, attention):
                     yield
+            except BaseException:
+                failed = True
+                raise
             finally:
-                native._disable_cp_dtensor_dispatcher()
-                DTensor._op_dispatcher._custom_op_handlers = previous_handlers
-                native._cp_options.enable_load_balance = previous_balance
-                _ACTIVE_LAYOUT.reset(token)
+                try:
+                    try:
+                        disable()
+                    except BaseException:
+                        if not failed:
+                            raise
+                finally:
+                    DTensor._op_dispatcher._custom_op_handlers = previous_handlers
+                    options.enable_load_balance = previous_balance
+                    _ACTIVE_LAYOUT.reset(token)

@@ -82,6 +82,7 @@ class _ReplayFacts:
     modules: tuple[weakref.ReferenceType[nn.Module], ...]
     head_ref: weakref.ReferenceType[nn.Module] | None
     head_paths: tuple[str, ...]
+    attentions: tuple[weakref.ReferenceType[nn.Module], ...] = ()
 
     @property
     def head(self):
@@ -122,11 +123,23 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         facts = self._model_facts.get(model)
         if facts is None or facts.head is not head:
             modules = tuple(model.named_modules())
+            spec, attentions = _model_spec(model), ()
+            if spec.causal_context_parallel:
+                try:
+                    layers = self._decoder_layers(model)
+                except ValueError:
+                    pass
+                else:
+                    blocks = layers.values() if isinstance(layers, nn.ModuleDict) else layers
+                    children = tuple(block._modules.get("self_attn") for block in blocks)
+                    if children and all(isinstance(child, nn.Module) for child in children):
+                        attentions = tuple(weakref.ref(child) for child in children)
             facts = _ReplayFacts(
-                _model_spec(model),
+                spec,
                 tuple(weakref.ref(child) for _, child in modules),
                 None if head is None else weakref.ref(head),
                 tuple(name for name, child in modules if child is head),
+                attentions,
             )
             self._model_facts[model] = facts
         return facts
@@ -652,13 +665,24 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
 
         models = [model for model in (teacher, self.student) if model is not None]
         for model in models:
+            facts = self._facts(model)
+            if not facts.attentions or any(reference() is None for reference in facts.attentions):
+                raise ValueError(
+                    "Native CP requires self_attn on every declared text decoder block"
+                )
+            owners = tuple(
+                module for reference in facts.modules if (module := reference()) is not None
+            )
             config = model.config.get_text_config()
             if (
-                not _model_spec(model).causal_context_parallel
+                not facts.spec.causal_context_parallel
                 or not model.supports_context_parallel
                 or config._attn_implementation != "sdpa"
-                or next(model.parameters()).dtype not in (torch.float16, torch.bfloat16)
-                or requires_full_context_activations(model)
+                or next(
+                    parameter for module in owners for parameter in module.parameters(recurse=False)
+                ).dtype
+                not in (torch.float16, torch.bfloat16)
+                or requires_full_context_activations(model, modules=owners)
                 or _document_dependent_positions(model)
                 # Fused P-QDQ attention bypasses the SDPA interface intercepted by native CP.
                 or any(
@@ -673,7 +697,8 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                             and module.kitchen_attn_fn is None
                         )
                     )
-                    for module in model.modules()
+                    for reference in facts.attentions
+                    if (module := reference()) is not None
                 )
             ):
                 raise ValueError("This model requires faithful full-context execution")
@@ -717,21 +742,30 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         return args, {**kwargs, "attention_mask": None, "is_causal": True}
 
     def _document_teacher(self, teacher, units, document, consume):
-        from ..._bypass_parallel import _all_rank_values, _size
+        from ..._bypass_parallel import _all_rank_max, _size
+        from .context_parallel import (
+            CPSequenceLayout,
+            _native_attention_api,
+            _NativeCPUnavailableError,
+        )
 
         cp = None if self.context is None else self.context.context_mesh
-        native, inputs = False, None
+        native, inputs, error = False, None, None
         if _size(cp) > 1:
             try:
-                native_api = importlib.import_module(
-                    "torch.distributed.tensor.experimental._context_parallel._attention"
-                )
-                if hasattr(native_api, "_ContextParallel"):
-                    inputs = self._cp_inputs(teacher, document)
-                    native = True
-            except Exception:
+                _native_attention_api()
+                inputs = self._cp_inputs(teacher, document)
+                native = True
+            except (ValueError, _NativeCPUnavailableError):
                 pass
-            native = all(_all_rank_values(self.context, native))
+            except Exception as exc:
+                if self.context.device_mesh.size() == 1:
+                    raise
+                error = f"{type(exc).__name__}: {exc}"
+            failed, replicated = _all_rank_max(self.context, [int(error is not None), -int(native)])
+            if failed:
+                self._synchronize_error(error)
+            native = replicated == -1
         if not native:
             prepared, error = None, None
             try:
@@ -745,31 +779,35 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 error = f"{type(exc).__name__}: {exc}"
             self._synchronize_error(error)
             return super().teacher_microbatch(teacher, units, prepared, consume)
-        from .context_parallel import CPSequenceLayout
-
         assert inputs is not None
         tokens, positions = inputs
-        layout = CPSequenceLayout(cp, tokens.shape[1], device=tokens.device)
-        batch = {
-            "input_ids": layout.shard(tokens, 1),
-            "position_ids": layout.shard(positions, 1),
-            "valid_mask": layout.shard(torch.ones_like(tokens, dtype=torch.bool), 1),
-        }
-        handles = [
-            module.register_forward_pre_hook(self._causal_attention, with_kwargs=True)
-            for model in (teacher, self.student)
-            if model is not None
-            for name, module in model.named_modules()
-            if name.endswith("self_attn")
-        ]
-        self._native_context = True
-        try:
-            with layout.attention():
+        with ExitStack() as stack:
+            error = None
+            try:
+                layout = CPSequenceLayout(cp, tokens.shape[1], device=tokens.device)
+                batch = {
+                    "input_ids": layout.shard(tokens, 1),
+                    "position_ids": layout.shard(positions, 1),
+                    "valid_mask": layout.shard(torch.ones_like(tokens, dtype=torch.bool), 1),
+                }
+                for model in (teacher, self.student):
+                    if model is not None:
+                        for reference in self._facts(model).attentions:
+                            handle = reference().register_forward_pre_hook(
+                                self._causal_attention, with_kwargs=True
+                            )
+                            stack.callback(handle.remove)
+                stack.enter_context(layout.attention())
+            except Exception as exc:
+                if self.context.device_mesh.size() == 1:
+                    raise
+                error = f"{type(exc).__name__}: {exc}"
+            self._synchronize_error(error)
+            self._native_context = True
+            try:
                 return super().teacher_microbatch(teacher, units, batch, consume)
-        finally:
-            self._native_context = False
-            for handle in handles:
-                handle.remove()
+            finally:
+                self._native_context = False
 
     def teacher_microbatch(self, teacher, units, batch, consume):
         """Keep document recurrence faithful and match every rank's forward schedule."""
