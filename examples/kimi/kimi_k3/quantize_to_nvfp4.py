@@ -110,8 +110,8 @@ from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_form
 from modelopt.torch.export.shard_cast_utils import (
     build_w13_amax_overrides,
     build_w13_kmax_overrides,
-    copy_aux_files,
     dequantize_mxfp4_to_bf16,
+    link_aux_files,
     mxfp4_kmax,
     prepare_output_dir,
     quantize_mxfp4_to_nvfp4,
@@ -1399,8 +1399,8 @@ def main():
         f"(MIXED_PRECISION: NVFP4 experts + {attention_algo} attention)"
     )
     _rewrite_config_json(src_config_path, args.output_ckpt, hf_quant_config)
-    _log(f"[aux] copying ancillary files from {args.source_ckpt}")
-    copy_aux_files(
+    _log(f"[aux] linking ancillary files from {args.source_ckpt}")
+    link_aux_files(
         args.source_ckpt,
         args.output_ckpt,
         skip_top_level=_SKIP_TOP_LEVEL,

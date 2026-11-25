@@ -574,7 +574,7 @@ def test_off_index_still_keeps_a_genuine_mtp_sidecar(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
-def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path, monkeypatch):
+def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path):
     """A hub-downloaded checkpoint stores EVERY file as a symlink into ``../../blobs/<sha>``.
 
     Rejecting symlinks outright therefore skips the sidecar of every checkpoint loaded by hub id
@@ -582,7 +582,6 @@ def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path, monkeypatc
     silent-missing-MTP failure the carry-over was written to prevent. The guard must look at what
     the link resolves to, not at whether it is a link.
     """
-    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path))
     blobs = tmp_path / "blobs"
     snapshot = tmp_path / "snapshots" / "deadbeef"
     blobs.mkdir(parents=True)
@@ -997,9 +996,9 @@ def test_copy_non_model_files_follows_links_only_within_the_checkpoint(tmp_path)
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
 def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path, monkeypatch):
-    """A Hub snapshot's files are links into the rest of the Hugging Face cache; since hub 1.32 a
-    Xet-backed one goes on through the repo's ``blobs/`` into a store shared by all repos. Inside
-    ``HF_HUB_CACHE`` they may lead anywhere in the cache, and nowhere outside it."""
+    """A Hub snapshot's files are links into its repo's ``blobs/``; since hub 1.32 a Xet-backed one
+    goes on into a store the whole cache shares. Inside ``HF_HUB_CACHE`` they may lead anywhere in
+    the cache, and nowhere outside it."""
     cache = tmp_path / "hub"
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache))
     repo = cache / "models--org--model"
@@ -1025,7 +1024,8 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path, mo
     # Writable, so a tokenizer.save_pretrained() into the export can replace it.
     assert (tmp_path / "export" / "tokenizer.json").stat().st_mode & stat.S_IWUSR
 
-    # Outside HF_HUB_CACHE the same tree is an ordinary local folder: no link may leave it.
+    # Outside HF_HUB_CACHE a snapshot may still use its repo's blobs/, but not the shared store.
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path / "elsewhere"))
-    with pytest.warns(UserWarning, match="outside the checkpoint directory"):
-        assert hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "local") == []
+    with pytest.warns(UserWarning, match="Skipping tokenizer.json: .* outside the checkpoint"):
+        copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "local")
+    assert copied == ["tokenizer_config.json"]
