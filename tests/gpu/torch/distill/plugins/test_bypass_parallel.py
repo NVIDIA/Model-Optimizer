@@ -183,6 +183,214 @@ def test_measurement_metadata_uses_batched_integer_collectives(bypass_cpu_worker
     bypass_cpu_workers.run(_measurement_metadata_worker, path)
 
 
+def _context_preflight_worker(rank, size, failure):
+    # This verifies real CPU scope/error coordination, without executing native CUDA SDPA.
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+    from modelopt.torch.distill.plugins.transformers.context_parallel import (
+        _ACTIVE_LAYOUT,
+        CPSequenceLayout,
+    )
+
+    native = import_module("torch.distributed.tensor.experimental._context_parallel._attention")
+    mesh = _runtime_mesh("cp")
+    dispatcher = DTensor._op_dispatcher
+    handlers, balance = dispatcher._custom_op_handlers, native._cp_options.enable_load_balance
+    layout = CPSequenceLayout(mesh, 4, load_balance=not balance)
+    disable = native._disable_cp_dtensor_dispatcher
+    unrelated = object()
+    previous = {**handlers, unrelated: object()}
+    previous_entries = previous.copy()
+    dispatcher._custom_op_handlers = previous
+    config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        use_cache=False,
+    )
+    config._attn_implementation = "sdpa"
+    teacher = LlamaForCausalLM(config).to(torch.bfloat16).eval()
+    adapter = TransformersBypassAdapter()
+    adapter.context = BypassMeshContext(device_mesh=mesh, context_mesh=mesh)
+    batch = {"input_ids": torch.tensor([[1, 2, 3, 4]])}
+    forwards, objects = [], []
+    handle = teacher.register_forward_pre_hook(lambda *_: forwards.append(True))
+    gather = dist.all_gather_object
+
+    def observed_gather(*args, **kwargs):
+        objects.append(True)
+        return gather(*args, **kwargs)
+
+    def restored():
+        assert dispatcher._custom_op_handlers is previous
+        assert dispatcher._custom_op_handlers == previous_entries
+        assert native._cp_options.enable_load_balance == balance
+        assert _ACTIVE_LAYOUT.get() is None
+
+    try:
+        with bounded_collectives(10), patch.object(dist, "all_gather_object", observed_gather):
+            if failure in ("RuntimeError", "AttributeError"):
+                exception = {"RuntimeError": RuntimeError, "AttributeError": AttributeError}[
+                    failure
+                ]
+                original = type(teacher).supports_context_parallel
+
+                def support(model):
+                    if rank == 0:
+                        raise exception("unexpected native admission failure")
+                    return original.__get__(model)
+
+                with (
+                    patch.object(type(teacher), "supports_context_parallel", property(support)),
+                    pytest.raises(ValueError, match=failure),
+                ):
+                    adapter._document_teacher(teacher, [], batch, lambda *_: None)
+                assert not forwards
+                assert objects  # Diagnostics are exchanged only after integer error agreement.
+                objects.clear()
+                adapter._document_teacher(
+                    teacher,
+                    [],
+                    {**batch, "loss_mask": torch.tensor([[int(rank != 0), 1, 1, 1]])},
+                    lambda *_: None,
+                )
+                assert len(forwards) == 1
+                assert not objects
+            elif failure == "setup":
+                enable = native._enable_cp_dtensor_dispatcher
+
+                def broken_enable():
+                    enable()
+                    if rank == 0:
+                        raise RuntimeError("native setup failure")
+
+                def unexpected_forward(*_):
+                    raise OSError("A peer entered forward before setup agreement")
+
+                with (
+                    patch.object(native, "_enable_cp_dtensor_dispatcher", broken_enable),
+                    teacher.register_forward_pre_hook(unexpected_forward),
+                    pytest.raises(ValueError, match="native setup failure"),
+                ):
+                    adapter._document_teacher(teacher, [], batch, lambda *_: None)
+                assert not forwards
+                restored()
+            elif failure == "api":
+                missing = [
+                    (native, name)
+                    for name in (
+                        "_ContextParallel",
+                        "_cp_options",
+                        "custom_ops",
+                        "_enable_cp_dtensor_dispatcher",
+                        "_disable_cp_dtensor_dispatcher",
+                    )
+                ] + [
+                    (native._ContextParallel, "AttentionType"),
+                ]
+
+                def unavailable():
+                    with (
+                        pytest.raises(RuntimeError, match="module-wrapper attention API"),
+                        layout.attention(),
+                    ):
+                        pytest.fail("An unavailable API entered the attention body")
+                    adapter._document_teacher(teacher, [], batch, lambda *_: None)
+
+                for target, name in missing:
+                    with patch.object(target, name):
+                        delattr(target, name)
+                        unavailable()
+                    restored()
+                # Deleting a dataclass instance field exposes its class default instead.
+                for target, name in (
+                    (native, "_cp_options"),
+                    (native._ContextParallel, "AttentionType"),
+                ):
+                    with patch.object(target, name, SimpleNamespace()):
+                        unavailable()
+                    restored()
+                assert len(forwards) == len(missing) + 2
+                assert not objects
+            elif failure == "scope":
+                teacher.vision = torch.nn.Module()
+                teacher.vision.self_attn = torch.nn.Linear(16, 16)
+                text = teacher.model.layers[0].self_attn
+                original = OSError("stop before CPU attention compute")
+
+                def inspect_scope(*_):
+                    assert text._forward_pre_hooks
+                    assert not teacher.vision.self_attn._forward_pre_hooks
+                    raise original
+
+                adapter._cp_inputs(teacher, batch)
+                with (
+                    teacher.register_forward_pre_hook(inspect_scope),
+                    patch.object(
+                        teacher, "named_modules", side_effect=AssertionError("Repeated model scan")
+                    ),
+                ):
+                    for _ in range(2):
+                        with pytest.raises(OSError) as caught:
+                            adapter._document_teacher(teacher, [], batch, lambda *_: None)
+                        assert caught.value is original
+                assert not text._forward_pre_hooks
+                assert not objects
+                restored()
+            else:
+                original = OSError("attention body failure")
+                cleanup = RuntimeError("attention disable failure")
+
+                def broken_disable():
+                    disable()
+                    raise cleanup
+
+                with patch.object(native, "_disable_cp_dtensor_dispatcher", broken_disable):
+                    if failure == "body_cleanup":
+                        with pytest.raises(OSError) as caught, layout.attention():
+                            raise original
+                        assert caught.value is original
+                    else:
+                        with pytest.raises(RuntimeError) as caught, layout.attention():
+                            assert _ACTIVE_LAYOUT.get() is layout
+                        assert caught.value is cleanup
+                    restored()
+            with layout.attention():
+                assert _ACTIVE_LAYOUT.get() is layout
+            restored()
+    finally:
+        handle.remove()
+        disable()
+        dispatcher._custom_op_handlers = handlers
+        native._cp_options.enable_load_balance = balance
+        _ACTIVE_LAYOUT.set(None)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["RuntimeError", "AttributeError", "setup", "api", "scope", "cleanup", "body_cleanup"],
+)
+@pytest.mark.timeout(300)
+def test_native_cp_preflight_and_scope_failures(bypass_cpu_workers, failure):
+    pytest.importorskip("transformers", minversion="5.23")
+    native = pytest.importorskip(
+        "torch.distributed.tensor.experimental._context_parallel._attention"
+    )
+    if not hasattr(native, "_ContextParallel"):
+        pytest.skip("Native CP needs Torch's scoped module-wrapper attention API")
+    timeout = bypass_cpu_workers.job_timeout
+    try:
+        bypass_cpu_workers.job_timeout = 240
+        bypass_cpu_workers.run(_context_preflight_worker, failure)
+    finally:
+        bypass_cpu_workers.job_timeout = timeout
+
+
 def _replicated_field_worker(rank, size, expert, full_boundary=False):
     torch.manual_seed(701)
     inputs = [torch.randn(1, 3, 256) * scale for scale in (0.5, 2.0)]

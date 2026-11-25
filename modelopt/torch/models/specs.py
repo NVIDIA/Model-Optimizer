@@ -378,7 +378,10 @@ class BypassSpec(SpecSection):
     both models pass its activation and position policy guards.
     """
     causal_context_parallel: bool = False
-    """Opt in to validated native causal SDPA context sharding; otherwise replay full context."""
+    """Opt in to native causal SDPA on each declared decoder block's ``self_attn`` child.
+
+    Other architectures replay full context; hooks are limited to these text decoder children.
+    """
     batch_packed_documents: bool = False
     """Permit independent documents in padded rows when activation and position policies agree."""
     functional_children: tuple[str, ...] = ()

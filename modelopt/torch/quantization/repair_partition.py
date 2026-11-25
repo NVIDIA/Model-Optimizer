@@ -41,21 +41,31 @@ __all__ = []
 _NATIVE_TP_CODECS = (FP8QTensor, NVFP4QTensor)
 
 
-def requires_full_context_activations(model):
-    """Detect activation fields or statistics that cannot follow native token-sharded CP."""
-    weights = {
-        id(quantizer)
-        for module in model.modules()
-        if isinstance(module, QuantModule)
-        for container in module.iter_weight_quantizers_for_calibration()
-        for quantizer in container.modules()
-        if isinstance(quantizer, TensorQuantizer)
-    }
+def requires_full_context_activations(model, *, modules=None):
+    """Detect activation fields or statistics that cannot follow native token-sharded CP.
+
+    Cached structural owners may be supplied; their quantizer descendants remain live.
+    """
+    owners = tuple(model.modules() if modules is None else modules)
+    quantizers = {id(module): module for module in owners if isinstance(module, TensorQuantizer)}
+    weights = set()
+    for module in owners:
+        if isinstance(module, QuantModule):
+            weights.update(
+                id(quantizer)
+                for container in module.iter_weight_quantizers_for_calibration()
+                for quantizer in container.modules()
+                if isinstance(quantizer, TensorQuantizer)
+            )
+            # Cached owners may have acquired quantizers through in-place PTQ.
+            quantizers.update(
+                (id(child), child)
+                for child in module.modules()
+                if isinstance(child, TensorQuantizer)
+            )
     return any(
-        isinstance(quantizer, TensorQuantizer)
-        and id(quantizer) not in weights
-        and _requires_full_context_activation(quantizer)
-        for quantizer in model.modules()
+        identity not in weights and _requires_full_context_activation(quantizer)
+        for identity, quantizer in quantizers.items()
     )
 
 
