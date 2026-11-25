@@ -18,6 +18,7 @@
 # ruff: noqa: PLR1714 -- Triton constexpr dispatch uses explicit scalar comparisons.
 
 import math
+from numbers import Integral
 
 import torch
 import triton
@@ -123,6 +124,20 @@ class _MaskedMSE(torch.autograd.Function):
 
 def masked_mse_sum(prediction, target, mask=None, features=1):
     """Sum valid squared errors while saving only the original narrow activations."""
+    if (
+        not prediction.is_cuda
+        or target.device != prediction.device
+        or target.shape != prediction.shape
+        or (mask is not None and mask.device != prediction.device)
+    ):
+        raise ValueError(
+            "Masked MSE requires matching prediction, target and mask on one CUDA device."
+        )
+    if not isinstance(features, Integral) or features <= 0:
+        raise ValueError("Masked MSE features must be a positive integer.")
+    features = int(features)
+    if mask is not None and mask.numel() < triton.cdiv(prediction.numel(), features):
+        raise ValueError("Masked MSE mask must cover every flattened feature group.")
     return _MaskedMSE.apply(prediction, target, mask, features)
 
 
