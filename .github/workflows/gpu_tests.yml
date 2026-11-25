@@ -116,9 +116,9 @@ jobs:
           PYTEST_ADDOPTS: ""
           COVERAGE_PROCESS_START: ""
           MODELOPT_WHEELHOUSE: /root/.cache/wheelhouse
-          FSDP2_MEASUREMENT_RUNNER: linux-amd64-gpu-rtxpro6000-latest-2
+          FSDP2_MEASUREMENT_RUNNER: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
           FSDP2_MEASUREMENT_IMAGE: ${{ matrix.container_image }}
-        run: python3 -m pip install nox && nox -s gpu_fsdp2_measurement
+        run: python3 -m pip install nox && nox -s ${{ matrix.nox_session }}
       - name: Upload FSDP2 measurement receipts
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.suite == 'fsdp2-measurement' }}
         uses: actions/upload-artifact@v7

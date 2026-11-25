@@ -292,7 +292,8 @@ def test_measurement_check_names_and_coverage_are_isolated():
     steps = jobs["gpu-tests"]["steps"]
     full = next(step for step in steps if step.get("name") == "Run gpu tests")
     focused = next(step for step in steps if step.get("name") == "Run fixed FSDP2 measurements")
-    assert "gpu_fsdp2_measurement" in focused["run"]
+    assert focused["run"].endswith("nox -s ${{ matrix.nox_session }}")
+    assert focused["env"]["FSDP2_MEASUREMENT_RUNNER"] == jobs["gpu-tests"]["runs-on"]
     assert focused["env"]["PYTEST_ADDOPTS"] == focused["env"]["COVERAGE_PROCESS_START"] == ""
     assert "--run-manual --run-nightly" in full["env"]["PYTEST_ADDOPTS"]
     coverage = next(step for step in steps if step.get("name") == "Upload GPU coverage to Codecov")
