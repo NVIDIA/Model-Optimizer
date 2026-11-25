@@ -30,9 +30,10 @@ The recipe sets no `kv_cache`, so the finalizing run also quantizes the attentio
 with `hf_ptq.py`'s `--kv_cache_qformat`, FP8 (`fp8_cast`) by default; the search scores without
 it. Pass `--kv_cache_qformat none` to keep it BF16, as in the results below.
 
-The language model loads only through the checkpoint's own code, hence `--trust_remote_code`;
-tested with transformers 5.18. `hf_ptq.py` holds this model on one GPU: on a GB200, a search with
-two of the expert candidates peaked at 184 GB and the finalize at 193 GB.
+The language model loads only through the checkpoint's own code, hence `--trust_remote_code`,
+and needs transformers 5.9 or later, which scopes a sub-model's weight renames to that sub-model;
+tested with 5.18. `hf_ptq.py` holds this model on one GPU: on a GB200, one format shard of the
+search peaked at about 180 GB and the finalize at 195 GB.
 
 To score the six quantized expert formats in parallel, run up to six format shards and merge them
 as described in

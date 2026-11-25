@@ -36,7 +36,11 @@ import modelopt.torch.quantization.conversion as quant_conversion
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.quantization import QuantModuleRegistry, tensor_quant
 from modelopt.torch.quantization.calib import MaxCalibrator
-from modelopt.torch.quantization.config import QuantizerAttributeConfig, RotateConfig
+from modelopt.torch.quantization.config import (
+    QuantizerAttributeConfig,
+    QuantizerCfgEntry,
+    RotateConfig,
+)
 from modelopt.torch.quantization.conversion import create_and_replace_svdquant_linear_on_the_fly
 from modelopt.torch.quantization.ggml.common import _CacheKey
 from modelopt.torch.quantization.nn import (
@@ -700,6 +704,9 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         (True, "modules-property"),
         (True, "dict-subclass"),
         (True, "state-subclass"),
+        (True, "dict-property"),
+        (True, "state-key"),
+        (True, "calibrator-setattr"),
         (True, "str-name"),
         (True, "foreign-member"),
         (True, "parametrized"),
@@ -730,6 +737,9 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         "modules-property",
         "dict-subclass",
         "state-subclass",
+        "dict-property",
+        "state-key",
+        "calibrator-setattr",
         "str-name",
         "foreign-member",
         "parametrized",
@@ -778,8 +788,36 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
             return 0
 
     class LookupHolder(torch.nn.Module):
+        state_reads = 0
+
         def __getattribute__(self, name):
+            if name == "__dict__":
+                type(self).state_reads += 1
             return super().__getattribute__(name)
+
+    class State(dict):
+        gets = 0
+
+        def get(self, *args):
+            type(self).gets += 1
+            return super().get(*args)
+
+    class DictHolder(torch.nn.Module):
+        reads = 0
+
+        @property
+        def __dict__(self):
+            type(self).reads += 1
+            return torch.nn.Module.__dict__["__dict__"].__get__(self)
+
+    class Key(str):
+        compared = 0
+
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            type(self).compared += 1
+            return str.__eq__(self, other)
 
     class ClassHolder(torch.nn.Module):
         @property
@@ -876,7 +914,19 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
             model[8].__dict__["_modules"] = type("Modules", (dict,), {})()
         elif layout == "state-subclass":
             model.add_module("8", torch.nn.Module())
-            model[8].__dict__ = type("State", (dict,), {})(model[8].__dict__)
+            model[8].__dict__ = State(model[8].__dict__)
+        elif layout == "dict-property":
+            model.add_module("8", DictHolder())
+        elif layout == "state-key":
+            # A key equal to a name the check, but no walk, would look up.
+            model.add_module("8", torch.nn.Module())
+            model[8].weight_quantizer = TensorQuantizer()
+            model[8].weight_quantizer.__dict__[Key("_hf_hook")] = None
+        elif layout == "calibrator-setattr":
+            # Configuring a quantizer sets its calibrator's axis through the calibrator's class.
+            model.add_module("8", torch.nn.Module())
+            model[8].weight_quantizer = TensorQuantizer()
+            model[8].weight_quantizer.__dict__["_calibrator"] = TensorQuantizer()
         elif layout == "str-name":
             # A name's own hash and equality run as the subtree walk looks it up.
             model.add_module("8", torch.nn.Module())
@@ -970,8 +1020,18 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     with context():
         mtq.set_quantizer_by_cfg(named, quant_cfg)
     monkeypatch.undo()
+    # The check refuses a class's own lookups, a state dict of a subclass or a key of a str
+    # subclass without running them. (Comparing the states compares the keys.)
+    assert LookupHolder.state_reads == State.gets == DictHolder.reads == Key.compared == 0
     assert states(named) == states(walked)
-    fast = ("plain", "cached-weight", "offload-hooks", "calibrator-state", "device-context")
+    fast = (
+        "plain",
+        "cached-weight",
+        "offload-hooks",
+        "calibrator-state",
+        "device-context",
+        "dict-property",
+    )
     if case_sensitive and layout in fast:
         # Only the "*" entry walks the model, the named entries before the one the model is checked
         # at, and the entries from the first replacement on.
@@ -982,6 +1042,75 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         # paths than the model registers, or the model keeps them out of a plain dict, or a
         # quantizer, or a mode or the Python dispatcher, can run the caller's code.
         assert walks == len(quant_cfg)
+
+
+@pytest.mark.usefixtures("check_at_the_first_named_entry")
+@pytest.mark.parametrize("weight_quantizer", ["*weight_quantizer", "0.weight_quantizer"])
+@pytest.mark.parametrize("value", ["unhashable-class", "no-module-class"])
+def test_set_quantizer_by_cfg_stores_an_opaque_config_value(monkeypatch, weight_quantizer, value):
+    """An entry stores a value whose class cannot be hashed, or has no module, as it did before: a
+    wildcard call never scans its entries, and a named one counts such a value as the caller's code."""
+
+    class UnhashableMeta(type):
+        __hash__ = None
+
+    namespace: dict = {}
+    exec("policy_class = type('Policy', (), {})", namespace)  # where no __name__ names a module
+    policy_class = (
+        UnhashableMeta("Policy", (), {})
+        if value == "unhashable-class"
+        else namespace["policy_class"]
+    )
+
+    scans = []
+    scan = quant_conversion._runs_callers_code
+    monkeypatch.setattr(
+        quant_conversion,
+        "_runs_callers_code",
+        lambda obj, seen: scans.append(obj) or scan(obj, seen),
+    )
+    policy = policy_class()
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4))
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+    scans.clear()
+    cfg = {"num_bits": 8, "backend_extra_args": {"policy": policy}}
+    mtq.set_quantizer_by_cfg(model, [{"quantizer_name": weight_quantizer, "cfg": cfg}])
+    assert model[0].weight_quantizer.backend_extra_args["policy"] is policy
+    assert bool(scans) == (weight_quantizer == "0.weight_quantizer")
+
+
+@pytest.mark.usefixtures("check_at_the_first_named_entry")
+def test_set_quantizer_by_cfg_reads_an_entry_without_its_getattr():
+    """An entry whose pydantic state is incomplete applies as it did before: the check reads its
+    state without pydantic's __getattr__, which reads the entry's extra state."""
+
+    class Extra(dict):
+        def __bool__(self):
+            raise AssertionError("the entry's extra state was read")
+
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4))
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+    entry = QuantizerCfgEntry(quantizer_name="0.weight_quantizer", enable=False)
+    object.__setattr__(entry, "__pydantic_extra__", Extra())
+    object.__delattr__(entry, "__pydantic_private__")
+    mtq.set_quantizer_by_cfg(model, [entry])
+    assert not model[0].weight_quantizer.is_enabled
+
+
+def test_set_quantizer_by_cfg_matches_a_filter_function_name():
+    """An entry whose name is a filter function, which only an unvalidated entry can hold, matches
+    the quantizers it accepts, as it did before."""
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4))
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+    entry = QuantizerCfgEntry.model_construct(
+        quantizer_name=lambda name: name.endswith("weight_quantizer"),
+        cfg=None,
+        enable=False,
+        parent_class=None,
+    )
+    mtq.set_quantizer_by_cfg(model, [entry])
+    assert not model[0].weight_quantizer.is_enabled
+    assert model[0].input_quantizer.is_enabled
 
 
 @pytest.mark.usefixtures("check_at_the_first_named_entry")
@@ -1218,8 +1347,8 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_aliases_
 @pytest.mark.usefixtures("check_at_the_first_named_entry")
 @pytest.mark.parametrize(
     ("kind", "same_call"),
-    [("calibrator", False), ("rotation", False), ("rotation", True)],
-    ids=["installed-calibrator", "installed-rotation", "rotation-entry"],
+    [("calibrator", False), ("axis-property", False), ("rotation", False), ("rotation", True)],
+    ids=["installed-calibrator", "axis-property", "installed-rotation", "rotation-entry"],
 )
 def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_configured_object_shares_a_layer(
     kind, same_call
@@ -1237,6 +1366,17 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_configured_object_s
             if name == "_axis" and value == 0:
                 share()
 
+    class AxisSharingCalibrator(MaxCalibrator):
+        @property
+        def _axis(self):
+            return self.__dict__.get("axis")
+
+        @_axis.setter
+        def _axis(self, value):
+            self.__dict__["axis"] = value
+            if value == 0:
+                share()
+
     class SharingRotation(RotateConfig):
         def model_copy(self, *args, **kwargs):
             share()
@@ -1246,8 +1386,10 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_configured_object_s
         nonlocal model
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
         model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
-        if kind == "calibrator":
-            setting = {"calibrator": SharingCalibrator}
+        if kind in ("calibrator", "axis-property"):
+            setting = {
+                "calibrator": SharingCalibrator if kind == "calibrator" else AxisSharingCalibrator
+            }
             # The quantizer keeps its calibrator until after an entry sets its axis.
             trigger = {"cfg": {"num_bits": 4, "axis": 0}}
         else:
