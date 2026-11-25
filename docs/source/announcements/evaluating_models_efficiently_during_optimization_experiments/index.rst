@@ -229,7 +229,7 @@ The choice of analysis level may depend on the benchmark and metric. See the
 
 .. figure:: images/budget-allocation-scicode-accuracy.svg
    :alt: Mean Candidate accuracy on SciCode with shading showing one observed standard deviation on either side of the mean. At 280 responses per model, the estimate varies less with more subtasks and fewer repetitions.
-   :width: 720px
+   :width: 640px
 
 .. _evaluation-collect-data:
 

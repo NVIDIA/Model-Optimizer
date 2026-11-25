@@ -13,13 +13,10 @@ Saved metrics
 We save the means, observed standard deviations, confidence intervals, and p-values as CSV
 summaries:
 
-- **SciCode: Candidate accuracy at fixed response budgets** — data used in the
+- **SciCode: candidate accuracy at fixed response budgets** — data used in the
   :ref:`Choose between question-level and repetition-level analysis <evaluation-choose-questions-and-repetitions>`
   example.
   CSV file: :download:`budget-allocation-accuracy.csv <budget-allocation-accuracy.csv>`.
-- **SciCode: accuracy differences at fixed response budgets** — data used in the
-  same comparison.
-  CSV file: :download:`budget-allocation-differences.csv <budget-allocation-differences.csv>`.
 - **SciCode: cap-hit rates** — data used in the
   :ref:`Collect as much evaluation data as you need <evaluation-collect-data>` example.
   CSV file: :download:`scicode-cap-data-volume.csv <scicode-cap-data-volume.csv>`.
@@ -35,8 +32,10 @@ Statistical methods
   For the confidence interval and p-values, group all scored subtasks and their repetitions by
   parent problem. For the 95% interval, resample paired parent problems with replacement and
   take the 2.5th and 97.5th percentiles of the resulting mean differences.
-  For the one-sided p-values, swap model labels for whole parent problems and count permuted mean
-  differences at least as extreme as the observed difference in the tested direction.
+  For the one-sided `paired permutation p-values
+  <https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html>`__,
+  swap model labels for whole parent problems and count permuted mean differences at least as
+  extreme as the observed difference in the tested direction.
 
   When question-level differences are independent and a t approximation is suitable, a paired
   t-based confidence interval and a one-sided paired t-test are alternatives.
@@ -107,7 +106,7 @@ order. The dotted reference in the SciCode accuracy plot uses all 294 subtasks w
 eight repetitions.
 
 We report the mean and sample SD across the group scores. Accuracy means are percentages.
-Candidate minus Baseline differences and all SDs are in percentage points. The means stay
+SDs are in percentage points. The means stay
 fixed because every allocation partitions the same saved response pool. Groups can share
 question or repetition IDs, so their observed spread is descriptive.
 

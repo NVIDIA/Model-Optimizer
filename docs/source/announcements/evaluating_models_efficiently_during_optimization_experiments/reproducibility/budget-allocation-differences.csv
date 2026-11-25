@@ -1,5 +1,0 @@
-comparison,benchmark,metric,responses_per_model,repetitions,unique_questions_or_subtasks,observed_groups,mean,observed_sd_pp,full_reference
-paired,SciCode,accuracy,280,1,280,8,1.6964285714285718,2.7249388149442,1.5731292517006803
-paired,SciCode,accuracy,280,2,140,8,1.6964285714285707,1.7984241563280163,1.5731292517006803
-paired,SciCode,accuracy,280,4,70,8,1.6964285714285716,2.123638304925247,1.5731292517006803
-paired,SciCode,accuracy,280,8,35,8,1.6964285714285716,2.123638304925245,1.5731292517006803
