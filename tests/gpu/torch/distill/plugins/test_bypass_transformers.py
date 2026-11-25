@@ -42,8 +42,8 @@ from modelopt.torch.distill._bypass_capture import BypassUnit
 from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
-from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
+from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.quantization.plugins.huggingface import register_hf_attentions_on_the_fly
 
 
 @pytest.fixture
@@ -91,9 +91,17 @@ def test_native_cp_preserves_effective_loss_validity(native_cp_models, validity)
 def test_native_cp_refuses_alternate_p_attention(native_cp_models, side, state):
     teacher, adapter = native_cp_models
     model = teacher if side == "teacher" else adapter.student
-    attention = _QuantAttention.convert(model.model.layers[0].self_attn)
+    batch = {"input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7]])}
+    original_attention_type = type(model.model.layers[0].self_attn)
+    with torch.no_grad():
+        expected = model(**batch).logits
+    register_hf_attentions_on_the_fly(model)
+    attention = QuantModuleRegistry.convert(model.model.layers[0].self_attn)
     for name in ("q", "k", "v", "p"):
         getattr(attention, f"{name}_bmm_quantizer").disable()
+    with torch.no_grad():
+        torch.testing.assert_close(model(**batch).logits, expected, rtol=0, atol=0)
+    assert original_attention_type in type(attention).__mro__
     quantizer = attention.p_bmm_quantizer
     quantizer.num_bits = (4, 3)
     quantizer.block_sizes = None
@@ -111,7 +119,6 @@ def test_native_cp_refuses_alternate_p_attention(native_cp_models, side, state):
             kv.block_sizes = None
             kv.amax = torch.tensor(3.0)
             kv.enable()
-    batch = {"input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7]])}
     if state == "active_p":
         assert quantizer.is_enabled and quantizer._if_quant
         with pytest.raises(ValueError):
