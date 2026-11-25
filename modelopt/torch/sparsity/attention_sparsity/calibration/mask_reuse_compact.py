@@ -77,6 +77,17 @@ from .mask_reuse_contracts import (
     threshold_pair_matches,
     validate_context_buckets,
 )
+from .mask_reuse_reduction import (
+    _DIVE_SHARE,
+    _EXACT_SHARE,
+    _LAYOUT_PRICE_ROUNDS,
+    _LAYOUT_SWEEPS,
+    _PRICE_REDUCTION,
+    _PRICE_ROUNDS,
+    _BucketTables,
+    _fixed_layout_choice,
+    _PricedRelaxation,
+)
 from .mask_reuse_solver import (
     DEFAULT_REFIT_TIME_LIMIT_SECONDS,
     NATIVE_FEASIBILITY_TOLERANCE,
@@ -977,10 +988,87 @@ def _selection_pass(
                     ),
                 )
 
-    def solve_target(bucket, target, incumbent, stage_session, phase):
+    heads = len(dataset.nearest) * dataset.global_num_heads
+    epsilon = Fraction(str(session.config.risk_absolute_tolerance)) * heads
+    # Stop pricing well inside the risk tolerance; any prices give a valid bound.
+    price_tolerance = max(0.01 * float(epsilon), 1e-9 * heads)
+    reducing = (
+        _PRICE_REDUCTION and session.config.backend == "highs" and bool(dataset.consumer_layers)
+    )
+    # A fixed layout is one anchor path, so discovery's priced relaxation applies to it
+    # unchanged: a consumer's table sits at its anchor's position and its offset from it.
+    position = {layer: index for index, layer in enumerate(sorted(dataset.nearest))}
+    starts = [position[anchor] for anchor in dataset.anchors]
+    stops = [*starts[1:], len(position)]
+    span = max(stop - start for start, stop in zip(starts, stops)) - 1
+    edge_allowed = np.zeros((len(position), span + 1), dtype=bool)
+    edge_allowed[starts, [stop - start - 1 for start, stop in zip(starts, stops)]] = True
+    where = {
+        layer: (position[anchor], position[layer] - position[anchor] - 1)
+        for layer, anchor in dataset.nearest.items()
+        if layer != anchor
+    }
+    donor_allowed = (
+        None if donor_head_mode == "calibrated" else np.eye(dataset.global_num_heads, dtype=bool)
+    )
+
+    def layout_tables(accumulator, target, prompts, required):
+        count = dataset.global_num_heads
+        risk = np.zeros((len(prompts), len(position), span, count, count))
+        anchor = np.zeros((len(prompts), len(position)))
+        for row, prompt in enumerate(prompts):
+            mass = accumulator.prompt_mass[target][prompt]
+            for layer, (start, offset) in where.items():
+                risk[row, start, offset] = mass[consumer_index[layer]]
+            if max_anchor_dropped_mass is None:
+                # Every policy uses every anchor, so only their total matters.
+                anchor[row, starts[0]] = sum(accumulator.anchor_risks[target][prompt])
+        skipped = np.zeros((len(position), count), dtype=np.int64)
+        skipped[starts] = accumulator.eligible_sum[target] - accumulator.retained_by_anchor[target]
+        return _BucketTables(
+            risk=risk,
+            anchor=anchor,
+            skipped=skipped,
+            required=required,
+            eligible=accumulator.eligible_sum[target],
+        )
+
+    def priced_start(incumbent, table, work_limit, expired):
+        """Offer the incumbent the assignment that the bound's prices lead to."""
+        shape = (len(incumbent.menus), max(map(len, incumbent.menus)))
+        risk = np.zeros((table.risk.shape[0], *shape))
+        skipped = np.zeros(shape, dtype=np.int64)
+        valid = np.zeros(shape, dtype=bool)
+        for row, menu in enumerate(incumbent.menus):
+            valid[row, : len(menu)] = True
+            skipped[row, : len(menu)] = [option.bmm1_skipped_tiles for option in menu]
+            risk[:, row, : len(menu)] = np.asarray([option.risk_by_prompt for option in menu]).T
+        choice = _fixed_layout_choice(
+            risk,
+            skipped,
+            valid,
+            table.anchor.sum(axis=1),
+            table.required,
+            work_limit=work_limit,
+            tolerance=price_tolerance,
+            max_rounds=_LAYOUT_PRICE_ROUNDS,
+            sweeps=_LAYOUT_SWEEPS,
+            expired=expired,
+        )
+        if choice is not None:
+            incumbent.consider([menu[option] for menu, option in zip(incumbent.menus, choice)])
+
+    def reduction(relaxed, prices, limit):
+        # Policies the native tolerances would accept at the limit stay in the program.
+        return relaxed.reduce(prices, limit + 4 * NATIVE_FEASIBILITY_TOLERANCE + 1e-12 * abs(limit))
+
+    def solve_target(
+        bucket, target, incumbent, stage_session, phase, keep=None, objective_target=None
+    ):
         accumulator = accumulators[bucket]
         prompts = dataset.prompts[(bucket, "calibration")]
         problem = pulp.LpProblem("compact_mask_reuse", pulp.LpMinimize)
+        problem._mask_reuse_objective_target = objective_target
         variables = {}
         options = {}
         prompt_risk_terms = defaultdict(list)
@@ -988,6 +1076,12 @@ def _selection_pass(
         for (layer, head), menu in menus:
             choice_variables = []
             for option_index, option in enumerate(menu):
+                if keep is not None and not (
+                    keep.fallbacks[0][(*where[layer], head)]
+                    if option.choice.fallback
+                    else keep.donors[0][(*where[layer], head, option.choice.donor_head)]
+                ):
+                    continue
                 key = (layer, head, option_index)
                 variable = pulp.LpVariable(
                     f"choice_{layer}_{head}_{option_index}",
@@ -1000,6 +1094,9 @@ def _selection_pass(
                 choice_variables.append(variable)
                 for prompt, risk in zip(prompts, option.risk_by_prompt, strict=True):
                     prompt_risk_terms[prompt].append(risk * variable)
+            if not choice_variables:
+                # The reduction leaves this head no option: no policy is within its limit.
+                return False
             problem += pulp.lpSum(choice_variables) == 1, f"choose_{layer}_{head}"
 
         def observe_assignment():
@@ -1041,19 +1138,31 @@ def _selection_pass(
                 for key, var in variables.items()
                 if seed.choices[key[:2]] == options[key].choice
             }
-            initial[worst_prompt_risk] = float(seed.risk_objective)
-            problem._mask_reuse_initial_values = initial
+            # A reduction below the seed's own value can omit some of its choices.
+            if len(initial) == len(incumbent.keys):
+                initial[worst_prompt_risk] = float(seed.risk_objective)
+                problem._mask_reuse_initial_values = initial
         return stage_session.minimize(problem, expression, phase)
 
     selections = {}
-    heads = len(dataset.nearest) * dataset.global_num_heads
-    epsilon = Fraction(str(session.config.risk_absolute_tolerance)) * heads
     for bucket in dataset.buckets:
         started = time.monotonic()
         accumulator = accumulators[bucket]
         prompts = dataset.prompts[(bucket, "calibration")]
         frontier = {}
         search = {}
+        priced = {}
+        relaxations = {}
+        point = None
+
+        def expired(started=started):
+            return time.monotonic() - started >= session.config.time_limit_seconds
+
+        def risk_limit(search=search):
+            """Largest risk at which a target can still be selected."""
+            best = min(i.best.risk_objective for i in search.values() if i.best is not None)
+            return float(best + epsilon) + NATIVE_FEASIBILITY_TOLERANCE
+
         for target in dataset.menus[bucket]:
             anchors = [accumulator.anchor_risks[target][prompt] for prompt in prompts]
             safe = max_anchor_dropped_mass is None or all(
@@ -1100,38 +1209,169 @@ def _selection_pass(
                     maximum_feasible_bmm1_skipped_tiles=maximum.bmm1_skipped_tiles,
                     maximum_feasible_bmm1_skip_ratio=maximum.bmm1_skipped_tiles / eligible,
                 )
+            elif reducing:
+                table = layout_tables(accumulator, target, prompts, incumbent.required)
+                relaxed = _PricedRelaxation([table], edge_allowed, donor_allowed)
+                prices = relaxed.maximize(
+                    start=point,
+                    tolerance=price_tolerance,
+                    max_rounds=_PRICE_ROUNDS,
+                    # A target whose bound passes the limit cannot be selected.
+                    stop_above=risk_limit(),
+                    expired=expired,
+                )
+                point = relaxed.point(prices)
+                priced[target] = prices
+                # A target stopped above the limit is never solved: its tables can go.
+                if not prices.stopped_above:
+                    relaxations[target] = relaxed
+                    priced_start(incumbent, table, relaxed.work_limit, expired)
         active = [t for t, i in search.items() if i.best is not None]
 
-        def run(target, phase, remaining_stages):
-            row = frontier[target]
+        def pruned(target, priced=priced, risk_limit=risk_limit):
+            return target in priced and priced[target].bound > risk_limit()
+
+        def run(target, phase, remaining_stages, ceiling=None):
+            incumbent = search[target]
             seconds = (
                 session.config.time_limit_seconds - (time.monotonic() - started)
             ) / remaining_stages
-            if seconds <= 0:
-                row[phase] = {"status": "budget_exhausted"}
-                return
-            stage = session.stage(seconds)
-            try:
-                complete = solve_target(bucket, target, search[target], stage, phase)
-            except (MaskReuseSolverFailure, MaskReuseAllocationPause):
-                raise
-            except MaskReuseSolverError:
-                complete = False
-            row[phase] = session.record_stage(stage, complete, bucket=bucket, target=target)
+            bound = priced[target].bound if phase == "risk" and target in priced else None
+            receipt: dict = {"status": "budget_exhausted"}
+            if seconds > 0:
+                stage = session.stage(seconds)
 
-        for index, target in enumerate(active):
-            run(target, "risk", len(active) - index + 1)
+                def solve(keep=None, part=stage, objective_target=None):
+                    return solve_target(
+                        bucket, target, incumbent, part, phase, keep, objective_target
+                    )
+
+                def dive(keep, objective_target):
+                    # A restricted program can only supply a better assignment; its
+                    # status and bounds say nothing about the full program.
+                    part = session.stage(_DIVE_SHARE * seconds)
+                    try:
+                        solve(keep, part, objective_target)
+                    except (MaskReuseSolverFailure, MaskReuseAllocationPause):
+                        raise
+                    except MaskReuseSolverError:
+                        pass
+                    finally:
+                        session.record_stage(
+                            part, False, bucket=bucket, target=target, restricted=True
+                        )
+
+                def risk():
+                    best = incumbent.best
+                    assert best is not None  # only targets with a policy reach the risk pass
+                    return float(best.risk_objective)
+
+                try:
+                    if target not in priced:
+                        complete = solve()
+                    elif phase == "risk":
+                        relaxed, prices = relaxations[target], priced[target]
+                        limit = bound + float(epsilon)
+                        near = 0.5 * (bound + limit)
+                        if near < risk():
+                            # A policy close to the bound usually exists among the
+                            # options priced within the tolerance of it.
+                            dive(reduction(relaxed, prices, near), near)
+                        if risk() <= limit:
+                            # The bound already shows this policy is within the tolerance
+                            # of the optimum. Proving the optimum itself is worth a short
+                            # attempt, not the time the cost pass needs.
+                            stage = session.stage(_EXACT_SHARE * seconds)
+                        complete = solve(reduction(relaxed, prices, risk()), stage)
+                    else:
+                        relaxed, prices = relaxations[target], priced[target]
+                        limit = float(ceiling)
+                        limit += 4 * NATIVE_FEASIBILITY_TOLERANCE + 1e-12 * abs(limit)
+                        # Every policy within the ceiling uses only these options.
+                        keep = relaxed.reduce(prices, limit)
+                        # Price the risk rows against the ceiling: the priced tile cost
+                        # bounds every policy within it, and shrinks the program again.
+                        costs = _PricedRelaxation(
+                            relaxed.tables, edge_allowed, donor_allowed, limit, keep
+                        )
+                        if costs.connected():
+                            cost_prices = costs.maximize(
+                                tolerance=0.5, max_rounds=_PRICE_ROUNDS, expired=expired
+                            )
+                            # The relaxation's cost holds the anchors' tiles and twice a
+                            # reused head's retained tiles; the program minimizes the latter.
+                            fixed = accumulator.anchor_evaluation[target].retained_tiles + len(
+                                starts
+                            ) * (dataset.global_num_heads * relaxed.tables[0].eligible)
+                            bound = (cost_prices.bound - fixed) / 2
+                            # Tiles that half the risk tolerance is worth at these prices.
+                            near = cost_prices.bound + max(
+                                2.0,
+                                0.5 * float(epsilon) * float(sum(map(np.sum, cost_prices.weights))),
+                            )
+
+                            def cost():
+                                if incumbent.best is None:
+                                    return math.inf
+                                return fixed + 2 * sum(
+                                    c.retained_tiles for c in incumbent.best.choices.values()
+                                )
+
+                            if cost() > near:
+                                dive(costs.reduce(cost_prices, near), (near - fixed) / 2)
+                            if incumbent.best is not None:
+                                keep = costs.reduce(cost_prices, cost() + 0.5)
+                        complete = solve(keep)
+                except (MaskReuseSolverFailure, MaskReuseAllocationPause):
+                    raise
+                except MaskReuseSolverError:
+                    complete = False
+                receipt = session.record_stage(stage, complete, bucket=bucket, target=target)
+            if bound is not None:
+                # The priced bound holds for the full program; keep the tighter one.
+                receipt["dual_bound"] = max(receipt.get("dual_bound", -math.inf), bound)
+            frontier[target][phase] = receipt
+
+        pending = list(active)
+        while pending:
+            target = pending.pop(0)
+            if pruned(target):
+                frontier[target]["risk"] = {
+                    "phase": "risk",
+                    "status": "pruned_by_risk_bound",
+                    "dual_bound": priced[target].bound,
+                    "finished": False,
+                }
+                continue
+            run(target, "risk", sum(not pruned(other) for other in pending) + 2)
 
         if active:
             best_risk = min(search[t].best.risk_objective for t in active)
             ceiling = best_risk + epsilon
-            eligible_targets = [
-                t
-                for t in active
-                if frontier[t]["risk"].get("dual_bound") is None
-                or frontier[t]["risk"]["dual_bound"]
-                <= float(ceiling) + NATIVE_FEASIBILITY_TOLERANCE
-            ]
+
+            def within(limit):
+                return [
+                    t
+                    for t in active
+                    if frontier[t]["risk"].get("dual_bound") is None
+                    or frontier[t]["risk"]["dual_bound"]
+                    <= float(limit) + NATIVE_FEASIBILITY_TOLERANCE
+                ]
+
+            bounds = [frontier[t]["risk"].get("dual_bound") for t in active]
+            lower = (
+                min(min(bounds), float(best_risk)) if all(v is not None for v in bounds) else None
+            )
+            certificate = None
+            if all(frontier[t]["risk"].get("finished") for t in within(ceiling)):
+                certificate = "optimum"
+            elif lower is not None and best_risk <= Fraction(lower) + epsilon:
+                # The optimum is not proved, but it cannot be below the bound. Measure the
+                # tolerance from the bound, so every policy at or below the ceiling is
+                # still within the tolerance of the optimum.
+                certificate = "lower_bound"
+                ceiling = Fraction(lower) + epsilon
+            eligible_targets = within(ceiling)
             for index, target in enumerate(eligible_targets):
                 incumbent = search[target]
                 incumbent.ceiling = ceiling
@@ -1141,7 +1381,7 @@ def _selection_pass(
                 elif incumbent.best is not None:
                     retained = sum(c.retained_tiles for c in incumbent.best.choices.values())
                     incumbent.rank = (retained, incumbent.best.risk_objective, ())
-                run(target, "cost", len(eligible_targets) - index)
+                run(target, "cost", len(eligible_targets) - index, ceiling)
             candidates = []
             for target in active:
                 selected = search[target].best
@@ -1163,13 +1403,9 @@ def _selection_pass(
                 if selected.risk_objective <= ceiling:
                     candidates.append(((cost, target), selected))
             (cost, target), selected = min(candidates, key=lambda item: item[0])
-            bounds = [frontier[t]["risk"].get("dual_bound") for t in active]
-            lower = (
-                min(min(bounds), float(best_risk)) if all(v is not None for v in bounds) else None
-            )
             complete = (
-                lower is not None
-                and all(frontier[t]["risk"].get("finished") for t in eligible_targets)
+                certificate is not None
+                and lower is not None
                 and selected.risk_objective
                 <= Fraction(float(lower)) + epsilon + Fraction(str(NATIVE_FEASIBILITY_TOLERANCE))
                 and frontier[target].get("cost", {}).get("finished", False)
@@ -1184,6 +1420,7 @@ def _selection_pass(
                     complete = False
             frontier[target]["selection_outcome"] = {
                 "status": "within_tolerance" if complete else "feasible",
+                "risk_certificate": certificate,
                 "risk_lower_bound": None if lower is None else lower / heads,
                 "risk_upper_bound": float(best_risk / heads),
                 "risk_ceiling": float(ceiling / heads),

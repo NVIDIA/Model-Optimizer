@@ -89,7 +89,18 @@ from .mask_reuse_contracts import (
     threshold_pair_matches,
     validate_context_buckets,
 )
-from .mask_reuse_reduction import _BucketTables, _fixed_layout_choice, _PricedRelaxation, _Reduction
+from .mask_reuse_reduction import (
+    _DIVE_SHARE,
+    _EXACT_SHARE,
+    _LAYOUT_PRICE_ROUNDS,
+    _LAYOUT_SWEEPS,
+    _PRICE_REDUCTION,
+    _PRICE_ROUNDS,
+    _BucketTables,
+    _fixed_layout_choice,
+    _PricedRelaxation,
+    _Reduction,
+)
 from .mask_reuse_solver import (
     NATIVE_FEASIBILITY_TOLERANCE,
     MaskReuseAllocationPause,
@@ -126,20 +137,9 @@ _MAX_TARGET_COMBINATIONS = 4096
 _GENERATED_RISK_TERM_THRESHOLD = 1_000_000
 # Memoryview/bytes headers outweigh tuple savings on very short vectors.
 _PACKED_RISK_MIN_PROMPTS = 16
-# Omit variables that no policy within the risk limit can use (mask_reuse_reduction).
-# The integer program keeps its optimum; only its size changes. HiGHS only: the
-# bundled CBC can crash on the small infeasible programs this creates.
-_PRICE_REDUCTION = True
 # Whether the work targets can be met, and the most work any policy can skip, depend
 # only on the option of each head that skips the most.
 _MOST_WORK = "most_work"
-_PRICE_ROUNDS = 400
-_LAYOUT_PRICE_ROUNDS = 120
-_LAYOUT_SWEEPS = 4
-# Shares of one solver stage: the search for a starting policy near the bound, and
-# the attempt to prove an optimum that the bound already shows is within tolerance.
-_DIVE_SHARE = 0.25
-_EXACT_SHARE = 0.1
 
 
 def _prompt_risk_vector(values, count: int) -> Sequence[float]:
