@@ -94,8 +94,8 @@ from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
+from modelopt.torch.export.shard_cast_utils import dequantize_fp8_ue8m0_to_bf16
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.qtensor.fp8_tensor import FP8QTensor
 from modelopt.torch.quantization.qtensor.mxfp4_tensor import MXFP4QTensor
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 from modelopt.torch.utils.distributed import ParallelState
@@ -170,11 +170,7 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
             block_sizes=[block_size],
         )
     if w.dtype == torch.float8_e4m3fn:
-        block = _ds_fp8_block_size(w, w.scale)
-        return FP8QTensor(w.shape, torch.bfloat16, w).dequantize(
-            scale=w.scale.contiguous().view(torch.float8_e8m0fnu),
-            block_sizes={-2: block, -1: block},
-        )
+        return dequantize_fp8_ue8m0_to_bf16(w, w.scale, block=_ds_fp8_block_size(w, w.scale))
     return w
 
 

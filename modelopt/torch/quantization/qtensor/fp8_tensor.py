@@ -19,8 +19,6 @@ import math
 
 import torch
 
-from modelopt.torch.kernels.quantization import gemm
-
 from ..qtensor.base_qtensor import BaseQuantizedTensor
 from ..utils import (
     convert_quantization_axis_to_reduce_axis,
@@ -30,55 +28,6 @@ from ..utils import (
 )
 
 __all__ = ["FP8QTensor"]
-
-
-def _scale_ue8m0(input, scales, block_sizes, *, dtype, inverse=False):
-    """Apply block exponents without expanding scales or upcasting the whole weight."""
-    if input.numel() == 0:
-        return torch.empty(input.shape, device=input.device, dtype=dtype)
-    blocks = [block_sizes.get(i, block_sizes.get(i - input.ndim, 1)) for i in range(input.ndim)]
-    if (
-        not inverse
-        and gemm.IS_AVAILABLE
-        and input.is_cuda
-        and input.ndim == 2
-        and input.is_contiguous()
-        and blocks[0] == blocks[1]
-        and blocks[0] in (32, 128)
-        and dtype in (torch.float16, torch.bfloat16, torch.float32)
-        # Triton's E4M3 conversion requires native FP8 hardware.
-        and torch.cuda.get_device_capability(input.device) >= (8, 9)
-    ):
-        return gemm.weight_dequant(
-            input,
-            scales.to(device=input.device, dtype=torch.float32).contiguous(),
-            blocks[0],
-            dtype=dtype,
-        )
-    output = torch.empty(input.shape, device=input.device, dtype=dtype)
-    working_dtype = torch.float64 if torch.float64 in (input.dtype, dtype) else torch.float32
-    # Keep working tensors bounded, including for large dense MTP projections.
-    rows = max(blocks[0], (1048576 // math.prod(input.shape[1:]) // blocks[0]) * blocks[0])
-    for start in range(0, input.shape[0], rows):
-        chunk = input[start : start + rows]
-        shape = [size for n, block in zip(chunk.shape, blocks) for size in (n // block, block)]
-        scale_shape = [size for n, block in zip(chunk.shape, blocks) for size in (n // block, 1)]
-        exponents = (
-            scales[start // blocks[0] : (start + chunk.shape[0]) // blocks[0]]
-            .contiguous()
-            .view(torch.uint8)
-            .to(device=input.device, dtype=torch.int32)
-            .reshape(scale_shape)
-            - 127
-        )
-        scaled = torch.ldexp(
-            chunk.to(working_dtype).reshape(shape), -exponents if inverse else exponents
-        )
-        if inverse:
-            scaled.clamp_(-448.0, 448.0)
-        scaled.masked_fill_(exponents == 128, float("nan"))
-        output[start : start + rows] = scaled.reshape(chunk.shape)
-    return output
 
 
 class FP8QTensor(BaseQuantizedTensor):
@@ -95,8 +44,6 @@ class FP8QTensor(BaseQuantizedTensor):
         scales: torch.Tensor = None,
         axis: tuple | int | None = None,
         block_sizes: dict | None = None,
-        *,
-        scale_dtype: torch.dtype | None = None,
     ) -> tuple:
         """Converting a tensor to a quantized format based on FP8 quantization. Only E4M3 is supported.
 
@@ -105,24 +52,12 @@ class FP8QTensor(BaseQuantizedTensor):
             scales (torch.Tensor): The scales for quantization.
             axis: The dimensions to reduce for quantization. None or int or tuple of ints.
             block_sizes (dict): A dictionary specifying the block size for each dimension.
-            scale_dtype: Set to ``torch.float8_e8m0fnu`` for power-of-two block scales.
-                The default preserves floating-point scales. Explicit scales must already
-                have the requested dtype; UE8M0 scales also select this format automatically.
 
         Note: One can only provide axis or block_sizes for FP8 quantization.
 
         Returns:
             tuple: FP8QTensor, scales
         """
-        ue8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
-        if scale_dtype is not None and scale_dtype != ue8m0_dtype:
-            raise ValueError("scale_dtype must be None or torch.float8_e8m0fnu")
-        if scales is not None and scale_dtype is not None and scales.dtype != scale_dtype:
-            raise ValueError("Explicit scales must have the requested scale_dtype")
-        use_ue8m0 = scale_dtype is not None or (scales is not None and scales.dtype == ue8m0_dtype)
-        if use_ue8m0 and (not block_sizes or axis is not None or input.ndim == 0):
-            raise ValueError("UE8M0 requires block_sizes and does not support axis quantization")
-
         original_input = input
 
         # If block_sizes is provided, pad the input so that each dimension is divisible by the block size.
@@ -136,22 +71,7 @@ class FP8QTensor(BaseQuantizedTensor):
             else:
                 reduce_axis = convert_quantization_axis_to_reduce_axis(input, axis)
                 amax = reduce_amax(input, axis=reduce_axis)
-            if use_ue8m0:
-                working_dtype = torch.float64 if amax.dtype == torch.float64 else torch.float32
-                # 448 = 0.875 * 2**9; avoid division/log2 rounding at scale boundaries.
-                mantissa, exponent = torch.frexp(amax.to(working_dtype))
-                exponent += (mantissa > 0.875).to(exponent.dtype) - 9
-                exponent.masked_fill_(mantissa == 0, -127)
-                exponent.masked_fill_(mantissa.isinf(), 127).clamp_(-127, 127)
-                # UE8M0 reserves 255 for blocks containing NaNs.
-                scales = (
-                    (exponent + 127)
-                    .masked_fill_(amax.isnan(), 255)
-                    .to(torch.uint8)
-                    .view(ue8m0_dtype)
-                )
-            else:
-                scales = amax / 448.0  # Consider parameterizing the divisor if needed
+            scales = amax / 448.0  # Consider parameterizing the divisor if needed
 
         # Determine the expected scales shape from the (possibly padded) input
         expected_shape = list(input.shape)
@@ -179,17 +99,12 @@ class FP8QTensor(BaseQuantizedTensor):
                 f"Mismatch in expected scale shape: {scales.shape} vs {tuple(expected_shape)}"
             )
 
-            if not use_ue8m0:
-                # Expand scales along each block dimension for broadcasting.
-                for dim, block_size in block_sizes.items():
-                    expanded_scales = expanded_scales.repeat_interleave(block_size, dim=dim)
+            # Expand scales along each block dimension for broadcasting.
+            for dim, block_size in block_sizes.items():
+                expanded_scales = expanded_scales.repeat_interleave(block_size, dim=dim)
 
         # Perform quantization using FP8 (E4M3) format.
-        quantized_data = (
-            _scale_ue8m0(input, scales, block_sizes, dtype=torch.float8_e4m3fn, inverse=True)
-            if use_ue8m0
-            else (input / expanded_scales).to(torch.float8_e4m3fn)
-        )
+        quantized_data = (input / expanded_scales).to(torch.float8_e4m3fn)
 
         # Crop quantized_data back to the original shape (if padding was added).
         slices = tuple(slice(0, dim) for dim in original_input.shape)
@@ -198,7 +113,7 @@ class FP8QTensor(BaseQuantizedTensor):
         return cls(original_input.shape, original_input.dtype, quantized_data_cropped), scales
 
     def dequantize(self, dtype: torch.dtype = None, **kwarg):
-        """Dequantize FP8 using floating-point or native UE8M0 block scales."""
+        """Dequantze FP8 packed tensor to a target dtype."""
         if dtype is None:
             dtype = self.metadata["dtype"]
         assert "scale" in kwarg, "Require scale for FP8 dequantization."
@@ -206,9 +121,6 @@ class FP8QTensor(BaseQuantizedTensor):
         # get args
         scales = kwarg["scale"]
         block_sizes = kwarg.get("block_sizes")
-        use_ue8m0 = scales.dtype == getattr(torch, "float8_e8m0fnu", None)
-        if use_ue8m0 and not block_sizes:
-            raise ValueError("UE8M0 requires block_sizes")
 
         quantized_data = self._quantized_data
         if block_sizes:
@@ -228,15 +140,12 @@ class FP8QTensor(BaseQuantizedTensor):
                 f"Scales shape {scales.shape} must match expected {tuple(expanded_shape)}."
             )
 
-            if not use_ue8m0:
-                # Expand scales for broadcasting
-                for dim, block_size in block_sizes.items():
-                    scales = scales.repeat_interleave(block_size, dim=dim)
+            # Expand scales for broadcasting
+            for dim, block_size in block_sizes.items():
+                scales = scales.repeat_interleave(block_size, dim=dim)
 
         # handle padded tensors
         slices = tuple(slice(0, dim) for dim in self.metadata["shape"])
-        if use_ue8m0:
-            return _scale_ue8m0(quantized_data, scales, block_sizes, dtype=dtype)[slices]
         scales = scales.to(self._quantized_data.device)
 
         return (quantized_data.to(dtype) * scales.to(dtype))[slices]

@@ -23,7 +23,7 @@ Changelog
 *Quantization - Export & Deployment*
 
 - ``examples/hf_ptq/convert_ggml_to_int8.py`` now also converts GGML exports that hold other formats (FP8, NVFP4, KV cache quantization): their GGML layers become ModelOpt ``INT8_PB_WO`` layers beside the rest of the export, which vLLM newer than 0.34.0 serves. Exports with only GGML layers still become compressed-tensors, and fused MoE experts now convert in both.
-- ``FP8QTensor`` now supports UE8M0 block scales for native checkpoint conversion. Set ``scale_dtype=torch.float8_e8m0fnu`` when quantizing; dequantization recognizes typed UE8M0 scales automatically.
+- Added shared checkpoint utilities for converting native DeepSeek-V4 FP8 weights with UE8M0 block scales to BF16 and back. The DeepSeek-V4 PTQ example now uses the shared decoder.
 
 *Quantization - Recipes*
 

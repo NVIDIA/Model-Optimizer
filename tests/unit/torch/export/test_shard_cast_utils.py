@@ -25,14 +25,82 @@ import modelopt.torch.export as modelopt_export
 import modelopt.torch.export.shard_cast_utils as shard_cast_utils
 from modelopt.torch.export.shard_cast_utils import (
     build_w13_kmax_overrides,
+    dequantize_fp8_ue8m0_to_bf16,
     dequantize_mxfp4_to_bf16,
     link_aux_files,
     mxfp4_kmax,
+    quantize_bf16_to_fp8_ue8m0,
     quantize_mxfp4_to_nvfp4_lossless,
     resolve_checkpoint_file,
     validate_aux_files,
 )
 from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
+
+
+@pytest.mark.parametrize("block", [32, 128])
+def test_native_fp8_roundtrip_partial_zero_and_scale_boundary_blocks(block):
+    """Native FP8-representable BF16 values survive encode/decode, including edge blocks."""
+    exponents = torch.tensor([-127, -8, -1, 0, 8, 119])
+    rows, cols = (len(exponents) + 1) * block - 3, block + 5
+    codes = torch.tensor([448.0, -224.0, 1.125, -0.5, 0.0]).repeat(rows, (cols + 4) // 5)
+    codes = codes[:, :cols]
+    row_exponents = torch.cat((exponents, torch.tensor([0]))).repeat_interleave(block)[:rows]
+    weight = torch.ldexp(codes, row_exponents[:, None]).to(torch.bfloat16)
+    weight[-block + 3 :] = 0
+    codes[-block + 3 :] = 0
+
+    encoded, scales = quantize_bf16_to_fp8_ue8m0(weight, block)
+    expected_scales = torch.cat((exponents + 127, torch.tensor([0]))).to(torch.uint8)
+    torch.testing.assert_close(scales, expected_scales[:, None].expand(-1, 2))
+    torch.testing.assert_close(encoded.float(), codes, rtol=0, atol=0)
+    torch.testing.assert_close(
+        dequantize_fp8_ue8m0_to_bf16(encoded, scales, block), weight, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        dequantize_fp8_ue8m0_to_bf16(encoded, scales.view(torch.float8_e8m0fnu), block),
+        weight,
+        rtol=0,
+        atol=0,
+    )
+    above = torch.nextafter(weight, torch.full_like(weight, float("inf")))
+    _, above_scales = quantize_bf16_to_fp8_ue8m0(above, block)
+    torch.testing.assert_close(above_scales[:-1], (expected_scales[:-1] + 1)[:, None].expand(-1, 2))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_native_fp8_export_rejects_nonfinite_weights(value):
+    weight = torch.zeros(2, 3, dtype=torch.bfloat16)
+    weight[0, 0] = value
+    with pytest.raises(ValueError):
+        quantize_bf16_to_fp8_ue8m0(weight)
+
+
+@pytest.mark.parametrize(
+    ("shape", "dtype", "block"),
+    [
+        ((1, 32, 32), torch.bfloat16, 32),
+        ((32, 32), torch.float32, 32),
+        ((32, 32), torch.bfloat16, 16),
+        ((0, 32), torch.bfloat16, 32),
+    ],
+)
+def test_native_fp8_export_rejects_unsupported_matrices(shape, dtype, block):
+    with pytest.raises(ValueError):
+        quantize_bf16_to_fp8_ue8m0(torch.zeros(shape, dtype=dtype), block)
+
+
+@pytest.mark.parametrize(
+    "scale",
+    [
+        torch.ones(2, 1, dtype=torch.uint8),
+        torch.ones(1, 1),
+        torch.full((1, 1), 255, dtype=torch.uint8),
+    ],
+)
+def test_native_fp8_load_rejects_invalid_scales(scale):
+    weight = torch.zeros(32, 32).to(torch.float8_e4m3fn)
+    with pytest.raises(ValueError):
+        dequantize_fp8_ue8m0_to_bf16(weight, scale, block=32)
 
 
 def test_mxfp4_to_nvfp4_lossless_cast_preserves_dequantized_values():
@@ -76,8 +144,10 @@ def test_public_api_contains_only_cast_helpers():
     assert set(shard_cast_utils.__all__) == {
         "build_w13_amax_overrides",
         "build_w13_kmax_overrides",
+        "dequantize_fp8_ue8m0_to_bf16",
         "dequantize_mxfp4_to_bf16",
         "mxfp4_kmax",
+        "quantize_bf16_to_fp8_ue8m0",
         "quantize_mxfp4_to_nvfp4",
         "quantize_mxfp4_to_nvfp4_lossless",
     }
