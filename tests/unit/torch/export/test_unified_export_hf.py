@@ -46,6 +46,7 @@ from modelopt.torch.export.quant_utils import (
 )
 from modelopt.torch.export.unified_export_hf import (
     _copy_non_model_files_from_source,
+    _export_transformers_checkpoint,
     _fuse_shared_input_modules,
     _resolve_export_dtype,
     _source_checkpoint,
@@ -1455,8 +1456,12 @@ def test_gpt_oss_mxfp4_experts_export_as_openai_releases_them(tmp_path, request,
     export_dir = tmp_path / "export"
     export_dir.mkdir()
     (export_dir / "hf_quant_config.json").write_text("{}")  # an earlier export's
-    export_hf_checkpoint(_quantize_experts_mxfp4(model), export_dir=export_dir)
+    model = _quantize_experts_mxfp4(model)
+    export_hf_checkpoint(model, export_dir=export_dir)
 
+    if placement != "resident":
+        # The layer-by-layer exports release what they pack once it is written.
+        assert not [n for n, _ in model.named_buffers() if n.endswith(("_blocks", "_scales"))]
     assert not (export_dir / "hf_quant_config.json").exists()
     assert json.loads((export_dir / "config.json").read_text())["quantization_config"] == {
         "quant_method": "mxfp4",
@@ -1504,19 +1509,29 @@ def test_gpt_oss_mxfp4_experts_export_as_openai_releases_them(tmp_path, request,
     ],
     ids=["kv-cache", "unquantized-layer"],
 )
+@pytest.mark.parametrize("entry", ["export_hf_checkpoint", "_export_transformers_checkpoint"])
 def test_gpt_oss_mxfp4_experts_export_refuses_what_openai_layout_cannot_describe(
-    tmp_path, extra_quant_cfg, refusal
+    tmp_path, entry, extra_quant_cfg, refusal
 ):
     """OpenAI's MXFP4 config cannot describe an FP8 KV cache, nor one layer's experts left in BF16,
-    so the export refuses both unwritten."""
+    so the export refuses both before it writes anything or changes the model."""
     pytest.importorskip("transformers")
+    # Local import: accelerate is optional, like transformers above.
+    from accelerate.hooks import ModelHook, add_hook_to_module
+
     model = _quantize_experts_mxfp4(_tiny_gpt_oss(), extra_quant_cfg)
+    # An export that goes ahead removes every accelerate hook.
+    add_hook_to_module(model.model.layers[0], ModelHook())
     before = {k: v.clone() for k, v in model.state_dict().items()}
 
     with pytest.raises(NotImplementedError, match=refusal):
-        export_hf_checkpoint(model, export_dir=tmp_path)
+        if entry == "export_hf_checkpoint":
+            export_hf_checkpoint(model, export_dir=tmp_path / "export")
+        else:
+            _export_transformers_checkpoint(model)
 
     after = model.state_dict()
     assert after.keys() == before.keys()
     assert all(torch.equal(after[k], v) for k, v in before.items())
-    assert not any(tmp_path.iterdir())
+    assert hasattr(model.model.layers[0], "_hf_hook")
+    assert not (tmp_path / "export").exists()

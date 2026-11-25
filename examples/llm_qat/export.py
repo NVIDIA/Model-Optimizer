@@ -14,15 +14,16 @@
 # limitations under the License.
 
 import argparse
-import json
 import warnings
 from pathlib import Path
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.opt as mto
-from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
-from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
+from modelopt.torch.export.unified_export_hf import (
+    _export_transformers_checkpoint,
+    _write_hf_export_config,
+)
 from modelopt.torch.opt.conversion import ModeloptStateManager, restore_from_modelopt_state
 from modelopt.torch.quantization.utils import set_quantizer_state_dict
 from modelopt.torch.utils import print_rank_0
@@ -86,11 +87,6 @@ def main(args):
             model, is_modelopt_qlora=is_qlora
         )
 
-        with open(f"{base_model_dir}/hf_quant_config.json", "w") as file:
-            json.dump(hf_quant_config, file, indent=4)
-
-        hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
-
         # Save model
         if is_qlora:
             model.base_model.save_pretrained(f"{base_model_dir}", state_dict=post_state_dict)
@@ -98,14 +94,8 @@ def main(args):
         else:
             model.save_pretrained(export_dir, state_dict=post_state_dict)
 
-        config_path = f"{base_model_dir}/config.json"
-
-        config_data = model.config.to_dict()
-
-        config_data["quantization_config"] = hf_quant_config
-
-        with open(config_path, "w") as file:
-            json.dump(config_data, file, indent=4)
+        # The quantization configs, written as export_hf_checkpoint writes them.
+        _write_hf_export_config(model, hf_quant_config, base_model_dir)
 
         # Save tokenizer
         tokenizer.save_pretrained(export_dir)

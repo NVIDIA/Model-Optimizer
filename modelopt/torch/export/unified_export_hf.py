@@ -152,6 +152,7 @@ from .quant_utils import (
     get_weight_scaling_factor_2,
     has_quantized_modules,
     maybe_transpose_expert_weight_dimensions,
+    mxfp4_release_quantization_config,
     postprocess_state_dict,
     preprocess_linear_fusion,
     sync_tied_input_amax,
@@ -1038,6 +1039,8 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
     the quant config.
     """
     dtype = _resolve_export_dtype(model, dtype)
+    # What the MXFP4 release layout cannot carry is refused before the steps below change the model.
+    mxfp4_release_quantization_config(model)
     # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
     # Sourced from HF's name-based all_tied_weights_keys, so it is correct even under FSDP/offload.
     tied_map = TiedWeightMap(model)
@@ -2179,6 +2182,8 @@ def export_hf_checkpoint(
             )
         # Each rank holds only its own experts' quantizers, so they are agreed on before any folds.
         _agree_on_fused_expert_quantization(model)
+    # What the MXFP4 release layout cannot carry is refused before anything is written or folded.
+    mxfp4_release_quantization_config(model)
     # Either form of sharding, including the hybrid where both hold: a model can be FSDP2-dense AND
     # expert-parallel, so these are tracked separately rather than as an either/or.
     _sharded_export = _ep_sharded or _fsdp2_sharded
