@@ -243,9 +243,10 @@ class _IQLinear(torch.autograd.Function):
 def iq_linear(inputs, packed, steps, format_name, weight_shape, bias=None):
     """Apply a native GGML matrix without expanding weights or saving a full dW.
 
-    ``steps`` are differentiable native fields in row-major block/group order,
+    ``steps`` are differentiable FP32 native fields in row-major block/group order,
     shaped ``(prod(weight_shape) // block_size, block_size // int8_group_size)``.
-    Packed codes remain immutable.
+    Packed codes remain immutable. Forward and input VJP decode weights again for
+    each 32-token row tile; larger token counts increase decode work.
     """
     fmt = IQ_FORMAT_REGISTRY[format_name]
     shape = tuple(weight_shape)
@@ -266,8 +267,12 @@ def iq_linear(inputs, packed, steps, format_name, weight_shape, bias=None):
     _, block_bytes = iq_metadata(packed.device, format_name)
     group = fmt.int8_group_size
     blocks = math.prod(shape) // fmt.block_size
-    if packed.numel() != blocks * block_bytes or steps.shape != (blocks, fmt.block_size // group):
-        raise ValueError("Packed bytes/native scale geometry do not match the IQ matrix.")
+    if (
+        packed.numel() != blocks * block_bytes
+        or steps.dtype != torch.float32
+        or steps.shape != (blocks, fmt.block_size // group)
+    ):
+        raise ValueError("Packed bytes/native FP32 scales do not match the IQ matrix.")
     if bias is not None:
         if bias.shape != (shape[0],) or bias.device != inputs.device or bias.dtype != inputs.dtype:
             raise ValueError(
