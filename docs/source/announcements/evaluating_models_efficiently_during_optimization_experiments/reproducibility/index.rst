@@ -50,11 +50,8 @@ Statistical methods
     <https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html>`__,
     swap model labels for whole parent problems and count permuted cap-hit rate differences at least
     as extreme as the observed difference in the tested direction. For an exact p-value, divide
-    this count by the total number of possible swap patterns.
-
-    Cap hits are rare, so most parent-level differences are zero. The permutation test avoids relying
-    on a t-distribution approximation for these sparse differences. It assumes that the models' results
-    for each parent problem are interchangeable under the null hypothesis.
+    this count by the total number of possible swap patterns.Cap hits are rare, so most subtask differences are zero. 
+    The permutation test avoids relying on a t-distribution approximation for these sparse differences.
 
     The outcomes are binary, but a simple binomial test on pooled responses would ignore question
     pairing and repetitions within each question. With one response per model and question and
