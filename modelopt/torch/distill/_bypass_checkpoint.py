@@ -49,7 +49,8 @@ def _tensor_hash(digest, value):
         value = value.to_local()
     if hasattr(value, "get_qtensor"):
         native = value.get_qtensor()
-        digest.update(str(native.metadata).encode())
+        digest.update(f"{type(native).__module__}.{type(native).__qualname__}".encode())
+        digest.update(_batch_hash(_semantic_config(native.metadata)).encode())
         value = native._quantized_data
     value = value.detach()
     if value.numel() * value.element_size() <= 8 * 1024 * 1024:
@@ -62,13 +63,17 @@ def _tensor_hash(digest, value):
 
 def _model_hash(model):
     digest = hashlib.sha256()
-    for name, value in model.state_dict().items():
+    for name, value in model.state_dict(keep_vars=True).items():
         if isinstance(value, torch.Tensor):
             digest.update(str((name, tuple(value.shape), value.dtype)).encode())
             _tensor_hash(digest, value)
         else:
             digest.update(json.dumps([name, value], sort_keys=True, default=str).encode())
     for name, module in model.named_modules():
+        native = getattr(module, "_native_weight_meta", None)
+        if native is not None:
+            digest.update(name.encode())
+            digest.update(_batch_hash(_semantic_config(native)).encode())
         if hasattr(module, "num_bits") and hasattr(module, "backend"):
             digest.update(str((name, module.extra_repr())).encode())
     config = getattr(model, "config", None)
@@ -111,15 +116,16 @@ def _batch_hash(batch):
             digest.update(str((tuple(value.shape), value.dtype)).encode())
             _tensor_hash(digest, value)
         elif isinstance(value, dict):
-            for key in sorted(value):
-                digest.update(str(key).encode())
+            digest.update(str(("dict", len(value))).encode())
+            for key in sorted(value, key=lambda key: (type(key).__name__, str(key))):
+                update(key)
                 update(value[key])
         elif isinstance(value, (tuple, list)):
             digest.update(str((type(value).__name__, len(value))).encode())
             for item in value:
                 update(item)
         elif value is None or isinstance(value, (str, int, float, bool)):
-            digest.update(json.dumps(value).encode())
+            digest.update(json.dumps([type(value).__name__, value]).encode())
         else:
             raise ValueError(
                 "Checkpointed batch Sequences require tensor or JSON-compatible leaves."

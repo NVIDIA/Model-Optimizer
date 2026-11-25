@@ -160,27 +160,36 @@ class _BypassRunner:
                 return value.detach().cpu()
             return value
 
-        position = {
-            "consumed_batches": self.consumed_batches,
-            "priming_batch": tree_map(pack, priming_batch),
-            "priming_devices": priming_devices,
-        }
-        if self.sequence_data:
-            position["prefix_sha256"] = self.consumed_digest.hexdigest()
-            position["next_batch_hash"] = (
-                _batch_hash(dataloader[self.consumed_batches])
-                if self.consumed_batches < len(dataloader)
-                else None
-            )
-        else:
-            position["loader_state"] = dataloader.state_dict()
-        self.checkpoint.save(
-            step,
-            fields=self._checkpoint_fields(),
-            optimizers=self.optimizers,
-            data_position=position,
-            rng_state=_rng_state(devices),
-        )
+        error, snapshot = None, None
+        try:
+            position = {
+                "consumed_batches": self.consumed_batches,
+                "priming_batch": tree_map(pack, priming_batch),
+                "priming_devices": priming_devices,
+            }
+            if self.sequence_data:
+                position["prefix_sha256"] = self.consumed_digest.hexdigest()
+                position["next_batch_hash"] = (
+                    _batch_hash(dataloader[self.consumed_batches])
+                    if self.consumed_batches < len(dataloader)
+                    else None
+                )
+            else:
+                position["loader_state"] = dataloader.state_dict()
+            snapshot = {
+                "fields": self._checkpoint_fields(),
+                "optimizers": self.optimizers,
+                "data_position": position,
+                "rng_state": _rng_state(devices),
+            }
+        except Exception as exc:
+            if self.runtime is None:
+                raise
+            error = f"{type(exc).__name__}: {exc}"
+        if self.runtime is not None:
+            self.runtime.synchronize_error(error)
+        assert snapshot is not None
+        self.checkpoint.save(step, **snapshot)
 
     def _restore_cursor(self, dataloader, state):
         assert self.checkpoint is not None
