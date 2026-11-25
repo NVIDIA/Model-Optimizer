@@ -1,0 +1,268 @@
+warning: `VIRTUAL_ENV=/tmp/builds/YQxxH4yPp/3/omniml/integration/nmm-sandbox/.venv-intern-agent` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.12`.
+Configuring global options
+Dry run for task __main__:cicd
+Resolved Arguments
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Argument Name    ┃ Resolved Value                                            ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ detach           │ True                                                      │
+│ hf_local         │ None                                                      │
+│ identity         │ '/.ssh/id_ed25519'                                        │
+│ job_dir          │ '/lustre/fsw/portfolios/coreai/users/chenhany/experiment… │
+│ job_name         │ 'NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mt… │
+│ pipeline         │ SandboxPipeline(                                          │
+│                  │   global_vars=GlobalVariables(                            │
+│                  │     hf_model='/hf-local/nvidia/NVIDIA-Nemotron-3-Super-1… │
+│                  │   task_0=SandboxTask0(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:latest',                │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=4),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/qualitative',       │
+│                  │ '--engine VLLM', '--speculative_algorithm MTP',           │
+│                  │ '--draft_length 3', '--tp_size 4', '--ep_size 1',         │
+│                  │ '--concurrency 32', '--output_length 4096',               │
+│                  │ '--aa_timing', '--show_progress', '--save_dir             │
+│                  │ /scratchspace/{sweep_name_default}/qualitative',          │
+│                  │ '--temperature 1', '--max_seq_len 65536', '--save_dir     │
+│                  │ /scratchspace/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_mtp… │
+│                  │ '--draft_length 7'],                                      │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}]), │
+│                  │   task_1=SandboxTask1(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:latest',                │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=4),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k',    │
+│                  │ '--engine VLLM', '--speculative_algorithm MTP',           │
+│                  │ '--draft_length 3', '--tp_size 4', '--ep_size 1',         │
+│                  │ '--concurrency 8', '--num_requests 80', '--output_length  │
+│                  │ 4096', '--aa_timing', '--show_progress', '--save_dir      │
+│                  │ /scratchspace/{sweep_name_default}/throughput_32k',       │
+│                  │ '--temperature 1', '--max_seq_len 65536', '--save_dir     │
+│                  │ /scratchspace/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_mtp… │
+│                  │ '--num_requests 80', '--draft_length 7'],                 │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}])) │
+│ task             │ None                                                      │
+│ test_level       │ 0                                                         │
+│ user             │ 'chenhany'                                                │
+└──────────────────┴───────────────────────────────────────────────────────────┘
+Launching cicd...
+============================================================
+Version Report
+============================================================
+  Launcher                       5c34b6a      (main)
+  Model-Optimizer                eb53a1fb     (pensieve-intern/OMNIML-5095/cell-t1-d7)
+============================================================
+────────────── Entering Experiment cicd with id: cicd_1781408325 ───────────────
+job NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm task 0 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:latest', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=4, time='04:00:00', local=False, segment=None)
+job NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm task 1 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:latest', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=4, time='04:00:00', local=False, segment=None)
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+[03:38:51] Connecting to                                           client.py:257
+           chenhany@cw-dfw-cs-001-login-01.nvidia.com                           
+[03:38:51] INFO     Connected (version 2.0, client             transport.py:1786
+                    OpenSSH_8.9p1)                                              
+[03:38:52] INFO     Authentication (publickey) successful!     transport.py:1786
+           INFO     rsyncing                                         rsync.py:37
+                    /tmp/pensieve-intern-agent-ukdlhxs6/workspace/ex            
+                    periments/cicd/cicd_1781408325 to                           
+                    /lustre/fsw/portfolios/coreai/users/chenhany/exp            
+                    eriments/cicd ...                                           
+[03:39:17] INFO     Successfully ran `rsync  -pthrvz  --rsh='ssh -i  rsync.py:93
+                    /.ssh/id_ed25519 -p 22 '                                    
+                    /tmp/pensieve-intern-agent-ukdlhxs6/workspace/ex            
+                    periments/cicd/cicd_1781408325                              
+                    chenhany@cw-dfw-cs-001-login-01.nvidia.com:/lust            
+                    re/fsw/portfolios/coreai/users/chenhany/experime            
+                    nts/cicd`                                                   
+[03:39:17] Launching job                                       experiment.py:800
+           NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_benc                  
+           h_mtp_vllm_0 for experiment cicd                                     
+[03:39:18] INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12788709                            
+[03:39:18] Launching job                                       experiment.py:800
+           NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_benc                  
+           h_mtp_vllm_1 for experiment cicd                                     
+[SLURM] Job 12788709 is no longer pending.
+           INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12788710                            
+────────────────── Detaching from Experiment cicd_1781408325. ──────────────────
+           Task specific cleanup won't be run.                experiment.py:1212
+           Ephemeral logs and artifacts may be lost.                            
+[SLURM] Job 12788710 - State: PENDING, Estimated start: N/A, Current time: 2026-06-14 03:39:18
+
+Experiment Status for cicd_1781408325
+
+Task 0: NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0
+- Status: PENDING
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12788709
+- Local Directory: /tmp/pensieve-intern-agent-ukdlhxs6/workspace/experiments/cicd/cicd_1781408325/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0
+- Remote Directory: /lustre/fsw/portfolios/coreai/users/chenhany/experiments/cicd/cicd_1781408325/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0
+
+Task 1: NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12788710
+- Local Directory: /tmp/pensieve-intern-agent-ukdlhxs6/workspace/experiments/cicd/cicd_1781408325/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1
+- Remote Directory: /lustre/fsw/portfolios/coreai/users/chenhany/experiments/cicd/cicd_1781408325/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1
+
+                                                                                
+# The experiment was run with the following tasks: ['NVIDIA-Nemotron-3-Super-120
+# You can inspect and reconstruct this experiment at a later point in time using
+experiment = run.Experiment.from_id("cicd_1781408325")                          
+experiment.status() # Gets the overall status                                   
+experiment.logs("NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0
+experiment.cancel("NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm
+                                                                                
+                                                                                
+# You can inspect this experiment at a later point in time using the CLI as well
+nemo experiment status cicd_1781408325                                          
+nemo experiment logs cicd_1781408325 0                                          
+nemo experiment cancel cicd_1781408325 0                                        
+                                                                                
+Found 2 experiment(s): cicd_1781406247 cicd_1781408325
+
+=== [2026-06-14 03:39:28] Polling iteration 1/14400 ===
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: RUNNING
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 2 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-14 03:42:33] Polling iteration 2/14400 ===
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: RUNNING
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 2 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-14 03:45:40] Polling iteration 3/14400 ===
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: RUNNING
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 2 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-14 03:48:45] Polling iteration 4/14400 ===
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: RUNNING
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 2 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-14 03:51:50] Polling iteration 5/14400 ===
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: RUNNING
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 2 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-14 03:54:55] Polling iteration 6/14400 ===
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: RUNNING
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 2 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-14 03:58:00] Polling iteration 7/14400 ===
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 3 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-14 04:01:05] Polling iteration 8/14400 ===
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 3 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-14 04:04:10] Polling iteration 9/14400 ===
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 3 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-14 04:07:15] Polling iteration 10/14400 ===
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 3 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-14 04:10:20] Polling iteration 11/14400 ===
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781406247 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781408325 / NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm_1: SUCCEEDED
+
+  Summary: 4 succeeded, 0 failed, 0 cancelled, 0 running, 0 pending
+
+All experiments complete.
+  SUCCEEDED: 4
+  FAILED: 0
+  CANCELLED: 0
+
+=== Fetching experiment logs ===
+Fetching logs: cicd_1781406247 task 0
+Fetching logs: cicd_1781406247 task 1
+Fetching logs: cicd_1781408325 task 0
+Fetching logs: cicd_1781408325 task 1
+=== Done fetching logs ===
