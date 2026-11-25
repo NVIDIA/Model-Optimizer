@@ -343,7 +343,9 @@ def test_unresolved_solver_keeps_a_priced_policy_within_the_bound(tmp_path, monk
     assert result["bmm1_skip_objective"]["target_met"]
     assert result["anchors"] == [0, 2]
     # No optimum was proved, yet the bound places the policy within the risk tolerance.
+    assert outcome["risk_certificate"] == "lower_bound"
     assert 0 <= outcome["risk_upper_bound"] - outcome["risk_lower_bound"] <= 1e-7
+    assert outcome["risk_ceiling"] == pytest.approx(outcome["risk_lower_bound"] + 1e-7, abs=1e-12)
 
 
 def test_joint_selector_recovers_anchor_placement_target_and_consumers(tmp_path):

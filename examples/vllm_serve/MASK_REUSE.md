@@ -143,7 +143,10 @@ bound on the risk of every policy. It also yields an exactly replayed starting
 policy, and the integer program omits every anchor edge and donor option that
 no policy at or below that policy's risk can use. A target tuple whose bound
 exceeds the ceiling is not solved. The cost pass prices the risk rows the same
-way.
+way. When the solver cannot prove the smallest risk within its budget but the
+bound is within `1e-7` of the best replayed policy, the ceiling is the bound
+plus `1e-7`, and the report records `risk_certificate: lower_bound` instead of
+`optimum`.
 
 HiGHS uses one thread. The solver checks the objective against its returned
 assignment, and the calibrator replays the exported policy against the capture.
