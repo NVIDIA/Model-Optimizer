@@ -77,6 +77,11 @@ class GraphPlacementConfig(ModeloptBaseConfig):
         title="Placement options",
         description="Extra options for modelopt.onnx.quantization.quantize, e.g. nodes_to_exclude.",
     )
+    dynamic_batch: bool = ModeloptField(
+        default=False,
+        title="Dynamic batch",
+        description="Export with a dynamic first dimension of every input.",
+    )
 
 
 def quantize_graph(
@@ -85,6 +90,7 @@ def quantize_graph(
     args: tuple[torch.Tensor, ...],
     forward_loop: ForwardLoop | None = None,
     quantize_mode: str = "int8",
+    dynamic_batch: bool = False,
     **placement_kwargs,
 ) -> fx.GraphModule:
     """Quantize ``model`` with quantizers placed on its graph as ModelOpt's ONNX path places Q/DQ.
@@ -111,6 +117,9 @@ def quantize_graph(
         config: A quantization config as for :func:`quantize`. Only ``"max"`` calibration is supported.
         args: Example positional tensor inputs for ``torch.export``.
         quantize_mode: Placement rules to use: ``"int8"`` or ``"fp8"``.
+        dynamic_batch: Export with a dynamic first dimension of every input, so the graph runs any
+            batch size; the example batch size must be at least 2. The ONNX path then places Q/DQ
+            as for a dynamic-batch ONNX model.
         placement_kwargs: Extra placement options for :func:`modelopt.onnx.quantization.quantize`,
             e.g. ``nodes_to_exclude`` (ONNX node names).
 
@@ -126,7 +135,11 @@ def quantize_graph(
     if not all(isinstance(arg, torch.Tensor) for arg in args):
         raise ValueError("Graph placement supports only positional tensor inputs.")
 
-    placement_config = {"quantize_mode": quantize_mode, "placement_kwargs": placement_kwargs}
+    placement_config = {
+        "quantize_mode": quantize_mode,
+        "placement_kwargs": placement_kwargs,
+        "dynamic_batch": dynamic_batch,
+    }
     graph_module = apply_mode(
         model,
         [(_MODE, placement_config)],
@@ -167,7 +180,7 @@ def _convert(
     # The ONNX path is an optional dependency of the torch path.
     from modelopt.onnx.quantization.placement import find_qdq_placement
 
-    exported = _export(model, args)
+    exported = _export(model, args, config.dynamic_batch)
     # The exporter decomposes the graph further before translating it; the ONNX model refers to
     # the nodes of its decomposed program.
     program = torch.onnx.export(exported, dynamo=True, verbose=False)
@@ -198,12 +211,14 @@ def _restore(
         torch.zeros(shape, dtype=getattr(torch, dtype), device=device)
         for shape, dtype in metadata["inputs"]
     )
-    graph_module = _export(model, args).module()
+    graph_module = _export(model, args, config.dynamic_batch).module()
     _insert_quantizers(graph_module, metadata["insertions"])
     return _replace_model(model, graph_module)
 
 
-def _export(model: torch.nn.Module, args: tuple) -> torch.export.ExportedProgram:
+def _export(
+    model: torch.nn.Module, args: tuple, dynamic_batch: bool
+) -> torch.export.ExportedProgram:
     # Place on the deployed (eval) graph. The ONNX path quantizes the matmuls inside attention, so
     # attention is traced from its math form.
     modes = {module: module.training for module in model.modules()}
@@ -214,7 +229,9 @@ def _export(model: torch.nn.Module, args: tuple) -> torch.export.ExportedProgram
     model.eval()
     try:
         with replace_function(F, "scaled_dot_product_attention", _sdpa_math):
-            return torch.export.export(model, args, strict=False)
+            batch = torch.export.Dim.DYNAMIC
+            dynamic_shapes = tuple({0: batch} for _ in args) if dynamic_batch else None
+            return torch.export.export(model, args, dynamic_shapes=dynamic_shapes, strict=False)
     finally:
         for module, training in modes.items():
             module.training = training

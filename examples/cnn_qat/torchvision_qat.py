@@ -84,6 +84,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--print-freq", type=int, default=100, help="Print frequency")
     parser.add_argument(
+        "--placement",
+        choices=["module", "graph"],
+        default="module",
+        help="Quantizer placement: 'module' quantizes the inputs and weights of Conv/Linear modules; "
+        "'graph' exports the model and places quantizers where ModelOpt's ONNX path places Q/DQ "
+        "for TensorRT, including residual adds and pooling (requires nvidia-modelopt[onnx])",
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default=".",
@@ -167,7 +175,13 @@ def main_worker(args: argparse.Namespace) -> None:
                 if seen >= 512:
                     break
 
-    model = mtq.quantize(model, quant_cfg, calibrate)
+    if args.placement == "graph":
+        # The model is captured with torch.export; the batch dimension stays dynamic so that
+        # partial last batches still run.
+        example = next(iter(val_calib_loader))[0].cuda(args.gpu)
+        model = mtq.quantize_graph(model, quant_cfg, (example,), calibrate, dynamic_batch=True)
+    else:
+        model = mtq.quantize(model, quant_cfg, calibrate)
     ptq_acc = validate(model, val_loader, criterion, args)
     print_rank_0(f"PTQ model accuracy: {ptq_acc:.2f}%")
 

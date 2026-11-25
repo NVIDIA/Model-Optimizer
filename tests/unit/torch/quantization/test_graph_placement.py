@@ -82,8 +82,14 @@ def test_quantize_graph_attention():
 
 def test_quantize_graph_qat_save_restore():
     model, example = build_se_residual_model()
+    example = example.repeat(2, 1, 1, 1)
     graph_module = mtq.quantize_graph(
-        model, mtq.INT8_DEFAULT_CFG, (example,), lambda m: m(example), log_level="WARNING"
+        model,
+        mtq.INT8_DEFAULT_CFG,
+        (example,),
+        lambda m: m(example),
+        dynamic_batch=True,
+        log_level="WARNING",
     )
 
     # Train mode uses batch statistics and trains the eager model's parameters in place.
@@ -94,6 +100,7 @@ def test_quantize_graph_qat_save_restore():
     assert not torch.equal(batch_norm.running_mean, running_mean)
     assert all(param.grad is not None for param in model.parameters())
     graph_module.eval()
+    example = example[:1]  # the batch is dynamic
     expected = graph_module(example)
 
     buffer = io.BytesIO()
