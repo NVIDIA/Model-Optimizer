@@ -86,7 +86,7 @@ def quantize_graph(
             f"Graph placement supports calibration {_SUPPORTED_ALGORITHMS}, not {method!r}."
         )
 
-    exported = torch.export.export(model, args, strict=False)
+    exported = _decompose_attention(torch.export.export(model, args, strict=False))
     # The exporter decomposes the graph further before translating it; its decomposed program is
     # the one whose node names the ONNX model refers to.
     program = torch.onnx.export(exported, dynamo=True, verbose=False)
@@ -96,6 +96,22 @@ def quantize_graph(
     _fix_train_mode(graph_module, model.training)
     _insert_quantizers(graph_module, onnx_model, placement)
     return quantize(graph_module, config, forward_loop)
+
+
+def _decompose_attention(exported: torch.export.ExportedProgram) -> torch.export.ExportedProgram:
+    # The ONNX path quantizes the matmul inputs inside attention, which the exporter translates
+    # from a single SDPA node. Its math form has no ONNX translation, so the exporter decomposes it
+    # into matmuls that the quantizers can be placed on.
+    sdpa = torch.ops.aten.scaled_dot_product_attention.default
+    if not any(node.target == sdpa for node in exported.graph.nodes):
+        return exported
+
+    def sdpa_math(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, **kwargs):
+        return torch.ops.aten._scaled_dot_product_attention_math.default(
+            q, k, v, attn_mask, dropout_p, is_causal, None, scale=scale, **kwargs
+        )[0]
+
+    return exported.run_decompositions({sdpa: sdpa_math})
 
 
 def _fix_train_mode(graph_module: fx.GraphModule, training: bool) -> None:

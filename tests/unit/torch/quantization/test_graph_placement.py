@@ -52,3 +52,24 @@ def test_quantize_graph_shares_quantizers():
         node.target for node in quantizer_nodes
     }
     torch.testing.assert_close(graph_module(example), model(example), rtol=0.1, atol=0.1)
+
+
+def test_quantize_graph_attention():
+    torch.manual_seed(0)
+    model = torch.nn.TransformerEncoderLayer(64, 4, 128, dropout=0.0, batch_first=True).eval()
+    example = torch.randn(4, 16, 64)
+
+    graph_module = mtq.quantize_graph(
+        model, mtq.INT8_DEFAULT_CFG, (example,), lambda m: m(example), log_level="WARNING"
+    )
+
+    # The ONNX path quantizes both inputs of both attention matmuls.
+    matmul_inputs = [
+        arg
+        for node in graph_module.graph.nodes
+        if node.target in (aten.matmul.default, aten.bmm.default)
+        for arg in node.args[:2]
+    ]
+    assert len(matmul_inputs) == 4
+    assert all(arg.op == "call_module" for arg in matmul_inputs)
+    torch.testing.assert_close(graph_module(example), model(example), rtol=0.1, atol=0.1)
