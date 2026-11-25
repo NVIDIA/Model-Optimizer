@@ -708,6 +708,7 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         (True, "state-key"),
         (True, "calibrator-setattr"),
         (True, "class-metaclass"),
+        (True, "late-wildcard"),
         (True, "str-name"),
         (True, "foreign-member"),
         (True, "parametrized"),
@@ -742,6 +743,7 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         "state-key",
         "calibrator-setattr",
         "class-metaclass",
+        "late-wildcard",
         "str-name",
         "foreign-member",
         "parametrized",
@@ -760,6 +762,8 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
 ):
     """Entries naming one quantizer each, as a finalized AutoQuantize search's, act as wildcards do."""
     monkeypatch.setattr(quant_conversion, "_CASE_SENSITIVE_NAMES", case_sensitive)
+    check_at = 8  # the named entry the model is checked at
+    monkeypatch.setattr(quant_conversion, "_EXACT_ENTRIES_BEFORE_CHECK", check_at)
 
     class FourBitHidingSequential(torch.nn.Sequential):
         hiding = False
@@ -990,6 +994,17 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     elif layout == "bound-traversal":
         # The name the delegated named_modules lists, which the holder's _modules lack.
         quant_cfg.append({"quantizer_name": "8.weight_quantizer", "enable": True})
+    elif layout == "late-wildcard":
+        # A wildcard entry with a cfg walks the model once. When it replaces no quantizer, the named
+        # entry after it walks its subtree; when it replaces some, the named entry walks the model.
+        quant_cfg.append(
+            {"quantizer_name": "*output_quantizer", "cfg": {"num_bits": 8}, "enable": False}
+        )
+        quant_cfg.append({"quantizer_name": "0.output_quantizer", "enable": True})
+        quant_cfg.append(
+            {"quantizer_name": "*output_quantizer", "cfg": [{"num_bits": 8}] * 2, "enable": False}
+        )
+        quant_cfg.append({"quantizer_name": "1.output_quantizer", "enable": True})
     # Replacing a quantizer with a SequentialQuantizer, and back, changes the names to find.
     first_replacing = len(quant_cfg)
     quant_cfg.append({"quantizer_name": "2.weight_quantizer", "cfg": [{"num_bits": 4}] * 2})
@@ -1007,9 +1022,11 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     elif layout == "newline-name":
         quant_cfg.append({"quantizer_name": "8.weight_quantizer\n", "enable": True})
     # The same names as one-character wildcards, matched by walking the model.
-    walked_cfg = [quant_cfg[0]] + [
-        {**entry, "quantizer_name": f"[{entry['quantizer_name'][0]}]{entry['quantizer_name'][1:]}"}
-        for entry in quant_cfg[1:]
+    walked_cfg = [
+        entry
+        if quant_conversion._WILDCARD_RE.search(name := entry["quantizer_name"])
+        else {**entry, "quantizer_name": f"[{name[0]}]{name[1:]}"}
+        for entry in quant_cfg
     ]
 
     def states(model):
@@ -1054,12 +1071,14 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
         "device-context",
         "dict-property",
         "class-metaclass",
+        "late-wildcard",
     )
     if case_sensitive and layout in fast:
         # Only the "*" entry walks the model, the named entries before the one the model is checked
         # at, and the entries from the first replacement on.
-        before_check = quant_conversion._EXACT_ENTRIES_BEFORE_CHECK - 1
-        assert walks == 1 + before_check + len(quant_cfg) - first_replacing
+        before_check = check_at - 1
+        late_walks = 3 if layout == "late-wildcard" else 0
+        assert walks == 1 + before_check + late_walks + len(quant_cfg) - first_replacing
     else:
         # Every entry walks the model: where fnmatch ignores case, or named_modules can list other
         # paths than the model registers, or the model keeps them out of a plain dict, or a
@@ -1137,6 +1156,49 @@ def test_set_quantizer_by_cfg_matches_a_filter_function_name():
 
 
 @pytest.mark.usefixtures("check_at_the_first_named_entry")
+def test_set_quantizer_by_cfg_reads_class_namespaces_only_with_str_keys():
+    """A named entry acts as its wildcard does on a model whose module class keeps a key of a str
+    subclass in its namespace: looking a name up there compares the keys of equal hash, so the
+    check looks only in namespaces of plain-str keys."""
+    armed = []
+
+    def configured(weight_quantizer, sub_quantizer):
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
+        model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+
+        class Key(str):
+            # Equal in hash to a name only the check looks up.
+            def __hash__(self):
+                return hash("__eq__")
+
+            def __eq__(self, other):
+                if armed and model[1] is not model[0]:
+                    model[1] = model[0]  # named_modules skips the second name
+                return False
+
+        model.add_module("2", type("Holder", (torch.nn.Module,), {Key("holder"): None})())
+        armed.append(True)
+        try:
+            mtq.set_quantizer_by_cfg(
+                model,
+                [
+                    {"quantizer_name": weight_quantizer, "cfg": {"num_bits": 4}},
+                    {"quantizer_name": sub_quantizer, "enable": False},
+                ],
+            )
+        finally:
+            armed.clear()
+        return {
+            name: module.get_modelopt_state(properties_only=True)
+            for name, module in model.named_modules()
+            if isinstance(module, TensorQuantizer)
+        }
+
+    walked = configured("[0].weight_quantizer", "[1].weight_quantizer")
+    assert configured("0.weight_quantizer", "1.weight_quantizer") == walked
+
+
+@pytest.mark.usefixtures("check_at_the_first_named_entry")
 def test_set_quantizer_by_cfg_walks_a_model_the_check_cannot_read():
     """A named entry acts as its wildcard does on a model holding a non-module child: both apply
     the entry's earlier matches, then fail as named_modules reaches that child."""
@@ -1176,6 +1238,7 @@ def check_at_the_first_named_entry(monkeypatch):
         ("tensor", False),
         ("function-mode", False),
         ("dispatch-mode", False),
+        ("calibrator-key", False),
     ],
     ids=[
         "later-entry",
@@ -1191,6 +1254,7 @@ def check_at_the_first_named_entry(monkeypatch):
         "tensor-subclass",
         "function-mode",
         "dispatch-mode",
+        "calibrator-key",
     ],
 )
 def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_layer(
@@ -1201,7 +1265,8 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
     registration hook, the __setattr__ of a parent whose quantizer an entry replaces, a quantizer of
     the caller's class, the __getattr__ a parent_class entry runs to find a match's parent, an
     attribute config of the caller's class, a value wrapped in a builtin or kept in pydantic's
-    fields set, a method or tensor subclass a quantizer holds, or a torch function or dispatch mode."""
+    fields set, a method or tensor subclass a quantizer holds, a key of a str subclass in its
+    calibrator's dict, or a torch function or dispatch mode."""
 
     def configured(weight_quantizer, sub_quantizer):
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
@@ -1238,6 +1303,13 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
                 share()
                 return super().model_copy(*args, **kwargs)
 
+        class SharingKey(str):
+            __hash__ = str.__hash__
+
+            def __eq__(self, other):
+                share()
+                return str.__eq__(self, other)
+
         class SharingDict(dict):
             def __len__(self):
                 share()
@@ -1272,6 +1344,11 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
             # Pinning amax registers it as a buffer, under the hook, with tensor operations.
             del model[0].weight_quantizer._amax
             cfg = {"num_bits": 8, "axis": None, "constant_amax": 1.0}
+        elif trigger == "calibrator-key":
+            # Setting the axis compares the calibrator dict's keys of the same hash.
+            calibrator = model[0].weight_quantizer._calibrator
+            calibrator.__dict__[SharingKey("_axis")] = calibrator.__dict__.pop("_axis")
+            cfg = {"num_bits": 4, "axis": 0}
         elif trigger == "tensor":
             # Pinning amax copies it into the buffer the quantizer holds.
             model[0].weight_quantizer._amax = torch.tensor(1.0).as_subclass(SharingTensor)
