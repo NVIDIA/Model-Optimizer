@@ -252,7 +252,8 @@ def test_donor_cache_preserves_complete_menu_selection(
         monkeypatch.setattr(topology, "cache", tracked_cache)
         cached = calibrate_mask_reuse_topology(path, evidence=_evidence(digest), **kwargs)
         info = wrappers[-1].cache_info()
-        assert info.misses == 2 * 2 * 3 * 2  # buckets * menus * pairs * heads
+        # At most buckets * menus * pairs * heads; reduced programs need fewer menus.
+        assert 0 < info.misses <= 2 * 2 * 3 * 2
         assert info.currsize == info.misses
         assert info.hits >= info.misses
 
@@ -322,6 +323,27 @@ def test_unresolved_topology_does_not_export_a_dense_maximum(tmp_path, monkeypat
     )
     with pytest.raises(MaskReuseSolverError, match="unresolved"):
         _run(tmp_path)
+
+
+def test_unresolved_solver_keeps_a_priced_policy_within_the_bound(tmp_path, monkeypatch):
+    pytest.importorskip("highspy")
+    solver = __import__(
+        "modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_solver",
+        fromlist=["_SolverSession"],
+    )
+
+    def unresolved(self, problem, expression, phase):
+        raise MaskReuseSolverError(f"unresolved calibration solve in {phase}", self.records)
+
+    monkeypatch.setattr(solver._SolverSession, "minimize", unresolved)
+    # The priced relaxation supplies an exactly replayed policy and a bound on the optimum.
+    result, _, _, _ = _run(tmp_path)
+    outcome = result["provenance"]["selection_result"]
+    assert outcome["status"] == "feasible"
+    assert result["bmm1_skip_objective"]["target_met"]
+    assert result["anchors"] == [0, 2]
+    # No optimum was proved, yet the bound places the policy within the risk tolerance.
+    assert 0 <= outcome["risk_upper_bound"] - outcome["risk_lower_bound"] <= 1e-7
 
 
 def test_joint_selector_recovers_anchor_placement_target_and_consumers(tmp_path):
