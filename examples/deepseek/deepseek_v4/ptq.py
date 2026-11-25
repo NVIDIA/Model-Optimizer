@@ -128,6 +128,11 @@ def _ds_fp8_block_size(weight: torch.Tensor, scale: torch.Tensor) -> int:
     for attr in ("fp8_block_size", "block_size"):
         blk = getattr(deekseep_v4_model, attr, None)
         if isinstance(blk, int) and blk > 0 and scale.shape == _fp8_scale_shape(weight, blk):
+            if blk not in _DS_FP8_BLOCK_SIZES:
+                raise ValueError(
+                    f"Unsupported DeepSeek-V4 {attr}={blk}; "
+                    f"supported FP8 block sizes are {_DS_FP8_BLOCK_SIZES}"
+                )
             return blk
     fits = [b for b in _DS_FP8_BLOCK_SIZES if scale.shape == _fp8_scale_shape(weight, b)]
     assert len(fits) == 1, (

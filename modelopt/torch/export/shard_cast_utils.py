@@ -64,13 +64,17 @@ def dequantize_fp8_ue8m0_to_bf16(
     Scales are uint8 exponent bytes or float8_e8m0fnu, with no NaN scale codes.
     """
     if weight.ndim != 2 or weight.dtype != torch.float8_e4m3fn or not weight.numel():
-        raise ValueError("Expected a nonempty FP8 E4M3 matrix")
+        raise ValueError(
+            f"Expected a nonempty FP8 E4M3 matrix, got shape {tuple(weight.shape)} ({weight.dtype})"
+        )
     if block not in (32, 128):
-        raise ValueError("Native DSV4 FP8 blocks must be 32x32 or 128x128")
+        raise ValueError(f"Native DSV4 FP8 blocks must be 32x32 or 128x128, got {block}")
     m, n = weight.shape
     expected = ((m + block - 1) // block, (n + block - 1) // block)
     if scale.shape != expected or scale.dtype not in (torch.uint8, torch.float8_e8m0fnu):
-        raise ValueError(f"Expected UE8M0 scales with shape {expected}")
+        raise ValueError(
+            f"Expected UE8M0 scales with shape {expected}, got {tuple(scale.shape)} ({scale.dtype})"
+        )
     scale = scale.to(device=weight.device).contiguous().view(torch.uint8)
     if (scale == 255).any():
         raise ValueError("Native checkpoint scales must not contain NaN codes")
@@ -90,9 +94,11 @@ def quantize_bf16_to_fp8_ue8m0(
     Uses square 32x32 or 128x128 blocks and recomputes scales for the trained weights.
     """
     if weight.ndim != 2 or weight.dtype != torch.bfloat16 or not weight.numel():
-        raise ValueError("Expected a nonempty BF16 matrix")
+        raise ValueError(
+            f"Expected a nonempty BF16 matrix, got shape {tuple(weight.shape)} ({weight.dtype})"
+        )
     if block not in (32, 128):
-        raise ValueError("Native DSV4 FP8 blocks must be 32x32 or 128x128")
+        raise ValueError(f"Native DSV4 FP8 blocks must be 32x32 or 128x128, got {block}")
     blocks = {-2: block, -1: block}
     amax = reduce_block_amax(reduce_block_padding(weight, blocks), blocks).float()
     if not torch.isfinite(amax).all():
@@ -105,7 +111,7 @@ def quantize_bf16_to_fp8_ue8m0(
     with torch.cuda.device_of(weight):
         scales = torch.ldexp(torch.ones_like(amax), exponent)
     quantized, _ = FP8QTensor.quantize(weight.float(), scales=scales, block_sizes=blocks)
-    return quantized._quantized_data, (exponent + E8M0_BIAS).to(torch.uint8)
+    return quantized._quantized_data.contiguous(), (exponent + E8M0_BIAS).to(torch.uint8)
 
 
 def dequantize_mxfp4_to_bf16(

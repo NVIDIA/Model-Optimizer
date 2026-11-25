@@ -223,11 +223,21 @@ def test_block_size_without_globals_picks_the_unique_known_size(monkeypatch, sha
     assert dsv4_ptq._ds_fp8_block_size(*_fp8_pair(*shape, block)) == block
 
 
-def test_block_size_rejects_shapes_no_known_block_explains(monkeypatch):
-    monkeypatch.setattr(dsv4_ptq, "deekseep_v4_model", types.SimpleNamespace(block_size=128))
-    weight = torch.zeros(256, 256, dtype=torch.float8_e4m3fn)
-    with pytest.raises(AssertionError, match="cannot infer FP8 block size"):
-        dsv4_ptq._ds_fp8_block_size(weight, torch.zeros(3, 5, dtype=torch.uint8))
+@pytest.mark.parametrize(
+    ("module_globals", "shape", "scale_shape", "error"),
+    [
+        ({"block_size": 128}, (256, 256), (3, 5), AssertionError),
+        ({"block_size": 64}, (256, 256), (4, 4), ValueError),
+        ({"fp8_block_size": 64, "block_size": 128}, (32, 32), (1, 1), ValueError),
+    ],
+)
+def test_block_size_rejects_unsupported_configurations(
+    monkeypatch, module_globals, shape, scale_shape, error
+):
+    monkeypatch.setattr(dsv4_ptq, "deekseep_v4_model", types.SimpleNamespace(**module_globals))
+    weight = torch.zeros(shape, dtype=torch.float8_e4m3fn)
+    with pytest.raises(error):
+        dsv4_ptq._ds_fp8_block_size(weight, torch.zeros(scale_shape, dtype=torch.uint8))
 
 
 def test_block_size_rejects_shapes_several_known_blocks_explain(monkeypatch):

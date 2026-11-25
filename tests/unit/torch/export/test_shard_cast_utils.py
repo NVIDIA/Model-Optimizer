@@ -20,6 +20,7 @@ import sys
 
 import pytest
 import torch
+from safetensors.torch import load_file, save_file
 
 import modelopt.torch.export as modelopt_export
 import modelopt.torch.export.shard_cast_utils as shard_cast_utils
@@ -38,7 +39,7 @@ from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
 
 
 @pytest.mark.parametrize("block", [32, 128])
-def test_native_fp8_roundtrip_partial_zero_and_scale_boundary_blocks(block):
+def test_native_fp8_roundtrip_partial_zero_and_scale_boundary_blocks(block, tmp_path):
     """Native FP8-representable BF16 values survive encode/decode, including edge blocks."""
     exponents = torch.tensor([-127, -8, -1, 0, 8, 119])
     rows, cols = (len(exponents) + 1) * block - 3, block + 5
@@ -50,6 +51,10 @@ def test_native_fp8_roundtrip_partial_zero_and_scale_boundary_blocks(block):
     codes[-block + 3 :] = 0
 
     encoded, scales = quantize_bf16_to_fp8_ue8m0(weight, block)
+    checkpoint = tmp_path / "native.safetensors"
+    save_file({"weight": encoded, "scale": scales}, checkpoint)
+    restored = load_file(checkpoint)
+    encoded, scales = restored["weight"], restored["scale"]
     expected_scales = torch.cat((exponents + 127, torch.tensor([0]))).to(torch.uint8)
     torch.testing.assert_close(scales, expected_scales[:, None].expand(-1, 2))
     torch.testing.assert_close(encoded.float(), codes, rtol=0, atol=0)
