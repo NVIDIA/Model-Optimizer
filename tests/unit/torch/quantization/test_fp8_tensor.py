@@ -21,6 +21,24 @@ import torch
 from modelopt.torch.quantization.qtensor import FP8QTensor
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_ue8m0_scale_boundary_neighbors(dtype):
+    """The first value above a boundary requires the next scale, even near underflow."""
+    exponents = torch.arange(-127, 128 if dtype == torch.float64 else 120)
+    boundary = torch.ldexp(torch.full(exponents.shape, 448.0, dtype=dtype), exponents)
+    weight = torch.stack(
+        (
+            torch.nextafter(boundary, torch.zeros_like(boundary)),
+            boundary,
+            torch.nextafter(boundary, torch.full_like(boundary, float("inf"))),
+        ),
+        dim=-1,
+    )
+    _, scales = FP8QTensor.quantize(weight, block_sizes={-1: 1}, scale_dtype=torch.float8_e8m0fnu)
+    expected = torch.stack((exponents + 127, exponents + 127, exponents + 128), dim=-1)
+    torch.testing.assert_close(scales.view(torch.uint8), expected.clamp(max=254).to(torch.uint8))
+
+
 @pytest.mark.parametrize(("block", "row_blocks"), [(32, 2), (128, 34)])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float64])
 def test_ue8m0_roundtrip_partial_and_zero_blocks(block, row_blocks, dtype):
