@@ -369,7 +369,7 @@ _PLAN_ATTR = "_modelopt_distribution_plan"
 
 
 def _plan_holders(model: torch.nn.Module) -> Iterator[tuple[str, torch.nn.Module]]:
-    """``model`` and those of its submodules that hold a parameter or buffer, named.
+    """``model`` and those of its submodules that hold a parameter or buffer: the ones a plan goes on.
 
     A submodule without any distributes nothing, and may be shared by every model in the process: a
     Hub kernel Transformers attaches to each attention layer (5.5 with ``kernels``, ``rotary_fn``)
@@ -386,7 +386,7 @@ def _plan_holders(model: torch.nn.Module) -> Iterator[tuple[str, torch.nn.Module
 
 def _recorded_plan(model: torch.nn.Module) -> tuple[str, DistributionPlan] | None:
     """Which of ``model`` and its submodules records a plan, named, and that plan; else ``None``."""
-    for name, module in _plan_holders(model):
+    for name, module in model.named_modules():
         recorded = getattr(module, _PLAN_ATTR, None)
         if recorded is not None:
             where = f"{type(module).__name__} {name!r}" if name else type(module).__name__

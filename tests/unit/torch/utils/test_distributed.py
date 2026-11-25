@@ -132,6 +132,11 @@ def test_models_sharing_a_stateless_module_each_record_their_plan():
         assert distribution_plan(model) is plan and distribution_plan(model[0]) is plan
     assert dist.recorded_distribution_plan(shared) is None
 
+    # One recorded as a model of its own still holds that plan in any model it is added to.
+    set_distribution_plan(shared, plans[0])
+    with pytest.raises(ValueError, match="its plan recorded once"):
+        set_distribution_plan(nn.Sequential(nn.Linear(2, 2), shared), plans[1])
+
 
 def _outcome(call):
     """``(value, None)``, or ``(None, error)`` if ``call()`` raises, a ``SystemExit`` included."""
