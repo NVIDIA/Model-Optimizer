@@ -264,7 +264,7 @@ def link_aux_files(
     for relative_path, src in sources:
         dst = dst_dir / relative_path
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.exists():
+        if dst.exists() or dst.is_symlink():  # a dangling link too, or the copy writes through it
             dst.unlink()
         link_or_copy(src, dst)
 

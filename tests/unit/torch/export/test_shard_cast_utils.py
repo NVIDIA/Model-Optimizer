@@ -126,8 +126,11 @@ def test_link_aux_files_accepts_huggingface_snapshot_blobs(tmp_path):
     assert resolve_checkpoint_file(snapshot, "tokenizer.json") == blob.resolve()
     validate_aux_files(snapshot)
     output = tmp_path / "output"
+    output.mkdir()
+    (output / "tiktoken.model").symlink_to(tmp_path / "outside")  # a dangling link where it copies
     link_aux_files(snapshot, output)
 
+    assert not (tmp_path / "outside").exists()
     assert (output / "tokenizer.json").read_text() == "tokenizer"
     assert not (output / "tokenizer.json").is_symlink()
     # Copied, not linked: the output stays writable, and writing it cannot change the blob.
