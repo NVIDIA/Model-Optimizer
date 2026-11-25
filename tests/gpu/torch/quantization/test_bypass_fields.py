@@ -88,6 +88,10 @@ def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys):
                 )
                 bias = torch.randn(shape[0], device="cuda", dtype=dtype, requires_grad=True)
                 steps = state.projected_steps().detach().requires_grad_(True)
+                if not measure and tokens == 7:
+                    for wrong_shape in (steps.t(), steps.reshape(shape[0], -1)):
+                        with pytest.raises(ValueError):
+                            iq_linear(x, state.packed, wrong_shape, name, shape, bias)
                 upstream = torch.randn(tokens, shape[0], device="cuda", dtype=dtype)
                 parameters = [steps, bias, *([x] if input_grad else [])]
                 saved = []

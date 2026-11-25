@@ -89,7 +89,7 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
             if not (exc.name or "").startswith("triton"):
                 raise
         else:
-            for level_device, scale_device in (("cpu", "meta"), ("meta", "cpu")):
+            for level_device, scale_device in (("cpu", "meta"), ("meta", "cpu"), ("cpu", "cpu")):
                 with pytest.raises(ValueError):
                     apply_block_scales(
                         torch.empty(16, dtype=torch.int8, device=level_device),
