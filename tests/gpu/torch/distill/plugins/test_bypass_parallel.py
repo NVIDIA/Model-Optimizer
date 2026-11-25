@@ -2012,6 +2012,37 @@ def _native_attention_calls(native):
         yield counts
 
 
+@contextmanager
+def _context_p_attention_calls():
+    from modelopt.torch.kernels.common.attention import triton_fa
+    from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
+
+    counts = {"forward": 0, "replay_forward": 0, "backward": 0}
+    original = _QuantAttention._triton_qdq_attention
+    original_backward = triton_fa._Attention.backward
+
+    def delegated(module, mode, *args, **kwargs):
+        assert mode == module._p_qdq_mode() == "fp8"
+        assert module.p_bmm_quantizer.is_enabled and module.p_bmm_quantizer._if_quant
+        result = original(module, mode, *args, **kwargs)
+        counts["forward"] += 1
+        if torch.is_grad_enabled():
+            assert result[0].requires_grad
+            counts["replay_forward"] += 1
+        return result
+
+    def delegated_backward(*args, **kwargs):
+        result = original_backward(*args, **kwargs)
+        counts["backward"] += 1
+        return result
+
+    with (
+        patch.object(_QuantAttention, "_triton_qdq_attention", delegated),
+        patch.object(triton_fa._Attention, "backward", staticmethod(delegated_backward)),
+    ):
+        yield counts
+
+
 def _context_relative_error(actual, expected):
     assert actual.shape == expected.shape
     assert torch.isfinite(actual).all() and torch.isfinite(expected).all()
@@ -2156,6 +2187,9 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
                 1, 1, length, length, dtype=torch.bool, device=device
             ).tril()
             batch["valid_mask"] = torch.ones(1, length, dtype=torch.bool, device=device)
+    elif case == "loss_mask":
+        for batch in batches:
+            batch["loss_mask"] = torch.tensor([[0, 0, 1, 1, 1, 1, 1]], device=device)
     student = mtq.quantize(
         copy.deepcopy(teacher),
         {
@@ -2168,8 +2202,26 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
             ],
             "algorithm": "max",
         },
-        lambda m: m(**{k: v for k, v in batches[0].items() if k != "valid_mask"}),
+        lambda m: m(
+            **{k: v for k, v in batches[0].items() if k not in ("valid_mask", "loss_mask")}
+        ),
     )
+    if case == "p_qdq":
+        from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
+
+        for model in (teacher, student):
+            attention = model.model.layers[0].self_attn
+            if not isinstance(attention, _QuantAttention):
+                attention = _QuantAttention.convert(attention)
+            for name in ("q", "k", "v"):
+                getattr(attention, f"{name}_bmm_quantizer").disable()
+            pq = attention.p_bmm_quantizer
+            pq.num_bits = (4, 3)
+            pq.block_sizes = None
+            pq.amax = torch.tensor(3.0, device=device)
+            pq.enable()
+            pq.enable_quant()
+            assert attention._p_qdq_mode() == "fp8"
     recipe = {
         "num_steps": 2,
         "global_batch_size": global_batch,
@@ -2188,7 +2240,16 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
     single = init_device_mesh("cuda", (size, 1), mesh_dim_names=("owners", "dp"))["dp"]
     gradients = []
     expected_records, actual_records = [], []
+    expected_masks, actual_masks = [], []
+    validity_records = expected_masks
+    original_record = DistributedBypassRuntime.record
     original_step = Lion.step
+
+    def observed_record(runtime, unit, record, **kwargs):
+        result = original_record(runtime, unit, record, **kwargs)
+        assert result.valid_mask is not None
+        validity_records.append(result.valid_mask.detach().clone())
+        return result
 
     def observed_step(optimizer, closure=None):
         gradients.append(
@@ -2203,6 +2264,13 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
     Lion.step = observed_step
     try:
         with ExitStack() as stack:
+            if case == "loss_mask":
+                stack.enter_context(
+                    patch.object(DistributedBypassRuntime, "record", observed_record)
+                )
+            reference_p_calls = (
+                stack.enter_context(_context_p_attention_calls()) if case == "p_qdq" else None
+            )
             if qualification:
                 stack.enter_context(_context_block_observations(reference, expected_records))
             mtd.bypass(reference, copy.deepcopy(teacher), batches, recipe, device_mesh=single)
@@ -2219,10 +2287,16 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
         for index in range(mesh["dp"].get_local_rank(), global_batch, dp_size)
     ]
     local = [batches[index] for index in local_indices]
+    validity_records = actual_masks
     Lion.step = observed_step
     try:
         with ExitStack() as stack:
             calls = stack.enter_context(_native_attention_calls(native))
+            if case == "loss_mask":
+                stack.enter_context(
+                    patch.object(DistributedBypassRuntime, "record", observed_record)
+                )
+            p_calls = stack.enter_context(_context_p_attention_calls()) if case == "p_qdq" else None
             if qualification:
                 stack.enter_context(_context_block_observations(student, actual_records))
             mtd.bypass(student, teacher, local, recipe, device_mesh=mesh)
@@ -2241,6 +2315,7 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
         "replicated_full_context" if fallback else "native_sdpa"
     ]
     block_errors = []
+    validity_receipt = None
     if qualification:
         if fallback:
             assert calls == {"forward": 0, "backward": 0}, calls
@@ -2248,6 +2323,42 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
             assert calls["forward"] > 0 and calls["backward"] > 0, calls
         assert len(expected_records) == len(batches)
         assert len(actual_records) == len(local_indices)
+        if case == "p_qdq":
+            for observed, records in (
+                (reference_p_calls, expected_records),
+                (p_calls, actual_records),
+            ):
+                assert observed["forward"] > observed["replay_forward"] > 0, observed
+                assert observed["replay_forward"] == observed["backward"] == len(records), observed
+        if case == "loss_mask":
+            expected_mask = torch.tensor(
+                [[False, False, True, True, True, True, True]], device=device
+            )
+            owned_mask = torch.tensor(
+                [[False, False, True, True, False, False, False]]
+                if mesh["cp"].get_local_rank() == 0
+                else [[False, False, False, False, True, True, True]],
+                device=device,
+            )
+            assert len(expected_masks) == len(expected_records)
+            assert len(actual_masks) == len(actual_records)
+            for mask in expected_masks:
+                torch.testing.assert_close(mask, expected_mask, rtol=0, atol=0)
+                assert mask.sum().item() == 5
+            for mask in actual_masks:
+                torch.testing.assert_close(mask, owned_mask, rtol=0, atol=0)
+                assert mask.sum().item() == (2 if mesh["cp"].get_local_rank() == 0 else 3)
+                owners = mask.to(torch.int32)
+                dist.all_reduce(owners, group=mesh["cp"].get_group())
+                torch.testing.assert_close(owners, expected_mask.to(torch.int32), rtol=0, atol=0)
+            validity_receipt = {
+                "effective_valid_tokens_per_sample": 5,
+                "effective_valid_elements_per_sample": 5 * config.hidden_size,
+                "owned_valid_token_indices": owned_mask[0].nonzero().flatten().tolist(),
+                "owned_valid_tokens_per_sample": int(owned_mask.sum()),
+                "summed_cp_valid_tokens_per_sample": 5,
+                "observed_replays": len(actual_masks),
+            }
         layout = CPSequenceLayout(mesh["cp"], length, device=device)
         for actual, index in zip(actual_records, local_indices, strict=True):
             expected = expected_records[index]
@@ -2312,6 +2423,16 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
             if not fallback
             else length,
             "training_ring_calls": calls,
+            "loss_validity": validity_receipt,
+            "p_attention": {
+                "route": "_QuantAttention._triton_qdq_attention:fp8_scalar_amax_3",
+                "boundary": "model.layers.0",
+                "autograd": "contiguous_P_QDQ_STE_whole_decoder_input_vjp",
+                "reference_calls": reference_p_calls,
+                "training_calls": p_calls,
+            }
+            if case == "p_qdq"
+            else None,
             "fallback_replays": len(actual_records) if fallback else 0,
             "probe": probe,
             "block_errors": block_errors,
@@ -2348,7 +2469,7 @@ def test_native_context_and_replicated_fallback_match_reference(native_workers, 
         native_workers.job_timeout = timeout
 
 
-@pytest.mark.parametrize("case", ["native", "mask", "dynamic", "sliding"])
+@pytest.mark.parametrize("case", ["native", "mask", "dynamic", "sliding", "loss_mask", "p_qdq"])
 @pytest.mark.timeout(300)
 def test_context_attention_and_policy_fallback_qualification(
     need_2_gpus, dist_workers, tmp_path, capsys, case
@@ -2364,6 +2485,9 @@ def test_context_attention_and_policy_fallback_qualification(
         "modelopt/torch/distill/plugins/transformers/bypass.py",
         "modelopt/torch/distill/plugins/transformers/context_parallel.py",
         "modelopt/torch/distill/_bypass_runtime.py",
+        "modelopt/torch/quantization/plugins/huggingface.py",
+        "modelopt/torch/kernels/common/attention/hf_triton_attention.py",
+        "modelopt/torch/kernels/common/attention/triton_fa.py",
         "tests/gpu/torch/distill/plugins/test_bypass_parallel.py",
     ]
     source = {
