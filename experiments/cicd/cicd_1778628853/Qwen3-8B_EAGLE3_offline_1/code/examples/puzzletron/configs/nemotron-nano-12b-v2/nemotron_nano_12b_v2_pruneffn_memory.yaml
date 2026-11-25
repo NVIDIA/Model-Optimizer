@@ -1,0 +1,22 @@
+defaults:
+  - nemotron_nano_12b_v2
+  - _self_
+
+# Input Hugging Face model to compress
+input_hf_model_path: /workspace/hf_models/nvidia/Nemotron-Nano-12B-v2
+
+# Dataset path for pruning and NAS scoring
+dataset_path: /workspace/datasets/Nemotron-Post-Training-Dataset-v2
+
+# Working directory for compression outputs
+puzzle_dir: /workspace/puzzle_dir
+
+# MIP memory constraint (in MiB) 
+mip:
+  human_constraints:
+    target_memory: 90_000 # 90 GiB
+
+# FFN intermediate sizes to search over (heterogeneous architecture)
+# teacher_intermediate_size is 20480
+pruning:
+  intermediate_size_list: [4352, 8448, 12544, 16384]

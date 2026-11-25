@@ -1,0 +1,3 @@
+This directory holds model-agnostic general recipes
+
+ptq/*: model-agnostic general Post Training Quantization recipes.
