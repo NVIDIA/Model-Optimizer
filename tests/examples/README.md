@@ -92,8 +92,9 @@ Model paths and TP are bound at runtime. For paired draft checkpoints, use `base
 target and `model_id` for the drafter; the adapter supplies the draft path after
 any local-checkpoint preparation. Do not duplicate that path inside
 `engine_kwargs` or disable speculation: an EAGLE case must load its drafter.
-The subprocess logs the resolved engine arguments before
-initialization, including values from run overrides. With SGLang layernorm
+The subprocess logs engine option names before initialization. The YAML
+records their values. Transformers loaders follow the selected backend's
+`trust_remote_code` setting, which defaults to `false`. With SGLang layernorm
 sequence parallelism, override EP together with TP; their values must match.
 
 `require_speculation: true` checks actual DFlash execution, in addition to

@@ -49,6 +49,13 @@ _RESERVED_ENGINE_FIELDS = {"model", "model_path", "tensor_parallel_size", "tp_si
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
+    def flatten_mapping(self, node):
+        # PyYAML also flattens inline merge sources without calling construct_mapping on them.
+        merges = [key for key, _ in node.value if key.tag == "tag:yaml.org,2002:merge"]
+        if len(merges) > 1:
+            raise ValueError(f"Duplicate YAML merge key at {merges[1].start_mark}")
+        super().flatten_mapping(node)
+
     def construct_mapping(self, node, deep=False):
         keys = set()
         for key_node, _ in node.value:

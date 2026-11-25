@@ -17,11 +17,11 @@ import asyncio
 import base64
 import copy
 import io
+import json
 import os
 import subprocess
 import sys
 import tempfile
-import traceback
 from pathlib import Path
 
 import pytest
@@ -72,148 +72,34 @@ def get_available_backends():
     return _AVAILABLE_BACKENDS
 
 
-def _run_trtllm_deploy(
-    model_id: str,
-    tensor_parallel_size: int,
-    mini_sm: int,
-    base_model: str,
-    engine_kwargs: dict | None = None,
-    sampling_kwargs: dict | None = None,
-    **request_kwargs,
-) -> None:
-    """Top-level entry for subprocess: run TensorRT-LLM deploy in a child process."""
-    try:
-        deployer = ModelDeployer(
-            backend="trtllm",
-            model_id=model_id,
-            tensor_parallel_size=tensor_parallel_size,
-            mini_sm=mini_sm,
-            base_model=base_model,
-            engine_kwargs=engine_kwargs,
-            sampling_kwargs=sampling_kwargs,
-            **request_kwargs,
-        )
-        deployer._deploy_trtllm_impl()
-    except Exception:
-        traceback.print_exc()
-        pytest.fail(traceback.format_exc())
-
-
-def _run_vllm_deploy(
-    model_id: str,
-    tensor_parallel_size: int,
-    mini_sm: int,
-    base_model: str,
-    engine_kwargs: dict | None = None,
-    sampling_kwargs: dict | None = None,
-    **request_kwargs,
-) -> None:
-    """Top-level entry for subprocess: run vLLM deploy in a child process."""
-    try:
-        deployer = ModelDeployer(
-            backend="vllm",
-            model_id=model_id,
-            tensor_parallel_size=tensor_parallel_size,
-            mini_sm=mini_sm,
-            base_model=base_model,
-            engine_kwargs=engine_kwargs,
-            sampling_kwargs=sampling_kwargs,
-            **request_kwargs,
-        )
-        deployer._deploy_vllm_impl()
-    except Exception:
-        traceback.print_exc()
-        pytest.fail(traceback.format_exc())
-
-
-def _run_sglang_deploy(
-    model_id: str,
-    tensor_parallel_size: int,
-    mini_sm: int,
-    base_model: str,
-    engine_kwargs: dict | None = None,
-    sampling_kwargs: dict | None = None,
-    **request_kwargs,
-) -> None:
-    """Top-level entry for subprocess: run SGLang deploy in a child process."""
-    try:
-        deployer = ModelDeployer(
-            backend="sglang",
-            model_id=model_id,
-            tensor_parallel_size=tensor_parallel_size,
-            mini_sm=mini_sm,
-            base_model=base_model,
-            engine_kwargs=engine_kwargs,
-            sampling_kwargs=sampling_kwargs,
-            **request_kwargs,
-        )
-        deployer._deploy_sglang_impl()
-    except Exception:
-        traceback.print_exc()
-        pytest.fail(traceback.format_exc())
-
-
-def _run_deploy_via_subprocess(
-    backend: str,
-    model_id: str,
-    tensor_parallel_size: int,
-    mini_sm: int,
-    base_model: str,
-    engine_kwargs: dict,
-    sampling_kwargs: dict,
-    **request_kwargs,
-) -> None:
-    """Run deploy in a subprocess and print its stdout/stderr so pytest capture=tee-sys captures to DB."""
-    tests_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    project_root = os.path.dirname(tests_dir)
+def _run_deploy_via_subprocess(backend: str, **parameters) -> None:
+    """Keep engine settings out of the child process arguments and failure tracebacks."""
+    tests_dir = Path(__file__).resolve().parents[1]
     env = {
         **os.environ,
-        "PYTHONPATH": project_root + os.pathsep + os.environ.get("PYTHONPATH", ""),
+        "PYTHONPATH": os.pathsep.join(
+            [str(tests_dir), str(tests_dir.parent), os.environ.get("PYTHONPATH", "")]
+        ),
     }
-    code = f"""import sys
-sys.path.insert(0, {tests_dir!r})
-if __name__ == '__main__':
-    from _test_utils.deploy_utils import _run_{backend}_deploy
-    _run_{backend}_deploy(
-        {model_id!r}, {tensor_parallel_size}, {mini_sm}, {base_model!r},
-        {engine_kwargs!r}, {sampling_kwargs!r}, **{request_kwargs!r}
-    )
-"""
+    launcher = []
     if backend == "trtllm":
-        mpirun = os.environ.get("MPIRUN", "mpirun")
-        cmd = [
-            mpirun,
+        launcher = [
+            os.environ.get("MPIRUN", "mpirun"),
             "--allow-run-as-root",
             "--oversubscribe",
             "-n",
             "1",
-            sys.executable,
         ]
-    else:
-        cmd = [sys.executable, "-c", code]
-
-    if backend == "trtllm":
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(code)
-            tmp_path = f.name
-        try:
-            returncode, output = _run_capturing(
-                [*cmd, tmp_path],
-                cwd=Path(tests_dir),
-                env=env,
-                cleanup_process_group=True,
-            )
-        finally:
-            os.unlink(tmp_path)
-    else:
-        returncode, output = _run_capturing(
-            cmd,
-            cwd=Path(tests_dir),
-            env=env,
-            cleanup_process_group=True,
-        )
-    if returncode:
-        raise subprocess.CalledProcessError(returncode, cmd, output=output)
+    fd, config_path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as config:
+            json.dump({"backend": backend, **parameters}, config)
+        cmd = [*launcher, sys.executable, "-m", "_test_utils.deploy_utils", config_path]
+        returncode, output = _run_capturing(cmd, cwd=tests_dir, env=env, cleanup_process_group=True)
+        if returncode:
+            raise subprocess.CalledProcessError(returncode, cmd, output=output)
+    finally:
+        os.unlink(config_path)
 
 
 # Common test prompts for all backends
@@ -266,6 +152,9 @@ class ModelDeployer:
         self.base_model = base_model
         self.engine_kwargs = dict(engine_kwargs or {})
         self.sm_family = sm_family
+        self.trust_remote_code = self.engine_kwargs.get("trust_remote_code", False)
+        if not isinstance(self.trust_remote_code, bool):
+            raise ValueError("trust_remote_code must be a boolean")
         self.sampling_kwargs = dict(sampling_kwargs or {})
         self.input_config = dict(input_config or {})
         self.chat_kwargs = dict(chat_kwargs or {})
@@ -273,6 +162,14 @@ class ModelDeployer:
         self.sm_versions = sm_versions
         if backend != "vllm" and self.chat_kwargs.keys() - {"chat_template_kwargs"}:
             raise ValueError("Only vLLM accepts chat-call options beyond chat_template_kwargs")
+        if backend != "vllm":
+            template_kwargs = self.chat_kwargs.get("chat_template_kwargs", {})
+            if not isinstance(template_kwargs, dict):
+                raise ValueError("chat_template_kwargs must be a mapping")
+            if reserved := {"tokenize", "add_generation_prompt"} & template_kwargs.keys():
+                raise ValueError(
+                    f"The deployment runner sets {sorted(reserved)} in the chat template"
+                )
         if {"messages", "sampling_params"} & self.chat_kwargs.keys():
             raise ValueError("Set input_config and sampling_kwargs instead of chat-call inputs")
         if require_speculation:
@@ -345,33 +242,25 @@ class ModelDeployer:
                 if model_fields & spec_config.keys():
                     raise ValueError("Set the draft checkpoint through model_id, not engine_kwargs")
                 spec_config[model_field] = self.model_id
-        print(f"Engine arguments ({self.backend}): {kwargs!r}", flush=True)
+        # Native engine options can contain credentials, including inside nested mappings.
+        print(f"Engine option names ({self.backend}): {sorted(kwargs)}", flush=True)
         return kwargs
 
     def run(self):
         """Run the deployment based on the specified backend."""
-        if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+        if not torch.cuda.is_available():
             pytest.skip("CUDA is not available")
-            return
-        if torch.cuda.get_device_capability() < (
-            self.mini_sm // 10,
-            self.mini_sm % 10,
-        ):
-            pytest.skip(reason=f"Requires sm{self.mini_sm} or higher")
-            return
-        if self.sm_family is not None and (
-            torch.cuda.get_device_capability()[0] != self.sm_family // 10
-        ):
-            pytest.skip(reason=f"Requires an sm{self.sm_family // 10}x GPU")
-            return
-        if self.sm_versions is not None:
-            major, minor = torch.cuda.get_device_capability()
-            if major * 10 + minor not in self.sm_versions:
-                pytest.skip(f"Selected backend recipe requires SM in {self.sm_versions}")
-
         if torch.cuda.device_count() < self.tensor_parallel_size:
-            pytest.skip(reason=f"Requires at least {self.tensor_parallel_size} GPUs")
-            return
+            pytest.skip(f"Requires at least {self.tensor_parallel_size} GPUs")
+        for device in range(self.tensor_parallel_size):
+            major, minor = torch.cuda.get_device_capability(device)
+            sm = major * 10 + minor
+            if sm < self.mini_sm:
+                pytest.skip(f"GPU {device} is SM{sm}, requires SM{self.mini_sm} or higher")
+            if self.sm_family is not None and major != self.sm_family // 10:
+                pytest.skip(f"GPU {device} is SM{sm}, requires an SM{self.sm_family // 10}x GPU")
+            if self.sm_versions is not None and sm not in self.sm_versions:
+                pytest.skip(f"GPU {device} is SM{sm}, selected recipe requires {self.sm_versions}")
 
         print(f"Deploying model: {self.model_id} with backend: {self.backend}")
         print(f"Tensor parallel size: {self.tensor_parallel_size}")
@@ -417,16 +306,20 @@ class ModelDeployer:
             if isinstance(llm_kwargs.get(field), dict):
                 llm_kwargs[field] = config_type(**llm_kwargs[field])
         spec_config = llm_kwargs.get("speculative_config")
-        if "eagle" in self.model_id.lower() and isinstance(spec_config, dict):
-            if "eagle3_one_model" not in EagleDecodingConfig.model_fields:
-                if spec_config.pop("eagle3_one_model", None) is False:
-                    print("This TensorRT-LLM version only supports one-model EAGLE3 execution.")
-            llm_kwargs["speculative_config"] = EagleDecodingConfig(**spec_config)
-        elif isinstance(spec_config, dict) and spec_config.get("decoding_type") == "DFlash":
+        if isinstance(spec_config, dict) and spec_config.get("decoding_type") == "DFlash":
             # DFlash is optional in older engine images used by other cases.
             from tensorrt_llm.llmapi import DFlashDecodingConfig
 
             llm_kwargs["speculative_config"] = DFlashDecodingConfig(**spec_config)
+        elif (
+            isinstance(spec_config, dict)
+            and "speculative_model_dir" in spec_config
+            and spec_config.get("decoding_type", "Eagle") in ("Eagle", "Eagle3")
+        ):
+            if "eagle3_one_model" not in EagleDecodingConfig.model_fields:
+                if spec_config.pop("eagle3_one_model", None) is False:
+                    print("This TensorRT-LLM version only supports one-model EAGLE3 execution.")
+            llm_kwargs["speculative_config"] = EagleDecodingConfig(**spec_config)
         llm = LLM(**llm_kwargs)
         try:
             # Transformers and multimodal helpers are optional deployment dependencies.
@@ -439,8 +332,12 @@ class ModelDeployer:
                 from tensorrt_llm.inputs import async_build_multimodal_prompt
                 from transformers import AutoConfig, AutoProcessor
 
-                config = AutoConfig.from_pretrained(tokenizer_model, trust_remote_code=True)
-                processor = AutoProcessor.from_pretrained(tokenizer_model, trust_remote_code=True)
+                config = AutoConfig.from_pretrained(
+                    tokenizer_model, trust_remote_code=self.trust_remote_code
+                )
+                processor = AutoProcessor.from_pretrained(
+                    tokenizer_model, trust_remote_code=self.trust_remote_code
+                )
                 prompts = [
                     asyncio.run(
                         async_build_multimodal_prompt(
@@ -454,7 +351,9 @@ class ModelDeployer:
                     )
                 ]
             else:
-                tokenizer = AutoTokenizer.from_pretrained(tokenizer_model, trust_remote_code=True)
+                tokenizer = AutoTokenizer.from_pretrained(
+                    tokenizer_model, trust_remote_code=self.trust_remote_code
+                )
                 prompts = (
                     [
                         tokenizer.apply_chat_template(
@@ -572,7 +471,9 @@ class ModelDeployer:
             from transformers import AutoTokenizer
 
             tokenizer_model = self.base_model or self.model_id
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_model, trust_remote_code=True)
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_model, trust_remote_code=self.trust_remote_code
+            )
             raw_prompts = [self.input_config["prompt"]] if self.input_config else COMMON_PROMPTS
             conversations = [[{"role": "user", "content": prompt}] for prompt in raw_prompts]
             generation_kwargs = (
@@ -632,3 +533,13 @@ class ModelDeployer:
         finally:
             llm.shutdown()
         del llm
+
+
+if __name__ == "__main__":
+    deployer = ModelDeployer(**json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")))
+    deploy = {
+        "trtllm": deployer._deploy_trtllm_impl,
+        "vllm": deployer._deploy_vllm_impl,
+        "sglang": deployer._deploy_sglang_impl,
+    }
+    deploy[deployer.backend]()

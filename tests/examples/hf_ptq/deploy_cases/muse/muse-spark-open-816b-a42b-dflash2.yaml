@@ -11,6 +11,7 @@ test_muse_spark_dflash2:
     backends:
       trtllm:
         # TRT-LLM 1.4.0rc3 on B300, TP4/EP4.
+        sm_versions: [100, 103]
         engine_kwargs:
           trust_remote_code: true
           moe_expert_parallel_size: 4

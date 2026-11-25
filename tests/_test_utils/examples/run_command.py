@@ -80,21 +80,23 @@ def _wait_for_process_group_exit(pgid: int) -> None:
         time.sleep(0.02)
 
 
-def _wait_without_reaping(process: subprocess.Popen, timeout: float | None) -> None:
+def _wait_without_reaping(
+    process: subprocess.Popen, timeout: float | None, capture_failed: threading.Event
+) -> None:
     # Keep the group leader's PID reserved until its workers have been cleaned up.
-    if os.name != "posix":
-        process.wait(timeout=timeout)
-        return
-    flags = os.WEXITED | os.WNOWAIT
-    if timeout is None:
-        os.waitid(os.P_PID, process.pid, flags)
-        return
-    deadline = time.monotonic() + timeout
-    while os.waitid(os.P_PID, process.pid, flags | os.WNOHANG) is None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired(process.args, timeout)
-        time.sleep(min(0.25, remaining))
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while not capture_failed.is_set():
+        if os.name == "posix":
+            if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None:
+                return
+        elif process.poll() is not None:
+            return
+        delay = 0.1
+        if deadline is not None:
+            delay = min(delay, deadline - time.monotonic())
+            if delay <= 0:
+                raise subprocess.TimeoutExpired(process.args, timeout)
+        capture_failed.wait(delay)
 
 
 def _run_capturing(
@@ -121,7 +123,7 @@ def _run_capturing(
         stderr=subprocess.STDOUT,
         text=True,
         encoding="utf-8" if log is not None else None,
-        errors="replace" if log is not None else None,
+        errors="replace",
         start_new_session=True,
     )
     # start_new_session makes the child its own group leader, so the group id is its pid (read now:
@@ -135,23 +137,33 @@ def _run_capturing(
             else:  # no process groups; the command itself is the best we can reach
                 process.kill()
 
+    capture_failed = threading.Event()
+    capture_error: Exception | None = None
+
     def _drain():
-        with contextlib.suppress(ValueError):  # the stream is closed under us on the escape path
-            for line in process.stdout:  # type: ignore[union-attr]
-                print(line, end="", flush=log is not None)
-                if log is None:
-                    chunks.append(line)
-                else:
-                    log.write(line)
-                    log.flush()
+        nonlocal capture_error
+        assert process.stdout is not None
+        try:
+            with process.stdout as stream:
+                for line in stream:
+                    print(line, end="", flush=log is not None)
+                    if log is None:
+                        chunks.append(line)
+                    else:
+                        log.write(line)
+                        log.flush()
+        except Exception as exc:
+            capture_error = exc
+            capture_failed.set()
 
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
     try:
-        _wait_without_reaping(process, timeout)
-        if cleanup_process_group:
+        _wait_without_reaping(process, timeout, capture_failed)
+        if cleanup_process_group or capture_failed.is_set():
             _kill_process_group()
-            _wait_for_process_group_exit(pgid)
+            if cleanup_process_group:
+                _wait_for_process_group_exit(pgid)
         else:
             reader.join(_ORPHAN_PIPE_TIMEOUT_S)
             if reader.is_alive():
@@ -179,8 +191,10 @@ def _run_capturing(
         raise
     finally:
         reader.join(_KILLED_PIPE_TIMEOUT_S)
-        if not reader.is_alive():
-            process.stdout.close()  # type: ignore[union-attr]
+    if reader.is_alive():
+        raise OSError("Timed out draining subprocess output")
+    if capture_error is not None:
+        raise OSError("Failed to capture subprocess output") from capture_error
     return returncode, "".join(chunks)
 
 
@@ -238,6 +252,7 @@ def run_example_command(
         return result
 
     if setup_free_port:
+        # The port helper imports torch.distributed, which standalone runners do not need.
         from _test_utils.torch.distributed.utils import get_free_port
 
         # Subprocess steps only: an in-process runner picks its own free port, since env is a
