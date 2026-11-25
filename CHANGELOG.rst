@@ -40,6 +40,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Hugging Face exports and the Kimi-K3 and DeepSeek-V4 NVFP4 converters now take a Hub snapshot's files only from the configured Hugging Face cache (``HF_HUB_CACHE``). A snapshot elsewhere, e.g. one fetched with ``cache_dir``, is treated as a plain local folder, so its files, which are links into its cache, are refused; point ``HF_HUB_CACHE`` or ``HF_HOME`` at that cache instead.
+
 **Deprecations**
 
 **Bug Fixes**

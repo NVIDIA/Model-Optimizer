@@ -15,7 +15,6 @@
 
 """Shared primitives for streaming checkpoint casts and export."""
 
-import errno
 import os
 import shutil
 from collections import defaultdict
@@ -34,7 +33,7 @@ from modelopt.torch.quantization.utils.numeric_utils import (
     mxfp4_to_nvfp4_global_amax,
     mxfp4_to_nvfp4_per_block_amax,
 )
-from modelopt.torch.utils.plugins.hf_checkpoint_utils import resolve_checkpoint_file
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import _copy_writable, resolve_checkpoint_file
 
 __all__ = [
     "build_w13_amax_overrides",
@@ -168,26 +167,6 @@ def quantize_mxfp4_to_nvfp4_lossless(
     return q_tensor._quantized_data, weight_scale, weight_scale_2, n_blocks, n_lossless
 
 
-def link_or_copy(src: Path, dst: Path) -> None:
-    """Hard-link a file, copying when the filesystem cannot create the link."""
-    if src.is_symlink() or not src.is_file():
-        raise ValueError(f"source must be a regular file, not a symlink: {src}")
-    try:
-        os.link(src, dst)
-    except OSError as exc:
-        copy_errnos = {
-            errno.EXDEV,
-            errno.EPERM,
-            errno.EACCES,
-            errno.EMLINK,
-            getattr(errno, "EOPNOTSUPP", errno.EXDEV),
-            getattr(errno, "ENOTSUP", errno.EXDEV),
-        }
-        if exc.errno not in copy_errnos:
-            raise
-        shutil.copy2(src, dst)
-
-
 def _collect_aux_files(
     src_dir: Path,
     *,
@@ -238,7 +217,7 @@ def validate_aux_files(
     )
 
 
-def link_aux_files(
+def copy_aux_files(
     src_dir: Path,
     dst_dir: Path,
     *,
@@ -246,7 +225,7 @@ def link_aux_files(
     skip_dir_names: Collection[str] = (),
     skip_file: Callable[[Path], bool] | None = None,
 ) -> None:
-    """Recursively link checkpoint sidecars while applying model-specific skips."""
+    """Recursively copy checkpoint sidecars while applying model-specific skips."""
     destination_dirs, sources = _collect_aux_files(
         src_dir,
         skip_top_level=skip_top_level,
@@ -258,9 +237,9 @@ def link_aux_files(
     for relative_path, src in sources:
         dst = dst_dir / relative_path
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.exists():
+        if dst.exists() or dst.is_symlink():  # a dangling link too, or the copy writes through it
             dst.unlink()
-        link_or_copy(src, dst)
+        _copy_writable(src, dst)
 
 
 def log(message: str) -> None:
