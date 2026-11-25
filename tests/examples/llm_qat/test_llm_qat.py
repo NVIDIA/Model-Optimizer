@@ -438,10 +438,11 @@ def test_gpt_oss_qat_mxfp4(mxfp4_gpt_oss_path, dataset_cache_dir, tmp_path):
     assert not (export_dir / "hf_quant_config.json").exists()
     config = json.loads((export_dir / "config.json").read_text())
     assert config["quantization_config"]["quant_method"] == "mxfp4"
-    # The export holds the trained experts in MXFP4, blocked along their input dim.
+    # The export holds the trained experts in MXFP4, blocked along their input dim: the bf16 cast
+    # of the fp32 master weights FSDP2 saves, as QAT's forward quantized them.
     qat_weights = load_file(str(qat_dir / "model.safetensors"))
     for name, weight in _mxfp4_experts(export_dir).items():
-        trained = qat_weights[f"model.layers.0.mlp.experts.{name}"].transpose(-1, -2).contiguous()
-        codes, scales = MXFP4QTensor.quantize(trained, 32)
+        trained = qat_weights[f"model.layers.0.mlp.experts.{name}"].transpose(-1, -2)
+        codes, scales = MXFP4QTensor.quantize(trained.to(torch.bfloat16).contiguous(), 32)
         expected = codes.dequantize(scale=scales, block_sizes={-1: 32}).transpose(-1, -2)
         assert torch.equal(weight.cpu(), expected.to(weight.dtype)), name
