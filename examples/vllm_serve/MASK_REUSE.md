@@ -137,6 +137,13 @@ under one ceiling shared by the targets: the smallest observed risk plus
 Discovery applies the same rule to target tuples sharing one anchor layout.
 The optional legacy anchor cap keeps its consumer-only risk definition.
 
+With HiGHS, discovery first prices the two things that couple the layers: the
+worst-prompt maximum and each range's work target. The priced value is a lower
+bound on the risk of every policy. It also yields an exactly replayed starting
+policy, and the integer program omits every anchor edge and donor option that
+no policy at or below that policy's risk can use. A target tuple whose bound
+exceeds the ceiling is not solved.
+
 HiGHS uses one thread. The solver checks the objective against its returned
 assignment, and the calibrator replays the exported policy against the capture.
 The default refit budget is 1,600 seconds per range. Discovery shares a

@@ -83,6 +83,28 @@ def test_native_cbc_proof_reports_infeasible_per_range_target(tmp_path, seed):
     assert result["calibration_report"]["joint_frontier"][0]["risk"]["native_infeasibility_proven"]
 
 
+@pytest.mark.parametrize("seed", [1, 4, 9])
+def test_reduced_program_preserves_the_full_optimum(tmp_path, monkeypatch, seed):
+    pytest.importorskip("highspy")
+    cp = checkpoint(tmp_path, layers=5, heads=3)
+    ranges = ((129, 512, 256), (513, 1024, 768))
+    rows = captures(cp, seed=seed, layers=5, heads=3, span=2, buckets=ranges)
+    reduced = solve(tmp_path, cp, rows, 0.3, "highs")
+    monkeypatch.setattr(mask_reuse_topology, "_PRICE_REDUCTION", False)
+    full = solve(tmp_path, cp, rows, 0.3, "highs")
+    key = "worst_development_prompt_model_wide_total_dropped_mass"
+    risks = []
+    for result in (reduced, full):
+        assert result["provenance"]["selection_result"]["status"] == "within_tolerance"
+        risks.append(result["calibration_report"]["risk_selection_objective"][key])
+    # Both answers are the cheapest policy within the same risk tolerance.
+    assert risks[0] == pytest.approx(risks[1], abs=1e-7)
+    assert (
+        reduced["calibration_report"]["combined_tile_cost"]
+        == full["calibration_report"]["combined_tile_cost"]
+    )
+
+
 def test_lazy_prompt_rows_preserve_the_eager_optimum(tmp_path, monkeypatch):
     pytest.importorskip("highspy")
     cp = checkpoint(tmp_path)
