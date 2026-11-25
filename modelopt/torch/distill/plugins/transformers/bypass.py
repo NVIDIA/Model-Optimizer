@@ -28,6 +28,7 @@ from torch import nn
 
 from modelopt.torch.models.specs import BypassSpec, get_spec
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
+from modelopt.torch.quantization.plugins import huggingface as hf_quantization
 
 from ..._bypass_capture import (
     BypassUnit,
@@ -661,6 +662,21 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 or next(model.parameters()).dtype not in (torch.float16, torch.bfloat16)
                 or requires_full_context_activations(model)
                 or _document_dependent_positions(model)
+                # Fused P-QDQ attention bypasses the SDPA interface intercepted by native CP.
+                or any(
+                    isinstance(module, hf_quantization._QuantAttention)
+                    and module.p_bmm_quantizer.is_enabled
+                    and module.p_bmm_quantizer._if_quant
+                    and (
+                        module._p_qdq_mode() is not None
+                        or module.use_kitchen
+                        or (
+                            getattr(hf_quantization, "kitchen", None) is not None
+                            and module.kitchen_attn_fn is None
+                        )
+                    )
+                    for module in model.modules()
+                )
             ):
                 raise ValueError("This model requires faithful full-context execution")
         supported = {
@@ -685,6 +701,10 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             value = batch.get(name)
             if value is not None and (value.shape != tokens.shape or not bool(value.eq(1).all())):
                 raise ValueError("Native CP requires unpadded single-document causal rows")
+        if batch.get("loss_mask") is not None:
+            validity = _valid_token_mask(batch)
+            if validity.shape != tokens.shape or not bool(validity.all()):
+                raise ValueError("Native CP requires all-valid loss tokens")
         if positions is not None and (
             positions.shape != tokens.shape
             or bool((positions[:, 1:] - positions[:, :-1] != 1).any())
