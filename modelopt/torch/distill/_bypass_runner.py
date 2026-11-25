@@ -335,18 +335,26 @@ class _BypassRunner:
             batches = self._iterator(train_dataloader)
             first = self._window(batches)
         else:
-            priming_devices = iter(saved["data_position"]["priming_devices"])
-            first = [
-                tree_map(
-                    lambda value: (
-                        value.to(next(priming_devices))
-                        if isinstance(value, torch.Tensor)
-                        else value
-                    ),
-                    saved["data_position"]["priming_batch"],
-                )
-            ]
-            self.adapter.validate_batch(first[0], self.config)
+            error = None
+            try:
+                priming_devices = iter(saved["data_position"]["priming_devices"])
+                first = [
+                    tree_map(
+                        lambda value: (
+                            value.to(next(priming_devices))
+                            if isinstance(value, torch.Tensor)
+                            else value
+                        ),
+                        saved["data_position"]["priming_batch"],
+                    )
+                ]
+                self.adapter.validate_batch(first[0], self.config)
+            except Exception as exc:
+                if self.runtime is None:
+                    raise
+                error = f"{type(exc).__name__}: {exc}"
+            if self.runtime is not None:
+                self.runtime.synchronize_error(error)
         modes = {
             module: module.training
             for root in (self.student, self.teacher)
@@ -382,10 +390,18 @@ class _BypassRunner:
             if saved is not None:
                 assert self.checkpoint is not None
                 batches = self._restore_cursor(train_dataloader, saved)
-                self.checkpoint.restore_training_state(
-                    saved, self._checkpoint_fields(), self.optimizers
-                )
-                _restore_rng_state(saved["rng_state"])
+                error = None
+                try:
+                    self.checkpoint.restore_training_state(
+                        saved, self._checkpoint_fields(), self.optimizers
+                    )
+                    _restore_rng_state(saved["rng_state"])
+                except Exception as exc:
+                    if self.runtime is None:
+                        raise
+                    error = f"{type(exc).__name__}: {exc}"
+                if self.runtime is not None:
+                    self.runtime.synchronize_error(error)
                 first.clear()
             for step in range(start + 1, self.config.num_steps + 1):
                 window = first if step == 1 else self._window(batches)
