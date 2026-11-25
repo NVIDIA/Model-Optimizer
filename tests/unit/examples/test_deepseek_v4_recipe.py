@@ -237,15 +237,18 @@ def test_block_size_rejects_shapes_several_known_blocks_explain(monkeypatch):
         dsv4_ptq._ds_fp8_block_size(*_fp8_pair(32, 32, 32))
 
 
-def test_fp8_dequant_crops_partial_blocks():
+@pytest.mark.parametrize("block", [32, 128])
+def test_fp8_dequant_crops_partial_blocks(monkeypatch, block):
     """Each element is scaled by its own block's UE8M0 exponent, including the partial
     trailing blocks that the ceil-div scale shape allocates."""
-    m, n, block = 100, 70, 32
+    m, n = 100, 270
+    monkeypatch.setattr(dsv4_ptq, "deekseep_v4_model", types.SimpleNamespace(block_size=block))
     gen = torch.Generator().manual_seed(0)
     weight = (torch.rand(m, n, generator=gen) * 4 - 2).to(torch.float8_e4m3fn)
     exp = torch.randint(-3, 4, dsv4_ptq._fp8_scale_shape(weight, block), generator=gen)
     scale = (exp + 127).to(torch.uint8)
-    got = dsv4_ptq._fp8_ue8m0_blockwise_to_bf16(weight, scale, block=block)
+    weight.scale = scale
+    got = dsv4_ptq._dequantize_linear_weight(types.SimpleNamespace(weight=weight))
     rows, cols = torch.arange(m)[:, None] // block, torch.arange(n)[None, :] // block
     want = (weight.to(torch.float32) * torch.pow(2.0, exp[rows, cols].to(torch.float32))).to(
         torch.bfloat16
