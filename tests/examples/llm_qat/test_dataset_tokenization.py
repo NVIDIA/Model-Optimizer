@@ -193,3 +193,36 @@ def test_dataset_source_config_normalizes_train_only_assistant_tokens():
             split="train",
             train_only_assistant_tokens="unsupported",
         )
+
+
+def _tokenize_with_template(chat_template, messages):
+    from _test_utils.torch.transformers_models import get_tiny_tokenizer
+
+    tokenizer = get_tiny_tokenizer()
+    tokenizer.chat_template = chat_template
+    tokenize = make_chat_tokenize_fn(tokenizer, max_length=32, train_only_assistant_tokens=False)
+    return tokenize({"messages": messages})
+
+
+def test_chat_template_sees_only_the_fields_a_message_has():
+    """A dataset fills the fields a message lacks with None or []; GPT-OSS's template indexes
+    tool_calls[0] wherever the key is present."""
+    template = (
+        "{% for m in messages %}"
+        "{% if 'tool_calls' in m %}{{ m.tool_calls[0].function.name }}{% endif %}{{ m.content }}"
+        "{% endfor %}"
+    )
+    messages = [
+        {"role": "user", "content": "Hello", "tool_calls": None},
+        {"role": "assistant", "content": "Hi", "tool_calls": []},
+    ]
+
+    tokenized = _tokenize_with_template(template, messages)
+
+    assert any(label != IGNORE_TOKEN_ID for label in tokenized["labels"])
+
+
+def test_sample_the_chat_template_rejects_is_skipped():
+    tokenized = _tokenize_with_template("{{ raise_exception('unsupported') }}", CONVERSATION)
+
+    assert set(tokenized["labels"]) == {IGNORE_TOKEN_ID}

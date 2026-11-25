@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 
 import datasets
 import yaml
+from jinja2 import TemplateError
 from transformers import PreTrainedTokenizerBase
 from transformers.trainer_pt_utils import LabelSmoother
 
@@ -262,6 +263,20 @@ def _is_tested_model_family(tokenizer: PreTrainedTokenizerBase) -> bool:
     return any(family in name_lower for family in _TESTED_MODEL_FAMILIES)
 
 
+def _present_fields(message: dict) -> dict:
+    """``message`` without the fields it never had.
+
+    A dataset gives every message of a split the same fields, ``None`` or ``[]`` where one had
+    none. A chat template that tests for a field's presence then reads it (GPT-OSS indexes
+    ``tool_calls[0]`` once the key is there) fails on such a message.
+    """
+    return {
+        key: value
+        for key, value in message.items()
+        if value is not None and not (isinstance(value, list) and not value)
+    }
+
+
 def make_chat_tokenize_fn(
     tokenizer: PreTrainedTokenizerBase,
     max_length: int,
@@ -321,7 +336,7 @@ def make_chat_tokenize_fn(
 
         try:
             result = tokenizer.apply_chat_template(
-                messages,
+                [_present_fields(m) if isinstance(m, dict) else m for m in messages],
                 tokenize=True,
                 return_dict=True,
                 return_assistant_tokens_mask=mask_mode == "native",
@@ -329,7 +344,8 @@ def make_chat_tokenize_fn(
                 truncation=True,
                 max_length=max_length,
             )
-        except (ValueError, TypeError, KeyError) as e:
+        # A chat template raises TemplateError on a conversation it cannot render.
+        except (ValueError, TypeError, KeyError, TemplateError) as e:
             warn_rank_0(f"Failed to tokenize sample: {e}. Skipping.")
             pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id or 0
             return {
