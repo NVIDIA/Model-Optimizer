@@ -774,13 +774,14 @@ class PrecisionConverter:
         ]
         network_inputs = [input.name for input in self.model.graph.input]
         network_outputs = [output.name for output in self.model.graph.output]
+        tensor_types = onnx_utils._build_tensor_type_map(self.model) if self.custom_ops else {}
         for node in high_precision_nodes:
             # Fixed custom outputs may be low precision even when their consumers require FP32.
             if node.op_type in (self.custom_ops or ()):
                 cast_to_fp32.extend(
                     output
                     for output in node.output
-                    if onnx_utils._get_tensor_type_by_name(self.model, output)
+                    if tensor_types.get(output)
                     in (onnx.TensorProto.FLOAT16, onnx.TensorProto.BFLOAT16)
                 )
             # Add cast up for network inputs

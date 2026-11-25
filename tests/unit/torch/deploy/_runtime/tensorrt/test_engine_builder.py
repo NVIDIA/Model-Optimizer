@@ -318,8 +318,8 @@ def test_trt11_rejects_implicit_precision_before_writing(
         ("fp16", (TensorProto.FLOAT16,), TensorProto.FLOAT, "default"),
     ]
     + [
-        (precision, (TensorProto.FLOAT,), TensorProto.FLOAT16, "output_consumer")
-        for precision in ["fp16", "bf16"]
+        (precision, (TensorProto.FLOAT,), TensorProto.FLOAT16, layout)
+        for precision, layout in product(["fp16", "bf16"], ["output_consumer", "unused_output"])
     ]
     + [
         (precision, (TensorProto.FLOAT, input_type), TensorProto.FLOAT16, "default")
@@ -363,6 +363,8 @@ def test_trt11_preserves_plugin_precision(
     )
     if overridable:
         graph.input.append(helper.make_tensor_value_info("weight", plugin_type, [4, 4]))
+    if layout == "unused_output":
+        graph.node[0].output.append("unused_auxiliary")
     if len(plugin_types) > 1:
         shape = [0, 4] if layout == "empty" else [1, 4]
         graph.node[0].input.append("half_input")
