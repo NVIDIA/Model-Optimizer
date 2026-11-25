@@ -1495,10 +1495,12 @@ def test_gpt_oss_mxfp4_experts_export_as_openai_releases_them(tmp_path, request,
     export_hf_checkpoint(model, export_dir=export_dir)
 
     if placement != "resident":
-        # The layer-by-layer exports release what they pack once it is written, and leave the
-        # experts fake-quantizing their weights.
+        # The layer-by-layer exports release what they pack once it is written.
         assert not [n for n, _ in model.named_buffers() if n.endswith(("_blocks", "_scales"))]
+    if placement == "fsdp2":
+        # The FSDP2 export restores the experts' weights, which still fake-quantize.
         experts = model.model.layers[0].mlp.experts
+        assert {"gate_up_proj", "down_proj"} <= set(experts._parameters)
         assert {"gate_up_proj", "down_proj"} <= experts._get_dm_attribute_manager().da_keys()
     assert not (export_dir / "hf_quant_config.json").exists()
     assert json.loads((export_dir / "config.json").read_text())["quantization_config"] == {
