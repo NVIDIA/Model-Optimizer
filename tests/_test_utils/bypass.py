@@ -15,6 +15,7 @@
 
 """A deterministic mixed-IQ problem shared by real Bypass and resume tests."""
 
+import json
 from collections import OrderedDict
 
 import torch
@@ -30,13 +31,13 @@ class BypassNetwork(nn.Sequential):
         return super().forward(hidden_states)
 
 
-def bypass_problem():
+def bypass_problem(*, activation_factory=nn.SiLU):
     torch.manual_seed(37)
     student = BypassNetwork(
         OrderedDict(
             [
                 ("mlp", nn.Linear(256, 256, bias=False)),
-                ("activation", nn.SiLU()),
+                ("activation", activation_factory()),
                 ("moe", nn.Linear(256, 256, bias=False)),
                 ("head", nn.Linear(256, 4, bias=False)),
             ]
@@ -65,7 +66,7 @@ def bypass_problem():
         OrderedDict(
             [
                 ("mlp", nn.Linear(256, 256, bias=False)),
-                ("activation", nn.SiLU()),
+                ("activation", activation_factory()),
                 ("moe", nn.Linear(256, 256, bias=False)),
                 ("head", nn.Linear(256, 4, bias=False)),
             ]
@@ -78,3 +79,29 @@ def bypass_problem():
         teacher.head.weight.copy_(student.head.weight)
     teacher.head.eval()
     return student, teacher, batches
+
+
+def committed_checkpoint(root, *, size=1, rank=0):
+    generation = root / (root / "latest").read_text().strip()
+    manifest = json.loads((generation / "COMMITTED.json").read_text())
+    assert manifest["world_size"] == size
+    return generation, torch.load(generation / f"rank-{rank}.pt", weights_only=True)
+
+
+def assert_exact_state(actual, expected):
+    if isinstance(expected, torch.Tensor):
+        assert actual.shape == expected.shape and actual.dtype == expected.dtype
+        assert torch.equal(
+            actual.contiguous().reshape(-1).view(torch.uint8),
+            expected.contiguous().reshape(-1).view(torch.uint8),
+        )
+    elif isinstance(expected, dict):
+        assert actual.keys() == expected.keys()
+        for key in expected:
+            assert_exact_state(actual[key], expected[key])
+    elif isinstance(expected, (list, tuple)):
+        assert len(actual) == len(expected)
+        for a, b in zip(actual, expected, strict=True):
+            assert_exact_state(a, b)
+    else:
+        assert actual == expected

@@ -27,7 +27,9 @@ from unittest import mock
 import numpy as np
 import pytest
 import torch
+from _test_utils.bypass import assert_exact_state as _equal
 from _test_utils.bypass import bypass_problem
+from _test_utils.bypass import committed_checkpoint as _committed
 from _test_utils.torch.distributed.utils import bounded_collectives
 
 import modelopt.torch.distill as mtd
@@ -38,6 +40,11 @@ from modelopt.torch.distill._bypass_checkpoint import _batch_hash, _model_hash, 
 from modelopt.torch.distill._bypass_optimizer import Lion
 from modelopt.torch.quantization.qtensor import FP8QTensor, QTensorWrapper
 from modelopt.torch.quantization.utils.native_weight import pin_native_weight
+
+
+class _SelfAttention(torch.nn.MultiheadAttention):
+    def forward(self, hidden_states):
+        return super().forward(hidden_states, hidden_states, hidden_states, need_weights=False)[0]
 
 
 class _Interrupted(list):
@@ -96,35 +103,17 @@ class _StatefulCursor:
         self.position = state["position"]
 
 
-def _committed(root, *, size=1, rank=0):
-    generation = root / (root / "latest").read_text().strip()
-    manifest = json.loads((generation / "COMMITTED.json").read_text())
-    assert manifest["world_size"] == size
-    return generation, torch.load(generation / f"rank-{rank}.pt", weights_only=True)
-
-
-def _equal(actual, expected):
-    if isinstance(expected, torch.Tensor):
-        assert actual.shape == expected.shape and actual.dtype == expected.dtype
-        assert torch.equal(
-            actual.contiguous().reshape(-1).view(torch.uint8),
-            expected.contiguous().reshape(-1).view(torch.uint8),
-        )
-    elif isinstance(expected, dict):
-        assert actual.keys() == expected.keys()
-        for key in expected:
-            _equal(actual[key], expected[key])
-    elif isinstance(expected, (list, tuple)):
-        assert len(actual) == len(expected)
-        for a, b in zip(actual, expected, strict=True):
-            _equal(a, b)
-    else:
-        assert actual == expected
-
-
 @pytest.mark.parametrize("stateful", [False, True])
 def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
-    initial, teacher, batches = bypass_problem()
+    def activation_factory():
+        activation = torch.nn.LeakyReLU(0.1) if stateful else torch.nn.SiLU()
+        if stateful:
+            return torch.nn.Sequential(
+                activation, activation, _SelfAttention(256, 2, batch_first=True)
+            )
+        return torch.nn.Sequential(activation, activation)
+
+    initial, teacher, batches = bypass_problem(activation_factory=activation_factory)
 
     def fresh_student():
         model = copy.deepcopy(initial)
@@ -190,6 +179,41 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, stateful):
         with pytest.raises(ValueError):
             mtd.bypass(refused, target, data, {**recipe, "resume_from": str(source)})
         _equal(refused.state_dict(), before)
+
+    for role in ("teacher", "student"):
+        changes = (
+            ("attention", "duplicate-edge", "execution")
+            if stateful
+            else ("duplicate-edge", "execution")
+        )
+        for change in changes:
+            refused, target = fresh_student(), copy.deepcopy(teacher)
+            changed = target if role == "teacher" else refused
+            if change == "attention":
+                # MultiheadAttention has empty extra_repr despite execution options.
+                changed.activation[2].num_heads = 4
+            elif change == "duplicate-edge":
+                # Default named_modules() deduplicates the repeated activation.
+                # Removing one registered edge still changes actual execution.
+                del changed.activation._modules["1"]
+            elif stateful:
+                changed.activation[0].negative_slope = 0.2
+            else:
+                activation = torch.nn.ReLU()
+                changed.activation = torch.nn.Sequential(activation, activation)
+            before = copy.deepcopy(refused.state_dict())
+            target_before = copy.deepcopy(target.state_dict())
+            caller_rng = _rng_state([])
+            with pytest.raises(ValueError):
+                mtd.bypass(
+                    refused,
+                    target,
+                    cursor(batches),
+                    {**recipe, "resume_from": str(generation)},
+                )
+            _equal(refused.state_dict(), before)
+            _equal(target.state_dict(), target_before)
+            _equal(_rng_state([]), caller_rng)
 
     refused = fresh_student()
     metadata = (
