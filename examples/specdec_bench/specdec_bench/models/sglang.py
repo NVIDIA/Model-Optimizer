@@ -25,6 +25,89 @@ except ImportError:
     sglang = None
 
 
+# SGLang renames engine arguments between releases and ``sgl.Engine`` rejects an unknown
+# one with a bare ``TypeError`` naming a single key, so a version skew surfaces as a crash
+# at startup rather than as anything actionable. Map the names we set onto whatever the
+# installed release calls them.
+#
+# 0.5.22 -- the first arm64 image carrying LiLiCorr -- split ``cuda_graph_max_bs`` into
+# separate decode/prefill limits and dropped the ``dflash_`` infix from the draft window.
+_ENGINE_ARG_ALIASES = {
+    "cuda_graph_max_bs": ("cuda_graph_max_bs_decode", "cuda_graph_max_bs_prefill"),
+    "speculative_dflash_draft_window_size": ("speculative_draft_window_size",),
+}
+
+# Arguments whose absence changes WHAT IS MEASURED rather than how fast it runs. Dropping
+# ``speculative_draft_model_path`` would quietly benchmark the target alone and report the
+# result as a speculative speedup, so these fail loudly instead of being skipped.
+_MUST_BIND_ENGINE_ARGS = frozenset(
+    {
+        "model_path",
+        "tp_size",
+        "ep_size",
+        "context_length",
+        "speculative_algorithm",
+        "speculative_draft_model_path",
+        "speculative_num_draft_tokens",
+        "speculative_num_steps",
+        "speculative_eagle_topk",
+    }
+)
+
+
+def _accepted_engine_args():
+    """Argument names the installed SGLang accepts, or ``None`` if undeterminable.
+
+    ``ServerArgs`` is a ``msgspec.Struct`` in recent releases and a dataclass before that;
+    its generated ``__init__`` signature is just ``(*args, **kwargs)``, so the field names
+    have to come from ``__annotations__``.
+    """
+    try:
+        from sglang.srt.server_args import ServerArgs
+    except Exception:
+        return None
+    return set(getattr(ServerArgs, "__annotations__", ()) or ()) or None
+
+
+def _adapt_engine_kwargs(engine_kwargs):
+    """Rewrite engine kwargs to the installed SGLang's spelling."""
+    accepted = _accepted_engine_args()
+    if not accepted:
+        return engine_kwargs
+
+    adapted, renamed, dropped = {}, [], []
+    for key, value in engine_kwargs.items():
+        if key in accepted:
+            adapted[key] = value
+            continue
+        targets = [t for t in _ENGINE_ARG_ALIASES.get(key, ()) if t in accepted]
+        if targets:
+            adapted.update(dict.fromkeys(targets, value))
+            renamed.append(f"{key} -> {'+'.join(targets)}")
+        elif key in _MUST_BIND_ENGINE_ARGS:
+            raise ValueError(
+                f"SGLang {_sglang_version()} does not accept engine argument '{key}' and no "
+                f"alias for it is known. Dropping it would change what this benchmark "
+                f"measures, so refusing to continue. Add an entry to _ENGINE_ARG_ALIASES."
+            )
+        else:
+            dropped.append(key)
+
+    if renamed:
+        print(f"[specdec_bench] SGLang arg rename: {', '.join(sorted(renamed))}")
+    if dropped:
+        print(
+            f"[specdec_bench] SGLang {_sglang_version()} does not accept "
+            f"{sorted(dropped)}; dropped (performance knobs only)."
+        )
+    return adapted
+
+
+def _sglang_version():
+    # ``sgl`` is unbound when the import above failed, so go through globals().
+    return getattr(globals().get("sgl"), "__version__", "?")
+
+
 class SGLANGModel(Model):
     # Cross-engine ``--max_seq_len`` (run.py) lands in kwargs under the
     # SGLang-native name ``context_length`` (see run.py's
@@ -104,8 +187,8 @@ class SGLANGModel(Model):
         if "mamba_scheduler_strategy" in kwargs:
             engine_kwargs["mamba_scheduler_strategy"] = kwargs["mamba_scheduler_strategy"]
 
-        self.engine_kwargs = engine_kwargs
-        self.model = sgl.Engine(**engine_kwargs)
+        self.engine_kwargs = _adapt_engine_kwargs(engine_kwargs)
+        self.model = sgl.Engine(**self.engine_kwargs)
 
         self.sampling_config = sampling_kwargs
 
