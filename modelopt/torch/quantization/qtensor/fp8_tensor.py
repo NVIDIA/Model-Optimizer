@@ -32,10 +32,13 @@ __all__ = ["FP8QTensor"]
 
 def _scale_ue8m0(input, scales, block_sizes, *, dtype, inverse=False):
     """Apply block exponents without expanding scales or upcasting the whole weight."""
-    blocks = [block_sizes.get(i, block_sizes.get(i - input.ndim, 1)) for i in range(input.ndim)]
-    # Keep FP32 temporaries bounded, including for large dense MTP projections.
-    rows = max(blocks[0], (1048576 // math.prod(input.shape[1:]) // blocks[0]) * blocks[0])
     output = torch.empty(input.shape, device=input.device, dtype=dtype)
+    if input.numel() == 0:
+        return output
+    working_dtype = torch.float64 if torch.float64 in (input.dtype, dtype) else torch.float32
+    blocks = [block_sizes.get(i, block_sizes.get(i - input.ndim, 1)) for i in range(input.ndim)]
+    # Keep working tensors bounded, including for large dense MTP projections.
+    rows = max(blocks[0], (1048576 // math.prod(input.shape[1:]) // blocks[0]) * blocks[0])
     for start in range(0, input.shape[0], rows):
         chunk = input[start : start + rows]
         shape = [size for n, block in zip(chunk.shape, blocks) for size in (n // block, block)]
@@ -48,7 +51,9 @@ def _scale_ue8m0(input, scales, block_sizes, *, dtype, inverse=False):
             .reshape(scale_shape)
             - 127
         )
-        scaled = torch.ldexp(chunk.float().reshape(shape), -exponents if inverse else exponents)
+        scaled = torch.ldexp(
+            chunk.to(working_dtype).reshape(shape), -exponents if inverse else exponents
+        )
         if inverse:
             scaled.clamp_(-448.0, 448.0)
         scaled.masked_fill_(exponents == 128, float("nan"))
@@ -112,8 +117,19 @@ class FP8QTensor(BaseQuantizedTensor):
                 reduce_axis = convert_quantization_axis_to_reduce_axis(input, axis)
                 amax = reduce_amax(input, axis=reduce_axis)
             if use_ue8m0:
-                exponent = torch.ceil(torch.log2(amax.float() / 448.0)).clamp_(-127, 127)
-                scales = (exponent + 127).to(torch.uint8).view(ue8m0_dtype)
+                working_dtype = torch.float64 if amax.dtype == torch.float64 else torch.float32
+                # CUDA log2 can round above exact power-of-two boundaries.
+                mantissa, exponent = torch.frexp(amax.to(working_dtype) / 448.0)
+                exponent -= (mantissa == 0.5).to(exponent.dtype)
+                exponent.masked_fill_(mantissa == 0, -127)
+                exponent.masked_fill_(mantissa.isinf(), 127).clamp_(-127, 127)
+                # UE8M0 reserves 255 for blocks containing NaNs.
+                scales = (
+                    (exponent + 127)
+                    .masked_fill_(amax.isnan(), 255)
+                    .to(torch.uint8)
+                    .view(ue8m0_dtype)
+                )
             else:
                 scales = amax / 448.0  # Consider parameterizing the divisor if needed
 

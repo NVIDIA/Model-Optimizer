@@ -22,15 +22,20 @@ from modelopt.torch.quantization.qtensor import FP8QTensor
 
 
 @pytest.mark.parametrize(("block", "row_blocks"), [(32, 2), (128, 34)])
-def test_ue8m0_roundtrip_partial_and_zero_blocks(block, row_blocks):
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float64])
+def test_ue8m0_roundtrip_partial_and_zero_blocks(block, row_blocks, dtype):
     """Known representable values retain their codes and scales, including zero blocks."""
-    codes = torch.tensor([448.0, -224.0, 1.125, -0.5, 0.0]).repeat(row_blocks * block, block)
+    codes = torch.tensor([448.0, -224.0, 1.125, -0.5, 0.0], dtype=dtype).repeat(
+        row_blocks * block, block
+    )
     codes = codes[:, : 2 * block - 3]
-    exponents = torch.tensor([[-3, -127], [2, 0]]).repeat(row_blocks // 2, 1)
+    exponents = torch.tensor(
+        [[122, -127], [127, 0]] if dtype == torch.float64 else [[-3, -127], [2, 0]]
+    ).repeat(row_blocks // 2, 1)
     rows = torch.arange(codes.shape[0]) // block
     cols = torch.arange(codes.shape[1]) // block
     codes[rows % 2 == 0, block:] = 0
-    weight = (codes * 2.0 ** exponents[rows[:, None], cols]).to(torch.bfloat16)
+    weight = (codes * 2.0 ** exponents[rows[:, None], cols]).to(dtype)
     blocks = {-2: block, -1: block}
 
     quantized, scales = FP8QTensor.quantize(
@@ -40,7 +45,7 @@ def test_ue8m0_roundtrip_partial_and_zero_blocks(block, row_blocks):
     assert torch.equal(scales.view(torch.uint8), (exponents + 127).to(torch.uint8))
     assert torch.equal(quantized._quantized_data.float(), codes)
     restored = quantized.dequantize(scale=scales, block_sizes=blocks)
-    assert restored.dtype == torch.bfloat16
+    assert restored.dtype == dtype
     assert torch.equal(restored, weight)
 
     requantized, new_scales = FP8QTensor.quantize(restored, scales=scales, block_sizes=blocks)
@@ -50,17 +55,39 @@ def test_ue8m0_roundtrip_partial_and_zero_blocks(block, row_blocks):
     assert torch.equal(new_scales.view(torch.uint8), scales.view(torch.uint8))
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])
 def test_ue8m0_dequantizes_before_casting(dtype):
     """Extreme scales must not overflow/underflow in the output dtype before multiplication."""
-    weight = torch.tensor([[0.5, 0.0, 0.125, 2.0]], dtype=torch.float8_e4m3fn)
-    scales = torch.tensor([[254, 254, 0, 255]], dtype=torch.uint8).view(torch.float8_e8m0fnu)
+    weight = torch.tensor([[0.5, 0.0, 0.125, 2.0, 2.0]], dtype=torch.float8_e4m3fn)
+    scales = torch.tensor([[254, 254, 0, 254, 255]], dtype=torch.uint8).view(torch.float8_e8m0fnu)
     quantized = FP8QTensor(weight.shape, dtype, weight)
     result = quantized.dequantize(scale=scales, block_sizes={-1: 1})
-    expected = torch.tensor([[2.0**126, 0.0, 2.0**-130, float("nan")]], dtype=torch.float64).to(
-        dtype
-    )
+    expected = torch.tensor(
+        [[2.0**126, 0.0, 2.0**-130, 2.0**128, float("nan")]], dtype=torch.float64
+    ).to(dtype)
     torch.testing.assert_close(result, expected, rtol=0, atol=0, equal_nan=True)
+
+
+@pytest.mark.parametrize("shape", [(4, 0), (0, 4), (0,)])
+def test_ue8m0_empty_roundtrip(shape):
+    weight = torch.empty(shape, dtype=torch.bfloat16)
+    quantized, scales = FP8QTensor.quantize(
+        weight, block_sizes={-1: 4}, scale_dtype=torch.float8_e8m0fnu
+    )
+    restored = quantized.dequantize(scale=scales, block_sizes={-1: 4})
+    torch.testing.assert_close(restored, weight)
+
+
+def test_ue8m0_nan_block():
+    weight = torch.tensor([[float("nan"), 1.0], [448.0, 0.0]])
+    quantized, scales = FP8QTensor.quantize(
+        weight, block_sizes={-1: 2}, scale_dtype=torch.float8_e8m0fnu
+    )
+    assert scales.view(torch.uint8).tolist() == [[255], [127]]
+    expected = torch.tensor([[float("nan"), float("nan")], [448.0, 0.0]])
+    torch.testing.assert_close(
+        quantized.dequantize(scale=scales, block_sizes={-1: 2}), expected, equal_nan=True
+    )
 
 
 @pytest.mark.parametrize("native_scales", [False, True])
