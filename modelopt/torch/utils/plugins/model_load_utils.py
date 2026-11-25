@@ -240,8 +240,14 @@ def _resolve_target(plan: dict, key: str) -> tuple[str, str | None]:
 
 
 # The hook below is installed on Transformers' classes, so process-wide: blocks that overlap in
-# time take turns, or one restoring the methods would drop the hook another still counts on.
+# time take turns, or one restoring the methods would drop the hook another still counts on. A load
+# that needs it also holds this across prepare_model_for_loading, whose hooks are process-wide too.
 _CONVERSION_HOOK_LOCK = threading.RLock()
+
+
+def _tracks_used_conversions() -> bool:
+    """Whether Transformers records which conversions a load used (``was_used``) by itself."""
+    return callable(getattr(WeightTransform, "was_used", None))
 
 
 @contextmanager
@@ -255,14 +261,15 @@ def _flagging_used_conversions(defer_to_was_used: bool = True):
     is set here, where Transformers matches each key, so the load's own matching decides it,
     whatever files and keys it read.
 
-    Yields the ids of the conversions matched in the block, or ``None`` when Transformers keeps
+    Yields the conversions matched in the block, by id, or ``None`` when Transformers keeps
     ``was_used`` itself and ``defer_to_was_used``; :func:`_used_conversions` reads either.
     """
-    if defer_to_was_used and callable(getattr(WeightTransform, "was_used", None)):
+    if defer_to_was_used and _tracks_used_conversions():
         yield None
         return
     with _CONVERSION_HOOK_LOCK:
-        matched: set[int] = set()
+        # Holding each keeps its id from going to a later object while the record is filtered.
+        matched: dict[int, WeightTransform] = {}
         classes, pending = [], [WeightTransform]
         while pending:
             cls = pending.pop()
@@ -274,7 +281,7 @@ def _flagging_used_conversions(defer_to_was_used: bool = True):
             def rename_source_key(self, source_key):
                 renamed, source_pattern = rename(self, source_key)
                 if source_pattern is not None:
-                    matched.add(id(self))
+                    matched[id(self)] = self
                 return renamed, source_pattern
 
             return rename_source_key
@@ -289,7 +296,7 @@ def _flagging_used_conversions(defer_to_was_used: bool = True):
                 cls.rename_source_key = rename
 
 
-def _used_conversions(conversions: list, matched: set[int] | None) -> list:
+def _used_conversions(conversions: list, matched: dict | None) -> list:
     """The ``conversions`` a load matched a key with.
 
     ``matched`` is what :func:`_flagging_used_conversions` yielded for the load.
@@ -1206,6 +1213,7 @@ def load_pretrained(
                 )
             whole = None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class
             with (
+                contextlib.nullcontext() if _tracks_used_conversions() else _CONVERSION_HOOK_LOCK,
                 prepare_model_for_loading(
                     model_type, ckpt_path, trust_remote_code, model_class=whole
                 ),

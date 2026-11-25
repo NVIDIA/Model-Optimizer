@@ -92,7 +92,6 @@ from transformers.core_model_loading import (
     Concatenate,
     MergeModulelist,
     WeightConverter,
-    WeightRenaming,
     WeightTransform,
 )
 from transformers.distributed import DistributedConfig
@@ -120,7 +119,6 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _ep_aware_caching_allocator_warmup,
     _ep_dense_meta_load,
     _experts_sharded_over,
-    _flagging_used_conversions,
     _fsdp2_shard_dense,
     _load_ep_dense_distributed,
     _make_expert_param_matcher,
@@ -376,33 +374,26 @@ def test_published_layout_vlm_loads_every_weight(tmp_path, gloo_group):
 
 
 def _as_on_transformers_5_5(monkeypatch):
-    """Loads as a Transformers without ``was_used`` (5.5) does: ``WeightTransform`` has no
-    ``was_used``, and ``from_pretrained`` records every conversion. Returns the class to load by."""
-    monkeypatch.delattr(WeightTransform, "was_used", raising=False)
-
-    class Loader:
-        @staticmethod
-        def from_pretrained(*args, **kwargs):
-            # A newer from_pretrained keeps the conversions was_used names: all of them here.
-            with monkeypatch.context() as patch:
-                patch.setattr(WeightTransform, "was_used", lambda self: True, raising=False)
-                return LlavaForConditionalGeneration.from_pretrained(*args, **kwargs)
-
-    return Loader
+    """Loads as a Transformers without ``was_used`` (5.5) does: the loader finds no ``was_used``,
+    and ``from_pretrained`` records every conversion. Returns the class to load by."""
+    monkeypatch.setattr(model_load_utils, "_tracks_used_conversions", lambda: False)
+    # A newer from_pretrained keeps the conversions was_used names: all of them here.
+    monkeypatch.setattr(WeightTransform, "was_used", lambda self: True, raising=False)
+    return LlavaForConditionalGeneration
 
 
 @pytest.mark.parametrize("loader", ["fsdp2", "whole"])
 def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monkeypatch, loader):
     """A load records only the conversions it converted a key with, on every Transformers version.
 
-    Each load meets an ``lm_head`` it doesn't convert: FSDP2 a head weight its index leaves out, so
-    it never reads it, and a head bias with no parameter, which it only carries over; the
-    whole-model load (as on 5.5, without ``was_used``) a tied head with no tensor. Recorded anyway,
+    Each load meets a tied ``lm_head`` it doesn't convert: FSDP2 a copy of it its index leaves out,
+    which it places but never reads, and a head bias with no parameter, which it only carries over;
+    the whole-model load (as on 5.5, without ``was_used``) no head tensor at all. Recorded anyway,
     the head's rename renames ``lm_head`` in the export (to ``language_model.model.lm_head`` for
     Gemma3). The whole-model load also reads a projector its index leaves out, and keeps its rename.
     """
     fsdp2 = loader == "fsdp2"
-    ref = _tiny_llava_checkpoint(tmp_path, drop=() if fsdp2 else ("lm_head.",), tie=not fsdp2)
+    ref = _tiny_llava_checkpoint(tmp_path, drop=() if fsdp2 else ("lm_head.",), tie=True)
     state = load_file(str(tmp_path / "model.safetensors"))
     (tmp_path / "model.safetensors").unlink()
     if fsdp2:
@@ -417,7 +408,10 @@ def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monke
     if fsdp2:
         request.getfixturevalue("gloo_group")
         model = _fsdp2_load(tmp_path)
-        assert "language_model.lm_head.bias" in model._modelopt_unplaced_source_keys
+        assert model._modelopt_unplaced_source_keys == ["language_model.lm_head.bias"]
+        head = model.lm_head.weight
+        head = head.full_tensor() if isinstance(head, DTensor) else head
+        assert torch.equal(head.detach(), ref.get_input_embeddings().weight.detach())
     else:
         model = load_pretrained(str(tmp_path), _as_on_transformers_5_5(monkeypatch))
         ref_projector = ref.model.multi_modal_projector
@@ -441,30 +435,49 @@ def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monke
     assert to_source(projector) == ("multi_modal_projector.linear_1" if renamed else projector)
 
 
-def test_overlapping_loads_each_record_their_matches(monkeypatch):
-    """The matching hook is process-wide: a load that ends first must not unhook one still running."""
-    monkeypatch.delattr(WeightTransform, "was_used", raising=False)
+def test_overlapping_loads_each_keep_their_hooks(tmp_path, monkeypatch):
+    """Without ``was_used`` (5.5) a load installs process-wide hooks: model preparation (such as
+    Nemotron-H's) and the conversion hook. One that ends first must not take them from one that
+    is still loading."""
+    _tiny_llava_checkpoint(tmp_path, drop=("lm_head.",), tie=True)
+    loader = _as_on_transformers_5_5(monkeypatch)
     stock = vars(WeightTransform)["rename_source_key"]
-    rename_a, rename_b = (WeightRenaming(f"^{p}\\.", "x.") for p in ("a", "b"))
-    b_entered, a_exited, b_matched = threading.Event(), threading.Event(), []
+    active, mine, seen = {"hook": None}, {}, {}
+    b_preparing, a_done = threading.Event(), threading.Event()
 
-    def load_b():
-        with _flagging_used_conversions() as matched:
-            b_entered.set()
-            a_exited.wait(5)
-            rename_b.rename_source_key("b.w")
-        b_matched.append(matched)
+    @contextmanager
+    def prepare(*args, **kwargs):  # swaps a process-wide hook in and back, as Nemotron-H's does
+        saved, active["hook"] = active["hook"], mine.setdefault(threading.get_ident(), object())
+        if threading.current_thread() is not threading.main_thread():
+            b_preparing.set()
+        try:
+            yield
+        finally:
+            active["hook"] = saved
 
-    with _flagging_used_conversions() as a_matched:
-        other = threading.Thread(target=load_b)
-        other.start()
-        b_entered.wait(0.2)  # B waits for A; unserialized, it would be inside by now
-        rename_a.rename_source_key("a.w")
-    a_exited.set()
-    other.join(10)
-    assert a_matched == {id(rename_a)}
-    assert b_matched == [{id(rename_b)}]
+    models = []
+    other = threading.Thread(target=lambda: models.append(load_pretrained(str(tmp_path), Probe)))
+
+    class Probe:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            if threading.current_thread() is threading.main_thread():  # A, mid-load, starts B
+                other.start()
+                b_preparing.wait(0.2)  # B waits for A; unserialized, it would be preparing by now
+            else:
+                a_done.wait(5)
+            seen[threading.get_ident()] = active["hook"] is mine[threading.get_ident()]
+            return loader.from_pretrained(*args, **kwargs)
+
+    monkeypatch.setattr(models_hf, "prepare_model_for_loading", prepare)
+    models.append(load_pretrained(str(tmp_path), Probe))
+    a_done.set()
+    other.join(30)
+    assert len(models) == 2 and all(seen.values()) and len(seen) == 2
+    assert active["hook"] is None
     assert vars(WeightTransform)["rename_source_key"] is stock
+    for model in models:
+        assert build_reverse_name_mapper(model)("lm_head") == "lm_head"
 
 
 def test_unsourced_parameter_raises(tmp_path, gloo_group):
