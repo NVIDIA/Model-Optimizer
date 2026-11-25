@@ -38,7 +38,7 @@ def _weights(
     rows,
     cols,
     valid,
-    K: tl.constexpr,
+    K,
     GROUP: tl.constexpr,
     KIND: tl.constexpr,
     BYTES: tl.constexpr,
@@ -60,8 +60,8 @@ def _forward(
     BIAS,
     Y,
     M,
-    N: tl.constexpr,
-    K: tl.constexpr,
+    N,
+    K,
     GROUP: tl.constexpr,
     KIND: tl.constexpr,
     BYTES: tl.constexpr,
@@ -104,8 +104,8 @@ def _input_backward(
     GRID,
     DX,
     M,
-    N: tl.constexpr,
-    K: tl.constexpr,
+    N,
+    K,
     GROUP: tl.constexpr,
     KIND: tl.constexpr,
     BYTES: tl.constexpr,
@@ -145,8 +145,8 @@ def _scale_backward(
     GRID,
     DS,
     M,
-    N: tl.constexpr,
-    K: tl.constexpr,
+    N,
+    K,
     GROUP: tl.constexpr,
     KIND: tl.constexpr,
     BYTES: tl.constexpr,
@@ -202,7 +202,7 @@ class _IQLinear(torch.autograd.Function):
                 enable_fp_fusion=False,
                 **meta,
             )
-        ctx.save_for_backward(x, packed, steps, grid)
+        ctx.save_for_backward(x if ctx.needs_input_grad[2] else None, packed, steps, grid)
         ctx.meta, ctx.shape, ctx.input_shape = meta, shape, inputs.shape
         ctx.has_bias = bias is not None
         return output.view(*inputs.shape[:-1], n)
@@ -212,27 +212,28 @@ class _IQLinear(torch.autograd.Function):
         x, packed, steps, grid = ctx.saved_tensors
         n, k = ctx.shape
         gradient = gradient.contiguous().view(-1, n)
+        m = gradient.shape[0]
         dx, ds = None, None
         if ctx.needs_input_grad[0]:
-            dx = torch.empty_like(x)
-            if x.shape[0]:
-                _input_backward[(triton.cdiv(x.shape[0], _TILE_M), triton.cdiv(k, _TILE_K))](
+            dx = gradient.new_empty((m, k))
+            if m:
+                _input_backward[(triton.cdiv(m, _TILE_M), triton.cdiv(k, _TILE_K))](
                     gradient,
                     packed,
                     steps,
                     grid,
                     dx,
-                    x.shape[0],
+                    m,
                     n,
                     k,
                     enable_fp_fusion=False,
                     **ctx.meta,
                 )
         if ctx.needs_input_grad[2]:
-            ds = torch.empty_like(steps) if x.shape[0] else torch.zeros_like(steps)
-            if x.shape[0]:
+            ds = torch.empty_like(steps) if m else torch.zeros_like(steps)
+            if m:
                 _scale_backward[(triton.cdiv(n, _SCALE_TILE_N), triton.cdiv(k, _TILE_K))](
-                    x, gradient, packed, grid, ds, x.shape[0], n, k, **ctx.meta
+                    x, gradient, packed, grid, ds, m, n, k, enable_fp_fusion=False, **ctx.meta
                 )
         db = gradient.sum(0) if ctx.has_bias and ctx.needs_input_grad[5] else None
         return None if dx is None else dx.view(ctx.input_shape), None, ds, None, None, db

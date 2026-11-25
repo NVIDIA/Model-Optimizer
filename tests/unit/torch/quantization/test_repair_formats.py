@@ -16,7 +16,9 @@
 
 """Native replay precision, saved tensors and observable quantizer behavior."""
 
+import builtins
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -25,7 +27,7 @@ from torch import nn
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight, pinned_packed_weight
-from modelopt.torch.quantization.repair_formats import IQScaleState
+from modelopt.torch.quantization.repair_formats import IQScaleState, _native_scale_kernels
 
 
 def _config(entries):
@@ -38,7 +40,7 @@ def _iq(path, name):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
-def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, name):
+def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, name, monkeypatch):
     torch.manual_seed(104)
     model = nn.Linear(512, 2, bias=False).to(dtype)
     mtq.quantize(model, _config([_iq("weight_quantizer", name)]))
@@ -78,6 +80,44 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
     assert (model.weight.numel(), torch.int8) in saved
     assert unpacked.count((model.weight.numel(), torch.int8)) == 1
     assert (model.weight.numel(), torch.float32) not in saved
+
+    if name == "iq1_m" and dtype == torch.float32:
+        try:
+            # Triton is optional for materialized replay and its CPU tests.
+            from modelopt.torch.kernels.quantization.repair import apply_block_scales
+        except ImportError as exc:
+            if not (exc.name or "").startswith("triton"):
+                raise
+        else:
+            for level_device, scale_device in (("cpu", "meta"), ("meta", "cpu")):
+                with pytest.raises(ValueError):
+                    apply_block_scales(
+                        torch.empty(16, dtype=torch.int8, device=level_device),
+                        torch.empty(1, device=scale_device),
+                        dtype,
+                    )
+
+        original_import = builtins.__import__
+        for error in (
+            ImportError("Optional Triton import failed", name="triton.language"),
+            ImportError("Unrelated import failed", name="other_dependency"),
+            RuntimeError("Unrelated runtime failure"),
+        ):
+
+            def unavailable_kernel(module, *args, _error=error, **kwargs):
+                if module == "modelopt.torch.kernels.quantization":
+                    raise _error
+                return original_import(module, *args, **kwargs)
+
+            with monkeypatch.context() as context:
+                context.setattr(builtins, "__import__", unavailable_kernel)
+                # Only optional-import selection is exercised, never tensor math.
+                metadata = SimpleNamespace(is_cuda=True)
+                if isinstance(error, ImportError) and error.name == "triton.language":
+                    assert _native_scale_kernels(metadata) is None
+                else:
+                    with pytest.raises(type(error)):
+                        _native_scale_kernels(metadata)
 
     # An initial update favoring a smaller scale must not prevent a later increase.
     with torch.no_grad():

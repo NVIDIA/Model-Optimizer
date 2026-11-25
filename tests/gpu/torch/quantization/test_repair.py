@@ -162,6 +162,31 @@ def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys):
                         actual_grad[2], reference_grad[2], rtol=0.01, atol=0.015
                     )
                 assert (torch.Size(shape), dtype) not in saved
+                frozen_x = x.detach().requires_grad_(input_grad)
+                frozen_bias = bias.detach().requires_grad_(True)
+                saved.clear()
+                with torch.autograd.graph.saved_tensors_hooks(observe, lambda value: value):
+                    frozen = iq_linear(
+                        frozen_x, state.packed, steps.detach(), name, shape, frozen_bias
+                    )
+                assert (frozen_x.shape, dtype) not in saved
+                frozen_grad = torch.autograd.grad(
+                    frozen, [frozen_bias, *([frozen_x] if input_grad else [])], upstream
+                )
+                torch.testing.assert_close(frozen, expected, rtol=0.01, atol=0.015)
+                torch.testing.assert_close(frozen_grad[0], reference_grad[1], rtol=0, atol=0)
+                if input_grad:
+                    torch.testing.assert_close(
+                        frozen_grad[1], reference_grad[2], rtol=0.01, atol=0.015
+                    )
+            if not measure:
+                # Inputs supplies metadata only, including when repair state is offloaded.
+                cpu_metadata = torch.empty(shape, dtype=dtype)
+                torch.testing.assert_close(state(cpu_metadata), native, rtol=0, atol=0)
+                state.cpu()
+                torch.testing.assert_close(
+                    state(model._parameters["weight"]), native.cpu(), rtol=0, atol=0
+                )
         finally:
             policy.close()
 

@@ -54,7 +54,12 @@ def _apply(
 
 @triton.jit
 def iq_levels(packed, grid, index, valid, kind: tl.constexpr, block_bytes: tl.constexpr):
-    """Decode arbitrary element tiles; shared by expanded and packed GEMM paths."""
+    """Decode arbitrary element tiles; shared by expanded and packed GEMM paths.
+
+    Mirrors ``modelopt/torch/quantization/ggml/`` modules
+    ``iq{1_s,1_m,2_xxs,2_xs,2_s}.py::_unpack_int8``. IQ1's factor 8 is
+    ``1 / _IQ1_*_DELTA``, with the signed delta represented by +/-1.
+    """
     base, offset = (index // 256) * block_bytes, index % 256
     group, element = offset // 8, offset % 8
     if kind == "iq1_m" or kind == "iq1_s":
@@ -121,6 +126,9 @@ def _decode_iq(
 def iq_metadata(device, format_name):
     if format_name not in SUPPORTED_FORMATS:
         raise ValueError(f"No native repair-level decoder for {format_name!r}.")
+    fmt = IQ_FORMAT_REGISTRY[format_name]
+    if fmt.block_size != 256:
+        raise ValueError("Native IQ kernels require 256-element blocks.")
     if format_name in ("iq1_m", "iq1_s"):
         grid = iq1_s_grid(device)
     elif format_name == "iq2_s":
@@ -129,7 +137,7 @@ def iq_metadata(device, format_name):
         grid = iq2_xs_grid(device)
     else:
         grid = iq2_xxs_grid(device)
-    return grid, IQ_FORMAT_REGISTRY[format_name].block_bytes
+    return grid, fmt.block_bytes
 
 
 def decode_iq_levels(packed, format_name, shape):
@@ -201,4 +209,6 @@ def apply_block_scales(levels, scales, dtype):
     Autograd retains integer levels and reduces scale gradients directly. Native
     code selection and scale-field projection remain owned by the format adapter.
     """
+    if levels.device != scales.device:
+        raise ValueError("Integer levels and block scales must share a device.")
     return _BlockScales.apply(levels, scales, dtype)
