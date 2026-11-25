@@ -7,6 +7,8 @@ training:
   nemo_rl:
     source_image: nvcr.io/nvidia/nemo-rl:v0.7.0
     package_version: 0.6.0+19244a094
+    # Exact Git revision of the NeMo RL source extracted from the release image.
+    source_commit: 19244a0949fb363326f71675223da75e09d14866
     # Source was extracted into the training container, preserving its Bridge/Core stack.
     # Custom KTO loss, response processor and checkpoint/runtime compatibility helpers were added.
 evaluation:

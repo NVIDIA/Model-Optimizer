@@ -39,4 +39,8 @@ export KTO_VALIDATION_DATA=/path/to/validation.jsonl
 export KTO_OUTPUT_DIR=/path/to/new-kto-output
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Make the Qwen checkpoint worker and pinned NeMo RL source visible to Ray.
+export PYTHONPATH="$SCRIPT_DIR/../src:$NEMO_RL_SOURCE${PYTHONPATH:+:$PYTHONPATH}"
+# Use the launcher's Python interpreter for standard NeMo RL workers.
+export NEMO_RL_PY_EXECUTABLES_SYSTEM=1
 exec python "$SCRIPT_DIR/../src/kto_train.py" --dpo-config "$NEMO_RL_SOURCE/examples/configs/dpo.yaml" "$@"
