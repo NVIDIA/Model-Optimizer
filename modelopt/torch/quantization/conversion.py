@@ -27,9 +27,6 @@ from typing import Any, cast
 
 import torch
 import torch.nn as nn
-from torch.overrides import _get_current_function_mode_stack
-from torch.utils._device import DeviceContext
-from torch.utils._python_dispatch import _get_current_dispatch_mode_stack
 
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.conversion import ApplyModeError, ModelLikeModule, ModeloptStateManager
@@ -321,7 +318,7 @@ _UNSCANNED_QUANTIZER_STATE = frozenset(k for k in vars(nn.Module()) if "hook" in
     "_calibrator",
 }
 # A call checks the model, at its first exact entry, only when it holds this many: on a model of
-# mostly quantizers the check costs a few dozen walks, which fewer named entries would not repay.
+# mostly quantizers the check costs about a dozen walks, more where quantizers hold more state.
 _EXACT_ENTRIES_FOR_CHECK = 64
 # The names of the state the scan reads, for each modelopt class it met.
 _MODELOPT_STATE_NAMES: dict[type, tuple[str, ...]] = {}
@@ -518,6 +515,12 @@ def _runs_global_hooks() -> bool:
     # PyTorch's own among them, which can call back into the caller's code, and the Python
     # dispatcher's kernels. A device context only sets where new tensors go. And a wrap of
     # nn.Module.named_modules itself, which an integration can install, lists other paths.
+    # PyTorch's private mode stacks, imported here so that a release without them only loses the
+    # shortcut: the caller walks the model whole when this raises.
+    from torch.overrides import _get_current_function_mode_stack
+    from torch.utils._device import DeviceContext
+    from torch.utils._python_dispatch import _get_current_dispatch_mode_stack
+
     modes = (*_get_current_function_mode_stack(), *_get_current_dispatch_mode_stack())
     named_modules = _CLASS_DICT.__get__(nn.Module).get("named_modules")
     return (
@@ -623,11 +626,13 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
     # dispatcher are set: configuring a quantizer runs them, and they can rewire the model mid-call.
     # Code run from elsewhere, such as a warnings or logging handler, a finalizer, another thread, a
     # patched function or a custom op kernel, must not rewire it.
-    # Only the names modelopt's own entries store are counted: reading an entry of the caller's
-    # class can run its code, and reading a missing name raises, which must happen in order below,
-    # after the entries before it have applied.
+    # Only the names modelopt's own entries store in a plain dict are counted: reading an entry of
+    # the caller's class, or state of a dict subclass, can run its code, and reading a missing name
+    # raises, which must happen in order below, after the entries before it have applied.
     exact_entries = sum(
-        type(entry) is QuantizerCfgEntry and _is_exact(vars(entry).get("quantizer_name"))
+        type(entry) is QuantizerCfgEntry
+        and _is_plain_state(state := vars(entry))
+        and _is_exact(state.get("quantizer_name"))
         for entry in quant_cfg
     )
     subtree = None if exact_entries >= _EXACT_ENTRIES_FOR_CHECK else False

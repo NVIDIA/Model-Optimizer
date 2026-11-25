@@ -16,6 +16,7 @@
 """Tests of tensor quantization function and module."""
 
 import contextlib
+import importlib.util
 import sys
 import weakref
 from types import MappingProxyType, SimpleNamespace
@@ -1074,12 +1075,13 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
             local = frame.f_locals
             walks += local.get("self") is named and local.get("memo") is None
 
+    previous = sys.getprofile()
     sys.setprofile(count_walks)
     try:
         with context():
             mtq.set_quantizer_by_cfg(named, quant_cfg)
     finally:
-        sys.setprofile(None)
+        sys.setprofile(previous)
     # The check refuses a class's own lookups, a state dict of a subclass or a key of a str
     # subclass without running them, and reads classes without their metaclass. (Comparing the
     # states compares the keys.)
@@ -1160,11 +1162,11 @@ def test_set_quantizer_by_cfg_reads_an_entry_without_its_getattr():
     assert not model[0].weight_quantizer.is_enabled
 
 
-@pytest.mark.parametrize("late", ["caller-class", "no-name"])
+@pytest.mark.parametrize("late", ["caller-class", "dict-state", "no-name"])
 def test_set_quantizer_by_cfg_reads_each_entry_after_the_entries_before_it(late):
-    """An entry of the caller's own class, or one with no stored name, is read once the entries
-    before it have applied, as before: counting a call's named entries reads only the names
-    modelopt's own entries store."""
+    """An entry of the caller's own class, one whose state is a dict subclass, or one with no
+    stored name, is read once the entries before it have applied, as before: counting a call's
+    named entries reads only the names modelopt's own entries store in a plain dict."""
     model = torch.nn.Sequential(torch.nn.Linear(4, 4))
     model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
     first = {"quantizer_name": "*input_quantizer", "enable": False}
@@ -1174,6 +1176,19 @@ def test_set_quantizer_by_cfg_reads_each_entry_after_the_entries_before_it(late)
         with pytest.raises(KeyError):
             mtq.set_quantizer_by_cfg(model, [first, entry])
         assert not model[0].input_quantizer.is_enabled
+        return
+
+    if late == "dict-state":
+
+        class State(dict):
+            def get(self, key, default=None):
+                assert not model[0].input_quantizer.is_enabled, "read before the first entry"
+                return super().get(key, default)
+
+        entry = QuantizerCfgEntry(quantizer_name="0.weight_quantizer", enable=False)
+        object.__setattr__(entry, "__dict__", State(vars(entry)))
+        mtq.set_quantizer_by_cfg(model, [first, entry])
+        assert not model[0].weight_quantizer.is_enabled
         return
 
     class Late(QuantizerCfgEntry):
@@ -1204,6 +1219,15 @@ def test_set_quantizer_by_cfg_matches_a_filter_function_name():
     mtq.set_quantizer_by_cfg(model, [entry])
     assert not model[0].weight_quantizer.is_enabled
     assert model[0].input_quantizer.is_enabled
+
+
+def _quantizer_states(model):
+    """Every quantizer's state, by name."""
+    return {
+        name: module.get_modelopt_state(properties_only=True)
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer)
+    }
 
 
 @pytest.mark.usefixtures("check_at_the_first_named_entry")
@@ -1239,11 +1263,7 @@ def test_set_quantizer_by_cfg_reads_class_namespaces_only_with_str_keys():
             )
         finally:
             armed.clear()
-        return {
-            name: module.get_modelopt_state(properties_only=True)
-            for name, module in model.named_modules()
-            if isinstance(module, TensorQuantizer)
-        }
+        return _quantizer_states(model)
 
     walked = configured("[0].weight_quantizer", "[1].weight_quantizer")
     assert configured("0.weight_quantizer", "1.weight_quantizer") == walked
@@ -1264,6 +1284,23 @@ def test_set_quantizer_by_cfg_walks_a_model_the_check_cannot_read():
 
     assert configured("0.weight_quantizer") is False
     assert configured("[0].weight_quantizer") is False
+
+
+def test_set_quantizer_by_cfg_walks_the_model_without_pytorchs_mode_stacks(monkeypatch):
+    """Without PyTorch's private mode stacks the module still loads, and a call with named entries
+    walks the model whole, as the check cannot see the active modes."""
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4))
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
+    monkeypatch.delattr(torch.utils._python_dispatch, "_get_current_dispatch_mode_stack")
+    spec = importlib.util.spec_from_file_location(
+        f"{quant_conversion.__package__}._without_mode_stacks", quant_conversion.__file__
+    )
+    conversion = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(conversion)
+    monkeypatch.setattr(conversion, "_EXACT_ENTRIES_FOR_CHECK", 1)
+    entry = {"quantizer_name": "0.weight_quantizer", "enable": False}
+    conversion.set_quantizer_by_cfg(model, [entry])
+    assert not model[0].weight_quantizer.is_enabled
 
 
 @pytest.mark.parametrize("below", [1, 0], ids=["below", "at"])
@@ -1481,11 +1518,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_callback_shares_a_l
         assert model[1] is model[0]  # the trigger ran
         # The states compare every attribute a quantizer holds.
         vars(model[0].weight_quantizer).pop("set_from_attribute_config", None)
-        return {
-            name: module.get_modelopt_state(properties_only=True)
-            for name, module in model.named_modules()
-            if isinstance(module, TensorQuantizer)
-        }
+        return _quantizer_states(model)
 
     walked = configured("[0].weight_quantizer", "[1].weight_quantizer")
     assert configured("0.weight_quantizer", "1.weight_quantizer") == walked
@@ -1523,11 +1556,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_aliases_
 
         cfg = {"num_bits": 4, "calibrator": AliasingCalibrator}
         mtq.set_quantizer_by_cfg(model, [{"quantizer_name": weight_quantizer, "cfg": cfg}])
-        return {
-            name: module.get_modelopt_state(properties_only=True)
-            for name, module in model.named_modules()
-            if isinstance(module, TensorQuantizer)
-        }
+        return _quantizer_states(model)
 
     assert configured("weight_quantizer") == configured("[w]eight_quantizer")
 
@@ -1595,11 +1624,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_configured_object_s
             mtq.set_quantizer_by_cfg(model, setting_entries)
             mtq.set_quantizer_by_cfg(model, entries)
         assert model[1] is model[0]
-        return {
-            name: module.get_modelopt_state(properties_only=True)
-            for name, module in model.named_modules()
-            if isinstance(module, TensorQuantizer)
-        }
+        return _quantizer_states(model)
 
     walked = configured("[0].weight_quantizer", "[1].weight_quantizer")
     assert configured("0.weight_quantizer", "1.weight_quantizer") == walked
