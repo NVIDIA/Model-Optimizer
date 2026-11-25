@@ -42,7 +42,7 @@ from huggingface_hub import snapshot_download
 from packaging.version import parse
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Container, Iterable
 from safetensors.torch import safe_open
 from torch.distributed import device_mesh
 from torch.distributed.checkpoint import HuggingFaceStorageReader
@@ -531,6 +531,7 @@ def _broadcast_load_group(
 
 def _group_sources_by_layer(
     ckpt_keys: "Iterable[str]",
+    indexed: "Container[str]",
     plan: dict | None,
     model_names: set[str],
     loadable: set[str],
@@ -538,11 +539,12 @@ def _group_sources_by_layer(
 ) -> tuple[dict[int, list[str]], list[str], list[str], set[str]]:
     """Bucket the checkpoint keys the load reads by the decoder layer their converted target lives in.
 
-    Keys are placed as Transformers' own loader places them (``convert_and_load_state_dict_in_model``),
-    so the FSDP2 load reads what ``from_pretrained`` loads: in its key order (``dot_natural_key``),
+    Keys are placed as Transformers' own loader places them (``convert_and_load_state_dict_in_model``):
     only into a name of ``model.state_dict()`` (``loadable``; not a non-persistent buffer), and a
     target a key fills one to one takes its first key only, while a converter's target takes every
-    key it fuses.
+    key it fuses. "First" is Transformers' key order (``dot_natural_key``), except that every key
+    the index lists (``indexed``) comes before one only a shard's header has: a header-only tensor
+    fills a target no indexed key does, and never replaces the indexed tensor FSDP2 always loaded.
 
     Returns ``(layer_sources, non_layer_sources, unplaced, targets)``: ``layer_sources[i]`` holds
     the keys targeting decoder layer ``i``, ``non_layer_sources`` holds root (embed/lm_head/norm)
@@ -550,23 +552,23 @@ def _group_sources_by_layer(
     weights the built model has no home for (an MTP head, an auxiliary tower). The names are kept,
     not just counted, so the export can copy them through: PTQ never touches them, but the exported
     checkpoint is still expected to contain them. ``targets`` holds the names some key loads into.
-    A key Transformers ignores -- a later source of a one-to-one target, or one for a non-persistent
-    buffer -- is in none of these: it is not read, and, naming the model's own tensor, not carried.
+    A key left out -- a later source of a one-to-one target, or one for a non-persistent buffer --
+    is in none of these: it is not read, and, naming the model's own tensor, not carried.
     """
     layer_sources: dict[int, list[str]] = {i: [] for i in range(len(layer_prefixes))}
     non_layer_sources: list[str] = []
     unplaced: list[str] = []
     targets: set[str] = set()
     one_to_one: dict[str, bool] = {}  # target -> whether its first key fills it one to one
-    for ckpt_key in sorted(ckpt_keys, key=dot_natural_key):
+    for ckpt_key in sorted(ckpt_keys, key=lambda k: (k not in indexed, dot_natural_key(k))):
         target, source_pattern, _ = (
             _resolve_target(plan, ckpt_key) if plan else (ckpt_key, None, [])
         )
         if target not in model_names:
             unplaced.append(ckpt_key)
             continue
-        # Transformers keeps the first key's load of a target: a one-to-one target ignores every
-        # later key, a converter's ignores a later one-to-one key.
+        # The first key's load of a target stands, as in Transformers: a one-to-one target ignores
+        # every later key, a converter's ignores a later one-to-one key.
         claimed = one_to_one.get(target)
         if target not in loadable or claimed or (claimed is not None and source_pattern is None):
             continue
@@ -1721,7 +1723,7 @@ def parallel_load_and_prepare_fsdp2(
     # own, so the stock plan is the only one.
     tensor_files = checkpoint_tensor_files(resolved_path)
     layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
-        tensor_files, plan, model_names, loadable, layer_prefixes
+        tensor_files, weight_map, plan, model_names, loadable, layer_prefixes
     )
     if unplaced:
         logger.debug(

@@ -436,29 +436,26 @@ def test_the_record_is_the_conversions_the_load_matched(tmp_path, request, monke
 
 
 @pytest.mark.parametrize("indexed", ["language_model.model.", "model.language_model."])
-def test_fsdp2_takes_the_source_from_pretrained_takes(tmp_path, gloo_group, indexed):
-    """Two keys of a shard name one parameter, with different values; only one is indexed. Both
-    loaders read the shard whole, and Transformers loads the key first in its order, not the
-    indexed one; FSDP2 loads that same key and doesn't overwrite it with the other."""
+def test_an_indexed_source_is_not_replaced_by_a_header_only_one(tmp_path, gloo_group, indexed):
+    """Two keys of a shard name one parameter, with different values, and the index lists one.
+    FSDP2 reads the shard whole, but loads the indexed tensor, as it did when it read the index
+    alone, whichever of the two comes first in Transformers' key order."""
     _tiny_llava_checkpoint(tmp_path)
     state = load_file(str(tmp_path / "model.safetensors"))
     (tmp_path / "model.safetensors").unlink()
     leaf = "layers.0.mlp.up_proj.weight"
-    for value, prefix in enumerate(("language_model.model.", "model.language_model.")):
+    spellings = ("language_model.model.", "model.language_model.")
+    for value, prefix in enumerate(spellings):
         state[prefix + leaf] = torch.full_like(state[f"language_model.model.{leaf}"], value)
     shard = "model-00001-of-00001.safetensors"
     save_file(state, str(tmp_path / shard), metadata={"format": "pt"})
-    other = next(p for p in ("language_model.model.", "model.language_model.") if p != indexed)
+    other = next(p for p in spellings if p != indexed)
     index = {"metadata": {}, "weight_map": {k: shard for k in state if k != other + leaf}}
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
 
-    expected = LlavaForConditionalGeneration.from_pretrained(str(tmp_path)).get_parameter(
-        f"model.language_model.{leaf}"
-    )
     loaded = _fsdp2_load(tmp_path).get_parameter(f"model.language_model.{leaf}")
     loaded = loaded.full_tensor() if isinstance(loaded, DTensor) else loaded
-    assert torch.equal(loaded.detach(), expected.detach())
-    assert torch.equal(loaded.detach(), torch.zeros_like(loaded))  # the first key, either way
+    assert torch.equal(loaded.detach(), torch.full_like(loaded, spellings.index(indexed)))
 
 
 def test_a_key_for_a_non_persistent_buffer_neither_loads_nor_renames_the_export(
