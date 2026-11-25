@@ -1,0 +1,144 @@
+[
+  {
+    "name": "layer 0 MLP input",
+    "path": "/workspace/Workspace/ammo2/scratch/qwen35_9b_mlp_input_layer0.pt",
+    "test_amax": 3.078125,
+    "test_shape": [
+      256,
+      4096
+    ],
+    "sig_power": 0.017077559605240822,
+    "n_calib_pool_seqs": 2131,
+    "n_calib_pool_tokens": 1055231,
+    "oracle_input_scale": 0.02876451020572512,
+    "oracle_mse": 0.00014605378964915872,
+    "oracle_snr_db": 20.679129797437902,
+    "amax_curve": [
+      {
+        "n_calib_seqs": 512,
+        "tokens_mean": 253512.0,
+        "amax_mean": 4.15625,
+        "amax_std": 0.0,
+        "mse_mean": 0.0001464574015699327,
+        "mse_std": 0.0,
+        "snr_mean_db": 20.667144851457927
+      },
+      {
+        "n_calib_seqs": 1024,
+        "tokens_mean": 505841.0,
+        "amax_mean": 4.15625,
+        "amax_std": 0.0,
+        "mse_mean": 0.0001464574015699327,
+        "mse_std": 0.0,
+        "snr_mean_db": 20.667144851457927
+      },
+      {
+        "n_calib_seqs": 2048,
+        "tokens_mean": 1013451.0,
+        "amax_mean": 4.15625,
+        "amax_std": 0.0,
+        "mse_mean": 0.0001464574015699327,
+        "mse_std": 0.0,
+        "snr_mean_db": 20.667144851457927
+      }
+    ],
+    "percentile_results": {
+      "p0.99000": {
+        "amax": 0.431640625,
+        "mse": 0.0011250379029661417,
+        "snr_db": 11.812586555686453
+      },
+      "p0.99900": {
+        "amax": 0.8828125,
+        "mse": 0.000406003586249426,
+        "snr_db": 16.23895940074718
+      },
+      "p0.99990": {
+        "amax": 1.7421875,
+        "mse": 0.00017096431110985577,
+        "snr_db": 19.99520349161952
+      },
+      "p0.99999": {
+        "amax": 2.53125,
+        "mse": 0.00014771461428608745,
+        "snr_db": 20.630023450372352
+      }
+    },
+    "best_amax_n_calib_seqs": 512,
+    "best_amax_snr": 20.667144851457927,
+    "final_amax_snr": 20.667144851457927,
+    "delta_db_best_vs_final": 0.0,
+    "delta_db_oracle_vs_final": 0.011984945979975237
+  },
+  {
+    "name": "layer 31 MLP input",
+    "path": "/workspace/Workspace/ammo2/scratch/qwen35_9b_mlp_input_layer31.pt",
+    "test_amax": 46.0,
+    "test_shape": [
+      256,
+      4096
+    ],
+    "sig_power": 1.253166913986206,
+    "n_calib_pool_seqs": 2131,
+    "n_calib_pool_tokens": 1055231,
+    "oracle_input_scale": 0.028061462566256523,
+    "oracle_mse": 0.010250180959701538,
+    "oracle_snr_db": 20.872773875308155,
+    "amax_curve": [
+      {
+        "n_calib_seqs": 512,
+        "tokens_mean": 253512.0,
+        "amax_mean": 53.0,
+        "amax_std": 0.0,
+        "mse_mean": 0.010388772934675217,
+        "mse_std": 0.0,
+        "snr_mean_db": 20.81444666066913
+      },
+      {
+        "n_calib_seqs": 1024,
+        "tokens_mean": 505841.0,
+        "amax_mean": 53.0,
+        "amax_std": 0.0,
+        "mse_mean": 0.010388772934675217,
+        "mse_std": 0.0,
+        "snr_mean_db": 20.81444666066913
+      },
+      {
+        "n_calib_seqs": 2048,
+        "tokens_mean": 1013451.0,
+        "amax_mean": 53.0,
+        "amax_std": 0.0,
+        "mse_mean": 0.010388772934675217,
+        "mse_std": 0.0,
+        "snr_mean_db": 20.81444666066913
+      }
+    ],
+    "percentile_results": {
+      "p0.99000": {
+        "amax": 2.890625,
+        "mse": 0.3364633619785309,
+        "snr_db": 5.710711400229015
+      },
+      "p0.99900": {
+        "amax": 7.03125,
+        "mse": 0.22863440215587616,
+        "snr_db": 7.388673417644037
+      },
+      "p0.99990": {
+        "amax": 34.0,
+        "mse": 0.01425390224903822,
+        "snr_db": 19.44075144002789
+      },
+      "p0.99999": {
+        "amax": 43.5,
+        "mse": 0.010318510234355927,
+        "snr_db": 20.843919208944335
+      }
+    },
+    "best_amax_n_calib_seqs": 512,
+    "best_amax_snr": 20.81444666066913,
+    "final_amax_snr": 20.81444666066913,
+    "delta_db_best_vs_final": 0.0,
+    "delta_db_oracle_vs_final": 0.058327214639025016
+  }
+]
