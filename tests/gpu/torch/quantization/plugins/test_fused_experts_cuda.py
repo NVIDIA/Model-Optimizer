@@ -168,6 +168,7 @@ def test_grouped_iq_repair_batches_native_scale_graphs(name, dtype):
         policy.prepare(experts)
         quantizers = experts.gate_up_proj_weight_quantizers
         states = [q._local_repair_state for q in quantizers]
+        assert all(state.projection_counts == {} for state in states)
         with torch.no_grad():
             for state in states:
                 state.global_delta.uniform_(-0.2, 0.2)
@@ -181,6 +182,7 @@ def test_grouped_iq_repair_batches_native_scale_graphs(name, dtype):
         with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as trace:
             actual = experts._quantize_grouped_weight(weight, quantizers)
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+        assert states[0].projection_counts == {"materialized": 1, "materialized_grouped": 1}
         actual_grads = torch.autograd.grad(actual, fields, gradient)
         for actual_grad, reference_grad in zip(actual_grads, reference_grads):
             torch.testing.assert_close(actual_grad, reference_grad, rtol=0, atol=0)
@@ -192,6 +194,7 @@ def test_grouped_iq_repair_batches_native_scale_graphs(name, dtype):
         expected = reference.detach().clone()
         expected[0].mul_(2)
         torch.testing.assert_close(hooked, expected, rtol=0, atol=0)
+        assert states[0].projection_counts == {"materialized": 2, "materialized_grouped": 1}
     finally:
         if handle is not None:
             handle.remove()

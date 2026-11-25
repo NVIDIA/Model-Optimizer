@@ -284,6 +284,8 @@ class IQScaleState(nn.Module):
             else self.weight_shape
         )
         self.field_prefix = field_prefix
+        # Local execution diagnostics live only as long as this prepared representation.
+        self.projection_counts = {}
         packed = (
             self.format.pack(processed_weight, quantizer)
             .detach()

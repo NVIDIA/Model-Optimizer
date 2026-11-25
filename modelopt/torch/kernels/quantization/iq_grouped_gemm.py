@@ -236,7 +236,14 @@ class _IQGrouped(torch.autograd.Function):
             ds = torch.empty_like(steps)
             n, k = ctx.meta["N"], ctx.meta["K"]
             _grouped_scales[(len(packeds), triton.cdiv(n, _SCALE_TILE_N), triton.cdiv(k, _TILE_K))](
-                inputs, gradient, pointers, grid, offsets, ds, **ctx.meta
+                inputs,
+                gradient,
+                pointers,
+                grid,
+                offsets,
+                ds,
+                enable_fp_fusion=False,
+                **ctx.meta,
             )
         if ctx.has_bias and ctx.needs_input_grad[6]:
             n = ctx.meta["N"]

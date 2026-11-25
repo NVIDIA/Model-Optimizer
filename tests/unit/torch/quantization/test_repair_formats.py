@@ -60,6 +60,7 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
     if dtype == torch.float16:
         state.global_base.fill_(2**-24)
     reference = copy.deepcopy(state)
+    assert state.projection_counts == reference.projection_counts == {}
     saved, unpacked = [], []
     with torch.autograd.graph.saved_tensors_hooks(
         lambda value: saved.append((value.numel(), value.dtype)) or value,
@@ -67,6 +68,8 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
     ):
         # TensorQuantizer can expose an equivalent block view of the logical weight.
         actual = state(model._parameters["weight"].reshape(4, 256))
+    assert state.projection_counts == {"materialized": 1}
+    assert reference.projection_counts == {}
     fmt = IQ_FORMAT_REGISTRY[name]
     levels, _ = fmt.decode_int8(reference.packed, torch.tensor(reference.weight_shape))
     steps = reference.projected_steps()
@@ -182,6 +185,7 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
         finite_state = IQScaleState(
             quantizer, processed_weight, weight.shape, field_prefix="weight_quantizer"
         )
+        assert finite_state.projection_counts == {}
         with torch.no_grad():
             finite_state.global_delta.fill_(0.25)
             finite_state.local_delta.fill_(1)
@@ -266,6 +270,16 @@ def test_packed_replay_gate_preserves_weight_quantizer_behavior(monkeypatch, beh
     finally:
         if handle is not None:
             handle.remove()
+        policy.close()
+    monkeypatch.undo()
+    quantizer.enable()
+    try:
+        policy.prepare(model)
+        fresh = quantizer._local_repair_state
+        assert fresh.projection_counts == {}
+        model(inputs)
+        assert fresh.projection_counts == {"materialized": 1}
+    finally:
         policy.close()
 
 
