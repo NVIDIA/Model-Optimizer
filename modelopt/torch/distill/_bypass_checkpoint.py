@@ -80,15 +80,28 @@ def _model_hash(model):
             value is not None and value.is_meta
             for value in (*module._parameters.values(), *module._buffers.values())
         )
+        if materialize:
+            from modelopt.torch.quantization.nn import TensorQuantizer
+
         if materialize and (
             not requires_weight_materialization(module, model, names)
             or any(
                 value is not None and value.is_meta
                 for child in module.modules()
                 if child is not module
-                for value in child._parameters.values()
+                for value in (
+                    *child._parameters.values(),
+                    *(
+                        buffer
+                        for key, buffer in child._buffers.items()
+                        if not isinstance(child, TensorQuantizer)
+                        and key not in child._non_persistent_buffers_set
+                    ),
+                )
             )
         ):
+            # Quantizer buffers belong with this weight owner. Other persistent
+            # descendant state needs its own bounded access window.
             # The canonical context walks descendants; do not silently onload a
             # frozen model under a composite/ancestor preload owner.
             raise ValueError(
