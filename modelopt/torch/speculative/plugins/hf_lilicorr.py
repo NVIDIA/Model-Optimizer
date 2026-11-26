@@ -199,10 +199,13 @@ class HFLiLiCorrModel(HFDFlashModel):
         """
         out = super()._compute_loss(ctx)
         batch, targets = ctx.batch, ctx.targets
+        top_logits, top_ids = ctx.topk("final", self.dflash_module.lilicorr.candidate_topk)
         # The backbone's own supervision, before its position weighting, so both losses
         # train the same positions.
         lilicorr_loss, accuracy, metrics = self._compute_lilicorr_loss(
-            logits=ctx.logits.final,
+            top_ids=top_ids,
+            top_logits=top_logits,
+            lse=ctx.lse("final"),
             target_ids=targets.token_ids,
             # Block position 0 is the anchor -- the one row whose input embedding is a real
             # verified token -- so the lattice covers positions 1..bs-1.
@@ -221,10 +224,17 @@ class HFLiLiCorrModel(HFDFlashModel):
         metrics["origin_accuracy"] = out.accuracy
         return LossOutput(out.loss + lilicorr_loss, accuracy, metrics)
 
+    def _head_request(self):
+        """The backbone loss's statistics, and the candidates the lattice scores."""
+        candidates = self.dflash_module.lilicorr.candidate_topk
+        return super()._head_request().extend(grads={"lse"}, top_k=candidates)
+
     def _compute_lilicorr_loss(
         self,
         *,
-        logits,
+        top_ids,
+        top_logits,
+        lse,
         target_ids,
         slot_mask,
         anchor_positions,
@@ -233,6 +243,10 @@ class HFLiLiCorrModel(HFDFlashModel):
         base_outputs,
     ):
         """Score the candidate lattice and evaluate the LiLiCorr objective.
+
+        ``top_ids`` / ``top_logits`` are the backbone's top-k candidates and their
+        (differentiable) logits per block position, ``[B, N, block_size, k]`` in descending
+        order, and ``lse`` their rows' logsumexp, ``[B, N, block_size]``.
 
         Returns ``(loss, accuracy, metrics)``. ``loss`` already carries the absolute
         term weights, ``accuracy`` is the greedy path-prefix fraction, and ``metrics``
@@ -243,15 +257,14 @@ class HFLiLiCorrModel(HFDFlashModel):
         bsz, n_blocks, block_size = target_ids.shape
         num_slots = block_size - 1
         topk = head.candidate_topk
-        vocab = logits.shape[-1]
         batch_blocks = bsz * n_blocks
 
-        if topk > vocab:
-            raise ValueError(f"lilicorr_candidate_topk={topk} exceeds the vocabulary size {vocab}.")
+        def slots(per_position):
+            """Block positions 1..block_size-1 of a ``[B, N, block_size, ...]`` tensor."""
+            return per_position.view(bsz, n_blocks, block_size, -1)[:, :, 1:].reshape(
+                batch_blocks, num_slots, -1
+            )
 
-        logits_slots = logits.view(bsz, n_blocks, block_size, vocab)[:, :, 1:, :].reshape(
-            batch_blocks, num_slots, vocab
-        )
         ground_truth = target_ids[:, :, 1:]
         gt_flat = ground_truth.reshape(batch_blocks, num_slots)
         # A block is trained only when every one of its slots is a supervised position,
@@ -259,23 +272,18 @@ class HFLiLiCorrModel(HFDFlashModel):
         valid_block = slot_mask.all(dim=-1).reshape(batch_blocks, 1)
 
         with torch.no_grad():
-            # topk already returns candidates in descending log-probability order, which
-            # is the rank order `rank_embedding` is indexed by. Taken on the logits
-            # rather than on a log_softmax of them: the map is strictly monotone per row,
-            # so the ids are identical, and it avoids a vocab-wide float32 buffer.
-            _, candidate_ids = torch.topk(logits_slots.detach(), k=topk, dim=-1)
+            # Descending logits, the same order as descending log-probabilities: the rank
+            # order `rank_embedding` is indexed by.
+            candidate_ids = slots(top_ids)
             gt_hits = candidate_ids == gt_flat.unsqueeze(-1)
             gt_in_slot = gt_hits.any(dim=-1)
             gt_indices = gt_hits.long().argmax(dim=-1)
 
-        # Soft-value channel. The candidate *ids* are the hard top-k, so the forward
-        # values are unchanged; recomputing their log-probs from the LIVE logits
-        # re-attaches the autograd graph, which is how the lattice terms reach the
-        # drafter body and not only the head. logsumexp rather than a full log_softmax
-        # so backward needs no second vocab-sized buffer.
-        candidate_logits = torch.gather(logits_slots, 2, candidate_ids).float()
-        log_denominator = torch.logsumexp(logits_slots.float(), dim=-1, keepdim=True)
-        candidate_log_probs = candidate_logits - log_denominator
+        # Soft-value channel. The candidate *ids* are the hard top-k; their log-probs keep
+        # the gradient of the live logits, which is how the lattice terms reach the drafter
+        # body and not only the head. A logsumexp rather than a full log_softmax, so backward
+        # needs no second vocab-sized buffer.
+        candidate_log_probs = slots(top_logits).float() - slots(lse.unsqueeze(-1))
 
         draft_slots = draft_hidden.view(bsz, n_blocks, block_size, -1)[:, :, 1:, :]
         start_scores, pair_scores = module.score_lattice(

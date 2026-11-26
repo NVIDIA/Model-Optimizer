@@ -31,6 +31,8 @@ Changelog
 
 *Speculative Decoding*
 
+- Add ``dflash_fused_loss`` to the DFlash config. DFlash, DFlash2 and LiLiCorr training then computes its loss in row chunks fused with the frozen ``lm_head`` projection instead of materializing the draft's full-vocabulary logits, which saves time and memory on large vocabularies.
+
 *Megatron Framework (M-LM / M-Bridge)*
 
 *Misc*

@@ -40,7 +40,8 @@
 
 A training step's supervision: which token each block position is trained on and where
 (:func:`_block_targets`), how the positions are weighted (:func:`_block_position_weights`),
-and :class:`LossContext`, which carries them with the draft's logits to the loss.
+and :class:`LossContext`, which carries them with the draft's logits to the loss, or
+:class:`FusedLossContext`, which carries per-row statistics of logits never materialized.
 
 The divergences a block objective is built from live in :data:`DIVERGENCES`. An objective
 is an ordered list of ``(name, weight, term)`` entries, summed left to right by
@@ -58,11 +59,13 @@ from ..losses import _lk_lambda_loss
 
 if TYPE_CHECKING:
     # Only for annotations: hf_dflash imports this module, so a runtime import would cycle.
+    from .dflash_head_stats import HeadRequest, HeadStats
     from .hf_dflash import DraftBatch
 
 __all__ = [
     "DIVERGENCES",
     "DraftLogits",
+    "FusedLossContext",
     "LossContext",
     "LossOutput",
     "objective_loss",
@@ -196,9 +199,9 @@ def _block_position_weights(mask, scheme, first, *, decay_factor, dpace_alpha, t
     return mask
 
 
-def _masked_top1(logits, target_ids, mask):
-    """Top-1 accuracy of ``logits`` against ``target_ids`` where ``mask`` is set (0-dim)."""
-    correct = (logits.argmax(dim=-1) == target_ids) & (mask > 0.5)
+def _masked_accuracy(preds, target_ids, mask):
+    """Fraction of ``preds`` equal to ``target_ids`` where ``mask`` is set (0-dim)."""
+    correct = (preds == target_ids) & (mask > 0.5)
     return correct.sum().float() / (mask.sum() + 1e-6)
 
 
@@ -291,12 +294,16 @@ class LossContext:
         self._ce_grad = ce_grad and torch.is_grad_enabled()
         self._tvd_chunk = tvd_chunk
         self._ce = {}
+        self._kd = {}
         self._tvd = {}
         self._teacher = None
+        self._weigh(weighting)
+
+    def _weigh(self, weighting):
+        """Set ``weights`` and ``weight_sum``; D-PACE reads the draft's confidence off ``ce``."""
+        mask = self.targets.mask
         self.weights = _block_position_weights(
-            targets.mask,
-            **weighting,
-            target_ce=lambda: self.ce("final").detach().view(targets.mask.shape),
+            mask, **weighting, target_ce=lambda: self.ce("final").detach().view(mask.shape)
         )
         self.weight_sum = self.weights.sum() + 1e-6
 
@@ -304,6 +311,16 @@ class LossContext:
     def trainable(self) -> bool:
         """Whether the weights leave anything to train on (reads the device once)."""
         return bool(self.weight_sum > 1.0)
+
+    @property
+    def has_head(self) -> bool:
+        """Whether a head sits between the backbone and the served distribution."""
+        return self.logits.backbone is not self.logits.final
+
+    @property
+    def draft_outputs(self) -> tuple:
+        """The draft outputs a zero loss reaches the draft through (``_draft_zero_loss``)."""
+        return (self.logits.final,)
 
     def reduce(self, per_token: torch.Tensor) -> torch.Tensor:
         """``per_token`` ([B * N * bs]) averaged under the step's position weights: 0-dim.
@@ -331,6 +348,33 @@ class LossContext:
                 )
         return self._ce[source]
 
+    def kd(self, source: str) -> torch.Tensor:
+        """Per-token cross-entropy against the base model's distribution: [B * N * bs]."""
+        if source not in self._kd:
+            logits = self.flat_logits(source)
+            target_soft = torch.softmax(self.teacher().reshape(logits.shape), dim=-1)
+            draft_logsoft = torch.log_softmax(logits, dim=-1)
+            self._kd[source] = -(target_soft * draft_logsoft).sum(dim=-1)
+        return self._kd[source]
+
+    def top1(self, source: str) -> torch.Tensor:
+        """Each block position's most likely token under ``logits.<source>``: [B, N, bs]."""
+        return getattr(self.logits, source).argmax(dim=-1)
+
+    def topk(self, source: str, k: int):
+        """``(logits, ids)`` of each block position's ``k`` likeliest tokens: [B, N, bs, k].
+
+        In descending order; the logits keep their gradient.
+        """
+        logits = getattr(self.logits, source)
+        if k > logits.shape[-1]:
+            raise ValueError(f"top_k={k} exceeds the vocabulary size {logits.shape[-1]}.")
+        return logits.topk(k, dim=-1)
+
+    def lse(self, source: str) -> torch.Tensor:
+        """``logsumexp`` of ``logits.<source>`` per block position, in fp32: [B, N, bs]."""
+        return torch.logsumexp(getattr(self.logits, source).float(), dim=-1)
+
     def teacher(self):
         """The base model's logits for every label position: [B, N, bs, V]."""
         if self._teacher is None:
@@ -347,6 +391,99 @@ class LossContext:
         return self._tvd[source]
 
 
+class FusedLossContext(LossContext):
+    """A ``LossContext`` whose draft logits are read through one fused lm_head pass.
+
+    The logits are never materialized: ``stats`` holds the per-row statistics ``request``
+    names, which ``fused_head_stats`` computed in row chunks fused with the projection. Only
+    a head-less variant trains this way, so ``final`` and ``backbone`` are the same logits
+    and both read ``stats``. What needs the logits whole, such as ``tvd``, is refused.
+    """
+
+    def __init__(
+        self,
+        batch: "DraftBatch",
+        stats: "HeadStats",
+        request: "HeadRequest",
+        targets: _BlockTargets,
+        *,
+        weighting: dict,
+        teacher,
+    ):
+        """Weigh the step's block positions; ``stats`` are ``request``'s, the rest as ``LossContext``.
+
+        It holds no ``logits``, so whatever reads them fails here rather than computing
+        something else.
+        """
+        self.batch = batch
+        self.stats = stats
+        self.request = request
+        self.targets = targets
+        self._teacher_fn = teacher
+        self._teacher = None
+        self._weigh(weighting)
+
+    @property
+    def has_head(self) -> bool:
+        """Never: a variant with a head cannot train on the fused pass."""
+        return False
+
+    @property
+    def draft_outputs(self) -> tuple:
+        """The draft's hidden states, the only draft output the fused pass leaves."""
+        return (self.batch.hidden,)
+
+    def _stat(self, source, name):
+        """``stats.<name>``, refusing an unknown source or a statistic the pass did not take."""
+        if source not in DraftLogits._fields:
+            raise ValueError(
+                f"Unknown logits source {source!r}; choose from {DraftLogits._fields}."
+            )
+        value = getattr(self.stats, name)
+        if value is None:
+            raise ValueError(f"The fused pass did not compute {name}; add it to _head_request.")
+        return value
+
+    def flat_logits(self, source: str) -> torch.Tensor:
+        """Refused: the fused pass never materializes the logits."""
+        raise ValueError(
+            "dflash_fused_loss never materializes the draft's logits; read their per-row "
+            "statistics (ce, kd, top1, topk, lse) instead."
+        )
+
+    def tvd(self, source):
+        """Refused: the distance to the teacher needs the draft's whole distribution."""
+        return self.flat_logits(source)
+
+    def ce(self, source: str) -> torch.Tensor:
+        """Per-token cross-entropy on the labels, from the fused pass: [B * N * bs]."""
+        return self._stat(source, "hard_ce")
+
+    def kd(self, source: str) -> torch.Tensor:
+        """Per-token cross-entropy against the base model, from the fused pass: [B * N * bs]."""
+        return self._stat(source, "kd_ce")
+
+    def top1(self, source: str) -> torch.Tensor:
+        """Each block position's most likely token, from the fused pass: [B, N, bs]."""
+        return self._stat(source, "top1").view(self.targets.mask.shape)
+
+    def topk(self, source: str, k: int):
+        """``(logits, ids)`` of the top ``k`` tokens, from the fused pass: [B, N, bs, k]."""
+        if k != self.request.top_k:
+            raise ValueError(
+                f"The fused pass took the top {self.request.top_k} tokens, not {k}; request "
+                "them in _head_request."
+            )
+        shape = (*self.targets.mask.shape, k)
+        return self._stat(source, "top_logits").view(shape), self._stat(source, "top_ids").view(
+            shape
+        )
+
+    def lse(self, source: str) -> torch.Tensor:
+        """``logsumexp`` of the logits per block position, from the fused pass: [B, N, bs]."""
+        return self._stat(source, "lse").view(self.targets.mask.shape)
+
+
 class _Divergence:
     """A loss term on one logits source: ``term.loss(ctx, source)`` -> 0-dim loss.
 
@@ -355,11 +492,14 @@ class _Divergence:
     term cannot pick the wrong mask or denominator. A term whose value is not a weighted
     mean of per-position ones -- a blend of other terms' reduced values -- overrides
     ``loss`` instead. ``needs_teacher``: it reads the base model's distribution.
-    ``needs_ce_grad``: it backpropagates through ``ctx.ce``.
+    ``needs_ce_grad``: it backpropagates through ``ctx.ce``. ``head_stat``: the one per-row
+    statistic of the logits it reads, which ``dflash_fused_loss`` computes for it; ``None``
+    when it needs more than that, so the fused pass cannot serve it.
     """
 
     needs_teacher = False
     needs_ce_grad = False
+    head_stat = None
 
     def per_token(self, ctx, source):
         """The term's value at each block position: [B * N * bs]."""
@@ -374,6 +514,7 @@ class _CrossEntropy(_Divergence):
     """``-log q(gold)``: cross-entropy on the labels."""
 
     needs_ce_grad = True
+    head_stat = "hard_ce"
 
     def per_token(self, ctx, source):
         return ctx.ce(source)
@@ -383,12 +524,10 @@ class _SoftCrossEntropy(_Divergence):
     """Cross-entropy against the base model's distribution (logit distillation)."""
 
     needs_teacher = True
+    head_stat = "kd_ce"
 
     def per_token(self, ctx, source):
-        logits = ctx.flat_logits(source)
-        target_soft = torch.softmax(ctx.teacher().reshape(logits.shape), dim=-1)
-        draft_logsoft = torch.log_softmax(logits, dim=-1)
-        return -(target_soft * draft_logsoft).sum(dim=-1)
+        return ctx.kd(source)
 
 
 class _TeacherTotalVariation(_Divergence):
@@ -404,6 +543,7 @@ class _LabelTotalVariation(_Divergence):
     """``1 - q(gold)``: total variation to the one-hot label, the per-position rejection rate."""
 
     needs_ce_grad = True
+    head_stat = "hard_ce"
 
     def per_token(self, ctx, source):
         return 1.0 - torch.exp(-ctx.ce(source))
@@ -429,6 +569,7 @@ class _AcceptanceBlend(_Divergence):
     """
 
     needs_ce_grad = True
+    head_stat = "hard_ce"
 
     def __init__(self, scale, decay):
         """Blend with ``s = scale`` and ``d = decay``."""

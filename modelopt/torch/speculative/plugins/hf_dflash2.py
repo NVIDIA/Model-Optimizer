@@ -18,7 +18,7 @@
 DFlash2 differs from DFlash only in the draft module (grouped dynamic convolutions
 around every sublayer, plus a candidate selector) and in one extra loss term, so
 this wrapper reuses ``HFDFlashModel``'s forward wholesale and overrides just
-:meth:`_build_objective` and :meth:`_compute_loss`.
+:meth:`_build_objective`, :meth:`_head_request` and :meth:`_compute_loss`.
 
 The convolutions need no supervision of their own: they sit inside the backbone
 and are trained by the backbone loss. The selector does, because at serving time
@@ -90,13 +90,30 @@ class HFDFlash2Model(HFDFlashModel):
 
         return DFlash2Exporter(self)
 
+    def _head_request(self):
+        """The backbone loss's statistics, and the top-k candidates the selector scores."""
+        request = super()._head_request()
+        if self.dflash_selector_loss_alpha <= 0:
+            return request
+        return request.extend(top_k=self.dflash_module.candidate_selector.top_k)
+
     def _selector_loss(
-        self, logits, target_ids, hidden, predecessor_ids, supervised_mask, loss_weights, weight_sum
+        self,
+        unary_logits,
+        candidate_ids,
+        target_ids,
+        hidden,
+        predecessor_ids,
+        supervised_mask,
+        loss_weights,
+        weight_sum,
     ):
         """Cross-entropy over the selector's candidate set, and its top-1 accuracy.
 
         Args:
-            logits: Backbone logits per block position ``[B, N, block_size, V]``.
+            unary_logits: The backbone's logits of its top-k candidates per block position
+                ``[B, N, block_size, k]``, differentiable.
+            candidate_ids: Those candidates' ids, in descending logit order, same shape.
             target_ids: Gold token ids ``[B, N, block_size]``.
             hidden: Backbone hidden states ``[B, N, block_size, H]``.
             predecessor_ids: Teacher-forced predecessor ids ``[B, N, block_size]``.
@@ -112,8 +129,6 @@ class HFDFlash2Model(HFDFlashModel):
         """
         selector = self.dflash_module.candidate_selector
         top_k = selector.top_k
-
-        unary_logits, candidate_ids = logits.topk(top_k, dim=-1)
 
         # Train on the strict top-k, the candidate set serving actually builds. A gold
         # token the backbone did not propose is a backbone recall failure, not a
@@ -193,8 +208,12 @@ class HFDFlash2Model(HFDFlashModel):
 
         # The backbone's own mask and position weights: a block position's choice only
         # matters if every earlier one was accepted, which decay / D-PACE model.
+        unary_logits, candidate_ids = ctx.topk(
+            "backbone", self.dflash_module.candidate_selector.top_k
+        )
         selector_loss, selector_accuracy, selector_coverage = self._selector_loss(
-            ctx.logits.backbone,
+            unary_logits,
+            candidate_ids,
             targets.token_ids,
             batch.hidden.reshape(bsz, n_blocks, block_size, -1),
             predecessor_ids,

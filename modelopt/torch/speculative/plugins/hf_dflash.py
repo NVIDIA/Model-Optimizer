@@ -85,13 +85,15 @@ from transformers.utils import ModelOutput
 from ..dflash.conversion import DFlashDMRegistry
 from ..dflash.dflash_model import DFlashModel
 from .dflash_flex_attention import build_draft_block_mask
+from .dflash_head_stats import HeadRequest, HeadStats, fused_head_stats, fused_projection
 from .dflash_losses import (
     DraftLogits,
+    FusedLossContext,
     LossContext,
     LossOutput,
     _block_targets,
     _first_predicted_position,
-    _masked_top1,
+    _masked_accuracy,
     _tvd_chunk,
     objective_loss,
     objective_term,
@@ -142,6 +144,11 @@ def _gather_rows(x, positions):
     """``x[b, positions[b, ...]]`` for ``x`` [B, seq, D] and ``positions`` [B, ...]."""
     idx = positions.reshape(positions.shape[0], -1, 1).expand(-1, -1, x.size(-1))
     return torch.gather(x, 1, idx).reshape(*positions.shape, x.size(-1))
+
+
+def _prediction_rows(label_positions):
+    """The base rows whose next-token logits predict the tokens at ``label_positions``."""
+    return (label_positions - 1).clamp(min=0)
 
 
 def _draft_mask_mod(seq_len, anchor_positions, block_keep_mask, block_size, window, causal):
@@ -452,6 +459,8 @@ class HFDFlashModel(DFlashModel):
             self.dflash_module.compile_body()
 
         self._objective = self._build_objective(config)
+        if self.dflash_fused_loss:
+            self._check_fused_loss()
         # Here, not in DFlashModel.modify: only here is it known whether the variant
         # pins the scheme, and a pin the loss cannot see afterwards is what made the
         # D-PACE notice below name the wrong field for DSpark and Domino.
@@ -486,6 +495,31 @@ class HFDFlashModel(DFlashModel):
     def _build_objective(self, config):
         """The block objective, ``[(name, weight, term)]``: KD from the base model, or CE."""
         return [objective_term("kd" if config.dflash_self_logit_distillation else "ce", 1.0)]
+
+    def _check_fused_loss(self):
+        """Refuse ``dflash_fused_loss`` where it would skip a head, a term or a gradient."""
+        owner = next(cls for cls in type(self).__mro__ if "_draft_logits" in vars(cls))
+        if owner is not HFDFlashModel:
+            raise ValueError(
+                f"dflash_fused_loss is not supported by {type(self).__name__}: "
+                f"{owner.__name__}._draft_logits puts a head after the backbone, which the "
+                "fused lm_head pass would skip. Unset dflash_fused_loss."
+            )
+        if unserved := [name for name, _, term in self._objective if term.head_stat is None]:
+            raise ValueError(
+                f"dflash_fused_loss cannot compute the objective's {unserved} terms, which "
+                "need the draft's logits whole. Unset dflash_fused_loss."
+            )
+        head = self._base_model_lm_head
+        try:
+            fused_projection(head)
+        except ValueError as err:
+            raise ValueError(f"dflash_fused_loss: {err} Unset dflash_fused_loss.") from None
+        if head.weight.requires_grad:
+            raise ValueError(
+                "dflash_fused_loss computes no gradient for lm_head, which is trainable here; "
+                "it needs dflash_freeze_base_model=True."
+            )
 
     def _base_device(self):
         """Device the frozen base model sits on. ``meta`` during a from_pretrained restore."""
@@ -847,13 +881,24 @@ class HFDFlashModel(DFlashModel):
         projection to just those vocab entries. ``label_positions`` is keyword-only, so every
         call says which positions it passes: handing it the logit rows reads one row early.
         """
-        positions = (label_positions - 1).clamp(min=0)
+        positions = _prediction_rows(label_positions)
         if base_outputs.logits is not None:
             if token_ids is None:
                 return _gather_rows(base_outputs.logits, positions)
             batch = torch.arange(positions.shape[0], device=positions.device)
             batch = batch.view(-1, *[1] * positions.dim())
             return base_outputs.logits[batch, positions.unsqueeze(-1), token_ids]
+        lm_head = self._base_model_lm_head
+        rows = self._teacher_hidden(base_outputs, label_positions=label_positions)
+        if token_ids is None:
+            return lm_head(rows)
+        logits = torch.einsum("...h,...kh->...k", rows, lm_head.weight[token_ids])
+        bias = getattr(lm_head, "bias", None)
+        return logits if bias is None else logits + bias[token_ids]
+
+    @torch.no_grad()
+    def _teacher_hidden(self, base_outputs, *, label_positions):
+        """The base model's final hidden that predicts the tokens at ``label_positions``: [B, ..., H]."""
         if base_outputs.base_hidden is None:
             raise ValueError(
                 "This objective needs the base model's distribution, but the batch carries "
@@ -862,13 +907,9 @@ class HFDFlashModel(DFlashModel):
         lm_head = self._base_model_lm_head
         # A producer can store the hidden states in a wider dtype than the target's weights.
         # Cast before the final norm too, which online training runs in the target's dtype.
+        positions = _prediction_rows(label_positions)
         rows = _gather_rows(base_outputs.base_hidden, positions).to(lm_head.weight.dtype)
-        rows = _apply_base_final_norm(rows, base_outputs.base_hidden_prenorm, self._base_model_norm)
-        if token_ids is None:
-            return lm_head(rows)
-        logits = torch.einsum("...h,...kh->...k", rows, lm_head.weight[token_ids])
-        bias = getattr(lm_head, "bias", None)
-        return logits if bias is None else logits + bias[token_ids]
+        return _apply_base_final_norm(rows, base_outputs.base_hidden_prenorm, self._base_model_norm)
 
     def _online_base_outputs(
         self,
@@ -922,8 +963,8 @@ class HFDFlashModel(DFlashModel):
 
         Overriding this puts a head between the backbone and the served distribution, so
         the logits have to exist: a loss that reaches them by projecting ``batch.hidden``
-        itself, as a fused lm_head would, reproduces the backbone's and silently drops the
-        head. Whoever adds such a path keys its refusal on who overrides this method.
+        itself, as ``dflash_fused_loss`` does, reproduces the backbone's and silently drops
+        the head. ``_check_fused_loss`` refuses a variant that overrides this method.
         """
         logits = self._base_model_lm_head(batch.hidden)
         logits = logits.view(*batch.anchors.shape, self.dflash_block_size, -1)
@@ -935,7 +976,7 @@ class HFDFlashModel(DFlashModel):
         return self.dflash_loss_objective
 
     def _loss_context(self, batch: DraftBatch) -> LossContext:
-        """The step's labels, the draft's logits and the position weights."""
+        """The step's labels, the draft's logits, or their fused statistics, and the weights."""
         targets = _block_targets(
             batch.input_ids,
             batch.anchors,
@@ -944,21 +985,63 @@ class HFDFlashModel(DFlashModel):
             self.dflash_block_size,
             self._label_shift,
         )
+        weighting = {
+            "scheme": self._position_weighting,
+            "first": _first_predicted_position(self._label_shift),
+            "decay_factor": self.dflash_loss_decay_factor,
+            "dpace_alpha": self.dflash_dpace_alpha,
+        }
+        teacher = functools.partial(
+            self._teacher_logits, batch.base_outputs, label_positions=targets.positions
+        )
+        if self.dflash_fused_loss:
+            request = self._head_request()
+            stats = self._draft_head_stats(batch, targets, request)
+            return FusedLossContext(
+                batch, stats, request, targets, weighting=weighting, teacher=teacher
+            )
         return LossContext(
             batch,
             self._draft_logits(batch),
             targets,
-            weighting={
-                "scheme": self._position_weighting,
-                "first": _first_predicted_position(self._label_shift),
-                "decay_factor": self.dflash_loss_decay_factor,
-                "dpace_alpha": self.dflash_dpace_alpha,
-            },
-            teacher=functools.partial(
-                self._teacher_logits, batch.base_outputs, label_positions=targets.positions
-            ),
+            weighting=weighting,
+            teacher=teacher,
             ce_grad=any(term.needs_ce_grad for _, _, term in self._objective),
             tvd_chunk=self._tvd_chunk_fn,
+        )
+
+    def _head_request(self) -> HeadRequest:
+        """The statistics of the draft's logits the loss reads; a variant extends it.
+
+        Only ``dflash_fused_loss`` computes from it: every statistic comes out of one pass.
+        """
+        request = HeadRequest(grads=frozenset(term.head_stat for _, _, term in self._objective))
+        if self._position_weighting == "dpace":
+            # D-PACE weighs positions by the draft's confidence in its label.
+            request = request.extend(values={"hard_ce"})
+        return request
+
+    def _draft_head_stats(self, batch, targets, request) -> HeadStats:
+        """``request``'s statistics of the logits ``batch.hidden`` projects to, fused with lm_head."""
+        teacher = {}
+        if "kd_ce" in request.grads | request.values:
+            base_outputs = batch.base_outputs
+            if base_outputs.logits is not None:
+                rows = self._teacher_logits(base_outputs, label_positions=targets.positions)
+                teacher["teacher_logits"] = rows.flatten(0, -2)
+            else:
+                # Projected chunk by chunk in the pass, so the teacher's logits are never whole.
+                rows = self._teacher_hidden(base_outputs, label_positions=targets.positions)
+                teacher["teacher_hidden"] = rows.flatten(0, -2)
+        weight, logit_scale, soft_cap = fused_projection(self._base_model_lm_head)
+        return fused_head_stats(
+            batch.hidden.flatten(0, -2),
+            weight,
+            request,
+            targets=targets.token_ids.view(-1),
+            logit_scale=logit_scale,
+            soft_cap=soft_cap,
+            **teacher,
         )
 
     def _compute_loss(self, ctx: LossContext) -> LossOutput:
@@ -967,15 +1050,16 @@ class HFDFlashModel(DFlashModel):
         Metrics: each objective term, and the backbone's accuracy when a head sits on it.
         A step whose position weights leave nothing to train gets ``_zero_output``.
         """
-        final, backbone = ctx.logits
         if not ctx.trainable:
-            return self._zero_output(ctx, self._draft_zero_loss(final.device, through=(final,)))
+            loss = self._draft_zero_loss(ctx.batch.hidden.device, through=ctx.draft_outputs)
+            return self._zero_output(ctx, loss)
         loss, metrics = objective_loss(self._objective, ctx, "final")
         with torch.no_grad():
-            accuracy = _masked_top1(final, ctx.targets.token_ids, ctx.targets.mask)
-            if backbone is not final:
-                metrics["backbone_accuracy"] = _masked_top1(
-                    backbone, ctx.targets.token_ids, ctx.targets.mask
+            target_ids, mask = ctx.targets.token_ids, ctx.targets.mask
+            accuracy = _masked_accuracy(ctx.top1("final"), target_ids, mask)
+            if ctx.has_head:
+                metrics["backbone_accuracy"] = _masked_accuracy(
+                    ctx.top1("backbone"), target_ids, mask
                 )
         return LossOutput(loss, accuracy, metrics)
 
@@ -983,7 +1067,7 @@ class HFDFlashModel(DFlashModel):
         """``loss``, a zero, for a step with nothing to train; accuracy and metrics read 0."""
         zero = torch.zeros((), device=loss.device)
         names = [f"loss_{name}" for name, _, _ in self._objective]
-        if ctx.logits.backbone is not ctx.logits.final:
+        if ctx.has_head:
             names.append("backbone_accuracy")
         return LossOutput(loss, zero, dict.fromkeys(names, zero))
 
