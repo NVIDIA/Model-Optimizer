@@ -127,19 +127,12 @@ def get_custom_layers(
         Dictionary containing tensors information: {'tensor_name': {'shape': tensor.shape, 'dtype': tensor.dtype}}
     """
     if not TRT_PYTHON_AVAILABLE:
-        raise ImportError("TensorRT Python bindings are required for custom-layer introspection.")
+        raise ImportError(
+            "TensorRT Python bindings could not be imported and are required for custom-layer "
+            "introspection. Install or repair a compatible TensorRT installation."
+        )
 
     logger.debug("Checking for custom TensorRT ops")
-
-    # The `onnx` extra does not install the TensorRT Python package, and reading a model's
-    # custom layers goes through a TensorRT network. Say so, rather than letting the `trt`
-    # name that the import at the top of this module never bound raise a NameError.
-    if not TRT_PYTHON_AVAILABLE:
-        raise ImportError(
-            "The TensorRT Python package is required to read the custom layers of an ONNX "
-            "model, and it is not installed. Install `tensorrt` to work with a model that "
-            "contains custom operators."
-        )
 
     # Initialize TensorRT logger and plugins
     trt_logger = trt.Logger(trt.Logger.WARNING)
