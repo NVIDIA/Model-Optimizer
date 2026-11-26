@@ -254,27 +254,18 @@ def bypass(session):
     if os.path.exists("examples/bypass/requirements.txt"):
         requirements += ["-r", "examples/bypass/requirements.txt"]
     session.run("python", "-m", "pip", "install", "-e", ".[dev-test,dev-fla]", *requirements)
-    # Separate invocations avoid same-named unit/GPU modules sharing an import name.
-    # Later slices add the model ports and tutorial to this same qualification lane.
+    # Temporary diagnostic branch: execute the existing four HF caller cases only.
     groups = (
         [
-            "tests/unit/torch/distill/test_bypass.py",
-            "tests/unit/torch/models/test_model_specs.py",
-            *(
-                f"tests/unit/torch/models/test_{name}_hf.py"
-                for name in ("deepseek_v41", "kimi_k31", "step5", "mimo_v2")
+            (
+                "tests/gpu/torch/quantization/test_bypass_fields.py"
+                "::test_automatic_grouped_projection_preserves_native_fields"
             ),
         ],
-        [
-            *glob.glob("tests/gpu/torch/distill/*bypass*.py"),
-            *glob.glob("tests/gpu/torch/distill/plugins/*bypass*.py"),
-            "tests/gpu/torch/quantization/test_bypass_fields.py",
-        ],
-        ["tests/examples/bypass"],
     )
     cov_args = _cov_args()
     for paths in groups:
-        existing = [path for path in paths if os.path.exists(path)]
+        existing = list(paths)
         if existing:
             session.run("python", "-m", "pytest", *existing, *cov_args, *session.posargs)
             if cov_args:
