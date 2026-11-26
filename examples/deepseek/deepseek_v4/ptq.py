@@ -293,9 +293,13 @@ def load_deepseek_v4(
             )
         # Validate once here rather than synchronizing CUDA on every expert forward.
         for name, weight in model.named_parameters():
-            if weight.dtype == torch.float8_e4m3fn:
-                if (weight.scale.contiguous().view(torch.uint8) == 255).any():
-                    raise ValueError(f"Native checkpoint scales for {name} contain NaN codes")
+            if weight.dtype != torch.float8_e4m3fn:
+                continue
+            scale = getattr(weight, "scale", None)
+            if scale is None or scale.dtype not in (torch.uint8, torch.float8_e8m0fnu):
+                continue
+            if (scale.contiguous().view(torch.uint8) == 255).any():
+                raise ValueError(f"Native checkpoint scales for {name} contain NaN codes")
         print(f"[rank {rank}] loaded")
     # Match generate.py: default device to this rank's CUDA so that any
     # torch.empty(...) / torch.zeros(...) inside the V4 forward (TileLang

@@ -323,6 +323,9 @@ def test_load_validates_native_fp8_checkpoint_scales(load_with, tmp_path, scale_
     class FP8Transformer(torch.nn.Module):
         def __init__(self, args):
             super().__init__()
+            self.unrelated_weight = torch.nn.Parameter(
+                torch.zeros(2, 3, device="cpu", dtype=torch.float8_e4m3fn), requires_grad=False
+            )
             self.proj = torch.nn.Module()
             self.proj.weight = torch.nn.Parameter(
                 torch.ones(129, 3, device="cpu").to(torch.float8_e4m3fn), requires_grad=False
