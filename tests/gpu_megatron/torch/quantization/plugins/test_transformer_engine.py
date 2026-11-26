@@ -201,7 +201,7 @@ def test_initialize_preserves_unquantized_output_rows():
     expected[rows] = original[rows]
     mtq.initialize_qdq_weights(model)
     with torch.enable_grad():
-        layer._initialize_qdq_weights(False, set())
+        layer._initialize_qdq_weights(set())
     torch.testing.assert_close(layer.weight, expected, rtol=0, atol=0)
 
 

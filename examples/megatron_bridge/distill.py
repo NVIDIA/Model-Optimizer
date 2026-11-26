@@ -33,6 +33,7 @@ from megatron.bridge.models.distillation_provider import convert_to_distillation
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
+from megatron.bridge.training import gpt_step
 from megatron.bridge.training.callbacks import Callback
 from megatron.bridge.training.config import (
     CheckpointConfig,
@@ -47,17 +48,10 @@ from megatron.bridge.training.config import (
     ValidationConfig,
 )
 from megatron.bridge.training.distill import distill
-from megatron.bridge.training.post_training.checkpointing import (
-    _get_modelopt_checkpoint_path,
-    has_modelopt_state,
-)
+from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
-from trainable_params import (
-    configure_trainable_parameters,
-    initialize_student_weights,
-    should_initialize_student_weights,
-)
+from trainable_params import configure_trainable_parameters
 
 try:
     from megatron.bridge.data.builders import DirectHFSFTDatasetConfig
@@ -187,13 +181,6 @@ def get_args():
             "If the checkpoint carries ModelOpt state (i.e. it is quantized), the quantizers are "
             "restored automatically, turning distillation into Quantization Aware Distillation (QAD)."
         ),
-    )
-    parser.add_argument(
-        "--qdq_student_weight",
-        action="store_true",
-        help="Initialize trainable student latents from the restored quantizers' Q→DQ output "
-        "on a fresh run. Default: keep checkpoint weights. Does not rerun calibration or GPTQ; "
-        "native checkpoint resumes are unchanged.",
     )
     parser.add_argument(
         "--trainable_params",
@@ -570,8 +557,6 @@ def get_args():
 
     _check_shared_vocabulary(args)
 
-    print_args(masked_args(args))
-
     return args
 
 
@@ -641,6 +626,34 @@ def _add_document_boundaries() -> None:
     GPTDataset.__getitem__ = getitem_with_boundaries
 
 
+def _load_batch_on_every_pp_stage() -> None:
+    """Give every pipeline stage the first stage's ``tokens`` and ``position_ids``.
+
+    Megatron-Bridge's ``get_batch`` loads ``position_ids`` only on the first stage (and MTP
+    stages), but models that use mRoPE need them on every stage, so later stages
+    otherwise fail on ``position_ids=None``. Later stages also load these two fields, but not the
+    full batch.
+    """
+    if not hasattr(gpt_step, "_middle_pp_stage_needs_batch") or (
+        "include_full_batch_fields"
+        not in inspect.signature(gpt_step.get_batch_from_iterator).parameters
+    ):
+        raise ValueError(
+            "Pipeline-parallel distillation of an mRoPE model needs a newer Megatron-Bridge, "
+            "such as the one in nvcr.io/nvidia/nemo:26.10."
+        )
+    get_batch_from_iterator = gpt_step.get_batch_from_iterator
+
+    def _get_batch_from_iterator(*args, **kwargs):
+        kwargs["is_first_pp_stage"] = True
+        kwargs["include_full_batch_fields"] = False
+        return get_batch_from_iterator(*args, **kwargs)
+
+    # TODO: remove once Megatron-Bridge's gpt_step loads position_ids on every PP stage for mRoPE.
+    gpt_step._middle_pp_stage_needs_batch = lambda cfg: True
+    gpt_step.get_batch_from_iterator = _get_batch_from_iterator
+
+
 class FakeQuantWeightCache(Callback):
     """Fake-quantize each student weight once per training step instead of once per micro-batch."""
 
@@ -678,17 +691,6 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     )
     if args.fake_quant_weight_cache and not student_has_modelopt_state:
         raise ValueError("--fake_quant_weight_cache needs a quantized --student_megatron_path.")
-    initialize_weights = should_initialize_student_weights(
-        args.qdq_student_weight,
-        Path(args.output_dir) / "checkpoints",
-        _get_modelopt_checkpoint_path(args.student_megatron_path)
-        if args.qdq_student_weight and args.student_megatron_path
-        else None,
-    )
-    if initialize_weights and not student_has_modelopt_state:
-        raise ValueError(
-            "--qdq_student_weight needs ModelOpt quantizer state in --student_megatron_path."
-        )
     if args.fake_quant_weight_cache and "callbacks" not in inspect.signature(distill).parameters:
         raise ValueError("--fake_quant_weight_cache needs a newer Megatron-Bridge; see the README.")
     # A quantized student pins the layout: it must match what quantize.py wrote, so reuse the same
@@ -794,6 +796,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             "VLM detected: distilling model.language_model only (vision tower / projector untouched). "
             "To export megatron non-quantized checkpoint, use export_distilled_megatron_to_hf.py"
         )
+    if args.pp_size > 1 and getattr(student_provider, "position_embedding_type", None) == "mrope":
+        _load_batch_on_every_pp_stage()
     distill_provider = convert_to_distillation_provider(
         student_provider,
         teacher_provider,
@@ -801,7 +805,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         distill_submodule="language_model" if is_vlm else None,
     )
 
-    if args.trainable_params or initialize_weights:
+    if args.trainable_params:
         # Run after initial student restoration; native training resume happens later.
         def _select_trainable_student_hook(model_chunks):
             """Select parameters in the distilled student before the teacher is attached."""
@@ -809,9 +813,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                 student = unwrap_model(chunk)
                 if is_vlm:
                     student = student.language_model
-                if args.trainable_params:
-                    configure_trainable_parameters(student, args.trainable_params)
-                initialize_student_weights(student, initialize_weights, checkpoint_dir)
+                configure_trainable_parameters(student, args.trainable_params)
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_select_trainable_student_hook, prepend=True)
@@ -1065,9 +1067,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
 
 
 if __name__ == "__main__":
-    dist.setup()
     args = get_args()
+    dist.setup()
     try:
+        print_args(masked_args(args))
         # Entered inside the try: opening the run is fatal by design, and the peers of a rank
         # that exits without dist.abort() stay blocked on the first collective.
         with distill_run(args, DISTILL) as owns_the_run:

@@ -39,12 +39,14 @@ from modelopt.torch.quantization.algorithms import (
     QuantRecipeHparam,
     _AutoQuantizeBaseSearcher,
     _AutoQuantizeGradientScoringSession,
+    _get_kl_div_loss,
+    _get_log_prob,
     _module_search_space_signature,
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
 from modelopt.torch.utils import safe_load, safe_save
-from modelopt.torch.utils.distributed import DistributedProcessGroup
+from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 
 
 class _AttentionLayer(torch.nn.Module):
@@ -868,13 +870,23 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
     assert torch.allclose(output_ref, output_test)
 
 
-@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+@pytest.mark.parametrize(
+    "method",
+    [
+        "gradient",
+        "kl_div",
+        {"method": "kl_div", "context_quant_level": "lowest"},
+        {"method": "kl_div", "context_quant_level": 1},
+    ],
+)
 def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, method):
     source = TransformerBlock()
     data = [source.get_input() for _ in range(2)]
     formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG]
 
-    def search(checkpoint, format_shard=None, model=None, calib_steps=2, score_steps=2):
+    def search(
+        checkpoint, format_shard=None, model=None, calib_steps=2, score_steps=2, method=method
+    ):
         return mtq.auto_quantize(
             copy.deepcopy(source) if model is None else model,
             constraints={"effective_bits": 6.0},
@@ -906,9 +918,10 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
     for i, shard in enumerate(shards):
         _, state = search(shard, (i, 2), model=model if i == 0 else None)
         assert not state["best"]["recipe"]
-    # Each searched format is calibrated by one shard, o_proj's held FP8 by both.
+    # Each searched format is calibrated by one shard; o_proj's FP8 and a scoring context by both.
     calibrated = [set(safe_load(shard)["quantizer_states"]) for shard in shards]
-    assert len(calibrated[0] & calibrated[1]) == 1 and len(calibrated[0] | calibrated[1]) == 3
+    shared = calibrated[0] & calibrated[1]
+    assert len(shared) == 1 + isinstance(method, dict) and len(calibrated[0] | calibrated[1]) == 3
 
     # Scores sum over batches, so a shard scored over fewer is refused.
     fewer = tmp_path / "fewer_steps.pth"
@@ -934,6 +947,35 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
     resumed = search(tmp_path / "interrupted.pth", (0, 2))[1]["candidate_stats"]
     for name, stats in safe_load(shards[0])["candidate_stats"].items():
         assert resumed[name]["raw_scores"] == stats["raw_scores"]
+    if method == "kl_div":  # saved before scoring options were recorded, it resumes as before
+        unrecorded = safe_load(shards[0])
+        del unrecorded["scoring_config"]
+        safe_save(unrecorded, tmp_path / "unrecorded.pth")
+        search(tmp_path / "unrecorded.pth", (0, 2))
+        # An option this version does not know, such as a renamed one, is refused, not dropped.
+        unknown = {"scoring_config": {"context": "lowest"}}
+        safe_save({**unrecorded, **unknown}, tmp_path / "unknown.pth")
+        with pytest.raises(ValueError, match="not known"):
+            search(tmp_path / "unknown.pth", (0, 2))
+        with pytest.raises(ValueError, match="not known"):
+            mtq.get_auto_quantize_config({**expected, **unknown}, {"effective_bits": 6.0})
+    if isinstance(method, dict):  # scores taken in another context neither resume nor merge
+        level = method["context_quant_level"]
+        other = {**method, "context_quant_level": 1 if level == "lowest" else "lowest"}
+        with pytest.raises(ValueError, match="scoring options"):
+            search(shards[0], (0, 2), method=other)
+        search(tmp_path / "other1.pth", (1, 2), method=other)
+        with pytest.raises(ValueError, match=r"search setups \(scoring_config\)"):
+            model_quant.merge_auto_quantize_checkpoints(
+                [shards[0], tmp_path / "other1.pth"], str(tmp_path / "z.pth")
+            )
+    if isinstance(method, dict) and method["context_quant_level"] == "lowest":  # 0 is the same
+        zero = {**method, "context_quant_level": 0}
+        search(shards[0], (0, 2), method=zero)
+        search(tmp_path / "zero1.pth", (1, 2), method=zero)
+        model_quant.merge_auto_quantize_checkpoints(
+            [shards[0], tmp_path / "zero1.pth"], str(tmp_path / "zero.pth")
+        )
 
     merged = tmp_path / "merged.pth"
     merge_states = model_quant.merge_auto_quantize_shards
@@ -965,7 +1007,17 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
 
     for name, stats in expected["candidate_stats"].items():
         assert state["candidate_stats"][name]["raw_scores"] == pytest.approx(stats["raw_scores"])
+        if isinstance(method, dict) and len(stats["formats"]) > 1:
+            # In a quantized context BF16 is measured too, not taken as 0.
+            assert stats["raw_scores"][-1] > 0
+    if isinstance(method, dict):
+        # Context scores share a base damage; the solver must still spend the 6-bit budget.
+        assert expected["best"]["constraints"]["effective_bits"] > 5.0
     assert state["best"]["recipe"] == expected["best"]["recipe"]
+    # A re-solve from the saved state uses the search's method options (the context's LP).
+    assert mtq.get_auto_quantize_config(
+        safe_load(merged), {"effective_bits": 6.0}
+    ) == mtq.get_auto_quantize_config(expected)
 
 
 def test_auto_quantize_disable_layers():
@@ -1663,6 +1715,70 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
                     s1["state_dict"][qname][buf_name], s2["state_dict"][qname][buf_name]
                 )
 
+    # Scores of another method or scoring options are refused before the model is converted, so
+    # the same model can retry with a new checkpoint.
+    other = {
+        "gradient": {"method": "kl_div", "context_quant_level": "lowest"},
+        "kl_div": {"method": "kl_div", "context_quant_level": "lowest"},
+        "aumann_shapley": {"method": "aumann_shapley", "num_path_nodes": 1},
+    }[method]
+    model_3 = SimpleLinear()
+
+    def search(checkpoint):
+        return mtq.auto_quantize(
+            model_3,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+            data_loader=[model_3.get_input() for _ in range(2)],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+            method=other,
+            checkpoint=checkpoint,
+        )
+
+    refusal = "method 'gradient'" if method == "gradient" else "scoring"
+    with pytest.raises(ValueError, match=refusal):
+        search(checkpoint_path)
+    assert not mto.ModeloptStateManager.is_converted(model_3)
+    search(str(tmp_path / "other_options.pth"))
+
+
+def _tensor_parallel_kl_job(rank, size):
+    torch.manual_seed(0)
+    tokens, vocab = 64, 32 * size
+    unquant = torch.randn(tokens, vocab).bfloat16()
+    context = (unquant.float() + 3 * torch.randn(tokens, vocab)).bfloat16()
+    nudged = context.clone()
+    nudged[:, :: vocab // size] += 0.125  # one column in each rank's shard
+    shard = slice(rank * vocab // size, (rank + 1) * vocab // size)
+
+    def reference(quant):
+        log_p = torch.log_softmax(unquant.double(), -1)[:, shard]
+        log_q = torch.log_softmax(quant.double(), -1)[:, shard]
+        return (log_p.exp() * (log_p - log_q)).sum()
+
+    lm_head = SimpleNamespace(parallel_state=ParallelState(tensor_parallel_group=None))
+    # The compiled function's math, without compiling it on CPU.
+    with torch.compiler.set_stance("force_eager"):
+        log_prob_unquant = _get_log_prob(unquant[:, shard], lm_head)
+        # Summed over batches, as the searcher sums each candidate's scores.
+        context_score, nudged_score = (
+            sum(_get_kl_div_loss(log_prob_unquant, quant[:, shard], lm_head) for _ in range(8))
+            for quant in (context, nudged)
+        )
+    expected = 8 * (reference(nudged) - reference(context))
+    assert reference(nudged).bfloat16() == reference(context).bfloat16()  # bf16 cannot tell them
+    torch.testing.assert_close(nudged_score - context_score, expected.float(), rtol=0.05, atol=0)
+
+
+def test_tensor_parallel_kl_keeps_small_differences_over_a_large_shared_kl(cpu_dist_workers):
+    """A KL context adds one large base to every candidate's score. The vocab-sharded log-probs
+    of a tensor-parallel LM head stay fp32 so the scores keep the candidates' small differences
+    through each batch's KL and the sum over batches; a bf16 KL rounds them away."""
+    cpu_dist_workers.run(_tensor_parallel_kl_job)
+
 
 def test_auto_quantize_checkpoint_rejects_changed_fixed_ptq_baseline(tmp_path):
     checkpoint_path = str(tmp_path / "autoquant_fixed_baseline_checkpoint.pth")
@@ -1954,6 +2070,7 @@ def test_get_auto_quantize_config(method):
         for entry in config["quant_cfg"]
     )
     assert config["algorithm"] == "max"
+    assert mtq.get_auto_quantize_config(search_state, algorithm="gptq")["algorithm"] == "gptq"
 
     # Re-solve with different constraints
     config_resoled = mtq.get_auto_quantize_config(

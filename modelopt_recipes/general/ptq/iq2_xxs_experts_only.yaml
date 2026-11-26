@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# IQ2_XXS weight-only PTQ of MoE routed experts only, with imatrix.
+# IQ2_XXS weight-only PTQ of MoE routed experts only, with local_hessian.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
@@ -22,7 +22,7 @@ imports:
 metadata:
   description: >-
     Applies GGML-compatible IQ2_XXS weight-only quantization to MoE routed experts only, each
-    expert's search weighted by imatrix statistics of the tokens routed to it. Shared experts, dense
-    layers and attention stay in BF16. Requires calibration data.
+    expert's local scales picked by its layer-output error on the tokens routed to it. Shared
+    experts, dense layers and attention stay in BF16. Requires calibration data.
 quantize:
   $import: preset

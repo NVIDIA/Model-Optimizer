@@ -19,7 +19,6 @@ import contextlib
 import copy
 import importlib
 import json
-import os
 import re
 import tempfile
 import traceback
@@ -36,12 +35,14 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from modelopt import env
 from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     copy_off_index_safetensors,
     locate_source_keys,
     off_index_safetensors_files,
+    resolve_checkpoint_file,
     sanitize_hf_config_for_deployment,
 )
 
@@ -74,6 +75,11 @@ try:
 except ImportError:
     _TRANSFORMERS_MODEL_TYPES = ()
     _TRANSFORMERS_CONFIG_TYPES = ()
+
+try:
+    from transformers.configuration_utils import remap_legacy_layer_types
+except ImportError:  # transformers without the layer type renames has nothing to restore
+    remap_legacy_layer_types = None
 
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
@@ -1773,6 +1779,12 @@ def _write_hf_export_config(
     original_config = f"{export_dir}/config.json"
     with open(original_config) as file:
         config_data = json.load(file)
+    if remap_legacy_layer_types is not None:
+        # Before the sanitize step: it trims trailing MTP entries from layer_types, and the
+        # restore only matches a list that is still exactly the remap of the source's.
+        _restore_source_layer_types(
+            config_data, _source_config_json(model), getattr(model, "config", None)
+        )
     sanitize_hf_config_for_deployment(config_data, model)
     if quantization_config is not None:
         config_data["quantization_config"] = quantization_config
@@ -1840,6 +1852,60 @@ def _source_checkpoint(model: nn.Module) -> str | None:
         or getattr(getattr(model, "config", None), "_name_or_path", None)
         or None
     )
+
+
+def _source_config_json(model: nn.Module) -> Any:
+    """The source checkpoint's ``config.json`` as parsed, or ``{}`` if it cannot be read.
+
+    Read through ``resolve_checkpoint_file``, which keeps the file inside the checkpoint directory
+    and bounds its size.
+    """
+    ckpt = _source_checkpoint(model)
+    # RuntimeError: a symlink loop on Python < 3.13, and the RecursionError of a deeply nested file.
+    with contextlib.suppress(OSError, ValueError, RuntimeError):
+        if ckpt:
+            return json.loads(
+                resolve_checkpoint_file(Path(ckpt), "config.json").read_text(encoding="utf-8")
+            )
+    return {}
+
+
+def _remapped_layer_types(layer_types: list) -> list | None:
+    """Transformers' remap of ``layer_types``, or ``None`` when it cannot be applied.
+
+    The remap is a transformers internal, and this runs on the last write of an export, so a
+    changed contract warns and leaves the config as transformers wrote it.
+    """
+    if remap_legacy_layer_types is None or not all(isinstance(t, str) for t in layer_types):
+        return None
+    try:
+        return remap_legacy_layer_types(layer_types)
+    except Exception as exc:
+        warnings.warn(f"Could not restore the source layer_types spelling ({exc}).")
+        return None
+
+
+def _restore_source_layer_types(config_data: dict, source: Any, config: Any) -> None:
+    """Spell ``layer_types`` as the source ``config.json`` does, in the config and its sub-configs.
+
+    transformers renames some layer types on load (``deepseek_sparse_attention`` becomes
+    ``indexed_attention`` in 5.18), and runtimes validate against the names the checkpoint ships.
+    The source's list is restored only where it is exactly what transformers' remap turns it into,
+    so a list the export edited or trimmed keeps its handling. Only the live config nodes are
+    followed, not any dict that happens to sit in the file.
+    """
+    if not isinstance(source, dict):
+        return
+    for key in ("layer_types", "mtp_layer_types"):  # the lists transformers' remap rewrites
+        source_types = source.get(key)
+        remapped = _remapped_layer_types(source_types) if isinstance(source_types, list) else None
+        if remapped is not None and remapped == config_data.get(key):
+            config_data[key] = source_types
+    for key, sub_config in getattr(config, "__dict__", {}).items():
+        if isinstance(sub_config, _TRANSFORMERS_CONFIG_TYPES) and isinstance(
+            config_data.get(key), dict
+        ):
+            _restore_source_layer_types(config_data[key], source.get(key), sub_config)
 
 
 def carryable_unplaced_keys(model: nn.Module) -> list[str]:
@@ -2085,17 +2151,8 @@ def _write_base_config(model: nn.Module, export_dir: Path) -> None:
 
 
 def _no_gather_export_asked() -> bool:
-    """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export.
-
-    ``nogather`` picks it; unset, empty or ``streaming`` keeps the default streaming path. Any other
-    value raises: a misspelled one would otherwise quietly take the path it was set to avoid.
-    """
-    value = os.environ.get("MODELOPT_FSDP2_EXPORT") or "streaming"
-    if value not in ("nogather", "streaming"):
-        raise ValueError(
-            f"MODELOPT_FSDP2_EXPORT={value!r}: expected 'nogather', or 'streaming', the default."
-        )
-    return value == "nogather"
+    """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export."""
+    return env.fsdp2_export() == "nogather"
 
 
 def export_hf_checkpoint(

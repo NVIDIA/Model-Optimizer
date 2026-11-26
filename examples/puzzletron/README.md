@@ -7,7 +7,7 @@ branch](https://github.com/NVIDIA/Model-Optimizer/tree/feature/puzzletron_v2/exa
 ## Puzzletron Algorithm Tutorial
 
 This tutorial demonstrates how to compress large language models using the puzzletron algorithm based on the [Puzzle paper](https://arxiv.org/abs/2411.19146).
-The goal of the algorithm it to find the most optimal modifications to MLP and attention layers of the model, resulting in a heterogeneous model architecture.
+The goal of the algorithm is to find the most optimal modifications to MLP and attention layers of the model, resulting in a heterogeneous model architecture.
 The supported modifications are:
 
 - `ffn_intermediate_size`: different FFN intermediate sizes

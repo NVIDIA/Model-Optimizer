@@ -145,7 +145,8 @@ def test_nvfp4_exported_onnx_is_topologically_sorted(monkeypatch):
     ],
 )
 @pytest.mark.parametrize(
-    "scale_case", ["fp8-rounding", "fp32-tensor-arithmetic", "fp32-block-arithmetic"]
+    "scale_case",
+    ["fp8-rounding", "fp32-tensor-arithmetic", "fp32-block-arithmetic", "e2m1-boundary"],
 )
 def test_nvfp4_packed_weights_match_eager(scale_case, convert, deprecated):
     block_size = 16
@@ -160,10 +161,17 @@ def test_nvfp4_packed_weights_match_eager(scale_case, convert, deprecated):
         weight[1, 0] = 2.099609375
         weight[1, -2:] = [-1.501953125, 0.6181640625]
         expected_scale = np.array([[448.0], [288.0]], dtype=np.float32)
-    else:
+    elif scale_case == "fp32-block-arithmetic":
         weight = np.zeros((2, block_size), dtype=np.float16)
         weight[:, 0] = [2.24609375, 2.515625]
         expected_scale = np.array([[384.0], [448.0]], dtype=np.float32)
+    else:
+        # weight[1, 10] / scale is exactly -1.75, where division and the reciprocal pick different codes.
+        weight = np.zeros((2, block_size), dtype=np.float16)
+        weight[0, 0] = 0.34375
+        weight[1, 0] = 0.057861328125
+        weight[1, 10] = -0.01611328125
+        expected_scale = np.array([[448.0], [72.0]], dtype=np.float32)
 
     weight_dq = helper.make_tensor_value_info("weight_dq", TensorProto.FLOAT, list(weight.shape))
     model = helper.make_model(

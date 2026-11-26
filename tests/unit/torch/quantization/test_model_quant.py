@@ -47,21 +47,22 @@ SEQUENTIAL_CFG = {
     "config",
     [mtq.INT8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.FP8_DEFAULT_CFG, SEQUENTIAL_CFG],
 )
-def test_initialize_qdq_weights_preserves_state_and_frozen_weights(config, dtype):
+def test_initialize_qdq_weights_preserves_state_and_initializes_frozen_weights(config, dtype):
     torch.manual_seed(42)
     model = nn.Sequential(nn.Linear(256, 16), nn.Linear(16, 8)).to(dtype=dtype)
     inputs = torch.randn(2, 256, dtype=dtype)
     mtq.quantize(model, copy.deepcopy(config), lambda m: m(inputs))
     model[1].requires_grad_(False)
-    expected = model[0].weight_quantizer(model[0].weight).detach().clone()
+    expected = [layer.weight_quantizer(layer.weight).detach().clone() for layer in model]
     parameters = dict(model.named_parameters())
-    frozen = {name: p.detach().clone() for name, p in parameters.items() if name != "0.weight"}
+    frozen = {name: p.detach().clone() for name, p in parameters.items() if name.endswith("bias")}
     buffers = {name: b.clone() for name, b in model.named_buffers()}
     state = copy.deepcopy(mto.modelopt_state(model))
 
-    assert mtq.initialize_qdq_weights(model, trainable_only=True) is model
+    assert mtq.initialize_qdq_weights(model) is model
 
-    torch.testing.assert_close(model[0].weight, expected, rtol=0, atol=0)
+    for layer, weight in zip(model, expected):
+        torch.testing.assert_close(layer.weight, weight, rtol=0, atol=0)
     assert model[0].weight.dtype == dtype
     assert all(p is parameters[name] for name, p in model.named_parameters())
     for name, value in frozen.items():
@@ -90,7 +91,6 @@ def test_initialize_qdq_weights_undoes_pre_scale():
     [
         "quantized",
         "transpose",
-        "frozen",
         "disabled",
         "unquantized",
         "frozen_bias",
@@ -110,8 +110,6 @@ def test_initialize_qdq_weights_refuses_ambiguous_alias_before_changes(alias):
         model[1].bias = nn.Parameter(model[0].weight[0], requires_grad=False)
     elif alias == "parameter_alias":
         model[0].extra_parameter = model[0].weight
-    elif alias == "frozen":
-        model[1].weight.requires_grad_(False)
     elif alias == "disabled":
         model[1].weight_quantizer.disable()
     elif alias == "unquantized":
@@ -120,7 +118,7 @@ def test_initialize_qdq_weights_refuses_ambiguous_alias_before_changes(alias):
         model[1].weight = weight
     before = {name: p.detach().clone() for name, p in model.named_parameters()}
     with pytest.raises(ValueError):
-        mtq.initialize_qdq_weights(model, trainable_only=True)
+        mtq.initialize_qdq_weights(model)
     for name, p in model.named_parameters():
         torch.testing.assert_close(p, before[name], rtol=0, atol=0)
 

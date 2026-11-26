@@ -1280,10 +1280,11 @@ class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
         of the group_size used in the quantization.""",
     )
     fused: bool = ModeloptField(
-        default=False,
+        default=True,
         title="Use fused Triton kernel for GPTQ.",
         description="""When True, use a fused Triton kernel that combines quantization and
-        per-column error propagation into one launch per GPTQ block.""",
+        per-column error propagation into one launch per GPTQ block. Applies to static NVFP4
+        weights without 4/6 scaling on SM89+; other cases use the unfused loop.""",
     )
     importance_weighted: bool = ModeloptField(
         default=False,
@@ -1559,7 +1560,11 @@ def normalize_quant_cfg_list(
     # Legacy flat-dict format: {"*": {...}, "*weight_quantizer": {...}} → list of single-key dicts.
     if isinstance(v, Mapping):
         _warn_legacy()
-        v = [{k: val} for k, val in v.items()]
+        # Legacy "default" was applied before every other key, wherever it appeared in the dict.
+        legacy_entries = [{k: val} for k, val in v.items() if k != "default"]
+        if "default" in v:
+            legacy_entries.insert(0, {"default": v["default"]})
+        v = legacy_entries
     elif not isinstance(v, Sequence) or isinstance(v, (str, bytes)):
         raise ValueError(
             f"quant_cfg must be a sequence of entries (or a legacy flat mapping), got "

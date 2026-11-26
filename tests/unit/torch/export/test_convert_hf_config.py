@@ -223,3 +223,35 @@ def test_iq_mixed_precision_rejects_bad_per_layer_group_size(fmt):
                 },
             }
         )
+
+
+def test_int8_pb_wo_config_carries_its_group_size():
+    """INT8_PB_WO's group scales need their group size, uniform or per layer."""
+    producer = {"name": "modelopt", "version": "test"}
+    uniform = convert_hf_quant_config_format(
+        {"producer": producer, "quantization": {"quant_algo": "INT8_PB_WO", "group_size": 32}}
+    )
+    assert (uniform["quant_algo"], uniform["group_size"]) == ("INT8_PB_WO", 32)
+    assert uniform["config_groups"]["group_0"]["weights"]["group_size"] == 32
+
+    mixed = convert_hf_quant_config_format(
+        {
+            "producer": producer,
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "model.layers.0.mlp.gate_proj": {"quant_algo": "INT8_PB_WO", "group_size": 16},
+                    "model.layers.0.mlp.down_proj": {"quant_algo": "INT8_PB_WO", "group_size": 32},
+                },
+            },
+        }
+    )
+    assert sorted(
+        (group["weights"]["group_size"], group["targets"])
+        for group in mixed["config_groups"].values()
+    ) == [(16, ["model.layers.0.mlp.gate_proj"]), (32, ["model.layers.0.mlp.down_proj"])]
+
+    with pytest.raises(ValueError):
+        convert_hf_quant_config_format(
+            {"producer": producer, "quantization": {"quant_algo": "INT8_PB_WO"}}
+        )
