@@ -40,6 +40,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Remove ``examples/deepseek/deepseek_v3``: quantize DeepSeek V3, R1, V3.1 and V3.2 with ``examples/hf_ptq/hf_ptq.py``, which loads their FP8 checkpoints through transformers and exports the quantized checkpoint directly (see the DeepSeek section of its README). Its ``--mla_quant`` schemes are the new ``model_type/deepseek_v3/ptq/`` recipes.
+
 **Deprecations**
 
 **Bug Fixes**
