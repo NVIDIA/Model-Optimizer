@@ -22,8 +22,10 @@ import torch.nn as nn
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantLinearConvBase, TensorQuantizer
+from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
 
 try:
+    from accelerate import hooks as accelerate_hooks
     from accelerate.hooks import AlignDevicesHook, ModelHook, add_hook_to_module
 except ImportError:
     pytest.skip("accelerate not available", allow_module_level=True)
@@ -113,3 +115,87 @@ def test_buffer_registered_during_weight_access_survives_buffer_offload():
         weights_map[pin_key], torch.tensor((8, 512)), dtype=torch.float32
     )
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
+
+
+@pytest.mark.parametrize("buffer_case", ["local", "sparse", "new_nested", "new_nested_resident"])
+def test_weight_access_keeps_buffer_persistence_local_to_its_owner(buffer_case, monkeypatch):
+    model = nn.Linear(4, 4, bias=False)
+    model.register_buffer("scale", torch.ones(4))
+    model.child = nn.Module()
+    if buffer_case == "local":
+        model.child.register_buffer("scale", torch.full((4,), 2.0), persistent=False)
+    elif buffer_case == "sparse":
+        model.child.register_buffer(
+            "scale", torch.sparse_coo_tensor([[1, 3]], [2.0, 2.0], (4,), check_invariants=True)
+        )
+    weights = model.state_dict() if buffer_case != "sparse" else {"weight": model.weight.detach()}
+    add_hook_to_module(
+        model,
+        AlignDevicesHook(
+            execution_device="cpu",
+            offload=True,
+            offload_buffers=buffer_case != "sparse",
+            place_submodules=buffer_case.startswith("new_nested"),
+            weights_map=weights,
+        ),
+    )
+    if buffer_case == "new_nested_resident":
+        model._hf_hook.pre_forward(model)
+    devices = {name: tensor.device for name, tensor in model.named_buffers()}
+    keys = model.state_dict().keys()
+    persistence = {owner: owner._non_persistent_buffers_set.copy() for owner in model.modules()}
+    sets = {owner: owner._non_persistent_buffers_set for owner in model.modules()}
+    inputs = torch.ones(1, 4)
+    with enable_weight_access_and_writeback(model, model):
+        torch.testing.assert_close(model.scale, torch.ones(4))
+        if buffer_case == "local":
+            torch.testing.assert_close(model.child.scale, torch.full((4,), 2.0))
+        elif buffer_case == "sparse":
+            torch.testing.assert_close(
+                model.child.scale.to_dense(), torch.tensor([0.0, 2.0, 0.0, 2.0])
+            )
+        else:
+            model.child.register_buffer("scratch", torch.full((4,), 2.0), persistent=False)
+            model.child.register_buffer("keep", torch.full((4,), 3.0))
+            scratch = model.child.scratch
+            persistence[model.child].add("scratch")
+            devices.update(
+                {
+                    "child.scratch": torch.device("cpu"),
+                    "child.keep": model.weight.device
+                    if buffer_case.endswith("resident")
+                    else torch.device("meta"),
+                }
+            )
+            keys = set(keys) | {"child.keep"}
+        expected = model(inputs).detach()
+    assert model.state_dict().keys() == keys
+    assert {name: tensor.device for name, tensor in model.named_buffers()} == devices
+    assert {owner: owner._non_persistent_buffers_set for owner in model.modules()} == persistence
+    assert all(owner._non_persistent_buffers_set is saved for owner, saved in sets.items())
+    torch.testing.assert_close(model(inputs), expected)
+    if buffer_case.startswith("new_nested"):
+        assert model.child.scratch is scratch
+        assert "child.scratch" not in weights
+        torch.testing.assert_close(weights["child.keep"], torch.full((4,), 3.0))
+        set_tensor = accelerate_hooks.set_module_tensor_to_device
+        armed = False
+
+        def fail_placement(owner, name, device, *args, **kwargs):
+            nonlocal armed
+            if owner is model and name == "scale" and str(device) == failure_device and armed:
+                armed = False
+                raise RuntimeError("native placement failed")
+            return set_tensor(owner, name, device, *args, **kwargs)
+
+        for failure_device in ("cpu", "meta"):
+            armed = True
+            with monkeypatch.context() as patch:
+                patch.setattr(accelerate_hooks, "set_module_tensor_to_device", fail_placement)
+                with pytest.raises(RuntimeError, match="native placement failed"):
+                    model(inputs)
+            assert all(owner._non_persistent_buffers_set is saved for owner, saved in sets.items())
+            assert {
+                owner: owner._non_persistent_buffers_set for owner in model.modules()
+            } == persistence
+            torch.testing.assert_close(model(inputs), expected)
