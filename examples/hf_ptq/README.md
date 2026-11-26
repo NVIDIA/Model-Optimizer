@@ -414,6 +414,13 @@ search-disabled layers, and cost-excluded layers — see
 recipes (carrying architecture-specific disabled layers — e.g. VL vision towers) live under
 `modelopt_recipes/model_type/<model>/auto_quantize/`.
 
+For dense Qwen3.5 on TensorRT-LLM 1.3.0, use
+`--recipe model_type/qwen3_5/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits-decoder_only`
+to avoid loading a W4A8 AWQ output head. The 6-bit target applies to the decoder;
+the head stays in its original dtype and does not count toward that target.
+When switching from the general recipe, start from the original weights and omit
+`--auto_quantize_checkpoint` or give it a fresh path: the two searches have different layer choices.
+
 For non-FSDP2 runs with `--batch_size 0`, automatic sizing probes the recipe's scoring workload.
 Gradient recipes retain gradient activations; KL recipes instead retain reference logits and
 FP32 log-probabilities across candidate forwards and KL computation. Composed recipes probe both
