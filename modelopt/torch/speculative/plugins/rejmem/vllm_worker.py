@@ -45,3 +45,7 @@ class RejMemWorkerExtension:
             "device_uuid": str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid),
             "draft_manifest": vllm_weights.draft_manifest(),
         }
+
+    def rejmem_dropped_memory_rows(self) -> int:
+        """Memory rows that found no KV slot since startup (synchronizes the GPU); 0 expected."""
+        return vllm_consumer.dropped_memory_rows()

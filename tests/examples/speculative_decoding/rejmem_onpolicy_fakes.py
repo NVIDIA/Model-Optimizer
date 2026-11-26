@@ -119,6 +119,8 @@ def serve(args):
                     if args.ignore_pushes_after < 0 or state["pushes"] <= args.ignore_pushes_after:
                         state["version"] += 1
                     return self.reply(state)
+                if self.path == "/collective_rpc":  # rejmem_dropped_memory_rows
+                    return self.reply({"results": [args.dropped_memory_rows]})
                 version = state["version"]
             tag, prompt = body["vllm_xargs"]["rejmem_tag"], body["prompt"]
             out, finish = rollout(args, prompt, body["max_tokens"], tag, version)
@@ -163,4 +165,5 @@ if __name__ == "__main__":
         p.add_argument("--capture_dir", required=True)
         p.add_argument("--log", required=True)
         p.add_argument("--ignore_pushes_after", type=int, default=-1)
+        p.add_argument("--dropped_memory_rows", type=int, default=0)
         serve(p.parse_args())

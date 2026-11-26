@@ -165,6 +165,7 @@ class OnPolicyTrainer:
         rollouts = rollout.generate(
             cfg, self.recipe.model.model_name_or_path, prompts, max_tokens, tags
         )
+        rollout.check_memory_rows(cfg.server_urls, cfg.request_timeout)
         t1 = time.perf_counter()
         records, nbytes = rollout.load_records(cfg.capture_dir, tags, cfg.record_timeout)
         _check_on_policy(records, version=self.pusher.weight_version)

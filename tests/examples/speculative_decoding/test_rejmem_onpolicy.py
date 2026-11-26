@@ -107,7 +107,7 @@ def experiment(tmp_path_factory):
     return root
 
 
-def _run(root, name, resume=None, ignore_pushes_after=(-1, -1)):
+def _run(root, name, resume=None, ignore_pushes_after=(-1, -1), dropped_memory_rows=(0, 0)):
     """One run on fresh servers; returns the exit codes and each node's server log."""
     ports = [[get_free_port() for _ in range(SERVERS)] for _ in range(NODES)]
     servers, trainers, master_port = [], [], get_free_port()
@@ -125,6 +125,7 @@ def _run(root, name, resume=None, ignore_pushes_after=(-1, -1)):
                 f"--capture_dir={capture}",
                 f"--log={root / f'{name}_{node}.jsonl'}",
                 f"--ignore_pushes_after={ignore_pushes_after[node]}",
+                f"--dropped_memory_rows={dropped_memory_rows[node]}",
             ]
             servers.append(subprocess.Popen(cmd, env=ENV))
     for port in [p for node_ports in ports for p in node_ports]:
@@ -206,6 +207,12 @@ def test_onpolicy_loop_shards_resumes_exactly_and_rejects_stale_records(experime
     assert codes[0] != 0 and codes[1] != 0
     assert [m["step"] for m in _metrics(root / "c")] == [1, 2]
     assert "OffPolicyError" in (root / "c_trainer1.log").read_text()
+
+    # A node's server dropped memory rows during the first rollout: every rank aborts before training.
+    codes, _ = _run(root, "d", dropped_memory_rows=(0, 1))
+    assert codes[0] != 0 and codes[1] != 0
+    assert not (root / "d" / "metrics.jsonl").exists()
+    assert "found no KV slot" in (root / "d_trainer1.log").read_text()
 
 
 @pytest.mark.parametrize("memory", [True, False])

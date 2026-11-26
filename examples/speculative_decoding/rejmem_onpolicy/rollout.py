@@ -277,6 +277,24 @@ async def _complete(client, url, cfg, model, prompt, max_tokens, tag):
     )
 
 
+def check_memory_rows(server_urls: list[str], timeout: float) -> None:
+    """Raise if a server dropped memory rows: its drafts then missed memory that its records hold.
+
+    The consumer's own per-step check reports a drop only a step or two later, i.e. after a batch's
+    last steps only once the next rollout starts; this check is synchronous.
+    """
+    for url in server_urls:
+        resp = httpx.post(
+            f"{url}/collective_rpc", json={"method": "rejmem_dropped_memory_rows"}, timeout=timeout
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"{url} collective_rpc: HTTP {resp.status_code}: {resp.text[:2000]}")
+        if dropped := sum(resp.json()["results"]):
+            raise RuntimeError(
+                f"{url}: {dropped} rejection-memory rows found no KV slot; raise --max-model-len"
+            )
+
+
 def load_records(
     capture_dir: str, tags: list[str], timeout: float
 ) -> tuple[list[RolloutRecord], int]:
