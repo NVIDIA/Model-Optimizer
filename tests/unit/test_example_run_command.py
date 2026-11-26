@@ -17,6 +17,7 @@
 import contextlib
 import os
 import signal
+import sys
 import time
 
 import pytest
@@ -77,3 +78,64 @@ def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(survivor, signal.SIGKILL)
+
+
+def _detacher_script(tmp_path):
+    """A descendant in its own session escapes the process-group scan but keeps the pipe."""
+    script = tmp_path / "detach.py"
+    script.write_text(
+        "import os, sys, time\n"
+        "os.setsid()\n"
+        "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+    return script
+
+
+def _kill_detached_survivor(pid_file):
+    for _ in range(50):  # the pid lands after the detached child starts
+        if pid_file.exists():
+            break
+        time.sleep(0.1)
+    if pid_file.exists():
+        with contextlib.suppress(ProcessLookupError, ValueError):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+
+def test_run_capturing_flags_a_detached_group_survivor(skip_on_windows, monkeypatch, tmp_path):
+    """``cleanup_process_group`` fails loudly when only the pipe proves a survivor exists."""
+    monkeypatch.setattr(run_command, "_KILLED_PIPE_TIMEOUT_S", 1)
+    pid_file = tmp_path / "survivor.pid"
+    script = _detacher_script(tmp_path)
+
+    try:
+        with pytest.raises(run_command.ProcessGroupCleanupError, match="Output pipe"):
+            run_command._run_capturing(
+                ["bash", "-c", f"{sys.executable} {script} {pid_file} & echo out; sleep 0.3"],
+                tmp_path,
+                os.environ.copy(),
+                cleanup_process_group=True,
+            )
+    finally:
+        _kill_detached_survivor(pid_file)
+
+
+def test_run_capturing_timeout_flags_a_detached_group_survivor(
+    skip_on_windows, monkeypatch, tmp_path
+):
+    """The timeout path reports the same unconfirmed cleanup instead of a bare timeout."""
+    monkeypatch.setattr(run_command, "_KILLED_PIPE_TIMEOUT_S", 1)
+    pid_file = tmp_path / "survivor.pid"
+    script = _detacher_script(tmp_path)
+
+    try:
+        with pytest.raises(run_command.ProcessGroupCleanupError, match="Output pipe"):
+            run_command._run_capturing(
+                ["bash", "-c", f"{sys.executable} {script} {pid_file} & sleep 60"],
+                tmp_path,
+                os.environ.copy(),
+                cleanup_process_group=True,
+                timeout=1,
+            )
+    finally:
+        _kill_detached_survivor(pid_file)

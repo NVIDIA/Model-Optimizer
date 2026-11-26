@@ -177,7 +177,7 @@ def _run_capturing(
         with contextlib.suppress(Exception):
             process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)
         raise
-    except BaseException:
+    except BaseException as error:
         # Interrupted (most likely pytest-timeout) while the command runs: its own process group is
         # not swept up with pytest's, so take the descendants down rather than leak them.
         try:
@@ -188,10 +188,24 @@ def _run_capturing(
         finally:
             with contextlib.suppress(Exception):
                 process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)  # reap: WNOWAIT left it waitable
+            if cleanup_process_group:
+                # A descendant that formed its own process group escapes the group scan above;
+                # only a drained output pipe confirms nothing survived.
+                reader.join(_KILLED_PIPE_TIMEOUT_S)
+                if reader.is_alive():
+                    raise ProcessGroupCleanupError(
+                        "Output pipe is still held open after process group cleanup; "
+                        "a detached descendant may still hold GPU resources"
+                    ) from error
         raise
     finally:
         reader.join(_KILLED_PIPE_TIMEOUT_S)
     if reader.is_alive():
+        if cleanup_process_group:
+            raise ProcessGroupCleanupError(
+                "Output pipe is still held open after process group cleanup; "
+                "a detached descendant may still hold GPU resources"
+            )
         raise OSError("Timed out draining subprocess output")
     if capture_error is not None:
         raise OSError("Failed to capture subprocess output") from capture_error

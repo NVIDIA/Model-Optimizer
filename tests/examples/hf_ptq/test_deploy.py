@@ -102,6 +102,10 @@ def test_phi(command):
 
 
 def test_kimi(command):
+    if command.model_id == "nvidia/Kimi-K2.6-Eagle3" and command.backend in {"trtllm", "sglang"}:
+        draft = _local_eagle_draft(command.model_id)
+        if draft is not None and draft.is_dir():
+            command.model_id = str(draft)
     command.run()
 
 
@@ -121,20 +125,19 @@ def test_medusa(command):
     command.run()
 
 
-def test_eagle(command):
-    """Skip test if MODELOPT_LOCAL_EAGLE_MODEL is set but model doesn't exist locally.
-    speculative models should be loaded by local path"""
+def _local_eagle_draft(model_id):
     local_root = os.getenv("MODELOPT_LOCAL_EAGLE_MODEL")
-    if not local_root:
-        pytest.skip("MODELOPT_LOCAL_EAGLE_MODEL is not set")
+    return Path(local_root) / model_id if local_root else None
 
-    local_path = os.path.join(local_root, command.model_id)
-    if os.path.isdir(local_path):
-        # Update model_id to use local path
-        command.model_id = local_path
-        command.run()
-    else:
-        pytest.skip(f"Local model not found: {local_path}")
+
+def test_eagle(command):
+    draft = _local_eagle_draft(command.model_id)
+    if draft is None:
+        pytest.skip("MODELOPT_LOCAL_EAGLE_MODEL is not set")
+    if not draft.is_dir():
+        pytest.skip(f"Local model not found: {draft}")
+    command.model_id = str(draft)
+    command.run()
 
 
 def test_nvidia_nemotron_3_ultra_550b_a55b_nvfp4(command):
