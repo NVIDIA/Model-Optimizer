@@ -17,7 +17,27 @@ import os
 import subprocess
 
 import pytest
-from _test_utils.deploy_utils import _run_deploy_via_subprocess
+from _test_utils.deploy_utils import ModelDeployer, _run_deploy_via_subprocess
+
+
+@pytest.mark.parametrize(
+    ("backend", "field", "value", "rejected"),
+    [
+        ("vllm", "pipeline_parallel_size", 2, True),
+        ("vllm", "pipeline_parallel_size", 1, False),
+        ("sglang", "dp_size", 2, True),
+        ("trtllm", "context_parallel_size", 4, True),
+        ("trtllm", "gpus_per_node", 8, True),
+        ("sglang", "ep_size", 4, False),  # expert parallel shares the TP ranks
+    ],
+)
+def test_text_deploy_topology_overrides(backend, field, value, rejected):
+    kwargs = {"engine_kwargs": {field: value}}
+    if rejected:
+        with pytest.raises(ValueError, match="Rank-multiplying"):
+            ModelDeployer(backend=backend, model_id="test/model", **kwargs)
+    else:
+        ModelDeployer(backend=backend, model_id="test/model", **kwargs)
 
 
 @pytest.mark.parametrize("private", [True, False], ids=["private", "diagnostic"])

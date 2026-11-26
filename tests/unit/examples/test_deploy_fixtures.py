@@ -30,11 +30,16 @@ deploy = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(deploy)
 
 
-@pytest.mark.parametrize("shared", [False, True], ids=["owned", "explicit-shared"])
-def test_deployment_cache(monkeypatch, tmp_path, shared):
+_HUB_LOCATION_VARS = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME")
+
+
+@pytest.mark.parametrize(
+    "cache_var", [None, *_HUB_LOCATION_VARS], ids=["owned", *_HUB_LOCATION_VARS]
+)
+def test_deployment_cache(monkeypatch, tmp_path, cache_var):
     monkeypatch.chdir(tmp_path)
     for key in (
-        "HF_HUB_CACHE",
+        *_HUB_LOCATION_VARS,
         "HF_HUB_OFFLINE",
         "TRANSFORMERS_OFFLINE",
         "TRANSFORMERS_CACHE",
@@ -43,8 +48,8 @@ def test_deployment_cache(monkeypatch, tmp_path, shared):
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(constants, "HF_HUB_CACHE", "hub")
-    if shared:
-        monkeypatch.setenv("HF_HUB_CACHE", "hub")
+    if cache_var:
+        monkeypatch.setenv(cache_var, "hub")
     snapshot = tmp_path / "hub/models--test--model/snapshots/staged/config.json"
     snapshot.parent.mkdir(parents=True)
     snapshot.write_text("{}", encoding="utf-8")
@@ -63,7 +68,7 @@ def test_deployment_cache(monkeypatch, tmp_path, shared):
     assert command.model_id == "test/model"
     worker_cache = Path(os.environ["HF_HUB_CACHE"])
     assert worker_cache.is_absolute()
-    if shared:
+    if cache_var:
         assert (worker_cache / snapshot.relative_to(tmp_path / "hub")).read_text() == "{}"
     else:
         assert worker_cache != snapshot.parents[3]
@@ -71,7 +76,7 @@ def test_deployment_cache(monkeypatch, tmp_path, shared):
     command_fixture.close()
     cache_fixture.close()
     assert snapshot.read_text() == "{}"
-    if not shared:
+    if not cache_var:
         assert not worker_cache.exists()
 
 

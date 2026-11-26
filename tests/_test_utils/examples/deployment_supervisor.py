@@ -40,9 +40,15 @@ def _reap_workers(pgid, deadline):
             continue
         for pid in map(int, Path("/proc/thread-self/children").read_text().split()):
             # This is our own child. Until reaped, its PID cannot be reused.
-            if os.waitpid(pid, os.WNOHANG)[0] == 0 and os.getpgid(pid) != pgid:
+            if os.waitpid(pid, os.WNOHANG)[0] != 0:
+                continue
+            try:
+                if os.getpgid(pid) == pgid:
+                    continue
                 os.kill(pid, signal.SIGKILL)
-                escaped = True
+            except ProcessLookupError:
+                continue  # it exited between the waitpid probe and this scan
+            escaped = True
         time.sleep(0.01)
     raise TimeoutError("Deployment workers did not exit")
 
@@ -71,8 +77,9 @@ def _supervise(control, grace, command):
             os.killpg(child.pid, signal.SIGKILL)
         code = child.wait(timeout=max(0, deadline - time.monotonic()))
         escaped = _reap_workers(child.pid, deadline)
-    if not escaped:
-        control.sendall(str(code).encode())
+    # "escaped" is still a confirmed cleanup: the adoptees were stopped, so the parent
+    # can report the detached worker as a case failure instead of aborting the suite.
+    control.sendall(f"escaped {code}".encode() if escaped else str(code).encode())
 
 
 if __name__ == "__main__":

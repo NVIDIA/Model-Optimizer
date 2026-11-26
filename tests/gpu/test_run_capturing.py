@@ -112,7 +112,7 @@ if sys.argv[2] == "timeout":
     time.sleep(60)
 """
     try:
-        with pytest.raises(run_command.ProcessGroupCleanupError):
+        with pytest.raises(run_command.DetachedWorkerError):
             run_command._run_capturing(
                 [
                     sys.executable,
@@ -127,6 +127,20 @@ if sys.argv[2] == "timeout":
                 cleanup_process_group=True,
                 timeout=timeout,
             )
+        # The supervisor reported the worker stopped; it must already be gone, not
+        # merely still about to die when teardown's emergency reap runs.
+        worker = int(pid_file.read_text())
+        for _ in range(20):
+            with contextlib.suppress(ChildProcessError):
+                if os.waitpid(worker, os.WNOHANG)[0]:
+                    break
+            try:
+                os.kill(worker, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("escaped worker still alive after confirmed cleanup")
     finally:
         try:
             _reap_test_child(pid_file)

@@ -50,6 +50,10 @@ class ProcessGroupCleanupError(RuntimeError):
     """A deployment's workers could not be confirmed stopped before the next case."""
 
 
+class DetachedWorkerError(subprocess.SubprocessError):
+    """The supervisor confirmed cleanup but had to stop workers detached from the deploy group."""
+
+
 def _wait_without_reaping(
     process: subprocess.Popen, timeout: float | None, capture_failed: threading.Event
 ) -> None:
@@ -87,6 +91,11 @@ def _finish_deployment(process, control, executable):
         raise ProcessGroupCleanupError("Lost deployment supervisor status") from exc
     if not result or process.returncode:
         raise ProcessGroupCleanupError("Could not confirm deployment workers stopped")
+    if result.startswith(b"escaped "):
+        raise DetachedWorkerError(
+            f"{executable} left workers outside its process group; the supervisor stopped "
+            f"them (command exit {int(result.split()[1])})"
+        )
     if result.startswith(b"errno "):
         err = int(result.split()[1])
         raise OSError(err, os.strerror(err), executable)

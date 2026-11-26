@@ -233,13 +233,25 @@ def _check_static_nvfp4(snapshot, directory):
         and group.get("input_activations", {}).get("dynamic") is False
         for group in groups.values()
     ), "Published NVFP4 must contain static Linear weights and input activations"
+    # The engine opens only the shards its weight index names; an unreferenced shard
+    # cannot satisfy the scale inventory. Without an index every shard is active.
+    indexes = sorted(component.glob("*.safetensors.index.json"))
+    assert len(indexes) <= 1, f"Multiple weight indexes under {component}"
+    shards = set(component.glob("*.safetensors"))
+    if indexes:
+        weight_map = json.loads(indexes[0].read_text(encoding="utf-8"))["weight_map"]
+        named = {component / name for name in weight_map.values()}
+    else:
+        named = shards
     entries = {}
-    for path in sorted(component.rglob("*.safetensors")):
+    for path in sorted(named):
         with path.open("rb") as stream:
             header_size = struct.unpack("<Q", stream.read(8))[0]
             assert header_size <= path.stat().st_size - 8, f"Invalid safetensors header: {path}"
             header = json.loads(stream.read(header_size))
-        entries.update({key: value for key, value in header.items() if key != "__metadata__"})
+        entries.update(
+            {key: {**value, "file": path} for key, value in header.items() if key != "__metadata__"}
+        )
     packed = sorted(
         name.removesuffix(".weight")
         for name, tensor in entries.items()
@@ -255,12 +267,36 @@ def _check_static_nvfp4(snapshot, directory):
         suffix: [prefix for prefix in packed if f"{prefix}.{suffix}" not in entries]
         for suffix in ("weight_scale", "weight_scale_2", "input_scale")
     }
+    invalid = []
+    if not any(missing.values()):
+        # Scales are small tensors: read their values and require finite, positive data.
+        import torch
+        from safetensors import safe_open
+
+        for prefix in packed:
+            dims = len(entries[f"{prefix}.weight"]["shape"])
+            for suffix in ("weight_scale", "weight_scale_2", "input_scale"):
+                key = f"{prefix}.{suffix}"
+                with safe_open(str(entries[key]["file"]), framework="pt") as shard:
+                    value = shard.get_tensor(key)
+                if (
+                    (suffix == "weight_scale" and value.ndim != dims)
+                    or (suffix != "weight_scale" and value.numel() != 1)
+                    or not (torch.isfinite(value).all() and (value > 0).all())
+                ):
+                    invalid.append(key)
     _write_json(
         directory / "static-activation-scales.json",
-        {"packed_modules": packed, "missing_scales": missing},
+        {
+            "packed_modules": packed,
+            "missing_scales": missing,
+            "invalid_scales": invalid,
+            "unreferenced_shards": sorted(path.name for path in shards - named),
+        },
     )
     assert packed, "Published checkpoint contains no packed NVFP4 Linear modules"
     assert not any(missing.values()), f"Published NVFP4 checkpoint is missing scales: {missing}"
+    assert not invalid, f"Published NVFP4 checkpoint has invalid scales: {invalid}"
 
 
 def _generate_sglang(config, snapshot, directory):

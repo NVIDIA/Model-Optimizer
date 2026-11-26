@@ -202,6 +202,27 @@ class ModelDeployer:
                 f"Set model_id and tensor_parallel_size instead of {reserved_keys} in "
                 "engine_kwargs so resource checks and engine arguments stay consistent."
             )
+        # Resource checks cover tensor_parallel_size ranks only; rank-multiplying fields
+        # (pipeline/context/data parallelism) would bypass them on this single-node harness.
+        topology_fields = {
+            "vllm": {"pipeline_parallel_size", "data_parallel_size"},
+            "sglang": {"pp_size", "dp_size", "nnodes"},
+            "trtllm": {
+                "pipeline_parallel_size",
+                "context_parallel_size",
+                "moe_cluster_parallel_size",
+                "gpus_per_node",
+            },
+        }.get(backend, set())
+        if unsupported := {
+            key: self.engine_kwargs[key]
+            for key in topology_fields & self.engine_kwargs.keys()
+            if self.engine_kwargs[key] != 1
+        }:
+            raise ValueError(
+                f"Rank-multiplying engine option(s) {sorted(unsupported)} need resource checks "
+                "this harness cannot perform"
+            )
 
     def _engine_arguments(self):
         """Bind runtime model paths and TP without supplying test parameter defaults."""
