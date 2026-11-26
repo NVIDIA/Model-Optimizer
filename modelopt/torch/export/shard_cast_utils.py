@@ -33,7 +33,10 @@ from modelopt.torch.quantization.utils.numeric_utils import (
     mxfp4_to_nvfp4_global_amax,
     mxfp4_to_nvfp4_per_block_amax,
 )
-from modelopt.torch.utils.plugins.hf_checkpoint_utils import resolve_checkpoint_file
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    _copy_into_export,
+    resolve_checkpoint_file,
+)
 
 __all__ = [
     "build_w13_amax_overrides",
@@ -239,7 +242,7 @@ def copy_aux_files(
         dst.parent.mkdir(parents=True, exist_ok=True)
         if dst.exists() or dst.is_symlink():  # a dangling link too, or the copy writes through it
             dst.unlink()
-        shutil.copyfile(src, dst)  # takes the output's own mode, not the cache's read-only one
+        _copy_into_export(src, dst)
 
 
 def log(message: str) -> None:
