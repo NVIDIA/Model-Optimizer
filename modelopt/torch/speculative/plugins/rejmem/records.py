@@ -19,6 +19,10 @@ One record per request, written inside vLLM by the capture hook and read by the 
 committed sequence with the target's features, and every drafting round with the target's features on
 the drafts the previous verify rejected (the round's memory). Positions are 0-based absolute positions
 in the committed sequence. This module must not import vLLM.
+
+A preempted request is admitted again when it resumes, and its record holds only the rounds after the
+last admission: ``round_index``, ``num_rounds_total`` and ``weight_version_start`` count from there, and
+committed positions before ``round_anchor_pos[0]`` have no round.
 """
 
 import json
@@ -40,7 +44,7 @@ TENSOR_SPEC: dict[str, tuple[torch.dtype, str]] = {
     "ctx_aux_hidden": (torch.bfloat16, "N,AH"),
     "ctx_last_hidden": (torch.bfloat16, "N,H"),  # after the target's final norm (lm_head input)
     "round_anchor_pos": (torch.int64, "R"),  # position of the round's anchor (bonus) token
-    "round_index": (torch.int64, "R"),  # ordinal of the round among all rounds of the request
+    "round_index": (torch.int64, "R"),  # ordinal of the round since the request's last admission
     # Drafts of the round accepted by the next verify; -1 if it was never verified.
     "round_num_accepted": (torch.int32, "R"),
     "round_draft_token_ids": (torch.int32, "R,NS"),  # proposals for positions anchor+1 .. anchor+NS
