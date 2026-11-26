@@ -15,14 +15,20 @@
 
 """CPU unit tests for GPTQ utilities."""
 
-from functools import partial
+import copy
+import warnings
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.utils.calib_utils import GPTQHelper, update_hessian
+from modelopt.torch.quantization import model_calib
+from modelopt.torch.quantization.utils import calib_utils
+from modelopt.torch.quantization.utils.calib_utils import (
+    GPTQHelper,
+    compute_hessian_inverse,
+    update_hessian,
+)
 from modelopt.torch.utils.distributed import ParallelState
 
 
@@ -125,6 +131,22 @@ def test_update_hessian_zero_token_input_noops():
     torch.testing.assert_close(hessian, expected_hessian)
 
 
+def test_hessian_inverse_is_the_upper_cholesky_factor_of_the_damped_inverse():
+    inputs = torch.randn(64, 16, dtype=torch.float64, generator=torch.Generator().manual_seed(0))
+    hessian = inputs.T @ inputs
+    weight = torch.randn(4, 16, dtype=torch.float64)
+    weight[:, 3] = 0  # a dead column decouples from the others
+    damped = hessian.clone()
+    damped[3, :] = damped[:, 3] = 0
+    damped[3, 3] = 1
+    damped += 0.1 * damped.diagonal().mean() * torch.eye(16, dtype=torch.float64)
+
+    upper = compute_hessian_inverse(hessian, weight, perc_damp=0.1)
+
+    assert torch.equal(upper, upper.triu())
+    torch.testing.assert_close(upper.T @ upper, torch.linalg.inv(damped))
+
+
 @pytest.mark.parametrize(("input_quantized", "forwards"), [(False, 1), (True, 2)])
 def test_gptq_runs_a_max_calibration_forward_only_for_activation_amax(input_quantized, forwards):
     """Weight amax comes from the weights; only an input quantizer needs a forward before GPTQ's."""
@@ -152,6 +174,60 @@ def test_gptq_runs_a_max_calibration_forward_only_for_activation_amax(input_quan
     assert len(calls) == forwards
 
 
+def test_bf16_hessian_input_on_cpu_gives_the_float32_result_and_warns_once():
+    """CPU GEMMs take no ``out_dtype``, so ``hessian_input_dtype: bfloat16`` falls back to the
+    float32 Hessian, warning once however many batches it reads."""
+    calib_utils._warn_bfloat16_hessian_unavailable.cache_clear()
+    torch.manual_seed(0)
+    model = torch.nn.Linear(32, 8, bias=False)
+    batches = [torch.randn(4, 32) for _ in range(3)]
+    weights = {}
+    for hessian_input_dtype in ("float32", "bfloat16"):
+        quantized = copy.deepcopy(model)
+        config = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            ],
+            "algorithm": {
+                "method": "gptq",
+                "block_size": 16,
+                "hessian_input_dtype": hessian_input_dtype,
+            },
+        }
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            mtq.quantize(quantized, config, lambda m: [m(batch) for batch in batches])
+        fallbacks = [w for w in caught if "hessian_input_dtype" in str(w.message)]
+        assert len(fallbacks) == (hessian_input_dtype == "bfloat16")
+        weights[hessian_input_dtype] = quantized.weight
+    assert torch.equal(weights["float32"], weights["bfloat16"])
+
+
+def test_a_windowed_linear_updates_before_a_later_one_sharing_its_weight(monkeypatch):
+    """Each update of a shared weight reads the last one's result, so a tensor-parallel linear tied
+    to a later plain one updates first, as it does when every linear is tensor-parallel."""
+    torch.manual_seed(0)
+    inputs = torch.randn(16, 32)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+        ],
+        "algorithm": {"method": "gptq", "block_size": 16},
+    }
+    weights = []
+    for parallel in (2, 1):  # every linear, then only the first
+        torch.manual_seed(0)
+        model = torch.nn.Sequential(*(torch.nn.Linear(32, 32, bias=False) for _ in range(2)))
+        model[1].weight = model[0].weight  # the second sees the first's output
+        windowed = set(model[:parallel])
+        monkeypatch.setattr(model_calib, "is_quantized_parallel_linear", lambda m: m in windowed)
+        mtq.quantize(model, config, lambda m: m(inputs))
+        weights.append(model[0].weight)
+    assert torch.equal(*weights)
+
+
 def _gptq_hessian_dp_sync_helper(rank, size, token_counts):
     torch.manual_seed(0)
     inputs = [torch.randn(n, 8) for n in token_counts]
@@ -167,8 +243,14 @@ def _gptq_hessian_dp_sync_helper(rank, size, token_counts):
     torch.testing.assert_close(helper.hessian, ref)
 
 
-def test_gptq_hessian_dp_sync(skip_on_windows):
+def test_gptq_hessian_dp_sync(cpu_dist_workers):
     """Token-weighted merge over a gloo (CPU) group, with one rank that saw no tokens."""
-    spawn_multiprocess_job(
-        2, partial(_gptq_hessian_dp_sync_helper, token_counts=(5, 0)), backend="gloo"
-    )
+    cpu_dist_workers.run(_gptq_hessian_dp_sync_helper, token_counts=(5, 0))
+
+
+def test_a_calibration_run_forgets_earlier_forward_measurements(monkeypatch):
+    """Another run, maybe of another model, must not size its Hessian reserve from this one."""
+    monkeypatch.setattr(calib_utils, "_calib_forward_peak", {0: 2**60})
+    model = torch.nn.Linear(16, 16)
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=lambda m: m(torch.randn(4, 16)))
+    assert 2**60 not in calib_utils._calib_forward_peak.values()

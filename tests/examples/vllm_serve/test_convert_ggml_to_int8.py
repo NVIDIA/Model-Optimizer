@@ -18,21 +18,41 @@ import sys
 
 import pytest
 import torch
-from _test_utils.examples.ggml_export import quantize_tiny_llama
+from _test_utils.examples.ggml_export import FP8_ATTENTION, quantize_tiny_llama
 from _test_utils.examples.run_command import run_example_command
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.inputs import TokensPrompt
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 from modelopt.torch.export import export_hf_checkpoint
 
+# vLLM serves ModelOpt INT8_PB_WO as the modelopt_int8 method from vllm-project/vllm#65272 on. The
+# ModelOpt case below skips without it, so a vLLM that renamed the method would skip it too.
+_SERVES_INT8_PB_WO = "modelopt_int8" in QUANTIZATION_METHODS
 
-@pytest.fixture(scope="module")
-def int8_export_in_vllm(tmp_path_factory):
+
+@pytest.fixture(
+    scope="module",
+    params=[
+        # Only GGML layers: compressed-tensors, which released vLLM serves.
+        pytest.param(((), 0.05), id="compressed-tensors"),
+        # FP8 attention beside the GGML MLPs: ModelOpt INT8_PB_WO, the FP8 layers carried over.
+        pytest.param(
+            (FP8_ATTENTION, 0.15),
+            id="modelopt",
+            marks=pytest.mark.skipif(
+                not _SERVES_INT8_PB_WO, reason="vLLM serves ModelOpt INT8_PB_WO after 0.34.0"
+            ),
+        ),
+    ],
+)
+def int8_export_in_vllm(request, tmp_path_factory):
     """vLLM serving the INT8 conversion of a GGML export, the model's own logprobs and its tokens."""
+    extra_quant_cfg, atol = request.param
     tmp_path = tmp_path_factory.mktemp("ggml_int8")
     # Group 32 (IQ1_S) and group 16 (IQ2_XS) layers take different vLLM kernels.
-    model, token_ids = quantize_tiny_llama(tmp_path)
+    model, token_ids = quantize_tiny_llama(tmp_path, extra_quant_cfg=extra_quant_cfg)
     with torch.no_grad():
         logits = model(token_ids).logits[0, :-1].float()
     expected = logits.log_softmax(-1).gather(-1, token_ids[0, 1:, None])[:, 0]
@@ -53,14 +73,14 @@ def int8_export_in_vllm(tmp_path_factory):
         dtype="bfloat16",
         skip_tokenizer_init=True,
     )
-    yield llm, token_ids[0], expected
+    yield llm, token_ids[0], expected, atol
     del llm
     gc.collect()
     cleanup_dist_env_and_memory(shutdown_ray=False)
 
 
 def test_vllm_serves_the_int8_export_like_the_fake_quantized_model(int8_export_in_vllm):
-    llm, token_ids, expected = int8_export_in_vllm
+    llm, token_ids, expected, atol = int8_export_in_vllm
     (output,) = llm.generate(
         TokensPrompt(prompt_token_ids=token_ids.tolist()),
         SamplingParams(max_tokens=1, prompt_logprobs=0, detokenize=False),
@@ -69,6 +89,7 @@ def test_vllm_serves_the_int8_export_like_the_fake_quantized_model(int8_export_i
         [lp[t].logprob for t, lp in zip(token_ids[1:].tolist(), output.prompt_logprobs[1:])]
     )
 
-    # vLLM's kernels round differently from the fake-quant reference by up to ~0.02; giving each
-    # group its neighbour's scale moves these logprobs by over 1.
-    torch.testing.assert_close(served, expected, atol=0.05, rtol=0)
+    # vLLM's INT8 kernels round differently from the fake-quant reference by up to ~0.02, and its FP8
+    # W8A8 kernels by up to ~0.09, exactly as when it serves ModelOpt's own FP8 export of the same
+    # layers; giving each INT8 group its neighbour's scale moves these logprobs by over 1.
+    torch.testing.assert_close(served, expected, atol=atol, rtol=0)

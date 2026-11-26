@@ -81,7 +81,7 @@ class DynamoDisable(Protocol):
 try:
     dynamo_skip: DynamoSkip = cast("Any", torch._dynamo.decorators).skip
     dynamo_disable: DynamoDisable = cast("Any", torch._dynamo.decorators).disable
-except:
+except AttributeError:
     dynamo_skip: DynamoSkip = cast("Any", torch._dynamo.eval_frame).skip
     dynamo_disable: DynamoDisable = cast("Any", torch._dynamo.eval_frame).disable
 

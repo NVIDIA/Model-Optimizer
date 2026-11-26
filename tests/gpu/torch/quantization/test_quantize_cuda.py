@@ -18,6 +18,7 @@
 import copy
 
 import pytest
+import torch
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quantize_common import (
     FP4_SVDQUANT_CFG,
@@ -28,6 +29,7 @@ from _test_utils.torch.quantization.quantize_common import (
 )
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
 
 NVFP4_WEIGHT_ACT_MSE_CFG = {
@@ -139,6 +141,39 @@ def test_quantize(model_cls, config):
     model = model_cls().cuda()
     calib_data = [model.get_input().cuda() for _ in range(8)]
     quantize_model_and_forward(model, config, calib_data)
+
+
+@pytest.mark.skipif(
+    not hasattr(tensor_quant.triton_kernel, "fp4_fake_quant_block"),
+    reason="fp4_fake_quant_block requires compute >= 8.9",
+)
+@pytest.mark.parametrize(
+    "config", [mtq.NVFP4_DEFAULT_CFG, mtq.W4A8_NVFP4_FP8_CFG, mtq.NVFP4_MLP_WEIGHT_ONLY_CFG]
+)
+def test_quantize_nvfp4_block_size(config):
+    """NVFP4 presets fake-quantize weights in the block size they configure, end to end."""
+    # Local import: transformers is optional and only this test in the module needs it.
+    from _test_utils.torch.transformers_models import get_tiny_llama
+
+    model = get_tiny_llama().cuda()
+    down_proj = model.model.layers[0].mlp.down_proj
+    with torch.no_grad():
+        # Global amax 42: 0.75 stays exact in a block of its own but rounds to 0 in a block shared with 42.
+        down_proj.weight.copy_(torch.tensor([0.75] * 16 + [42.0] * 16).expand_as(down_proj.weight))
+    input_ids = torch.randint(0, model.config.vocab_size, (2, 16), device="cuda")
+    mtq.quantize(model, config, lambda m: m(input_ids))
+
+    weight = down_proj.weight.detach().clone()
+    if down_proj.weight_quantizer.block_sizes[-1] == 16:
+        expected = weight
+    else:
+        expected = torch.where(weight == 0.75, 0.0, weight)
+    with torch.no_grad():
+        assert torch.equal(down_proj.weight_quantizer(weight), expected)
+        logits = model(input_ids).logits
+        down_proj.weight.copy_(expected)
+        down_proj.weight_quantizer.disable()
+        assert torch.equal(model(input_ids).logits, logits)
 
 
 @pytest.mark.parametrize(

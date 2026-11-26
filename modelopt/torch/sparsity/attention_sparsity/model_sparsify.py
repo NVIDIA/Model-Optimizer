@@ -15,16 +15,16 @@
 
 """Main API functions for sparse attention optimization."""
 
+import warnings
 from typing import Any
 
 import torch
 
-from modelopt.torch.opt.conversion import apply_mode
 from modelopt.torch.opt.searcher import ForwardLoop
 
 from .calibration import calibrate_sparse_attention
 from .config import SparseAttentionConfig
-from .mode import SparseAttentionModeRegistry
+from .conversion import get_sparse_attention_mode_state, update_sparse_attention_metadata
 
 __all__ = [
     "calibrate",
@@ -38,6 +38,10 @@ def sparsify(
     forward_loop: ForwardLoop | None = None,
 ) -> torch.nn.Module:
     """Applies sparse attention optimization to the model in-place.
+
+    .. deprecated:: 0.49.0
+        Use :meth:`mts.sparsify(model, config, forward_loop=forward_loop)
+        <modelopt.torch.sparsity.sparsification.sparsify>` instead.
 
     This method performs replacement of attention modules with their sparse counterparts.
 
@@ -101,7 +105,9 @@ def sparsify(
 
             This requires the model to be loaded with ``attn_implementation="eager"``.
 
-        forward_loop: Reserved for future use.
+        forward_loop: Callable that forwards calibration data through the model, used when
+            ``sparse_cfg`` contains a ``"calibration"`` entry. If None, a RULER calibration
+            dataset is generated from the model's tokenizer.
 
             Here are a few examples for correct ``forward_loop`` definitions:
 
@@ -148,12 +154,14 @@ def sparsify(
     Returns:
         A pytorch model which has sparse attention applied and optionally calibrated.
     """
-    model = apply_mode(
-        model, mode=[("sparse_attention", config)], registry=SparseAttentionModeRegistry
+    warnings.warn(
+        "mtsa.sparsify() is deprecated; use modelopt.torch.sparsity.sparsify() instead.",
+        DeprecationWarning,
+        stacklevel=2,
     )
+    from ..sparsification import sparsify as _sparsify  # circular: ..sparsification imports this
 
-    # Calibrate the sparsity ratio of the attention modules
-    return calibrate(model, config, forward_loop=forward_loop)
+    return _sparsify(model, config, forward_loop=forward_loop)
 
 
 def calibrate(
@@ -173,5 +181,10 @@ def calibrate(
     Returns:
         The calibrated model with optimized sparse attention thresholds.
     """
+    # Saving refreshes only the last mode's metadata, which may not be sparse_attention, so refresh it
+    # for each converted model in ``model``, which may also be a wrapper or a container of several.
+    mode_states = [(m, s) for m in model.modules() if (s := get_sparse_attention_mode_state(m))]
     calibrate_sparse_attention(model, config, forward_loop=forward_loop)
+    for m, (mode_config, metadata) in mode_states:
+        update_sparse_attention_metadata(m, mode_config, metadata)
     return model

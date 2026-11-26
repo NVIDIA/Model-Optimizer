@@ -56,7 +56,7 @@ def test_runtime_precision_conversion_preserves_mode_steps(
         precision_utils, "convert_fp16_io", lambda graph: events.append("convert_io")
     )
     monkeypatch.setattr(
-        precision_utils.gs, "export_onnx", lambda graph: events.append("export") or io_model
+        precision_utils, "export_onnx", lambda graph: events.append("export") or io_model
     )
 
     def convert(model, **kwargs):
@@ -109,7 +109,7 @@ def test_export_transform_runs_between_int8_qdq_and_fp8(monkeypatch):
 
     monkeypatch.setattr(export_utils.gs, "import_onnx", lambda model: graph)
     monkeypatch.setattr(
-        export_utils.gs, "export_onnx", lambda graph: events.append("export") or int8_model
+        export_utils, "export_onnx", lambda graph: events.append("export") or int8_model
     )
     monkeypatch.setattr(
         export_utils,

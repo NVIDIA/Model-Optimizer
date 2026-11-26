@@ -44,15 +44,20 @@ from ..extensions import get_cuda_ext_ggml
 from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
+    ScaleFit,
+    choice_blocks,
     chunk_importance,
     dequantize_blocks,
+    encode_every_choice,
     importance_blocks,
     narrow_to_float32,
+    super_block_scales,
     validate_block_chunk_size,
     validate_packed_weights,
     validate_weight,
 )
-from .iq1_s import _search_shifted_grid, iq1_s_grid
+from .iq1_s import _IQ1_LEVELS, _search_shifted_grid, iq1_s_grid
+from .scale_fields import NativeScaleSpec
 
 __all__ = [
     "IQ1_M_BLOCK_BYTES",
@@ -107,12 +112,20 @@ def _predict_iq1_m_scales(blocks: torch.Tensor) -> torch.Tensor:
 
 
 def _encode_blocks(
-    blocks: torch.Tensor, grid: torch.Tensor, weights: torch.Tensor | None = None
+    blocks: torch.Tensor,
+    grid: torch.Tensor,
+    weights: torch.Tensor | None = None,
+    choices: torch.Tensor | None = None,
+    scales: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Encode a moderate-size batch of flattened 256-value blocks."""
+    """Encode a moderate-size batch of flattened 256-value blocks.
+
+    ``choices``, ``[blocks, 16]``, fixes each 16-value group's local scale instead of searching it;
+    each vector still picks its own shift.
+    """
     x = narrow_to_float32(blocks)
     block_count = x.shape[0]
-    d = _predict_iq1_m_scales(x)
+    d = _predict_iq1_m_scales(x) if scales is None else scales
     d_float = d.float()
     best_error, best_entry = _search_shifted_grid(
         x.reshape(block_count, _IQ1_M_GROUPS, 8), d_float, grid, weights
@@ -125,30 +138,12 @@ def _encode_blocks(
     local_entry = per_shift_entry.gather(2, shift_index.unsqueeze(2)).squeeze(2)
 
     pair_error = local_error.reshape(block_count, 16, 2, 8).sum(dim=2)
-    selected_local = pair_error.argmin(dim=-1)
+    selected_local = pair_error.argmin(dim=-1) if choices is None else choices
     group_local = selected_local.repeat_interleave(2, dim=1)
     selected_entry = local_entry.gather(2, group_local.unsqueeze(-1)).squeeze(-1)
     selected_shift = shift_index.gather(2, group_local.unsqueeze(-1)).squeeze(-1)
 
-    packed = torch.empty((block_count, IQ1_M_BLOCK_BYTES), dtype=torch.uint8, device=x.device)
-    packed[:, :32] = (selected_entry & 0xFF).to(torch.uint8)
-
-    # Each group's nibble is three index-high bits and its shift bit; two groups share a byte,
-    # low nibble first.
-    nibbles = ((selected_entry >> 8) & 0x7) | (selected_shift << 3)
-    packed[:, 32:48] = (nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)).to(torch.uint8)
-
-    # Four scale words, each carrying four 3-bit local scales (two sub-blocks, two halves each)
-    # in bits 0..11 and one nibble of d in bits 12..15, low nibble in the first word. The fields
-    # are disjoint, so summing them is the same as OR-ing them.
-    d_bits = d.contiguous().view(torch.int16).to(torch.int64) & 0xFFFF
-    local_shifts = torch.tensor([0, 3, 6, 9], dtype=torch.int64, device=x.device)
-    nibble_shifts = torch.tensor([0, 4, 8, 12], dtype=torch.int64, device=x.device)
-    words = (selected_local.reshape(block_count, 4, 4) << local_shifts).sum(dim=-1)
-    words |= ((d_bits.unsqueeze(-1) >> nibble_shifts) & 0xF) << 12
-    packed[:, 48:56:2] = (words & 0xFF).to(torch.uint8)
-    packed[:, 49:56:2] = ((words >> 8) & 0xFF).to(torch.uint8)
-    return torch.where((d_float == 0).unsqueeze(1), 0, packed)
+    return _pack_fields(selected_entry, selected_shift, selected_local, d)
 
 
 @torch.no_grad()
@@ -157,31 +152,51 @@ def quantize_iq1_m(
     *,
     block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
     importance: torch.Tensor | None = None,
+    choices: torch.Tensor | None = None,
+    scales: torch.Tensor | None = None,
+    every_choice: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ1_M blocks.
 
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 56]``
     and ``[weight.ndim]``. ``importance``, a non-negative per-input-column vector, weights each
-    value's squared error in the search, as llama.cpp's imatrix does.
+    value's squared error in the search, as llama.cpp's imatrix does. ``choices``,
+    ``[*weight.shape[:-1], weight.shape[-1] // 256, 16]``, fixes each 16-value group's 3-bit local
+    scale.
+    ``scales``, one FP16 super-block scale per block, replaces the predicted ones.
+    ``every_choice`` returns every choice's payload instead, each with that choice in every
+    group, ``[num_choices, *packed shape]``.
     """
     validate_weight(weight, "IQ1_M")
     validate_block_chunk_size(block_chunk_size)
     block_importance = importance_blocks(importance, weight, "IQ1_M")
+    block_choices = choice_blocks(choices, weight, 16, 8, "IQ1_M", every_choice)
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ1_M_BLOCK_SIZE)
+    block_scales = super_block_scales(
+        blocks, _predict_iq1_m_scales, scales, _SCALE_BLOCK_CHUNK_SIZE
+    )
     grid = iq1_s_grid(weight.device)
     packed_shape = (*weight.shape[:-1], weight.shape[-1] // IQ1_M_BLOCK_SIZE, IQ1_M_BLOCK_BYTES)
     if weight.is_cuda:
         extension = get_cuda_ext_ggml()
         if extension is not None:
-            scale_chunks = [
-                _predict_iq1_m_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
-                for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
-            ]
-            packed = extension.iq1_m_pack(blocks, grid, torch.cat(scale_chunks), block_importance)
-            return packed.reshape(packed_shape), logical_shape
+            packed = extension.iq1_m_pack(
+                blocks, grid, block_scales, block_importance, block_choices, every_choice
+            )
+            return packed.reshape(*packed.shape[:-2], *packed_shape), logical_shape
 
+    if every_choice:
+        return encode_every_choice(
+            quantize_iq1_m,
+            weight,
+            16,
+            8,
+            block_chunk_size=block_chunk_size,
+            importance=importance,
+            scales=scales,
+        )
     chunks = [
         _encode_blocks(
             blocks[start : start + block_chunk_size],
@@ -189,6 +204,8 @@ def quantize_iq1_m(
             chunk_importance(
                 block_importance, start, min(start + block_chunk_size, blocks.shape[0])
             ),
+            None if block_choices is None else block_choices[start : start + block_chunk_size],
+            block_scales[start : start + block_chunk_size],
         )
         for start in range(0, blocks.shape[0], block_chunk_size)
     ]
@@ -225,40 +242,101 @@ def dequantize_iq1_m(
     ).reshape(shape)
 
 
-def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Levels in eighths of a grid step (±1, ±7, ±9) and the step of each 16-value half."""
-    count = blocks.shape[0]
-    scale_shifts = torch.tensor([0, 3, 6, 9], dtype=torch.int64, device=blocks.device)
-    low = blocks[:, :32].to(torch.int64).reshape(count, _IQ1_M_SUBBLOCKS, 4)
-    qh = blocks[:, 32:48].to(torch.int64).reshape(count, _IQ1_M_SUBBLOCKS, 2)
-    words = blocks[:, 48:56:2].to(torch.int64) | (blocks[:, 49:56:2].to(torch.int64) << 8)
+def _scale_words(blocks: torch.Tensor) -> torch.Tensor:
+    return blocks[:, 48:56:2].to(torch.int64) | (blocks[:, 49:56:2].to(torch.int64) << 8)
 
-    # The FP16 super-block scale is the four words' top nibbles, low word first.
+
+def _payload_scales(blocks: torch.Tensor) -> torch.Tensor:
+    """The FP16 super-block scale of each block: the four scale words' top nibbles, low word first."""
+    words = _scale_words(blocks)
     d_bits = (
         (words[:, 0] >> 12)
         | ((words[:, 1] >> 8) & 0x00F0)
         | ((words[:, 2] >> 4) & 0x0F00)
         | (words[:, 3] & 0xF000)
     )
-    d = d_bits.to(torch.int16).view(torch.float16).float()
+    return d_bits.to(torch.int16).view(torch.float16)
 
-    # Each qh byte carries two groups, low nibble first: three high index bits and a delta sign.
-    nibbles = torch.stack((qh & 0xF, qh >> 4), dim=-1).reshape(count, _IQ1_M_SUBBLOCKS, 4)
-    entries = low | ((nibbles & 0x7) << 8)
-    delta_sign = torch.where((nibbles & 0x8).bool(), -1.0, 1.0).unsqueeze(-1)
 
-    # Each word packs four 3-bit local scales below its nibble of d: two sub-blocks, two
-    # halves each, so word w, slot k is sub-block 2 * w + k // 2, half k % 2. Groups 0,1 take
-    # the first half's scale and groups 2,3 the second, which is the order the steps flatten in.
-    local = ((words.unsqueeze(-1) >> scale_shifts) & 0x7).reshape(count, _IQ1_M_SUBBLOCKS * 2)
-    steps = d.unsqueeze(-1) * (2 * local + 1).float() * _IQ1_M_DELTA
+def _unpack_fields(
+    packed: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Read grid entries, sign or delta bits, local scales, and the shared FP16 scale."""
+    count = packed.shape[0]
+    high = packed[:, 32:48].long()
+    nibbles = torch.stack((high & 15, high >> 4), -1).reshape(count, 32)
+    entries = packed[:, :32].long() | ((nibbles & 7) << 8)
+    auxiliary = nibbles >> 3
+    d = _payload_scales(packed).float()
+    local = _read_local_scales(packed)
+    return entries.reshape(count, 32), auxiliary, local, d
 
+
+def _pack_fields(
+    entries: torch.Tensor, auxiliary: torch.Tensor, local: torch.Tensor, d: torch.Tensor
+) -> torch.Tensor:
+    """Pack native fields without searching the codebook; round the shared scale to FP16."""
+    entries, auxiliary, local = entries.long(), auxiliary.long(), local.long()
+    count = entries.shape[0]
+    packed = torch.empty((count, IQ1_M_BLOCK_BYTES), dtype=torch.uint8, device=entries.device)
+    native_d = d.clamp(-65504, 65504).to(torch.float16)
+    packed[:, :32] = (entries & 255).to(torch.uint8)
+    nibbles = (entries >> 8) | (auxiliary << 3)
+    packed[:, 32:48] = (nibbles[:, ::2] | (nibbles[:, 1::2] << 4)).to(torch.uint8)
+    words = (local.reshape(count, 4, 4) << (torch.arange(4, device=entries.device) * 3)).sum(-1)
+    _write_scale_words(packed, words, native_d)
+    return torch.where((native_d == 0).unsqueeze(-1), 0, packed)
+
+
+def _write_scale_words(blocks: torch.Tensor, local_bits: torch.Tensor, scales: torch.Tensor):
+    """Write each block's four scale words, ``local_bits`` below one nibble of its FP16 scale.
+
+    Bits 0..11 hold the local scales and bits 12..15 the scale's nibbles, low nibble first.
+    """
+    d_bits = scales.to(torch.float16).contiguous().view(torch.int16).to(torch.int64) & 0xFFFF
+    nibble_shifts = torch.tensor([0, 4, 8, 12], dtype=torch.int64, device=blocks.device)
+    words = local_bits | (((d_bits.unsqueeze(-1) >> nibble_shifts) & 0xF) << 12)
+    blocks[:, 48:56:2] = (words & 0xFF).to(torch.uint8)
+    blocks[:, 49:56:2] = ((words >> 8) & 0xFF).to(torch.uint8)
+
+
+def _replace_payload_scales(blocks: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """``blocks`` with each FP16 super-block scale written back into the scale words' top nibbles."""
+    replaced = blocks.clone()
+    _write_scale_words(replaced, _scale_words(blocks) & 0x0FFF, scales)
+    return replaced
+
+
+def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Levels in eighths of a grid step (±1, ±7, ±9) and the step of each 16-value half."""
+    entries, auxiliary, local, d = _unpack_fields(blocks)
+    delta_sign = torch.where(auxiliary.bool(), -1.0, 1.0).unsqueeze(-1)
     levels = iq1_s_grid(blocks.device)[entries] / _IQ1_M_DELTA + delta_sign
-    return levels.reshape(count, IQ1_M_BLOCK_SIZE), steps
+    steps = d.unsqueeze(-1) * (2 * local + 1).float() * _IQ1_M_DELTA
+    return levels.reshape(-1, IQ1_M_BLOCK_SIZE), steps
+
+
+def _read_local_scales(blocks: torch.Tensor) -> torch.Tensor:
+    shifts = torch.tensor([0, 3, 6, 9], device=blocks.device)
+    return ((_scale_words(blocks).unsqueeze(-1) >> shifts) & 7).reshape(-1, 16)
+
+
+def _write_local_scales(blocks: torch.Tensor, local: torch.Tensor) -> None:
+    shifts = torch.tensor([0, 3, 6, 9], device=blocks.device)
+    words = (local.int().reshape(-1, 4, 4) << shifts).sum(-1)
+    _write_scale_words(blocks, words, _payload_scales(blocks))
 
 
 IQ1_M_FORMAT = GGMLFormat(
     name="iq1_m",
+    scale_spec=NativeScaleSpec(
+        local_max=7,
+        local_multiplier=2,
+        local_bias=1,
+        divisor=8,
+        read_local=_read_local_scales,
+        write_local=_write_local_scales,
+    ),
     block_size=IQ1_M_BLOCK_SIZE,
     block_bytes=IQ1_M_BLOCK_BYTES,
     quantize=quantize_iq1_m,
@@ -267,7 +345,14 @@ IQ1_M_FORMAT = GGMLFormat(
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
     int8_group_size=_IQ1_M_INT8_GROUP_SIZE,
     unpack_int8=_unpack_int8,
+    pack_fields=_pack_fields,
+    unpack_fields=_unpack_fields,
     weighted=True,
+    choice_groups=16,
+    num_choices=8,
+    payload_scales=_payload_scales,
+    scale_fit=ScaleFit(top=15, levels=_IQ1_LEVELS),
+    replace_payload_scales=_replace_payload_scales,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq1_m and

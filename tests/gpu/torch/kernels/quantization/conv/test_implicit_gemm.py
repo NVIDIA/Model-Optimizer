@@ -990,11 +990,10 @@ class TestFP4FakeQuantVsModelopt:
 
         This is the function used by the actual quantization pipeline with
         num_bits=4 (E2M1) and scale_bits=8 (E4M3).
-        Note: dynamic_block_quantize_op dispatches to Triton with default block_size=16.
         """
         from modelopt.torch.quantization.tensor_quant import dynamic_block_quantize_op
 
-        block_size = 16  # dynamic_block_quantize_op uses block_size=16 for Triton path
+        block_size = 16
         torch.manual_seed(seed)
         num_blocks = 16
         x = torch.randn(num_blocks, block_size, device="cuda", dtype=torch.float32) * 10
@@ -1022,7 +1021,7 @@ class TestFP4FakeQuantVsModelopt:
         torch.manual_seed(42)
         block_size = 16
         # Simulate a large tensor: 256 blocks of 16 elements
-        # (tile_rows must be power-of-2 for Triton block_ptr)
+        # (tile_rows must be power-of-2 for tl.arange)
         num_blocks = 256
         x = torch.randn(num_blocks, block_size, device="cuda", dtype=torch.float32) * 5
         global_amax = x.abs().max()

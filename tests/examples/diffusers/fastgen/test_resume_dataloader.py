@@ -32,8 +32,6 @@ Dependency-guarded with ``importorskip`` so it skips where torch / nemo_automode
 torchdata are absent (e.g. a CPU login node) and runs in the training container.
 """
 
-from __future__ import annotations
-
 import pathlib
 import sys
 from types import SimpleNamespace

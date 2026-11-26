@@ -1,0 +1,17 @@
+[
+  {
+    "id": "outline-nvfp4-recipe-search",
+    "question": "Outline a Qwen3-8B ModelOpt search for the smallest NVFP4 checkpoint\nwithin 1 percentage point of BF16 on both GPQA and IFBench.\n\nUse BF16 plus three candidates: FP8 control, NVFP4 AutoQuant, and\nmanual/sensitivity-guided NVFP4. Share one calibration dataset and\n128 samples across candidates.\n\nGive a portfolio table and briefly state the experiment order,\nvalidation gates, size metric, acceptance rule, and future skill\nhandoffs. Omit implementation details and size calculations.\n\nPlan only; no execution, QAD, or invented results.",
+    "expected_skill": "modelopt-quant-recipe-search",
+    "expected_script": null,
+    "ground_truth": "A planning outline with a portfolio table: BF16 reference, FP8 diagnostic control, NVFP4 AutoQuant, and manual/sensitivity-guided NVFP4. All three quantized candidates share one calibration dataset and 128 samples. Briefly establish the BF16 reference and FP8 control, use AutoQuant sensitivity to inform the manual candidate where applicable, validate checkpoint coverage/metadata and runtime compatibility before comparable GPQA/IFBench evaluation, and compare measured checkpoint bytes including scales and metadata. Both benchmarks independently permit at most a 1-percentage-point loss from matching BF16. Recommend only the smallest qualifying tested NVFP4 candidate after measurements, or none if neither qualifies; FP8 is a control, not an eligible winner. Name future PTQ, evaluation, and comparison skill handoffs. No implementation details, size calculations, fabricated measurements, claimed winner, execution, or QAD.",
+    "expected_behavior": [
+      "Loads the recipe-search skill before outlining; Skill-tool activation or reading SKILL.md both count.",
+      "Provides a portfolio table with BF16 plus exactly three quantized candidates: FP8 control, NVFP4 AutoQuant, and manual/sensitivity-guided NVFP4; shares one calibration dataset and 128 samples across quantized candidates.",
+      "Briefly states the experiment order and checkpoint coverage/metadata and runtime-compatibility gates before comparable accuracy evaluation; implementation commands and detailed configurations are not required.",
+      "Uses measured checkpoint bytes including scales and metadata; requires both GPQA and IFBench independently to remain within 1 percentage point of matching BF16 and selects only the smallest qualifying tested NVFP4 candidate, or reports none. No measured result or winner is claimed.",
+      "Names future PTQ, evaluation, and comparison skill handoffs, using modelopt-ptq, modelopt-evaluation, and modelopt-compare-results or unambiguous aliases, without executing those workflows.",
+      "Returns an outline rather than an implementation protocol, omitting size calculations and fabricated measurements; performs no model download, checkpoint generation, job submission, evaluation execution, or QAD."
+    ]
+  }
+]

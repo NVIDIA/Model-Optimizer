@@ -21,6 +21,7 @@ from unittest import mock
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quantize_common import (
     INT4_AWQ_CLIP_CFG,
@@ -30,6 +31,8 @@ from _test_utils.torch.quantization.quantize_common import (
     save_restore_test,
 )
 from pydantic import ValidationError
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -42,6 +45,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     register_quant_backend,
     unregister_quant_backend,
 )
+from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.utils.distributed import ParallelState
 
 # A test config with double-quant (using `SequentialQuantizers`)
@@ -628,6 +632,63 @@ def test_skip_weight_quant_check_env_var_bypasses_the_guard():
         mtq.quantize(model, config, lambda m: m(m.get_input()))
 
 
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "MODELOPT_SKIP_WEIGHT_QUANT_CHECK",
+        "MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP",
+        "MODELOPT_NVFP4_TRITON_SWEEP",
+    ],
+)
+def test_a_malformed_variable_refuses_before_the_model_changes(monkeypatch, variable):
+    """Quantizing reads it once the model has begun to change, so the entry points parse it first."""
+    model = SimpleLinear()
+    forward_loop = lambda m: m(m.get_input())  # noqa: E731
+    monkeypatch.setenv(variable, "enabled")
+    with pytest.raises(ValueError, match=variable):
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+    with pytest.raises(ValueError, match=variable):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=[SimpleLinear.get_input()],
+            forward_step=lambda m, batch: m(batch),
+            loss_func=lambda output, batch: output.sum(),
+        )
+    assert not is_quantized(model)
+
+    monkeypatch.delenv(variable)
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+    quantized = repr(model)
+    monkeypatch.setenv(variable, "enabled")
+    with pytest.raises(ValueError, match=variable):
+        # A config that would disable every quantizer.
+        mtq.quantize(model, {"quant_cfg": [{"quantizer_name": "*", "enable": False}]}, forward_loop)
+    with pytest.raises(ValueError, match=variable):
+        mtq.calibrate(model, "max", forward_loop)
+    assert repr(model) == quantized
+
+
+def _malformed_variable_on_one_rank_job(rank, size):
+    model = SimpleLinear()
+    malformed = {"MODELOPT_SKIP_WEIGHT_QUANT_CHECK": "enabled"} if rank == 1 else {}
+    # Rank 1 raises its own error; rank 0 one naming it.
+    error = ValueError if rank == 1 else RuntimeError
+    with (
+        bounded_collectives(),
+        mock.patch.dict(os.environ, malformed),
+        pytest.raises(error, match="MODELOPT_SKIP_WEIGHT_QUANT_CHECK='enabled'"),
+    ):
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(m.get_input()))
+    assert not is_quantized(model)
+
+
+def test_a_malformed_variable_on_one_rank_refuses_on_every_rank(cpu_dist_workers):
+    """A rank refusing alone would leave the other waiting for it in calibration."""
+    cpu_dist_workers.run(_malformed_variable_on_one_rank_job)
+
+
 class _ToyIndexer(torch.nn.Module):
     """Stands in for a framework's sparse-attention indexer (vLLM ``Indexer``, MCore ``CSAIndexer``)."""
 
@@ -727,6 +788,36 @@ def _test_indexer_check_covers_all_ranks(rank, size):
 
 def test_indexer_k_check_covers_all_ranks(cpu_dist_workers):
     cpu_dist_workers.run(_test_indexer_check_covers_all_ranks)
+
+
+def _awq_on_a_sharded_fsdp2_model_job(rank, size):
+    model = SimpleLinear()
+    fully_shard(model, mesh=init_device_mesh("cpu", (size,)))
+    forward_loop = lambda m: m(m.get_input())  # noqa: E731
+    with bounded_collectives():
+        for config in (mtq.W4A8_AWQ_BETA_CFG, INT4_AWQ_FULL_CFG):  # awq_lite, awq_full
+            with pytest.raises(NotImplementedError, match=f"FSDP2 model sharded over {size} ranks"):
+                mtq.quantize(model, config, forward_loop)
+        # AutoQuantize checks every candidate before it calibrates the first one.
+        with pytest.raises(NotImplementedError, match="AutoQuantize candidate 'W4A8_AWQ_BETA_CFG'"):
+            mtq.auto_quantize(
+                model,
+                constraints={"effective_bits": 6.0},
+                quantization_formats=[mtq.FP8_DEFAULT_CFG, mtq.W4A8_AWQ_BETA_CFG],
+                data_loader=[SimpleLinear.get_input()],
+                forward_step=lambda m, batch: m(batch),
+                loss_func=lambda output, batch: output.sum(),
+            )
+        assert not is_quantized(model)
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+        with pytest.raises(NotImplementedError, match="awq_lite"):
+            mtq.calibrate(model, "awq_lite", forward_loop)
+
+
+def test_awq_on_a_sharded_fsdp2_model_is_refused(cpu_dist_workers):
+    """Each rank would fold its own AWQ scale into its shard: every rank refuses alike, before the
+    model changes, through ``mtq.quantize``, ``mtq.auto_quantize`` and ``mtq.calibrate``."""
+    cpu_dist_workers.run(_awq_on_a_sharded_fsdp2_model_job)
 
 
 @pytest.mark.parametrize(
@@ -850,18 +941,23 @@ def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
             )
 
 
-def test_legacy_dict_format_end_to_end():
+@pytest.mark.parametrize("default_enabled", [False, True])
+@pytest.mark.parametrize("default_last", [False, True])
+def test_legacy_dict_format_end_to_end(default_last, default_enabled):
     """Old dict-format quant_cfg works end-to-end through mtq.quantize via normalization."""
     model = SimpleLinear()
     # Old-style dict config with "default" key and wildcard keys
-    old_config = {
-        "quant_cfg": {
-            "default": {"enable": False},
-            "*weight_quantizer": {"num_bits": 8, "axis": 0},
-            "*input_quantizer": {"num_bits": 8, "axis": None},
-        },
-        "algorithm": "max",
+    quant_cfg = {
+        "*weight_quantizer": {"num_bits": 8, "axis": 0},
+        "*input_quantizer": {"num_bits": 8, "axis": None},
     }
+    # "default" applies first wherever it appears, as in the docs' legacy example.
+    default_cfg = {"num_bits": 4, "enable": True} if default_enabled else {"enable": False}
+    if default_last:
+        quant_cfg["default"] = default_cfg
+    else:
+        quant_cfg = {"default": default_cfg, **quant_cfg}
+    old_config = {"quant_cfg": quant_cfg, "algorithm": "max"}
     model = mtq.quantize(model, old_config, lambda m: m(m.get_input()))
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer):
@@ -869,10 +965,15 @@ def test_legacy_dict_format_end_to_end():
                 assert module.is_enabled
                 assert module.num_bits == 8
             elif name.endswith("output_quantizer"):
-                # "default" key → quantizer_name="*" with enable=False disables everything,
-                # but weight/input quantizers are re-enabled by subsequent entries.
-                # output_quantizer is NOT re-enabled so it stays disabled.
-                assert not module.is_enabled
+                if default_enabled:
+                    # Only "default" matches output_quantizer, so it keeps the default's attributes.
+                    assert module.is_enabled
+                    assert module.num_bits == 4
+                else:
+                    # "default" key → quantizer_name="*" with enable=False disables everything,
+                    # but weight/input quantizers are re-enabled by subsequent entries.
+                    # output_quantizer is NOT re-enabled so it stays disabled.
+                    assert not module.is_enabled
 
 
 @pytest.mark.parametrize("config", ["INT8_DEFAULT_CFG", "W4A8_AWQ_BETA_CFG"])

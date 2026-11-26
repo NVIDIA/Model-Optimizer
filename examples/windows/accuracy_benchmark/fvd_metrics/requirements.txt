@@ -2,5 +2,5 @@
 numpy
 opencv-python-headless
 scipy
-torch>=2.0.0
+torch>=2.8
 tqdm

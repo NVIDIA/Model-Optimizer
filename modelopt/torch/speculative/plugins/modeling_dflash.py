@@ -50,9 +50,7 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP as _MLP_CLS  # noqa: N814
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as _NORM_CLS  # noqa: N814
-from transformers.models.qwen3.modeling_qwen3 import (
-    Qwen3RotaryEmbedding as _ROTARY_CLS,  # noqa: N814
-)
+from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding as _ROTARY_CLS  # noqa: N814
 from transformers.models.qwen3.modeling_qwen3 import repeat_kv
 from transformers.models.qwen3.modeling_qwen3 import rotate_half as _rotate_half
 

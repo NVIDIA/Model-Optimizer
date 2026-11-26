@@ -28,7 +28,7 @@ docs/source/reference/generated
 # Jupyter Notebook
 **/.ipynb_checkpoints
 
-# Agent session workspaces (see plugins/modelopt/skills/common/workspace-management.md)
+# Agent session workspaces (see skills/common/workspace-management.md)
 workspaces/
 
 # Environments
@@ -66,6 +66,7 @@ venv/
 .claude/settings.local.json
 .claude/agents/*
 !.claude/agents/modelopt-model-deployer.md
+!.claude/agents/modelopt-model-distiller.md
 !.claude/agents/modelopt-model-downloader.md
 !.claude/agents/modelopt-model-evaluator.md
 !.claude/agents/modelopt-model-performance-benchmarker.md

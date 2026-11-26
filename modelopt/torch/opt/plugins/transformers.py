@@ -15,6 +15,7 @@
 
 """ModelOpt plugin for enabling automatic save/restore of ModelOpt state for HuggingFace models."""
 
+import argparse
 import dataclasses
 import fnmatch
 import gc
@@ -30,10 +31,13 @@ from typing import Any
 import torch
 import torch.nn as nn
 import transformers
+from packaging.version import Version
 from transformers import HfArgumentParser, PreTrainedModel, Trainer, TrainerCallback
 from transformers import modeling_utils as tf_modeling_utils
+from transformers.conversion_mapping import get_model_conversion_mapping
+from transformers.core_model_loading import WeightConverter, WeightRenaming, rename_source_key
 
-from modelopt.torch.utils import print_rank_0, report_memory
+from modelopt.torch.utils import get_unwrapped_name, print_rank_0, report_memory
 
 from ..conversion import ModeloptStateManager, load_modelopt_state
 from .huggingface import (
@@ -168,6 +172,50 @@ def _legacy_tied_weights_keys_as_dict(model: nn.Module):
                 del module._tied_weights_keys
 
 
+def _revert_weight_conversion(model, state_dict):
+    """Revert transformers' load-time weight conversions except on state that modules keep out.
+
+    Before 5.21 (huggingface/transformers#49548), transformers matches a converted weight's name
+    anywhere in a key, so it also catches state named after the weight, such as the quantizers of
+    fused MoE experts (``experts.gate_up_proj_weight_quantizers.0._amax``), and fails to convert it.
+    A module names such submodules in ``_modelopt_unconverted_submodules()``; their state is saved
+    under its in-memory names. This can go once ModelOpt requires transformers 5.21.
+    """
+    revert = tf_modeling_utils._modelopt_cache["revert_weight_conversion"]
+    prefixes = tuple(
+        # State-dict keys drop the names of wrappers such as activation checkpointing's.
+        f"{get_unwrapped_name(name)}.{submodule}."
+        for name, module in model.named_modules()
+        if hasattr(module, "_modelopt_unconverted_submodules")
+        for submodule in module._modelopt_unconverted_submodules()
+    )
+    kept = {key: value for key, value in state_dict.items() if key.startswith(prefixes)}
+    if not kept:
+        return revert(model, state_dict)
+    _warn_if_loading_converts(model, kept)
+    other = {key: value for key, value in state_dict.items() if key not in kept}
+    return {**revert(model, other), **kept}
+
+
+def _warn_if_loading_converts(model, state_dict):
+    """Warn if ``from_pretrained`` would convert, and so fail to load, this unconverted state.
+
+    Each key is renamed as a fresh load of the checkpoint renames it: through the model's whole
+    conversion mapping, with transformers' own renaming order and scopes.
+    """
+    conversions = get_model_conversion_mapping(model)
+    renamings = [c for c in conversions if isinstance(c, WeightRenaming)]
+    converters = [c for c in conversions if isinstance(c, WeightConverter)]
+    caught = [key for key in state_dict if rename_source_key(key, renamings, converters)[1]]
+    if caught:
+        warnings.warn(
+            f"from_pretrained cannot load this checkpoint with transformers {transformers.__version__}:"
+            f" its weight conversion also matches {len(caught)} saved tensors, such as {caught[0]!r}."
+            " transformers 5.21 and later load it; or save and restore the model with mto.save and"
+            " mto.restore."
+        )
+
+
 def _save_pretrained_with_checks(self, save_directory, *args, **kwargs):
     if getattr(self, "_tp_size", None) is not None and ModeloptStateManager.is_converted(self):
         raise NotImplementedError(
@@ -195,12 +243,15 @@ pretrained_model_patch_methods = [
     ("save_pretrained", _save_pretrained_with_checks),
 ]
 
+modeling_utils_patch_methods: list[tuple[str, Any]] = [
+    ("_load_state_dict_into_zero3_model", _load_params_and_buffers_into_zero3_model)
+]
+if Version(transformers.__version__) < Version("5.21"):
+    # Installed once, for every save: per-save swaps of this global would race between threads.
+    modeling_utils_patch_methods.append(("revert_weight_conversion", _revert_weight_conversion))
+
 register_for_patching("transformers", PreTrainedModel, pretrained_model_patch_methods)
-register_for_patching(
-    "transformers",
-    tf_modeling_utils,
-    [("_load_state_dict_into_zero3_model", _load_params_and_buffers_into_zero3_model)],
-)
+register_for_patching("transformers", tf_modeling_utils, modeling_utils_patch_methods)
 
 
 @dataclasses.dataclass
@@ -256,7 +307,9 @@ class ModelOptTrainerArguments(ModelOptHFArguments):
         metadata={
             "help": (
                 "Run `gc.collect()` before each training/prediction step to work around "
-                "GPU memory leaks during QAT/distillation."
+                "GPU memory leaks during QAT/distillation. After the first optimizer step, objects "
+                "that live until `train()` returns are frozen (`gc.freeze()`) so these "
+                "collections skip them."
             ),
         },
     )
@@ -279,12 +332,42 @@ def _translate_warmup_keys(config: dict, actions) -> None:
 
 
 class ModelOptArgParser(HfArgumentParser):
-    """HfArgumentParser with ``--config`` YAML support and ``--generate_docs`` for ARGUMENTS.md."""
+    """HfArgumentParser with YAML defaults and Markdown argument documentation.
+
+    ``--config`` and ``--generate_docs`` require ``parse_args_into_dataclasses``.
+    The inherited ``parse_args`` and ``parse_known_args`` retain argparse behavior.
+    """
 
     def __init__(self, *args, docs_header_extra: str | None = None, **kwargs):
         """Store an optional verbatim markdown block to inject into generated docs."""
         super().__init__(*args, **kwargs)
         self._docs_header_extra = docs_header_extra
+        self._parsing_dataclasses = False
+
+    def format_help(self):
+        """Include options consumed before HuggingFace's dataclass parsing."""
+        if not self._parsing_dataclasses:
+            return super().format_help()
+        options = argparse.ArgumentParser(add_help=False)
+        options.add_argument(
+            "--config",
+            type=str,
+            metavar="PATH",
+            help="Load YAML defaults; command-line arguments override them.",
+        )
+        options.add_argument(
+            "--generate_docs",
+            type=str,
+            nargs="?",
+            metavar="PATH",
+            default="ARGUMENTS.md",
+            help="Generate argument documentation and exit.",
+        )
+        formatter = self._get_formatter()
+        formatter.start_section("ModelOpt options")
+        formatter.add_arguments(options._actions)
+        formatter.end_section()
+        return super().format_help() + "\n" + formatter.format_help()
 
     def parse_args_into_dataclasses(self, args=None, **kwargs):
         """Parse args with optional YAML config defaults and doc generation."""
@@ -328,7 +411,11 @@ class ModelOptArgParser(HfArgumentParser):
                         )
                 self.set_defaults(**applicable)
 
-        return super().parse_args_into_dataclasses(args=args, **kwargs)
+        self._parsing_dataclasses = True
+        try:
+            return super().parse_args_into_dataclasses(args=args, **kwargs)
+        finally:
+            self._parsing_dataclasses = False
 
     @staticmethod
     def _all_modelopt_fields():
@@ -406,7 +493,7 @@ class ModelOptArgParser(HfArgumentParser):
                 default_str = self._format_default(f.default, f.default_factory)
                 help_text = dict(f.metadata).get("help", "")
                 # Collapse multi-line help into single line
-                help_text = " ".join(help_text.split())
+                help_text = " ".join(help_text.split()).replace("%%", "%")
                 lines.append(f"| {name} | {type_str} | {default_str} | {help_text} |")
 
             lines.append("")
@@ -521,13 +608,12 @@ class ModelOptHFTrainer(Trainer):
         """
         enable_huggingface_checkpointing()
         super().__init__(*args, **kwargs)
-        _raw_dtype = getattr(getattr(self.model, "config", None), "dtype", None) or getattr(
-            getattr(self.model, "config", None), "torch_dtype", None
-        )
+        _raw_dtype = getattr(getattr(self.model, "config", None), "dtype", None)
         self._original_dtype = None if _raw_dtype is None else str(_raw_dtype).rsplit(".", 1)[-1]
         if trainer_args is None and isinstance(self.args, ModelOptTrainerArguments):
             trainer_args = self.args
         self.trainer_args = trainer_args or ModelOptTrainerArguments()
+        self._gc_frozen = False
         self._lr_config = self._resolve_lr_config(lr_config, self.trainer_args)
         self._apply_gradient_checkpointing_defaults()
         self.add_callback(_MemoryReportCallback())
@@ -556,14 +642,37 @@ class ModelOptHFTrainer(Trainer):
     def training_step(self, *args, **kwargs):
         """Run gc.collect() before the training step if manual_gc is enabled."""
         if self.trainer_args.manual_gc:
-            gc.collect()
+            self._collect_garbage(freeze=True)
         return super().training_step(*args, **kwargs)
 
     def prediction_step(self, *args, **kwargs):
         """Run gc.collect() before the prediction step if manual_gc is enabled."""
         if self.trainer_args.manual_gc:
-            gc.collect()
+            self._collect_garbage()
         return super().prediction_step(*args, **kwargs)
+
+    def _collect_garbage(self, freeze=False):
+        """``gc.collect()``; with ``freeze``, also ``gc.freeze()`` once training is under way.
+
+        After the first optimizer step the models, quantizers and optimizer state exist and stay
+        alive until ``train()`` returns. Frozen, later collections skip them instead of rescanning
+        them every step, which took about 0.5 s per collection on a 30B MoE.
+        """
+        gc.collect()
+        if freeze and not self._gc_frozen and self.state.global_step >= 1:
+            gc.freeze()
+            self._gc_frozen = True
+
+    def train(self, *args, **kwargs):
+        """Train, then unfreeze what the per-step collections froze so it can be freed."""
+        try:
+            return super().train(*args, **kwargs)
+        finally:
+            if self._gc_frozen:
+                # Also unfreezes anything frozen before (Python itself starts with a few frozen
+                # objects); that only makes later collections scan them again.
+                gc.unfreeze()
+                self._gc_frozen = False
 
     def _load_best_model(self, *args, **kwargs):
         """Run gc.collect() before loading the best model if manual_gc is enabled."""

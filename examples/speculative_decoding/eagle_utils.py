@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import inspect
+import random
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,7 +25,6 @@ import numpy as np
 import torch
 import transformers
 from datasets import load_dataset
-from packaging.version import Version
 from scripts.ar_validate import validate_ar
 from transformers import Trainer, TrainerCallback
 
@@ -62,6 +62,7 @@ def make_speculative_data_module(
     shift_labels=True,
     final_aux_is_base_hidden=False,
     aux_hidden_states_optional=False,
+    seed: int = 42,
 ) -> dict:
     """Create data module for speculative decoding training.
 
@@ -73,6 +74,7 @@ def make_speculative_data_module(
             the base (KD-target) hidden instead of an extra dedicated plane.
         aux_hidden_states_optional: accept dumps written with ``--no-aux-hidden-states``.
             Only modes that never read the aux planes may set this.
+        seed: Seed for shuffling offline files before applying ``sample_size``.
     """
 
     # Validated once for every mode: each branch consumes sample_size differently
@@ -203,13 +205,15 @@ def make_speculative_data_module(
         assert not data_args.vlm_processor, "Offline data is not supported for VLM."
 
         offline_data_path = Path(data_args.offline_data_path)
-        dumped_files = [str(p) for p in offline_data_path.rglob("*.pt")]
+        # All ranks and resumed runs must assign the same file to each dataset index.
+        dumped_files = sorted(str(p) for p in offline_data_path.rglob("*.pt"))
+        # Avoid source-prefix bias without changing the training RNG state.
+        random.Random(seed).shuffle(dumped_files)
         if not dumped_files:
             raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
 
-        # sample_size=-1 means use all samples; positive integer selects that many
-        if data_args.sample_size > 0:
-            dumped_files = dumped_files[: data_args.sample_size]
+        if sample_size > 0:
+            dumped_files = dumped_files[:sample_size]
         train_dataset = OfflineSupervisedDataset(
             dumped_files,
             answer_only_loss=answer_only_loss,
@@ -235,6 +239,16 @@ class EagleTrainerWithAccLog(Trainer):
     ):
         super().__init__(*args, **kwargs)
         self.lora_lr_multiplier = lora_lr_multiplier
+        # compute_loss drops num_items_in_batch, so Trainer must average the mean loss.
+        self.model_accepts_loss_kwargs = False
+
+    def get_train_dataloader(self):
+        """Apply ``dataloader_in_order``, which ``Trainer`` forwards only from transformers 5.15."""
+        dataloader = super().get_train_dataloader()
+        # accelerate's wrapper forwards attribute reads to the torch loader, not writes.
+        loader = getattr(dataloader, "base_dataloader", dataloader)
+        loader.in_order = getattr(self.args, "dataloader_in_order", True)
+        return dataloader
 
     def create_optimizer(self, model=None):
         """Override to give LoRA parameters a higher learning rate.
@@ -314,6 +328,17 @@ class EagleTrainerWithAccLog(Trainer):
                         new_groups.append(group)
                 self.optimizer.param_groups = new_groups
         return self.optimizer
+
+    def training_step(self, *args, **kwargs):
+        """Average mean losses once and restore the shared accumulation count."""
+        accumulation_steps = self.accelerator.gradient_accumulation_steps
+        try:
+            if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
+                # Trainer already averages these losses before calling backward.
+                self.accelerator.gradient_accumulation_steps = 1
+            return super().training_step(*args, **kwargs)
+        finally:
+            self.accelerator.gradient_accumulation_steps = accumulation_steps
 
     def compute_loss(self, *args, **kwargs):
         """Override compute_loss to save train accs and per-component losses in trainer state."""
@@ -654,13 +679,6 @@ def get_patched_templated_ring_attn(orig_templated_attn: Callable):
 def patch_ring_attention_for_ttt():
     """Patch torch ring attention to support context parallelism for TTT."""
     # Torch Ring Attention only supports no mask or causal mask. We apply the following patches to enable TTT mask.
-
-    if Version(torch.__version__) < Version("2.10.0"):
-        raise RuntimeError(
-            f"Context parallel TTT only supported for PyTorch >= 2.10.0. "
-            f"Got {torch.__version__}. "
-            f"Please use torch 2.10.0 or cp_size=1."
-        )
 
     from torch.distributed.tensor.experimental._context_parallel import _attention
 

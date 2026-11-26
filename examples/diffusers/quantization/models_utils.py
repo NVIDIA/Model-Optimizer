@@ -15,29 +15,19 @@
 
 import logging
 from collections.abc import Callable
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import torch
 from diffusers import (
     DiffusionPipeline,
+    Flux2Pipeline,
     FluxPipeline,
     LTXConditionPipeline,
+    QwenImagePipeline,
     StableDiffusion3Pipeline,
     WanPipeline,
 )
-
-try:
-    from diffusers import Flux2Pipeline
-except ImportError:
-    Flux2Pipeline = None
-
-# Qwen-Image classes were added in a recent diffusers release; import lazily so
-# this example still imports on older diffusers versions.
-try:
-    from diffusers import QwenImagePipeline
-except ImportError:
-    QwenImagePipeline = None
 from utils import (
     filter_func_default,
     filter_func_flux_dev,
@@ -49,7 +39,7 @@ from utils import (
 )
 
 
-class ModelType(str, Enum):
+class ModelType(StrEnum):
     """Supported model types."""
 
     SDXL_BASE = "sdxl-1.0"

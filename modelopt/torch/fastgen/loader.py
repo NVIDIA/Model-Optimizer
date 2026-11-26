@@ -41,24 +41,14 @@ The loader resolves paths in two places, in order:
 Suffixes ``.yml`` and ``.yaml`` are both accepted.
 """
 
-from __future__ import annotations
-
-import contextlib
 from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-# ``Traversable`` moved out of ``importlib.abc`` in Python 3.11. We only need it for
-# type hints, but suppress ImportError so older runtimes can still import this module.
-with contextlib.suppress(ImportError):
-    from importlib.resources.abc import Traversable
+from typing import Any
 
 import yaml
 
 from .config import DMDConfig, PDDConfig
-
-if TYPE_CHECKING:
-    from importlib.abc import Traversable
 
 __all__ = ["load_config", "load_dmd_config", "load_pdd_config"]
 
