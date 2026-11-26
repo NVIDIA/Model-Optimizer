@@ -920,10 +920,52 @@ def test_automatic_grouped_projection_preserves_native_fields(
         assert up_states[0].projection_counts == {"packed_grouped": 1, "materialized_grouped": 1}
         assert down_states[0].projection_counts == {"materialized_grouped": 2}
         torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015)
-        for a, b in zip(observed, oracle, strict=True):
+        field_names = {
+            id(parameter): field_name
+            for state in [*up_states, *down_states]
+            for field_name, parameter in state.values().items()
+        }
+        gradient_names = ["hidden", *(field_names[id(parameter)] for parameter in fields)]
+        errors, diagnostics = [], []
+        for index, (gradient_name, a, b) in enumerate(
+            zip(gradient_names, observed, oracle, strict=True)
+        ):
+            difference_norm = (a.float() - b.float()).norm()
+            reference_norm = b.float().norm()
+            error = difference_norm / reference_norm.clamp_min(1e-20)
+            errors.append(error)
+            diagnostics.append(
+                {
+                    "index": index,
+                    "name": gradient_name,
+                    "dtype": str(a.dtype),
+                    "shape": list(a.shape),
+                    "actual_norm": a.float().norm().item(),
+                    "reference_norm": reference_norm.item(),
+                    "difference_norm": difference_norm.item(),
+                    "relative_error": error.item(),
+                }
+            )
+        # Flush every field before the first assertion can hide later discrepancies.
+        with capsys.disabled():
+            print(
+                json.dumps(
+                    {
+                        "path": "hf_qwen3_moe_vjp_diagnostics",
+                        "format": name,
+                        "input_device": str(device),
+                        "noncurrent_device": noncurrent,
+                        "gradients": diagnostics,
+                    },
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+        for gradient_name, a, b, error in zip(
+            gradient_names, observed, oracle, errors, strict=True
+        ):
             assert torch.isfinite(a).all() and torch.isfinite(b).all()
-            error = (a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-20)
-            assert error < 5e-4, error.item()
+            assert error < 5e-4, (gradient_name, error.item())
         assert observed[0].float().norm() > 0
         for states in (up_states, down_states):
             indices = {id(p) for state in states for p in state.parameters()}
