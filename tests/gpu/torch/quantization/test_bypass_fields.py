@@ -752,8 +752,11 @@ def test_automatic_grouped_projection_preserves_native_fields(
     with torch.cuda.device(device):
         if not torch.cuda.is_bf16_supported():
             pytest.skip("Grouped packed qualification requires BF16 CUDA support")
+    from transformers import Qwen3MoeConfig
     from transformers.integrations.moe import _grouped_linear
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
+    from modelopt.torch.quantization.plugins.huggingface import _QuantFusedExperts
     from modelopt.torch.quantization.repair_formats import repair_grouped_linear
 
     torch.manual_seed(131)
@@ -776,7 +779,13 @@ def test_automatic_grouped_projection_preserves_native_fields(
             # Exercise real kernels on CI hardware; automatic production policy stays GB300-only.
             monkeypatch.setattr(
                 "modelopt.torch.quantization.repair_formats._packed_projection_qualified",
-                lambda *args: True,
+                lambda inputs, format_name, shape: (
+                    inputs.device == device
+                    and inputs.dtype == torch.bfloat16
+                    and inputs.shape == (8, 4096)
+                    and format_name == name
+                    and tuple(shape) == (2048, 4096)
+                ),
             )
         states = [q._local_repair_state for q in quantizers]
         assert all(state.projection_counts == {} for state in states)
@@ -850,6 +859,114 @@ def test_automatic_grouped_projection_preserves_native_fields(
         assert pointers.numel() == 4 and not pointers.requires_grad
         for state, original in zip(states, original_codes, strict=True):
             torch.testing.assert_close(state.packed, original, rtol=0, atol=0)
+    finally:
+        policy.close()
+
+    # A configurable production HF block reaches the same gate through its real router/forward.
+    torch.manual_seed(137)
+    config = Qwen3MoeConfig(
+        num_experts=4,
+        hidden_size=4096,
+        moe_intermediate_size=1024,
+        num_experts_per_tok=2,
+        experts_implementation="grouped_mm",
+    )
+    block = Qwen3MoeSparseMoeBlock(config).to(device=device, dtype=torch.bfloat16)
+    with torch.no_grad():
+        # Standalone HF expert containers allocate empty banks; full models initialize them later.
+        for parameter in block.parameters():
+            parameter.normal_(mean=0.0, std=0.02)
+    mtq.quantize(block, _config([_iq("*experts.*weight_quantizers.*", name)]), None)
+    experts = block.experts
+    assert isinstance(experts, _QuantFusedExperts)
+    assert experts.gate_up_proj.shape == (4, 2048, 4096)
+    assert experts.down_proj.shape == (4, 4096, 1024)
+    assert experts.config._experts_implementation == "grouped_mm"
+    policy = IQRepairPolicy()
+    try:
+        fields = policy.prepare(block)
+        up_states = [q._local_repair_state for q in experts.gate_up_proj_weight_quantizers]
+        down_states = [q._local_repair_state for q in experts.down_proj_weight_quantizers]
+        assert all(state.projection_counts == {} for state in [*up_states, *down_states])
+        with torch.no_grad():
+            for state in [*up_states, *down_states]:
+                state.global_delta.uniform_(-0.05, 0.05)
+                state.local_delta.uniform_(-0.05, 0.05)
+        hidden = torch.randn(1, 4, 4096, device=device, dtype=torch.bfloat16, requires_grad=True)
+        upstream = torch.randn_like(hidden) / hidden.numel()
+        hf_production_qualified = _packed_projection_qualified(
+            hidden.reshape(-1, 4096).repeat_interleave(2, dim=0), name, (2048, 4096)
+        )
+        actual = block(hidden)
+        assert torch.cuda.current_device() == current
+        observed = torch.autograd.grad(actual, [hidden, *fields], upstream)
+        assert torch.cuda.current_device() == current
+        assert experts._intercept_count == 2
+        up_counts = [dict(state.projection_counts) for state in up_states]
+        down_counts = [dict(state.projection_counts) for state in down_states]
+        assert up_counts == [{"packed_grouped": 1}, {}, {}, {}]
+        assert down_counts == [{"materialized_grouped": 1}, {}, {}, {}]
+        # Keep the same genuine router and HF forward; select the native materialized backend.
+        with monkeypatch.context() as reference:
+            reference.setattr(
+                "modelopt.torch.quantization.repair_formats._packed_projection_qualified",
+                lambda *args: False,
+            )
+            with torch.cuda.device(device):
+                expected = block(hidden)
+                oracle = torch.autograd.grad(expected, [hidden, *fields], upstream)
+        assert torch.cuda.current_device() == current
+        assert experts._intercept_count == 4
+        assert up_states[0].projection_counts == {"packed_grouped": 1, "materialized_grouped": 1}
+        assert down_states[0].projection_counts == {"materialized_grouped": 2}
+        torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015)
+        for a, b in zip(observed, oracle, strict=True):
+            assert torch.isfinite(a).all() and torch.isfinite(b).all()
+            error = (a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-20)
+            assert error < 5e-4, error.item()
+        assert observed[0].float().norm() > 0
+        for states in (up_states, down_states):
+            indices = {id(p) for state in states for p in state.parameters()}
+            assert (
+                sum(
+                    gradient.float().norm()
+                    for parameter, gradient in zip(fields, observed[1:], strict=True)
+                    if id(parameter) in indices
+                )
+                > 0
+            )
+        with capsys.disabled():
+            print(
+                json.dumps(
+                    {
+                        "path": "hf_qwen3_moe_packed_grouped",
+                        "caller": "Qwen3MoeSparseMoeBlock.forward -> _QuantFusedExperts.forward",
+                        "experts_implementation": config._experts_implementation,
+                        "device_name": torch.cuda.get_device_name(device),
+                        "device_capability": torch.cuda.get_device_capability(device),
+                        "input_device": str(device),
+                        "caller_current_device": current,
+                        "noncurrent_device": noncurrent,
+                        "production_qualified": hf_production_qualified,
+                        "eligibility_override": eligibility_override,
+                        "format": name,
+                        "dtype": str(hidden.dtype),
+                        "input_shape": list(hidden.shape),
+                        "experts": config.num_experts,
+                        "hidden_size": config.hidden_size,
+                        "moe_intermediate_size": config.moe_intermediate_size,
+                        "num_experts_per_tok": config.num_experts_per_tok,
+                        "routed_rows": 8,
+                        "gate_up_shape": list(experts.gate_up_proj.shape),
+                        "down_shape": list(experts.down_proj.shape),
+                        "gate_up_actual_counts": up_counts,
+                        "down_actual_counts": down_counts,
+                        "oracle": "same HF block, native materialized fields and HF grouped linear",
+                    },
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
     finally:
         policy.close()
 
