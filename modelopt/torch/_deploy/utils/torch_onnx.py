@@ -45,7 +45,7 @@ from modelopt.onnx.export import (
 )
 from modelopt.onnx.export.nvfp4_dtype import canonicalize_nvfp4_fp16
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
-from modelopt.onnx.trt_utils import infer_types_shapes_tensorrt
+from modelopt.onnx.trt_utils import TRT_PYTHON_AVAILABLE, infer_types_shapes_tensorrt
 from modelopt.onnx.utils import (
     change_casts_to_fp16,
     check_model_uses_external_data,
@@ -691,7 +691,11 @@ def get_onnx_bytes_and_metadata(
         and source_parameter_dtypes == {torch.float16}
     ):
         onnx_opt_graph = canonicalize_nvfp4_fp16(onnx_opt_graph)
-        onnx_opt_graph = infer_types_shapes_tensorrt(onnx_opt_graph, strongly_typed=True)
+        onnx_opt_graph = (
+            infer_types_shapes_tensorrt(onnx_opt_graph, strongly_typed=True)
+            if TRT_PYTHON_AVAILABLE
+            else infer_shapes(onnx_opt_graph)
+        )
     elif weights_dtype in ["fp16", "bf16"] and not is_bf16_fp8_noop:
         if uses_other_unsupported_quantizer or uses_fp8:
             onnx_opt_graph = convert_float_to_float16(

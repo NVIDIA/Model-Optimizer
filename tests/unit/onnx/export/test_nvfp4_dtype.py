@@ -24,67 +24,119 @@ import torch
 from onnx import TensorProto as T
 from onnx import helper, numpy_helper
 
+import modelopt.torch._deploy.utils.torch_onnx as torch_onnx_mod
+import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.tensor_quant as tensor_quant
 from modelopt.onnx.export.nvfp4_dtype import canonicalize_nvfp4_fp16
+from modelopt.onnx.utils import infer_shapes
+from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 from modelopt.torch._deploy.utils.torch_onnx import _prepare_nvfp4_fp16_export
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
-@pytest.mark.parametrize("wrapped", [False, True])
-def test_double_dq_preserves_fp32_scale(wrapped):
+@pytest.mark.parametrize("scale_mode", ["initializer", "cast", "direct_fp4"])
+def test_double_dq_preserves_fp32_scale(scale_mode):
     """Exercise the exported dtype contract without bypassing validation."""
     scale = numpy_helper.from_array(np.array(1e-8, dtype=np.float32), "global")
     fp8 = helper.make_tensor("fp8", T.FLOAT8E4M3FN, [1], bytes([56]), raw=True)
     fp4 = helper.make_tensor("fp4", T.FLOAT4E2M1, [16], bytes([0x22] * 8), raw=True)
-    nodes = []
-    source_scale = "global"
-    if wrapped:
+    int8_w = numpy_helper.from_array(np.ones(16, dtype=np.int8), "int8_w")
+    int8_s = numpy_helper.from_array(np.array(0.5, dtype=np.float16), "int8_s")
+    nodes = [
+        helper.make_node("DequantizeLinear", ["int8_w", "int8_s"], ["int8_out"], name="int8_dq")
+    ]
+    initializers = [scale, fp4, int8_w, int8_s]
+    if scale_mode == "direct_fp4":
+        direct_s = numpy_helper.from_array(np.ones(1, dtype=np.float16), "direct_s")
+        initializers.append(direct_s)
         nodes.append(
-            helper.make_node("Cast", ["global"], ["half_scale"], name="scale_cast", to=T.FLOAT16)
-        )
-        source_scale = "half_scale"
-    nodes.extend(
-        [
-            helper.make_node(
-                "DequantizeLinear", ["fp8", source_scale], ["blocks"], name="scale_dq"
-            ),
-            helper.make_node(
-                "Cast",
-                ["blocks"],
-                ["cast_blocks"],
-                name="unused_scale_cast",
-                to=T.FLOAT,
-            ),
             helper.make_node(
                 "DequantizeLinear",
-                ["fp4", "cast_blocks"],
+                ["fp4", "direct_s"],
                 ["out"],
                 name="data_dq",
                 block_size=16,
                 axis=0,
-            ),
-        ]
-    )
+            )
+        )
+    else:
+        initializers.append(fp8)
+        source_scale = "global"
+        if scale_mode == "cast":
+            nodes.append(
+                helper.make_node(
+                    "Cast", ["global"], ["half_scale"], name="scale_cast", to=T.FLOAT16
+                )
+            )
+            source_scale = "half_scale"
+        nodes.extend(
+            [
+                helper.make_node(
+                    "DequantizeLinear", ["fp8", source_scale], ["blocks"], name="scale_dq"
+                ),
+                helper.make_node(
+                    "Cast",
+                    ["blocks"],
+                    ["cast_blocks"],
+                    name="unused_scale_cast",
+                    to=T.FLOAT,
+                ),
+                helper.make_node(
+                    "DequantizeLinear",
+                    ["fp4", "cast_blocks"],
+                    ["out"],
+                    name="data_dq",
+                    block_size=16,
+                    axis=0,
+                ),
+            ]
+        )
     graph = helper.make_graph(
         nodes,
         "double_dq",
         [],
-        [helper.make_tensor_value_info("out", T.FLOAT, [16])],
-        [scale, fp8, fp4],
+        [
+            helper.make_tensor_value_info("out", T.FLOAT, [16]),
+            helper.make_tensor_value_info("int8_out", T.FLOAT16, [16]),
+        ],
+        initializers,
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 23)])
     result = canonicalize_nvfp4_fp16(model)
     onnx.checker.check_model(result, full_check=True)
     onnx.shape_inference.infer_shapes(result, strict_mode=True, check_type=True)
     assert result.graph.output[0].type.tensor_type.elem_type == T.FLOAT16
-    assert [node.op_type for node in result.graph.node] == [
-        "DequantizeLinear",
-        "DequantizeLinear",
-    ]
-    literal = next(
-        t for t in result.graph.initializer if t.name == "scale_dq_global_scale_fp32_literal"
+    assert result.graph.output[1].type.tensor_type.elem_type == T.FLOAT16
+    if scale_mode != "direct_fp4":
+        literal = next(
+            t for t in result.graph.initializer if t.name == "scale_dq_global_scale_fp32_literal"
+        )
+        assert literal.data_type == T.FLOAT
+        assert numpy_helper.to_array(literal).tobytes() == numpy_helper.to_array(scale).tobytes()
+
+
+@pytest.mark.parametrize("bad_scale", ["dynamic_input", "fp16_literal"])
+def test_canonicalize_rejects_invalid_global_scale(bad_scale):
+    """Reject non-literal or non-FP32 global scales instead of silently mis-scaling."""
+    fp8 = helper.make_tensor("fp8", T.FLOAT8E4M3FN, [1], bytes([56]), raw=True)
+    inputs = []
+    initializers = [fp8]
+    if bad_scale == "dynamic_input":
+        inputs.append(helper.make_tensor_value_info("global", T.FLOAT, []))
+        match = "must be a literal"
+    else:
+        initializers.append(numpy_helper.from_array(np.array(1.0, dtype=np.float16), "global"))
+        match = "must originate in FP32"
+    graph = helper.make_graph(
+        [helper.make_node("DequantizeLinear", ["fp8", "global"], ["out"], name="scale_dq")],
+        "invalid_scale",
+        inputs,
+        [helper.make_tensor_value_info("out", T.FLOAT, [1])],
+        initializers,
     )
-    assert literal.data_type == T.FLOAT
-    assert numpy_helper.to_array(literal).tobytes() == numpy_helper.to_array(scale).tobytes()
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 23)])
+    with pytest.raises(ValueError, match=match):
+        canonicalize_nvfp4_fp16(model)
 
 
 def test_prepare_retains_tiny_quantizer_buffers():
@@ -99,15 +151,26 @@ def test_prepare_retains_tiny_quantizer_buffers():
     assert torch.equal(model[1]._test_scale, before)
 
 
-def test_preconverted_matmul_drops_stale_fp32_annotation():
+@pytest.mark.parametrize("cast_input", [False, True])
+def test_preconverted_matmul_drops_stale_fp32_annotation(cast_input):
     """Exercise the exported dtype contract without bypassing validation."""
-    graph = helper.make_graph(
+    x_dtype = T.FLOAT if cast_input else T.FLOAT16
+    x_name = "x_cast" if cast_input else "x"
+    nodes = (
+        [helper.make_node("Cast", ["x"], ["x_cast"], name="cast_x", to=T.FLOAT16)]
+        if cast_input
+        else []
+    )
+    nodes.extend(
         [
-            helper.make_node("MatMul", ["x", "weight"], ["product"], name="matmul"),
+            helper.make_node("MatMul", [x_name, "weight"], ["product"], name="matmul"),
             helper.make_node("Add", ["product", "bias"], ["out"], name="add"),
-        ],
+        ]
+    )
+    graph = helper.make_graph(
+        nodes,
         "stale_annotation",
-        [helper.make_tensor_value_info("x", T.FLOAT16, [1, 2])],
+        [helper.make_tensor_value_info("x", x_dtype, [1, 2])],
         [helper.make_tensor_value_info("out", T.FLOAT16, [1, 2])],
         [
             numpy_helper.from_array(np.ones((2, 2), dtype=np.float16), "weight"),
@@ -130,3 +193,37 @@ def test_prepare_rejects_unvalidated_bf16_without_mutation():
     with pytest.raises(ValueError, match="FP32/FP16"):
         _prepare_nvfp4_fp16_export(model)
     assert all(torch.equal(value, before[name]) for name, value in model.state_dict().items())
+
+
+@pytest.mark.parametrize("trt_available", [False, True])
+def test_nvfp4_fp16_export_canonicalizes_biased_linear(monkeypatch, trt_available):
+    """Cover the end-to-end get_onnx_bytes_and_metadata NVFP4 FP16 export path with and without TensorRT."""
+    monkeypatch.setattr(tensor_quant, "dynamic_block_quantize_op", lambda x, *_: x)
+    monkeypatch.setattr(torch_onnx_mod, "TRT_PYTHON_AVAILABLE", trt_available)
+    seen_strongly_typed = []
+    if trt_available:
+        monkeypatch.setattr(
+            torch_onnx_mod,
+            "infer_types_shapes_tensorrt",
+            lambda g, strongly_typed=False: (
+                seen_strongly_typed.append(strongly_typed) or infer_shapes(g)
+            ),
+        )
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16, bias=True)).eval()
+    x = torch.randn(1, 2, 16)
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop=lambda m: m(x))
+    _prepare_nvfp4_fp16_export(model)
+    data, _ = get_onnx_bytes_and_metadata(
+        model, (x.half(),), weights_dtype="fp16", model_name="nvfp4_bias_cpu", onnx_opset=23
+    )
+    proto = onnx.load_model_from_string(OnnxBytes.from_bytes(data).get_onnx_model_file_bytes())
+    onnx.checker.check_model(proto)
+    assert proto.graph.output[0].type.tensor_type.elem_type == T.FLOAT16
+    assert any(node.op_type == "TRT_FP4DynamicQuantize" for node in proto.graph.node)
+    assert seen_strongly_typed == ([True] if trt_available else [])
+    fp32_scales = [
+        init for init in proto.graph.initializer if init.name.endswith("_global_scale_fp32_literal")
+    ]
+    assert len(fp32_scales) == 3
+    assert all(init.data_type == T.FLOAT for init in fp32_scales)
