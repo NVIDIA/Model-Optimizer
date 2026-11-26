@@ -24,6 +24,7 @@ move released-layout keys onto the canonical names.
 """
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -53,3 +54,58 @@ def remap_dspark_nested_head_keys(state_dict, prefix, *args, **kwargs):
             )
         else:
             state_dict[flat] = nested_value
+
+
+# Serving layout -> this module's native (nn.Sequential) layout. LiLiCorrExporter writes
+# the serving names, which is what vLLM and SGLang both require; warm-starting from such
+# an export has to translate them back. Values are (serving_suffix, native_suffix).
+_LILICORR_SERVING_TO_NATIVE = (
+    (
+        re.compile(r"^(?P<p>.*)lilicorr\.feature_norm\.(?P<t>weight|bias)$"),
+        r"\g<p>lilicorr.feature_mlp.0.\g<t>",
+    ),
+    (
+        re.compile(r"^(?P<p>.*)lilicorr\.feature_mlp\.up_proj\.(?P<t>weight|bias)$"),
+        r"\g<p>lilicorr.feature_mlp.1.\g<t>",
+    ),
+    (
+        re.compile(r"^(?P<p>.*)lilicorr\.feature_mlp\.down_proj\.(?P<t>weight|bias)$"),
+        r"\g<p>lilicorr.feature_mlp.3.\g<t>",
+    ),
+    (
+        re.compile(r"^(?P<p>.*)lilicorr\.layers\.(?P<i>\d+)\.mlp\.up_proj\.(?P<t>weight|bias)$"),
+        r"\g<p>lilicorr.layers.\g<i>.mlp.0.\g<t>",
+    ),
+    (
+        re.compile(r"^(?P<p>.*)lilicorr\.layers\.(?P<i>\d+)\.mlp\.down_proj\.(?P<t>weight|bias)$"),
+        r"\g<p>lilicorr.layers.\g<i>.mlp.2.\g<t>",
+    ),
+)
+
+
+def remap_lilicorr_serving_keys(state_dict, prefix, *args, **kwargs):
+    """Accept the LiLiCorr reranker in serving or native layout.
+
+    ``LiLiCorrHead`` builds its MLPs as ``nn.Sequential`` (positional child names) while
+    both serving stacks build the same arithmetic as named ``up_proj``/``down_proj``
+    submodules with the feature LayerNorm lifted to a sibling ``feature_norm``.
+    ``LiLiCorrExporter`` writes the serving names, so warm-starting from an exported
+    drafter arrives in that layout and has to be translated back.
+    """
+    for key in [k for k in state_dict if k.startswith(prefix)]:
+        for pattern, replacement in _LILICORR_SERVING_TO_NATIVE:
+            native = pattern.sub(replacement, key)
+            if native == key:
+                continue
+            value = state_dict.pop(key)
+            # A native key already present wins, and we say which copy was dropped: the
+            # two layouts hold the same tensor, so picking silently would be invisible.
+            if native in state_dict:
+                logger.warning(
+                    "LiLiCorr: ignoring %s because %s is also present in the checkpoint.",
+                    key,
+                    native,
+                )
+            else:
+                state_dict[native] = value
+            break
