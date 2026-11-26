@@ -4,6 +4,7 @@ training:
   modelopt: 0.46.0rc1
   megatron_bridge: 0.6.0+c93251151
   megatron_core: 0.19.0+16ad357ee
+  transformer_engine: 2.17.1+4329ff84
   nemo_rl:
     source_image: nvcr.io/nvidia/nemo-rl:v0.7.0
     package_version: 0.6.0+19244a094

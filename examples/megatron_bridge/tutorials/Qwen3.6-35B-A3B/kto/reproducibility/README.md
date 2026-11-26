@@ -4,7 +4,7 @@
 
 ## KTO training
 
-The run used a custom KTO loss and response processor in NeMo RL’s Megatron preference-training loop. The files below adapt that implementation for this tutorial. The checkpoint handoff must preserve the distributed layout and quantization state. Export the trained QAKTO policy using the parent’s [NVFP4 export procedure](../../README.md#4-export).
+We fine-tuned the QAD model with KTO to reduce reasoning loops. We ran training in NeMo RL with expert parallelism of four (EP=4) so it fit on one GB300 node with four GPUs. Export the trained QAKTO model using the parent’s [NVFP4 export procedure](../../README.md#4-export).
 
 ### Collect KTO training responses
 
@@ -25,7 +25,11 @@ See [experiment_environment.yaml](../config/experiment_environment.yaml) for the
 bash kto/reproducibility/run_kto.sh
 ```
 
-The starting Megatron checkpoint must contain model weights and saved ModelOpt quantization state.
+Set `PRETRAINED_CHECKPOINT` to the Megatron QAD checkpoint directory for the starting step (for example, `iter_0000500`). It must contain the model weights and saved ModelOpt quantization state. The launcher uses the [Qwen checkpoint helper](../src/qwen36_checkpoint.py) to load the language model and check that quantization is active.
+
+If Megatron Bridge needs a separate architecture config, place a matching `run_config.yaml` in the checkpoint directory alongside the weights.
+
+The original GB300 run on NeMo 26.08 needed the [SM103 attention patch](../src/sm103_attention.py). Use automatic attention selection with NeMo 26.10 RC8 or later. The RC8 QAD retest ran without the patch.
 
 ## Evaluation
 

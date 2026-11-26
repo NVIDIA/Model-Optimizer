@@ -48,7 +48,10 @@ def enable_sm103_flash() -> None:
     if patched in code.co_consts:
         return
     if code.co_consts.count(eligible) != 1:
-        raise RuntimeError("Unexpected FlashAttention 2 eligibility check in Transformer Engine")
+        raise RuntimeError(
+            "Cannot apply the GB300 FlashAttention 2 patch. "
+            "Expected exactly one copy of the GPU capability list in the Transformer Engine selector."
+        )
     selector.__code__ = code.replace(
         co_consts=tuple(patched if value == eligible else value for value in code.co_consts)
     )
