@@ -28,24 +28,36 @@ pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Requires Linux 
 
 def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(monkeypatch, tmp_path):
     """A killed command whose descendant inherited the output pipe must not hang the caller."""
+    # Adopt the orphaned grandchild so the liveness check can reap it; kill(0) alone would
+    # still see a zombie in a container whose PID 1 does not reap.
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    assert libc.prctl(37, ctypes.byref(previous), 0, 0, 0) == 0  # PR_GET_CHILD_SUBREAPER
+    assert libc.prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
     monkeypatch.setattr(run_command, "_ORPHAN_PIPE_TIMEOUT_S", 1)
     pid_file = tmp_path / "survivor.pid"
 
     started = time.monotonic()
-    with pytest.warns(UserWarning, match="descendants holding its output pipe"):
-        returncode, output = run_command._run_capturing(
-            ["bash", "-c", f"sleep 60 & echo $! > {pid_file}; echo out; sleep 0.3; kill -9 $$"],
-            tmp_path,
-            os.environ.copy(),
-        )
-
-    survivor = int(pid_file.read_text())
     try:
+        with pytest.warns(UserWarning, match="descendants holding its output pipe"):
+            returncode, output = run_command._run_capturing(
+                ["bash", "-c", f"sleep 60 & echo $! > {pid_file}; echo out; sleep 0.3; kill -9 $$"],
+                tmp_path,
+                os.environ.copy(),
+            )
+
+        survivor = int(pid_file.read_text())
         assert returncode == -9
         assert "out" in output  # captured despite the survivor
         assert time.monotonic() - started < 10  # the patched grace period is 1s
 
         for _ in range(50):  # the group kill is asynchronous
+            try:
+                reaped, _ = os.waitpid(survivor, os.WNOHANG)
+            except ChildProcessError:
+                reaped = 0  # adopted by another reaper; probe it below instead
+            if reaped == survivor:
+                break
             try:
                 os.kill(survivor, 0)
             except ProcessLookupError:
@@ -54,8 +66,15 @@ def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(monkeypatch
         else:
             pytest.fail(f"survivor {survivor} outlived _run_capturing")
     finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(survivor, signal.SIGKILL)
+        try:
+            if pid_file.exists():
+                survivor = int(pid_file.read_text())
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(survivor, signal.SIGKILL)
+                with contextlib.suppress(ChildProcessError):
+                    os.waitpid(survivor, 0)
+        finally:
+            assert libc.prctl(36, previous.value, 0, 0, 0) == 0
 
 
 @pytest.mark.parametrize("timeout", [None, 0.5], ids=["normal-exit", "timeout"])

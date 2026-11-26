@@ -54,9 +54,11 @@ class _UniqueKeyLoader(yaml.SafeLoader):
         if getattr(node, "_modelopt_flattened", False):
             return
         # PyYAML also flattens inline merge sources without calling construct_mapping on them.
+        # Report only key and line: interpolating a Mark would quote the source snippet,
+        # which can carry values such as tokens into the collection error.
         merges = [key for key, _ in node.value if key.tag == "tag:yaml.org,2002:merge"]
         if len(merges) > 1:
-            raise ValueError(f"Duplicate YAML merge key at {merges[1].start_mark}")
+            raise ValueError(f"Duplicate YAML merge key at line {merges[1].start_mark.line + 1}")
         keys = set()
         for key_node, _ in node.value:
             if key_node.tag == "tag:yaml.org,2002:merge":
@@ -64,10 +66,14 @@ class _UniqueKeyLoader(yaml.SafeLoader):
             key = self.construct_object(key_node, deep=False)
             try:
                 if key in keys:
-                    raise ValueError(f"Duplicate YAML key {key!r} at {key_node.start_mark}")
+                    raise ValueError(
+                        f"Duplicate YAML key {key!r} at line {key_node.start_mark.line + 1}"
+                    )
                 keys.add(key)
             except TypeError as exc:
-                raise ValueError(f"Invalid YAML key at {key_node.start_mark}") from exc
+                raise ValueError(
+                    f"Invalid YAML key at line {key_node.start_mark.line + 1}"
+                ) from exc
         super().flatten_mapping(node)
         node._modelopt_flattened = True
 

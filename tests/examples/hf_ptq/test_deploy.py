@@ -106,6 +106,14 @@ def _deployment_cache(request):
         yield Path(owned), last_consumer
 
 
+def _native_overrides(overrides, backend):
+    """Whether ``--deploy-config`` supplies native engine, sampling or chat options."""
+    return any(
+        overrides.get("backends", {}).get(backend, {}).get(name)
+        for name in ("engine_kwargs", "sampling_kwargs", "chat_kwargs")
+    )
+
+
 @pytest.fixture
 def command(request, _deployment_cache, monkeypatch):
     """Apply run overrides only after pytest has selected this case."""
@@ -115,6 +123,9 @@ def command(request, _deployment_cache, monkeypatch):
         case, backend, overrides, tensor_parallel_size=request.config.getoption("--deploy-tp")
     )
     deployer = ImageModelDeployer if case.get("task") == "image-generation" else ModelDeployer
+    if deployer is ModelDeployer:
+        # Override values are caller-supplied and may carry credentials; recipe values are public.
+        params["private_output"] = _native_overrides(overrides, backend)
     if _deployment_cache is None:
         if cache_root := os.getenv("HF_HUB_CACHE"):
             monkeypatch.setenv("HF_HUB_CACHE", str(Path(cache_root).expanduser().resolve()))

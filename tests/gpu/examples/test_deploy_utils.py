@@ -20,7 +20,8 @@ import pytest
 from _test_utils.deploy_utils import _run_deploy_via_subprocess
 
 
-def test_text_deploy_private_output(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("private", [True, False], ids=["private", "diagnostic"])
+def test_text_deploy_private_output(monkeypatch, tmp_path, capsys, private):
     # A stand-in engine echoes an unknown credential field before failing in the real worker.
     secret = "placeholder-private-authorization"
     reached = tmp_path / "engine-received.txt"
@@ -40,9 +41,17 @@ def test_text_deploy_private_output(monkeypatch, tmp_path, capsys):
             "vllm",
             model_id="test/model",
             engine_kwargs={"extra_headers": {"Authorization": secret}},
+            private_output=private,
         )
     assert reached.read_text() == secret
-    assert secret not in str(error.value)
+    # Worker argv only carries the config path in either mode.
     assert secret not in repr(error.value.cmd)
-    assert not error.value.output
-    assert secret not in capsys.readouterr().out
+    captured = capsys.readouterr().out
+    if private:
+        assert not error.value.output
+        assert secret not in str(error.value)
+        assert secret not in captured
+    else:
+        # Public recipe values keep their diagnostic output on failure.
+        assert secret in error.value.output
+        assert secret in captured

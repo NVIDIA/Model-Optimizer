@@ -90,15 +90,15 @@ def _run_deploy_via_subprocess(backend: str, **parameters) -> None:
             "-n",
             "1",
         ]
+    # Native backend errors can echo arbitrary override values; checked-in recipe values
+    # are public, so only caller-supplied overrides mark the output private. Kept out of
+    # the worker config: it controls the parent's capture, not the deployment.
+    private_output = parameters.pop("private_output", False)
     fd, config_path = tempfile.mkstemp(suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as config:
             json.dump({"backend": backend, **parameters}, config)
         cmd = [*launcher, sys.executable, "-m", "_test_utils.deploy_utils", config_path]
-        # Native backend errors can echo arbitrary override values.
-        private_output = any(
-            parameters.get(key) for key in ("engine_kwargs", "sampling_kwargs", "chat_kwargs")
-        )
         returncode, output = _run_capturing(
             cmd, cwd=tests_dir, env=env, cleanup_process_group=True, discard_output=private_output
         )
@@ -132,6 +132,7 @@ class ModelDeployer:
         chat_kwargs: dict | None = None,
         require_speculation: bool = False,
         sm_versions: list[int] | None = None,
+        private_output: bool = False,
     ):
         """
         Initialize the ModelDeployer.
@@ -150,6 +151,8 @@ class ModelDeployer:
             chat_kwargs: chat-template settings, or native chat-call options for vLLM.
             require_speculation: require evidence of actual draft execution during generation.
             sm_versions: exact CUDA capabilities allowed by the selected backend recipe.
+            private_output: drain backend output without retaining or printing it, for runs
+                whose overrides may carry credentials.
         """
         self.backend = backend
         self.model_id = model_id
@@ -166,6 +169,7 @@ class ModelDeployer:
         self.chat_kwargs = dict(chat_kwargs or {})
         self.require_speculation = require_speculation
         self.sm_versions = sm_versions
+        self.private_output = private_output
         if backend != "vllm" and self.chat_kwargs.keys() - {"chat_template_kwargs"}:
             raise ValueError("Only vLLM accepts chat-call options beyond chat_template_kwargs")
         if backend != "vllm":
@@ -289,6 +293,7 @@ class ModelDeployer:
                     input_config=self.input_config,
                     chat_kwargs=self.chat_kwargs,
                     require_speculation=self.require_speculation,
+                    private_output=self.private_output,
                 )
             except ProcessGroupCleanupError as exc:
                 pytest.exit(
