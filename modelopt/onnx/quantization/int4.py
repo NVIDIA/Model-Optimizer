@@ -748,29 +748,25 @@ def get_act_scale(x):
     return x.__abs__().mean(0)
 
 
+def _normalize_weight_blocks(weight, block_size, damping):
+    """Normalize consecutive axis-0 blocks while preserving trailing dimensions."""
+    original_rows = weight.shape[0]
+    if original_rows % block_size != 0:
+        weight = _pad(weight, block_size)
+    padded_shape = weight.shape
+    weight = weight.reshape(padded_shape[0] // block_size, block_size, *padded_shape[1:])
+    block_amax = weight.__abs__().max(axis=1, keepdims=True)
+    weight = weight.__abs__() / (block_amax + damping)
+    return weight.reshape(padded_shape)[:original_rows]
+
+
 def get_weight_scale(weight, block_size=None):
     """Get scale tensors for weights."""
-    org_shape = weight.shape
-    slice_after_padding = None
     if block_size:
-        if org_shape[0] % block_size != 0:
-            slice_after_padding = slice(org_shape[0])
-            weight = _pad(weight, block_size)
-            org_shape = weight.shape
-        # Blocks are `block_size` consecutive rows; splitting dim 0 into
-        # (n_blocks, block_size) keeps each block's rows together, unlike
-        # reshape(block_size, -1), which interleaves rows from different blocks.
-        # A batched MatMul initializer carries extra trailing axes beyond the
-        # output-channel one, so only the leading axis is split here.
-        weight = weight.reshape(org_shape[0] // block_size, block_size, *org_shape[1:])
-        weight_abs_amax = weight.__abs__().max(axis=1, keepdims=True)
-        scale = weight.__abs__() / (weight_abs_amax + np.finfo(weight_abs_amax.dtype).tiny)
-        scale = scale.reshape(org_shape)
+        scale = _normalize_weight_blocks(weight, block_size, np.finfo(weight.dtype).tiny)
     else:
         weight_abs_amax = weight.__abs__().max(axis=0, keepdims=True)
         scale = weight.__abs__() / (weight_abs_amax + np.finfo(weight_abs_amax.dtype).tiny)
-    if slice_after_padding is not None:
-        scale = scale[slice_after_padding, ...]
     scale = scale.mean(1)
     return scale
 
@@ -955,24 +951,8 @@ def get_x_w_mean_for_subgraph(
         np.get_default_memory_pool().free_all_blocks()
 
     assert w_concatenated is not None
-    org_shape = w_concatenated.shape
-    slice_after_padding = None
-    if org_shape[0] % block_size != 0:
-        slice_after_padding = slice(org_shape[0])
-        w_concatenated = _pad(w_concatenated, block_size)
-        org_shape = w_concatenated.shape
-    # Blocks are `block_size` consecutive rows; splitting dim 0 into
-    # (n_blocks, block_size) keeps each block's rows together, unlike
-    # reshape(block_size, -1), which interleaves rows from different blocks.
-    # A batched MatMul initializer carries extra trailing axes beyond the
-    # output-channel one, so only the leading axis is split here.
-    w_concatenated = w_concatenated.reshape(org_shape[0] // block_size, block_size, *org_shape[1:])
-    div_by = np.amax(np.abs(w_concatenated), axis=1, keepdims=True)
-    div_by = div_by + 1e-6  # damping factor 1e-6 is taken from AutoAWQ
-    w_concatenated = np.abs(w_concatenated) / div_by
-    w_concatenated = w_concatenated.reshape(org_shape)
-    if slice_after_padding is not None:
-        w_concatenated = w_concatenated[slice_after_padding, ...]
+    # Damping factor 1e-6 is taken from AutoAWQ.
+    w_concatenated = _normalize_weight_blocks(w_concatenated, block_size, 1e-6)
     w_m = np.mean(w_concatenated, axis=1)
 
     del w_concatenated
