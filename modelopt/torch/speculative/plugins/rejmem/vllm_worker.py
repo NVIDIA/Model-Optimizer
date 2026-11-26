@@ -18,8 +18,13 @@
 Load with ``vllm serve ... --worker-extension-cls
 modelopt.torch.speculative.plugins.rejmem.vllm_worker.RejMemWorkerExtension``. vLLM imports this module in
 every worker process before it builds the model runner, so the patches are in place before the DFlash
-speculator exists. Each ``install()`` reads its own environment variables and is a no-op when disabled.
+speculator exists. Each ``install()`` reads its own environment variables and is a no-op when disabled;
+``vllm_weights`` always patches, since its patches only act on draft weight updates.
 """
+
+from typing import Any
+
+import torch
 
 from . import vllm_capture, vllm_consumer, vllm_weights
 
@@ -32,3 +37,11 @@ vllm_weights.install()
 
 class RejMemWorkerExtension:
     """Mixed into vLLM's GPU worker; its methods are reachable through ``collective_rpc``."""
+
+    def rejmem_weight_info(self) -> dict[str, Any]:
+        """Draft weight version, GPU UUID and launch-checkpoint manifest, for the trainer's weight push."""
+        return {
+            "weight_version": vllm_weights.current_weight_version(),
+            "device_uuid": str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid),
+            "draft_manifest": vllm_weights.draft_manifest(),
+        }
