@@ -324,11 +324,12 @@ def quantize_rtn(
             quantized_weights=gemm_weights_quantized,
             attributes=dq_node_attributes,
             layer_info=layer_info,
+            column_major=use_column_major,
         )
 
         # Add transpose nodes for column-major if needed
         if use_column_major:
-            qdq.insert_transpose_nodes_for_column_major(graph)
+            qdq.insert_transpose_nodes_for_column_major(graph, gemm_weights_quantized)
 
         if gather_w_map is not None:
             gather_dq_node_attributes = {
@@ -553,6 +554,7 @@ def _quantize_awq_clip(
 
     scales = {}
     gemm_weights_quantized = {}
+    transposed_weights: set[str] = set()
 
     t = time.time()
 
@@ -637,6 +639,10 @@ def _quantize_awq_clip(
             if do_transpose:
                 qw = qw.T
                 scale = scale.T
+                transposed_weights.add(weight_tensor.name)
+            else:
+                # A weight shared with another node is stored as this node last quantized it.
+                transposed_weights.discard(weight_tensor.name)
             scales[weight_tensor.name] = scale.astype(
                 onnx.helper.tensor_dtype_to_np_dtype(gemm_io_type)
             )
@@ -679,10 +685,12 @@ def _quantize_awq_clip(
             quantized_weights=gemm_weights_quantized,
             attributes=dq_node_attributes,
             layer_info=layer_info,
+            transposed_weights=transposed_weights,
+            column_major=use_column_major,
         )
         # Add transpose nodes for column-major if needed
         if use_column_major:
-            qdq.insert_transpose_nodes_for_column_major(graph_gs)
+            qdq.insert_transpose_nodes_for_column_major(graph_gs, gemm_weights_quantized)
         if gather_w_map is not None:
             assert gather_s_map is not None, "scale-map not found for quantizable gather nodes"
             gather_dq_node_attributes = {
@@ -1129,6 +1137,7 @@ def _quantize_awq_lite(
     zero_points = {}
     scales = {}
     gemm_weights_quantized = {}
+    transposed_weights: set[str] = set()
     input_tensors = {}
     pre_quant_scale = {}
 
@@ -1289,8 +1298,12 @@ def _quantize_awq_lite(
             if do_transpose:
                 qw = qw.T
                 scale = scale.T
+                transposed_weights.add(weight_tensor.name)
                 if zp is not None:
                     zp = zp.T
+            else:
+                # A weight shared with another node is stored as this node last quantized it.
+                transposed_weights.discard(weight_tensor.name)
             if has_cupy:
                 qw = np.asnumpy(qw)
                 scale = np.asnumpy(scale)
@@ -1409,11 +1422,16 @@ def _quantize_awq_lite(
         # Transposes the weights and scales in-place
         use_column_major = kwargs.get("use_column_major", False)
         if use_column_major:
-            qdq.apply_column_major_transformation(gemm_weights_quantized, scales)
+            qdq.apply_column_major_transformation(
+                gemm_weights_quantized, scales, zero_points if use_zero_point else None
+            )
             dq_node_attributes = {"axis": 1, "block_size": block_size}
         else:
             dq_node_attributes = {"axis": 0, "block_size": block_size}
         scales = reshape_scales_for_per_channel_nodes(scales, block_size, layer_info)
+        if use_zero_point:
+            # Zero points follow the scales' layout, so per-channel ones are flattened too.
+            zero_points = reshape_scales_for_per_channel_nodes(zero_points, block_size, layer_info)
         qdq.insert_dq_nodes(
             graph_gs,
             scales,
@@ -1421,10 +1439,12 @@ def _quantize_awq_lite(
             attributes=dq_node_attributes,
             zero_points=zero_points if use_zero_point else None,
             layer_info=layer_info,
+            transposed_weights=transposed_weights,
+            column_major=use_column_major,
         )
         # Add transpose nodes for column-major if needed
         if use_column_major:
-            qdq.insert_transpose_nodes_for_column_major(graph_gs)
+            qdq.insert_transpose_nodes_for_column_major(graph_gs, gemm_weights_quantized)
         if gather_w_map is not None:
             assert gather_s_map is not None, "scale-map not found for quantizable gather nodes"
             assert not use_zero_point or gather_zp_map, (
