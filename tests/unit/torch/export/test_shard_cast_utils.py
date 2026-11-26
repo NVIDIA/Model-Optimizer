@@ -16,7 +16,6 @@
 """Tests for shared streaming checkpoint-cast utilities."""
 
 import os
-import stat
 import sys
 
 import pytest
@@ -117,12 +116,19 @@ def test_copy_aux_files_accepts_huggingface_snapshot_blobs(tmp_path, monkeypatch
     blob = repository / "blobs" / "tokenizer-blob"
     snapshot.mkdir(parents=True)
     blob.parent.mkdir()
-    blob.write_text("tokenizer")
+    blob.write_text("tokenizer.json")
     (snapshot / "tokenizer.json").symlink_to(os.path.relpath(blob, snapshot))
-    frozen = repository / "blobs" / "tiktoken-blob"
-    frozen.write_text("tiktoken")
-    frozen.chmod(0o444)  # as huggingface_hub keeps the files of its shared store
-    (snapshot / "tiktoken.model").symlink_to(os.path.relpath(frozen, snapshot))
+    # Since huggingface_hub 1.32, a repo blob may link on into a store the whole cache shares.
+    shared = {
+        "tiktoken.model": tmp_path / "blobs" / "ab" / "tiktoken-payload",
+        "vocab.json": tmp_path / "blobs" / "cd" / "vocab-payload",
+    }
+    for name, payload in shared.items():
+        payload.parent.mkdir(parents=True)
+        payload.write_text(name)
+        (repository / "blobs" / name).symlink_to(os.path.relpath(payload, repository / "blobs"))
+        (snapshot / name).symlink_to(f"../../blobs/{name}")
+    shared["tiktoken.model"].chmod(0o444)  # as the hub keeps them; vocab.json's stays writable
 
     assert resolve_checkpoint_file(snapshot, "tokenizer.json") == blob.resolve()
     validate_aux_files(snapshot)
@@ -132,13 +138,12 @@ def test_copy_aux_files_accepts_huggingface_snapshot_blobs(tmp_path, monkeypatch
     copy_aux_files(snapshot, output)
 
     assert not (tmp_path / "outside").exists()
-    assert (output / "tokenizer.json").read_text() == "tokenizer"
     assert not (output / "tokenizer.json").is_symlink()
-    # Copies, never links: writing the output cannot change the cache, and read-only blobs come out
-    # writable.
-    assert not (output / "tokenizer.json").samefile(blob)
-    assert not (output / "tiktoken.model").samefile(frozen)
-    assert (output / "tiktoken.model").stat().st_mode & stat.S_IWUSR
+    # Copies, never links: every output file is writable, and editing it leaves the cache unchanged.
+    for name, source in {"tokenizer.json": blob, **shared}.items():
+        assert (output / name).read_text() == name
+        (output / name).write_text("edited")
+        assert source.read_text() == name
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink and FIFO support")

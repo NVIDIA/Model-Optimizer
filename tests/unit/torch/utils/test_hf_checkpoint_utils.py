@@ -1033,3 +1033,24 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path, mo
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path / "elsewhere"))
     with pytest.warns(UserWarning, match="outside the checkpoint directory"):
         assert hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "local") == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
+def test_copy_non_model_files_takes_an_unresolvable_hub_cache_as_absent(tmp_path, monkeypatch):
+    """``HF_HUB_CACHE`` is looked up only for a link out of the checkpoint, and one that cannot be
+    resolved -- a symlink loop raises RuntimeError before Python 3.13 -- does not fail the export."""
+
+    class Unresolvable:
+        def __fspath__(self):
+            raise RuntimeError("Symlink loop")
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", Unresolvable())
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "tokenizer.json").write_text("{}")
+    (tmp_path / "secret").write_text("host file")
+    (source_dir / "vocab.json").symlink_to(tmp_path / "secret")
+
+    with pytest.warns(UserWarning, match="Skipping vocab.json: .* outside the checkpoint"):
+        copied = hf_checkpoint_utils.copy_non_model_files(source_dir, tmp_path / "export")
+    assert copied == ["tokenizer.json"]

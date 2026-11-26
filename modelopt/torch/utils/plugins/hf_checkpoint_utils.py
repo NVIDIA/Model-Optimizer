@@ -435,10 +435,13 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _allowed_source_root(src_dir: Path) -> Path:
-    source_root = src_dir.resolve(strict=True)
-    hub_cache = Path(constants.HF_HUB_CACHE).resolve()
-    return hub_cache if _is_relative_to(source_root, hub_cache) else source_root
+def _hub_cache_root(src_dir: Path) -> Path | None:
+    """``HF_HUB_CACHE`` if ``src_dir`` is inside it, else ``None``, as when it cannot be resolved."""
+    try:
+        hub_cache = Path(constants.HF_HUB_CACHE).resolve()
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python < 3.13
+        return None
+    return hub_cache if _is_relative_to(src_dir.resolve(strict=True), hub_cache) else None
 
 
 def resolve_checkpoint_file(
@@ -455,11 +458,14 @@ def resolve_checkpoint_file(
         raise ValueError(f"checkpoint source is not a readable regular file: {src}") from exc
     if not resolved_src.is_file():
         raise ValueError(f"checkpoint source must resolve to a regular file: {src}")
-    if not _is_relative_to(resolved_src, _allowed_source_root(src_dir)):
-        raise ValueError(
-            f"checkpoint source is outside the checkpoint directory: {src} -> {resolved_src} (a "
-            f"checkpoint inside HF_HUB_CACHE, now {constants.HF_HUB_CACHE}, may use any file there)"
-        )
+    if not _is_relative_to(resolved_src, src_dir.resolve(strict=True)):
+        hub_cache = _hub_cache_root(src_dir)
+        if hub_cache is None or not _is_relative_to(resolved_src, hub_cache):
+            raise ValueError(
+                f"checkpoint source is outside the checkpoint directory: {src} -> "
+                f"{resolved_src} (a checkpoint inside HF_HUB_CACHE, now "
+                f"{constants.HF_HUB_CACHE}, may use any file there)"
+            )
     if max_bytes is not None and resolved_src.stat().st_size > max_bytes:
         raise ValueError(f"checkpoint source exceeds the {max_bytes}-byte size limit: {src}")
     return resolved_src
