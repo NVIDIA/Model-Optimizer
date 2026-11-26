@@ -205,14 +205,13 @@ class ModelDeployer:
 
     def _engine_arguments(self):
         """Bind runtime model paths and TP without supplying test parameter defaults."""
-        is_draft = bool(self.base_model) or "eagle" in self.model_id.lower()
         model_key = "model_path" if self.backend == "sglang" else "model"
         kwargs = {
-            model_key: self.base_model if is_draft else self.model_id,
+            model_key: self.base_model or self.model_id,
             **engine_tp_kwargs(self.backend, self.tensor_parallel_size),
             **copy.deepcopy(self.engine_kwargs),
         }
-        if is_draft:
+        if self.base_model:
             # test_eagle may replace the checkpoint ID with its local path after collection.
             if self.backend == "sglang":
                 if self.require_speculation and kwargs.get("speculative_algorithm") != "DFLASH":

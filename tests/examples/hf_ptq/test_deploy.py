@@ -138,7 +138,7 @@ def command(request, _deployment_cache, monkeypatch):
         yield deployer(**params)
     finally:
         for entry in hub.glob("models--*"):
-            if last_consumer.get(entry.name, request.node) is request.node:
+            if entry.name not in last_consumer or last_consumer[entry.name] is request.node:
                 last_consumer.pop(entry.name, None)
                 if entry.is_symlink():
                     entry.unlink()

@@ -132,8 +132,9 @@ pytest tests/examples/hf_ptq/test_deploy.py --run-release \
 ```
 
 The image, stage log, and numeric request and parallelism settings are saved in
-the case's pytest temporary directory. The worker receives private overrides in a
-separate temporary file. Its raw output can include those overrides and is discarded.
+the case's pytest temporary directory. The image worker reads its full configuration,
+including private overrides, from a separate temporary file. Its raw output can
+include those overrides and is discarded.
 The command above keeps the artifacts in a directory suitable for archiving.
 An insufficient GPU allocation or unsupported SM is reported as a skip. A job
 qualifying a specific image checkpoint must require a passing result for its
