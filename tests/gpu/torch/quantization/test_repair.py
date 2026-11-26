@@ -863,24 +863,67 @@ def test_automatic_grouped_projection_preserves_native_fields(
         hf_production_qualified = _packed_projection_qualified(
             hidden.reshape(-1, 4096).repeat_interleave(2, dim=0), name, (2048, 4096)
         )
-        actual = block(hidden)
-        assert torch.cuda.current_device() == current
-        observed = torch.autograd.grad(actual, [hidden, *fields], upstream)
-        assert torch.cuda.current_device() == current
-        assert experts._intercept_count == 2
-        up_counts = [dict(state.projection_counts) for state in up_states]
-        down_counts = [dict(state.projection_counts) for state in down_states]
-        assert up_counts == [{"packed_grouped": 1}, {}, {}, {}]
-        assert down_counts == [{"materialized_grouped": 1}, {}, {}, {}]
-        # Keep the same genuine router and HF forward; select the native materialized backend.
-        with monkeypatch.context() as reference:
-            reference.setattr(
-                "modelopt.torch.quantization.repair_formats._packed_projection_qualified",
-                lambda *args: False,
+        boundaries = {"actual": {}, "native": {}}
+        phase = "actual"
+
+        def capture_projection(stage, inputs, output, offsets):
+            record = {
+                "input": inputs.detach().clone(),
+                "output": output.detach().clone(),
+                "offsets": offsets.detach().clone(),
+            }
+            boundaries[phase][stage] = record
+
+            def capture_input_vjp(gradient):
+                record["input_vjp"] = gradient.detach().clone()
+
+            def capture_output_vjp(gradient):
+                record["output_vjp"] = gradient.detach().clone()
+
+            inputs.register_hook(capture_input_vjp)
+            output.register_hook(capture_output_vjp)
+
+        def observe_packed(quantizers, inputs, offsets, *args, **kwargs):
+            output = repair_grouped_linear(quantizers, inputs, offsets, *args, **kwargs)
+            if output is not None:
+                stage = (
+                    "gate_up" if quantizers is experts.gate_up_proj_weight_quantizers else "down"
+                )
+                capture_projection(stage, inputs, output, offsets)
+            return output
+
+        def observe_native(inputs, weight, offsets, *args, **kwargs):
+            output = _grouped_linear(inputs, weight, offsets, *args, **kwargs)
+            stage = "gate_up" if weight.shape == experts.gate_up_proj.shape else "down"
+            capture_projection(stage, inputs, output, offsets)
+            return output
+
+        # Delegate every projection and leave the observed gradients unchanged.
+        with monkeypatch.context() as observer:
+            observer.setattr(
+                "modelopt.torch.quantization.repair_formats.repair_grouped_linear",
+                observe_packed,
             )
-            with torch.cuda.device(device):
-                expected = block(hidden)
-                oracle = torch.autograd.grad(expected, [hidden, *fields], upstream)
+            observer.setattr("transformers.integrations.moe._grouped_linear", observe_native)
+            actual = block(hidden)
+            assert torch.cuda.current_device() == current
+            observed = torch.autograd.grad(actual, [hidden, *fields], upstream)
+            assert torch.cuda.current_device() == current
+            assert experts._intercept_count == 2
+            up_counts = [dict(state.projection_counts) for state in up_states]
+            down_counts = [dict(state.projection_counts) for state in down_states]
+            assert up_counts == [{"packed_grouped": 1}, {}, {}, {}]
+            assert down_counts == [{"materialized_grouped": 1}, {}, {}, {}]
+            # Keep the same genuine router and HF forward; select the native materialized backend.
+            phase = "native"
+            with monkeypatch.context() as reference:
+                reference.setattr(
+                    "modelopt.torch.quantization.repair_formats._packed_projection_qualified",
+                    lambda *args: False,
+                )
+                with torch.cuda.device(device):
+                    expected = block(hidden)
+                    oracle = torch.autograd.grad(expected, [hidden, *fields], upstream)
         assert torch.cuda.current_device() == current
         assert experts._intercept_count == 4
         assert up_states[0].projection_counts == {"packed_grouped": 1, "materialized_grouped": 1}
@@ -922,6 +965,125 @@ def test_automatic_grouped_projection_preserves_native_fields(
                         "input_device": str(device),
                         "noncurrent_device": noncurrent,
                         "gradients": diagnostics,
+                    },
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+
+        def discrepancy(a, b):
+            a, b = a.detach().float(), b.detach().float()
+            difference = a - b
+            return {
+                "shape": list(a.shape),
+                "actual_norm": a.norm().item(),
+                "reference_norm": b.norm().item(),
+                "difference_norm": difference.norm().item(),
+                "relative_error": (difference.norm() / b.norm().clamp_min(1e-20)).item(),
+                "max_absolute_difference": difference.abs().max().item(),
+                "unequal_elements": torch.count_nonzero(difference).item(),
+            }
+
+        boundary_diagnostics = {
+            stage: {
+                key: discrepancy(boundaries["actual"][stage][key], boundaries["native"][stage][key])
+                for key in ("input", "output", "input_vjp", "output_vjp", "offsets")
+            }
+            for stage in ("gate_up", "down")
+        }
+
+        def replay_projection(stage, inputs, gradient, *, packed=False):
+            states = up_states if stage == "gate_up" else down_states
+            quantizers = (
+                experts.gate_up_proj_weight_quantizers
+                if stage == "gate_up"
+                else experts.down_proj_weight_quantizers
+            )
+            weight = experts.gate_up_proj if stage == "gate_up" else experts.down_proj
+            parameters = [parameter for state in states for parameter in state.parameters()]
+            inputs = inputs.detach().requires_grad_(True)
+            offsets = boundaries["native"][stage]["offsets"]
+            if packed:
+                output = repair_grouped_linear(quantizers, inputs, offsets)
+                assert output is not None
+            else:
+                output = _grouped_linear(
+                    inputs, experts._quantize_grouped_weight(weight, quantizers), offsets
+                )
+            gradients = torch.autograd.grad(output, [inputs, *parameters], gradient)
+            return output.detach(), gradients
+
+        # Reuse the same owners sequentially, after the original route/counter checks.
+        with torch.cuda.device(device):
+            native_up = boundaries["native"]["gate_up"]
+            packed_output, packed_gradients = replay_projection(
+                "gate_up", native_up["input"], native_up["output_vjp"], packed=True
+            )
+            native_output, native_gradients = replay_projection(
+                "gate_up", native_up["input"], native_up["output_vjp"]
+            )
+            up_parameters = [parameter for state in up_states for parameter in state.parameters()]
+            up_names = ["input", *(field_names[id(parameter)] for parameter in up_parameters)]
+            local_up = {
+                "output": discrepancy(packed_output, native_output),
+                "packed_output_vs_original": discrepancy(
+                    packed_output, boundaries["actual"]["gate_up"]["output"]
+                ),
+                "native_output_vs_original": discrepancy(native_output, native_up["output"]),
+                "native_input_vjp_vs_original": discrepancy(
+                    native_gradients[0], native_up["input_vjp"]
+                ),
+                "common_input_common_upstream_vjps": {
+                    field_name: discrepancy(a, b)
+                    for field_name, a, b in zip(
+                        up_names, packed_gradients, native_gradients, strict=True
+                    )
+                },
+            }
+            del packed_gradients, native_gradients, packed_output, native_output
+            native_down = boundaries["native"]["down"]
+            _, actual_down_gradients = replay_projection(
+                "down", boundaries["actual"]["down"]["input"], native_down["output_vjp"]
+            )
+            _, native_down_gradients = replay_projection(
+                "down", native_down["input"], native_down["output_vjp"]
+            )
+            down_parameters = [
+                parameter for state in down_states for parameter in state.parameters()
+            ]
+            down_names = ["input", *(field_names[id(parameter)] for parameter in down_parameters)]
+            original_actual = dict(zip(gradient_names, observed, strict=True))
+            original_native = dict(zip(gradient_names, oracle, strict=True))
+            local_down = {
+                field_name: {
+                    "common_upstream_vjp": discrepancy(a, b),
+                    "actual_replay_vs_original": discrepancy(
+                        a,
+                        boundaries["actual"]["down"]["input_vjp"]
+                        if index == 0
+                        else original_actual[field_name],
+                    ),
+                    "native_replay_vs_original": discrepancy(
+                        b,
+                        native_down["input_vjp"] if index == 0 else original_native[field_name],
+                    ),
+                }
+                for index, (field_name, a, b) in enumerate(
+                    zip(down_names, actual_down_gradients, native_down_gradients, strict=True)
+                )
+            }
+        assert torch.cuda.current_device() == current
+        with capsys.disabled():
+            print(
+                json.dumps(
+                    {
+                        "path": "hf_qwen3_moe_boundary_diagnostics",
+                        "format": name,
+                        "input_device": str(device),
+                        "noncurrent_device": noncurrent,
+                        "boundaries": boundary_diagnostics,
+                        "gate_up_common_input_common_upstream": local_up,
+                        "down_native_changed_input_common_upstream": local_down,
                     },
                     separators=(",", ":"),
                 ),
