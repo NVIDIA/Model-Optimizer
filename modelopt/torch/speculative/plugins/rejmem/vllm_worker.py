@@ -46,6 +46,9 @@ class RejMemWorkerExtension:
             "draft_manifest": vllm_weights.draft_manifest(),
         }
 
-    def rejmem_dropped_memory_rows(self) -> int:
-        """Memory rows that found no KV slot since startup (synchronizes the GPU); 0 expected."""
-        return vllm_consumer.dropped_memory_rows()
+    def rejmem_dropped_memory_rows(self) -> dict[str, int]:
+        """Memory rows that found no KV slot since startup (synchronizes the GPU); 0 expected.
+
+        A dict, because vLLM's ``/collective_rpc`` turns results other than dicts and lists into strings.
+        """
+        return {"dropped_memory_rows": vllm_consumer.dropped_memory_rows()}

@@ -289,7 +289,7 @@ def check_memory_rows(server_urls: list[str], timeout: float) -> None:
         )
         if resp.status_code != 200:
             raise RuntimeError(f"{url} collective_rpc: HTTP {resp.status_code}: {resp.text[:2000]}")
-        if dropped := sum(resp.json()["results"]):
+        if dropped := sum(r["dropped_memory_rows"] for r in resp.json()["results"]):
             raise RuntimeError(
                 f"{url}: {dropped} rejection-memory rows found no KV slot; raise --max-model-len"
             )

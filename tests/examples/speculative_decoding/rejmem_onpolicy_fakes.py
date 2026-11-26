@@ -120,7 +120,9 @@ def serve(args):
                         state["version"] += 1
                     return self.reply(state)
                 if self.path == "/collective_rpc":  # rejmem_dropped_memory_rows
-                    return self.reply({"results": [args.dropped_memory_rows]})
+                    return self.reply(
+                        {"results": [{"dropped_memory_rows": args.dropped_memory_rows}]}
+                    )
                 version = state["version"]
             tag, prompt = body["vllm_xargs"]["rejmem_tag"], body["prompt"]
             out, finish = rollout(args, prompt, body["max_tokens"], tag, version)
