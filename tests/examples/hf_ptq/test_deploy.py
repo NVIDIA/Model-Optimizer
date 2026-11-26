@@ -79,6 +79,7 @@ def _deployment_cache(request):
     )
     if (
         offline
+        or os.getenv("HF_HUB_CACHE")
         or hasattr(request.config, "workerinput")
         or any(os.getenv(key) for key in transformers_caches)
     ):
@@ -88,7 +89,7 @@ def _deployment_cache(request):
     # Hub is optional during collection. Use its configured volume for large downloads.
     from huggingface_hub.constants import HF_HUB_CACHE
 
-    hub = Path(HF_HUB_CACHE)
+    hub = Path(HF_HUB_CACHE).expanduser().resolve()
     hub.mkdir(parents=True, exist_ok=True)
     last_consumer = {}
     for item in request.session.items:
@@ -115,6 +116,8 @@ def command(request, _deployment_cache, monkeypatch):
     )
     deployer = ImageModelDeployer if case.get("task") == "image-generation" else ModelDeployer
     if _deployment_cache is None:
+        if cache_root := os.getenv("HF_HUB_CACHE"):
+            monkeypatch.setenv("HF_HUB_CACHE", str(Path(cache_root).expanduser().resolve()))
         yield deployer(**params)
         return
     hub, last_consumer = _deployment_cache
@@ -185,7 +188,7 @@ def test_medusa(command):
 def _local_eagle_draft(model_id):
     local_root = os.getenv("MODELOPT_LOCAL_EAGLE_MODEL")
     if local_root:
-        draft = Path(local_root) / model_id
+        draft = (Path(local_root).expanduser() / model_id).resolve()
         if not draft.is_dir():
             pytest.skip(f"Local model not found: {draft}")
         return draft

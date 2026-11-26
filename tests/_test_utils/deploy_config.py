@@ -50,25 +50,26 @@ _RESERVED_ENGINE_FIELDS = {"model", "model_path", "tensor_parallel_size", "tp_si
 
 class _UniqueKeyLoader(yaml.SafeLoader):
     def flatten_mapping(self, node):
+        # Aliases can revisit a node whose inherited keys have already been flattened.
+        if getattr(node, "_modelopt_flattened", False):
+            return
         # PyYAML also flattens inline merge sources without calling construct_mapping on them.
         merges = [key for key, _ in node.value if key.tag == "tag:yaml.org,2002:merge"]
         if len(merges) > 1:
             raise ValueError(f"Duplicate YAML merge key at {merges[1].start_mark}")
-        super().flatten_mapping(node)
-
-    def construct_mapping(self, node, deep=False):
         keys = set()
         for key_node, _ in node.value:
             if key_node.tag == "tag:yaml.org,2002:merge":
                 continue
-            key = self.construct_object(key_node, deep=deep)
+            key = self.construct_object(key_node, deep=False)
             try:
                 if key in keys:
                     raise ValueError(f"Duplicate YAML key {key!r} at {key_node.start_mark}")
                 keys.add(key)
             except TypeError as exc:
                 raise ValueError(f"Invalid YAML key at {key_node.start_mark}") from exc
-        return super().construct_mapping(node, deep=deep)
+        super().flatten_mapping(node)
+        node._modelopt_flattened = True
 
 
 def _mapping(value, name, allowed=None):

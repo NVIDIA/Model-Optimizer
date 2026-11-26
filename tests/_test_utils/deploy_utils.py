@@ -95,7 +95,13 @@ def _run_deploy_via_subprocess(backend: str, **parameters) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as config:
             json.dump({"backend": backend, **parameters}, config)
         cmd = [*launcher, sys.executable, "-m", "_test_utils.deploy_utils", config_path]
-        returncode, output = _run_capturing(cmd, cwd=tests_dir, env=env, cleanup_process_group=True)
+        # Native backend errors can echo arbitrary override values.
+        private_output = any(
+            parameters.get(key) for key in ("engine_kwargs", "sampling_kwargs", "chat_kwargs")
+        )
+        returncode, output = _run_capturing(
+            cmd, cwd=tests_dir, env=env, cleanup_process_group=True, discard_output=private_output
+        )
         if returncode:
             raise subprocess.CalledProcessError(returncode, cmd, output=output)
     finally:
@@ -264,11 +270,11 @@ class ModelDeployer:
 
         print(f"Deploying model: {self.model_id} with backend: {self.backend}")
         print(f"Tensor parallel size: {self.tensor_parallel_size}")
-        print(f"Sampling arguments: {self.sampling_kwargs!r}", flush=True)
+        print(f"Sampling option names: {sorted(self.sampling_kwargs)}", flush=True)
         if self.input_config:
             print(f"Input configuration: {self.input_config!r}", flush=True)
         if self.chat_kwargs:
-            print(f"Chat arguments: {self.chat_kwargs!r}", flush=True)
+            print(f"Chat option names: {sorted(self.chat_kwargs)}", flush=True)
         # Use subprocess + capture so pytest capture=tee-sys (and DB plugins) see deploy output.
         if self.backend in ("vllm", "trtllm", "sglang"):
             try:

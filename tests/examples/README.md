@@ -188,9 +188,13 @@ Each model runs in a fresh child process; engine shutdown and process-group
 cleanup release its GPU resources before the next model starts. Hugging Face
 downloads in a default sequential run use a private directory on the Hub cache
 volume. The suite keeps shared targets and drafters through their last selected
-case and removes the private directory at teardown. `HF_HUB_CACHE` selects the
-volume. Offline runs, xdist workers, and explicit legacy Transformers cache
-overrides use caller-managed snapshots.
+case and removes the private directory at teardown. Set `HF_HUB_CACHE` to reuse
+caller-managed snapshots without eviction (relative paths are resolved before
+launching workers). Offline runs, xdist workers, and explicit legacy Transformers
+cache overrides also use caller-managed snapshots. Text backend output is
+discarded when native engine, sampling, or chat overrides are present because
+backend logs and validation errors can echo their values. Use the normal Hugging
+Face authentication environment or login cache for Hub access.
 
 The run YAML customizes the checked-in cases; it is not another model catalog.
 Existing GPU/SM skips, checkpoint preparation and shared ModelOpt pytest

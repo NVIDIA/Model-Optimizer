@@ -89,3 +89,22 @@ backends:
     assert resolved["engine_kwargs"] == expected_engine
     assert resolved["sampling_kwargs"] == ({} if scenario == "defaults" else {"temperature": 0})
     assert case["tensor_parallel_size"] == 8
+
+
+@pytest.mark.parametrize(
+    ("mapping", "expected_tp"),
+    [
+        ("{<<: {tensor_parallel_size: 2, tensor_parallel_size: 4}}", None),
+        ("{<<: {tensor_parallel_size: 2}, <<: {tensor_parallel_size: 4}}", None),
+        ("{<<: [{backend: vllm}, {tensor_parallel_size: 4}]}", 4),
+        ("{<<: {tensor_parallel_size: 2}, tensor_parallel_size: 4}", 4),
+    ],
+)
+def test_yaml_merge_keys(tmp_path, mapping, expected_tp):
+    config = tmp_path / "run.yaml"
+    config.write_text(f"run: {mapping}\n", encoding="utf-8")
+    if expected_tp is None:
+        with pytest.raises(ValueError, match="Duplicate YAML"):
+            load_deploy_config(config)
+    else:
+        assert load_deploy_config(config)["run"]["tensor_parallel_size"] == expected_tp
