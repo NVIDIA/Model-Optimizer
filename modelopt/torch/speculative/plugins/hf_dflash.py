@@ -144,16 +144,25 @@ def _gather_rows(x, positions):
     return torch.gather(x, 1, idx).reshape(*positions.shape, x.size(-1))
 
 
-def _draft_mask_mod(seq_len, anchor_positions, block_keep_mask, block_size, window, causal):
+def _draft_mask_mod(
+    seq_len, anchor_positions, block_keep_mask, block_size, window, causal, mem_count=None
+):
     """The draft's attention visibility rule, as a FlexAttention ``mask_mod``.
 
     Elementwise ops and indexing only, so the one rule feeds ``create_block_mask`` and,
     evaluated on broadcast index grids, the dense SDPA mask.
+
+    ``mem_count`` ([B, N]) adds rejection memory between the context and the blocks, so KV is
+    ``[context | memory | draft blocks]``: ``block_size - 1`` rows per block, of which every
+    query of that block, and no other, sees the first ``mem_count``.
     """
     # Indexed inside mask_mod, which create_block_mask runs under vmap: keep them integral.
     anchors = anchor_positions.to(torch.int32)
     keep = block_keep_mask.to(torch.bool)
+    counts = None if mem_count is None else mem_count.to(torch.int32)
     last_block = anchors.shape[1] - 1
+    mem_rows = 0 if counts is None else block_size - 1
+    draft_start = seq_len + anchors.shape[1] * mem_rows
 
     def mask_mod(b, h, q_idx, kv_idx):
         # torch 2.8's flex backward also passes padded rows (q_idx >= Q_LEN): keep reads in bounds.
@@ -163,12 +172,23 @@ def _draft_mask_mod(seq_len, anchor_positions, block_keep_mask, block_size, wind
         ctx_ok = is_ctx & (kv_idx < anchor)
         if window is not None:
             # Window from the query's real position (anchor + position in block).
-            ctx_ok = ctx_ok & (kv_idx > anchor + (q_idx % block_size) - window)
-        draft_ok = (~is_ctx) & (q_block == (kv_idx - seq_len) // block_size)
+            reach = anchor + (q_idx % block_size) - window
+            if counts is not None:
+                # vLLM appends the memory keys after the block and aligns the window to the
+                # last key, so the window over the context starts that many positions later.
+                reach = reach + counts[b, q_block]
+            ctx_ok = ctx_ok & (kv_idx > reach)
+        is_draft = kv_idx >= draft_start
+        draft_ok = is_draft & (q_block == (kv_idx - draft_start) // block_size)
         if causal:
             # Block-causal: block position i sees draft positions <= i.
-            draft_ok = draft_ok & (((kv_idx - seq_len) % block_size) <= (q_idx % block_size))
-        return (ctx_ok | draft_ok) & keep[b, q_block]
+            draft_ok = draft_ok & (((kv_idx - draft_start) % block_size) <= (q_idx % block_size))
+        visible = ctx_ok | draft_ok
+        if counts is not None:
+            mem_idx = kv_idx - seq_len
+            mem_ok = ~(is_ctx | is_draft) & (mem_idx // mem_rows == q_block)
+            visible = visible | (mem_ok & (mem_idx % mem_rows < counts[b, q_block]))
+        return visible & keep[b, q_block]
 
     return mask_mod
 
@@ -195,6 +215,16 @@ class DraftBatch(NamedTuple):
     keep: torch.Tensor  # [B, N] whether each block is trained
     base_outputs: DFlashBaseModelOutput
     hidden: torch.Tensor  # [B, N * bs, H] the draft's hidden states
+
+
+class _RolloutRounds(NamedTuple):
+    """A rollout's drafting rounds, the forward's ``rejmem_*`` kwargs: one block per round."""
+
+    anchor_pos: torch.Tensor  # [B, K] int64 position of the round's anchor
+    anchor_valid: torch.Tensor  # [B, K] bool, False for padding
+    # The memory pair, both None when memory is off: then no memory segment is built at all.
+    mem_count: torch.Tensor | None  # [B, K] int32 drafts the previous verify rejected, 0..bs - 1
+    mem_aux_hidden: torch.Tensor | None  # [B, K, bs - 1, A*H] features on them; row i at anchor + i
 
 
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -675,18 +705,30 @@ class HFDFlashModel(DFlashModel):
         )
         return self._base_model_embeddings(noise_ids)
 
-    def _build_position_ids(self, seq_len, anchor_positions, device):
-        """Build position IDs: context [0..S-1], draft blocks [anchor+0..anchor+B-1]."""
+    def _build_position_ids(self, seq_len, anchor_positions, device, mem_rows=0):
+        """Build position IDs: context [0..S-1], draft blocks [anchor+0..anchor+B-1].
+
+        ``mem_rows`` puts each block's memory rows [anchor+0..anchor+mem_rows-1] in between.
+        """
         bsz = anchor_positions.shape[0]
         block_size = self.dflash_block_size
 
         ctx_pos = torch.arange(seq_len, device=device).unsqueeze(0).expand(bsz, -1)
         offsets = torch.arange(block_size, device=device).view(1, 1, -1)
-        draft_pos = (anchor_positions.unsqueeze(-1) + offsets).view(bsz, -1)
-        return torch.cat([ctx_pos, draft_pos], dim=1)
+        block_pos = anchor_positions.unsqueeze(-1) + offsets
+        mem_pos = block_pos[..., :mem_rows].flatten(1)
+        return torch.cat([ctx_pos, mem_pos, block_pos.view(bsz, -1)], dim=1)
 
     def _build_draft_attention_mask(
-        self, seq_len, anchor_positions, block_keep_mask, n_blocks, dtype, device, window=None
+        self,
+        seq_len,
+        anchor_positions,
+        block_keep_mask,
+        n_blocks,
+        dtype,
+        device,
+        window=None,
+        mem_count=None,
     ):
         """Build the draft attention mask: context (causal) + draft (per ``dflash_draft_attention``).
 
@@ -701,12 +743,16 @@ class HFDFlashModel(DFlashModel):
         ``"causal"`` restricts a query at block position ``i`` to draft positions ``<= i`` so
         the block is modelled autoregressively.
 
+        ``mem_count`` ([B, N]) adds each block's rejection memory between the context and the
+        blocks, see ``_draft_mask_mod``.
+
         Returns a dense additive SDPA mask, or a ``BlockMask`` under
         ``dflash_use_flex_attention``; both evaluate the one rule in ``_draft_mask_mod``.
         """
         bsz = anchor_positions.shape[0]
         q_len = n_blocks * self.dflash_block_size
-        kv_len = seq_len + q_len
+        mem_len = 0 if mem_count is None else n_blocks * (self.dflash_block_size - 1)
+        kv_len = seq_len + mem_len + q_len
         mask_mod = _draft_mask_mod(
             seq_len,
             anchor_positions,
@@ -714,6 +760,7 @@ class HFDFlashModel(DFlashModel):
             self.dflash_block_size,
             window,
             causal=self.dflash_draft_attention == "causal",
+            mem_count=mem_count,
         )
 
         if self.dflash_use_flex_attention:
@@ -983,6 +1030,65 @@ class HFDFlashModel(DFlashModel):
             names.append("backbone_accuracy")
         return LossOutput(loss, zero, dict.fromkeys(names, zero))
 
+    def _rollout_rounds(self, kwargs, input_ids):
+        """The forward's ``rejmem_*`` kwargs as ``_RolloutRounds``, checked; None without them."""
+        given = {name: kwargs.get(f"rejmem_{name}") for name in _RolloutRounds._fields}
+        if all(value is None for value in given.values()):
+            return None
+        missing = [f"rejmem_{name}" for name, value in given.items() if value is None]
+        if missing not in ([], ["rejmem_mem_count", "rejmem_mem_aux_hidden"]):
+            raise ValueError(
+                "Rejection-memory training needs rejmem_anchor_pos and rejmem_anchor_valid, and "
+                f"rejmem_mem_count with rejmem_mem_aux_hidden or neither; missing {missing}."
+            )
+        if not self.dflash_offline:
+            raise ValueError(
+                "rejmem_* kwargs need offline training (dflash_offline, base_model_outputs): the "
+                "target's features on the rejected drafts come from the rollout, not a base forward."
+            )
+        rounds = _RolloutRounds(**given)
+        # K is pinned so that the compiled draft and its block mask see one shape every step.
+        shape = (input_ids.shape[0], self.dflash_num_anchors)
+        aux = kwargs["base_model_outputs"]["aux_hidden_states"]
+        expected = {
+            "anchor_pos": (shape, torch.int64),
+            "anchor_valid": (shape, torch.bool),
+            "mem_count": (shape, torch.int32),
+            "mem_aux_hidden": ((*shape, self.dflash_block_size - 1, aux.shape[-1]), aux.dtype),
+        }
+        for name, value in given.items():
+            if value is not None and (tuple(value.shape), value.dtype) != expected[name]:
+                raise ValueError(
+                    f"rejmem_{name} must be {expected[name][0]} {expected[name][1]} (K = "
+                    f"dflash_num_anchors; A*H and dtype as aux_hidden_states), got "
+                    f"{tuple(value.shape)} {value.dtype}."
+                )
+        if rounds.mem_count is not None:
+            # vLLM appends the r memory keys after the block and aligns the mask to the last key.
+            if self.dflash_draft_attention == "causal":
+                # A causal mask so aligned shows query j block positions up to j + r.
+                raise ValueError(
+                    "Rejection memory needs dflash_draft_attention='bidirectional': vLLM cannot "
+                    "serve it to causal draft layers."
+                )
+            window = self.dflash_swa_window_size
+            if window is not None and window < 2 * self.dflash_block_size - 1:
+                # A shorter window would hide the start of the block from its last queries.
+                raise ValueError(
+                    f"Rejection memory needs dflash_swa_window_size >= 2 * dflash_block_size - 1 "
+                    f"({2 * self.dflash_block_size - 1}), got {window}."
+                )
+        in_range = rounds.anchor_pos >= 0
+        if rounds.mem_count is not None:
+            in_range &= (rounds.mem_count >= 0) & (rounds.mem_count < self.dflash_block_size)
+        # A host sync, but the forward's keep test a few ops later waits for the same work.
+        if not (in_range | ~rounds.anchor_valid).all():
+            raise ValueError(
+                "Valid rejmem rounds need rejmem_anchor_pos >= 0 and rejmem_mem_count in "
+                f"[0, {self.dflash_block_size - 1}]."
+            )
+        return rounds
+
     def forward(
         self,
         input_ids=None,
@@ -1007,6 +1113,18 @@ class HFDFlashModel(DFlashModel):
 
         A variant changes the step only through its hooks: ``_online_base_outputs``,
         ``_draft_logits`` (its head), ``_position_weighting`` and ``_compute_loss``.
+
+        Rejection-memory training (offline only) replaces the random anchors with a rollout's
+        drafting rounds, one block each, given as kwargs with ``K = dflash_num_anchors``:
+
+        - ``rejmem_anchor_pos`` [B, K] int64 and ``rejmem_anchor_valid`` [B, K] bool: the
+          rounds' anchors. A block is trained if valid and it has a label under the rules above.
+        - ``rejmem_mem_count`` [B, K] int32 and ``rejmem_mem_aux_hidden`` [B, K, bs - 1, A*H],
+          both or neither: the target's features on the ``mem_count`` drafts the previous
+          verify rejected, row i at position anchor + i; later rows are ignored. They are extra
+          context rows that every query of their own block sees, and no other; under a sliding
+          window, that block's window over the context starts ``mem_count`` positions later.
+          Without the pair, the rounds train exactly as random anchors at the same positions.
         """
         if not self.training:
             if self.dflash_offline:
@@ -1041,6 +1159,7 @@ class HFDFlashModel(DFlashModel):
             )
 
         # 1. Run base model → extract target hidden states
+        rounds = self._rollout_rounds(kwargs, input_ids)
         if self.dflash_offline:
             assert "base_model_outputs" in kwargs
             base_outputs = DFlashBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
@@ -1069,10 +1188,23 @@ class HFDFlashModel(DFlashModel):
             input_ids, attention_mask, labels, kwargs.get("loss_mask")
         )
 
-        # 3. Random anchor sampling
-        anchor_positions, block_keep_mask = self._sample_anchor_positions(
-            seq_len, loss_mask, device
-        )
+        # 3. Random anchor sampling, or the rollout's rounds
+        if rounds is None:
+            anchor_positions, block_keep_mask = self._sample_anchor_positions(
+                seq_len, loss_mask, device
+            )
+        else:
+            # A round is trained if it is real and has a label.
+            anchor_positions = rounds.anchor_pos
+            targets = _block_targets(
+                input_ids,
+                anchor_positions,
+                rounds.anchor_valid,
+                loss_mask,
+                block_size,
+                self._label_shift,
+            )
+            block_keep_mask = targets.mask.any(dim=-1)
         n_blocks = anchor_positions.shape[1]
 
         if n_blocks == 0 or not block_keep_mask.any():
@@ -1090,7 +1222,9 @@ class HFDFlashModel(DFlashModel):
         noise_embedding = self._build_noise_embedding(
             input_ids, anchor_positions, block_keep_mask, n_blocks
         )
-        full_pos = self._build_position_ids(seq_len, anchor_positions, device)
+        mem_count = None if rounds is None else rounds.mem_count
+        mem_rows = 0 if mem_count is None else block_size - 1
+        full_pos = self._build_position_ids(seq_len, anchor_positions, device, mem_rows)
         attn_mask = self._build_draft_attention_mask(
             seq_len,
             anchor_positions,
@@ -1099,7 +1233,16 @@ class HFDFlashModel(DFlashModel):
             target_hidden.dtype,
             device,
             window=self.dflash_swa_window_size,
+            mem_count=mem_count,
         )
+        if mem_count is not None:
+            # Memory rows go through the draft exactly as context rows do, after the sequence.
+            # Rows no query sees are zeroed: masked keys still enter the matmuls, and NaN * 0 = NaN.
+            seen = torch.arange(mem_rows, device=device) < mem_count.unsqueeze(-1)
+            seen = (seen & block_keep_mask.unsqueeze(-1)).unsqueeze(-1)
+            target_hidden = torch.cat(
+                [target_hidden, rounds.mem_aux_hidden.masked_fill(~seen, 0).flatten(1, 2)], dim=1
+            )
 
         # 5. Draft forward
         hidden = self.dflash_module(
