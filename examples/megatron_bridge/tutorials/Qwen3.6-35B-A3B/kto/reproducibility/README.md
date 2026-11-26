@@ -8,14 +8,18 @@ We fine-tuned the QAD baseline in NeMo RL on one four-GPU GB300 node. The parent
 
 ### Collect KTO training responses
 
-The experiment reused saved QAD-generated responses. To collect a new training set:
+Follow these steps to collect a new training set.
 
 1. Use the [44/11 subtask split](data/subtask_split.yaml). Collect responses only for the 44 training subtasks and reserve the other 11 for evaluation.
-2. Generate repeated responses with the QAD model and run the SciCode tests. Keep responses that pass as correct examples.
-3. Inspect unfinished responses and keep those that repeat without making progress as looping examples. A token-cap hit alone does not confirm a loop.
-4. Preserve each response’s original prompt, remove duplicates and keep examples within the 32,768-token training limit. Select 104 correct and 104 looping responses.
+2. Generate multiple responses per training subtask with the QAD baseline. Keep complete responses that pass the SciCode tests as correct examples.
+3. For looping examples, screen generations that reached the 131,072-token output cap without a final answer. Find a paragraph that occurs at least three times, ignoring differences in whitespace. Keep the reasoning through the third occurrence so the training example contains the repetition.
+4. Keep each response’s original prompt and remove duplicates. Keep only examples that fit within 32,768 tokens, including the prompt, response, and EOS for correct answers. Select 104 correct responses and 104 looping prefixes.
 
 Follow [training.example.jsonl](data/training.example.jsonl): each row holds correct and looping responses with their own prompts. Prompts end in `<think>\n`; the processor adds EOS only to correct responses.
+
+<img src="figures/training-lengths.png" alt="Histograms of response and total training lengths for correct responses and looping prefixes" width="640">
+
+Median response lengths were 2,957 tokens for correct responses and 4,853 tokens for looping prefixes. The longest training example used 23,852 tokens including its prompt.
 
 ### Run KTO training
 

@@ -83,6 +83,8 @@ The shared reference level *z* is a batch KL estimate of the model’s overall l
 
 We evaluated two NVFP4 Qwen3.6-35B-A3B checkpoints: the QAD baseline and QAKTO. We compared accuracy, cap-hit rates, missing final answers, abstention, and completion token use.
 
+For BF16 and QAD scores and the SciCode results with `presence_penalty: 1.5`, see the parent tutorial’s [benchmark results](../README.md#results) and [presence-penalty ablation](../ABLATIONS.md#scicode-non-termination-diagnosis-and-decode-time-fix).
+
 See [Reproducibility](reproducibility/README.md) for data collection, training, export and evaluation instructions.
 
 ### Evaluation data
