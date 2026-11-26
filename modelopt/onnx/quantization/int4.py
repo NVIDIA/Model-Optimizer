@@ -748,21 +748,25 @@ def get_act_scale(x):
     return x.__abs__().mean(0)
 
 
+def _normalize_weight_blocks(weight, block_size, damping):
+    """Normalize consecutive axis-0 blocks while preserving trailing dimensions."""
+    original_rows = weight.shape[0]
+    if original_rows % block_size != 0:
+        weight = _pad(weight, block_size)
+    padded_shape = weight.shape
+    weight = weight.reshape(padded_shape[0] // block_size, block_size, *padded_shape[1:])
+    block_amax = weight.__abs__().max(axis=1, keepdims=True)
+    weight = weight.__abs__() / (block_amax + damping)
+    return weight.reshape(padded_shape)[:original_rows]
+
+
 def get_weight_scale(weight, block_size=None):
     """Get scale tensors for weights."""
-    org_shape = weight.shape
-    slice_after_padding = None
     if block_size:
-        if org_shape[0] % block_size != 0:
-            slice_after_padding = slice(org_shape[0])
-            weight = _pad(weight, block_size)
-            org_shape = weight.shape
-        weight = weight.reshape(block_size, -1)
-    weight_abs_amax = weight.__abs__().max(axis=0, keepdims=True)
-    scale = weight.__abs__() / (weight_abs_amax + np.finfo(weight_abs_amax.dtype).tiny)
-    scale = scale.reshape(org_shape)
-    if slice_after_padding is not None:
-        scale = scale[slice_after_padding, ...]
+        scale = _normalize_weight_blocks(weight, block_size, np.finfo(weight.dtype).tiny)
+    else:
+        weight_abs_amax = weight.__abs__().max(axis=0, keepdims=True)
+        scale = weight.__abs__() / (weight_abs_amax + np.finfo(weight_abs_amax.dtype).tiny)
     scale = scale.mean(1)
     return scale
 
@@ -947,12 +951,8 @@ def get_x_w_mean_for_subgraph(
         np.get_default_memory_pool().free_all_blocks()
 
     assert w_concatenated is not None
-    org_shape = w_concatenated.shape
-    w_concatenated = w_concatenated.reshape(block_size, -1)
-    div_by = np.amax(np.abs(w_concatenated), axis=0)
-    div_by = div_by + 1e-6  # damping factor 1e-6 is taken from AutoAWQ
-    w_concatenated = np.abs(w_concatenated) / div_by
-    w_concatenated = w_concatenated.reshape(org_shape)
+    # Damping factor 1e-6 is taken from AutoAWQ.
+    w_concatenated = _normalize_weight_blocks(w_concatenated, block_size, 1e-6)
     w_m = np.mean(w_concatenated, axis=1)
 
     del w_concatenated
