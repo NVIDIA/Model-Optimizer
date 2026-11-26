@@ -145,25 +145,37 @@ def validate_record(rec: RolloutRecord) -> None:
         raise ValueError("anchors must lie in [prompt_len, len(token_ids))")
     if int(m["num_rounds_total"]) < r:
         raise ValueError("num_rounds_total < kept rounds")
-    tok = t["token_ids"]
-    for i in range(r):
-        a, k = int(anchor[i]), int(acc[i])
-        if k >= 0 and a + k < length:
-            # Accepted drafts are committed right after the anchor.
-            if not torch.equal(tok[a + 1 : a + 1 + k], t["round_draft_token_ids"][i, :k]):
-                raise ValueError(f"round {i}: accepted drafts differ from committed tokens")
-        if i + 1 < r and int(index[i + 1]) == int(index[i]) + 1 and k >= 0:
-            if int(anchor[i + 1]) != a + k + 1:
-                raise ValueError(f"round {i + 1}: anchor != previous anchor + accepted + 1")
-            nxt = int(count[i + 1])
-            if nxt > ns - k:
-                raise ValueError(f"round {i + 1}: more memory rows than rejected drafts")
-            lo = int(off[i + 1])
-            # The next round's memory rows are this round's rejected drafts, in order.
-            if not torch.equal(
-                t["mem_token_ids"][lo : lo + nxt], t["round_draft_token_ids"][i, k : k + nxt]
-            ):
-                raise ValueError(f"round {i + 1}: memory tokens are not the rejected drafts")
+    # Vectorized over rounds: a per-round loop of small torch calls is slow and GIL-bound.
+    tok, drafts, mem_tok = t["token_ids"], t["round_draft_token_ids"], t["mem_token_ids"]
+    acc, col = acc.long(), torch.arange(ns)
+    # Accepted drafts are committed right after the anchor.
+    took = ((acc >= 0) & (anchor + acc < length))[:, None] & (col < acc[:, None])
+    committed = tok[(anchor[:, None] + 1 + col).clamp(max=max(length - 1, 0))]
+    _raise_first_round(took & (committed != drafts), "accepted drafts differ from committed tokens")
+    # Consecutive rounds: the anchor advances by accepted + 1 and the memory holds the rejected drafts.
+    chain = (index[1:] == index[:-1] + 1) & (acc[:-1] >= 0)
+    _raise_first_round(
+        chain & (anchor[1:] != anchor[:-1] + acc[:-1] + 1),
+        "anchor != previous anchor + accepted + 1",
+        shift=1,
+    )
+    _raise_first_round(
+        chain & (count[1:] > ns - acc[:-1]), "more memory rows than rejected drafts", shift=1
+    )
+    rejected = chain[:, None] & (col < count[1:, None])
+    if rejected.any():
+        got = mem_tok[(off[1:-1, None] + col).clamp(max=mem - 1)]
+        want = drafts[:-1].gather(1, (acc[:-1, None] + col).clamp(0, ns - 1))
+        _raise_first_round(
+            rejected & (got != want), "memory tokens are not the rejected drafts", shift=1
+        )
+
+
+def _raise_first_round(bad: torch.Tensor, msg: str, shift: int = 0) -> None:
+    """Raise ``msg`` for the first round that has a True entry in ``bad`` ([R] or [R, NS])."""
+    rounds = (bad.any(dim=1) if bad.dim() > 1 else bad).nonzero()
+    if len(rounds):
+        raise ValueError(f"round {int(rounds[0]) + shift}: {msg}")
 
 
 def save_record(path: str, rec: RolloutRecord) -> None:
